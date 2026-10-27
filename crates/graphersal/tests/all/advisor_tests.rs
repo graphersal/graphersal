@@ -133,9 +133,9 @@ fn large_repeated_strings_are_advised_a_measured_compression() {
     };
     assert_eq!(candidate.codec.name(), "dedup", "{rule:?}");
     assert_eq!(name, "customer_cv");
-    let before = graph.read().memory_usage().unwrap().property_bytes;
+    let before = graph.read().memory_usage().unwrap().unwrap().property_bytes;
     run(&graph, &rule.action.command());
-    let saved = before - graph.read().memory_usage().unwrap().property_bytes;
+    let saved = before - graph.read().memory_usage().unwrap().unwrap().property_bytes;
     // What was promised is what the rule saves (the estimate measures with the rule's code;
     // the dedup table's overhead is counted per entry, so within 1 %).
     let promised = rule.memory_bytes as f64;

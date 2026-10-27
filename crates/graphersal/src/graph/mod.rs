@@ -299,7 +299,7 @@ impl TraversalGraph {
     /// consuming and returning `Self` (the builder form of `PersistentStorage::set_graph_id`).
     #[cfg(feature = "persist")]
     pub(crate) fn with_graph_id(mut self, graph_id: u128) -> Self {
-        crate::graph::PersistentStorage::set_graph_id(&mut self, graph_id);
+        self.graph_id = std::sync::OnceLock::from(graph_id);
         self
     }
 

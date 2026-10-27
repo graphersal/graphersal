@@ -12,6 +12,7 @@ fn t1_memory_usage_basics() {
     let empty = TraversalGraph::new();
     let stats = empty
         .memory_usage()
+        .unwrap()
         .expect("TraversalGraph always supports introspection");
     // Index structures may have a minimum capacity even for an empty graph, so this is "small",
     // not necessarily exactly zero.
@@ -22,7 +23,7 @@ fn t1_memory_usage_basics() {
     assert_eq!(stats.total_mb(), stats.total_bytes() as f64 / 1_048_576.0);
 
     let mut graph = TraversalGraph::new();
-    let before = graph.memory_usage().unwrap();
+    let before = graph.memory_usage().unwrap().unwrap();
 
     let mut props = graphersal::prelude::PropertyMap::default();
     props.insert(
@@ -32,7 +33,7 @@ fn t1_memory_usage_basics() {
     let v1 = graph
         .add_vertex(None, vec!["person".into()], props)
         .unwrap();
-    let after_one_vertex = graph.memory_usage().unwrap();
+    let after_one_vertex = graph.memory_usage().unwrap().unwrap();
     assert!(after_one_vertex.total_bytes() > before.total_bytes());
 
     let v2 = graph
@@ -51,7 +52,7 @@ fn t1_memory_usage_basics() {
             graphersal::prelude::PropertyMap::default(),
         )
         .unwrap();
-    let after_edge = graph.memory_usage().unwrap();
+    let after_edge = graph.memory_usage().unwrap().unwrap();
     assert!(after_edge.total_bytes() > after_one_vertex.total_bytes());
 }
 
@@ -63,7 +64,7 @@ fn t1_memory_usage_basics() {
 #[test]
 fn t1_memory_usage_via_generic_storage_trait() {
     fn reachable_through_trait<S: GraphStorage>(storage: &S) -> Option<MemoryStats> {
-        storage.memory_usage()
+        storage.memory_usage().unwrap()
     }
 
     let graph = TraversalGraph::new();
@@ -210,6 +211,7 @@ fn t1_large_fixture_reports_positive_total() {
     let stats = graph
         .read()
         .memory_usage()
+        .unwrap()
         .expect("TraversalGraph always supports introspection");
     assert!(stats.total_bytes() > 0);
     assert!(stats.structure_bytes > 0);
@@ -222,20 +224,20 @@ fn t1_large_fixture_reports_positive_total() {
 #[test]
 fn t2_category_attribution() {
     let mut graph = TraversalGraph::new();
-    let before = graph.memory_usage().unwrap();
+    let before = graph.memory_usage().unwrap().unwrap();
 
     let mut props = graphersal::prelude::PropertyMap::default();
     let long_string: String = "x".repeat(4096);
     props.insert("blob", ElementProperty::String(long_string.into()));
     graph.add_vertex(None, vec![], props).unwrap();
-    let after = graph.memory_usage().unwrap();
+    let after = graph.memory_usage().unwrap().unwrap();
 
     assert!(after.property_bytes > before.property_bytes + 3000);
     // Structure/index should not jump by anywhere near as much as the 4KB string did.
     assert!(after.structure_bytes - before.structure_bytes < 1000);
     assert!(after.index_bytes - before.index_bytes < 1000);
 
-    let before_labels = graph.memory_usage().unwrap();
+    let before_labels = graph.memory_usage().unwrap().unwrap();
     for _ in 0..200 {
         graph
             .add_vertex(
@@ -245,7 +247,7 @@ fn t2_category_attribution() {
             )
             .unwrap();
     }
-    let after_labels = graph.memory_usage().unwrap();
+    let after_labels = graph.memory_usage().unwrap().unwrap();
     assert!(after_labels.index_bytes > before_labels.index_bytes);
 }
 
@@ -702,7 +704,7 @@ fn property_bytes_count_the_hash_index_of_every_map() {
             .add_vertex(None, vec!["person".into()], props)
             .unwrap();
     }
-    let stats = graph.memory_usage().unwrap();
+    let stats = graph.memory_usage().unwrap().unwrap();
     let per_slot = stats.property_bytes as f64 / (vertices * per_vertex) as f64;
     // Never below the value slot alone.
     let entry = size_of::<ElementProperty>() as f64;
@@ -718,5 +720,5 @@ fn property_bytes_count_the_hash_index_of_every_map() {
     let mut bare = TraversalGraph::new();
     bare.add_vertex(None, vec!["person".into()], PropertyMap::default())
         .unwrap();
-    assert_eq!(bare.memory_usage().unwrap().property_bytes, 0);
+    assert_eq!(bare.memory_usage().unwrap().unwrap().property_bytes, 0);
 }

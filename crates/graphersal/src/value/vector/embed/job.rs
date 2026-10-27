@@ -386,16 +386,16 @@ fn declared_for<S: GraphStorage>(
     label: &str,
     to: &str,
     info: &EmbedderInfo,
-) -> bool {
-    storage
-        .declared_property_schema(kind, &[CompactString::new(label)], to)
+) -> Result<bool, GraphError> {
+    Ok(storage
+        .declared_property_schema(kind, &[CompactString::new(label)], to)?
         .and_then(|node| node.vector)
         .is_some_and(|vector| {
             vector.embedder.as_deref() == Some(info.model.as_str())
                 && vector
                     .dimension
                     .is_none_or(|dimension| dimension as usize == info.dimension)
-        })
+        }))
 }
 
 /// The schema change a page's unit makes first: none when the property is declared for the
@@ -407,11 +407,11 @@ fn ensure_declared<S: GraphStorage>(
     allowed: bool,
 ) -> Result<bool, PageError> {
     let kind = node_type(job.element);
-    if declared_for(storage, kind, &job.label, &job.to, info) {
+    if declared_for(storage, kind, &job.label, &job.to, info)? {
         return Ok(false);
     }
     match provenance::plan(
-        storage.get_schema().as_ref(),
+        storage.get_schema()?.as_ref(),
         kind,
         &job.label,
         &job.to,
@@ -456,7 +456,7 @@ fn run<S: GraphStorage, A: Access<S>>(
     // Phase 0: the schema check and the ids (read lock, once).
     let collected = access.read(|storage| {
         let plan = provenance::plan(
-            storage.get_schema().as_ref(),
+            storage.get_schema().map_err(TraverserError::from)?.as_ref(),
             kind,
             &job.label,
             &job.to,

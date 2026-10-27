@@ -1296,7 +1296,7 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
     // 15): refused before anything is scanned.
     super::files::refuse_other_version(dir)?;
     // The backend's own records come first: what it lost is missing from every file below.
-    let backend = dir.store_dir().check();
+    let backend = crate::persist::dir::backend_check(&**dir.store_dir());
     for reason in backend.damage {
         damage.push(Damage::new(DamageKind::Container, ".", reason));
     }

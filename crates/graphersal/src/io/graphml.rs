@@ -176,27 +176,19 @@ impl GraphMLImport {
         reader: Reader<R>,
         presets: Option<&std::collections::HashMap<CompactString, crate::value::ElementProperty>>,
     ) -> Result<(), IOError> {
-        let mut budget = UnitBudget::start(&*g, presets, GRAPHML_IMPORT);
-        let mark = g.begin_unit();
+        let mut budget = UnitBudget::start(&*g, presets, GRAPHML_IMPORT)?;
+        let mark = g.begin_unit()?;
         let imported = crate::graph::storage::close_on_unwind(
             g,
             |g| {
                 self.import_outside_units(g, reader, &mut budget)?;
                 crate::traversal::memory_budget::check(&budget, &*g).map_err(IOError::Graph)
             },
-            |g| {
-                g.rollback_unit(
-                    mark,
-                    &crate::graph::RollbackReason::failed(&crate::graph::storage::UNWOUND),
-                )
-            },
+            |g| crate::graph::storage::rollback_unwound(g, mark),
         );
         match imported {
             Ok(()) => g.commit_unit(mark).map_err(IOError::Graph),
-            Err(err) => {
-                g.rollback_unit(mark, &crate::graph::RollbackReason::failed(&err));
-                Err(err)
-            }
+            Err(err) => Err(crate::graph::storage::rollback_failed_unit(g, mark, err)),
         }
     }
 
@@ -413,7 +405,7 @@ impl GraphMLImport {
             buf.clear();
         }
 
-        g.shrink_to_fit();
+        g.shrink_to_fit()?;
         Ok(())
     }
 
@@ -1131,7 +1123,7 @@ fn lift_declared_properties<S: GraphStorage>(
     data: &mut PropertyMap,
 ) -> Result<(), IOError> {
     for (key, slot) in data.iter_mut() {
-        let Some(declared) = g.declared_property_schema(kind, labels, key) else {
+        let Some(declared) = g.declared_property_schema(kind, labels, key)? else {
             continue;
         };
         // A node without `type` (`{}`, or `anyOf` of such) declares no type to restore.

@@ -141,7 +141,15 @@ fn sorted(mut definitions: Vec<Definition>) -> Vec<Definition> {
 }
 
 fn catalog_of(store: &Store) -> Vec<Definition> {
-    sorted(store.graph().read().definitions().cloned().collect())
+    sorted(
+        store
+            .graph()
+            .read()
+            .definitions()
+            .unwrap()
+            .cloned()
+            .collect(),
+    )
 }
 
 #[test]
@@ -213,7 +221,7 @@ fn an_index_of_a_newer_element_kind_is_kept_not_served_and_never_created() {
     graph
         .set_definition(Definition::property_index("doc_body", index))
         .unwrap();
-    assert!(graph.property_indexes().is_empty());
+    assert!(graph.property_indexes().unwrap().is_empty());
     let listed = eval_value(
         Arc::new(Graph::new(graph)),
         r#"let i = g.indexes()[0]; [i.element, i.served, i.reason.contains("property")]"#,
@@ -298,6 +306,7 @@ fn a_saved_query_of_a_newer_gql_dialect_is_kept_listed_and_refused_to_run() {
         let graph = store.graph().read();
         let definition = graph
             .definition(DefinitionKind::QUERY, "future")
+            .unwrap()
             .expect("kept");
         let stored = definition.as_query().expect("a query").clone();
         assert_eq!(stored, query);

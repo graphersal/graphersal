@@ -173,7 +173,7 @@ fn a_schema_change_is_a_unit_with_a_set_schema_mutation() {
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        graph.get_schema().unwrap().mode,
+        graph.get_schema().unwrap().unwrap().mode,
         SchemaMode::Open,
         "rolled back"
     );
@@ -191,13 +191,13 @@ fn a_schema_change_is_a_unit_with_a_set_schema_mutation() {
     // Inside a transaction: in effect immediately, gone with the rollback.
     let result: Result<(), GraphError> = graph.transaction(|g| {
         g.set_schema(GraphSchema::new().with_mode(SchemaMode::Closed))?;
-        assert_eq!(g.get_schema().unwrap().mode, SchemaMode::Closed);
+        assert_eq!(g.get_schema().unwrap().unwrap().mode, SchemaMode::Closed);
         // The schema of the unit applies at once: this fails and rolls the unit back.
         g.add_vertex(None, vec!["undeclared".into()], PropertyMap::default())
             .map(drop)
     });
     assert!(result.is_err());
-    assert_eq!(graph.get_schema().unwrap().mode, SchemaMode::Open);
+    assert_eq!(graph.get_schema().unwrap().unwrap().mode, SchemaMode::Open);
 }
 
 /// The backfill recipe of the book: make a key required in one transaction.
@@ -232,7 +232,7 @@ fn backfill_then_require_in_one_transaction() {
         })
         .unwrap();
     assert!(
-        graph.get_schema().unwrap().vertices["person"]
+        graph.get_schema().unwrap().unwrap().vertices["person"]
             .schema
             .is_required("email")
     );
@@ -394,7 +394,10 @@ fn the_dsl_methods_in_both_spellings_take_maps_and_json_text() {
         "let s = g.get_schema(); s.mode = \"none\"; g.set_schema(s)",
     )
     .unwrap();
-    assert_eq!(graph.read().get_schema().unwrap().mode, SchemaMode::None);
+    assert_eq!(
+        graph.read().get_schema().unwrap().unwrap().mode,
+        SchemaMode::None
+    );
     let _ = run(&graph, r#"g.patch_schema(#{mode: "open"})"#).unwrap();
     let patched = run(&graph, r#"g.patch_schema(`{"meta": {"status": "draft"}}`)"#).unwrap();
     assert!(schema_of(patched).to_json().contains(r#""status":"draft""#));
@@ -474,7 +477,7 @@ fn a_script_unit_rolls_the_schema_back_and_executions_report_changes() {
     );
     assert!(failed.is_err());
     assert!(
-        graph.read().get_schema().is_none(),
+        graph.read().get_schema().unwrap().is_none(),
         "rolled back with the script"
     );
 
@@ -505,12 +508,15 @@ fn rust_executions_report_changes() {
     assert_eq!(write.changes(), UnitChanges::new(true, false));
     // A unit that changed the schema reports it.
     let mut tg = TraversalGraph::new();
-    let mark = tg.begin_unit();
+    let mark = tg.begin_unit().unwrap();
     tg.set_schema(GraphSchema::new().with_mode(SchemaMode::Open))
         .unwrap();
-    assert_eq!(tg.unit_changes(mark), UnitChanges::new(false, true));
+    assert_eq!(
+        tg.unit_changes(mark).unwrap(),
+        UnitChanges::new(false, true)
+    );
     tg.add_vertex(None, vec!["a".into()], PropertyMap::default())
         .unwrap();
-    assert_eq!(tg.unit_changes(mark), UnitChanges::new(true, true));
+    assert_eq!(tg.unit_changes(mark).unwrap(), UnitChanges::new(true, true));
     tg.commit_unit(mark).unwrap();
 }

@@ -720,7 +720,8 @@ impl<S: GraphStorage> Graph<S> {
         // SAFETY: this thread holds the lock upgradable, which keeps every writer out, so no
         // thread has a `&mut S`; it holds no unit, so it has no view of its own.
         let base = unsafe { &*self.lock.data_ptr() };
-        let started_at = base.next_unit_started_at();
+        // A storage that cannot read its clock fails the begin: `abandon` releases the lock.
+        let started_at = base.next_unit_started_at()?;
         std::mem::forget(abandon);
         *self.unit.state.lock() = HeldUnit {
             depth: 1,
@@ -758,6 +759,8 @@ impl<S: GraphStorage> Graph<S> {
         // counted call refuses new ones).
         let mark = unsafe { &mut *self.lock.data_ptr() }.begin_unit();
         drop(call);
+        // A storage that cannot open the savepoint fails the begin; nothing is recorded.
+        let mark = mark?;
         let mut held = self.unit.state.lock();
         held.marks.push(mark);
         held.depth = held.depth.saturating_add(1);
@@ -808,9 +811,11 @@ impl<S: GraphStorage> Graph<S> {
         self.close_held_unit(
             "commit a unit",
             false,
-            |storage, mark| {
-                storage.set_unit_metadata(metadata);
-                storage.commit_unit(mark)
+            |storage, mark| match storage.set_unit_metadata(metadata) {
+                Ok(()) => storage.commit_unit(mark),
+                Err(err) => Err(crate::graph::storage::rollback_failed_unit(
+                    storage, mark, err,
+                )),
             },
             || Ok(()),
         )?
@@ -828,8 +833,8 @@ impl<S: GraphStorage> Graph<S> {
             "roll back a unit",
             false,
             |storage, mark| storage.rollback_unit(mark, reason),
-            || (),
-        )
+            || Ok(()),
+        )?
     }
 
     /// Closes the innermost unit the current thread holds by undoing it without the commit
@@ -868,7 +873,7 @@ impl<S: GraphStorage> Graph<S> {
         let level = usize::try_from(mark.raw()).unwrap_or(usize::MAX);
         let stored = self.unit.state.lock().marks.get(level).copied();
         Ok(match stored {
-            Some(stored) => guard.unit_changes(stored),
+            Some(stored) => guard.unit_changes(stored)?,
             None => UnitChanges::NONE,
         })
     }
@@ -918,8 +923,11 @@ impl<S: GraphStorage> Graph<S> {
             unit: &self.unit,
             write: true,
         };
-        if !exclusive {
-            self.make_unit_exclusive();
+        // Opens the storage's units not open yet (a storage that failed to open one at an
+        // earlier write gets asked again): a failure is this write's error.
+        match exclusive {
+            false => self.make_unit_exclusive()?,
+            true => self.open_storage_units()?,
         }
         // SAFETY: this thread holds the lock exclusively, and no other view of it exists on
         // this thread (checked above, and the counter refuses new ones while this one lives).
@@ -932,13 +940,12 @@ impl<S: GraphStorage> Graph<S> {
     /// [`Self::held_write`] without waiting: [`GraphError::GraphViewHeld`] while another view
     /// of the unit is alive on this thread, `None` while other threads read.
     fn try_held_write(&self) -> Result<Option<WriteAccess<'_, S>>, GraphError> {
-        let upgraded = {
+        {
             let mut held = self.unit.state.lock();
             if held.reads > 0 || held.writes > 0 {
                 return Err(view_held("write the graph"));
             }
-            let upgraded = !held.exclusive;
-            if upgraded {
+            if !held.exclusive {
                 // SAFETY: this thread holds the unit's lock upgradable.
                 if !unsafe { self.raw().try_upgrade() } {
                     return Ok(None);
@@ -948,15 +955,12 @@ impl<S: GraphStorage> Graph<S> {
                     lock_series(&self.workload, "write.hold").map(|_| Instant::now());
             }
             held.writes += 1;
-            upgraded
-        };
+        }
         let view = HeldView {
             unit: &self.unit,
             write: true,
         };
-        if upgraded {
-            self.open_storage_units();
-        }
+        self.open_storage_units()?;
         // SAFETY: as in `held_write`.
         Ok(Some(WriteAccess::Held(
             unsafe { &mut *self.lock.data_ptr() },
@@ -966,8 +970,9 @@ impl<S: GraphStorage> Graph<S> {
 
     /// Upgrades the lock of the unit the current thread holds for good (its first write),
     /// waiting for the other threads' readers (the wait counts as `write.wait`), then opens the
-    /// storage's units. The caller is the thread's only view of the graph.
-    fn make_unit_exclusive(&self) {
+    /// storage's units (their error when one cannot open; the lock stays exclusive). The caller
+    /// is the thread's only view of the graph.
+    fn make_unit_exclusive(&self) -> Result<(), GraphError> {
         let series = lock_series(&self.workload, "write.wait");
         let asked = series.as_ref().map(|_| Instant::now());
         // SAFETY: this thread holds the unit's lock upgradable (not exclusive yet).
@@ -986,18 +991,20 @@ impl<S: GraphStorage> Graph<S> {
                 held.exclusive_since = Some(acquired);
             }
         }
-        self.open_storage_units();
+        self.open_storage_units()
     }
 
     /// Opens on the storage, in order, every level of the held unit not opened yet: the
     /// outermost with the pinned time ([`GraphStorage::begin_unit_at`]), nested ones as
-    /// savepoints. The lock must be exclusive and the caller the thread's only view of it.
-    fn open_storage_units(&self) {
+    /// savepoints. The lock must be exclusive and the caller the thread's only view of it. A
+    /// level the storage cannot open stops here with its error: the levels opened so far stay
+    /// open (they belong to levels still held), the rest is opened at the next write.
+    fn open_storage_units(&self) -> Result<(), GraphError> {
         loop {
             let (level, started_at) = {
                 let held = self.unit.state.lock();
                 if held.marks.len() >= held.depth as usize {
-                    return;
+                    return Ok(());
                 }
                 (held.marks.len(), held.started_at)
             };
@@ -1007,7 +1014,7 @@ impl<S: GraphStorage> Graph<S> {
             let mark = match (level, started_at) {
                 (0, Some(started_at)) => storage.begin_unit_at(started_at),
                 _ => storage.begin_unit(),
-            };
+            }?;
             self.unit.state.lock().marks.push(mark);
         }
     }
@@ -1053,9 +1060,17 @@ impl<S: GraphStorage> Graph<S> {
             unit: &self.unit,
             write: true,
         };
-        match exclusive {
+        let opened = match exclusive {
             false => self.make_unit_exclusive(),
             true => self.open_storage_units(),
+        };
+        if let Err(err) = opened {
+            // Only a dry run of a level that never wrote gets here (an opened level has all
+            // levels below it open): the level is closed (it changed nothing) and the storage's
+            // refusal reported.
+            drop(call);
+            drop(finish);
+            return Err(err);
         }
         let Some(mark) = self.unit.state.lock().marks.get(level).copied() else {
             // Not reached: the levels were just opened.

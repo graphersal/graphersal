@@ -150,10 +150,10 @@ fn the_system_jobs_flush_and_compact() {
             .to_list()
             .unwrap();
     }
-    let before = store.graph().read().memory_structure().unwrap();
+    let before = store.graph().read().memory_structure().unwrap().unwrap();
     scheduler.set_enabled("compact", true).unwrap();
     scheduler.run_now("compact", T0 + 2 * MINUTE).unwrap();
-    let after = store.graph().read().memory_structure().unwrap();
+    let after = store.graph().read().memory_structure().unwrap().unwrap();
     assert!(before.vertex_slots.spare > 0, "{before:?}");
     assert_eq!(after.vertex_slots.spare, 0);
 }
@@ -736,7 +736,13 @@ fn the_statistics_memory_is_shown_beside_the_graph() {
     let (before, total) = usage(store.graph());
     assert!(before > 0);
     // The storage's own figure is the same total: the statistics are not in it.
-    let storage_total = store.graph().read().memory_usage().unwrap().total_bytes();
+    let storage_total = store
+        .graph()
+        .read()
+        .memory_usage()
+        .unwrap()
+        .unwrap()
+        .total_bytes();
     assert_eq!(total as u64, storage_total);
     for i in 0..50 {
         let _ = crate::script_host::eval_value(

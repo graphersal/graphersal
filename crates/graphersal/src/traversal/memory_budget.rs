@@ -177,28 +177,28 @@ impl MemoryBudget {
     /// live counter already includes the graph), else the graph's footprint
     /// ([`GraphStorage::memory_footprint_bytes`]: at most ONE walk, none when the graph has not
     /// changed since the last run; a storage without introspection counts as 0 bytes) and its
-    /// element count.
-    pub(crate) fn start<S: GraphStorage + ?Sized>(self, storage: &S) -> Self {
+    /// element count. A storage that cannot measure itself fails the run with its error.
+    pub(crate) fn start<S: GraphStorage + ?Sized>(self, storage: &S) -> Result<Self, GraphError> {
         if let Some(live) = tracked_live_bytes() {
-            return Self {
+            return Ok(Self {
                 tracked: true,
                 live_at_start: live,
                 ..self
-            };
+            });
         }
-        let base = storage.memory_footprint_bytes().unwrap_or(0);
+        let base = storage.memory_footprint_bytes()?.unwrap_or(0);
         let elements = (storage.vertex_count() as u64).saturating_add(storage.edge_count() as u64);
         let element_bytes = base
             .checked_div(elements)
             .unwrap_or(0)
             .max(MIN_ELEMENT_BYTES);
-        Self {
+        Ok(Self {
             tracked: false,
             base,
             elements_at_start: elements,
             element_bytes,
             ..self
-        }
+        })
     }
 
     /// What is in use now by the measure of this budget, before the run's own traversers and
@@ -307,18 +307,21 @@ impl UnitBudget {
     /// the key) and the storage's execution policy, started on `storage` as it is now (at most
     /// one walk of the graph, none when its footprint is cached). `None` when no budget is
     /// configured, or the configuration is invalid (a traversal on the same graph reports that
-    /// as `TraverserError::InvalidOption`; the unit is not stopped for it).
+    /// as `TraverserError::InvalidOption`; the unit is not stopped for it). `Err`: the storage
+    /// cannot read its policy or measure itself (the unit fails before it starts).
     pub(crate) fn start<S: GraphStorage + ?Sized>(
         storage: &S,
         presets: Option<&HashMap<CompactString, ElementProperty>>,
         operation: &'static str,
-    ) -> Option<Self> {
-        let limit = unit_limit(&storage.execution_policy(), presets)?;
-        Some(Self {
-            budget: MemoryBudget::new(limit).start(storage),
+    ) -> Result<Option<Self>, GraphError> {
+        let Some(limit) = unit_limit(&storage.execution_policy()?, presets) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            budget: MemoryBudget::new(limit).start(storage)?,
             operation,
             countdown: UNIT_CHECK_INTERVAL,
-        })
+        }))
     }
 
     /// Counts one handled element; every [`UNIT_CHECK_INTERVAL`]-th one checks the budget
@@ -538,7 +541,7 @@ mod tests {
         assert_eq!(walks(&graph), 2, "a rolled-back unit keeps the figure");
 
         // Inside a unit with uncommitted changes every run walks and nothing is cached.
-        let mark = graph.begin_unit();
+        let mark = graph.begin_unit().unwrap();
         graph
             .insert_vertex(Some("open".into()), vec!["x".into()], Default::default())
             .unwrap();
@@ -558,7 +561,9 @@ mod tests {
             .to_list()
             .unwrap();
         assert_eq!(walks(&graph), 4, "uncommitted changes are never cached");
-        graph.rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"));
+        graph
+            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+            .unwrap();
         assert_eq!(graph.last_commit_seq(), seq);
         read(&graph);
         assert_eq!(
@@ -578,8 +583,8 @@ mod tests {
     #[test]
     fn estimated_budget_counts_base_traversers_and_growth() {
         let mut graph = crate::TraversalGraph::tinkerpop_modern();
-        let base = graph.memory_usage().unwrap().total_bytes();
-        let budget = MemoryBudget::new(base + 1000).start(&graph);
+        let base = graph.memory_usage().unwrap().unwrap().total_bytes();
+        let budget = MemoryBudget::new(base + 1000).start(&graph).unwrap();
         assert!(!budget.tracked);
         assert!(budget.check(1000).is_ok());
         let err = budget.check(1001).unwrap_err();

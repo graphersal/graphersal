@@ -334,7 +334,7 @@ fn an_estimate_changes_nothing() {
         .unwrap();
     let seq = graph.last_commit_seq();
     let before = content(&graph);
-    let catalog: Vec<Definition> = graph.definitions().cloned().collect();
+    let catalog: Vec<Definition> = graph.definitions().unwrap().cloned().collect();
     let stats = graph.compression_stats("bio").unwrap();
     let memory = graph.memory_usage().unwrap();
     for path in ["bio", "details.cv", "name", "nothing"] {
@@ -351,7 +351,10 @@ fn an_estimate_changes_nothing() {
     assert_eq!(graph.last_commit_seq(), seq);
     assert!(seen.lock().unwrap().is_empty(), "no unit was committed");
     assert_eq!(content(&graph), before);
-    assert_eq!(graph.definitions().cloned().collect::<Vec<_>>(), catalog);
+    assert_eq!(
+        graph.definitions().unwrap().cloned().collect::<Vec<_>>(),
+        catalog
+    );
     assert_eq!(graph.compression_stats("bio").unwrap(), stats);
     assert_eq!(graph.memory_usage().unwrap(), memory);
     graph.check_compression_invariant().unwrap();

@@ -135,7 +135,7 @@ fn with_property(graph: &Graph, key: &str) -> usize {
 }
 
 fn declared_embedder(graph: &Graph, label: &str, key: &str) -> Option<String> {
-    let schema = graph.read().get_schema()?;
+    let schema = graph.read().get_schema().unwrap()?;
     schema
         .vertices
         .get(label)?
@@ -197,7 +197,7 @@ fn the_job_embeds_page_by_page_and_declares_the_model() {
         Some("mock@1")
     );
     // The declaration has the embedder's shape.
-    let schema = graph.read().get_schema().unwrap();
+    let schema = graph.read().get_schema().unwrap().unwrap();
     let vector = schema.vertices["doc"].schema.properties["emb"]
         .vector
         .clone()
@@ -594,7 +594,7 @@ fn a_conflicting_declaration_stops_the_job_before_the_embedder_runs() {
     let patch = |node: &str| {
         let declared = schema_with(node).unwrap().vertices["doc"].schema.properties["emb"].clone();
         let mut lock = graph.write();
-        let mut schema = lock.get_schema().unwrap();
+        let mut schema = lock.get_schema().unwrap().unwrap();
         schema.vertices["doc"]
             .schema
             .properties
@@ -685,7 +685,7 @@ fn edges_and_jpath_sources() {
         .element(ElementKind::Edge);
     let report = run_job(&graph, &job, &Embedders::default()).unwrap();
     assert_eq!(report.embedded, 2);
-    let schema = graph.read().get_schema().unwrap();
+    let schema = graph.read().get_schema().unwrap().unwrap();
     let declared = schema.edges["knows"].schema.properties["emb"]
         .vector
         .clone()
@@ -1141,7 +1141,7 @@ fn docs_declared(n: usize, element: &str, dimension: Option<u32>) -> Arc<Graph> 
     let graph = docs(n);
     {
         let mut lock = graph.write();
-        let mut schema = lock.get_schema().unwrap();
+        let mut schema = lock.get_schema().unwrap().unwrap();
         let dimension = dimension
             .map(|d| format!(r#", "dimension": {d}"#))
             .unwrap_or_default();
@@ -1192,7 +1192,7 @@ fn an_f32_embedder_fills_an_i8_or_bit_property_quantized() {
         );
         assert_eq!(stored_elements(&graph), vec![element; 3]);
         // The declaration keeps its element and gets the embedder's model.
-        let schema = graph.read().get_schema().unwrap();
+        let schema = graph.read().get_schema().unwrap().unwrap();
         let vector = schema.vertices["doc"].schema.properties["emb"]
             .vector
             .clone()

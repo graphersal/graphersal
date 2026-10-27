@@ -403,21 +403,42 @@ impl StoreDir for Probe {
     fn lock(&self, kind: LockKind) -> io::Result<Option<DirLockGuard>> {
         self.inner.lock(kind)
     }
-    fn space_usage(&self) -> Option<SpaceUsage> {
+    fn space_usage(&self) -> io::Result<Option<SpaceUsage>> {
         self.inner.space_usage()
     }
     fn compact(&self) -> io::Result<Option<DirCompaction>> {
         self.inner.compact()
     }
-    fn free_space(&self) -> Option<u64> {
+    fn free_space(&self) -> io::Result<Option<u64>> {
         match self.free.load(Ordering::SeqCst) {
             u64::MAX => self.inner.free_space(),
-            free => Some(free),
+            FREE_SPACE_FAILS => Err(io::Error::other("statvfs failed")),
+            free => Ok(Some(free)),
         }
     }
-    fn check(&self) -> DirCheck {
+    fn check(&self) -> io::Result<DirCheck> {
         self.inner.check()
     }
+}
+
+/// The `Probe::free` value that makes `free_space` fail like a failing `statvfs`.
+const FREE_SPACE_FAILS: u64 = u64::MAX - 1;
+
+/// A backend whose free-space query fails: the compaction advice, which consults it, fails
+/// with that error instead of reading it as "unknown".
+#[test]
+fn a_failing_free_space_query_fails_the_compaction_advice() {
+    let temp = Temp::new("advice-free-space-fails");
+    let probe = Probe::new(Arc::new(SingleFileDir::new(temp.join("graph.gstore"))));
+    let dir: Arc<dyn StoreDir> = probe.clone();
+    let store = history(&dir, policy());
+    probe.free.store(FREE_SPACE_FAILS, Ordering::SeqCst);
+    let err = store.compaction_advice().unwrap_err();
+    assert!(matches!(err, PersistError::Io { .. }), "{err:?}");
+    assert!(err.to_string().contains("free space"), "{err}");
+    probe.free.store(u64::MAX, Ordering::SeqCst);
+    assert!(store.compaction_advice().is_ok());
+    store.close().unwrap();
 }
 
 /// A store with history to prune: three snapshots of a graph that shrinks.
@@ -603,14 +624,14 @@ fn the_prune_estimate_counts_the_wal_and_equals_what_prune_removes() {
         );
         assert!(before.recommended, "{backend:?}: {before:?}");
         assert_eq!(before.decided_by, AdviceRule::ThresholdsMet, "{backend:?}");
-        let live_before = dir.space_usage().map(|usage| usage.live_bytes);
+        let live_before = dir.space_usage().unwrap().map(|usage| usage.live_bytes);
         let report = store.prune(store.graph().read().last_commit_seq()).unwrap();
         assert_eq!(report.segments_removed, before.prune.segments_removed);
         assert_eq!(report.snapshots_removed, before.prune.snapshots_removed);
         assert_eq!(report.files_retained, before.prune.files_retained);
         let after = store.compaction_advice_with(policy).unwrap();
         assert_eq!(after.prune_bytes, 0, "{backend:?}: {after:?}");
-        match (live_before, dir.space_usage()) {
+        match (live_before, dir.space_usage().unwrap()) {
             // A single file: the pruned bytes became garbage; the live data shrank by them,
             // within the container's own bookkeeping (the name table, record framing: a few bytes per extent, well below 2 %).
             (Some(live_before), Some(usage)) => {

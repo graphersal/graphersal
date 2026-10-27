@@ -85,7 +85,7 @@ fn write_files<S: PersistentStorage + ?Sized>(
     write: &WriteOptions,
     target: &DirPath,
 ) -> Result<Vec<(String, u64)>, PersistError> {
-    let seq = graph.last_commit_seq();
+    let seq = graph.last_commit_seq()?;
     let next = seq
         .checked_add(1)
         .ok_or(crate::error::GraphError::SequenceOverflow {
@@ -177,7 +177,7 @@ fn full<S: PersistentStorage + ?Sized>(
                 .create_dir_all()
                 .map_err(|err| PersistError::io("creating the backup directory", err))?;
         }
-        let seq = graph.last_commit_seq();
+        let seq = graph.last_commit_seq()?;
         let taken_at = crate::graph::undo::now_micros();
         let mut files_written = write_files(store, graph, graph_file, write, target)?;
         // The models are files of the store, copied as they are; a damaged one is skipped
@@ -261,7 +261,7 @@ fn increment<S: PersistentStorage + ?Sized>(
         .map(|entry| entry.branched_at)
         .min()
         .unwrap_or(u64::MAX);
-    let seq = graph.last_commit_seq();
+    let seq = graph.last_commit_seq()?;
     let b_newest = list_snapshots(target)?.last().map(|(s, _)| *s).unwrap_or(0);
     let b_commit = backup.backup.map_or(0, |m| m.commit_seq).max(b_newest);
     if b_commit > valid_to.min(seq) {

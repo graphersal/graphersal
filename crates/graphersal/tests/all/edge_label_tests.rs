@@ -55,6 +55,7 @@ fn label_of(graph: &TraversalGraph, id: &str) -> Option<String> {
 fn edge_label_count(graph: &TraversalGraph, label: &str) -> usize {
     graph
         .statistics()
+        .unwrap()
         .expect("statistics")
         .edge_label_count(label)
 }
@@ -120,7 +121,7 @@ fn relabel_updates_label_index_and_statistics() {
     assert_eq!(edge_label_count(&graph, "knows"), 1);
     assert_eq!(edge_label_count(&graph, "likes"), 1);
     assert_eq!(
-        graph.statistics().cloned(),
+        graph.statistics().unwrap().cloned(),
         Some(GraphStatistics::from_storage(&graph))
     );
     // The traversal sees the new label through the label index.
@@ -156,8 +157,8 @@ fn relabel_of_a_removed_edge_is_an_error() {
 #[test]
 fn rollback_restores_the_label_and_the_statistics() {
     let mut graph = small();
-    let before = graph.statistics().cloned();
-    let mark = graph.begin_unit();
+    let before = graph.statistics().unwrap().cloned();
+    let mark = graph.begin_unit().unwrap();
     assert!(
         graph
             .set_edge_label(e(&graph, "ab"), "made".into())
@@ -169,10 +170,12 @@ fn rollback_restores_the_label_and_the_statistics() {
             .unwrap()
     );
     assert_eq!(edge_label_count(&graph, "made"), 1);
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(label_of(&graph, "ab").as_deref(), Some("created"));
     assert_eq!(label_of(&graph, "ac"), None, "unlabeled again");
-    assert_eq!(graph.statistics().cloned(), before);
+    assert_eq!(graph.statistics().unwrap().cloned(), before);
     assert_eq!(graph.edges_by_label("made").count(), 0);
     assert_eq!(graph.edges_by_label("knows").count(), 0);
     assert_eq!(graph.edges_by_label("created").count(), 1);
@@ -224,7 +227,7 @@ fn relabel_is_captured_with_before_and_after() {
     copy.apply_change_set(&sets[0]).unwrap();
     assert_eq!(label_of(&copy, "ac").as_deref(), Some("knows"));
     assert_eq!(label_of(&copy, "ab").as_deref(), Some("made"));
-    assert_eq!(copy.statistics(), graph.statistics());
+    assert_eq!(copy.statistics().unwrap(), graph.statistics().unwrap());
 }
 
 #[test]
@@ -362,7 +365,7 @@ fn closed() -> TraversalGraph {
 #[test]
 fn closed_schema_rejects_a_label_the_edge_does_not_satisfy() {
     let mut graph = closed();
-    let before = graph.statistics().cloned();
+    let before = graph.statistics().unwrap().cloned();
     let edge = e(&graph, "ab");
     for (label, expected) in [
         ("undeclared", "UnknownEdgeLabel"),
@@ -380,7 +383,7 @@ fn closed_schema_rejects_a_label_the_edge_does_not_satisfy() {
             "{label}"
         );
     }
-    assert_eq!(graph.statistics().cloned(), before);
+    assert_eq!(graph.statistics().unwrap().cloned(), before);
     assert!(!graph.set_edge_label(edge, "created".into()).unwrap());
     assert!(graph.set_edge_label(edge, "made".into()).unwrap());
     assert_eq!(edge_label_count(&graph, "made"), 1);
@@ -405,7 +408,14 @@ fn labeling_unlabeled_edges_lets_a_graph_freeze_closed() {
     graph
         .set_schema(inferred.with_mode(SchemaMode::Closed))
         .unwrap();
-    assert!(graph.get_schema().unwrap().edges.contains_key("knows"));
+    assert!(
+        graph
+            .get_schema()
+            .unwrap()
+            .unwrap()
+            .edges
+            .contains_key("knows")
+    );
 }
 
 #[test]
@@ -466,15 +476,17 @@ fn compression_rules_of_the_new_label_apply() {
             CompressionDefinition::new(ElementKind::Edge, "made", "notes").unwrap(),
         )
         .unwrap();
-    let compressed = |g: &TraversalGraph| g.memory_usage().unwrap().compressed_values;
+    let compressed = |g: &TraversalGraph| g.memory_usage().unwrap().unwrap().compressed_values;
     assert_eq!(compressed(&graph), 0);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .set_edge_label(e(&graph, "ab"), "made".into())
         .unwrap();
     assert_eq!(compressed(&graph), 1);
     graph.check_compression_invariant().unwrap();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(compressed(&graph), 0);
     graph.check_compression_invariant().unwrap();
     graph
@@ -536,6 +548,6 @@ fn a_label_change_survives_the_journal() {
     .graph;
     assert_eq!(label_of(&recovered, "ac").as_deref(), Some("knows"));
     assert_eq!(label_of(&recovered, "ab").as_deref(), Some("made"));
-    assert_eq!(recovered.statistics(), graph.statistics());
+    assert_eq!(recovered.statistics().unwrap(), graph.statistics().unwrap());
     assert_eq!(recovered.last_commit_seq(), graph.last_commit_seq());
 }

@@ -182,7 +182,7 @@ let name = report
     .property(&PropertyTarget::top_level(ElementKind::Vertex, Some("person"), "name"))
     .unwrap();
 assert_eq!(name.elements, 4);
-assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().property_bytes);
+assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().unwrap().property_bytes);
 println!("{report}");
 ```
 

@@ -187,7 +187,7 @@ fn invariant(graph: &TraversalGraph) {
 
 /// How many stored values are compressed (memory counters).
 fn compressed_count(graph: &TraversalGraph) -> u64 {
-    graph.memory_usage().unwrap().compressed_values
+    graph.memory_usage().unwrap().unwrap().compressed_values
 }
 
 /// The logical content of a graph: every vertex and edge with its labels and properties, by id
@@ -613,9 +613,9 @@ fn memory_counters_and_a_clear_saving() {
         }
         graph
     };
-    let plain = build(false).memory_usage().unwrap();
+    let plain = build(false).memory_usage().unwrap().unwrap();
     let compressed_graph = build(true);
-    let compressed = compressed_graph.memory_usage().unwrap();
+    let compressed = compressed_graph.memory_usage().unwrap().unwrap();
     assert_eq!(plain.compressed_values, 0);
     assert_eq!(compressed.compressed_values, 10_000);
     assert!(compressed.compressed_plain_bytes > compressed.compressed_stored_bytes * 2);
@@ -690,7 +690,7 @@ fn rollbacks_restore_the_logical_data_and_the_invariant() {
     assert!(result.is_err());
     invariant(&graph);
     assert_eq!(content(&graph), oracle);
-    assert_eq!(graph.definitions().count(), 4);
+    assert_eq!(graph.definitions().unwrap().count(), 4);
     assert!(compressed_count(&graph) > 10);
 
     // A dry run leaves the graph as it was and reports plain values.
@@ -851,7 +851,7 @@ fn a_replayed_journal_compresses_on_the_replica() {
 #[test]
 fn invalid_rules_are_rejected_and_change_nothing() {
     let mut graph = compressed_graph();
-    let before = (content(&graph), graph.definitions().count());
+    let before = (content(&graph), graph.definitions().unwrap().count());
     assert!(CompressionDefinition::new(ElementKind::Vertex, "customer", "details[0]").is_err());
     assert!(CompressionDefinition::new(ElementKind::Vertex, "customer", "list[-1]").is_err());
     assert!(CompressionDefinition::new(ElementKind::Vertex, "customer", "").is_err());
@@ -876,7 +876,7 @@ fn invalid_rules_are_rejected_and_change_nothing() {
         let text = err.to_string();
         assert!(!text.is_empty(), "{definition:?}");
         assert_eq!(
-            (content(&graph), graph.definitions().count()),
+            (content(&graph), graph.definitions().unwrap().count()),
             before,
             "{definition:?}"
         );
@@ -908,7 +908,7 @@ fn invalid_rules_are_rejected_and_change_nothing() {
         let err = eval_value(shared.clone(), script).unwrap_err().to_string();
         assert!(err.contains("Help:") || !err.is_empty(), "{script}: {err}");
     }
-    assert_eq!(shared.read().definitions().count(), 4);
+    assert_eq!(shared.read().definitions().unwrap().count(), 4);
     // The defaults.
     let r = CompressionDefinition::new(ElementKind::Vertex, "a", "b").unwrap();
     assert_eq!(r.min_bytes(), DEFAULT_MIN_BYTES);
@@ -1126,7 +1126,7 @@ fn read_only_policies_and_saved_queries_cannot_change_rules() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("read-only"), "{err}");
-    assert_eq!(shared.read().definitions().count(), 5);
+    assert_eq!(shared.read().definitions().unwrap().count(), 5);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1224,7 +1224,7 @@ fn random_histories_keep_the_invariant_and_the_logical_data() {
                 .map(|_| (rng.below(12), rng.below(1000)))
                 .collect();
             let commit = rng.below(3) != 0;
-            let mark = graph.begin_unit();
+            let mark = graph.begin_unit().unwrap();
             for &(op, arg) in &ops {
                 random_op(&mut graph, op, arg, true);
             }
@@ -1234,10 +1234,12 @@ fn random_histories_keep_the_invariant_and_the_logical_data() {
                     random_op(&mut oracle, op, arg, false);
                 }
             } else {
-                graph.rollback_unit(
-                    mark,
-                    &graphersal::changes::RollbackReason::failed(&"random rollback"),
-                );
+                graph
+                    .rollback_unit(
+                        mark,
+                        &graphersal::changes::RollbackReason::failed(&"random rollback"),
+                    )
+                    .unwrap();
             }
             if let Err(reason) = graph.check_compression_invariant() {
                 panic!("seed {seed}: {reason}");
@@ -1316,7 +1318,7 @@ fn measure_ratio_and_throughput() {
             }
         }
         let read_secs = start.elapsed().as_secs_f64();
-        let memory = graph.memory_usage().unwrap();
+        let memory = graph.memory_usage().unwrap().unwrap();
         println!(
             "dictionary={dictionary}: {} of {} values compressed, plain {} bytes, stored {} bytes \
              (ratio {:.3}, dictionary {} bytes); property_bytes {}; define pass (compress) \

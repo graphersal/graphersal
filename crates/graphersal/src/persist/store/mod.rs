@@ -722,7 +722,7 @@ impl Store {
             });
         }
         let _lock = DirLock::exclusive(&dir)?;
-        let backend = dir.store_dir().check();
+        let backend = crate::persist::dir::backend_check(&**dir.store_dir());
         if !backend.damage.is_empty() {
             return Err(PersistError::corrupt(
                 dir.display(),
@@ -1104,7 +1104,7 @@ impl<S: PersistentStorage + Default> Store<S> {
         graph: S,
         options: StoreOptions,
     ) -> Result<Store<S>, PersistError> {
-        graph::require_journal_capabilities(graph.capabilities())?;
+        graph::require_journal_capabilities(graph.capabilities()?)?;
         let dir = DirPath::root(dir.into_store_dir());
         let lineage = vec![LineageEntry {
             graph_id: graph.graph_id(),
@@ -1782,7 +1782,7 @@ impl StoreCore {
                 .with_codec(options.codec)
                 .with_chunk_bytes(options.chunk_bytes)
                 .with_segment_bytes(options.snapshot_segment_bytes);
-            let snapshot = NewSnapshotDir::begin(dir, graph.last_commit_seq())?;
+            let snapshot = NewSnapshotDir::begin(dir, graph.last_commit_seq()?)?;
             write_graph_snapshot(snapshot.tmp(), graph, &write)?;
             snapshot.finish()?;
             write_graph_file(
@@ -1830,7 +1830,7 @@ impl StoreCore {
         }
         let lock = DirLock::exclusive(&dir)?;
         // The backend's own records (a single-file container) come before every store file.
-        let backend = dir.store_dir().check();
+        let backend = crate::persist::dir::backend_check(&**dir.store_dir());
         if !backend.damage.is_empty() {
             let trigger = PersistError::corrupt(
                 dir.display(),
@@ -2366,7 +2366,7 @@ impl StoreCore {
     pub fn info(&self) -> Result<StoreInfo, PersistError> {
         let (commit_seq, last_commit_at) = {
             let graph = self.shared.graph.read();
-            (graph.last_commit_seq(), graph.last_committed_at())
+            (graph.last_commit_seq()?, graph.last_committed_at())
         };
         let file = self
             .shared
@@ -2386,9 +2386,9 @@ impl StoreCore {
         info.durable = self.durable_position();
         info.clean = self.backup.is_some();
         info.definitions_by_kind =
-            count_by_kind(self.shared.graph.read().definition_kinds().into_iter());
+            count_by_kind(self.shared.graph.read().definition_kinds()?.into_iter());
         info.definitions = info.definitions_by_kind.values().sum();
-        info.schema_models = self.shared.graph.read().schema_models();
+        info.schema_models = self.shared.graph.read().schema_models()?;
         info.damage_found = self.damage_found()?;
         info.frozen_by_damage = self.is_frozen_by_damage();
         info.stopped = self.stopped_reason()?;
@@ -2486,7 +2486,7 @@ impl StoreCore {
 
     pub fn compact(&self) -> Result<CompactReport, PersistError> {
         self.writable("compact the store")?;
-        let up_to = self.shared.graph.read().last_commit_seq();
+        let up_to = self.shared.graph.read().last_commit_seq()?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
             PersistError::store(
                 "compact the store",
@@ -2701,7 +2701,7 @@ impl StoreCore {
                 err.to_string(),
             ));
         }
-        let current = graph.last_commit_seq();
+        let current = graph.last_commit_seq()?;
         let dir = &self.shared.dir;
         let reason = format!("rollback to {target}");
         let target = match target {
@@ -2789,19 +2789,19 @@ impl StoreCore {
             ));
         }
         let dir = &self.shared.dir;
-        let intent = rollback::plan_restore(dir, id, graph.last_commit_seq())?;
+        let intent = rollback::plan_restore(dir, id, graph.last_commit_seq()?)?;
         intent.write(dir)?;
         rollback::apply_restore(dir, &intent, None)
             .map_err(|err| self.stop_after_failed_change("the attic restore", err))?;
         self.reload_in_place(&mut *graph).map_err(|err| {
             self.stop_after_failed_reload("restore the attic entry", "restore", err)
         })?;
-        Ok(graph.last_commit_seq())
+        Ok(graph.last_commit_seq()?)
     }
 
     pub fn attic_can_restore(&self, id: &str) -> Result<(), PersistError> {
         self.writable("restore the attic entry")?;
-        let commit_seq = self.shared.graph.read().last_commit_seq();
+        let commit_seq = self.shared.graph.read().last_commit_seq()?;
         rollback::plan_restore(&self.shared.dir, id, commit_seq).map(|_| ())
     }
 
@@ -2917,8 +2917,13 @@ impl StoreCore {
     /// failure the graph is emptied again (an empty graph, never a partial one) before the
     /// error is returned; the caller stops the store.
     fn reload_in_place(&self, graph: &mut dyn LiveWrite) -> Result<u128, PersistError> {
-        self.reload_in_place_inner(graph)
-            .inspect_err(|_| graph.clear())
+        self.reload_in_place_inner(graph).inspect_err(|_| {
+            // The reload's error is the one reported (the caller stops the store); a storage
+            // that cannot even empty itself is logged beside it.
+            if let Err(err) = graph.clear() {
+                tracing::error!("emptying the graph after a failed reload failed too: {err}");
+            }
+        })
     }
 
     fn reload_in_place_inner(&self, graph: &mut dyn LiveWrite) -> Result<u128, PersistError> {
@@ -3014,7 +3019,7 @@ impl StoreCore {
             // From now on every commit is refused (vetoed and rolled back).
             self.shared.wal.closed.store(true, Ordering::Release);
         }
-        let last_commit = self.shared.graph.read().last_commit_seq();
+        let last_commit = self.shared.graph.read().last_commit_seq()?;
         // A store frozen by damage found while it was open writes nothing more to its disk
         // (it opens as "not closed cleanly" next time, which is no damage).
         if result.is_ok()
@@ -3048,7 +3053,7 @@ impl StoreCore {
             return Ok(None);
         }
         // Only the checkpoint's own record since the last snapshot: nothing to write.
-        let current = self.shared.graph.read().last_commit_seq();
+        let current = self.shared.graph.read().last_commit_seq()?;
         if list_snapshot_infos(&self.shared.dir)?
             .last()
             .is_some_and(|s| s.commit_seq == current)
@@ -3299,7 +3304,7 @@ impl Shared {
         let name = name.unwrap_or_default();
         if sync {
             let graph = self.graph.write();
-            let last = graph.last_commit_seq();
+            let last = graph.last_commit_seq()?;
             if self.durable.commit_seq() < last
                 && let Some(Err(err)) = self.journal.sync_now()
             {
@@ -3406,7 +3411,7 @@ impl Shared {
     ) -> Result<CheckpointReport, PersistError> {
         let snapshot = {
             let graph = self.graph.read();
-            let seq = graph.last_commit_seq();
+            let seq = graph.last_commit_seq()?;
             let existing = list_snapshot_infos(&self.dir)?;
             if let Some(same) = existing_snapshot(&existing, seq, name)? {
                 return Ok(CheckpointReport::existing(same));
@@ -3779,7 +3784,7 @@ fn load_latest(
     // nothing is written from here on, not even the torn-tail cut.
     // The manifest was read by the load just now: a failure here is a real one (an I/O error,
     // or damage that opens the store in maintenance mode), never "nothing critical".
-    let read_only = match graph.critical_definition().or_else(|| newer.first()) {
+    let read_only = match graph.critical_definition()?.or_else(|| newer.first()) {
         Some(reason) => Some(reason),
         None => read_manifest(&snapshot_path)?.1.critical_segment_reason(),
     };
@@ -3862,7 +3867,7 @@ fn attach_journal(
         .sum();
     wal.since_checkpoint.store(since, Ordering::Release);
     let graph_id = graph.graph_id();
-    let next = graph.last_commit_seq().checked_add(1).ok_or(
+    let next = graph.last_commit_seq()?.checked_add(1).ok_or(
         crate::error::GraphError::SequenceOverflow {
             sequence: crate::error::COMMIT_SEQUENCE,
         },
@@ -3951,7 +3956,7 @@ fn attach_journal(
         .with_known_marks(marks.iter().map(|m| m.name().to_string()))
         .with_files(Box::new(files))
         .with_durable_end(durable)
-        .continuing(graph.last_commit_seq(), segment, offset);
+        .continuing(graph.last_commit_seq()?, segment, offset);
     cell.set(Some(journal));
     Ok(durable)
 }
@@ -4216,7 +4221,10 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         attic: rollback::attic_list(dir)?,
         snapshot_bytes: rollback::tree_bytes(&dir.join(SNAPSHOTS_DIR)),
         backup: file.backup,
-        space: dir.store_dir().space_usage(),
+        space: dir
+            .store_dir()
+            .space_usage()
+            .map_err(|err| PersistError::io("reading the space usage of the store", err))?,
         definitions: 0,
         definitions_by_kind: Default::default(),
         damage_policy: file.damage_policy,

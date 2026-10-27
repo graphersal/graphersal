@@ -177,10 +177,16 @@ impl<S: GraphStorage> StepGqlLookup<S> {
 
     /// The vertices of the property index slice `[value, value]` of every scan label, each
     /// once (a superset); `None` when the value is not an index key the lookup serves, there
-    /// is no scan label, or the storage serves no index for one of the labels.
-    fn by_index(&self, storage: &S, key: &str, value: &RowValue<S>) -> Option<Vec<S::VertexId>> {
+    /// is no scan label, or the storage serves no index for one of the labels; the storage's
+    /// error when it cannot read the index.
+    fn by_index(
+        &self,
+        storage: &S,
+        key: &str,
+        value: &RowValue<S>,
+    ) -> Result<Option<Vec<S::VertexId>>, crate::error::GraphError> {
         let Value::Scalar(scalar) = value else {
-            return None;
+            return Ok(None);
         };
         let servable = match scalar {
             ElementProperty::String(_) | ElementProperty::Boolean(_) | ElementProperty::Uuid(_) => {
@@ -190,20 +196,23 @@ impl<S: GraphStorage> StepGqlLookup<S> {
             _ => false,
         };
         if !servable || self.labels.is_empty() {
-            return None;
+            return Ok(None);
         }
         let range = PropertyIndexRange::equal(scalar.clone());
         let mut found = Vec::new();
         let dedup = self.labels.len() > 1;
         let mut seen = std::collections::HashSet::new();
         for label in self.labels.iter() {
-            for v in storage.vertices_by_property_index(label, key, &range)? {
+            let Some(served) = storage.vertices_by_property_index(label, key, &range)? else {
+                return Ok(None);
+            };
+            for v in served {
                 if !dedup || seen.insert(v) {
                     found.push(v);
                 }
             }
         }
-        Some(found)
+        Ok(Some(found))
     }
 
     /// Calls `check` with every vertex of the scan labels (every vertex without scan labels),
@@ -299,7 +308,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlLookup<S> {
                 return Ok(());
             }
             (GqlLookupKey::Id, _) => None,
-            (GqlLookupKey::Property(key), _) => self.by_index(storage, key, &value),
+            (GqlLookupKey::Property(key), _) => self.by_index(storage, key, &value)?,
         };
         match candidates {
             Some(candidates) => {

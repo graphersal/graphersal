@@ -1895,10 +1895,12 @@ mod tests {
             .unwrap()
             .collect();
         assert_eq!(found, vec![v]);
-        let mark = graph.begin_unit();
+        let mark = graph.begin_unit().unwrap();
         graph.set_vertex_property(v, "age".into(), int(30)).unwrap();
         graph.check_property_indexes().unwrap();
-        graph.rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"));
+        graph
+            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+            .unwrap();
         graph.check_property_indexes().unwrap();
         graph.drop_vertex(v).unwrap();
         graph.check_property_indexes().unwrap();

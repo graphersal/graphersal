@@ -288,7 +288,7 @@ fn rust_count_still_mutates() {
 fn rust_schema_enforcement_applies_to_created_edges() {
     let mut graph = rust_two();
     graph.traversal_mut().merge_e(knows_1_2()).next().unwrap();
-    let schema = graph.infer_schema().with_mode(SchemaMode::Closed);
+    let schema = graph.infer_schema().unwrap().with_mode(SchemaMode::Closed);
     graph.set_schema(schema).unwrap();
     let err = graph
         .traversal_mut()

@@ -1046,7 +1046,7 @@ fn blow_ups_are_refused_by_the_materialization_limit_and_the_memory_budget() {
     }
     // Under a memory budget (the engine's estimate in this test binary: the graph's footprint
     // plus what the query holds and is about to build) with the default materialization limit.
-    let footprint = graph.read().memory_usage().unwrap().total_bytes();
+    let footprint = graph.read().memory_usage().unwrap().unwrap().total_bytes();
     let budget = [("memory.limit", (footprint + 1_000_000) as i64)];
     for query in [
         "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 10000000)) AS x",

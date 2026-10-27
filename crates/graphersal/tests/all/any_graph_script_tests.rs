@@ -137,28 +137,28 @@ impl GraphStorage for Wrapped {
     fn drop_edge_property(&mut self, prop: &str, edge: EdgeHandle) -> Result<(), GraphError> {
         GraphStorage::drop_edge_property(&mut self.0, prop, edge)
     }
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         GraphStorage::begin_unit(&mut self.0)
     }
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         GraphStorage::commit_unit(&mut self.0, mark)
     }
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
         GraphStorage::rollback_unit(&mut self.0, mark, reason)
     }
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         GraphStorage::unit_changes(&self.0, mark)
     }
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
         GraphStorage::discard_unit(&mut self.0, mark)
     }
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         GraphStorage::capabilities(&self.0)
     }
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
         GraphStorage::register_commit_hook(&mut self.0, hook)
     }
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(&self.0)
     }
 }
@@ -219,7 +219,7 @@ fn an_atomic_script_on_a_foreign_graph_commits_or_rolls_back_as_a_whole() {
     .unwrap();
     assert_eq!(int(committed), 7);
     assert_eq!(graph.read().vertex_count(), 7);
-    let seq = graph.read().last_commit_seq();
+    let seq = graph.read().last_commit_seq().unwrap();
 
     let failed = eval_value_atomic(
         graph.clone(),
@@ -230,7 +230,7 @@ fn an_atomic_script_on_a_foreign_graph_commits_or_rolls_back_as_a_whole() {
     );
     assert!(failed.is_err());
     assert_eq!(graph.read().vertex_count(), 7);
-    assert_eq!(graph.read().last_commit_seq(), seq);
+    assert_eq!(graph.read().last_commit_seq().unwrap(), seq);
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn a_dry_run_on_a_foreign_graph_reports_and_undoes_its_changes() {
     assert_eq!(int(count), 7);
     assert_eq!(changes.len(), 1);
     assert_eq!(graph.read().vertex_count(), 6);
-    assert_eq!(graph.read().last_commit_seq(), 0);
+    assert_eq!(graph.read().last_commit_seq().unwrap(), 0);
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn a_panic_in_an_atomic_script_rolls_back_and_moves_the_storage_back() {
     )
     .unwrap();
     assert_eq!(int(count), 7);
-    assert_eq!(graph.read().last_commit_seq(), 1);
+    assert_eq!(graph.read().last_commit_seq().unwrap(), 1);
 }
 
 #[test]

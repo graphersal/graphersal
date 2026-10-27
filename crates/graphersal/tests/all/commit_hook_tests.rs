@@ -187,7 +187,7 @@ fn content<S: GraphStorage>(graph: &S) -> Content {
         })
         .collect();
     edges.sort_by(|a, b| a.0.cmp(&b.0));
-    (vertices, edges, graph.get_schema())
+    (vertices, edges, graph.get_schema().unwrap())
 }
 
 fn person_schema(mode: SchemaMode) -> GraphSchema {
@@ -206,16 +206,16 @@ fn person_schema(mode: SchemaMode) -> GraphSchema {
 #[test]
 fn traversal_graph_reports_atomic_change_capture_and_writable() {
     let graph = TraversalGraph::new();
-    let caps = graph.capabilities();
+    let caps = graph.capabilities().unwrap();
     assert!(caps.atomic && caps.change_capture && caps.writable);
     assert!(!caps.immutable && !caps.durability && !caps.concurrent_writers);
     assert!(caps.is_consistent());
     let boxed: Box<TraversalGraph> = Box::new(TraversalGraph::new());
-    assert_eq!(boxed.capabilities(), caps);
+    assert_eq!(boxed.capabilities().unwrap(), caps);
     let mut owned = TraversalGraph::new();
-    assert_eq!(GraphStorage::capabilities(&&mut owned), caps);
+    assert_eq!(GraphStorage::capabilities(&&mut owned).unwrap(), caps);
     assert_eq!(
-        GraphStorage::capabilities(&&graph),
+        GraphStorage::capabilities(&&graph).unwrap(),
         StorageCapabilities::none(),
         "a read-only view claims nothing"
     );
@@ -399,16 +399,18 @@ fn a_nested_savepoint_emits_nothing_of_its_own() {
     let mut graph = TraversalGraph::new();
     let log = Events::default();
     let a = hook(&mut graph, "a", &log);
-    let outer = graph.begin_unit();
+    let outer = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("a".into()), vec![], PropertyMap::default())
         .unwrap();
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("b".into()), vec![], PropertyMap::default())
         .unwrap();
-    graph.rollback_unit(inner, &RollbackReason::failed(&"inner"));
-    let inner = graph.begin_unit();
+    graph
+        .rollback_unit(inner, &RollbackReason::failed(&"inner"))
+        .unwrap();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("c".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -456,7 +458,11 @@ fn a_vetoed_schema_change_is_rolled_back() {
         .set_schema(person_schema(SchemaMode::Open))
         .unwrap_err();
     assert!(matches!(err, GraphError::CommitRejected { .. }));
-    assert_eq!(graph.get_schema(), None, "the old (absent) schema is back");
+    assert_eq!(
+        graph.get_schema().unwrap(),
+        None,
+        "the old (absent) schema is back"
+    );
     // Also when it is part of a traversal-level unit: `GraphTraversalSource::set_schema`.
     let err = graph
         .traversal_mut()
@@ -466,7 +472,7 @@ fn a_vetoed_schema_change_is_rolled_back() {
         &*err,
         TraverserError::Graph(GraphError::CommitRejected { .. })
     ));
-    assert_eq!(graph.get_schema(), None);
+    assert_eq!(graph.get_schema().unwrap(), None);
     assert_eq!(graph.last_commit_seq(), 0);
     assert_eq!(
         events(&log),
@@ -486,7 +492,7 @@ fn schema_and_data_of_one_traversal_roll_back_together_on_a_veto() {
     let log = Events::default();
     let a = hook(&mut graph, "a", &log);
     a.set_veto(true);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph.set_schema(person_schema(SchemaMode::Open)).unwrap();
     let marko = graph.get_vertex_by_id("1").unwrap();
     graph
@@ -534,7 +540,7 @@ fn journal() -> (TraversalGraph, Vec<ChangeSet>) {
         Some(ElementProperty::String(id)) => graph.get_vertex_by_id(&id).unwrap(),
         other => panic!("unexpected id {other:?}"),
     };
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_edge(
             Some("e9".into()),
@@ -664,7 +670,7 @@ fn a_snapshot_with_position_restores_the_numbering() {
     let position = source.last_commit_seq();
     let restored = TraversalGraph::new().with_last_commit_seq(position);
     assert_eq!(restored.last_commit_seq(), position);
-    assert_eq!(GraphStorage::last_commit_seq(&restored), position);
+    assert_eq!(GraphStorage::last_commit_seq(&restored).unwrap(), position);
 }
 
 #[cfg(feature = "io")]

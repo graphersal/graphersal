@@ -145,14 +145,14 @@ impl GraphStorage for Forwarding {
     ) -> Box<dyn Iterator<Item = ForwardEdgeId> + 'a> {
         Box::new(GraphStorage::edges_by_label(&self.0, label).map(ForwardEdgeId))
     }
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         GraphStorage::statistics(&self.0)
     }
 
     fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
         GraphStorage::set_schema(&mut self.0, schema)
     }
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         GraphStorage::get_schema(&self.0)
     }
     fn declared_property_schema(
@@ -160,14 +160,18 @@ impl GraphStorage for Forwarding {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         GraphStorage::declared_property_schema(&self.0, kind, labels, key)
     }
 
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         GraphStorage::definitions(&self.0)
     }
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         GraphStorage::definition(&self.0, kind, name)
     }
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
@@ -179,7 +183,7 @@ impl GraphStorage for Forwarding {
     fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
         GraphStorage::recompress(&mut self.0, name)
     }
-    fn compression_stats(&self, name: &str) -> Option<CompressionStats> {
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
         GraphStorage::compression_stats(&self.0, name)
     }
     fn estimate_compression(
@@ -188,7 +192,7 @@ impl GraphStorage for Forwarding {
     ) -> Result<CompressionEstimate, GraphError> {
         GraphStorage::estimate_compression(&self.0, request)
     }
-    fn property_indexes(&self) -> Vec<PropertyIndexInfo> {
+    fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
         GraphStorage::property_indexes(&self.0)
     }
     fn vertices_by_property_index<'a>(
@@ -196,18 +200,23 @@ impl GraphStorage for Forwarding {
         label: &'a str,
         key: &'a str,
         range: &PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>> {
-        let found = GraphStorage::vertices_by_property_index(&self.0, label, key, range)?;
-        Some(Box::new(found.map(ForwardVertexId)))
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
+        let Some(found) = GraphStorage::vertices_by_property_index(&self.0, label, key, range)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(found.map(ForwardVertexId))))
     }
     fn edges_by_property_index<'a>(
         &'a self,
         label: &'a str,
         key: &'a str,
         range: &PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>> {
-        let found = GraphStorage::edges_by_property_index(&self.0, label, key, range)?;
-        Some(Box::new(found.map(ForwardEdgeId)))
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
+        let Some(found) = GraphStorage::edges_by_property_index(&self.0, label, key, range)? else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(found.map(ForwardEdgeId))))
     }
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
@@ -215,11 +224,14 @@ impl GraphStorage for Forwarding {
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>> {
-        let found = GraphStorage::vertices_by_transformed_property_index(
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
+        let Some(found) = GraphStorage::vertices_by_transformed_property_index(
             &self.0, label, key, transform, range,
-        )?;
-        Some(Box::new(found.map(ForwardVertexId)))
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(found.map(ForwardVertexId))))
     }
     fn edges_by_transformed_property_index<'a>(
         &'a self,
@@ -227,11 +239,14 @@ impl GraphStorage for Forwarding {
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>> {
-        let found = GraphStorage::edges_by_transformed_property_index(
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
+        let Some(found) = GraphStorage::edges_by_transformed_property_index(
             &self.0, label, key, transform, range,
-        )?;
-        Some(Box::new(found.map(ForwardEdgeId)))
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(found.map(ForwardEdgeId))))
     }
 
     fn insert_vertex(
@@ -336,40 +351,40 @@ impl GraphStorage for Forwarding {
     fn drop_edge_property(&mut self, prop: &str, edge: ForwardEdgeId) -> Result<(), GraphError> {
         GraphStorage::drop_edge_property(&mut self.0, prop, edge.0)
     }
-    fn shrink_to_fit(&mut self) {
-        GraphStorage::shrink_to_fit(&mut self.0);
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        GraphStorage::shrink_to_fit(&mut self.0)
     }
 
-    fn memory_usage(&self) -> Option<MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
         GraphStorage::memory_usage(&self.0)
     }
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         GraphStorage::memory_footprint_bytes(&self.0)
     }
-    fn execution_policy(&self) -> ExecutionPolicy {
+    fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         GraphStorage::execution_policy(&self.0)
     }
 
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         GraphStorage::begin_unit(&mut self.0)
     }
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
         GraphStorage::begin_unit_at(&mut self.0, started_at)
     }
-    fn next_unit_started_at(&self) -> Option<i128> {
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         GraphStorage::next_unit_started_at(&self.0)
     }
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         GraphStorage::commit_unit(&mut self.0, mark)
     }
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
-        GraphStorage::rollback_unit(&mut self.0, mark, reason);
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        GraphStorage::rollback_unit(&mut self.0, mark, reason)
     }
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         GraphStorage::unit_changes(&self.0, mark)
     }
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
-        GraphStorage::set_unit_metadata(&mut self.0, metadata);
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        GraphStorage::set_unit_metadata(&mut self.0, metadata)
     }
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
         GraphStorage::discard_unit(&mut self.0, mark)
@@ -377,13 +392,13 @@ impl GraphStorage for Forwarding {
     fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {
         GraphStorage::mark(&mut self.0, name)
     }
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         GraphStorage::capabilities(&self.0)
     }
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
         GraphStorage::register_commit_hook(&mut self.0, hook)
     }
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(&self.0)
     }
     fn unit_started_at(&self) -> Option<i128> {
@@ -407,7 +422,7 @@ impl graphersal::storage::PersistentStorage for Forwarding {
     fn graph_id(&self) -> u128 {
         graphersal::storage::PersistentStorage::graph_id(&self.0)
     }
-    fn set_graph_id(&mut self, graph_id: u128) {
+    fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::set_graph_id(&mut self.0, graph_id)
     }
     fn last_committed_at(&self) -> i64 {
@@ -416,7 +431,7 @@ impl graphersal::storage::PersistentStorage for Forwarding {
     fn id_sequences(&self) -> (u64, u64) {
         graphersal::storage::PersistentStorage::id_sequences(&self.0)
     }
-    fn raise_position(&mut self, commit_seq: u64, committed_at: i64) {
+    fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::raise_position(
             &mut self.0,
             commit_seq,
@@ -456,13 +471,13 @@ impl graphersal::storage::PersistentStorage for Forwarding {
     fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::load_definition(&mut self.0, definition)
     }
-    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+    fn reserve_load(&mut self, vertices: u64, edges: u64) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::reserve_load(&mut self.0, vertices, edges)
     }
-    fn finish_load(&mut self) {
+    fn finish_load(&mut self) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::finish_load(&mut self.0)
     }
-    fn clear(&mut self) {
+    fn clear(&mut self) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::clear(&mut self.0)
     }
     fn attach_journal(

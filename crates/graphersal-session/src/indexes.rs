@@ -251,11 +251,12 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
     Ok(Definition::property_index(name, index))
 }
 
-/// The property indexes of `g`, by name, as their entries (module docs).
-pub fn indexes_in<S: GraphStorage>(g: &S) -> Value {
-    let served = g.property_indexes();
-    Value::Array(
-        g.definitions()
+/// The property indexes of `g`, by name, as their entries (module docs); the storage's error
+/// when it cannot read its catalog or its indexes.
+pub fn indexes_in<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
+    let served = g.property_indexes()?;
+    Ok(Value::Array(
+        g.definitions()?
             .filter_map(|definition| {
                 let index = definition.as_property_index()?;
                 Some(entry(
@@ -265,18 +266,21 @@ pub fn indexes_in<S: GraphStorage>(g: &S) -> Value {
                 ))
             })
             .collect(),
-    )
+    ))
 }
 
-/// The property index `name` of `g` as its entry, `null` when there is none.
-pub fn index_in<S: GraphStorage>(g: &S, name: &str) -> Value {
-    match g
-        .definition(DefinitionKind::PROPERTY_INDEX, name)
-        .and_then(Definition::as_property_index)
-    {
-        Some(index) => entry(name, index, stats_of(&g.property_indexes(), name)),
-        None => Value::Null,
-    }
+/// The property index `name` of `g` as its entry, `null` when there is none; the storage's
+/// error when it cannot read it.
+pub fn index_in<S: GraphStorage>(g: &S, name: &str) -> Result<Value, GraphError> {
+    Ok(
+        match g
+            .definition(DefinitionKind::PROPERTY_INDEX, name)?
+            .and_then(Definition::as_property_index)
+        {
+            Some(index) => entry(name, index, stats_of(&g.property_indexes()?, name)),
+            None => Value::Null,
+        },
+    )
 }
 
 fn stats_of(served: &[PropertyIndexInfo], name: &str) -> Option<PropertyIndexStats> {
@@ -295,12 +299,13 @@ pub(crate) fn store_index<S: GraphStorage>(
     g: &mut S,
     definition: Definition,
 ) -> Result<(), Vec<FieldError>> {
-    if !g.capabilities().property_indexes {
-        let err = GraphError::unsupported("property indexes");
-        return Err(vec![FieldError::new("general", format_diagnostic(&err))]);
+    let general = |err: GraphError| vec![FieldError::new("general", format_diagnostic(&err))];
+    if !g.capabilities().map_err(general)?.property_indexes {
+        return Err(general(GraphError::unsupported("property indexes")));
     }
     let name = definition.name().to_string();
     if g.definition(DefinitionKind::PROPERTY_INDEX, &name)
+        .map_err(general)?
         .is_some()
     {
         return Err(vec![FieldError::new(
@@ -309,7 +314,7 @@ pub(crate) fn store_index<S: GraphStorage>(
         )]);
     }
     if let Some(index) = definition.as_property_index()
-        && let Err(err) = index.check_create(&name, g.get_schema().as_ref())
+        && let Err(err) = index.check_create(&name, g.get_schema().map_err(general)?.as_ref())
     {
         return Err(vec![field_of(&err)]);
     }
@@ -524,7 +529,7 @@ mod tests {
         let index = PropertyIndexDefinition::from_payload(&payload).unwrap();
         tg.transaction(|g| g.set_definition(Definition::property_index("future", index)))
             .unwrap();
-        let listed = indexes_in(&tg);
+        let listed = indexes_in(&tg).unwrap();
         assert_eq!(listed[0]["type"], "future-x", "{listed}");
         assert_eq!(listed[0]["served"], false, "{listed}");
         assert_eq!(listed[0]["stats"], Value::Null, "{listed}");
@@ -559,9 +564,9 @@ mod tests {
         let definition = || index_definition(&json!({"label": "person", "key": "age"})).unwrap();
         store_index(&mut tg, definition()).unwrap();
         store_index(&mut fw, definition()).unwrap();
-        assert_eq!(indexes_in(&tg), indexes_in(&fw));
-        assert_eq!(index_in(&fw, "person_age")["stats"]["entries"], 4);
-        assert_eq!(index_in(&fw, "none"), Value::Null);
+        assert_eq!(indexes_in(&tg).unwrap(), indexes_in(&fw).unwrap());
+        assert_eq!(index_in(&fw, "person_age").unwrap()["stats"]["entries"], 4);
+        assert_eq!(index_in(&fw, "none").unwrap(), Value::Null);
         // A storage without the capability: the entry of a stored definition says `null`.
         let entry = entry(
             "x",

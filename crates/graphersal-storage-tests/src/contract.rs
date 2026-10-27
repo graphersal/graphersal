@@ -43,6 +43,7 @@ pub fn props(pairs: &[(&str, ElementProperty)]) -> PropertyMap {
 pub fn statistics_of<S: GraphStorage>(storage: &S) -> GraphStatistics {
     storage
         .statistics()
+        .unwrap()
         .cloned()
         .unwrap_or_else(|| GraphStatistics::from_storage(storage))
 }
@@ -168,7 +169,7 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
     }
     // A storage that reports statistics must report exactly the recomputed ones.
     let stats = GraphStatistics::from_storage(storage);
-    if let Some(reported) = storage.statistics() {
+    if let Some(reported) = storage.statistics().unwrap() {
         assert_eq!(
             reported, &stats,
             "statistics() != GraphStatistics::from_storage"
@@ -1406,11 +1407,11 @@ pub fn schema_application_failure_leaves_graph_and_schema_unchanged<S: GraphStor
     storage: &mut S,
 ) {
     vertex(storage, Some("p"), &["Person"], PropertyMap::default());
-    assert!(storage.get_schema().is_none());
+    assert!(storage.get_schema().unwrap().is_none());
     let result = storage.set_schema(person_schema(SchemaMode::Closed));
     if schema_unsupported(&result) {
         assert!(
-            storage.get_schema().is_none(),
+            storage.get_schema().unwrap().is_none(),
             "a storage without schema support stores no schema"
         );
         return;
@@ -1418,7 +1419,7 @@ pub fn schema_application_failure_leaves_graph_and_schema_unchanged<S: GraphStor
     let err = result.expect_err("the vertex lacks a required property");
     assert!(matches!(err, GraphError::Schema(_)), "got {err:?}");
     assert!(
-        storage.get_schema().is_none(),
+        storage.get_schema().unwrap().is_none(),
         "a failed set_schema stored the schema"
     );
     assert_eq!(storage.vertex_count(), 1);
@@ -1438,13 +1439,13 @@ pub fn schema_modes_enforce_declared_properties<S: GraphStorage>(storage: &mut S
     let result = storage.set_schema(person_schema(SchemaMode::Closed));
     if schema_unsupported(&result) {
         assert!(
-            storage.get_schema().is_none(),
+            storage.get_schema().unwrap().is_none(),
             "a storage without schema support stores no schema"
         );
         return;
     }
     result.expect("an empty graph satisfies any schema");
-    assert!(storage.get_schema().is_some());
+    assert!(storage.get_schema().unwrap().is_some());
     let ok = vertex(storage, None, &["Person"], props(&[("name", "ann".into())]));
     assert!(
         matches!(
@@ -1638,7 +1639,7 @@ pub fn read_only_rejects_writes<S: GraphStorage>(
     assert!(storage.drop_edge(edge).is_err());
     assert!(storage.drop_vertex_property("k", vertex).is_err());
     assert!(storage.drop_edge_property("k", edge).is_err());
-    let definitions = storage.definitions().count();
+    let definitions = storage.definitions().unwrap().count();
     assert!(storage.set_definition(sample_query("q")).is_err());
     assert!(
         storage
@@ -1646,7 +1647,7 @@ pub fn read_only_rejects_writes<S: GraphStorage>(
             .is_err()
     );
     assert_eq!(
-        storage.definitions().count(),
+        storage.definitions().unwrap().count(),
         definitions,
         "a rejected catalog write changed the catalog"
     );
@@ -1683,8 +1684,13 @@ pub fn sample_query(name: &str) -> Definition {
 pub fn definitions_are_stored_validated_and_removed<S: GraphStorage>(storage: &mut S) {
     match storage.set_definition(sample_query("b")) {
         Err(GraphError::Unsupported { .. }) => {
-            assert_eq!(storage.definitions().count(), 0);
-            assert!(storage.definition(DefinitionKind::QUERY, "b").is_none());
+            assert_eq!(storage.definitions().unwrap().count(), 0);
+            assert!(
+                storage
+                    .definition(DefinitionKind::QUERY, "b")
+                    .unwrap()
+                    .is_none()
+            );
             assert!(matches!(
                 storage.remove_definition(DefinitionKind::QUERY, "b"),
                 Err(GraphError::Unsupported { .. })
@@ -1705,6 +1711,7 @@ pub fn definitions_are_stored_validated_and_removed<S: GraphStorage>(storage: &m
     storage.set_definition(opaque.clone()).expect("opaque");
     let listed: Vec<(u8, String)> = storage
         .definitions()
+        .unwrap()
         .map(|d| (d.kind().code(), d.name().to_string()))
         .collect();
     assert_eq!(
@@ -1717,17 +1724,19 @@ pub fn definitions_are_stored_validated_and_removed<S: GraphStorage>(storage: &m
         "definitions are listed by kind, then by name"
     );
     assert_eq!(
-        storage.definition(DefinitionKind::from_code(200), "future"),
+        storage
+            .definition(DefinitionKind::from_code(200), "future")
+            .unwrap(),
         Some(&opaque)
     );
     // Replace.
     let replaced = Definition::query("a", QueryDefinition::new("fn a() { 1 }"));
     storage.set_definition(replaced.clone()).expect("replace");
     assert_eq!(
-        storage.definition(DefinitionKind::QUERY, "a"),
+        storage.definition(DefinitionKind::QUERY, "a").unwrap(),
         Some(&replaced)
     );
-    assert_eq!(storage.definitions().count(), 3);
+    assert_eq!(storage.definitions().unwrap().count(), 3);
     // Refused: an invalid name, an invalid folder; nothing changes.
     assert!(matches!(
         storage.set_definition(Definition::query(
@@ -1744,10 +1753,10 @@ pub fn definitions_are_stored_validated_and_removed<S: GraphStorage>(storage: &m
         Err(GraphError::Definition(_))
     ));
     assert_eq!(
-        storage.definition(DefinitionKind::QUERY, "a"),
+        storage.definition(DefinitionKind::QUERY, "a").unwrap(),
         Some(&replaced)
     );
-    assert_eq!(storage.definitions().count(), 3);
+    assert_eq!(storage.definitions().unwrap().count(), 3);
     // Remove.
     assert!(
         storage
@@ -1759,8 +1768,13 @@ pub fn definitions_are_stored_validated_and_removed<S: GraphStorage>(storage: &m
             .remove_definition(DefinitionKind::QUERY, "a")
             .expect("remove")
     );
-    assert!(storage.definition(DefinitionKind::QUERY, "a").is_none());
-    assert_eq!(storage.definitions().count(), 2);
+    assert!(
+        storage
+            .definition(DefinitionKind::QUERY, "a")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(storage.definitions().unwrap().count(), 2);
     // Names are per kind.
     assert!(
         !storage
@@ -1809,7 +1823,7 @@ impl CommitHook for EventCounter {
 pub fn mutation_outside_unit_records_nothing<S: GraphStorage>(storage: &mut S) {
     let (hook, events) = EventCounter::new();
     let _ = storage.register_commit_hook(Box::new(hook));
-    let seq = storage.last_commit_seq();
+    let seq = storage.last_commit_seq().unwrap();
     let a = vertex(storage, Some("a"), &["person"], props(&[("n", 1.into())]));
     let b = vertex(storage, None, &[], props(&[]));
     let e = edge(storage, Some("ab"), Some("knows"), a, b, props(&[]));
@@ -1828,7 +1842,7 @@ pub fn mutation_outside_unit_records_nothing<S: GraphStorage>(storage: &mut S) {
         "a mutation outside a unit calls no hook"
     );
     assert_eq!(
-        storage.last_commit_seq(),
+        storage.last_commit_seq().unwrap(),
         seq,
         "a mutation outside a unit is not a commit"
     );

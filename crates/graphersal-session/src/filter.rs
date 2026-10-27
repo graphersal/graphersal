@@ -142,7 +142,7 @@ impl GraphFilter {
                 .into());
             }
         }
-        let schema = g.get_schema();
+        let schema = g.get_schema()?;
         let hide_isolated = match fields.get("hideIsolated") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,

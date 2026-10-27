@@ -47,7 +47,9 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
     fn graph_id(&self) -> u128;
 
     /// Sets the lineage id (a snapshot load, a fork or a repair that starts a new lineage).
-    fn set_graph_id(&mut self, graph_id: u128);
+    /// `Err`: the storage could not store it (a backend error); the load, fork or repair
+    /// fails with it.
+    fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError>;
 
     /// The commit time of the last committed unit (microseconds since the Unix epoch, UTC; `0`
     /// before the first commit); never goes back.
@@ -58,7 +60,9 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
 
     /// Raises the commit sequence number ([`GraphStorage::last_commit_seq`]) and the commit
     /// time ([`Self::last_committed_at`]) to at least these values; never lowers either.
-    fn raise_position(&mut self, commit_seq: u64, committed_at: i64);
+    /// `Err`: the storage could not store the position (a backend error); the load or
+    /// recovery fails with it.
+    fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError>;
 
     /// Load sink: stores a vertex as it is (no validation, nothing recorded, no hook, no
     /// sequence change). [`GraphError::VertexIdUniqueConstraint`] when `id` exists already.
@@ -90,20 +94,27 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
 
     /// Load sink: the load is about to store about `vertices` vertices and `edges` edges (the
     /// counts of a snapshot's manifest, checked against its memory estimate but not trusted):
-    /// a storage may allocate for them at once. Default: nothing.
-    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+    /// a storage may allocate for them at once. Default: nothing. `Err`: the storage cannot
+    /// take that many (a backend error; not for a mere allocation hint it ignores); the load
+    /// fails with it.
+    fn reserve_load(&mut self, vertices: u64, edges: u64) -> Result<(), GraphError> {
         let _ = (vertices, edges);
+        Ok(())
     }
 
     /// Ends a load: derived state is built here ([`TraversalGraph`] runs its compression pass
-    /// and shrinks its indexes). Default: nothing.
-    fn finish_load(&mut self) {}
+    /// and shrinks its indexes). Default: nothing. `Err`: the derived state could not be built
+    /// (a backend error); the load fails with it and the storage is dropped or cleared.
+    fn finish_load(&mut self) -> Result<(), GraphError> {
+        Ok(())
+    }
 
     /// Empties data, schema, catalog, statistics and position (commit sequence, time, id
     /// sequences, lineage id), and KEEPS the registered commit hooks and the journal slot. An
     /// open unit is closed without a rollback. Used to load another state into the same
-    /// instance.
-    fn clear(&mut self);
+    /// instance. `Err`: the storage could not empty itself (a backend error); the Store
+    /// operation that reloads fails with it and does not load into the storage.
+    fn clear(&mut self) -> Result<(), GraphError>;
 
     /// Puts `journal` into the storage's journal slot
     /// ([`CommitHooks::set_journal`](crate::graph::CommitHooks::set_journal)).
@@ -134,7 +145,8 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
         }
         self.raise_id_sequences(changes.node_sequence(), changes.edge_sequence())
             .map_err(|err| err.to_string())?;
-        self.raise_position(changes.commit_seq(), changes.committed_at());
+        self.raise_position(changes.commit_seq(), changes.committed_at())
+            .map_err(|err| err.to_string())?;
         Ok(())
     }
 }
@@ -167,8 +179,9 @@ impl PersistentStorage for TraversalGraph {
         *self.graph_id.get_or_init(crate::value::uuid::new_v7)
     }
 
-    fn set_graph_id(&mut self, graph_id: u128) {
+    fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError> {
         self.graph_id = std::sync::OnceLock::from(graph_id);
+        Ok(())
     }
 
     #[inline]
@@ -181,9 +194,10 @@ impl PersistentStorage for TraversalGraph {
         (self.node_sequence, self.edge_sequence)
     }
 
-    fn raise_position(&mut self, commit_seq: u64, committed_at: i64) {
+    fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError> {
         self.undo.last_commit_seq = self.undo.last_commit_seq.max(commit_seq);
         self.undo.last_committed_at = self.undo.last_committed_at.max(committed_at);
+        Ok(())
     }
 
     fn load_vertex(
@@ -233,22 +247,25 @@ impl PersistentStorage for TraversalGraph {
     /// The compression load pass (the rules' dictionaries and compressed values), the build of
     /// every property index from the data (entries are never persisted), then
     /// [`TraversalGraph::shrink_to_fit`].
-    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+    fn reserve_load(&mut self, vertices: u64, edges: u64) -> Result<(), GraphError> {
         let room = |n: u64| usize::try_from(n).unwrap_or(0);
         self.graph.reserve_exact(room(vertices), room(edges));
+        Ok(())
     }
 
-    fn finish_load(&mut self) {
+    fn finish_load(&mut self) -> Result<(), GraphError> {
         self.compression_load_pass();
         self.property_index_rebuild_all();
-        self.shrink_to_fit();
+        TraversalGraph::shrink_to_fit(self);
+        Ok(())
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self) -> Result<(), GraphError> {
         let hooks = std::mem::take(&mut self.undo.hooks);
         let policy = std::mem::replace(&mut self.execution_policy, ExecutionPolicy::permissive());
         *self = TraversalGraph::new().with_execution_policy(policy);
         self.undo.hooks = hooks;
+        Ok(())
     }
 
     fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), GraphError> {
@@ -287,7 +304,7 @@ mod tests {
         fn graph_id(&self) -> u128 {
             (**self).graph_id()
         }
-        fn set_graph_id(&mut self, graph_id: u128) {
+        fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError> {
             (**self).set_graph_id(graph_id)
         }
         fn last_committed_at(&self) -> i64 {
@@ -296,7 +313,7 @@ mod tests {
         fn id_sequences(&self) -> (u64, u64) {
             (**self).id_sequences()
         }
-        fn raise_position(&mut self, commit_seq: u64, committed_at: i64) {
+        fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError> {
             (**self).raise_position(commit_seq, committed_at)
         }
         fn load_vertex(
@@ -323,7 +340,7 @@ mod tests {
         fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
             (**self).load_definition(definition)
         }
-        fn clear(&mut self) {
+        fn clear(&mut self) -> Result<(), GraphError> {
             (**self).clear()
         }
         fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), GraphError> {
@@ -439,9 +456,10 @@ mod tests {
             })
             .collect();
         edges.sort();
-        let schema = storage.get_schema().unwrap_or_default().to_json();
+        let schema = storage.get_schema().unwrap().unwrap_or_default().to_json();
         let definitions = storage
             .definitions()
+            .unwrap()
             .map(|d| d.name().to_string())
             .collect();
         (
@@ -449,7 +467,7 @@ mod tests {
             edges,
             schema,
             definitions,
-            storage.last_commit_seq(),
+            storage.last_commit_seq().unwrap(),
             storage.last_committed_at(),
             storage.id_sequences(),
         )
@@ -475,7 +493,7 @@ mod tests {
             assert_eq!(own_state, boxed_state, "verify: {verify}");
             assert_eq!(own.vertex_count(), 2);
             assert_eq!(own.last_commit_seq(), 3);
-            assert_eq!(own.definitions().count(), 1);
+            assert_eq!(own.definitions().unwrap().count(), 1);
         }
     }
 

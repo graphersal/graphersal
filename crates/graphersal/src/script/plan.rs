@@ -265,19 +265,26 @@ pub(crate) fn run_unit_on<S: GraphStorage + Default + Send + Sync + 'static>(
         Err(err) => return UnitResult(Err(as_script_error(err))),
     };
     let dry_run = kind == UnitKind::DryRun;
-    // A panic (an engine bug) closes the unit before it continues to the host. The close
-    // cannot fail here: this thread holds the unit it just opened.
+    // A panic (an engine bug) closes the unit before it continues to the host. This thread
+    // holds the unit it just opened, so only the storage can fail the close, and that cannot
+    // be reported while the panic unwinds: it is logged.
     let evaluated = crate::graph::storage::close_on_unwind(
         &mut (),
         |_| body().0,
         |_| {
-            let _ = match dry_run {
+            let closed = match dry_run {
                 true => graph.discard_unit(mark).map(|_| ()),
                 false => graph.rollback_unit(
                     mark,
                     &crate::graph::RollbackReason::failed(&crate::graph::storage::UNWOUND),
                 ),
             };
+            match closed {
+                Ok(()) | Err(GraphError::Unsupported { .. }) => {}
+                Err(err) => {
+                    tracing::error!("closing a unit a panic unwound through failed: {err}");
+                }
+            }
         },
     );
     UnitResult(match (kind, evaluated) {
@@ -285,13 +292,20 @@ pub(crate) fn run_unit_on<S: GraphStorage + Default + Send + Sync + 'static>(
             .discard_unit(mark)
             .map(|changes| (value, Some(changes)))
             .map_err(as_script_error),
-        (UnitKind::DryRun, Err(err)) => {
+        (UnitKind::DryRun, Err(err)) => match graph.discard_unit(mark) {
             // The unit is closed the same way and its change set dropped; on a storage
             // without change capture its `Unsupported` is dropped too: the script's own error
             // is the one to report (as `Transactional::dry_run` does).
-            let _ = graph.discard_unit(mark);
-            Err(err)
-        }
+            Ok(_) => Err(err),
+            Err(GraphError::Unsupported { operation })
+                if operation == crate::graph::storage::DRY_RUN_OPERATION =>
+            {
+                Err(err)
+            }
+            // The storage could not undo the dry run (the unit is closed): that is the error
+            // to report, naming the script's failure as its cause.
+            Err(failed) => Err(as_script_error(GraphError::rollback_failed(&err, failed))),
+        },
         (UnitKind::Atomic, Ok(value)) => graph
             .commit_unit(mark)
             .map(|()| (value, None))
@@ -301,9 +315,13 @@ pub(crate) fn run_unit_on<S: GraphStorage + Default + Send + Sync + 'static>(
             .map(|()| (value, None))
             .map_err(as_script_error),
         (UnitKind::Atomic | UnitKind::Call(_), Err(err)) => {
-            // Cannot fail: this thread holds the unit (see above).
-            let _ = graph.rollback_unit(mark, &crate::graph::RollbackReason::failed(&err));
-            Err(err)
+            // This thread holds the unit (see above): only the storage can fail the rollback
+            // (the unit is closed either way), and then that is the error to report, naming
+            // the script's failure as its cause.
+            match graph.rollback_unit(mark, &crate::graph::RollbackReason::failed(&err)) {
+                Ok(()) => Err(err),
+                Err(rollback) => Err(as_script_error(GraphError::rollback_failed(&err, rollback))),
+            }
         }
     })
 }

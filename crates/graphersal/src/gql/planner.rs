@@ -251,20 +251,23 @@ pub(crate) struct StorageFacts<'s> {
 }
 
 impl<'s> StorageFacts<'s> {
-    /// Reads the facts of `storage` (cheap: no walk over the data).
-    pub(crate) fn from_storage<S: GraphStorage + ?Sized>(storage: &'s S) -> Self {
+    /// Reads the facts of `storage` (cheap: no walk over the data); the storage's error when
+    /// it cannot read its statistics or indexes.
+    pub(crate) fn from_storage<S: GraphStorage + ?Sized>(
+        storage: &'s S,
+    ) -> Result<Self, crate::error::GraphError> {
         let mut indexes: Vec<(String, String)> = storage
-            .property_indexes()
+            .property_indexes()?
             .into_iter()
             .filter(|info| info.element == ElementKind::Vertex && info.transform.is_none())
             .map(|info| (info.label, info.key))
             .collect();
         indexes.sort_unstable();
         indexes.dedup();
-        StorageFacts {
-            statistics: storage.statistics(),
+        Ok(StorageFacts {
+            statistics: storage.statistics()?,
             indexes,
-        }
+        })
     }
 }
 

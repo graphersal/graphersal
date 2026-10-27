@@ -650,7 +650,7 @@ impl StoreDir for UpgradeView {
         self.inner.lock(kind)
     }
 
-    fn check(&self) -> super::super::dir::DirCheck {
+    fn check(&self) -> io::Result<super::super::dir::DirCheck> {
         self.inner.check()
     }
 }

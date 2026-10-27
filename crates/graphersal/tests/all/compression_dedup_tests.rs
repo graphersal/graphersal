@@ -212,7 +212,7 @@ fn is_shared(graph: &TraversalGraph, id: &str, key: &str) -> bool {
 
 /// Asserts that every table holds only what elements reference (after a sweep).
 fn tables_are_tight(graph: &TraversalGraph) {
-    for definition in graph.definitions() {
+    for definition in graph.definitions().unwrap() {
         let Some(rule) = definition.as_compression() else {
             continue;
         };
@@ -706,7 +706,7 @@ fn rollbacks_restore_the_data_the_invariant_and_sweep_the_tables() {
     invariant(&graph);
     tables_are_tight(&graph);
     assert_eq!(content(&graph), oracle);
-    assert_eq!(graph.definitions().count(), 3);
+    assert_eq!(graph.definitions().unwrap().count(), 3);
     assert_eq!(
         graph.compression_stats("path").unwrap().distinct_values,
         distinct_before
@@ -816,7 +816,7 @@ fn a_dictionary_with_dedup_is_refused_with_a_help_that_names_the_fix() {
         diagnostic.contains(r#"codec: "dedup""#),
         "the help shows a runnable fix: {diagnostic}"
     );
-    assert_eq!(graph.definitions().count(), 0);
+    assert_eq!(graph.definitions().unwrap().count(), 0);
     let err = Definition::compression("p", bad).validate().unwrap_err();
     assert!(
         matches!(&err, graphersal::error::DefinitionError::InvalidField { field, .. } if field == "dictionary"),
@@ -840,7 +840,7 @@ fn a_dictionary_with_dedup_is_refused_with_a_help_that_names_the_fix() {
         let err = eval_value(shared.clone(), script).unwrap_err().to_string();
         assert!(!err.is_empty(), "{script}");
     }
-    assert_eq!(shared.read().definitions().count(), 1);
+    assert_eq!(shared.read().definitions().unwrap().count(), 1);
     // Two rules on one path stay a conflict across codecs.
     let err = eval_value(
         shared.clone(),
@@ -859,8 +859,8 @@ fn a_dictionary_with_dedup_is_refused_with_a_help_that_names_the_fix() {
 fn memory_usage_counts_each_shared_text_once() {
     let plain = graph_of(400);
     let graph = deduped_graph(400);
-    let without = plain.memory_usage().unwrap();
-    let with = graph.memory_usage().unwrap();
+    let without = plain.memory_usage().unwrap().unwrap();
+    let with = graph.memory_usage().unwrap().unwrap();
     assert_eq!(without.deduped_values, 0);
     assert_eq!(without.dedup_table_bytes, 0);
     let references: u64 = ["path", "file", "site"]
@@ -895,7 +895,7 @@ fn memory_usage_counts_each_shared_text_once() {
 #[test]
 fn the_dsl_memory_usage_reports_the_dedup_counters() {
     let graph = shared(deduped_graph(400));
-    let stats = graph.read().memory_usage().unwrap();
+    let stats = graph.read().memory_usage().unwrap().unwrap();
     assert!(stats.deduped_values > 0, "{stats:?}");
     assert!(stats.deduped_plain_bytes > 0, "{stats:?}");
     assert!(stats.dedup_table_bytes > 0, "{stats:?}");

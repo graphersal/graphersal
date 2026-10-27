@@ -543,31 +543,35 @@ impl Session {
     }
 }
 
-/// The compression rules of `g`, by name, as their entries (module docs).
-pub fn compressions_in<S: GraphStorage>(g: &S) -> Value {
-    Value::Array(
-        g.definitions()
-            .filter_map(|definition| {
-                let rule = definition.as_compression()?;
-                Some(entry(
-                    definition.name(),
-                    rule,
-                    g.compression_stats(definition.name()),
-                ))
-            })
-            .collect(),
-    )
+/// The compression rules of `g`, by name, as their entries (module docs); the storage's
+/// error when it cannot read its catalog or the rules' stats.
+pub fn compressions_in<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
+    let mut entries = Vec::new();
+    for definition in g.definitions()? {
+        let Some(rule) = definition.as_compression() else {
+            continue;
+        };
+        entries.push(entry(
+            definition.name(),
+            rule,
+            g.compression_stats(definition.name())?,
+        ));
+    }
+    Ok(Value::Array(entries))
 }
 
-/// The compression rule `name` of `g` as its entry, `null` when there is none.
-pub fn compression_in<S: GraphStorage>(g: &S, name: &str) -> Value {
-    match g
-        .definition(DefinitionKind::COMPRESSION, name)
-        .and_then(Definition::as_compression)
-    {
-        Some(rule) => entry(name, rule, g.compression_stats(name)),
-        None => Value::Null,
-    }
+/// The compression rule `name` of `g` as its entry, `null` when there is none; the storage's
+/// error when it cannot read it.
+pub fn compression_in<S: GraphStorage>(g: &S, name: &str) -> Result<Value, GraphError> {
+    Ok(
+        match g
+            .definition(DefinitionKind::COMPRESSION, name)?
+            .and_then(Definition::as_compression)
+        {
+            Some(rule) => entry(name, rule, g.compression_stats(name)?),
+            None => Value::Null,
+        },
+    )
 }
 
 /// The estimate of `request` over `g` as JSON ([`estimate_json`]); an error (a storage without
@@ -593,15 +597,20 @@ pub(crate) fn store_compression<S: GraphStorage>(
     replaces: Option<&str>,
 ) -> Result<(), Vec<FieldError>> {
     let name = definition.name().to_string();
-    let exists = |g: &S, name: &str| g.definition(DefinitionKind::COMPRESSION, name).is_some();
-    if (!is_edit || replaces.is_some()) && exists(g, &name) {
+    let general = |err: GraphError| vec![FieldError::new("general", format_diagnostic(&err))];
+    let exists = |g: &S, name: &str| {
+        g.definition(DefinitionKind::COMPRESSION, name)
+            .map(|found| found.is_some())
+            .map_err(general)
+    };
+    if (!is_edit || replaces.is_some()) && exists(g, &name)? {
         return Err(vec![FieldError::new(
             "name",
             format!("a compression rule named '{name}' exists already; choose another name"),
         )]);
     }
     if let Some(old) = replaces
-        && !exists(g, old)
+        && !exists(g, old)?
     {
         return Err(vec![FieldError::new(
             "general",
@@ -880,12 +889,18 @@ mod tests {
         };
         store_compression(&mut tg, rule(), false, None).unwrap();
         store_compression(&mut fw, rule(), false, None).unwrap();
-        assert_eq!(compressions_in(&tg), compressions_in(&fw));
-        assert_eq!(compression_in(&fw, "cv")["stats"]["compressedValues"], 1);
-        assert_eq!(compression_in(&fw, "none"), Value::Null);
+        assert_eq!(compressions_in(&tg).unwrap(), compressions_in(&fw).unwrap());
+        assert_eq!(
+            compression_in(&fw, "cv").unwrap()["stats"]["compressedValues"],
+            1
+        );
+        assert_eq!(compression_in(&fw, "none").unwrap(), Value::Null);
         recompress_in(&mut tg, "cv").unwrap();
         recompress_in(&mut fw, "cv").unwrap();
-        assert_eq!(compression_in(&tg, "cv"), compression_in(&fw, "cv"));
+        assert_eq!(
+            compression_in(&tg, "cv").unwrap(),
+            compression_in(&fw, "cv").unwrap()
+        );
         assert!(recompress_in(&mut fw, "none").is_err());
         // A storage that reports no stats (no compressed properties): the entry says `null`.
         let entry = entry("cv", rule().as_compression().unwrap(), None);
@@ -905,7 +920,7 @@ mod tests {
         let mut g = TraversalGraph::new();
         g.set_definition(Definition::compression("cv", rule))
             .unwrap();
-        let listed = compression_in(&g, "cv");
+        let listed = compression_in(&g, "cv").unwrap();
         assert_eq!(listed["codec"], "zstd");
         assert_eq!(listed["served"], false);
         assert_eq!(listed["stats"], Value::Null);
@@ -922,7 +937,7 @@ mod tests {
         let known = CompressionDefinition::new(ElementKind::Vertex, "customer", "bio").unwrap();
         g.set_definition(Definition::compression("bio", known))
             .unwrap();
-        let listed = compression_in(&g, "bio");
+        let listed = compression_in(&g, "bio").unwrap();
         assert_eq!(listed["served"], true);
         assert_eq!(listed["reason"], Value::Null);
     }

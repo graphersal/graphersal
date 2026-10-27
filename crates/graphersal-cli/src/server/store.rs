@@ -305,7 +305,7 @@ pub(super) fn stop_running_query(context: &Context) {
 
 /// Whether the store is a single file (its backend keeps garbage to compact).
 fn is_single_file(store: &Store) -> bool {
-    store.dir().space_usage().is_some()
+    store.dir().space_usage().unwrap().is_some()
 }
 
 /// Keeps letters, digits, `.`, `_` and `-` (the rest becomes `-`).

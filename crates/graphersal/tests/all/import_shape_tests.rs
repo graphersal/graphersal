@@ -311,6 +311,7 @@ fn ruled_graph() -> TraversalGraph {
 fn ages(graph: &TraversalGraph, age: i64) -> Vec<String> {
     let mut ids: Vec<String> = graph
         .vertices_by_property_index("p", "age", &PropertyIndexRange::equal(int(age)))
+        .unwrap()
         .expect("an index")
         .filter_map(|v| graph.vertex_id(v).map(str::to_string))
         .collect();
@@ -319,7 +320,11 @@ fn ages(graph: &TraversalGraph, age: i64) -> Vec<String> {
 }
 
 fn check_ruled(graph: &TraversalGraph, how: &str) {
-    assert_eq!(graph.memory_usage().unwrap().compressed_values, 3, "{how}");
+    assert_eq!(
+        graph.memory_usage().unwrap().unwrap().compressed_values,
+        3,
+        "{how}"
+    );
     graph.check_compression_invariant().unwrap();
     graph.check_property_indexes().unwrap();
     assert_eq!(ages(graph, 7), ["0", "2"], "{how}");
@@ -479,14 +484,14 @@ fn a_live_import_shares_the_shapes_the_graph_already_has() {
             .insert_vertex(Some(format!("old{i}").into()), vec!["p".into()], props)
             .unwrap();
     }
-    let before = graph.memory_usage().unwrap().shape_bytes;
+    let before = graph.memory_usage().unwrap().unwrap().shape_bytes;
     let lines: String = (0..50)
         .map(|i| {
             format!(r#"{{"id":"n{i}","label":"p","properties":{{"z":[{{"value":{i}}}],"a":[{{"value":1}}],"m":[{{"value":2}}]}}}}"#) + "\n"
         })
         .collect();
     graph.import_graphson_reader(lines.as_bytes()).unwrap();
-    assert_eq!(graph.memory_usage().unwrap().shape_bytes, before);
+    assert_eq!(graph.memory_usage().unwrap().unwrap().shape_bytes, before);
     // The same through a change set and a GraphML import.
     let mut builder = ChangeSet::builder(1, 1);
     builder.push(Mutation::add_vertex(
@@ -499,7 +504,7 @@ fn a_live_import_shares_the_shapes_the_graph_already_has() {
         r#"{GRAPHML_HEAD}<node id="ml"><data key="z">1</data><data key="a">2</data><data key="m">3</data></node>{GRAPHML_TAIL}"#
     );
     graph.import_graphml_reader(xml.as_bytes()).unwrap();
-    assert_eq!(graph.memory_usage().unwrap().shape_bytes, before);
+    assert_eq!(graph.memory_usage().unwrap().unwrap().shape_bytes, before);
     assert_eq!(GraphStorage::vertices(&graph).count(), 55);
 }
 
@@ -508,7 +513,7 @@ fn a_failed_import_or_change_set_leaves_nothing() {
     let mut graph = graphson(GRAPHSON_ORDER);
     let before = content(&graph);
     let stats = format!("{:?}", graph.statistics());
-    let shapes = graph.memory_usage().unwrap().shape_bytes;
+    let shapes = graph.memory_usage().unwrap().unwrap().shape_bytes;
 
     // GraphSON: new keys first, then an id the graph already has.
     let bad = concat!(
@@ -540,5 +545,5 @@ fn a_failed_import_or_change_set_leaves_nothing() {
 
     assert_eq!(format!("{:?}", graph.statistics()), stats);
     graph.shrink_to_fit();
-    assert_eq!(graph.memory_usage().unwrap().shape_bytes, shapes);
+    assert_eq!(graph.memory_usage().unwrap().unwrap().shape_bytes, shapes);
 }

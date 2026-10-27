@@ -94,15 +94,41 @@ impl Procedures for NoProcedures {
     }
 }
 
-/// The catalog of a storage ([`GraphStorage::definition`]).
-pub(crate) struct StorageProcedures<'s, S: GraphStorage + ?Sized>(pub(crate) &'s S);
+/// The catalog of a storage ([`GraphStorage::definition`]). A catalog read that fails is kept
+/// (the lookup answers "not found" meanwhile) and reported by [`Self::take_error`], which the
+/// caller asks after the resolution: the storage's error, never "no such query".
+pub(crate) struct StorageProcedures<'s, S: GraphStorage + ?Sized> {
+    storage: &'s S,
+    error: std::cell::RefCell<Option<crate::error::GraphError>>,
+}
+
+impl<'s, S: GraphStorage + ?Sized> StorageProcedures<'s, S> {
+    /// The catalog of `storage`.
+    pub(crate) fn new(storage: &'s S) -> Self {
+        Self {
+            storage,
+            error: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// The first failed catalog read, if any.
+    pub(crate) fn take_error(&self) -> Option<crate::error::GraphError> {
+        self.error.borrow_mut().take()
+    }
+}
 
 impl<S: GraphStorage + ?Sized> Procedures for StorageProcedures<'_, S> {
     fn saved_query(&self, name: &str) -> Option<QueryDefinition> {
-        self.0
-            .definition(DefinitionKind::QUERY, name)
-            .and_then(|d| d.as_query())
-            .cloned()
+        match self.storage.definition(DefinitionKind::QUERY, name) {
+            Ok(found) => found.and_then(|d| d.as_query()).cloned(),
+            Err(err) => {
+                let mut kept = self.error.borrow_mut();
+                if kept.is_none() {
+                    *kept = Some(err);
+                }
+                None
+            }
+        }
     }
 }
 

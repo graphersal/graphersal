@@ -1507,7 +1507,7 @@ pub fn run(args: &[String]) -> i32 {
                 Ok((files, bytes)) => {
                     outln!(
                         "Copied the store {from} into the {} {to}: {files} file(s), {}; verified.",
-                        if target.space_usage().is_some() {
+                        if target.space_usage().unwrap().is_some() {
                             "single file"
                         } else {
                             "directory"

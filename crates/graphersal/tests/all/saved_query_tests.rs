@@ -580,7 +580,7 @@ fn a_query_cannot_write_the_schema_or_the_catalog() {
         &err(&graph, r#"g.query("definer")"#),
         "a saved query is read-only",
     );
-    assert!(graph.read().get_schema().is_none());
+    assert!(graph.read().get_schema().unwrap().is_none());
     assert_eq!(query_count(&graph), 2);
 }
 

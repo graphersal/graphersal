@@ -119,7 +119,7 @@ mod store {
                 JobDefinition::new("0 * * * *", JobTask::Checkpoint),
             ))
             .unwrap();
-        graph.finish_load();
+        graph.finish_load().unwrap();
         let mut packed = Vec::new();
         graph.write_snapshot(&mut packed).unwrap();
         let store =

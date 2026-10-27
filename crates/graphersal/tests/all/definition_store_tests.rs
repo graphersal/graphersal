@@ -113,7 +113,13 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn catalog(store: &Store) -> Vec<Definition> {
-    store.graph().read().definitions().cloned().collect()
+    store
+        .graph()
+        .read()
+        .definitions()
+        .unwrap()
+        .cloned()
+        .collect()
 }
 
 /// The manifest of the store's newest snapshot.
@@ -244,6 +250,7 @@ fn the_catalog_round_trips_on_every_backend_and_unknown_definitions_stay_byte_id
                 .graph()
                 .read()
                 .definition(DefinitionKind::QUERY, "top")
+                .unwrap()
                 .and_then(|d| d.as_query())
                 .and_then(|q| q.folder()),
             Some("reports/sales")
@@ -373,6 +380,7 @@ fn a_host_kind_round_trips_through_every_store_path() {
         let graph = store.graph().read();
         let definition = graph
             .definition(kind, "person_name")
+            .unwrap()
             .expect("host definition");
         decode_payload(definition.opaque_payload().unwrap()).unwrap()
     };
@@ -485,7 +493,7 @@ fn compression_rules_survive_every_store_path() {
             .check_compression_invariant()
             .unwrap_or_else(|reason| panic!("{what}: {reason}"));
         assert_eq!(
-            graph.memory_usage().unwrap().compressed_values,
+            graph.memory_usage().unwrap().unwrap().compressed_values,
             expected_values as u64,
             "{what}"
         );
@@ -583,14 +591,16 @@ fn a_property_index_with_a_transform_survives_every_store_path() {
     // The definition is stored, and the index is rebuilt from the data with `entries` entries.
     let check = |graph: &TraversalGraph, entries: u64, what: &str| {
         assert_eq!(
-            graph.definition(DefinitionKind::PROPERTY_INDEX, "person_name_to_lower"),
+            graph
+                .definition(DefinitionKind::PROPERTY_INDEX, "person_name_to_lower")
+                .unwrap(),
             Some(&definition),
             "{what}"
         );
         graph
             .check_property_indexes()
             .unwrap_or_else(|reason| panic!("{what}: {reason}"));
-        let infos = graph.property_indexes();
+        let infos = graph.property_indexes().unwrap();
         assert_eq!(infos.len(), 1, "{what}");
         assert_eq!(
             infos[0].transform,

@@ -542,7 +542,7 @@ fn gap5_applying_a_schema_to_violating_data_fails_in_open_and_closed() {
 fn gap5_failed_schema_application_keeps_the_previous_schema() {
     let mut graph = violating_graph();
     let _ = graph.set_schema(schema(SchemaMode::Closed));
-    assert!(graph.get_schema().is_none());
+    assert!(graph.get_schema().unwrap().is_none());
 }
 
 /// Guard: the dry run reports the violations, and conforming data is accepted.

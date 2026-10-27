@@ -980,12 +980,12 @@ mod schema_set_separately {
     #[test]
     fn save_then_load_with_the_schema_set_first_restores_every_type() {
         let original = modern_with_schema();
-        let schema = original.read().get_schema().expect("schema");
+        let schema = original.read().get_schema().unwrap().expect("schema");
         let xml = export(&original);
 
         let loaded = import_into(target_with(schema.clone()), &xml).expect("import succeeds");
         assert_eq!(snapshot(&loaded), snapshot(&original));
-        assert_eq!(loaded.read().get_schema(), Some(schema));
+        assert_eq!(loaded.read().get_schema().unwrap(), Some(schema));
         let uid = loaded
             .read()
             .traversal()
@@ -1006,6 +1006,7 @@ mod schema_set_separately {
         let json = original
             .read()
             .get_schema()
+            .unwrap()
             .expect("schema")
             .to_json_pretty();
         let xml = export(&original);
@@ -1021,7 +1022,7 @@ mod schema_set_separately {
         let original = modern_with_schema();
         let xml = export(&original);
         let loaded = import_into(GraphSource::empty(), &xml).expect("import succeeds");
-        assert!(loaded.read().get_schema().is_none());
+        assert!(loaded.read().get_schema().unwrap().is_none());
         let values = |key: &str| {
             loaded
                 .read()
@@ -1049,7 +1050,7 @@ mod schema_set_separately {
               <graph><data key="s">{"version":1,"mode":"closed","vertices":{}}</data><node id="1"/></graph>
             </graphml>"#;
         let loaded = import_into(GraphSource::empty(), xml).expect("import succeeds");
-        assert!(loaded.read().get_schema().is_none());
+        assert!(loaded.read().get_schema().unwrap().is_none());
         assert_eq!(loaded.read().vertex_count(), 1);
         assert!(
             loaded

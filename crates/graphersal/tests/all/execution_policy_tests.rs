@@ -339,5 +339,5 @@ fn there_is_no_way_to_change_the_policy_of_an_already_constructed_graph() {
     write_lock.shrink_to_fit();
     drop(write_lock);
     let read_lock = graph.read();
-    assert_eq!(read_lock.execution_policy(), policy);
+    assert_eq!(read_lock.execution_policy().unwrap(), policy);
 }

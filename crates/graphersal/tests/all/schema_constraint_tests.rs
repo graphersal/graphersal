@@ -190,7 +190,7 @@ fn an_existing_violation_blocks_switching_to_an_enforcing_mode() {
     let text = err.to_string();
     assert!(text.contains("title"), "{text}");
     assert_eq!(
-        g.get_schema().unwrap().mode,
+        g.get_schema().unwrap().unwrap().mode,
         SchemaMode::None,
         "the old schema stays"
     );

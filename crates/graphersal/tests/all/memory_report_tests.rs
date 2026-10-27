@@ -55,7 +55,7 @@ fn vertex<'a>(report: &'a MemoryReport, label: &str, key: &str) -> &'a PropertyM
 fn assert_reconciles(graph: &TraversalGraph, report: &MemoryReport) {
     assert_eq!(
         report.property_bytes(),
-        graph.memory_usage().unwrap().property_bytes,
+        graph.memory_usage().unwrap().unwrap().property_bytes,
         "the report's property bytes differ from memory_usage()"
     );
 }
@@ -146,7 +146,7 @@ fn modern_rows_labels_and_structure() {
     assert_eq!(report.labels[3].element, ElementKind::Edge);
 
     let structure = report.structure.unwrap();
-    assert_eq!(structure.totals, graph.memory_usage().unwrap());
+    assert_eq!(structure.totals, graph.memory_usage().unwrap().unwrap());
     assert_eq!(structure.vertex_slots.live, 6);
     assert_eq!(structure.edge_slots.live, 6);
     assert_eq!(structure.vertex_slots.tombstoned, 0);
@@ -411,7 +411,10 @@ fn every_property_index_is_reported_separately() {
     let report = full(&graph);
     assert_eq!(report.indexes.len(), 2);
     let total: u64 = report.indexes.iter().map(|i| i.stats.bytes).sum();
-    assert_eq!(total, graph.memory_usage().unwrap().property_index_bytes);
+    assert_eq!(
+        total,
+        graph.memory_usage().unwrap().unwrap().property_index_bytes
+    );
     assert!(report.indexes.iter().all(|i| i.stats.entries == 4));
     assert_eq!(vertex(&report, "person", "name").indexes, ["person_name"]);
     assert_eq!(vertex(&report, "person", "age").indexes, ["person_age"]);
@@ -664,7 +667,12 @@ fn the_dsl_answers_the_report_map() {
     let bytes = eval_value(shared.clone(), "g.memory_report().property_bytes").unwrap();
     assert_eq!(
         bytes.as_int().unwrap() as u64,
-        shared.read().memory_usage().unwrap().property_bytes
+        shared
+            .read()
+            .memory_usage()
+            .unwrap()
+            .unwrap()
+            .property_bytes
     );
     for (script, needle) in [
         ("g.memory_report(#{rows: 2})", "the key 'rows'"),

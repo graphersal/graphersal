@@ -287,7 +287,7 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     ) -> Result<(Manifest, Vec<u8>, SnapshotInfo), PersistError> {
         let graph = self.graph;
         let options = self.options;
-        let definitions = super::definitions::records_of(graph.definitions())
+        let definitions = super::definitions::records_of(graph.definitions()?)
             .map_err(|reason| PersistError::encode("the catalog of definitions", reason))?;
         let (node_sequence, edge_sequence) = graph.id_sequences();
         let mut rows = Vec::new();
@@ -302,7 +302,7 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
         let mut manifest = Manifest {
             fixed: ManifestFixed {
                 graph_id: graph.graph_id(),
-                commit_seq: graph.last_commit_seq(),
+                commit_seq: graph.last_commit_seq()?,
                 created_at: options
                     .created_at
                     .unwrap_or_else(crate::graph::undo::now_micros),
@@ -313,7 +313,7 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
                 edge_count: graph.edge_count() as u64,
                 vertex_property_count,
                 edge_property_count,
-                memory_bytes: graph.memory_usage().map_or(0, |usage| usage.total_bytes()),
+                memory_bytes: graph.memory_usage()?.map_or(0, |usage| usage.total_bytes()),
                 schema_len: schema.len() as u64,
                 schema_crc: crc(schema),
                 name: super::manifest::truncate_utf8(
@@ -337,12 +337,13 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     }
 
     /// The `schema.json` bytes of the graph (those of the empty schema when none is stored).
-    pub(crate) fn schema(&self) -> Vec<u8> {
-        self.graph
-            .get_schema()
+    pub(crate) fn schema(&self) -> Result<Vec<u8>, PersistError> {
+        Ok(self
+            .graph
+            .get_schema()?
             .unwrap_or_default()
             .to_json()
-            .into_bytes()
+            .into_bytes())
     }
 }
 

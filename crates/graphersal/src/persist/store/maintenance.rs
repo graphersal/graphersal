@@ -587,7 +587,7 @@ pub(super) fn verify(
     }
 
     // The backend's own records (a single-file container).
-    let backend = dir.store_dir().check();
+    let backend = crate::persist::dir::backend_check(&**dir.store_dir());
     for reason in backend.damage {
         problem(&mut report, ".", None, format!("container: {reason}"));
     }

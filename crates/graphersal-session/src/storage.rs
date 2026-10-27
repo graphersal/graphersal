@@ -328,15 +328,15 @@ where
     }
 
     fn inferred_schema(&self) -> Result<GraphSchema, GraphError> {
-        reading(self, |g| g.infer_schema())
+        reading_with(self, |g| g.infer_schema())
     }
 
     fn schema_view(&self) -> Result<Value, GraphError> {
-        reading(self, crate::views::schema_view)
+        reading_with(self, crate::views::schema_view)
     }
 
     fn schema_view_of(&self, schema: GraphSchema) -> Result<Value, GraphError> {
-        reading(self, |g| crate::views::schema_view_of(g, schema))
+        reading_with(self, |g| crate::views::schema_view_of(g, schema))
     }
 
     fn graph_view(&self, max_nodes: usize, max_edges: usize) -> Result<CompactGraph, GraphError> {
@@ -359,11 +359,11 @@ where
     }
 
     fn statistics_view(&self) -> Result<Value, GraphError> {
-        reading(self, crate::views::statistics_view)
+        reading_with(self, crate::views::statistics_view)
     }
 
     fn memory_view(&self) -> Result<Value, GraphError> {
-        let mut view = reading(self, crate::views::memory_usage)?;
+        let mut view = reading_with(self, crate::views::memory_usage)?;
         if let (Some(stats), Some(map)) = (Graph::workload_stats(self), view.as_object_mut()) {
             map.insert("workload_bytes".into(), stats.memory_bytes().into());
         }
@@ -457,15 +457,15 @@ where
     }
 
     fn queries(&self, folder: Option<&str>) -> Result<Vec<(String, QueryDefinition)>, GraphError> {
-        reading(self, |g| crate::queries::queries_in(g, folder))
+        reading_with(self, |g| crate::queries::queries_in(g, folder))
     }
 
     fn query(&self, name: &str) -> Result<Option<QueryDefinition>, GraphError> {
-        reading(self, |g| crate::queries::query_in(g, name))
+        reading_with(self, |g| crate::queries::query_in(g, name))
     }
 
     fn count_kind(&self, kind: DefinitionKind) -> Result<usize, GraphError> {
-        reading(self, |g| crate::queries::count_kind(g, kind))
+        reading_with(self, |g| crate::queries::count_kind(g, kind))
     }
 
     fn store_query(
@@ -490,7 +490,7 @@ where
     }
 
     fn catalog_text(&self) -> Result<String, GraphError> {
-        reading(self, crate::queries::catalog_text)
+        reading_with(self, crate::queries::catalog_text)
     }
 
     fn load_catalog(
@@ -508,11 +508,11 @@ where
     }
 
     fn compressions(&self) -> Result<Value, GraphError> {
-        reading(self, crate::compression::compressions_in)
+        reading_with(self, crate::compression::compressions_in)
     }
 
     fn compression(&self, name: &str) -> Result<Value, GraphError> {
-        reading(self, |g| crate::compression::compression_in(g, name))
+        reading_with(self, |g| crate::compression::compression_in(g, name))
     }
 
     fn store_compression(
@@ -540,11 +540,11 @@ where
     }
 
     fn indexes(&self) -> Result<Value, GraphError> {
-        reading(self, crate::indexes::indexes_in)
+        reading_with(self, crate::indexes::indexes_in)
     }
 
     fn index(&self, name: &str) -> Result<Value, GraphError> {
-        reading(self, |g| crate::indexes::index_in(g, name))
+        reading_with(self, |g| crate::indexes::index_in(g, name))
     }
 
     fn store_index(&self, definition: Definition) -> Result<(), Vec<FieldError>> {
@@ -823,10 +823,10 @@ fn logical(map: Option<&PropertyMap>) -> PropertyMap {
 /// the catalog, the vertices and edges in `src`'s order, then the auto-id sequences.
 fn copy_plain<S: GraphStorage + Default>(src: &TraversalGraph) -> Result<S, GraphError> {
     let mut dst = S::default();
-    if let Some(schema) = GraphStorage::get_schema(src) {
+    if let Some(schema) = GraphStorage::get_schema(src)? {
         dst.set_schema(schema)?;
     }
-    for definition in GraphStorage::definitions(src) {
+    for definition in GraphStorage::definitions(src)? {
         dst.set_definition(definition.clone())?;
     }
     for v in GraphStorage::vertices(src) {
@@ -865,10 +865,10 @@ fn copy_plain<S: GraphStorage + Default>(src: &TraversalGraph) -> Result<S, Grap
 /// sequences.
 fn copy_loaded<S: PersistentStorage + Default>(src: &TraversalGraph) -> Result<S, GraphError> {
     let mut dst = S::default();
-    if let Some(schema) = GraphStorage::get_schema(src) {
+    if let Some(schema) = GraphStorage::get_schema(src)? {
         dst.load_schema(schema)?;
     }
-    for definition in GraphStorage::definitions(src) {
+    for definition in GraphStorage::definitions(src)? {
         dst.load_definition(definition.clone())?;
     }
     for v in GraphStorage::vertices(src) {
@@ -890,12 +890,12 @@ fn copy_loaded<S: PersistentStorage + Default>(src: &TraversalGraph) -> Result<S
             logical(GraphStorage::edge_properties(src, e)),
         )?;
     }
-    dst.finish_load();
-    dst.set_graph_id(PersistentStorage::graph_id(src));
+    dst.finish_load()?;
+    dst.set_graph_id(PersistentStorage::graph_id(src))?;
     dst.raise_position(
-        GraphStorage::last_commit_seq(src),
+        GraphStorage::last_commit_seq(src)?,
         PersistentStorage::last_committed_at(src),
-    );
+    )?;
     let (vertices, edges) = PersistentStorage::id_sequences(src);
     dst.raise_id_sequences(vertices, edges)?;
     Ok(dst)
@@ -1106,7 +1106,7 @@ where
     }
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError> {
         let recovered = Store::<S>::read_only_at(self, target)?;
-        let commit_seq = GraphStorage::last_commit_seq(&recovered.graph);
+        let commit_seq = GraphStorage::last_commit_seq(&recovered.graph)?;
         Ok(StoreView {
             graph: Arc::new(Graph::new_persistent(recovered.graph)),
             commit_seq,

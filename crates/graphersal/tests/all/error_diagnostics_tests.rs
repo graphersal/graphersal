@@ -4736,7 +4736,7 @@ fn applying_a_schema_to_violating_data_help_says_how_to_proceed() {
         ),
         "{help}"
     );
-    assert_eq!(graph.get_schema(), None);
+    assert_eq!(graph.get_schema().unwrap(), None);
 }
 
 #[cfg(feature = "script")]
@@ -6171,7 +6171,7 @@ fn commit_sequence_overflow_help_names_the_cause_and_the_rollback() {
 #[test]
 fn auto_id_sequence_overflow_help_suggests_explicit_ids() {
     let mut graph = TraversalGraph::new();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(
             Some(u64::MAX.to_string().into()),
@@ -6979,7 +6979,7 @@ fn embed_property_and_text_query_errors_carry_their_help() {
         .unwrap();
     {
         let mut lock = graph.write();
-        let mut schema = lock.get_schema().unwrap();
+        let mut schema = lock.get_schema().unwrap().unwrap();
         let mut other = schema.vertices["person"].schema.properties["emb"].clone();
         if let Some(vector) = other.vector.as_mut() {
             vector.embedder = Some("acme/other@2".to_string());
@@ -7275,7 +7275,7 @@ fn a_dictionary_on_a_dedup_rule_help_names_the_fix() {
     assert!(help.contains(fix), "{help}");
     let shared = std::sync::Arc::new(Graph::new(graph));
     let _ = crate::script_host::eval_value(shared.clone(), fix).unwrap();
-    assert_eq!(shared.read().definitions().count(), 1);
+    assert_eq!(shared.read().definitions().unwrap().count(), 1);
 
     let rule = CompressionDefinition::new(ElementKind::Vertex, "symbol", "path")
         .unwrap()

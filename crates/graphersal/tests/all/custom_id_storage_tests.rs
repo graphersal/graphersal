@@ -215,7 +215,7 @@ impl GraphStorage for CustomIdStorage {
         self.inner.drop_edge_property(prop, self.eh(edge))
     }
 
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         self.inner.get_schema()
     }
 }

@@ -948,7 +948,7 @@ fn pattern_comprehension_scope_errors() {
 #[test]
 fn a_pattern_comprehension_list_obeys_the_memory_budget() {
     let graph = modern();
-    let footprint = graph.read().memory_usage().unwrap().total_bytes();
+    let footprint = graph.read().memory_usage().unwrap().unwrap().total_bytes();
     let query = "RETURN size([(a)--(b)--(c)--(d) | [a, b, c, d]]) AS n";
     let lock = graph.read();
     let error = lock

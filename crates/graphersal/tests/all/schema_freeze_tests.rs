@@ -386,7 +386,7 @@ fn dsl_one_liner_in_every_spelling() {
     ] {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         run(&graph, call).unwrap_or_else(|err| panic!("{call}: {err}"));
-        let stored = graph.read().get_schema();
+        let stored = graph.read().get_schema().unwrap();
         match mode {
             // An inferred schema in mode none is still stored (it declares labels).
             "none" => assert_eq!(stored.unwrap().mode, SchemaMode::None),
@@ -404,14 +404,20 @@ fn dsl_mode_overrides_the_schemas_own_mode() {
         r#"let s = g.infer_schema(); s.mode = "closed"; g.set_schema(s, SchemaMode.open)"#,
     )
     .unwrap();
-    assert_eq!(graph.read().get_schema().unwrap().mode, SchemaMode::Open);
+    assert_eq!(
+        graph.read().get_schema().unwrap().unwrap().mode,
+        SchemaMode::Open
+    );
     // JSON text works too.
     run(
         &graph,
         r#"g.set_schema(`{"mode": "closed", "vertices": {"person": {}}}`, "open")"#,
     )
     .unwrap();
-    assert_eq!(graph.read().get_schema().unwrap().mode, SchemaMode::Open);
+    assert_eq!(
+        graph.read().get_schema().unwrap().unwrap().mode,
+        SchemaMode::Open
+    );
 }
 
 #[test]
@@ -426,7 +432,7 @@ fn dsl_validate_schema_with_mode_is_the_dry_run() {
     )
     .unwrap();
     assert_eq!(out, r#"["closed", 1, "<unlabeled>", 0]"#);
-    assert!(graph.read().get_schema().is_none());
+    assert!(graph.read().get_schema().unwrap().is_none());
 }
 
 #[test]
@@ -440,7 +446,7 @@ fn dsl_rejects_an_unknown_mode() {
     assert!(err.contains("SchemaMode.closed"), "{err}");
     let err = run(&graph, "g.set_schema(g.infer_schema(), 3)").unwrap_err();
     assert!(err.contains("expecting a schema mode"), "{err}");
-    assert!(graph.read().get_schema().is_none());
+    assert!(graph.read().get_schema().unwrap().is_none());
 }
 
 #[test]

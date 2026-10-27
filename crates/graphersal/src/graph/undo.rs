@@ -308,7 +308,9 @@ impl TraversalGraph {
             // walk on a graph that has not changed since the last one.
             self.undo.budget =
                 crate::traversal::memory_budget::unit_limit(&self.execution_policy, None)
-                    .map(|limit| MemoryBudget::new(limit).start(&*self));
+                    // `TraversalGraph` measures itself without failing (its
+                    // `memory_footprint_bytes` is always `Ok`).
+                    .and_then(|limit| MemoryBudget::new(limit).start(&*self).ok());
             // The unit's time (`defaultFunction` `now`): never earlier than the previous unit's
             // or the last commit's, so a later unit never stores an earlier `now`.
             let started_at = self.unit_start_from(clock);
@@ -1030,9 +1032,9 @@ mod tests {
     #[test]
     fn outermost_commit_clears_and_nested_commit_keeps() {
         let mut graph = TraversalGraph::new();
-        let outer = graph.begin_unit();
+        let outer = graph.begin_unit().unwrap();
         GraphStorage::insert_vertex(&mut graph, None, vec![], PropertyMap::default()).expect("add");
-        let inner = graph.begin_unit();
+        let inner = graph.begin_unit().unwrap();
         GraphStorage::insert_vertex(&mut graph, None, vec![], PropertyMap::default()).expect("add");
         graph.commit_unit(inner).expect("commit");
         assert_eq!(graph.undo.len(), 2);

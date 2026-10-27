@@ -30,7 +30,10 @@ fn identity_and_downcast() {
     assert!(any.storage_type_name().ends_with("TraversalGraph"));
     let again = any.clone().into_any_graph();
     assert!(Arc::ptr_eq(&again, &any));
-    assert_eq!(any.capabilities().unwrap(), graph.read().capabilities());
+    assert_eq!(
+        any.capabilities().unwrap(),
+        graph.read().capabilities().unwrap()
+    );
 }
 
 #[test]
@@ -38,9 +41,12 @@ fn statistics_memory_and_commit_position() {
     let (graph, any) = modern();
     assert_eq!(
         any.statistics().unwrap().as_ref(),
-        graph.read().statistics()
+        graph.read().statistics().unwrap()
     );
-    assert_eq!(any.memory_usage().unwrap(), graph.read().memory_usage());
+    assert_eq!(
+        any.memory_usage().unwrap(),
+        graph.read().memory_usage().unwrap()
+    );
     let before = any.last_commit_seq().unwrap();
     graph
         .write()
@@ -75,7 +81,10 @@ fn schema_methods_match_the_traversal_source() {
     );
     any.set_schema(schema.clone()).unwrap();
     assert_eq!(any.get_schema().unwrap(), Some(schema.clone()));
-    assert_eq!(any.get_schema().unwrap(), graph.read().get_schema());
+    assert_eq!(
+        any.get_schema().unwrap(),
+        graph.read().get_schema().unwrap()
+    );
     assert!(any.diff_schema(&schema).unwrap().changes.is_empty());
 
     let patch =
@@ -250,7 +259,10 @@ fn write_snapshot_of_a_traversal_graph() {
     assert_eq!((info.vertex_count, info.edge_count), (6, 6));
     let loaded = TraversalGraph::read_snapshot(bytes.as_slice()).unwrap();
     assert_eq!(loaded.graph_id(), graph.read().graph_id());
-    assert_eq!(loaded.statistics(), graph.read().statistics());
+    assert_eq!(
+        loaded.statistics().unwrap(),
+        graph.read().statistics().unwrap()
+    );
 }
 
 /// A storage that is not a `TraversalGraph`: it forwards the required methods, the catalog and
@@ -367,10 +379,14 @@ impl GraphStorage for Foreign {
     fn drop_edge_property(&mut self, prop: &str, edge: EdgeHandle) -> Result<(), GraphError> {
         self.0.drop_edge_property(prop, edge)
     }
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         GraphStorage::definitions(&self.0)
     }
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         GraphStorage::definition(&self.0, kind, name)
     }
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
@@ -379,22 +395,22 @@ impl GraphStorage for Foreign {
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.0, kind, name)
     }
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         self.0.begin_unit()
     }
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         self.0.commit_unit(mark)
     }
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
         self.0.rollback_unit(mark, reason)
     }
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         self.0.unit_changes(mark)
     }
-    fn capabilities(&self) -> StorageCapabilities {
-        StorageCapabilities::none()
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        Ok(StorageCapabilities::none()
             .with_atomic(true)
-            .with_writable(true)
+            .with_writable(true))
     }
 }
 

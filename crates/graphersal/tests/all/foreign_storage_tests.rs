@@ -125,7 +125,7 @@ where
             Err(err) => (Err(err), None),
         },
     };
-    let last_commit_seq = graph.read().last_commit_seq();
+    let last_commit_seq = graph.read().last_commit_seq().unwrap();
     Outcome {
         result: result
             .map(|value| value.to_string())
@@ -1534,7 +1534,7 @@ fn export_snapshot_writes_the_reference_bytes_on_a_persistent_forwarding_graph()
     // A fixed lineage id (every segment header carries it), so both graphs write the same bytes.
     fn modern_with_graph_id() -> TraversalGraph {
         let mut graph = TraversalGraph::tinkerpop_modern();
-        graphersal::storage::PersistentStorage::set_graph_id(&mut graph, 7);
+        graphersal::storage::PersistentStorage::set_graph_id(&mut graph, 7).unwrap();
         graph
     }
     let persistent = || {

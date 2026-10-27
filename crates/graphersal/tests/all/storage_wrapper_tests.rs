@@ -74,6 +74,7 @@ where
     assert_eq!(
         storage
             .statistics()
+            .unwrap()
             .expect("statistics")
             .vertex_label_count("person"),
         1
@@ -116,6 +117,7 @@ where
     assert_eq!(
         storage
             .statistics()
+            .unwrap()
             .expect("statistics")
             .edge_label_count("knows"),
         1
@@ -161,29 +163,36 @@ where
     assert!(storage.edge_properties(e).unwrap().get("w").is_none());
 
     // schema and diagnostics
-    assert!(storage.get_schema().is_none());
+    assert!(storage.get_schema().unwrap().is_none());
     storage
         .set_schema(GraphSchema::from_json(SCHEMA).unwrap())
         .unwrap();
-    assert_eq!(storage.get_schema().unwrap().mode, SchemaMode::Open);
+    assert_eq!(
+        storage.get_schema().unwrap().unwrap().mode,
+        SchemaMode::Open
+    );
     assert_eq!(
         storage
             .declared_property_schema(GraphNodeType::Vertex, &[s("person")], "name")
+            .unwrap()
             .map(|node| node.type_name()),
         Some("union<string|null>".to_string())
     );
     assert_eq!(
         storage
             .declared_property_schema(GraphNodeType::Edge, &[s("knows")], "w")
+            .unwrap()
             .map(|node| node.type_name()),
         Some("union<int64|null>".to_string())
     );
     assert_eq!(
-        storage.declared_property_schema(GraphNodeType::Vertex, &[s("person")], "nope"),
+        storage
+            .declared_property_schema(GraphNodeType::Vertex, &[s("person")], "nope")
+            .unwrap(),
         None
     );
-    assert!(storage.memory_usage().is_some());
-    assert!(storage.capabilities().writable);
+    assert!(storage.memory_usage().unwrap().is_some());
+    assert!(storage.capabilities().unwrap().writable);
 
     // removal
     storage.drop_edge(e).unwrap();
@@ -286,22 +295,25 @@ fn a_read_only_reference_rejects_every_write() {
     assert!(view.contains_vertex(marko));
     assert_eq!(
         view.statistics()
+            .unwrap()
             .expect("statistics")
             .vertex_label_count("person"),
         4
     );
     assert_eq!(
         view.statistics()
+            .unwrap()
             .expect("statistics")
             .edge_label_count("created"),
         4
     );
-    assert!(view.get_schema().is_none());
+    assert!(view.get_schema().unwrap().is_none());
     assert_eq!(
-        view.declared_property_schema(GraphNodeType::Vertex, &[s("person")], "name"),
+        view.declared_property_schema(GraphNodeType::Vertex, &[s("person")], "name")
+            .unwrap(),
         None
     );
-    assert!(view.memory_usage().is_some());
+    assert!(view.memory_usage().unwrap().is_some());
 }
 
 #[test]
@@ -332,13 +344,13 @@ fn a_shared_arc_rejects_every_write_and_a_sole_one_accepts_it() {
             .is_err()
     );
     assert!(
-        !shared.capabilities().writable,
+        !shared.capabilities().unwrap().writable,
         "a shared Arc claims nothing"
     );
 
     // once the second owner is gone, the same Arc writes again
     drop(other_owner);
-    assert!(shared.capabilities().writable);
+    assert!(shared.capabilities().unwrap().writable);
     shared.set_vertex_property(a, s("k"), 1.into()).unwrap();
     assert_eq!(
         shared.vertex_properties(a).unwrap().get("k"),
@@ -403,6 +415,7 @@ fn assert_replayed<S: GraphStorage>(storage: &S) {
     assert_eq!(
         storage
             .statistics()
+            .unwrap()
             .expect("statistics")
             .edge_label_count("knows"),
         1
@@ -440,8 +453,10 @@ fn commit_hooks_register_through_box_and_mut_ref_and_see_traversal_commits() {
         .unwrap();
     // two hooks, one commit each
     assert_eq!(recorder.0.lock().unwrap().len(), 2);
-    assert!(boxed.last_commit_seq() > 0);
-    let mark = boxed.begin_unit();
-    boxed.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    assert!(boxed.last_commit_seq().unwrap() > 0);
+    let mark = boxed.begin_unit().unwrap();
+    boxed
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(boxed.vertex_count(), 1);
 }

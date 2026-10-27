@@ -269,9 +269,9 @@ fn choice(label: &str, declared: bool, count: usize, connects: Option<bool>) -> 
 /// unknown kind or a missing endpoint is an error.
 pub fn label_choices_in<S: GraphStorage>(g: &S, request: &Value) -> Result<Value, SessionError> {
     let kind = kind_of(request.get("kind").and_then(Value::as_str).unwrap_or(""))?;
-    let schema = g.get_schema().unwrap_or_default();
+    let schema = g.get_schema()?.unwrap_or_default();
     let closed = schema.mode == SchemaMode::Closed;
-    let stats = g.statistics();
+    let stats = g.statistics()?;
     let mut counts: Vec<(String, usize)> = match (kind, stats) {
         (ElementKind::Vertex, Some(s)) => s
             .vertex_label_counts()
@@ -466,9 +466,10 @@ pub fn delete_in<S: GraphStorage>(
     if validate_only {
         return g.dry_run(drop).map(|_| false);
     }
-    let before = g.last_commit_seq();
+    let before = g.last_commit_seq()?;
     g.transaction(drop)?;
-    Ok(g.last_commit_seq() != before)
+    // The commit happened: a position that cannot be read afterwards counts as a change.
+    Ok(g.last_commit_seq().map_or(true, |after| after != before))
 }
 
 /// The element a creation request of `kind` describes (module docs) and its properties; the

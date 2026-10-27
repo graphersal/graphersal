@@ -511,10 +511,10 @@ fn try_read_never_blocks_and_never_panics() {
 #[test]
 fn the_storage_opens_a_unit_at_the_time_it_is_given() {
     let mut storage = TraversalGraph::tinkerpop_modern();
-    let at = storage.next_unit_started_at().unwrap();
-    let mark = storage.begin_unit_at(at);
+    let at = storage.next_unit_started_at().unwrap().unwrap();
+    let mark = storage.begin_unit_at(at).unwrap();
     assert_eq!(storage.unit_started_at(), Some(at));
-    let inner = storage.begin_unit_at(at + 1_000_000_000);
+    let inner = storage.begin_unit_at(at + 1_000_000_000).unwrap();
     assert_eq!(
         storage.unit_started_at(),
         Some(at),
@@ -523,11 +523,11 @@ fn the_storage_opens_a_unit_at_the_time_it_is_given() {
     storage.commit_unit(inner).unwrap();
     storage.commit_unit(mark).unwrap();
     assert_eq!(storage.unit_started_at(), None);
-    assert!(storage.next_unit_started_at().unwrap() >= at);
+    assert!(storage.next_unit_started_at().unwrap().unwrap() >= at);
     // A time before the floor is raised to it.
-    let mark = storage.begin_unit_at(at - 1_000_000_000);
+    let mark = storage.begin_unit_at(at - 1_000_000_000).unwrap();
     assert!(storage.unit_started_at().unwrap() >= at);
-    storage.rollback_unit(mark, &reason());
+    storage.rollback_unit(mark, &reason()).unwrap();
 }
 
 /// The unit's clock is pinned when the unit opens: the owner's read view reports it before the

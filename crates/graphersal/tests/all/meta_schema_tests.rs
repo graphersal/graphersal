@@ -207,7 +207,10 @@ fn test_traversal_graph_and_source_set_schema_and_enforcement() {
         .traversal_mut()
         .set_schema(GraphSchema::from_json(&sample_schema_text()).unwrap())
         .expect("an empty graph satisfies the schema");
-    assert_eq!(graph.get_schema().unwrap().mode, SchemaMode::Closed);
+    assert_eq!(
+        graph.get_schema().unwrap().unwrap().mode,
+        SchemaMode::Closed
+    );
 
     let mut user_props = PropertyMap::default();
     user_props.insert("id", ElementProperty::Number(1.into()));

@@ -223,6 +223,7 @@ fn the_statistics_stay_exact_after_inserts() {
     );
     let kept = graph
         .statistics()
+        .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
     assert_eq!(kept, GraphStatistics::from_storage(&graph));
@@ -235,7 +236,7 @@ fn the_statistics_stay_exact_after_inserts() {
     assert_eq!(kept.edge_label_count("OWNS"), 4);
     // A failed write leaves the statistics as they were.
     let _ = gql(&mut graph, "FOR x IN [1, 0] INSERT (:Pet {v: 1 / x})").unwrap_err();
-    assert_eq!(graph.statistics(), Some(&kept));
+    assert_eq!(graph.statistics().unwrap(), Some(&kept));
 }
 
 // ----- stage 3d: DELETE in the unit machinery -----
@@ -299,6 +300,7 @@ fn the_statistics_stay_exact_after_deletes() {
     ok(&mut graph, "MATCH ()-[r:knows]->() DELETE r");
     let kept = graph
         .statistics()
+        .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
     assert_eq!(kept, GraphStatistics::from_storage(&graph));
@@ -321,12 +323,12 @@ fn the_statistics_stay_exact_after_deletes() {
         .drop()
         .to_list()
         .unwrap();
-    assert_eq!(twin.statistics(), Some(&kept));
+    assert_eq!(twin.statistics().unwrap(), Some(&kept));
     // A failed delete (NODETACH) leaves the statistics as they were.
     ok(&mut graph, "INSERT (:A)-[:R]->(:B)");
-    let kept = graph.statistics().unwrap().clone();
+    let kept = graph.statistics().unwrap().unwrap().clone();
     let _ = gql(&mut graph, "MATCH (a:A) DELETE a").unwrap_err();
-    assert_eq!(graph.statistics(), Some(&kept));
+    assert_eq!(graph.statistics().unwrap(), Some(&kept));
 }
 
 // ----- stage 3e: MERGE in the unit machinery -----
@@ -412,6 +414,7 @@ fn the_statistics_stay_exact_after_merges() {
     ok(&mut graph, q);
     let kept = graph
         .statistics()
+        .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
     assert_eq!(kept, GraphStatistics::from_storage(&graph));
@@ -423,7 +426,7 @@ fn the_statistics_stay_exact_after_merges() {
     assert_eq!(kept.edge_label_count("OWNS"), 4);
     // A failed MERGE (a NULL value on the last row) leaves the statistics as they were.
     let _ = gql(&mut graph, "FOR x IN [1, NULL] MERGE (:Pet {v: x})").unwrap_err();
-    assert_eq!(graph.statistics(), Some(&kept));
+    assert_eq!(graph.statistics().unwrap(), Some(&kept));
 }
 
 // ----- the schema -----

@@ -147,16 +147,16 @@ impl StoreDir for Panicking {
     fn lock(&self, kind: LockKind) -> io::Result<Option<DirLockGuard>> {
         self.inner.lock(kind)
     }
-    fn space_usage(&self) -> Option<SpaceUsage> {
+    fn space_usage(&self) -> io::Result<Option<SpaceUsage>> {
         self.inner.space_usage()
     }
     fn compact(&self) -> io::Result<Option<DirCompaction>> {
         self.inner.compact()
     }
-    fn free_space(&self) -> Option<u64> {
+    fn free_space(&self) -> io::Result<Option<u64>> {
         self.inner.free_space()
     }
-    fn check(&self) -> DirCheck {
+    fn check(&self) -> io::Result<DirCheck> {
         self.inner.check()
     }
 }

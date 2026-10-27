@@ -282,8 +282,13 @@ fn a_built_change_set_equals_the_captured_one_and_applies_and_replays_like_it() 
     for graph in [&applied, &replayed, &via_trait] {
         assert_eq!(graph.vertex_count(), 2);
         assert_eq!(graph.edge_count(), 1);
-        assert_eq!(graph.get_schema(), Some(schema()));
-        assert!(graph.definition(DefinitionKind::QUERY, "q").is_some());
+        assert_eq!(graph.get_schema().unwrap(), Some(schema()));
+        assert!(
+            graph
+                .definition(DefinitionKind::QUERY, "q")
+                .unwrap()
+                .is_some()
+        );
         let names = graph
             .traversal()
             .v(None::<()>)
@@ -369,12 +374,12 @@ fn the_builder_refuses_what_no_commit_produces() {
 #[test]
 fn raise_position_never_lowers() {
     let mut graph = TraversalGraph::new();
-    graph.raise_position(10, 1_000);
+    graph.raise_position(10, 1_000).unwrap();
     assert_eq!(graph.last_commit_seq(), 10);
-    graph.raise_position(3, 5);
+    graph.raise_position(3, 5).unwrap();
     assert_eq!(graph.last_commit_seq(), 10);
     assert_eq!(PersistentStorage::last_committed_at(&graph), 1_000);
-    graph.raise_position(11, 2_000);
+    graph.raise_position(11, 2_000).unwrap();
     assert_eq!(graph.last_commit_seq(), 11);
     assert_eq!(PersistentStorage::last_committed_at(&graph), 2_000);
     graph.raise_id_sequences(4, 2).unwrap();
@@ -388,7 +393,7 @@ fn raise_position_never_lowers() {
 #[test]
 fn the_load_sink_stores_as_is_and_refuses_duplicates_and_missing_endpoints() {
     let mut graph = TraversalGraph::new();
-    graph.set_graph_id(0xABC);
+    graph.set_graph_id(0xABC).unwrap();
     assert_eq!(graph.graph_id(), 0xABC);
     graph.load_schema(schema()).unwrap();
     graph.load_definition(query("q")).unwrap();
@@ -419,11 +424,11 @@ fn the_load_sink_stores_as_is_and_refuses_duplicates_and_missing_endpoints() {
         graph.load_edge("f".into(), None, "a", "zz", PropertyMap::new()),
         Err(GraphError::VertexNotFound { .. })
     ));
-    graph.finish_load();
+    graph.finish_load().unwrap();
     assert_eq!((graph.vertex_count(), graph.edge_count()), (2, 1));
-    assert_eq!(graph.get_schema(), Some(schema()));
+    assert_eq!(graph.get_schema().unwrap(), Some(schema()));
     assert_eq!(graph.last_commit_seq(), 0, "loading commits nothing");
-    assert_eq!(graph.statistics().unwrap().vertex_count(), 2);
+    assert_eq!(graph.statistics().unwrap().unwrap().vertex_count(), 2);
 }
 
 #[test]
@@ -439,10 +444,10 @@ fn clear_empties_everything_and_keeps_the_hooks_and_the_journal() {
     graph.set_schema(schema()).unwrap();
     graph.set_definition(query("q")).unwrap();
     let lineage = graph.graph_id();
-    graph.clear();
+    graph.clear().unwrap();
     assert_eq!((graph.vertex_count(), graph.edge_count()), (0, 0));
-    assert_eq!(graph.get_schema(), None);
-    assert_eq!(graph.definitions().count(), 0);
+    assert_eq!(graph.get_schema().unwrap(), None);
+    assert_eq!(graph.definitions().unwrap().count(), 0);
     assert_eq!(graph.last_commit_seq(), 0);
     assert_eq!(graph.id_sequences(), (0, 0));
     assert_ne!(

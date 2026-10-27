@@ -339,12 +339,16 @@ fn a_failed_application_leaves_graph_and_schema_unchanged() {
     g.add_edge(None, Some("knows".into()), p0, c0, PropertyMap::default())
         .unwrap();
     let (v, e) = (g.vertex_count(), g.edge_count());
-    let before = g.get_schema();
+    let before = g.get_schema().unwrap();
     assert_eq!(before, None);
     for mode in [SchemaMode::Open, SchemaMode::Closed] {
         assert!(g.set_schema(schema(mode)).is_err(), "{mode:?}");
         assert_eq!((g.vertex_count(), g.edge_count()), (v, e));
-        assert_eq!(g.get_schema(), before, "{mode:?}: no schema was stored");
+        assert_eq!(
+            g.get_schema().unwrap(),
+            before,
+            "{mode:?}: no schema was stored"
+        );
         // the data is untouched: no coercion, no removal
         assert_eq!(
             g.vertex_properties(p0).and_then(|p| p.get("name")),
@@ -355,7 +359,7 @@ fn a_failed_application_leaves_graph_and_schema_unchanged() {
         g.set_schema(GraphSchema::from_json(&schema(SchemaMode::Closed).to_json()).unwrap())
             .is_err()
     );
-    assert_eq!(g.get_schema(), before);
+    assert_eq!(g.get_schema().unwrap(), before);
 
     // the id sequences are not consumed by failed applications
     let mut a = TraversalGraph::new();
@@ -389,7 +393,7 @@ fn a_failed_application_keeps_an_existing_enforcing_schema() {
     let mut strict = schema(SchemaMode::Closed);
     strict.vertices.shift_remove("Person");
     assert!(g.set_schema(strict).is_err());
-    assert_eq!(g.get_schema().unwrap().mode, SchemaMode::Open);
+    assert_eq!(g.get_schema().unwrap().unwrap().mode, SchemaMode::Open);
     assert!(
         g.add_vertex(
             Some("q".into()),
@@ -415,7 +419,7 @@ fn mode_none_applies_without_validation_and_removes_an_enforcing_schema() {
     g2.set_schema(schema(SchemaMode::Closed)).unwrap();
     // The empty schema is no schema.
     g2.set_schema(GraphSchema::new()).unwrap();
-    assert_eq!(g2.get_schema(), None);
+    assert_eq!(g2.get_schema().unwrap(), None);
 }
 
 #[test]
@@ -843,7 +847,7 @@ fn validate_schema_is_the_dry_run_with_the_same_report() {
         .violations;
     let applied = apply_err(&mut g, schema(SchemaMode::Closed));
     assert_eq!(&dry, report_of(&applied));
-    assert_eq!(g.get_schema(), None);
+    assert_eq!(g.get_schema().unwrap(), None);
     assert!(
         g.traversal()
             .validate_schema(&schema(SchemaMode::None))
@@ -919,12 +923,15 @@ fn rhai_set_schema_fails_with_the_report_and_changes_nothing() {
     .to_string();
     assert!(err.contains("Cannot apply the Closed schema"), "{err}");
     // nothing was applied: the creation that Closed would reject still works
-    assert!(graph.read().get_schema().is_none());
+    assert!(graph.read().get_schema().unwrap().is_none());
     let _ = eval_value(graph.clone(), r#"g.addV("Alien").toList(); 1"#).unwrap();
     // mode "none" applies regardless
     let none = schema(SchemaMode::None).to_json();
     let _ = eval_value(graph.clone(), &format!("g.set_schema(`{none}`)")).unwrap();
-    assert_eq!(graph.read().get_schema().unwrap().mode, SchemaMode::None);
+    assert_eq!(
+        graph.read().get_schema().unwrap().unwrap().mode,
+        SchemaMode::None
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

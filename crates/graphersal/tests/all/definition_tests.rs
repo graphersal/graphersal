@@ -68,6 +68,7 @@ fn opaque(name: &str, payload: &[u8]) -> Definition {
 fn names(graph: &TraversalGraph) -> Vec<(u8, String)> {
     graph
         .definitions()
+        .unwrap()
         .map(|d| (d.kind().code(), d.name().to_string()))
         .collect()
 }
@@ -120,7 +121,7 @@ fn refused(definition: Definition) -> DefinitionError {
         .set_definition(definition)
         .unwrap_err();
     assert_eq!(
-        graph.definitions().count(),
+        graph.definitions().unwrap().count(),
         0,
         "a refused definition is not stored"
     );
@@ -368,7 +369,7 @@ fn the_catalog_is_bounded() {
             QueryDefinition::new("fn y() { 2 }"),
         ))
         .unwrap();
-    assert_eq!(graph.definitions().count(), MAX_DEFINITIONS);
+    assert_eq!(graph.definitions().unwrap().count(), MAX_DEFINITIONS);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -423,7 +424,10 @@ fn define_list_get_replace_move_describe_remove() {
         .traversal_mut()
         .describe_query("top", Some("Moved."))
         .unwrap();
-    let stored = graph.definition(DefinitionKind::QUERY, "top").unwrap();
+    let stored = graph
+        .definition(DefinitionKind::QUERY, "top")
+        .unwrap()
+        .unwrap();
     let query = stored.as_query().unwrap();
     assert_eq!(query.folder(), Some("archive"));
     assert_eq!(query.description(), Some("Moved."));
@@ -431,6 +435,7 @@ fn define_list_get_replace_move_describe_remove() {
     graph.traversal_mut().describe_query("top", None).unwrap();
     let query = graph
         .definition(DefinitionKind::QUERY, "top")
+        .unwrap()
         .unwrap()
         .as_query()
         .unwrap()
@@ -451,6 +456,7 @@ fn define_list_get_replace_move_describe_remove() {
         graph
             .definition(DefinitionKind::QUERY, "top")
             .unwrap()
+            .unwrap()
             .as_query()
             .unwrap()
             .folder(),
@@ -469,7 +475,7 @@ fn define_list_get_replace_move_describe_remove() {
             .remove_definition(DefinitionKind::QUERY, "alpha")
             .unwrap()
     );
-    assert_eq!(graph.definitions().count(), 2);
+    assert_eq!(graph.definitions().unwrap().count(), 2);
 }
 
 #[test]
@@ -486,7 +492,7 @@ fn a_read_only_source_and_a_shared_reference_cannot_define() {
         second.set_definition(top()).is_err(),
         "a shared Arc is read-only"
     );
-    assert_eq!(graph.definitions().count(), 1);
+    assert_eq!(graph.definitions().unwrap().count(), 1);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -529,29 +535,42 @@ fn rollback_and_savepoints_restore_the_catalog() {
     });
     assert!(failed.is_err());
     assert_eq!(names(&graph), [(1, "top".to_string())]);
-    assert_eq!(graph.definition(DefinitionKind::QUERY, "top"), Some(&top()));
+    assert_eq!(
+        graph.definition(DefinitionKind::QUERY, "top").unwrap(),
+        Some(&top())
+    );
 
     // A savepoint: the inner change is undone, the outer one kept.
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .set_definition(Definition::query(
             "kept",
             QueryDefinition::new("fn kept() { 1 }"),
         ))
         .unwrap();
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     let replaced = Definition::query("top", QueryDefinition::new("fn top() { 2 }"));
     graph.set_definition(replaced).unwrap();
     assert_eq!(
-        graph.unit_changes(inner),
+        graph.unit_changes(inner).unwrap(),
         UnitChanges::NONE.with_definitions(true)
     );
-    graph.rollback_unit(inner, &RollbackReason::failed(&"savepoint"));
-    assert!(graph.unit_changes(mark).definitions);
-    assert!(!graph.unit_changes(mark).data && !graph.unit_changes(mark).schema);
+    graph
+        .rollback_unit(inner, &RollbackReason::failed(&"savepoint"))
+        .unwrap();
+    assert!(graph.unit_changes(mark).unwrap().definitions);
+    assert!(!graph.unit_changes(mark).unwrap().data && !graph.unit_changes(mark).unwrap().schema);
     graph.commit_unit(mark).unwrap();
-    assert_eq!(graph.definition(DefinitionKind::QUERY, "top"), Some(&top()));
-    assert!(graph.definition(DefinitionKind::QUERY, "kept").is_some());
+    assert_eq!(
+        graph.definition(DefinitionKind::QUERY, "top").unwrap(),
+        Some(&top())
+    );
+    assert!(
+        graph
+            .definition(DefinitionKind::QUERY, "kept")
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -565,7 +584,10 @@ fn dry_run_reports_and_discards_catalog_changes() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(graph.definition(DefinitionKind::QUERY, "top"), Some(&top()));
+    assert_eq!(
+        graph.definition(DefinitionKind::QUERY, "top").unwrap(),
+        Some(&top())
+    );
     assert_eq!(graph.last_commit_seq(), seq);
     let [
         Mutation::SetDefinition {
@@ -607,6 +629,7 @@ fn change_sets_carry_before_and_after_in_execution_order() {
     graph.set_definition(top()).unwrap();
     let moved = graph
         .definition(DefinitionKind::QUERY, "top")
+        .unwrap()
         .cloned()
         .map(|mut d| {
             d.as_query_mut().unwrap().set_folder(Some("archive".into()));
@@ -728,7 +751,10 @@ fn a_hook_can_veto_a_catalog_change() {
         err.root_cause(),
         TraverserError::Graph(GraphError::CommitRejected { .. })
     ));
-    assert_eq!(graph.definition(DefinitionKind::QUERY, "top"), Some(&top()));
+    assert_eq!(
+        graph.definition(DefinitionKind::QUERY, "top").unwrap(),
+        Some(&top())
+    );
     assert_eq!(graph.last_commit_seq(), seq);
     assert_eq!(*recorder.rollbacks.lock().unwrap(), 1);
 }
@@ -767,6 +793,7 @@ fn change_sets_with_definitions_round_trip_through_serde() {
         replayed
             .definition(DefinitionKind::from_code(42), "idx")
             .unwrap()
+            .unwrap()
             .flags()
             .bits(),
         0x81
@@ -800,6 +827,7 @@ fn opaque_definitions_survive_changes_of_others() {
         .unwrap();
     let kept = graph
         .definition(DefinitionKind::from_code(42), "index_a")
+        .unwrap()
         .unwrap();
     assert_eq!(kept, &critical);
     assert_eq!(kept.opaque_payload(), Some(payload.as_slice()));
@@ -1086,7 +1114,7 @@ fn a_journal_refuses_a_critical_definition_of_an_unknown_kind_without_poisoning(
     let err = graph.set_definition(critical).unwrap_err();
     assert!(matches!(err, GraphError::CommitRejected { .. }), "{err:?}");
     assert!(err.to_string().contains("critical"), "{err}");
-    assert_eq!(graph.definitions().count(), 2);
+    assert_eq!(graph.definitions().unwrap().count(), 2);
     // The journal still takes commits.
     graph.traversal_mut().add_v("after").to_list().unwrap();
 }
@@ -1213,17 +1241,17 @@ fn a_host_definition_is_stored_opaque_and_survives_units_and_the_exchange_form()
 
     let mut graph = TraversalGraph::new();
     graph.set_definition(host.clone()).unwrap();
-    assert_eq!(graph.definition(kind, "person_name"), Some(&host));
+    assert_eq!(graph.definition(kind, "person_name").unwrap(), Some(&host));
     // A failed transaction restores it.
     let failed: Result<(), GraphError> = graph.transaction(|g| {
         g.remove_definition(kind, "person_name")?;
         g.set_definition(Definition::query("1x", top_query()))
     });
     assert!(failed.is_err());
-    assert_eq!(graph.definition(kind, "person_name"), Some(&host));
+    assert_eq!(graph.definition(kind, "person_name").unwrap(), Some(&host));
 
     // The exchange form carries the numeric kind and the bytes.
-    let text = catalog_to_json(graph.definitions());
+    let text = catalog_to_json(graph.definitions().unwrap());
     assert!(text.contains("\"kind\":200"), "{text}");
     assert_eq!(catalog_from_json(&text).unwrap(), vec![host]);
 }

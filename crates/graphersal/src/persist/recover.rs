@@ -292,7 +292,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
             target: target.to_string(),
             reason,
         };
-        let snapshot_seq = if based { graph.last_commit_seq() } else { 0 };
+        let snapshot_seq = if based { graph.last_commit_seq()? } else { 0 };
         let snapshot_time = if based { graph.last_committed_at() } else { 0 };
         match &target {
             RecoveryTarget::CommitSeq(seq) if *seq < snapshot_seq => {
@@ -337,7 +337,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                         found: reader.first_commit_seq(),
                     });
                 }
-                graph.set_graph_id(reader.graph_id());
+                graph.set_graph_id(reader.graph_id())?;
                 based = true;
                 graph.graph_id()
             };
@@ -350,7 +350,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 match (position(reader.graph_id()), position(lineage)) {
                     // A descendant: the replay continues under the new lineage id.
                     (Some(journal_at), Some(graph_at)) if journal_at < graph_at => {
-                        graph.set_graph_id(reader.graph_id());
+                        graph.set_graph_id(reader.graph_id())?;
                     }
                     // An ancestor: only its commits the snapshot already holds may appear.
                     (Some(_), Some(_)) => limit = snapshot_seq,
@@ -483,7 +483,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
         // The replayed elements grew the slot vectors past the snapshot's exact reservation:
         // release the spare capacity, as the end of a load does.
         if report.commits_replayed > 0 {
-            graph.shrink_to_fit();
+            graph.shrink_to_fit()?;
         }
         Ok(report)
     }
@@ -611,9 +611,15 @@ mod tests {
             });
             assert_eq!(generic_state, expected, "verify {verify}");
             assert_eq!(own_state, expected, "verify {verify}");
-            assert_eq!(generic.graph.get_schema(), live.get_schema());
-            assert_eq!(generic.graph.definitions().count(), 1);
-            assert_eq!(generic.graph.last_commit_seq(), live.last_commit_seq());
+            assert_eq!(
+                generic.graph.get_schema().unwrap(),
+                live.get_schema().unwrap()
+            );
+            assert_eq!(generic.graph.definitions().unwrap().count(), 1);
+            assert_eq!(
+                generic.graph.last_commit_seq().unwrap(),
+                live.last_commit_seq()
+            );
             assert_eq!(generic.graph.id_sequences(), live.id_sequences());
         }
     }

@@ -10,7 +10,9 @@
 use crate::error::GraphError;
 use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::hooks::RollbackReason;
-use crate::graph::storage::{GraphStorage, UNWOUND, close_on_unwind};
+use crate::graph::storage::{
+    DRY_RUN_OPERATION, GraphStorage, close_on_unwind, rollback_failed_unit, rollback_unwound,
+};
 
 /// The rollback reason the hooks receive when a transaction closure returns `Err`.
 const CLOSURE_FAILED: &str = "the transaction closure returned an error";
@@ -101,6 +103,12 @@ pub trait Transactional: GraphStorage {
     /// added to the enclosing one's (a principal only when none is set yet, attributes only
     /// for keys not set yet; the enclosing transaction wins), and a nested one that returns
     /// `Err` contributes nothing.
+    ///
+    /// A storage that cannot open the unit fails the call with its error before `body` runs. A
+    /// storage that cannot attach the metadata fails it after rolling the unit back. A storage
+    /// whose rollback fails (after `body` returned `Err`) closes the unit anyway, and the call
+    /// fails with [`GraphError::RollbackFailed`] instead of `body`'s error (`E` has no text to
+    /// keep; the error names the closure's failure as its cause).
     fn transaction_with<T, E>(
         &mut self,
         metadata: CommitMetadata,
@@ -109,20 +117,25 @@ pub trait Transactional: GraphStorage {
     where
         E: From<GraphError>,
     {
-        let mark = self.begin_unit();
-        let outcome = close_on_unwind(self, body, |this| {
-            this.rollback_unit(mark, &RollbackReason::failed(&UNWOUND));
-        });
+        let mark = self.begin_unit()?;
+        let outcome = close_on_unwind(self, body, |this| rollback_unwound(this, mark));
         match outcome {
             Ok(value) => {
-                self.set_unit_metadata(metadata);
+                if let Err(err) = self.set_unit_metadata(metadata) {
+                    return Err(E::from(rollback_failed_unit(self, mark, err)));
+                }
                 self.commit_unit(mark)?;
                 Ok(value)
             }
-            Err(err) => {
-                self.rollback_unit(mark, &RollbackReason::failed(&CLOSURE_FAILED));
-                Err(err)
-            }
+            Err(err) => match self.rollback_unit(mark, &RollbackReason::failed(&CLOSURE_FAILED)) {
+                Ok(()) => Err(err),
+                // `E` carries no text to keep: the rollback failure, which names the closure's
+                // failure as its cause, is the error to report.
+                Err(rollback) => Err(E::from(GraphError::rollback_failed(
+                    &CLOSURE_FAILED,
+                    rollback,
+                ))),
+            },
         }
     }
 
@@ -175,27 +188,41 @@ pub trait Transactional: GraphStorage {
     where
         E: From<GraphError>,
     {
-        let mark = self.begin_unit();
+        let mark = self.begin_unit()?;
         let outcome = close_on_unwind(self, body, |this| {
-            // Unwinding: only the unit is closed; its change set is not wanted.
-            let _ = this.discard_unit(mark);
+            // Unwinding: only the unit is closed; its change set is not wanted, and a failure
+            // to close it cannot be reported (the panic continues).
+            match this.discard_unit(mark) {
+                Ok(_) | Err(GraphError::Unsupported { .. }) => {}
+                Err(err) => {
+                    tracing::error!("closing a dry run a panic unwound through failed: {err}");
+                }
+            }
         });
         match outcome {
             Ok(value) => {
                 let changes = self.discard_unit(mark)?;
                 debug_assert!(
-                    self.capabilities().change_capture,
+                    self.capabilities().is_ok_and(|c| c.change_capture),
                     "a storage that overrides discard_unit must claim change_capture"
                 );
                 Ok((value, changes))
             }
-            Err(err) => {
+            Err(err) => match self.discard_unit(mark) {
                 // The unit is closed the same way and its change set dropped; on a storage
-                // without change capture its `Unsupported` is dropped too: `body`'s own error is
-                // the one to report.
-                let _ = self.discard_unit(mark);
-                Err(err)
-            }
+                // without change capture its `Unsupported` is dropped too: `body`'s own error
+                // is the one to report.
+                Ok(_) => Err(err),
+                Err(GraphError::Unsupported { operation }) if operation == DRY_RUN_OPERATION => {
+                    Err(err)
+                }
+                // The storage could not undo the dry run: that is the error to report (it names
+                // the closure's failure as its cause).
+                Err(failed) => Err(E::from(GraphError::rollback_failed(
+                    &CLOSURE_FAILED,
+                    failed,
+                ))),
+            },
         }
     }
 }

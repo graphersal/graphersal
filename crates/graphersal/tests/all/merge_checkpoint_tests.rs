@@ -48,10 +48,14 @@ pub(crate) fn exact(graph: &TraversalGraph) -> Vec<String> {
         ),
         format!(
             "schema {}",
-            graph.get_schema().map(|s| s.to_json()).unwrap_or_default()
+            graph
+                .get_schema()
+                .unwrap()
+                .map(|s| s.to_json())
+                .unwrap_or_default()
         ),
     ];
-    for definition in graph.definitions() {
+    for definition in graph.definitions().unwrap() {
         out.push(format!("definition {definition:?}"));
     }
     let mut elements = Vec::new();
@@ -90,7 +94,11 @@ pub(crate) fn exact(graph: &TraversalGraph) -> Vec<String> {
 /// `a` and `b` hold exactly the same: [`exact`] and the statistics.
 pub(crate) fn same(a: &TraversalGraph, b: &TraversalGraph, label: &str) {
     assert_eq!(exact(a), exact(b), "{label}");
-    assert_eq!(a.statistics(), b.statistics(), "{label}: statistics");
+    assert_eq!(
+        a.statistics().unwrap(),
+        b.statistics().unwrap(),
+        "{label}: statistics"
+    );
 }
 
 /// The oracle of a store's files: the newest snapshot loaded and the WAL after it replayed.

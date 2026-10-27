@@ -1144,8 +1144,8 @@ fn memory_usage_counts_the_components() {
             .add_vertex(Some("v".into()), vec!["doc".into()], props)
             .unwrap();
     }
-    let small_bytes = small.memory_usage().unwrap().property_bytes;
-    let big_bytes = big.memory_usage().unwrap().property_bytes;
+    let small_bytes = small.memory_usage().unwrap().unwrap().property_bytes;
+    let big_bytes = big.memory_usage().unwrap().unwrap().property_bytes;
     assert!(
         big_bytes >= small_bytes + (4096 - 4) * 4,
         "{small_bytes} vs {big_bytes}"

@@ -193,9 +193,10 @@ fn holds(info: &StoreInfo, graph: &TraversalGraph) -> Holds {
         names: names(graph),
         marko_age: age_of(graph, "marko"),
         data: dump(graph),
-        schema: graph.get_schema().map(|s| s.to_json()),
+        schema: graph.get_schema().unwrap().map(|s| s.to_json()),
         definitions: graph
             .definitions()
+            .unwrap()
             .map(|d| (d.kind().code(), d.name().to_string()))
             .collect(),
         marks: info

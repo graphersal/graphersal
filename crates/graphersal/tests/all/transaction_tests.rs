@@ -107,7 +107,10 @@ fn snapshot(graph: &TraversalGraph) -> Snapshot {
         .collect();
     adjacency.sort();
     // The incrementally kept statistics always equal a full recomputation.
-    let stats = graph.statistics().expect("TraversalGraph keeps statistics");
+    let stats = graph
+        .statistics()
+        .unwrap()
+        .expect("TraversalGraph keeps statistics");
     assert_eq!(stats, &GraphStatistics::from_storage(graph));
     let owned = |counts: Vec<(&str, usize)>| -> Vec<(String, usize)> {
         counts
@@ -164,10 +167,12 @@ fn assert_rolled_back(
     change: impl FnOnce(&mut TraversalGraph) -> Result<(), GraphError>,
 ) -> TraversalGraph {
     let before = snapshot(&graph);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     change(&mut graph).expect("the change itself succeeds");
     assert_ne!(snapshot(&graph), before, "the change must be visible");
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(snapshot(&graph), before);
     graph
 }
@@ -182,24 +187,28 @@ fn e(graph: &TraversalGraph, id: &str) -> EdgeHandle {
 
 /// The id the next auto-id vertex gets (added and rolled back in a unit of its own).
 fn next_vertex_id(graph: &mut TraversalGraph) -> String {
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let handle = graph
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
     let id = graph.vertex_id(handle).unwrap().to_string();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     id
 }
 
 /// The id the next auto-id edge gets.
 fn next_edge_id(graph: &mut TraversalGraph) -> String {
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let a = v(graph, "1");
     let handle = graph
         .add_edge(None, None, a, a, PropertyMap::default())
         .unwrap();
     let id = graph.edge_id(handle).unwrap().to_string();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     id
 }
 
@@ -389,15 +398,20 @@ fn jpath_writes_and_removals_are_restored_without_and_with_a_schema() {
 #[test]
 fn schema_change_is_rolled_back() {
     let mut graph = TraversalGraph::tinkerpop_modern();
-    let before = graph.get_schema();
-    let mark = graph.begin_unit();
+    let before = graph.get_schema().unwrap();
+    let mark = graph.begin_unit().unwrap();
     GraphStorage::set_schema(&mut graph, GraphSchema::new().with_mode(SchemaMode::Open)).unwrap();
     graph
         .add_vertex(Some("x".into()), vec!["n".into()], PropertyMap::default())
         .unwrap();
-    assert_eq!(graph.get_schema().map(|s| s.mode), Some(SchemaMode::Open));
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
-    assert_eq!(graph.get_schema(), before);
+    assert_eq!(
+        graph.get_schema().unwrap().map(|s| s.mode),
+        Some(SchemaMode::Open)
+    );
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
+    assert_eq!(graph.get_schema().unwrap(), before);
     assert!(graph.get_vertex_by_id("x").is_none());
 }
 
@@ -434,25 +448,27 @@ fn a_mixed_unit_is_rolled_back_completely() {
 #[test]
 fn nested_units_are_savepoints() {
     let mut graph = TraversalGraph::tinkerpop_modern();
-    let outer = graph.begin_unit();
+    let outer = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("kept".into()), vec![], PropertyMap::default())
         .unwrap();
     let after_outer = snapshot(&graph);
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("undone".into()), vec![], PropertyMap::default())
         .unwrap();
     let marko = v(&graph, "1");
     graph.drop_vertex(marko).unwrap();
-    graph.rollback_unit(inner, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(inner, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(
         snapshot(&graph),
         after_outer,
         "only the inner unit is undone"
     );
     // A committed inner unit is still undone by a rollback of its outer unit.
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("inner".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -463,27 +479,31 @@ fn nested_units_are_savepoints() {
     assert!(graph.get_vertex_by_id("undone").is_none());
 
     let before = snapshot(&graph);
-    let outer = graph.begin_unit();
-    let inner = graph.begin_unit();
+    let outer = graph.begin_unit().unwrap();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("gone".into()), vec![], PropertyMap::default())
         .unwrap();
     graph.commit_unit(inner).expect("commit");
-    graph.rollback_unit(outer, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(outer, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(snapshot(&graph), before);
 }
 
 #[test]
 fn a_committed_unit_is_final() {
     let mut graph = TraversalGraph::tinkerpop_modern();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("x".into()), vec![], PropertyMap::default())
         .unwrap();
     graph.commit_unit(mark).expect("commit");
     // A later unit's rollback does not reach behind the commit.
-    let mark = graph.begin_unit();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    let mark = graph.begin_unit().unwrap();
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert!(graph.get_vertex_by_id("x").is_some());
 }
 
@@ -491,22 +511,26 @@ fn a_committed_unit_is_final() {
 fn units_on_a_read_only_reference_are_no_ops() {
     let graph = TraversalGraph::tinkerpop_modern();
     let mut storage = &graph;
-    let mark = storage.begin_unit();
+    let mark = storage.begin_unit().unwrap();
     assert_eq!(mark, UnitMark::default());
-    storage.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(graph.vertex_count(), 6);
 }
 
 #[test]
 fn units_are_forwarded_by_box_and_arc() {
     let mut boxed: Box<TraversalGraph> = Box::new(TraversalGraph::tinkerpop_modern());
-    let mark = boxed.begin_unit();
+    let mark = boxed.begin_unit().unwrap();
     GraphStorage::add_vertex(&mut boxed, Some("b".into()), vec![], PropertyMap::default()).unwrap();
-    boxed.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    boxed
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert!(boxed.get_vertex_by_id("b").is_none());
 
     let mut shared = std::sync::Arc::new(TraversalGraph::tinkerpop_modern());
-    let mark = shared.begin_unit();
+    let mark = shared.begin_unit().unwrap();
     GraphStorage::add_vertex(
         &mut shared,
         Some("a".into()),
@@ -514,7 +538,9 @@ fn units_are_forwarded_by_box_and_arc() {
         PropertyMap::default(),
     )
     .unwrap();
-    shared.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    shared
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert!(shared.get_vertex_by_id("a").is_none());
 }
 
@@ -631,7 +657,7 @@ fn a_timeout_rolls_back_the_writes_before_it() {
 #[test]
 fn a_schema_violation_rolls_back_the_whole_traversal() {
     let mut graph = TraversalGraph::tinkerpop_modern();
-    let mut schema = graph.infer_schema();
+    let mut schema = graph.infer_schema().unwrap();
     schema.mode = SchemaMode::Closed;
     graph.set_schema(schema).unwrap();
     let before = snapshot(&graph);
@@ -1151,16 +1177,16 @@ mod explicit {
     fn a_dry_run_rolls_back_a_schema_change_and_a_read_only_one_is_empty() {
         let mut graph = TraversalGraph::tinkerpop_modern();
         let before = snapshot(&graph);
-        let mode_before = graph.get_schema().map(|s| s.mode);
+        let mode_before = graph.get_schema().unwrap().map(|s| s.mode);
         let (_, changes) = graph
             .dry_run(|g| {
-                let mut schema = g.infer_schema();
+                let mut schema = g.infer_schema().unwrap();
                 schema.mode = SchemaMode::Open;
                 g.set_schema(schema)
             })
             .unwrap();
         assert!(matches!(changes.mutations(), [Mutation::SetSchema { .. }]));
-        assert_eq!(graph.get_schema().map(|s| s.mode), mode_before);
+        assert_eq!(graph.get_schema().unwrap().map(|s| s.mode), mode_before);
         assert_eq!(snapshot(&graph), before);
 
         let (count, changes) = graph
@@ -1381,7 +1407,7 @@ mod explicit {
         add(&mut boxed, "ann").unwrap();
         let mark = mark_of(&mut boxed).unwrap();
         assert_eq!(mark.name(), "before-import");
-        assert_eq!(mark.commit_seq(), boxed.last_commit_seq());
+        assert_eq!(mark.commit_seq(), boxed.last_commit_seq().unwrap());
         // A mark names a committed state: not inside a unit.
         let inside: Result<(), GraphError> = boxed.transaction(|g| {
             assert!(matches!(

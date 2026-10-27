@@ -40,7 +40,7 @@ type LabelCounts = HashMap<CompactString, usize, FnvBuildHasher>;
 /// use graphersal::prelude::*;
 ///
 /// let graph = TraversalGraph::tinkerpop_modern();
-/// let stats = graph.statistics().expect("TraversalGraph keeps statistics");
+/// let stats = graph.statistics().unwrap().expect("TraversalGraph keeps statistics");
 /// assert_eq!(stats.vertex_count(), 6);
 /// assert_eq!(stats.vertex_label_count("person"), 4);
 /// assert_eq!(stats.edge_label_count("knows"), 2);

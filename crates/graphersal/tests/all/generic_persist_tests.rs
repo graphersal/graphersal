@@ -52,7 +52,7 @@ fn rich_graph() -> TraversalGraph {
 /// instances write the same bytes.
 fn modern_with_graph_id() -> TraversalGraph {
     let mut graph = TraversalGraph::tinkerpop_modern();
-    graph.set_graph_id(7);
+    graph.set_graph_id(7).unwrap();
     graph
 }
 
@@ -94,11 +94,17 @@ fn a_snapshot_loads_into_another_storage_type_and_is_rewritten_byte_for_byte() {
         assert_eq!(forwarded.vertex_count(), graph.vertex_count());
         assert_eq!(forwarded.edge_count(), graph.edge_count());
         assert_eq!(forwarded.graph_id(), graph.graph_id());
-        assert_eq!(forwarded.last_commit_seq(), graph.last_commit_seq());
+        assert_eq!(
+            forwarded.last_commit_seq().unwrap(),
+            graph.last_commit_seq()
+        );
         assert_eq!(forwarded.last_committed_at(), graph.last_committed_at());
         assert_eq!(forwarded.id_sequences(), graph.id_sequences());
-        assert_eq!(forwarded.get_schema(), graph.get_schema());
-        assert_eq!(forwarded.definitions().count(), graph.definitions().count());
+        assert_eq!(forwarded.get_schema().unwrap(), graph.get_schema().unwrap());
+        assert_eq!(
+            forwarded.definitions().unwrap().count(),
+            graph.definitions().unwrap().count()
+        );
 
         let from_forwarded = write(&forwarded);
         let from_loaded = write(&loaded);
@@ -127,7 +133,7 @@ fn a_snapshot_is_not_loaded_into_a_storage_that_holds_elements() {
     );
     // A cleared storage is empty again.
     let mut cleared = Forwarding::new(TraversalGraph::tinkerpop_modern());
-    cleared.clear();
+    cleared.clear().unwrap();
     let loaded =
         persist::read_snapshot_into(original.as_slice(), &ReadOptions::new(), cleared).unwrap();
     assert_eq!(loaded.vertex_count(), 6);
@@ -206,7 +212,10 @@ fn recovery_into_another_storage_type_reaches_the_state_of_the_traversal_graph()
     assert!(
         sections_after_manifest(&write(&recovered.graph)) == sections_after_manifest(&write(&live))
     );
-    assert_eq!(recovered.graph.last_commit_seq(), live.last_commit_seq());
+    assert_eq!(
+        recovered.graph.last_commit_seq().unwrap(),
+        live.last_commit_seq()
+    );
 }
 
 #[test]
@@ -225,7 +234,7 @@ fn recovery_into_another_storage_type_without_a_snapshot_starts_from_the_journal
         .unwrap();
     assert_eq!(forwarded.graph.vertex_count(), 2);
     assert_eq!(forwarded.graph.graph_id(), graph.graph_id());
-    assert_eq!(forwarded.graph.last_commit_seq(), 2);
+    assert_eq!(forwarded.graph.last_commit_seq().unwrap(), 2);
     // Into a storage that holds elements: refused.
     let err = Recovery::new_in(Forwarding::new(TraversalGraph::tinkerpop_modern()))
         .journal(wal.as_slice())

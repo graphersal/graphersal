@@ -86,7 +86,7 @@ fn capture(
     graph: &mut TraversalGraph,
     change: impl FnOnce(&mut TraversalGraph) -> Result<(), GraphError>,
 ) -> ChangeSet {
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     change(graph).expect("the change succeeds");
     graph.commit_unit(mark).expect("commit");
     let mut sets = graph.recorded();
@@ -167,7 +167,7 @@ fn content(graph: &TraversalGraph) -> Content {
         })
         .collect();
     edges.sort_by(|a, b| a.0.cmp(&b.0));
-    (vertices, edges, graph.get_schema())
+    (vertices, edges, graph.get_schema().unwrap())
 }
 
 /// Applies `mutations` through the storage API, checking every before-value against the graph
@@ -294,7 +294,7 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
                 assert!(graph.remove_vertex_label(h, label).unwrap());
             }
             Mutation::SetSchema { before, after, .. } => {
-                let current = graph.get_schema().unwrap_or_default();
+                let current = graph.get_schema().unwrap().unwrap_or_default();
                 assert_eq!(&current, before.as_ref());
                 GraphStorage::set_schema(graph, (**after).clone()).unwrap();
             }
@@ -840,12 +840,12 @@ fn compact_orders_a_segment_for_replay() {
 fn an_empty_unit_produces_no_change_set_and_no_commit() {
     let mut graph = modern();
     let seq = graph.last_commit_seq();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph.commit_unit(mark).expect("commit");
     // A read-only traversal, a drop over an empty set, removing an absent property.
     graph.traversal_mut().v(None::<()>).count().next().unwrap();
     graph.traversal_mut().v("nope").drop().to_list().unwrap();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let marko = v(&graph, "1");
     graph.drop_vertex_property("missing", marko).unwrap();
     graph
@@ -859,11 +859,13 @@ fn an_empty_unit_produces_no_change_set_and_no_commit() {
 #[test]
 fn a_rolled_back_unit_produces_nothing() {
     let mut graph = modern();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("x".into()), vec![], PropertyMap::default())
         .unwrap();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     let failed = graph
         .traversal_mut()
         .add_v("n")
@@ -894,16 +896,18 @@ fn commit_seq_is_monotonic_and_advances_also_without_capture() {
 #[test]
 fn nested_units_produce_one_change_set_without_rolled_back_savepoints() {
     let mut graph = modern();
-    let outer = graph.begin_unit();
+    let outer = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("a".into()), vec![], PropertyMap::default())
         .unwrap();
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("b".into()), vec![], PropertyMap::default())
         .unwrap();
-    graph.rollback_unit(inner, &RollbackReason::failed(&"test"));
-    let inner = graph.begin_unit();
+    graph
+        .rollback_unit(inner, &RollbackReason::failed(&"test"))
+        .unwrap();
+    let inner = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("c".into()), vec![], PropertyMap::default())
         .unwrap();

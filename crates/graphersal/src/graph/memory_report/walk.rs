@@ -424,7 +424,7 @@ fn id_heap(len: usize) -> u64 {
 pub(crate) fn compute<S: GraphStorage>(
     storage: &S,
     request: &MemoryReportRequest,
-) -> (MemoryReport, bool) {
+) -> Result<(MemoryReport, bool), crate::error::GraphError> {
     let started = web_time::Instant::now();
     let vertex_total = storage.vertex_count() as u64;
     let total = vertex_total + storage.edge_count() as u64;
@@ -499,14 +499,14 @@ pub(crate) fn compute<S: GraphStorage>(
     }
     request.report_progress(passed, total);
 
-    let structure = storage.memory_structure();
-    let mut report = fold(storage, walk, structure.as_ref());
+    let structure = storage.memory_structure()?;
+    let mut report = fold(storage, walk, structure.as_ref())?;
     report.structure = structure;
     report.sample_every = step;
     report.sampled = visited < passed;
     report.visited_elements = visited;
     report.path_depth = request.path_depth();
-    report.commit_seq = storage.last_commit_seq();
+    report.commit_seq = storage.last_commit_seq()?;
     report.tracked_live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
     if let Some(cap) = request.max_rows()
         && report.properties.len() > cap
@@ -530,7 +530,7 @@ pub(crate) fn compute<S: GraphStorage>(
         report.labels.sort_by(label_order);
     }
     report.elapsed_micros = started.elapsed().as_micros() as u64;
-    (report, cancelled)
+    Ok((report, cancelled))
 }
 
 /// What a label row costs, for its order: its property bytes plus its slots.
@@ -552,25 +552,23 @@ fn fold<S: GraphStorage>(
     storage: &S,
     walk: Walk,
     structure: Option<&super::StructureMemory>,
-) -> MemoryReport {
-    let indexes = storage.property_indexes();
-    let rules: Vec<RuleMemory> = storage
-        .definitions()
-        .filter(|definition| definition.kind() == DefinitionKind::COMPRESSION)
-        .filter_map(|definition| {
-            let rule = definition.as_compression()?;
-            Some(RuleMemory {
-                name: definition.name().to_string(),
-                target: PropertyTarget::new(
-                    rule.element(),
-                    Some(rule.label()),
-                    rule.path().clone(),
-                ),
-                codec: rule.codec_name().to_string(),
-                stats: storage.compression_stats(definition.name()),
-            })
-        })
-        .collect();
+) -> Result<MemoryReport, crate::error::GraphError> {
+    let indexes = storage.property_indexes()?;
+    let mut rules: Vec<RuleMemory> = Vec::new();
+    for definition in storage.definitions()? {
+        if definition.kind() != DefinitionKind::COMPRESSION {
+            continue;
+        }
+        let Some(rule) = definition.as_compression() else {
+            continue;
+        };
+        rules.push(RuleMemory {
+            name: definition.name().to_string(),
+            target: PropertyTarget::new(rule.element(), Some(rule.label()), rule.path().clone()),
+            codec: rule.codec_name().to_string(),
+            stats: storage.compression_stats(definition.name())?,
+        });
+    }
 
     // The scale of each label: elements passed over elements read (1 for a full walk; a
     // cancelled walk scales what it passed).
@@ -775,7 +773,7 @@ fn fold<S: GraphStorage>(
         .collect();
     labels.sort_by(label_order);
 
-    MemoryReport {
+    Ok(MemoryReport {
         properties,
         labels,
         shapes: ShapeSummary {
@@ -787,5 +785,5 @@ fn fold<S: GraphStorage>(
         indexes,
         compression_rules: rules,
         ..MemoryReport::default()
-    }
+    })
 }

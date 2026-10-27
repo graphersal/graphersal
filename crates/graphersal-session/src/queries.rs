@@ -733,31 +733,36 @@ impl Session {
 }
 
 /// The saved queries of `g` in `folder` and below it (segment-wise like `g.queries(folder)`;
-/// `None` or `""`: all), by name.
-pub fn queries_in<S: GraphStorage>(g: &S, folder: Option<&str>) -> Vec<(String, QueryDefinition)> {
+/// `None` or `""`: all), by name; the storage's error when it cannot read its catalog.
+pub fn queries_in<S: GraphStorage>(
+    g: &S,
+    folder: Option<&str>,
+) -> Result<Vec<(String, QueryDefinition)>, GraphError> {
     let prefix = folder.unwrap_or("").trim().trim_end_matches('/');
-    g.definitions()
+    Ok(g.definitions()?
         .filter(|definition| definition.kind() == DefinitionKind::QUERY)
         .filter_map(|definition| {
             let query = definition.as_query()?;
             in_folder(query.folder(), prefix)
                 .then(|| (definition.name().to_string(), query.clone()))
         })
-        .collect()
+        .collect())
 }
 
-/// The saved query `name` of `g`, `None` when there is none.
-pub fn query_in<S: GraphStorage>(g: &S, name: &str) -> Option<QueryDefinition> {
-    g.definition(DefinitionKind::QUERY, name)
+/// The saved query `name` of `g`, `None` when there is none; the storage's error when it
+/// cannot read its catalog.
+pub fn query_in<S: GraphStorage>(g: &S, name: &str) -> Result<Option<QueryDefinition>, GraphError> {
+    Ok(g.definition(DefinitionKind::QUERY, name)?
         .and_then(Definition::as_query)
-        .cloned()
+        .cloned())
 }
 
-/// How many definitions of `kind` `g` holds.
-pub fn count_kind<S: GraphStorage>(g: &S, kind: DefinitionKind) -> usize {
-    g.definitions()
+/// How many definitions of `kind` `g` holds; the storage's error when it cannot read its
+/// catalog.
+pub fn count_kind<S: GraphStorage>(g: &S, kind: DefinitionKind) -> Result<usize, GraphError> {
+    Ok(g.definitions()?
         .filter(|definition| definition.kind() == kind)
-        .count()
+        .count())
 }
 
 /// Stores the checked saved query `definition` in `g` in ONE commit, with the editor's name
@@ -770,15 +775,19 @@ pub(crate) fn store_query<S: GraphStorage>(
     replaces: Option<&str>,
 ) -> Result<(), Vec<FieldError>> {
     let name = definition.name().to_string();
-    let exists = |g: &S, name: &str| g.definition(DefinitionKind::QUERY, name).is_some();
-    if (!is_edit || replaces.is_some()) && exists(g, &name) {
+    let exists = |g: &S, name: &str| {
+        g.definition(DefinitionKind::QUERY, name)
+            .map(|found| found.is_some())
+            .map_err(|err| vec![FieldError::new("general", format_diagnostic(&err))])
+    };
+    if (!is_edit || replaces.is_some()) && exists(g, &name)? {
         return Err(vec![FieldError::new(
             "name",
             format!("a saved query named '{name}' exists already; choose another name"),
         )]);
     }
     if let Some(old) = replaces
-        && !exists(g, old)
+        && !exists(g, old)?
     {
         return Err(vec![FieldError::new(
             "general",
@@ -823,11 +832,11 @@ pub fn move_query_in<S: GraphStorage>(
 }
 
 /// The catalog of `g` as its JSON exchange form (`{"definitions": [..]}`, every kind), with a
-/// final line break.
-pub fn catalog_text<S: GraphStorage>(g: &S) -> String {
-    let mut text = catalog_to_json(g.definitions());
+/// final line break; the storage's error when it cannot read its catalog.
+pub fn catalog_text<S: GraphStorage>(g: &S) -> Result<String, GraphError> {
+    let mut text = catalog_to_json(g.definitions()?);
     text.push('\n');
-    text
+    Ok(text)
 }
 
 /// Stores every one of `definitions` in `g` in ONE commit, replacing those of the same kind
@@ -840,7 +849,7 @@ pub fn load_catalog_in<S: GraphStorage>(
 ) -> Result<(), SessionError> {
     g.transaction(|unit| {
         let stale: Vec<(DefinitionKind, String)> = if replace {
-            unit.definitions()
+            unit.definitions()?
                 .filter(|old| {
                     !definitions
                         .iter()
@@ -1323,24 +1332,27 @@ mod tests {
             g.store(query("fn older() { 2 }"), true, None).unwrap();
         }
         assert_eq!(
-            queries_in(&tg, Some("reports")),
-            queries_in(&fw, Some("reports"))
+            queries_in(&tg, Some("reports")).unwrap(),
+            queries_in(&fw, Some("reports")).unwrap()
         );
-        assert_eq!(queries_in(&fw, Some("other")).len(), 0);
-        assert_eq!(query_in(&tg, "older"), query_in(&fw, "older"));
-        assert_eq!(count_kind(&fw, DefinitionKind::QUERY), 1);
+        assert_eq!(queries_in(&fw, Some("other")).unwrap().len(), 0);
+        assert_eq!(
+            query_in(&tg, "older").unwrap(),
+            query_in(&fw, "older").unwrap()
+        );
+        assert_eq!(count_kind(&fw, DefinitionKind::QUERY).unwrap(), 1);
         move_query_in(&mut tg, "older", None).unwrap();
         move_query_in(&mut fw, "older", None).unwrap();
-        let text = catalog_text(&tg);
-        assert_eq!(text, catalog_text(&fw));
+        let text = catalog_text(&tg).unwrap();
+        assert_eq!(text, catalog_text(&fw).unwrap());
         assert!(remove_definition_in(&mut fw, DefinitionKind::QUERY, "older").unwrap());
-        assert_eq!(count_kind(&fw, DefinitionKind::QUERY), 0);
+        assert_eq!(count_kind(&fw, DefinitionKind::QUERY).unwrap(), 0);
         let definitions = catalog_from_json(&text).unwrap();
         load_catalog_in(&mut fw, definitions.clone(), true).unwrap();
-        assert_eq!(catalog_text(&fw), text);
+        assert_eq!(catalog_text(&fw).unwrap(), text);
         let mut empty = graphersal_storage_tests::forwarding::Forwarding::default();
         carry_catalog(&mut empty, definitions).unwrap();
-        assert_eq!(catalog_text(&empty), text);
+        assert_eq!(catalog_text(&empty).unwrap(), text);
     }
 
     /// `store_query` on either storage, behind one object-safe call for the loop above.

@@ -1218,8 +1218,8 @@ fn schema_history_image() -> MemDir {
 fn is_empty(graph: &TraversalGraph) -> bool {
     graph.vertex_count() == 0
         && graph.edge_count() == 0
-        && graph.get_schema().is_none()
-        && graph.definitions().next().is_none()
+        && graph.get_schema().unwrap().is_none()
+        && graph.definitions().unwrap().next().is_none()
 }
 
 /// A read failing at every point of an in-place rollback and of an attic restore: when the
@@ -1344,8 +1344,8 @@ fn a_failed_reload_leaves_an_empty_graph_a_stopped_store_and_a_clear_error() {
                 } else {
                     assert!(names == done || names == other, "{context}: {names:?}");
                 }
-                assert!(graph.get_schema().is_some(), "{context}");
-                assert_eq!(graph.definitions().count(), 1, "{context}");
+                assert!(graph.get_schema().unwrap().is_some(), "{context}");
+                assert_eq!(graph.definitions().unwrap().count(), 1, "{context}");
             }
             assert!(store.verify().unwrap().is_ok(), "{context}");
         }

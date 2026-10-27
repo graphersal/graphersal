@@ -455,7 +455,9 @@ fn update_in<S: GraphStorage>(
             Err(err) => Err(vec![field_error("general", &err)]),
         };
     }
-    let before = g.last_commit_seq();
+    let before = g
+        .last_commit_seq()
+        .map_err(|err| vec![field_error("general", &err)])?;
     let stored = g.transaction(|g| {
         let errors = apply(g, kind, id, ops);
         if errors.is_empty() {
@@ -465,7 +467,9 @@ fn update_in<S: GraphStorage>(
         }
     });
     match stored {
-        Ok(()) => Ok(g.last_commit_seq() != before),
+        // The commit happened: a position that cannot be read afterwards counts as a change
+        // (the front end refreshes rather than show a stale element).
+        Ok(()) => Ok(g.last_commit_seq().map_or(true, |after| after != before)),
         Err(EditFailed::Fields(errors)) => Err(errors),
         Err(EditFailed::Graph(err)) => Err(vec![field_error("general", &err)]),
     }
@@ -853,7 +857,7 @@ mod tests {
                 element_view(&fw, ElementKind::Vertex, "1")
             );
         }
-        assert_eq!(fw.last_commit_seq(), tg.last_commit_seq());
+        assert_eq!(fw.last_commit_seq().unwrap(), tg.last_commit_seq());
         let bad = [Op::Set("weight".into(), ElementProperty::from(1i64))];
         let errors = |r: Result<bool, Vec<FieldError>>| {
             r.unwrap_err()

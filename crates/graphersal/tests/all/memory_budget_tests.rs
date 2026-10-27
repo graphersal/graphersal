@@ -18,7 +18,7 @@ fn modern() -> Arc<Graph> {
 /// The estimated footprint of `graph` (what the budget starts from without a tracking
 /// allocator).
 fn footprint(graph: &Graph) -> u64 {
-    graph.read().memory_usage().unwrap().total_bytes()
+    graph.read().memory_usage().unwrap().unwrap().total_bytes()
 }
 
 /// The error under the step frames of `err`.
@@ -218,6 +218,7 @@ fn modern_with_room(room: u64) -> (TraversalGraph, u64) {
     let base = TraversalGraph::tinkerpop_modern()
         .memory_usage()
         .unwrap()
+        .unwrap()
         .total_bytes();
     let limit = base + room;
     let policy = ExecutionPolicy::permissive().with_default("memory.limit", limit as i64);
@@ -229,7 +230,7 @@ fn modern_with_room(room: u64) -> (TraversalGraph, u64) {
 
 /// The estimated bytes of one added element on `graph` (the budget's average element size).
 fn element_bytes(graph: &TraversalGraph) -> u64 {
-    let base = graph.memory_usage().unwrap().total_bytes();
+    let base = graph.memory_usage().unwrap().unwrap().total_bytes();
     (base / (graph.vertex_count() + graph.edge_count()) as u64).max(128)
 }
 
@@ -304,7 +305,7 @@ fn assert_untouched(graph: &TraversalGraph) {
 #[test]
 fn a_graphml_import_over_the_budget_rolls_back_fully() {
     let (mut graph, limit) = modern_with_room(4_000);
-    let base = graph.memory_usage().unwrap().total_bytes();
+    let base = graph.memory_usage().unwrap().unwrap().total_bytes();
     let per = element_bytes(&graph);
     let err = graph
         .import_graphml_reader(graphml_vertices("tmp", 5_000).as_bytes())
@@ -359,7 +360,7 @@ fn an_applied_change_set_over_the_budget_rolls_back_fully() {
     let (mut graph, limit) = modern_with_room(4_000);
     // The figures the budget starts from: the footprint is cached by the commit position, and
     // a rolled-back unit keeps that position.
-    let base = graph.memory_usage().unwrap().total_bytes();
+    let base = graph.memory_usage().unwrap().unwrap().total_bytes();
     let per = element_bytes(&graph);
     let err = graph
         .apply_change_set(&change_set_adding("tmp", 100))

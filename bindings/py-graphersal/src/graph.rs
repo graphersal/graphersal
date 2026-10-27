@@ -96,7 +96,10 @@ fn with_memory_budget(
         return Ok(inner);
     };
     let graph = inner.into_inner();
-    let mut policy: ExecutionPolicy = graph.execution_policy().with_default("memory.limit", limit);
+    let mut policy: ExecutionPolicy = graph
+        .execution_policy()
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?
+        .with_default("memory.limit", limit);
     if let Some(headroom) = memory_headroom {
         policy = policy.with_default(
             "memory.headroom",

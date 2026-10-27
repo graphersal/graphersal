@@ -372,7 +372,7 @@ pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
         plans.push(plan);
         Ok(())
     })?;
-    let schema = encoder.schema();
+    let schema = encoder.schema()?;
     let index: Vec<_> = plans.iter().map(|plan| plan.index()).collect();
     let (_, manifest, info) = encoder.manifest(
         &index,
@@ -1246,7 +1246,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         .saturating_add(fixed.edge_count)
         .saturating_mul(64);
     if claimed_slots <= fixed.memory_bytes {
-        graph.reserve_load(fixed.vertex_count, fixed.edge_count);
+        graph.reserve_load(fixed.vertex_count, fixed.edge_count)?;
     }
     let max_depth = options.max_value_depth;
     restore_definitions(graph, &manifest, max_depth)?;
@@ -1382,9 +1382,9 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     let _ = FIXED_BYTES;
     // Derived state (a `TraversalGraph`'s compressed properties, D11: the file holds plain
     // values; the end of the load encodes the rule paths and builds the dictionaries).
-    graph.finish_load();
-    graph.set_graph_id(fixed.graph_id);
-    graph.raise_position(fixed.commit_seq, fixed.last_commit_at);
+    graph.finish_load()?;
+    graph.set_graph_id(fixed.graph_id)?;
+    graph.raise_position(fixed.commit_seq, fixed.last_commit_at)?;
     graph.raise_id_sequences(fixed.node_sequence, fixed.edge_sequence)?;
     Ok(())
 }

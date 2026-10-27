@@ -125,26 +125,42 @@
 //!     ) -> Result<(), GraphError> {
 //!         Err(refused())
 //!     }
-//!     fn statistics(&self) -> Option<&GraphStatistics> { None }
-//!     fn get_schema(&self) -> Option<GraphSchema> { None }
+//!     // The methods beyond single elements return a `Result`: a storage whose state sits in a
+//!     // backend returns `GraphError::storage_failed(..)` instead of an empty answer.
+//!     fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> { Ok(None) }
+//!     fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> { Ok(None) }
 //!     fn declared_property_schema(
 //!         &self,
 //!         _kind: GraphNodeType,
 //!         _labels: &[CompactString],
 //!         _key: &str,
-//!     ) -> Option<PropertySchema> {
-//!         None
+//!     ) -> Result<Option<PropertySchema>, GraphError> {
+//!         Ok(None)
 //!     }
-//!     fn definition(&self, _kind: DefinitionKind, _name: &str) -> Option<&Definition> { None }
-//!     fn compression_stats(&self, _name: &str) -> Option<CompressionStats> { None }
-//!     fn memory_usage(&self) -> Option<MemoryStats> { None }
-//!     fn execution_policy(&self) -> ExecutionPolicy { ExecutionPolicy::default() }
-//!     fn begin_unit(&mut self) -> UnitMark { UnitMark::new(0) }
+//!     fn definition(
+//!         &self,
+//!         _kind: DefinitionKind,
+//!         _name: &str,
+//!     ) -> Result<Option<&Definition>, GraphError> {
+//!         Ok(None)
+//!     }
+//!     fn compression_stats(&self, _name: &str) -> Result<Option<CompressionStats>, GraphError> {
+//!         Ok(None)
+//!     }
+//!     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> { Ok(None) }
+//!     fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
+//!         Ok(ExecutionPolicy::default())
+//!     }
+//!     fn begin_unit(&mut self) -> Result<UnitMark, GraphError> { Ok(UnitMark::new(0)) }
 //!     fn commit_unit(&mut self, _mark: UnitMark) -> Result<(), GraphError> { Ok(()) }
-//!     fn rollback_unit(&mut self, _mark: UnitMark, _reason: &RollbackReason) {}
-//!     fn unit_changes(&self, _mark: UnitMark) -> UnitChanges { UnitChanges::NONE }
-//!     fn capabilities(&self) -> StorageCapabilities {
-//!         StorageCapabilities::none().with_isolation(IsolationLevel::default())
+//!     fn rollback_unit(&mut self, _mark: UnitMark, _reason: &RollbackReason) -> Result<(), GraphError> {
+//!         Ok(())
+//!     }
+//!     fn unit_changes(&self, _mark: UnitMark) -> Result<UnitChanges, GraphError> {
+//!         Ok(UnitChanges::NONE)
+//!     }
+//!     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+//!         Ok(StorageCapabilities::none().with_isolation(IsolationLevel::default()))
 //!     }
 //!     fn register_commit_hook(&mut self, _hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
 //!         Err(refused())

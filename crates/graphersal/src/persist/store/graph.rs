@@ -45,18 +45,18 @@ pub(crate) trait StoreGraph: Send + Sync + 'static {
 /// What the Store reads from its graph under the read lock.
 pub(crate) trait LiveRead {
     /// [`GraphStorage::last_commit_seq`].
-    fn last_commit_seq(&self) -> u64;
+    fn last_commit_seq(&self) -> Result<u64, GraphError>;
     /// [`PersistentStorage::last_committed_at`].
     fn last_committed_at(&self) -> i64;
     /// [`PersistentStorage::graph_id`].
     fn graph_id(&self) -> u128;
     /// The kind of every definition of the catalog.
-    fn definition_kinds(&self) -> Vec<DefinitionKind>;
+    fn definition_kinds(&self) -> Result<Vec<DefinitionKind>, GraphError>;
     /// The model identities the schema's `embedder` keywords name (format spec 4.5).
-    fn schema_models(&self) -> Vec<String>;
+    fn schema_models(&self) -> Result<Vec<String>, GraphError>;
     /// Why the state must not be written by this version: a critical definition of a kind it
     /// does not know (format spec 16 rule 3).
-    fn critical_definition(&self) -> Option<String>;
+    fn critical_definition(&self) -> Result<Option<String>, GraphError>;
     /// Writes the graph as a snapshot directory into `tmp` (the streaming encoder).
     fn write_snapshot_live(&self, tmp: &DirPath, write: &WriteOptions) -> Result<(), PersistError>;
     /// A backup of the graph in memory (format spec 12.11, [`super::from_memory`]).
@@ -81,7 +81,7 @@ pub(crate) trait LiveWrite: LiveRead {
     /// Empties the graph ([`PersistentStorage::clear`]: data, schema, catalog and position go,
     /// the hooks and the journal slot stay). After a failed reload: an empty graph, never a
     /// partial one.
-    fn clear(&mut self);
+    fn clear(&mut self) -> Result<(), GraphError>;
     /// Puts `journal` into the graph's journal slot, after checking the precondition of a
     /// journaled storage (design 4.2): it claims `atomic` and `change_capture`.
     fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), PersistError>;
@@ -111,7 +111,7 @@ where
     G: Deref,
     G::Target: PersistentStorage,
 {
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         self.0.last_commit_seq()
     }
 
@@ -123,24 +123,27 @@ where
         self.0.graph_id()
     }
 
-    fn definition_kinds(&self) -> Vec<DefinitionKind> {
-        self.0.definitions().map(|d| d.kind()).collect()
+    fn definition_kinds(&self) -> Result<Vec<DefinitionKind>, GraphError> {
+        Ok(self.0.definitions()?.map(|d| d.kind()).collect())
     }
 
-    fn schema_models(&self) -> Vec<String> {
-        self.0
-            .get_schema()
+    fn schema_models(&self) -> Result<Vec<String>, GraphError> {
+        Ok(self
+            .0
+            .get_schema()?
             .map(|schema| {
                 crate::value::vector::embed::provenance::schema_models(&schema)
                     .into_iter()
                     .map(|(model, _)| model)
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
-    fn critical_definition(&self) -> Option<String> {
-        crate::persist::definitions::critical_unknown(self.0.definitions())
+    fn critical_definition(&self) -> Result<Option<String>, GraphError> {
+        Ok(crate::persist::definitions::critical_unknown(
+            self.0.definitions()?,
+        ))
     }
 
     fn write_snapshot_live(&self, tmp: &DirPath, write: &WriteOptions) -> Result<(), PersistError> {
@@ -170,16 +173,16 @@ where
 
     fn reload(&mut self, plan: &LoadPlan) -> Result<RecoveryReport, PersistError> {
         let graph = &mut *self.0;
-        graph.clear();
+        graph.clear()?;
         plan.run_into(graph)
     }
 
-    fn clear(&mut self) {
-        self.0.clear();
+    fn clear(&mut self) -> Result<(), GraphError> {
+        self.0.clear()
     }
 
     fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), PersistError> {
-        require_journal_capabilities(self.0.capabilities())?;
+        require_journal_capabilities(self.0.capabilities()?)?;
         Ok(self.0.attach_journal(journal)?)
     }
 
@@ -247,7 +250,7 @@ where
 {
     /// Probes an empty instance: the capabilities are a property of the storage type.
     fn check(&self) -> Result<(), PersistError> {
-        require_journal_capabilities((self.0)().capabilities())
+        require_journal_capabilities((self.0)().capabilities()?)
     }
 
     fn empty(&self) -> Arc<dyn StoreGraph> {
@@ -454,8 +457,8 @@ mod tests {
         type VertexId = VertexHandle;
         type EdgeId = EdgeHandle;
 
-        fn capabilities(&self) -> StorageCapabilities {
-            self.claims
+        fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+            Ok(self.claims)
         }
         fn vertex_count(&self) -> usize {
             self.inner.vertex_count()
@@ -575,7 +578,7 @@ mod tests {
         fn graph_id(&self) -> u128 {
             self.inner.graph_id()
         }
-        fn set_graph_id(&mut self, graph_id: u128) {
+        fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError> {
             self.inner.set_graph_id(graph_id)
         }
         fn last_committed_at(&self) -> i64 {
@@ -584,7 +587,7 @@ mod tests {
         fn id_sequences(&self) -> (u64, u64) {
             self.inner.id_sequences()
         }
-        fn raise_position(&mut self, commit_seq: u64, committed_at: i64) {
+        fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError> {
             self.inner.raise_position(commit_seq, committed_at)
         }
         fn load_vertex(
@@ -611,7 +614,7 @@ mod tests {
         fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
             self.inner.load_definition(definition)
         }
-        fn clear(&mut self) {
+        fn clear(&mut self) -> Result<(), GraphError> {
             self.inner.clear()
         }
         fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), GraphError> {
@@ -620,7 +623,7 @@ mod tests {
     }
 
     fn claims(atomic: bool, change_capture: bool) -> StorageCapabilities {
-        let mut claims = TraversalGraph::new().capabilities();
+        let mut claims = TraversalGraph::new().capabilities().unwrap();
         claims.atomic = atomic;
         claims.change_capture = change_capture;
         claims

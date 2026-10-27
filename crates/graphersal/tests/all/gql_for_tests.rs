@@ -1055,7 +1055,7 @@ mod lookup {
         fn drop_edge_property(&mut self, prop: &str, edge: EdgeHandle) -> Result<(), GraphError> {
             GraphStorage::drop_edge_property(&mut self.0, prop, edge)
         }
-        fn property_indexes(&self) -> Vec<PropertyIndexInfo> {
+        fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
             GraphStorage::property_indexes(&self.0)
         }
     }

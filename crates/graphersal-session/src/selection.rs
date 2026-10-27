@@ -726,7 +726,7 @@ pub struct MetaGraph {
 /// [`META_SCAN_MAX_EDGES`] edges.
 pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGraph, SessionError> {
     let mut ticker = Ticker { cancel, n: 0 };
-    let mut counts: Vec<(String, usize)> = match g.statistics() {
+    let mut counts: Vec<(String, usize)> = match g.statistics()? {
         Some(stats) => stats
             .primary_vertex_label_counts()
             .into_iter()

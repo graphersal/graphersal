@@ -62,8 +62,8 @@ where
         )?;
     }
     if copy_schema
-        && target.get_schema().is_none()
-        && let Some(schema) = source.get_schema()
+        && target.get_schema()?.is_none()
+        && let Some(schema) = source.get_schema()?
     {
         target.set_schema(schema)?;
     }

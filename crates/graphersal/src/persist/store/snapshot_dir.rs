@@ -228,7 +228,7 @@ pub(crate) fn write_graph_snapshot<S: PersistentStorage + ?Sized>(
         })?;
         property_counts[slot] = totals.property_count;
     }
-    let schema = encoder.schema();
+    let schema = encoder.schema()?;
     let (_, manifest, _) =
         encoder.manifest(&index, property_counts[0], property_counts[1], &schema)?;
     write_file(&tmp.join(SCHEMA_FILE), |out| out.put(&schema))?;

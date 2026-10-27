@@ -162,7 +162,7 @@ fn a_store_reopens_with_graph_schema_sequences_position_and_time() {
     assert_eq!(g.last_committed_at(), time);
     assert_eq!((g.node_sequence(), g.edge_sequence()), (nodes, edges));
     assert_eq!(g.graph_id(), id);
-    assert_eq!(g.get_schema().unwrap().to_json(), schema.to_json());
+    assert_eq!(g.get_schema().unwrap().unwrap().to_json(), schema.to_json());
 }
 
 #[test]

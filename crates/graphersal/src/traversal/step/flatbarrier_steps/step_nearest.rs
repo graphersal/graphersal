@@ -129,7 +129,7 @@ impl MetricCache {
         storage: &S,
         key: &VectorKey,
         value: &TraverserValue<S>,
-    ) -> Result<VectorMetric, VectorError> {
+    ) -> TraverserResult<VectorMetric> {
         let labels: &[CompactString] = match value {
             TraverserValue::Vertex(node) => storage.vertex_labels(*node),
             _ => &[],
@@ -144,7 +144,7 @@ impl MetricCache {
                     Some((_, metric)) => *metric,
                     None => {
                         let metric = key
-                            .declared_metric(storage, value)
+                            .declared_metric(storage, value)?
                             .unwrap_or(VectorMetric::Cosine);
                         if self.by_labels.len() < 64 {
                             self.by_labels.push((labels.to_vec(), metric));
@@ -154,7 +154,7 @@ impl MetricCache {
                 }
             }
             _ => key
-                .declared_metric(storage, value)
+                .declared_metric(storage, value)?
                 .unwrap_or(VectorMetric::Cosine),
         };
         match self.chosen {
@@ -163,10 +163,13 @@ impl MetricCache {
                 Ok(metric)
             }
             Some(first) if first == metric => Ok(metric),
-            Some(first) => Err(VectorError::MetricConflict {
-                first,
-                second: metric,
-            }),
+            Some(first) => Err(vector_error(
+                "nearest",
+                VectorError::MetricConflict {
+                    first,
+                    second: metric,
+                },
+            )),
         }
     }
 }
@@ -228,9 +231,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepNearest<'g, S
             };
             let metric = match self.metric {
                 Some(metric) => metric,
-                None => cache
-                    .resolve(context.storage, &self.key, &traverser.value)
-                    .map_err(|error| vector_error("nearest", error))?,
+                None => cache.resolve(context.storage, &self.key, &traverser.value)?,
             };
             context.tick_n(stored.dimension() / 1024)?;
             let score = stored

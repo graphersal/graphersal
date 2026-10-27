@@ -694,7 +694,7 @@ fn storage_facts_read_statistics_and_untransformed_vertex_indexes() {
             PropertyIndexDefinition::new(ElementKind::Edge, "knows", "weight"),
         )
         .unwrap();
-    let facts = StorageFacts::from_storage(&graph);
+    let facts = StorageFacts::from_storage(&graph).unwrap();
     assert_eq!(facts.vertex_label_count("person"), Some(4));
     assert_eq!(facts.vertex_label_count("software"), Some(2));
     assert_eq!(facts.vertex_label_count("nothing"), Some(0));

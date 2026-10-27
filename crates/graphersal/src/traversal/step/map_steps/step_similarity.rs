@@ -164,9 +164,11 @@ impl TextQuery {
             TraverserValue::Vertex(node) => {
                 let labels = context.storage.vertex_labels(*node);
                 (
-                    context
-                        .storage
-                        .declared_property_schema(GraphNodeType::Vertex, labels, name),
+                    context.storage.declared_property_schema(
+                        GraphNodeType::Vertex,
+                        labels,
+                        name,
+                    )?,
                     labels.first().cloned().unwrap_or_default(),
                 )
             }
@@ -177,7 +179,7 @@ impl TextQuery {
                         GraphNodeType::Edge,
                         std::slice::from_ref(&label),
                         name,
-                    ),
+                    )?,
                     label,
                 )
             }
@@ -453,10 +455,10 @@ impl VectorKey {
         &self,
         storage: &S,
         value: &TraverserValue<S>,
-    ) -> Option<VectorMetric> {
+    ) -> Result<Option<VectorMetric>, crate::error::GraphError> {
         match &self.key {
             PropKey::Name(name) => element_metric(storage, value, name),
-            PropKey::Path(_) => None,
+            PropKey::Path(_) => Ok(None),
         }
     }
 }
@@ -468,20 +470,26 @@ fn element_metric<S: GraphStorage>(
     storage: &S,
     value: &TraverserValue<S>,
     name: &str,
-) -> Option<VectorMetric> {
+) -> Result<Option<VectorMetric>, crate::error::GraphError> {
     let declared = match value {
         TraverserValue::Vertex(node) => storage.declared_property_schema(
             GraphNodeType::Vertex,
             storage.vertex_labels(*node),
             name,
-        ),
-        TraverserValue::Edge(edge) => {
-            let label = CompactString::new(storage.edge_label(*edge)?);
-            storage.declared_property_schema(GraphNodeType::Edge, &[label], name)
-        }
+        )?,
+        TraverserValue::Edge(edge) => match storage.edge_label(*edge) {
+            Some(label) => storage.declared_property_schema(
+                GraphNodeType::Edge,
+                &[CompactString::new(label)],
+                name,
+            )?,
+            None => None,
+        },
         _ => None,
-    }?;
-    declared.vector.and_then(|vector| vector.metric)
+    };
+    Ok(declared
+        .and_then(|declared| declared.vector)
+        .and_then(|vector| vector.metric))
 }
 
 /// The metric the stored schema declares for the property a property reference
@@ -489,7 +497,7 @@ fn element_metric<S: GraphStorage>(
 fn reference_metric<S: GraphStorage>(
     storage: &S,
     value: &TraverserValue<S>,
-) -> Option<VectorMetric> {
+) -> Result<Option<VectorMetric>, crate::error::GraphError> {
     match value {
         TraverserValue::VertexProperty(name, node, _) => {
             element_metric(storage, &TraverserValue::Vertex(*node), name)
@@ -497,7 +505,7 @@ fn reference_metric<S: GraphStorage>(
         TraverserValue::EdgeProperty(name, edge, _) => {
             element_metric(storage, &TraverserValue::Edge(*edge), name)
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -630,7 +638,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSimilarity<'g, S> {
             None => match &self.key {
                 Some(key) => key.declared_metric(context.storage, &source.value),
                 None => reference_metric(context.storage, &source.value),
-            }
+            }?
             .unwrap_or(VectorMetric::Cosine),
         };
         context.tick_n(1 + stored.dimension() / 1024)?;

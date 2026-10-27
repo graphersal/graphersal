@@ -323,19 +323,19 @@ where
     }
 
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
-        Ok(self.read_checked()?.capabilities())
+        self.read_checked()?.capabilities()
     }
 
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
-        Ok(self.read_checked()?.last_commit_seq())
+        self.read_checked()?.last_commit_seq()
     }
 
     fn statistics(&self) -> Result<Option<GraphStatistics>, GraphError> {
-        Ok(self.read_checked()?.statistics().cloned())
+        Ok(self.read_checked()?.statistics()?.cloned())
     }
 
     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
-        let stats = self.read_checked()?.memory_usage();
+        let stats = self.read_checked()?.memory_usage()?;
         Ok(stats.map(|mut stats| {
             stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
             stats
@@ -365,7 +365,7 @@ where
     }
 
     fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
-        Ok(self.read_checked()?.get_schema())
+        self.read_checked()?.get_schema()
     }
 
     fn set_schema(&self, schema: GraphSchema) -> TraverserResult<()> {
@@ -395,7 +395,7 @@ where
     fn definitions(&self, kind: Option<DefinitionKind>) -> Result<Vec<Definition>, GraphError> {
         Ok(self
             .read_checked()?
-            .definitions()
+            .definitions()?
             .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
             .cloned()
             .collect())
@@ -406,7 +406,7 @@ where
         kind: DefinitionKind,
         name: &str,
     ) -> Result<Option<Definition>, GraphError> {
-        Ok(self.read_checked()?.definition(kind, name).cloned())
+        Ok(self.read_checked()?.definition(kind, name)?.cloned())
     }
 
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()> {
@@ -435,7 +435,7 @@ where
     }
 
     fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
-        Ok(self.read_checked()?.compression_stats(name))
+        self.read_checked()?.compression_stats(name)
     }
 
     fn estimate_compression(
@@ -456,7 +456,7 @@ where
     }
 
     fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
-        Ok(self.read_checked()?.property_indexes())
+        self.read_checked()?.property_indexes()
     }
 
     fn mark(&self, name: &str) -> Result<Mark, GraphError> {

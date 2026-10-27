@@ -241,10 +241,10 @@ fn snapshot_round_trip_keeps_every_value_type_and_shape() {
     assert_eq!(dump(&loaded), dump(&graph));
     // Statistics and indexes are rebuilt.
     assert_eq!(
-        loaded.statistics().cloned(),
+        loaded.statistics().unwrap().cloned(),
         Some(GraphStatistics::from_storage(&loaded))
     );
-    assert_eq!(loaded.statistics(), graph.statistics());
+    assert_eq!(loaded.statistics().unwrap(), graph.statistics().unwrap());
     let count = |g: GraphTraversalSource<'_, &TraversalGraph>| g.count().next().unwrap();
     assert_eq!(
         count(loaded.traversal().v(None::<()>).has_label("person")),
@@ -318,7 +318,7 @@ fn snapshot_restores_schema_position_sequences_and_lineage() {
         (nodes, edges)
     );
     assert_eq!(loaded.graph_id(), graph.graph_id());
-    assert_eq!(loaded.get_schema(), Some(schema));
+    assert_eq!(loaded.get_schema().unwrap(), Some(schema));
     // The schema is enforced again after the load.
     assert!(loaded.traversal_mut().add_v("person").to_list().is_err());
     // Numbering continues.
@@ -1117,7 +1117,7 @@ fn opaque_record(definition: &Definition) -> Vec<u8> {
 }
 
 fn catalog_of(graph: &TraversalGraph) -> Vec<Definition> {
-    graph.definitions().cloned().collect()
+    graph.definitions().unwrap().cloned().collect()
 }
 
 #[test]
@@ -1139,6 +1139,7 @@ fn a_packed_snapshot_keeps_the_catalog_and_writes_unknown_definitions_back_uncha
         let record = opaque_record(
             loaded
                 .definition(DefinitionKind::from_code(99), name)
+                .unwrap()
                 .unwrap(),
         );
         assert!(

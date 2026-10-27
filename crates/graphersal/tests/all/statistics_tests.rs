@@ -29,7 +29,10 @@ impl CommitHook for Recorder {
 
 /// Asserts the kept statistics equal a full recomputation and returns a copy.
 fn exact(graph: &TraversalGraph) -> GraphStatistics {
-    let kept = graph.statistics().expect("TraversalGraph keeps statistics");
+    let kept = graph
+        .statistics()
+        .unwrap()
+        .expect("TraversalGraph keeps statistics");
     assert_eq!(kept, &GraphStatistics::from_storage(graph));
     kept.clone()
 }
@@ -57,7 +60,7 @@ fn modern_graph_statistics() {
     );
     assert_eq!(stats.vertex_label_count("nope"), 0);
     // The traversal source passes the same statistics through.
-    assert_eq!(graph.traversal().statistics(), Some(&stats));
+    assert_eq!(graph.traversal().statistics().unwrap(), Some(&stats));
 }
 
 #[test]
@@ -131,7 +134,7 @@ fn every_mutation_kind_keeps_the_statistics_exact() {
 fn rollback_restores_the_statistics() {
     let mut graph = TraversalGraph::tinkerpop_modern();
     let before = exact(&graph);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let n = graph
         .add_vertex(
             None,
@@ -152,7 +155,9 @@ fn rollback_restores_the_statistics() {
     graph.remove_vertex_label(v(&graph, "4"), "person").unwrap();
     graph.drop_vertex(v(&graph, "1")).unwrap();
     assert_ne!(exact(&graph), before);
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(exact(&graph), before);
 }
 
@@ -163,7 +168,7 @@ fn a_replay_rebuilds_the_statistics() {
     source
         .register_commit_hook(Box::new(Recorder(recorded.clone())))
         .expect("TraversalGraph supports hooks");
-    let mark = source.begin_unit();
+    let mark = source.begin_unit().unwrap();
     let n = source
         .add_vertex(
             Some("n".into()),

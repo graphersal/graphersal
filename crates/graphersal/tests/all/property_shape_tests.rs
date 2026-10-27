@@ -31,8 +31,8 @@ fn shape_bytes_do_not_grow_with_elements_of_the_same_keys() {
     for i in 0..500 {
         person(&mut many, &i.to_string(), &["name", "age", "city"]);
     }
-    let one = one.memory_usage().unwrap();
-    let many_stats = many.memory_usage().unwrap();
+    let one = one.memory_usage().unwrap().unwrap();
+    let many_stats = many.memory_usage().unwrap().unwrap();
     assert!(one.shape_bytes > 0);
     assert_eq!(one.shape_bytes, many_stats.shape_bytes);
     assert!(many_stats.property_bytes >= many_stats.shape_bytes);
@@ -45,19 +45,19 @@ fn shape_bytes_do_not_grow_with_elements_of_the_same_keys() {
 fn a_new_key_order_is_a_new_shape_and_shrink_releases_unused_ones() {
     let mut graph = TraversalGraph::new();
     person(&mut graph, "a", &["name", "age"]);
-    let base = graph.memory_usage().unwrap().shape_bytes;
+    let base = graph.memory_usage().unwrap().unwrap().shape_bytes;
     let b = person(&mut graph, "b", &["age", "name"]);
-    let two = graph.memory_usage().unwrap().shape_bytes;
+    let two = graph.memory_usage().unwrap().unwrap().shape_bytes;
     assert!(two > base, "{two} vs {base}");
     graph.drop_vertex(b).unwrap();
     graph.shrink_to_fit();
-    assert!(graph.memory_usage().unwrap().shape_bytes < two);
+    assert!(graph.memory_usage().unwrap().unwrap().shape_bytes < two);
 }
 
 #[test]
 fn the_rhai_memory_map_reports_shape_bytes() {
     let graph = std::sync::Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
-    let stats = graph.read().memory_usage().unwrap();
+    let stats = graph.read().memory_usage().unwrap().unwrap();
     let reported = eval_value(graph.clone(), "g.memory_usage().shape_bytes")
         .unwrap()
         .as_int()

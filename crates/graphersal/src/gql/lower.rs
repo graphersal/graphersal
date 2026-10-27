@@ -291,12 +291,17 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
         if !self.steps.is_empty() {
             return self.gql_error(not_at_start(query));
         }
-        let lowered = {
-            let facts = StorageFacts::from_storage(&self.storage);
-            let own = StorageProcedures(&self.storage);
+        let lowered = (|| {
+            let facts = StorageFacts::from_storage(&self.storage)?;
+            let own = StorageProcedures::new(&self.storage);
             let procedures = catalog.unwrap_or(&own);
-            prepare::<S>(query, params, &Resolver::new(procedures, &facts))
-        };
+            let lowered = prepare::<S>(query, params, &Resolver::new(procedures, &facts));
+            // A catalog read that failed: the storage's error, not a "no such query".
+            match own.take_error() {
+                Some(err) => Err(TraverserError::from(err)),
+                None => lowered,
+            }
+        })();
         match lowered {
             Ok(lowered) => lowered.emit(self),
             Err(error) => self.v(None).gql_error(error),
@@ -1984,7 +1989,7 @@ fn lower_with_placeholders(
             .collect();
         let source = GraphTraversalSource::new(&scratch);
         let lowered = {
-            let facts = StorageFacts::from_storage(&source.storage);
+            let facts = StorageFacts::from_storage(&source.storage)?;
             // The calls of saved queries add no step here (their effects are added by name,
             // `PlannedWrites::calls`); their arguments are placeholders too.
             let mut resolver = Resolver::new(&NoProcedures, &facts);
@@ -5156,7 +5161,7 @@ fn merge_lowering(
         }
     }
     let source = GraphTraversalSource::new(graph);
-    let facts = StorageFacts::from_storage(&source.storage);
+    let facts = StorageFacts::from_storage(&source.storage)?;
     let mut lowered = prepare::<G>(query, &[], &Resolver::new(&NoProcedures, &facts))?;
     let mut instrs = std::mem::take(&mut lowered.instrs);
     let mut found = Vec::new();

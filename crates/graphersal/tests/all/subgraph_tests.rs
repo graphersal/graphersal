@@ -576,7 +576,7 @@ mod rust_api {
             .to_graph()
             .unwrap();
         let mut sub = sub.write();
-        let schema = sub.get_schema().expect("schema copied");
+        let schema = sub.get_schema().unwrap().expect("schema copied");
         assert_eq!(schema.mode, SchemaMode::Closed);
         assert!(schema.vertices.contains_key("Person") && schema.edges.contains_key("knows"));
         // Enforced: an undeclared label is rejected in the copy.
@@ -604,7 +604,7 @@ mod rust_api {
         let sub = src.traversal().e("e1").to_graph().unwrap();
         let mut sub = sub.write();
         assert_eq!(
-            sub.get_schema().expect("schema copied").mode,
+            sub.get_schema().unwrap().expect("schema copied").mode,
             SchemaMode::Open
         );
         // Open: a declared field is validated, an undeclared one is allowed.
@@ -621,11 +621,11 @@ mod rust_api {
     #[test]
     fn a_graph_without_a_stored_schema_gives_a_subgraph_without_one() {
         let src = source();
-        assert!(src.get_schema().is_none());
+        assert!(src.get_schema().unwrap().is_none());
         let sub = src.traversal().e("e1").to_graph().unwrap();
         let mut sub = sub.write();
         assert!(
-            sub.get_schema().is_none(),
+            sub.get_schema().unwrap().is_none(),
             "an inferred schema is never copied as a stored one"
         );
         sub.add_vertex(None, vec![s("Later")], PropertyMap::default())
@@ -725,7 +725,7 @@ mod rust_api {
             .to_list()
             .unwrap();
         assert_eq!(
-            target.read().get_schema().map(|s| s.mode),
+            target.read().get_schema().unwrap().map(|s| s.mode),
             Some(SchemaMode::Open)
         );
     }

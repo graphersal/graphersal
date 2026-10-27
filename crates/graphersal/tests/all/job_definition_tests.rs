@@ -190,12 +190,14 @@ fn a_job_survives_every_store_path() {
         .graph()
         .read()
         .definition(DefinitionKind::JOB, "nightly")
+        .unwrap()
         .cloned()
         .unwrap();
     let job_of = |graph: &Arc<Graph>| {
         graph
             .read()
             .definition(DefinitionKind::JOB, "nightly")
+            .unwrap()
             .cloned()
     };
     // The journal (no checkpoint yet): reopen replays it.
@@ -214,7 +216,7 @@ fn a_job_survives_every_store_path() {
     assert_eq!(job_of(opened.graph()).as_ref(), Some(&expected));
     opened.close().unwrap();
     // The catalog file carries it too.
-    let text = graphersal::catalog::catalog_to_json(store.graph().read().definitions());
+    let text = graphersal::catalog::catalog_to_json(store.graph().read().definitions().unwrap());
     let back = graphersal::catalog::catalog_from_json(&text).unwrap();
     assert!(back.iter().any(|d| d == &expected), "{text}");
     store.close().unwrap();
@@ -247,6 +249,7 @@ fn a_job_of_a_newer_version_is_kept_byte_for_byte_and_not_run() {
         .graph()
         .read()
         .definition(DefinitionKind::JOB, "future")
+        .unwrap()
         .and_then(|d| d.as_job().cloned())
         .unwrap();
     assert_eq!(kept.to_payload(), payload);

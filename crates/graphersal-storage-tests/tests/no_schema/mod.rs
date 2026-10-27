@@ -86,7 +86,7 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.contains_edge(edge)
     }
 
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         self.0.statistics()
     }
 
@@ -202,11 +202,15 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.drop_edge_property(prop, edge)
     }
 
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         self.0.definitions()
     }
 
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         self.0.definition(kind, name)
     }
 
@@ -222,23 +226,23 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.recompress(name)
     }
 
-    fn compression_stats(&self, name: &str) -> Option<CompressionStats> {
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
         self.0.compression_stats(name)
     }
 
-    fn memory_usage(&self) -> Option<MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
         self.0.memory_usage()
     }
 
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         self.0.memory_footprint_bytes()
     }
 
-    fn execution_policy(&self) -> ExecutionPolicy {
+    fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         self.0.execution_policy()
     }
 
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         self.0.begin_unit()
     }
 
@@ -246,16 +250,16 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.commit_unit(mark)
     }
 
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
-        self.0.rollback_unit(mark, reason);
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        self.0.rollback_unit(mark, reason)
     }
 
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         self.0.unit_changes(mark)
     }
 
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
-        self.0.set_unit_metadata(metadata);
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        self.0.set_unit_metadata(metadata)
     }
 
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
@@ -266,7 +270,7 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.mark(name)
     }
 
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         self.0.capabilities()
     }
 
@@ -274,7 +278,7 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.register_commit_hook(hook)
     }
 
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         self.0.last_commit_seq()
     }
 
@@ -301,5 +305,5 @@ fn set_schema_keeps_the_trait_default() {
         storage.set_schema(GraphSchema::new()),
         Err(GraphError::Unsupported { .. })
     ));
-    assert!(storage.get_schema().is_none());
+    assert!(storage.get_schema().unwrap().is_none());
 }

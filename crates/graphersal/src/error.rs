@@ -1814,6 +1814,34 @@ pub enum GraphError {
         operation: &'static str,
     },
 
+    /// The storage's backend failed while it served `operation` (an I/O error, a lost
+    /// connection, a poisoned lock of a host storage): what a [`GraphStorage`] method returns
+    /// instead of an empty answer when it cannot read or change its state. `source` is the
+    /// backend's own error, unchanged. Built with [`GraphError::storage_failed`].
+    #[error("The graph storage failed to {operation}: {source}")]
+    #[non_exhaustive]
+    StorageFailed {
+        /// What the storage was asked to do ("read its statistics", "open a unit", ...).
+        operation: &'static str,
+        /// The backend's error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    /// A unit could not be rolled back after `cause` made it fail
+    /// ([`GraphStorage::rollback_unit`] returned `source`). The unit is closed; what the
+    /// storage holds now is up to the storage (see its own error). The graph stays usable for
+    /// the next operation.
+    #[error("{cause}; rolling the unit back failed as well: {source}")]
+    #[non_exhaustive]
+    RollbackFailed {
+        /// The text of the error that made the unit roll back.
+        cause: String,
+        /// The storage's rollback error.
+        #[source]
+        source: Box<GraphError>,
+    },
+
     /// A `u64` counter of the graph is at its maximum and cannot advance: the commit sequence
     /// number (the unit was rolled back, nothing of it is applied) or an auto-id sequence (no
     /// new auto id can be handed out). The counters never wrap around, because a reused commit
@@ -2031,6 +2059,28 @@ impl GraphError {
     /// journal, a bad name, an open unit).
     pub fn mark_unavailable(reason: &'static str) -> Self {
         GraphError::MarkUnavailable { reason }
+    }
+
+    /// [`GraphError::StorageFailed`]: the storage's backend failed to `operation` (a phrase
+    /// after "failed to", for example `"read its statistics"`) with `source` (an
+    /// [`std::io::Error`], a host error type, or a message: `&str`/`String` convert).
+    pub fn storage_failed(
+        operation: &'static str,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        GraphError::StorageFailed {
+            operation,
+            source: source.into(),
+        }
+    }
+
+    /// [`GraphError::RollbackFailed`]: rolling a unit back after `cause` failed with
+    /// `rollback`. The engine builds it where a failed operation's rollback fails too.
+    pub fn rollback_failed(cause: &dyn std::fmt::Display, rollback: GraphError) -> Self {
+        GraphError::RollbackFailed {
+            cause: cause.to_string(),
+            source: Box::new(rollback),
+        }
     }
 
     /// [`GraphError::ElementRemoved`] for a vertex.
@@ -2268,6 +2318,22 @@ impl DiagnosticError for GraphError {
                  example commit hooks and dry runs need change_capture, and therefore atomic), \
                  or run it on a TraversalGraph, the reference storage, which implements every \
                  operation of the trait."
+            )),
+            GraphError::StorageFailed { source, .. } => Some(match refusal_help(&**source) {
+                Some(own) => own,
+                None => "The graph's storage could not reach its own state (its backend \
+                         reported the error above): nothing of the operation was applied. \
+                         Check the storage's backend (a file, a connection, a lock of the host) \
+                         and run the operation again once it is available."
+                    .to_string(),
+            }),
+            GraphError::RollbackFailed { source, .. } => Some(format!(
+                "The operation failed (the first part of the message), and the storage could \
+                 not undo what it had done so far: the unit is closed, but what the storage \
+                 holds now is up to the storage. {}",
+                source.help().unwrap_or_else(|| "Check the storage's backend before the next \
+                     write."
+                    .to_string())
             )),
             GraphError::SequenceOverflow { sequence } if *sequence == COMMIT_SEQUENCE => Some(
                 "The graph was numbered close to the end of the commit sequence (for example by \
@@ -9062,6 +9128,35 @@ impl TraverserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A storage backend failure and a failed rollback name the backend and, for a rollback,
+    /// both errors; a Store refusal as the source keeps the Store's own help.
+    #[test]
+    fn storage_failures_carry_their_help() {
+        let failed = GraphError::storage_failed("read its statistics", "the disk is gone");
+        assert_eq!(
+            failed.to_string(),
+            "The graph storage failed to read its statistics: the disk is gone"
+        );
+        let help = failed.help().unwrap();
+        assert!(
+            help.contains("nothing of the operation was applied"),
+            "{help}"
+        );
+        assert!(help.contains("run the operation again"), "{help}");
+        let rollback = GraphError::rollback_failed(&"the step failed", failed);
+        assert_eq!(
+            rollback.to_string(),
+            "the step failed; rolling the unit back failed as well: The graph storage failed to \
+             read its statistics: the disk is gone"
+        );
+        let help = rollback.help().unwrap();
+        assert!(
+            help.contains("could not undo what it had done so far"),
+            "{help}"
+        );
+        assert!(help.contains("Check the storage's backend"), "{help}");
+    }
 
     /// The denials of a saved query that writes which the inference prevents (it refuses such
     /// bodies when they are saved) explain the rule, not the host's authorizer.

@@ -413,12 +413,20 @@ pub(crate) fn before_mismatch<S: GraphStorage + ?Sized>(
             Some(e) => (storage.edge_label(e) != before.as_deref())
                 .then(|| "its label differs from the recorded before label".into()),
         },
-        Mutation::SetSchema { before, .. } => (check_schema
-            && storage.get_schema().unwrap_or_default().to_json() != before.to_json())
-        .then(|| "the schema differs from the recorded before image".to_string()),
+        // A storage that cannot read its schema or catalog fails the check with its error: the
+        // before image cannot be confirmed.
+        Mutation::SetSchema { before, .. } if check_schema => match storage.get_schema() {
+            Ok(schema) => (schema.unwrap_or_default().to_json() != before.to_json())
+                .then(|| "the schema differs from the recorded before image".to_string()),
+            Err(err) => Some(format!("the schema cannot be read: {err}")),
+        },
+        Mutation::SetSchema { .. } => None,
         Mutation::SetDefinition {
             kind, name, before, ..
-        } => (storage.definition(*kind, name) != before.as_deref())
-            .then(|| format!("the {kind} '{name}' differs from the recorded before image")),
+        } => match storage.definition(*kind, name) {
+            Ok(found) => (found != before.as_deref())
+                .then(|| format!("the {kind} '{name}' differs from the recorded before image")),
+            Err(err) => Some(format!("the {kind} '{name}' cannot be read: {err}")),
+        },
     }
 }

@@ -1408,7 +1408,7 @@ impl Session {
             )],
             Ok(loaded) => type_drift(
                 &self.graph.inferred_schema()?,
-                &loaded.read().infer_schema(),
+                &loaded.read().infer_schema()?,
             ),
         };
         Ok(json!({"text": text, "schema": schema_json, "warnings": warnings}))
@@ -1437,7 +1437,7 @@ impl Session {
                 let mut warnings = report_warnings(&report);
                 warnings.extend(type_drift(
                     &self.graph.inferred_schema()?,
-                    &loaded.read().infer_schema(),
+                    &loaded.read().infer_schema()?,
                 ));
                 warnings
             }

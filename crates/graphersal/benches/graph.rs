@@ -1381,7 +1381,7 @@ mod element_properties {
         let handles = handles(&graph);
         let last = format!("k{}", width - 1);
         bencher.bench_local(|| {
-            let mark = graph.begin_unit();
+            let mark = graph.begin_unit().unwrap();
             for &v in &handles {
                 graph
                     .set_vertex_property(v, last.as_str().into(), ElementProperty::Null)
@@ -1391,7 +1391,9 @@ mod element_properties {
                     .set_vertex_property(v, "added".into(), ElementProperty::from(1))
                     .unwrap();
             }
-            graph.rollback_unit(mark, &RollbackReason::failed(&"bench"));
+            graph
+                .rollback_unit(mark, &RollbackReason::failed(&"bench"))
+                .unwrap();
         });
     }
 

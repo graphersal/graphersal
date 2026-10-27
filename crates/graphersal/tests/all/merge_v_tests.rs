@@ -294,7 +294,7 @@ fn rust_count_still_mutates() {
 #[test]
 fn rust_schema_enforcement_applies_to_created_vertices() {
     let mut graph = rust_marko();
-    let schema = graph.infer_schema().with_mode(SchemaMode::Closed);
+    let schema = graph.infer_schema().unwrap().with_mode(SchemaMode::Closed);
     graph.set_schema(schema).unwrap();
     let err = graph
         .traversal_mut()

@@ -188,7 +188,9 @@ pub(super) fn advise(
 ) -> Result<CompactionAdvice, PersistError> {
     let (prune, prune_bytes) = prune_estimate(dir, u64::MAX)?;
     let backend = dir.store_dir();
-    let usage = backend.space_usage();
+    let usage = backend
+        .space_usage()
+        .map_err(|err| PersistError::io("reading the space usage of the store", err))?;
     let compactable = usage.is_some();
     let (total, live, garbage, needed, free) = match usage {
         Some(usage) => (
@@ -196,7 +198,9 @@ pub(super) fn advise(
             usage.live_bytes,
             usage.garbage_bytes(),
             usage.live_bytes.saturating_sub(prune_bytes),
-            backend.free_space(),
+            backend.free_space().map_err(|err| {
+                PersistError::io("reading the free space of the file system", err)
+            })?,
         ),
         None => {
             let total = super::rollback::tree_bytes(dir);

@@ -368,6 +368,7 @@ fn looked_up(
 ) -> Vec<String> {
     let mut ids: Vec<String> = graph
         .vertices_by_property_index(label, key, range)
+        .unwrap()
         .expect("an index")
         .filter_map(|v| graph.vertex_id(v).map(str::to_string))
         .collect();
@@ -393,10 +394,12 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
     // Every mutation runs twice: once rolled back (the index must be as before), once kept.
     macro_rules! both_ways {
         ($graph:ident, $body:expr) => {{
-            let mark = $graph.begin_unit();
+            let mark = $graph.begin_unit().unwrap();
             let _ = (|$graph: &mut TraversalGraph| $body)(&mut $graph);
             check(&$graph);
-            $graph.rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"));
+            $graph
+                .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"))
+                .unwrap();
             check(&$graph);
             let result = (|$graph: &mut TraversalGraph| $body)(&mut $graph);
             check(&$graph);
@@ -485,6 +488,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
         graph
             .edges_by_property_index("r", "since", &since)
             .unwrap()
+            .unwrap()
             .count()
     };
     assert_eq!(edges(&graph), 1);
@@ -508,21 +512,25 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
         .set_edge_property(e, "since".into(), 2020.into())
         .unwrap();
     // A drop and its rollback: the element comes back under a NEW handle.
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph.drop_vertex(w).unwrap();
     check(&graph);
     assert_eq!(edges(&graph), 0);
-    graph.rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"))
+        .unwrap();
     check(&graph);
     assert_eq!(edges(&graph), 1);
     let w = graph.get_vertex_by_id("w").unwrap();
     graph.drop_vertex(w).unwrap();
     check(&graph);
     assert_eq!(edges(&graph), 0);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph.drop_vertex(v).unwrap();
     check(&graph);
-    graph.rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"))
+        .unwrap();
     check(&graph);
     assert_eq!(looked_up(&graph, "p", "title", &ceo), ["v"]);
     let v = graph.get_vertex_by_id("v").unwrap();
@@ -535,7 +543,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
         .add_vertex(None, vec!["p".into()], props(&[("title", "CEO".into())]))
         .unwrap();
     let _ = x;
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .remove_definition(DefinitionKind::PROPERTY_INDEX, "p_title")
         .unwrap();
@@ -543,9 +551,12 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
     assert!(
         graph
             .vertices_by_property_index("p", "title", &ceo)
+            .unwrap()
             .is_none()
     );
-    graph.rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"))
+        .unwrap();
     check(&graph);
     assert_eq!(looked_up(&graph, "p", "title", &ceo).len(), 1);
 }
@@ -581,7 +592,15 @@ fn compressed_strings_are_indexed_by_their_text() {
         &format!(r#"g.v("1").property("bio", "{long}").iterate()"#),
     );
     check(&graph);
-    assert!(graph.read().memory_usage().unwrap().compressed_values > 0);
+    assert!(
+        graph
+            .read()
+            .memory_usage()
+            .unwrap()
+            .unwrap()
+            .compressed_values
+            > 0
+    );
     let query = format!(r#"v().has_label("person").has("bio", "{long}")"#);
     assert!(uses_index(&graph, &query));
     let (with, without) = both(&graph, &query);
@@ -631,7 +650,7 @@ fn replay_and_apply_change_set_rebuild_the_same_index() {
     }
     for graph in [replayed, applied] {
         graph.check_property_indexes().unwrap();
-        let infos = graph.property_indexes();
+        let infos = graph.property_indexes().unwrap();
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].stats.entries, 2);
         assert_eq!(infos[0].stats.distinct_values, 2);
@@ -883,9 +902,17 @@ fn a_string_eq_predicate_in_a_child_traversal_is_served() {
 #[test]
 fn memory_usage_accounts_the_index() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    assert_eq!(graph.read().memory_usage().unwrap().property_index_bytes, 0);
+    assert_eq!(
+        graph
+            .read()
+            .memory_usage()
+            .unwrap()
+            .unwrap()
+            .property_index_bytes,
+        0
+    );
     ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
-    let stats = graph.read().memory_usage().unwrap();
+    let stats = graph.read().memory_usage().unwrap().unwrap();
     assert!(stats.property_index_bytes > 0);
     assert_eq!(
         stats.total_bytes(),
@@ -1044,11 +1071,12 @@ mod stores {
     /// The index of `graph` serves `person.age` with these stats and equals a rebuild.
     fn served(graph: &TraversalGraph, entries: u64) {
         graph.check_property_indexes().unwrap();
-        let infos = graph.property_indexes();
+        let infos = graph.property_indexes().unwrap();
         assert_eq!(infos.len(), 1, "{infos:?}");
         assert_eq!(infos[0].stats.entries, entries);
         let found = graph
             .vertices_by_property_index("person", "age", &PropertyIndexRange::equal(29.into()))
+            .unwrap()
             .unwrap()
             .count();
         assert_eq!(found, 1);
@@ -1084,7 +1112,7 @@ mod stores {
         let latest = Store::open_read_only(&main, RecoveryTarget::Latest).unwrap();
         served(&latest.graph, 3);
         let past = Store::open_read_only(&main, RecoveryTarget::CommitSeq(before_index)).unwrap();
-        assert!(past.graph.property_indexes().is_empty());
+        assert!(past.graph.property_indexes().unwrap().is_empty());
         past.graph.check_property_indexes().unwrap();
 
         // A backup opens with the index; a fork carries it.
@@ -1104,7 +1132,7 @@ mod stores {
             .rollback_to(RecoveryTarget::CommitSeq(before_index), RollbackMode::Move)
             .unwrap();
         let graph = store.graph().read();
-        assert!(graph.property_indexes().is_empty());
+        assert!(graph.property_indexes().unwrap().is_empty());
         graph.check_property_indexes().unwrap();
         drop(graph);
         store.close().unwrap();
@@ -1498,6 +1526,7 @@ mod index_types {
         let definition = graph
             .read()
             .definition(DefinitionKind::PROPERTY_INDEX, "person_age")
+            .unwrap()
             .cloned()
             .unwrap();
         let text = definition.to_json();
@@ -1511,9 +1540,9 @@ mod index_types {
         let index = PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age")
             .with_type(PropertyIndexType::MemoryOrdered);
         graph.traversal_mut().create_index("ages", index).unwrap();
-        assert_eq!(graph.property_indexes().len(), 1);
+        assert_eq!(graph.property_indexes().unwrap().len(), 1);
         assert_eq!(
-            graph.property_indexes()[0].index_type,
+            graph.property_indexes().unwrap()[0].index_type,
             PropertyIndexType::MemoryOrdered
         );
         let future = PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name")
@@ -1534,6 +1563,7 @@ mod index_types {
         assert!(
             graph
                 .definition(DefinitionKind::PROPERTY_INDEX, "names")
+                .unwrap()
                 .is_none()
         );
         // The DSL, both spellings.
@@ -1605,6 +1635,7 @@ mod index_types {
         let mixed = graph
             .read()
             .property_indexes()
+            .unwrap()
             .into_iter()
             .find(|info| info.key == "mixed")
             .unwrap();
@@ -1686,7 +1717,7 @@ mod index_types {
         // they are.
         let mut applied = TraversalGraph::new();
         applied
-            .set_schema(live.read().get_schema().unwrap())
+            .set_schema(live.read().get_schema().unwrap().unwrap())
             .unwrap();
         for changes in journal.lock().unwrap().iter() {
             applied.apply_change_set(changes).unwrap();
@@ -1694,13 +1725,14 @@ mod index_types {
         assert!(
             applied
                 .definition(DefinitionKind::PROPERTY_INDEX, "doc_emb")
+                .unwrap()
                 .is_some()
         );
         let mut replayed = TraversalGraph::new();
         for changes in journal.lock().unwrap().iter() {
             replayed = replayed.replay(changes).unwrap();
         }
-        assert_eq!(replayed.property_indexes().len(), 2);
+        assert_eq!(replayed.property_indexes().unwrap().len(), 2);
     }
 
     /// A payload of a type this version does not know, its keys in an order of their own and
@@ -1724,6 +1756,7 @@ mod index_types {
     fn kept_not_served(graph: &TraversalGraph) {
         let stored = graph
             .definition(DefinitionKind::PROPERTY_INDEX, "future_age")
+            .unwrap()
             .expect("kept");
         assert_eq!(stored, &future_definition());
         let index = stored.as_property_index().unwrap();
@@ -1735,6 +1768,7 @@ mod index_types {
         assert!(
             graph
                 .property_indexes()
+                .unwrap()
                 .iter()
                 .all(|info| info.name != "future_age")
         );
@@ -1776,6 +1810,7 @@ mod index_types {
             graph
                 .read()
                 .vertices_by_property_index("person", "age", &PropertyIndexRange::equal(29.into()))
+                .unwrap()
                 .is_none()
         );
         let query = r#"v().has_label("person").has("age", 29)"#;
@@ -1803,6 +1838,7 @@ mod index_types {
             graph
                 .read()
                 .definition(DefinitionKind::PROPERTY_INDEX, "future_age")
+                .unwrap()
                 .is_none()
         );
     }
@@ -2131,7 +2167,7 @@ mod transforms {
         let graph = Arc::new(Graph::new(string_graph(&mut rng, 80, true)));
         declare(&graph);
         check(&graph);
-        let infos = graph.read().property_indexes();
+        let infos = graph.read().property_indexes().unwrap();
         assert!(infos.iter().any(|info| info.stats.skipped > 0), "{infos:?}");
         let query = r#"v().has_label("a").has("n", __.to_lower().is("alice"))"#;
         // to_lower() fails on the number: with or without the rule, the same error.
@@ -2150,6 +2186,7 @@ mod transforms {
             graph
                 .read()
                 .property_indexes()
+                .unwrap()
                 .iter()
                 .all(|info| info.stats.skipped == 0)
         );
@@ -2209,7 +2246,7 @@ mod transforms {
             .is_err()
         );
         check(&graph);
-        assert_eq!(graph.read().property_indexes().len(), 3);
+        assert_eq!(graph.read().property_indexes().unwrap().len(), 3);
     }
 
     #[test]
@@ -2229,7 +2266,15 @@ mod transforms {
             &format!(r#"g.v("1").property("bio", "{long}").iterate()"#),
         );
         check(&graph);
-        assert!(graph.read().memory_usage().unwrap().compressed_values > 0);
+        assert!(
+            graph
+                .read()
+                .memory_usage()
+                .unwrap()
+                .unwrap()
+                .compressed_values
+                > 0
+        );
         let query = format!(
             r#"v().has_label("person").has("bio", __.to_lower().is("{}"))"#,
             long.to_lowercase()
@@ -2430,7 +2475,7 @@ mod transforms {
             .set_definition(Definition::property_index("future", index.clone()))
             .unwrap();
         check(&graph);
-        assert!(graph.read().property_indexes().is_empty());
+        assert!(graph.read().property_indexes().unwrap().is_empty());
         let listed = run(&graph, "g.indexes()[0]").unwrap().to_string();
         assert!(listed.contains("\"served\": false"), "{listed}");
         assert!(listed.contains("\"transform\": \"unaccent\""), "{listed}");
@@ -2512,7 +2557,7 @@ mod transforms {
         store.close().unwrap();
         let store = Store::open(&main, options()).unwrap();
         check(store.graph());
-        let infos = store.graph().read().property_indexes();
+        let infos = store.graph().read().property_indexes().unwrap();
         assert_eq!(infos[0].transform, Some(PropertyIndexTransform::ToLower));
         assert_eq!(infos[0].stats.entries, 2);
         assert!(uses_index(store.graph(), query));
@@ -2530,7 +2575,7 @@ mod transforms {
         )
         .unwrap();
         loaded.check_property_indexes().unwrap();
-        assert_eq!(loaded.property_indexes()[0].stats.entries, 2);
+        assert_eq!(loaded.property_indexes().unwrap()[0].stats.entries, 2);
         store.close().unwrap();
     }
 }

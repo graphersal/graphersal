@@ -169,7 +169,10 @@ fn a_forwarding_store_creates_commits_reopens_and_checkpoints_on_every_backend()
 
         // A manual checkpoint, then more commits, then a reopen from the new snapshot.
         let snapshot = store.checkpoint(Some("manual")).unwrap();
-        assert_eq!(snapshot.commit_seq, store.graph().read().last_commit_seq());
+        assert_eq!(
+            snapshot.commit_seq,
+            store.graph().read().last_commit_seq().unwrap()
+        );
         add_person(&store, "cy");
         let before = state(&*store.graph().read());
         store.close().unwrap();
@@ -342,7 +345,7 @@ fn a_critical_unknown_definition_opens_a_forwarding_store_read_only() {
         let store = open(&dir);
         let reason = store.read_only_reason().unwrap().expect("read-only");
         assert!(reason.contains("critical"), "{backend:?}: {reason}");
-        assert_eq!(store.graph().read().definitions().count(), 1);
+        assert_eq!(store.graph().read().definitions().unwrap().count(), 1);
         let refused = store.graph().write().transaction(|g| {
             g.add_vertex(None, vec![], PropertyMap::new())?;
             Ok::<_, GraphError>(())

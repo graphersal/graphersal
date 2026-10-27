@@ -892,7 +892,7 @@ mod graph_tests {
         let a = person(&mut graph, "ann", 30);
         let b = person(&mut graph, "bob", 40);
         let before = shape_of(&graph, a);
-        let mark = graph.begin_unit();
+        let mark = graph.begin_unit().unwrap();
         graph
             .set_vertex_property(a, "city".into(), "rome".into())
             .expect("set");
@@ -903,7 +903,9 @@ mod graph_tests {
         assert_eq!(keys(&graph, a), ["name", "age", "city"]);
         graph.drop_vertex_property("name", a).expect("drop");
         assert_eq!(keys(&graph, a), ["age", "city"]);
-        graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+        graph
+            .rollback_unit(mark, &RollbackReason::failed(&"test"))
+            .unwrap();
         assert_eq!(keys(&graph, a), ["name", "age"]);
         assert!(Arc::ptr_eq(&shape_of(&graph, a), &before));
         assert!(Arc::ptr_eq(&shape_of(&graph, b), &before));
@@ -917,12 +919,14 @@ mod graph_tests {
             .set_vertex_property(a, "only_here".into(), 1.into())
             .expect("set");
         let id = graph.vertex_weight(a).expect("live").0.clone();
-        let mark = graph.begin_unit();
+        let mark = graph.begin_unit().unwrap();
         graph.drop_vertex(a).expect("drop");
         // The element image in the undo log holds the shape: a sweep must keep it.
         graph.shrink_to_fit();
         let held = graph.shapes.len();
-        graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+        graph
+            .rollback_unit(mark, &RollbackReason::failed(&"test"))
+            .unwrap();
         let restored = graph.index.get_node(&graph.graph, &id).expect("restored");
         assert_eq!(keys(&graph, restored), ["name", "age", "only_here"]);
         assert_eq!(graph.shapes.len(), held);
@@ -981,8 +985,8 @@ mod graph_tests {
         for i in 0..1000 {
             person(&mut large, &format!("p{i}"), i);
         }
-        let small_stats = small.memory_usage().expect("stats");
-        let large_stats = large.memory_usage().expect("stats");
+        let small_stats = small.memory_usage().unwrap().expect("stats");
+        let large_stats = large.memory_usage().unwrap().expect("stats");
         assert_eq!(small_stats.shape_bytes, large_stats.shape_bytes);
         assert_eq!(small_stats.shape_bytes, small.shapes.heap_bytes());
         assert!(large_stats.property_bytes >= large_stats.shape_bytes);

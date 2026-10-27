@@ -856,8 +856,8 @@ impl GraphSONImport {
         reader: R,
         presets: Option<&HashMap<CompactString, ElementProperty>>,
     ) -> Result<ImportReport, IOError> {
-        let mut budget = UnitBudget::start(&*g, presets, GRAPHSON_IMPORT);
-        let mark = g.begin_unit();
+        let mut budget = UnitBudget::start(&*g, presets, GRAPHSON_IMPORT)?;
+        let mark = g.begin_unit()?;
         let imported = crate::graph::storage::close_on_unwind(
             g,
             |g| {
@@ -865,22 +865,14 @@ impl GraphSONImport {
                 crate::traversal::memory_budget::check(&budget, &*g).map_err(IOError::Graph)?;
                 Ok(report)
             },
-            |g| {
-                g.rollback_unit(
-                    mark,
-                    &crate::graph::RollbackReason::failed(&crate::graph::storage::UNWOUND),
-                )
-            },
+            |g| crate::graph::storage::rollback_unwound(g, mark),
         );
         match imported {
             Ok(report) => {
                 g.commit_unit(mark).map_err(IOError::Graph)?;
                 Ok(report)
             }
-            Err(err) => {
-                g.rollback_unit(mark, &crate::graph::RollbackReason::failed(&err));
-                Err(err)
-            }
+            Err(err) => Err(crate::graph::storage::rollback_failed_unit(g, mark, err)),
         }
     }
 
@@ -1010,7 +1002,7 @@ impl GraphSONImport {
             }
         }
         importer.edges()?;
-        importer.g.shrink_to_fit();
+        importer.g.shrink_to_fit()?;
         let (vertices, edges) = (importer.vertex_count, importer.edge_count);
         Ok(importer.report.finish(vertices, edges))
     }

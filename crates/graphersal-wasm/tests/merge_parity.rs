@@ -69,7 +69,7 @@ fn merged_hash() -> u64 {
         .with_checkpoint_after_bytes(if cfg!(target_arch = "wasm32") { 1 } else { 0 });
     let dir = MemDir::new();
     let mut graph = TraversalGraph::new();
-    graph.set_graph_id(0x5EED);
+    graph.set_graph_id(0x5EED).unwrap();
     let store = Store::create_with(&dir, graph, options).unwrap();
     history(&store);
     #[cfg(target_arch = "wasm32")]

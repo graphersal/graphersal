@@ -132,7 +132,7 @@ fn names_and_bytes_survive_a_reopen() {
     drop(dir);
     let reopened = unshared(&tmp.0);
     assert_eq!(image(&reopened), expected);
-    assert!(reopened.check().is_ok(), "{:?}", reopened.check());
+    assert!(reopened.check().unwrap().is_ok(), "{:?}", reopened.check());
     let mut read = String::new();
     reopened
         .open_read("GRAPH")
@@ -211,7 +211,7 @@ fn every_cut_of_the_last_record_is_a_torn_tail() {
     for cut in complete..full.len() as u64 {
         let path = copy_with(&tmp, &full[..cut as usize], "cut.gstore");
         let cut_dir = unshared(&path);
-        let check = cut_dir.check();
+        let check = cut_dir.check().unwrap();
         assert!(check.damage.is_empty(), "cut at {cut}: {check:?}");
         let (files, dirs) = image(&cut_dir);
         let graph = &files.iter().find(|(n, _)| n == "GRAPH").unwrap().1;
@@ -222,7 +222,7 @@ fn every_cut_of_the_last_record_is_a_torn_tail() {
         cut_dir.append("marks", b"after").unwrap();
         drop(cut_dir);
         let again = unshared(&path);
-        assert!(again.check().is_ok(), "cut at {cut}");
+        assert!(again.check().unwrap().is_ok(), "cut at {cut}");
         let marks = again.read("marks", 100).unwrap();
         assert!(marks.ends_with(b"after"), "cut at {cut}");
         checked += 1;
@@ -254,7 +254,7 @@ fn zero_filled_tails_and_unsynced_reordering_are_torn_tails() {
     }
     let path = copy_with(&tmp, &full, "reordered.gstore");
     let reordered = unshared(&path);
-    assert!(reordered.check().damage.is_empty());
+    assert!(reordered.check().unwrap().damage.is_empty());
     assert_eq!(image(&reordered), expected);
     // Only zeros after the synced end.
     let mut zeros = full.clone();
@@ -279,7 +279,7 @@ fn a_damaged_synced_record_followed_by_durable_ones_is_damage() {
     flipped[at as usize + 9] ^= 0x01;
     let path = copy_with(&tmp, &flipped, "flip-head.gstore");
     let damaged = unshared(&path);
-    let check = damaged.check();
+    let check = damaged.check().unwrap();
     assert_eq!(check.damage.len(), 2, "{check:?}");
     assert!(check.damage[0].contains("not readable"), "{check:?}");
     assert!(check.damage[1].contains("missing"), "{check:?}");
@@ -294,7 +294,7 @@ fn a_damaged_synced_record_followed_by_durable_ones_is_damage() {
     flipped[payload_at] ^= 0x01;
     let path = copy_with(&tmp, &flipped, "flip-put.gstore");
     let damaged = unshared(&path);
-    assert_eq!(damaged.check().damage.len(), 1);
+    assert_eq!(damaged.check().unwrap().damage.len(), 1);
     assert_eq!(damaged.read("GRAPH", 100).unwrap(), b"graph-v2");
     // A flipped bit in the payload of the LAST append: handed through (the Store judges).
     let mut flipped = full.clone();
@@ -302,7 +302,7 @@ fn a_damaged_synced_record_followed_by_durable_ones_is_damage() {
     flipped[last] ^= 0x01;
     let path = copy_with(&tmp, &flipped, "flip-last.gstore");
     let passed = unshared(&path);
-    assert!(passed.check().damage.is_empty());
+    assert!(passed.check().unwrap().damage.is_empty());
     assert_eq!(passed.read("marks", 100).unwrap(), b"m1m2m2");
 }
 
@@ -336,7 +336,7 @@ fn header_slots_and_tables_fall_back_to_the_older_generation() {
         flipped[at] ^= 0x04;
         let path = copy_with(&tmp, &flipped, "slot.gstore");
         let opened = unshared(&path);
-        let check = opened.check();
+        let check = opened.check().unwrap();
         assert!(check.damage.is_empty(), "{what}: {check:?}");
         assert!(!check.warnings.is_empty(), "{what}: {check:?}");
         assert_eq!(image(&opened), expected, "{what}");
@@ -345,7 +345,7 @@ fn header_slots_and_tables_fall_back_to_the_older_generation() {
         opened.inner.mutate(|open| open.write_table()).unwrap();
         drop(opened);
         let again = unshared(&path);
-        assert!(again.check().is_ok(), "{what}: {:?}", again.check());
+        assert!(again.check().unwrap().is_ok(), "{what}: {:?}", again.check());
         let _ = fs::remove_file(&path);
     }
     // Both slots damaged: every record from the start.
@@ -354,7 +354,7 @@ fn header_slots_and_tables_fall_back_to_the_older_generation() {
     flipped[SLOT_AT[1] as usize + 20] ^= 0x04;
     let path = copy_with(&tmp, &flipped, "both.gstore");
     let opened = unshared(&path);
-    assert!(opened.check().damage.is_empty());
+    assert!(opened.check().unwrap().damage.is_empty());
     assert_eq!(image(&opened), expected);
 }
 
@@ -368,13 +368,13 @@ fn compaction_keeps_every_name_and_byte_and_gives_the_garbage_back() {
         .unwrap();
     dir.remove_tree("snapshots/old").unwrap();
     let expected = image(&dir);
-    let usage = dir.space_usage().unwrap();
+    let usage = dir.space_usage().unwrap().unwrap();
     assert!(usage.garbage_bytes() > 2 << 20, "{usage:?}");
     let guard = dir.lock(LockKind::Writer).unwrap().unwrap();
     let done = dir.compact().unwrap().unwrap();
     assert!(done.bytes_after < done.bytes_before / 4, "{done:?}");
     assert_eq!(fs::metadata(&tmp.0).unwrap().len(), done.bytes_after);
-    let after = dir.space_usage().unwrap();
+    let after = dir.space_usage().unwrap().unwrap();
     assert!(after.garbage_bytes() < 4096, "{after:?} ({usage:?} before)");
     assert_eq!(image(&dir), expected);
     // Still the writer of the new file: another container cannot lock it.
@@ -382,7 +382,7 @@ fn compaction_keeps_every_name_and_byte_and_gives_the_garbage_back() {
     dir.append("marks", b"more").unwrap();
     drop(guard);
     let reopened = unshared(&tmp.0);
-    assert!(reopened.check().is_ok());
+    assert!(reopened.check().unwrap().is_ok());
     assert_eq!(reopened.read("marks", 100).unwrap(), b"m1m2more");
     assert!(reopened.lock(LockKind::Writer).unwrap().is_some());
     // No temporary file is left next to it.

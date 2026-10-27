@@ -108,7 +108,7 @@ impl MemoryStats {
     /// use graphersal::prelude::*;
     ///
     /// let graph = TraversalGraph::new();
-    /// let stats = graph.memory_usage().expect("TraversalGraph always supports introspection");
+    /// let stats = graph.memory_usage().unwrap().expect("TraversalGraph always supports introspection");
     /// assert_eq!(
     ///     stats.total_bytes(),
     ///     stats.structure_bytes
@@ -132,7 +132,7 @@ impl MemoryStats {
     /// use graphersal::prelude::*;
     ///
     /// let graph = TraversalGraph::new();
-    /// let stats = graph.memory_usage().unwrap();
+    /// let stats = graph.memory_usage().unwrap().unwrap();
     /// assert_eq!(stats.total_mb(), stats.total_bytes() as f64 / 1_048_576.0);
     /// ```
     pub fn total_mb(&self) -> f64 {

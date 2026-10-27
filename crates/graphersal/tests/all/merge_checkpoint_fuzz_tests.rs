@@ -96,7 +96,11 @@ fn case(seed: u64) {
                 // ancestor lineage; the closed branch checks it for written snapshots.)
                 let alone = newest_alone(&shared).0;
                 assert_eq!(exact(&alone)[1..], exact(&live)[1..], "live");
-                assert_eq!(alone.statistics(), live.statistics(), "live");
+                assert_eq!(
+                    alone.statistics().unwrap(),
+                    live.statistics().unwrap(),
+                    "live"
+                );
                 drop(live);
                 assert_verified(&open);
                 store = Some(open);

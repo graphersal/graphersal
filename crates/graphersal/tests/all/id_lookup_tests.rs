@@ -86,7 +86,7 @@ fn rollback_of_adds_and_drops_restores_the_lookups() {
         )
         .expect("edge");
 
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     // Drop a vertex (cascading its edge), add new elements, one of them reusing a dropped id.
     GraphStorage::drop_vertex(&mut graph, a).expect("drop");
     let c = add(&mut graph, &uuid_id(13));
@@ -94,7 +94,9 @@ fn rollback_of_adds_and_drops_restores_the_lookups() {
     graph
         .insert_edge(Some(uuid_id(14).into()), None, c, b, PropertyMap::default())
         .expect("edge");
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
 
     for id in [uuid_id(10), uuid_id(11)] {
         let handle = graph.get_vertex_by_id(&id).expect("restored vertex");

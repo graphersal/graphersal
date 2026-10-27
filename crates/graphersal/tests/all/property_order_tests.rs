@@ -231,10 +231,12 @@ fn assert_order_restored(
     change: impl FnOnce(&mut TraversalGraph) -> Result<(), GraphError>,
 ) {
     let before = dump(graph);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     change(graph).expect("the change itself succeeds");
     assert_ne!(dump(graph), before, "the change must be visible");
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(dump(graph), before);
 }
 
@@ -505,14 +507,14 @@ fn a_dry_run_sees_its_own_order_and_leaves_the_graph_unchanged() {
 fn a_rolled_back_savepoint_restores_the_order_of_the_enclosing_unit() {
     let mut graph = fixture();
     let original = dump(&graph);
-    let outer = graph.begin_unit();
+    let outer = graph.begin_unit().unwrap();
     let x = v(&graph, "x");
     graph.drop_vertex_property("d", x).unwrap();
     graph.set_vertex_property(x, "d".into(), 1.into()).unwrap();
     let after_outer = dump(&graph);
     assert_eq!(vkeys(&graph, "x"), owned(&["e", "a", "b", "c", "d"]));
 
-    let inner = graph.begin_unit();
+    let inner = graph.begin_unit().unwrap();
     graph.drop_vertex_property("e", x).unwrap();
     graph.drop_vertex_property("d", x).unwrap();
     graph.set_vertex_property(x, "e".into(), 1.into()).unwrap();
@@ -521,10 +523,14 @@ fn a_rolled_back_savepoint_restores_the_order_of_the_enclosing_unit() {
     graph.drop_edge_property("a", xy).unwrap();
     graph.set_edge_property(xy, "a".into(), 1.into()).unwrap();
     assert_eq!(vkeys(&graph, "x"), owned(&["a", "b", "c", "e", "n"]));
-    graph.rollback_unit(inner, &RollbackReason::failed(&"inner"));
+    graph
+        .rollback_unit(inner, &RollbackReason::failed(&"inner"))
+        .unwrap();
     assert_eq!(dump(&graph), after_outer);
 
-    graph.rollback_unit(outer, &RollbackReason::failed(&"outer"));
+    graph
+        .rollback_unit(outer, &RollbackReason::failed(&"outer"))
+        .unwrap();
     assert_eq!(dump(&graph), original);
 }
 
@@ -606,10 +612,12 @@ fn reorder_in_units(graph: &mut TraversalGraph) {
             Ok(())
         })
         .unwrap();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let x = v(graph, "x");
     graph.drop_vertex_property("b", x).unwrap();
-    graph.rollback_unit(mark, &RollbackReason::failed(&"not recorded"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"not recorded"))
+        .unwrap();
 }
 
 #[test]
@@ -1100,14 +1108,16 @@ fn a_compressed_property_keeps_its_position() {
 
     // Rollback of a drop and of an overwrite restores position and compression.
     let before = dump(&graph);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph.drop_vertex_property("bio", c).unwrap();
     assert_eq!(graph.compression_stats("bio").unwrap().compressed_values, 0);
     graph
         .set_vertex_property(c, "bio".into(), long_text(3).as_str().into())
         .unwrap();
     assert_eq!(vkeys(&graph, "c"), owned(&["name", "age", "bio"]));
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
     assert_eq!(dump(&graph), before);
     assert_eq!(graph.compression_stats("bio").unwrap().compressed_values, 1);
 
@@ -1186,7 +1196,7 @@ fn property_index_results_are_unchanged_after_overwrite_and_rollback() {
     assert_eq!(ids_with(&graph, "d", 2), owned(&["x"]));
     let before = dump(&graph);
 
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let (x, xy) = (v(&graph, "x"), e(&graph, "xy"));
     graph.set_vertex_property(x, "d".into(), 7.into()).unwrap();
     graph.set_edge_property(xy, "e".into(), 7.into()).unwrap();
@@ -1196,7 +1206,9 @@ fn property_index_results_are_unchanged_after_overwrite_and_rollback() {
     graph.drop_vertex_property("d", x).unwrap();
     graph.set_vertex_property(x, "d".into(), 8.into()).unwrap();
     assert_eq!(vkeys(&graph, "x"), owned(&["e", "a", "b", "c", "d"]));
-    graph.rollback_unit(mark, &RollbackReason::failed(&"test"));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&"test"))
+        .unwrap();
 
     graph.check_property_indexes().unwrap();
     assert_eq!(dump(&graph), before);

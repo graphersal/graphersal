@@ -6,7 +6,7 @@ use crate::GraphSource;
 use crate::error::{ResultExt, StepAt, StepFrame, TraverserError, TraverserResult};
 use crate::graph::{
     Definition, DefinitionKind, Graph, GraphNodeType, GraphSchema, GraphStorage, QueryDefinition,
-    RollbackReason, SchemaDiff, SchemaPatch, SchemaValidation, TraversalGraph, VisualizeFormat,
+    SchemaDiff, SchemaPatch, SchemaValidation, TraversalGraph, VisualizeFormat,
 };
 use crate::traversal::bulk;
 use crate::traversal::context::{
@@ -387,7 +387,7 @@ fn index_vertices<S: GraphStorage>(
     storage: &S,
     labels: &[String],
     access: &crate::traversal::step::IndexAccess,
-) -> Option<Vec<S::VertexId>> {
+) -> Result<Option<Vec<S::VertexId>>, crate::error::GraphError> {
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     let mut seen: std::collections::HashSet<S::VertexId> = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -402,6 +402,9 @@ fn index_vertices<S: GraphStorage>(
                     range,
                 )?,
             };
+            let Some(found) = found else {
+                return Ok(None);
+            };
             for node in found {
                 if !dedup || seen.insert(node) {
                     out.push(node);
@@ -409,7 +412,7 @@ fn index_vertices<S: GraphStorage>(
             }
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The edge counterpart of [`index_vertices`].
@@ -417,7 +420,7 @@ fn index_edges<S: GraphStorage>(
     storage: &S,
     labels: &[String],
     access: &crate::traversal::step::IndexAccess,
-) -> Option<Vec<S::EdgeId>> {
+) -> Result<Option<Vec<S::EdgeId>>, crate::error::GraphError> {
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     let mut seen: std::collections::HashSet<S::EdgeId> = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -432,6 +435,9 @@ fn index_edges<S: GraphStorage>(
                     range,
                 )?,
             };
+            let Some(found) = found else {
+                return Ok(None);
+            };
             for edge in found {
                 if !dedup || seen.insert(edge) {
                     out.push(edge);
@@ -439,7 +445,7 @@ fn index_edges<S: GraphStorage>(
             }
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 fn single_label(labels: &[String]) -> Option<&str> {
@@ -831,7 +837,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// A new traversal source over `storage`, with an empty step pipeline.
     pub fn new(storage: S) -> Self {
         debug_assert!(
-            storage.capabilities().is_consistent(),
+            storage.capabilities().is_ok_and(|c| c.is_consistent()),
             "inconsistent StorageCapabilities (change_capture requires atomic): {:?}",
             storage.capabilities()
         );
@@ -1222,7 +1228,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// ```
     pub fn get_schema(&self) -> TraverserResult<Option<GraphSchema>> {
         self.authorize_schema("get_schema", crate::graph::Action::Read)?;
-        Ok(self.storage.get_schema())
+        Ok(self.storage.get_schema()?)
     }
 
     /// Replaces the stored schema. In mode `open`/`closed` the existing data is validated
@@ -1280,7 +1286,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// authorizer for `Update` on the schema.
     pub fn patch_schema(&mut self, patch: &SchemaPatch) -> TraverserResult<GraphSchema> {
         self.authorize_schema("patch_schema", crate::graph::Action::Update)?;
-        let schema = patch.apply(self.storage.get_schema().as_ref())?;
+        let schema = patch.apply(self.storage.get_schema()?.as_ref())?;
         crate::graph::schema::defaults::check_defaults(&schema)?;
         let stored = schema.clone();
         self.atomically(|this| {
@@ -1297,26 +1303,26 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     pub fn validate_schema(&self, schema: &GraphSchema) -> TraverserResult<SchemaValidation> {
         self.authorize_schema("validate_schema", crate::graph::Action::Read)?;
         crate::graph::schema::defaults::check_defaults(schema)?;
-        Ok(self.validation(schema.clone()))
+        self.validation(schema.clone())
     }
 
     /// [`Self::validate_schema`] of the stored schema patched with `patch` (see
     /// [`Self::patch_schema`]); nothing is applied.
     pub fn validate_schema_patch(&self, patch: &SchemaPatch) -> TraverserResult<SchemaValidation> {
         self.authorize_schema("validate_schema_patch", crate::graph::Action::Read)?;
-        let schema = patch.apply(self.storage.get_schema().as_ref())?;
+        let schema = patch.apply(self.storage.get_schema()?.as_ref())?;
         crate::graph::schema::defaults::check_defaults(&schema)?;
-        Ok(self.validation(schema))
+        self.validation(schema)
     }
 
-    fn validation(&self, schema: GraphSchema) -> SchemaValidation {
+    fn validation(&self, schema: GraphSchema) -> TraverserResult<SchemaValidation> {
         let violations = crate::graph::schema::apply::scan_storage(&self.storage, &schema);
-        let diff = SchemaDiff::between(self.storage.get_schema().as_ref(), &schema);
-        SchemaValidation {
+        let diff = SchemaDiff::between(self.storage.get_schema()?.as_ref(), &schema);
+        Ok(SchemaValidation {
             schema,
             violations,
             diff,
-        }
+        })
     }
 
     /// The schema the graph's data satisfies (see
@@ -1326,9 +1332,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// [`Self::infer_schema_step`].)
     pub fn infer_schema(&self) -> TraverserResult<GraphSchema> {
         self.authorize_schema("infer_schema", crate::graph::Action::Read)?;
-        Ok(crate::graph::schema::SchemaInferer::infer_from_storage(
-            &self.storage,
-        ))
+        Ok(self.storage.infer_schema()?)
     }
 
     /// The changes from the stored schema to `schema` and whether they are backward compatible
@@ -1337,7 +1341,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     pub fn diff_schema(&self, schema: &GraphSchema) -> TraverserResult<SchemaDiff> {
         self.authorize_schema("diff_schema", crate::graph::Action::Read)?;
         Ok(SchemaDiff::between(
-            self.storage.get_schema().as_ref(),
+            self.storage.get_schema()?.as_ref(),
             schema,
         ))
     }
@@ -1383,7 +1387,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         self.authorize_definition("list_definitions", crate::graph::Action::Read, kind, None)?;
         Ok(self
             .storage
-            .definitions()
+            .definitions()?
             .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
             .cloned()
             .collect())
@@ -1402,7 +1406,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             Some(kind),
             Some(name),
         )?;
-        Ok(self.storage.definition(kind, name).cloned())
+        Ok(self.storage.definition(kind, name)?.cloned())
     }
 
     /// Stores `definition` in the catalog, replacing the one of the same kind and name. It is
@@ -1419,7 +1423,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     pub fn set_definition(&mut self, definition: Definition) -> TraverserResult<()> {
         let action = if self
             .storage
-            .definition(definition.kind(), definition.name())
+            .definition(definition.kind(), definition.name())?
             .is_some()
         {
             crate::graph::Action::Update
@@ -1474,7 +1478,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// // Reads are plain.
     /// let read = graph.traversal().v(None).values("cv").to_list().unwrap();
     /// assert_eq!(read, vec![ElementProperty::from(cv.as_str())]);
-    /// assert_eq!(graph.memory_usage().unwrap().compressed_values, 1);
+    /// assert_eq!(graph.memory_usage().unwrap().unwrap().compressed_values, 1);
     /// ```
     pub fn define_compression(
         &mut self,
@@ -1500,7 +1504,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             Ok(())
         } else if let Some(reason) = self
             .storage
-            .definition(DefinitionKind::COMPRESSION, name)
+            .definition(DefinitionKind::COMPRESSION, name)?
             .and_then(|definition| definition.as_compression())
             .and_then(|rule| rule.unserved_reason())
         {
@@ -1536,7 +1540,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             Some(DefinitionKind::COMPRESSION),
             Some(name),
         )?;
-        Ok(self.storage.compression_stats(name))
+        Ok(self.storage.compression_stats(name)?)
     }
 
     /// Estimates compression rules for one `(element, label, path)` before defining one (book
@@ -1641,12 +1645,12 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         name: &str,
         index: crate::graph::PropertyIndexDefinition,
     ) -> TraverserResult<()> {
-        if !self.storage.capabilities().property_indexes {
+        if !self.storage.capabilities()?.property_indexes {
             return Err(crate::error::GraphError::unsupported("property indexes").into());
         }
         let action = if self
             .storage
-            .definition(DefinitionKind::PROPERTY_INDEX, name)
+            .definition(DefinitionKind::PROPERTY_INDEX, name)?
             .is_some()
         {
             crate::graph::Action::Update
@@ -1660,7 +1664,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             Some(name),
         )?;
         index
-            .check_create(name, self.storage.get_schema().as_ref())
+            .check_create(name, self.storage.get_schema()?.as_ref())
             .map_err(crate::error::GraphError::from)?;
         self.set_definition(Definition::property_index(name, index))
     }
@@ -1682,10 +1686,10 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             Some(DefinitionKind::PROPERTY_INDEX),
             None,
         )?;
-        let served = self.storage.property_indexes();
+        let served = self.storage.property_indexes()?;
         Ok(self
             .storage
-            .definitions()
+            .definitions()?
             .filter(|definition| definition.kind() == DefinitionKind::PROPERTY_INDEX)
             .map(|definition| {
                 let stats = served
@@ -1730,7 +1734,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         )?;
         let mut definition = self
             .storage
-            .definition(DefinitionKind::QUERY, name)
+            .definition(DefinitionKind::QUERY, name)?
             .cloned()
             .ok_or_else(|| crate::error::DefinitionError::NotFound {
                 kind: DefinitionKind::QUERY.to_string(),
@@ -1756,7 +1760,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         })
     }
     /// An on-demand snapshot of the underlying storage's approximate memory footprint, or `None`
-    /// if the backing [`GraphStorage`] does not support introspection (the trait default).
+    /// if the backing [`GraphStorage`] does not support introspection (the trait default); the
+    /// storage's error when it cannot measure itself now.
     /// A thin pass-through to [`GraphStorage::memory_usage`], so any storage backend plugged into
     /// this source gets this uniformly, not just [`crate::TraversalGraph`] used through a
     /// concrete type.
@@ -1770,11 +1775,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     ///
     /// let graph = TraversalGraph::new();
     /// let g = graph.traversal();
-    /// let stats = g.memory_usage().expect("TraversalGraph always supports introspection");
+    /// let stats = g.memory_usage().unwrap().expect("TraversalGraph always supports introspection");
     /// assert!(stats.total_bytes() < u64::MAX);
     /// ```
-    pub fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
-        self.storage.memory_usage()
+    pub fn memory_usage(&self) -> TraverserResult<Option<crate::graph::MemoryStats>> {
+        Ok(self.storage.memory_usage()?)
     }
 
     /// The memory report (book page "Memory Usage", section "The memory report"): where the
@@ -1802,7 +1807,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// assert_eq!((row.elements, row.label_elements), (4, 4));
     /// assert_eq!(row.value_types[0].name, "string");
     /// // The rows add up to the property bytes of `memory_usage()`.
-    /// assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().property_bytes);
+    /// assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().unwrap().property_bytes);
     /// ```
     pub fn memory_report(
         &self,
@@ -1827,7 +1832,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 &request.clone().with_cancel(token),
             ),
             _ => crate::graph::memory_report::walk::compute(&self.storage, request),
-        };
+        }?;
         if cancelled {
             return Err(TraverserError::Cancelled {
                 elapsed_ms: report.elapsed_micros / 1000,
@@ -1838,7 +1843,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     }
 
     /// The element counts the underlying storage keeps up to date, or `None` if the backing
-    /// [`GraphStorage`] keeps none (the trait default). A thin pass-through to
+    /// [`GraphStorage`] keeps none (the trait default); the storage's error when it cannot read
+    /// them now. A thin pass-through to
     /// [`GraphStorage::statistics`]; like [`Self::memory_usage`] a plain method call, not a step.
     ///
     /// ```rust
@@ -1846,11 +1852,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     ///
     /// let graph = TraversalGraph::tinkerpop_modern();
     /// let g = graph.traversal();
-    /// let stats = g.statistics().expect("TraversalGraph keeps statistics");
+    /// let stats = g.statistics().unwrap().expect("TraversalGraph keeps statistics");
     /// assert_eq!(stats.primary_vertex_label_count("software"), 2);
     /// ```
-    pub fn statistics(&self) -> Option<&crate::graph::GraphStatistics> {
-        self.storage.statistics()
+    pub fn statistics(&self) -> TraverserResult<Option<&crate::graph::GraphStatistics>> {
+        Ok(self.storage.statistics()?)
     }
 
     /// Executes the traversal and returns its first result, or `None` if it yields nothing.
@@ -1968,12 +1974,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         &mut self,
         body: impl FnOnce(&mut Self) -> TraverserResult<R>,
     ) -> TraverserResult<R> {
-        let mark = self.storage.begin_unit();
+        let mark = self.storage.begin_unit()?;
         let result = crate::graph::storage::close_on_unwind(self, body, |this| {
-            this.storage.rollback_unit(
-                mark,
-                &RollbackReason::failed(&crate::graph::storage::UNWOUND),
-            )
+            crate::graph::storage::rollback_unwound(&mut this.storage, mark)
         });
         match result {
             Ok(value) => {
@@ -1981,11 +1984,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 self.storage.commit_unit(mark)?;
                 Ok(value)
             }
-            Err(err) => {
-                self.storage
-                    .rollback_unit(mark, &RollbackReason::failed(&err));
-                Err(err)
-            }
+            Err(err) => Err(crate::graph::storage::rollback_failed_unit(
+                &mut self.storage,
+                mark,
+                err,
+            )),
         }
     }
 
@@ -2306,8 +2309,21 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         }
         let start = Instant::now();
         // One unit around the run AND the materialization: an error in either rolls back.
-        let seq_before = self.storage.last_commit_seq();
-        let mark = self.storage.begin_unit();
+        let not_run = |err: crate::error::GraphError| ExecutedItems {
+            items: Vec::new(),
+            error: Some(Box::new(TraverserError::from(err))),
+            profile: None,
+            mutated: false,
+            changes: crate::graph::UnitChanges::NONE,
+        };
+        let seq_before = match self.storage.last_commit_seq() {
+            Ok(seq) => seq,
+            Err(err) => return not_run(err),
+        };
+        let mark = match self.storage.begin_unit() {
+            Ok(mark) => mark,
+            Err(err) => return not_run(err),
+        };
         let (profile, materialized) = crate::graph::storage::close_on_unwind(
             &mut self,
             |this| {
@@ -2332,20 +2348,21 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 });
                 (profile, materialized)
             },
-            |this| {
-                this.storage.rollback_unit(
-                    mark,
-                    &RollbackReason::failed(&crate::graph::storage::UNWOUND),
-                )
-            },
+            |this| crate::graph::storage::rollback_unwound(&mut this.storage, mark),
         );
         // Asked before the unit closes: whether the run changed something that is kept. For a
         // run nested in an enclosing unit (an explicit transaction, a whole-script unit) this is
-        // the answer, since only the outermost commit advances the commit sequence number.
-        let changes = if materialized.is_ok() {
-            self.storage.unit_changes(mark)
-        } else {
-            crate::graph::UnitChanges::NONE
+        // the answer, since only the outermost commit advances the commit sequence number. A
+        // storage that cannot tell fails the run (rolled back below).
+        let (materialized, changes) = match materialized {
+            Ok(items) => match self.storage.unit_changes(mark) {
+                Ok(changes) => (Ok(items), changes),
+                Err(err) => (
+                    Err(Box::new(TraverserError::from(err))),
+                    crate::graph::UnitChanges::NONE,
+                ),
+            },
+            Err(err) => (Err(err), crate::graph::UnitChanges::NONE),
         };
         let changed = changes.any();
         let committed = match materialized {
@@ -2355,13 +2372,23 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 .commit_unit(mark)
                 .map(|()| items)
                 .map_err(|err| Box::new(TraverserError::from(err))),
-            Err(err) => {
-                self.storage
-                    .rollback_unit(mark, &RollbackReason::failed(&err));
-                Err(err)
-            }
+            Err(err) => Err(crate::graph::storage::rollback_failed_unit(
+                &mut self.storage,
+                mark,
+                err,
+            )),
         };
-        let mutated = changed || self.storage.last_commit_seq() > seq_before;
+        let mutated = changed
+            || match self.storage.last_commit_seq() {
+                Ok(seq_after) => seq_after > seq_before,
+                // The unit is closed (committed or rolled back) and its outcome is what the run
+                // reports; only whether it advanced the position is unknown. Assume it did, so
+                // a front end refreshes its views rather than show a stale graph.
+                Err(err) => {
+                    tracing::warn!("reading the commit position after a run failed: {err}");
+                    committed.is_ok()
+                }
+            };
         match committed {
             Ok(items) => ExecutedItems {
                 items,
@@ -2602,7 +2629,21 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             .clone()
             .unwrap_or_else(crate::value::Embedders::current);
         let storage = &self.storage;
-        if let Err(err) = bind_embedders(&mut self.steps, &embedders, &|| storage.get_schema()) {
+        // The schema is read only when a text query needs it; a storage that cannot read it
+        // fails the run with its own error (checked first: a bind error after a failed read
+        // would only be its consequence).
+        let schema_error = std::cell::Cell::new(None);
+        let read_schema = || {
+            storage.get_schema().unwrap_or_else(|err| {
+                schema_error.set(Some(err));
+                None
+            })
+        };
+        let bound = bind_embedders(&mut self.steps, &embedders, &read_schema);
+        if let Some(err) = schema_error.take() {
+            return failed_before_run(Box::new(TraverserError::from(err)), &self.options);
+        }
+        if let Err(err) = bound {
             return failed_before_run(err, &self.options);
         }
         if let Some(restrictions) = &self.restrictions
@@ -2610,20 +2651,35 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         {
             return failed_before_run(err, &self.options);
         }
-        let policy = self.storage.execution_policy();
+        let policy = match self.storage.execution_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                return failed_before_run(Box::new(TraverserError::from(err)), &self.options);
+            }
+        };
         let mut options = match ExecutionOptions::parse(&self.options, &policy) {
             Ok(options) => options,
             Err(err) => return failed_before_run(err, &self.options),
         };
         // The memory budget's starting point: the live heap with a tracking allocator, else one
         // walk of the graph's footprint, here and never per check.
-        options.memory = options.memory.map(|budget| budget.start(&self.storage));
+        options.memory = match options.memory.map(|budget| budget.start(&self.storage)) {
+            Some(Err(err)) => {
+                return failed_before_run(Box::new(TraverserError::from(err)), &self.options);
+            }
+            started => started.and_then(Result::ok),
+        };
         let path_analysis = options.path_analysis;
         let limits = bulk::ExpansionLimits::of(&options);
         let spelling = options.render_spelling;
         // Implicit auto-commit: the run is one unit of atomicity; any error inside it (a step,
         // the schema, a resource limit, `evaluationTimeout`) rolls back what it changed.
-        let mark = self.storage.begin_unit();
+        let mark = match self.storage.begin_unit() {
+            Ok(mark) => mark,
+            Err(err) => {
+                return failed_before_run(Box::new(TraverserError::from(err)), &self.options);
+            }
+        };
         let count_inputs = crate::graph::workload::scope::attached().is_some();
         let (result, mut profile, deadline, step_inputs) = crate::graph::storage::close_on_unwind(
             self,
@@ -2658,12 +2714,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     context.step_inputs.take(),
                 )
             },
-            |this| {
-                this.storage.rollback_unit(
-                    mark,
-                    &RollbackReason::failed(&crate::graph::storage::UNWOUND),
-                )
-            },
+            |this| crate::graph::storage::rollback_unwound(&mut this.storage, mark),
         );
         // Steps render in snake_case; `render.spelling` respells the diagnostics once, here.
         profile.respell(spelling);
@@ -2679,11 +2730,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 .commit_unit(mark)
                 .map(|()| value)
                 .map_err(|err| Box::new(TraverserError::from(err))),
-            Err(err) => {
-                self.storage
-                    .rollback_unit(mark, &RollbackReason::failed(&err));
-                Err(err)
-            }
+            Err(err) => Err(crate::graph::storage::rollback_failed_unit(
+                &mut self.storage,
+                mark,
+                err,
+            )),
         };
         RunOutcome {
             result,
@@ -2697,7 +2748,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// assert that a query without a path consumer records none.
     #[cfg(test)]
     pub(crate) fn internal_path_node_count(&mut self) -> TraverserResult<usize> {
-        let policy = self.storage.execution_policy();
+        let policy = self.storage.execution_policy()?;
         let options = ExecutionOptions::parse(&self.options, &policy)?;
         let path_analysis = options.path_analysis;
         let mut context = TraverserContext::with_options(
@@ -2727,7 +2778,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         // the `property_index` rule is left out of the pipeline).
         let optimizer = crate::traversal::optimizer::TraversalOptimizer::for_run(
             &context.options,
-            context.storage.property_indexes(),
+            context.storage.property_indexes()?,
         )
         .with_diagnostics(context.strategy.contains(TraversalStrategy::Diagnostics));
         let level = optimizer.apply(steps);
@@ -3005,7 +3056,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                     // unoptimized `group_count().by(T.label)` groups it. Read
                                     // from the storage's statistics; a storage without them is
                                     // scanned instead.
-                                    match context.storage.statistics() {
+                                    match context.storage.statistics().with_step_frame(
+                                        || step.get_name(),
+                                        step_at,
+                                        || plan_frame(steps, level, logical_step_idx),
+                                    )? {
                                         Some(stats) => {
                                             for (label, cnt) in stats.primary_vertex_label_counts()
                                             {
@@ -3078,7 +3133,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                     }
                                     cnt
                                 } else if let Some(labels) = init_labels {
-                                    match (single_label(labels), context.storage.statistics()) {
+                                    match (
+                                        single_label(labels),
+                                        context.storage.statistics().with_step_frame(
+                                            || step.get_name(),
+                                            step_at,
+                                            || plan_frame(steps, level, logical_step_idx),
+                                        )?,
+                                    ) {
                                         // One label: the statistics hold its count.
                                         (Some(label), Some(stats)) => {
                                             stats.vertex_label_count(label)
@@ -3144,9 +3206,19 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                     }
                                 }
                                 count_out = source.len();
-                            } else if let Some(candidates) = init_labels.and_then(|labels| {
-                                index_vertices(&*context.storage, labels, step.index_access()?)
-                            }) {
+                            } else if let Some(candidates) =
+                                match (init_labels, step.index_access()) {
+                                    (Some(labels), Some(access)) => {
+                                        index_vertices(&*context.storage, labels, access)
+                                            .with_step_frame(
+                                                || step.get_name(),
+                                                step_at,
+                                                || plan_frame(steps, level, logical_step_idx),
+                                            )?
+                                    }
+                                    _ => None,
+                                }
+                            {
                                 // A property index serves a condition (book page "Property
                                 // Indexes"): its candidates (a superset) are checked like the
                                 // label scan's elements.
@@ -3167,8 +3239,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                 count_out = source.len();
                             } else if let Some(labels) = init_labels {
                                 let single = single_label(labels);
-                                if let Some(stats) = context.storage.statistics()
-                                    && property_filters.is_empty()
+                                if let Some(stats) = context.storage.statistics().with_step_frame(
+                                    || step.get_name(),
+                                    step_at,
+                                    || plan_frame(steps, level, logical_step_idx),
+                                )? && property_filters.is_empty()
                                 {
                                     let expected: usize = match single {
                                         Some(label) => stats.vertex_label_count(label),
@@ -3258,7 +3333,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                         }
                                     }
                                 } else {
-                                    match context.storage.statistics() {
+                                    match context.storage.statistics().with_step_frame(
+                                        || step.get_name(),
+                                        step_at,
+                                        || plan_frame(steps, level, logical_step_idx),
+                                    )? {
                                         Some(stats) => {
                                             for (label, cnt) in stats.edge_label_counts() {
                                                 tmp.insert(label.to_string(), cnt);
@@ -3335,7 +3414,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                         labels.iter().map(|l| l.as_str()).collect();
                                     distinct.sort_unstable();
                                     distinct.dedup();
-                                    match context.storage.statistics() {
+                                    match context.storage.statistics().with_step_frame(
+                                        || step.get_name(),
+                                        step_at,
+                                        || plan_frame(steps, level, logical_step_idx),
+                                    )? {
                                         Some(stats) => distinct
                                             .iter()
                                             .map(|label| stats.edge_label_count(label))
@@ -3391,9 +3474,19 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                     }
                                 }
                                 count_out = source.len();
-                            } else if let Some(candidates) = init_labels.and_then(|labels| {
-                                index_edges(&*context.storage, labels, step.index_access()?)
-                            }) {
+                            } else if let Some(candidates) =
+                                match (init_labels, step.index_access()) {
+                                    (Some(labels), Some(access)) => {
+                                        index_edges(&*context.storage, labels, access)
+                                            .with_step_frame(
+                                                || step.get_name(),
+                                                step_at,
+                                                || plan_frame(steps, level, logical_step_idx),
+                                            )?
+                                    }
+                                    _ => None,
+                                }
+                            {
                                 // A property index serves a condition (see the vertex case).
                                 for edge_index in candidates {
                                     tick_deadline(&mut context.deadline).with_step_frame(

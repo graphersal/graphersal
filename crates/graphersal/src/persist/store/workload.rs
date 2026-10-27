@@ -142,8 +142,8 @@ impl<S: PersistentStorage> Store<S> {
         if let Some(schedule) = nightly {
             jobs.push(
                 Job::new("compact", JobKind::System, schedule, move |_| {
-                    crate::graph::GraphStorage::shrink_to_fit(&mut *graph.write());
-                    Ok(())
+                    crate::graph::GraphStorage::shrink_to_fit(&mut *graph.write())
+                        .map_err(|err| err.to_string())
                 })
                 .disabled(),
             );
@@ -204,6 +204,7 @@ impl<S: PersistentStorage + Default> Store<S> {
             .read_checked()
             .map_err(PersistError::Graph)?
             .definitions()
+            .map_err(PersistError::Graph)?
             .filter(|d| d.kind() == crate::graph::definition::DefinitionKind::JOB)
             .cloned()
             .collect();

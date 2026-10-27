@@ -267,8 +267,9 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 ///
 /// ## Statistics, schema and diagnostics
 ///
-/// [`Self::statistics`] (default `None`: the executor scans instead) must, when reported, equal
-/// what [`GraphStatistics::from_storage`] computes, after every mutation and every rollback.
+/// [`Self::statistics`] (default `Ok(None)`: the executor scans instead; `Err`: the query
+/// fails) must, when reported, equal what [`GraphStatistics::from_storage`] computes, after
+/// every mutation and every rollback.
 /// [`Self::set_schema`] (default: unsupported), [`Self::get_schema`] and
 /// [`Self::declared_property_schema`] default to "no schema"; [`Self::memory_usage`] and
 /// [`Self::execution_policy`] are optional diagnostics and host policy.
@@ -281,6 +282,20 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// atomic, treats a catalog change like a schema change: recorded, rolled back, reported as
 /// [`UnitChanges::definitions`] and captured as a
 /// [`Mutation::SetDefinition`](crate::graph::Mutation::SetDefinition).
+///
+/// ## Errors of the non-element methods
+///
+/// Every method that reads or changes the storage's state beyond single elements returns a
+/// `Result` (the unit methods, [`Self::capabilities`], [`Self::last_commit_seq`],
+/// [`Self::statistics`], the schema, catalog, compression, property index and memory methods,
+/// [`Self::shrink_to_fit`], [`Self::execution_policy`]), so a storage whose state lives behind
+/// a backend (a remote service, a file, a lock of its own) can report a failure instead of
+/// answering with an empty or made-up value. Return
+/// [`GraphError::storage_failed`] for such a backend error, never an empty answer. The defaults
+/// return `Ok` of what a storage without the feature reports. The engine reads these once per
+/// query or unit (never per traverser) and fails the query, import or transaction with the
+/// error; a failed [`Self::rollback_unit`] still closes the unit (see there). The hot element
+/// access methods (`vertices`, `out_edges`, `vertex_properties`, ...) stay infallible.
 pub trait GraphStorage: Send + Sync {
     /// Opaque, storage-local vertex handle.
     ///
@@ -391,17 +406,21 @@ pub trait GraphStorage: Send + Sync {
     /// `None`, a fused count per label (`group_count_pushdown`) scans the elements instead, with the
     /// same result. A storage that reports statistics must report exactly what
     /// [`GraphStatistics::from_storage`] computes from its data.
-    fn statistics(&self) -> Option<&GraphStatistics> {
-        None
+    ///
+    /// `Err` when the storage cannot read its statistics now (a backend error,
+    /// [`GraphError::StorageFailed`]); the query that asked fails with it.
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
+        Ok(None)
     }
 
     /// Infers the schema the currently stored vertices and edges satisfy (see
-    /// [`SchemaInferer`]). Never stores anything.
-    fn infer_schema(&self) -> GraphSchema
+    /// [`SchemaInferer`]). Never stores anything. `Err` when the storage cannot read its data
+    /// (a backend error).
+    fn infer_schema(&self) -> Result<GraphSchema, GraphError>
     where
         Self: Sized,
     {
-        SchemaInferer::infer_from_storage(self)
+        Ok(SchemaInferer::infer_from_storage(self))
     }
 
     /// Replaces the stored schema. In mode `Open`/`Closed` an implementation validates ALL
@@ -422,15 +441,17 @@ pub trait GraphStorage: Send + Sync {
 
     /// The schema this graph *stores* (set by [`Self::set_schema`]), never an inferred one:
     /// `None` when no schema is stored. A snapshot (`subgraph()`) copies only what is stored.
-    /// Default: `None`.
-    fn get_schema(&self) -> Option<GraphSchema> {
-        None
+    /// Default: `Ok(None)`. `Err` when the storage cannot read its schema now (a backend
+    /// error).
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
+        Ok(None)
     }
 
     /// The schema declared for the top-level property `key` on an element with these `labels`
     /// in the graph's *stored* schema, independent of its
     /// [`SchemaMode`](crate::graph::schema::SchemaMode). Uses the first label (in order) whose
-    /// schema declares `key`. Default: `None`, no declarations.
+    /// schema declares `key`. Default: `Ok(None)`, no declarations; `Err` when the storage
+    /// cannot read its schema now (a backend error).
     ///
     /// This never consults an inferred schema: importers use it to restore logical types only
     /// from what the consumer explicitly declared.
@@ -439,21 +460,27 @@ pub trait GraphStorage: Send + Sync {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         let _ = (kind, labels, key);
-        None
+        Ok(None)
     }
 
     /// Every stored [definition](crate::catalog) (saved queries, ...), by kind code
-    /// and then by name (byte order). Default: none.
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
-        std::iter::empty()
+    /// and then by name (byte order). Default: none. `Err` when the storage cannot read its
+    /// catalog now (a backend error).
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
+        Ok(std::iter::empty())
     }
 
-    /// The stored definition of `kind` named `name`. Default: `None`.
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    /// The stored definition of `kind` named `name`. Default: `Ok(None)`. `Err` when the
+    /// storage cannot read its catalog now (a backend error).
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         let _ = (kind, name);
-        None
+        Ok(None)
     }
 
     /// Stores `definition`, replacing the one of the same kind and name. It is
@@ -497,11 +524,14 @@ pub trait GraphStorage: Send + Sync {
     }
 
     /// What the compression rule `name` holds right now: the compressed values at its path,
-    /// their plain and stored sizes, its dictionary size. `None`: no such rule, or a storage
-    /// without compressed properties (the default).
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
+    /// their plain and stored sizes, its dictionary size. `Ok(None)`: no such rule, or a storage
+    /// without compressed properties (the default). `Err`: a backend error.
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
         let _ = name;
-        None
+        Ok(None)
     }
 
     /// Estimates compression rules for one `(element, label, path)` without changing anything
@@ -523,23 +553,26 @@ pub trait GraphStorage: Send + Sync {
     /// with their current stats: one entry per index the lookups below answer. The optimizer
     /// reads it once per run to pick an index, so it must be cheap (no walk over the data).
     /// Default: none (a storage without property indexes keeps index definitions in its catalog
-    /// like any other definition, but never serves them).
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
-        Vec::new()
+    /// like any other definition, but never serves them). `Err` when the storage cannot read
+    /// them now (a backend error): the query being planned fails with it.
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
+        Ok(Vec::new())
     }
 
     /// The vertices labelled `label` whose top-level property `key` lies in `range`, read from
-    /// the property index on `(vertex, label, key)`; `None` when there is no such index (the
-    /// default). The result may hold MORE vertices than the range does (the caller re-checks
-    /// every condition), never fewer, each vertex once; the order is unspecified.
+    /// the property index on `(vertex, label, key)`; `Ok(None)` when there is no such index
+    /// (the default). The result may hold MORE vertices than the range does (the caller
+    /// re-checks every condition), never fewer, each vertex once; the order is unspecified.
+    /// `Err` when the index cannot be read now (a backend error): the step that asked fails
+    /// with it, it never falls back to a scan.
     fn vertices_by_property_index<'a>(
         &'a self,
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>>, GraphError> {
         let _ = (label, key, range);
-        None
+        Ok(None)
     }
 
     /// The edge counterpart of [`Self::vertices_by_property_index`].
@@ -548,9 +581,9 @@ pub trait GraphStorage: Send + Sync {
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
         let _ = (label, key, range);
-        None
+        Ok(None)
     }
 
     /// The vertices labelled `label` whose top-level property `key`, transformed by
@@ -567,9 +600,9 @@ pub trait GraphStorage: Send + Sync {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>>, GraphError> {
         let _ = (label, key, transform, range);
-        None
+        Ok(None)
     }
 
     /// The edge counterpart of [`Self::vertices_by_transformed_property_index`].
@@ -579,9 +612,9 @@ pub trait GraphStorage: Send + Sync {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
         let _ = (label, key, transform, range);
-        None
+        Ok(None)
     }
 
     // Mutation methods required for side-effect steps
@@ -720,7 +753,7 @@ pub trait GraphStorage: Send + Sync {
         mut properties: PropertyMap,
         context: &CreateContext,
     ) -> Result<Self::VertexId, GraphError> {
-        if let Some(schema) = self.get_schema() {
+        if let Some(schema) = self.get_schema()? {
             // A repeated label changes nothing: the first label declaring a key decides.
             crate::graph::schema::defaults::fill_defaults(
                 &schema,
@@ -745,7 +778,7 @@ pub trait GraphStorage: Send + Sync {
         mut properties: PropertyMap,
         context: &CreateContext,
     ) -> Result<Self::EdgeId, GraphError> {
-        if let Some(schema) = self.get_schema() {
+        if let Some(schema) = self.get_schema()? {
             crate::graph::schema::defaults::fill_defaults(
                 &schema,
                 GraphNodeType::Edge,
@@ -874,18 +907,23 @@ pub trait GraphStorage: Send + Sync {
     /// Removes one property from an edge.
     fn drop_edge_property(&mut self, prop: &str, edge: Self::EdgeId) -> Result<(), GraphError>;
 
-    /// Shrinks the capacity of internal indices as much as possible. Default: a no-op.
-    fn shrink_to_fit(&mut self) {}
+    /// Shrinks the capacity of internal indices as much as possible. Default: a no-op
+    /// (`Ok(())`). `Err`: the storage could not compact (a backend error); its data is
+    /// unchanged either way.
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        Ok(())
+    }
 
-    /// An approximate memory-footprint snapshot, broken down by subsystem, or `None` if this
-    /// storage backend does not support introspection. Default: `None` — a backend opts in by
-    /// overriding this; callers must not assume `Some` just because the trait method exists.
+    /// An approximate memory-footprint snapshot, broken down by subsystem, or `Ok(None)` if this
+    /// storage backend does not support introspection. Default: `Ok(None)` — a backend opts in
+    /// by overriding this; callers must not assume `Some` just because the trait method exists.
+    /// `Err`: the storage cannot measure itself now (a backend error).
     ///
     /// Placed on the trait, not as a `TraversalGraph`-only inherent method, so the pipeline's
     /// storage-backend-agnostic design isn't broken by this diagnostic: a future storage backend
     /// can be substituted without losing (or having to fake) this capability.
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
-        None
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
+        Ok(None)
     }
 
     /// What only the storage can tell about its memory for the memory report
@@ -894,8 +932,9 @@ pub trait GraphStorage: Send + Sync {
     /// label index bytes and the shape table, or `None` (the default) when the storage does not
     /// report them. The rest of the memory report (per label and per property, indexes, rules) is
     /// computed for any storage through the read methods; a storage needs nothing for it.
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
-        None
+    /// `Err`: a backend error (the memory report fails with it).
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
+        Ok(None)
     }
 
     /// The total of [`Self::memory_usage`] ([`MemoryStats::total_bytes`]), or `None` without
@@ -903,11 +942,12 @@ pub trait GraphStorage: Send + Sync {
     /// allocator) starts every run from. A storage may cache it by its commit position
     /// ([`Self::last_commit_seq`]) so that a run on an unchanged graph does not walk it again;
     /// `TraversalGraph` does (also keyed by its element counts; not cached while an open unit
-    /// holds uncommitted changes). Default: [`Self::memory_usage`]'s total, uncached.
+    /// holds uncommitted changes). Default: [`Self::memory_usage`]'s total, uncached. `Err`:
+    /// a backend error; a run under an estimated memory budget fails with it.
     ///
     /// [`MemoryStats::total_bytes`]: crate::graph::MemoryStats::total_bytes
-    fn memory_footprint_bytes(&self) -> Option<u64> {
-        self.memory_usage().map(|stats| stats.total_bytes())
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        Ok(self.memory_usage()?.map(|stats| stats.total_bytes()))
     }
 
     /// The host-set ceiling this storage instance's queries execute under: which `g.with()`
@@ -920,8 +960,12 @@ pub trait GraphStorage: Send + Sync {
     /// capability. Returned by value (matching `memory_usage()`'s `Option<MemoryStats>` shape)
     /// rather than by reference, since `ExecutionPolicy` is small and this sidesteps any
     /// lifetime/static-storage question for a default implementation.
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
-        crate::graph::ExecutionPolicy::permissive()
+    ///
+    /// `Err` when the storage cannot read its policy now (a host that keeps it in a backend):
+    /// the run that asked fails with it before it executes anything; the engine never falls
+    /// back to the permissive policy.
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
+        Ok(crate::graph::ExecutionPolicy::permissive())
     }
 
     /// Opens a unit of atomicity and returns its mark.
@@ -960,8 +1004,15 @@ pub trait GraphStorage: Send + Sync {
     /// assert_eq!(graph.read().vertex_count(), 7);
     /// graph.commit_unit(mark).unwrap();
     /// ```
-    fn begin_unit(&mut self) -> UnitMark {
-        UnitMark::default()
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the storage cannot open a unit (a backend error,
+    /// [`GraphError::StorageFailed`]): then no unit is open and the caller must not close one.
+    /// The engine fails the traversal, import or transaction that asked, before it changes
+    /// anything.
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
+        Ok(UnitMark::default())
     }
 
     /// [`Self::begin_unit`] with the unit's start time given: when it opens the outermost unit,
@@ -980,7 +1031,8 @@ pub trait GraphStorage: Send + Sync {
     /// Default: [`Self::begin_unit`] (a storage without a unit clock, or one that takes its own
     /// time). A storage that overrides [`Self::unit_started_at`] overrides this and
     /// [`Self::next_unit_started_at`] too; a wrapper forwards both, like `begin_unit`.
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+    /// Errors as [`Self::begin_unit`]: a held unit's first write fails with it.
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
         let _ = started_at;
         self.begin_unit()
     }
@@ -992,9 +1044,11 @@ pub trait GraphStorage: Send + Sync {
     /// hands it to [`Self::begin_unit_at`] when the storage's unit opens. Changes nothing.
     ///
     /// Default: `None` (a storage without a unit clock; [`Self::unit_started_at`] stays
-    /// `None` too, and the graph pins no time). [`TraversalGraph`] returns its clock.
-    fn next_unit_started_at(&self) -> Option<i128> {
-        None
+    /// `None` too, and the graph pins no time). [`TraversalGraph`] returns its clock. `Err`: the
+    /// storage cannot read its clock floor now (a backend error); `Graph::begin_unit` fails
+    /// with it and opens nothing.
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(None)
     }
 
     /// Closes the innermost unit `mark` and keeps its changes. When it is the outermost unit,
@@ -1019,8 +1073,22 @@ pub trait GraphStorage: Send + Sync {
     /// outermost unit and it had changed something. Default: a no-op (nothing is undone); see
     /// [`Self::begin_unit`]. Behind a [`Graph`](crate::graph::Graph), a unit opened through a
     /// write guard is rolled back under that same guard.
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the storage could not undo the unit (a backend error,
+    /// [`GraphError::StorageFailed`]). **The unit counts as closed either way**: the caller
+    /// never retries the rollback nor closes the mark again, and the storage is responsible
+    /// for its own state afterwards (a durable backend typically refuses further writes until
+    /// it has recovered). The engine closes the unit, keeps the graph usable for the next
+    /// operation, and reports the failure to the caller of the traversal, import or
+    /// transaction: as [`GraphError::RollbackFailed`] carrying the error that caused the
+    /// rollback, or as the storage's error itself when nothing else had failed (a dry run, an
+    /// explicit `rollback_unit`). A rollback during a panic's unwinding cannot report anything:
+    /// the engine logs it (`tracing::error!`) and resumes the panic.
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
         let _ = (mark, reason);
+        Ok(())
     }
 
     /// What the open unit `mark` currently holds: whether data and whether the schema changed
@@ -1038,10 +1106,11 @@ pub trait GraphStorage: Send + Sync {
     /// conformance suite (`graphersal-storage-tests`,
     /// `unit_changes_never_claims_an_undone_change`) fails.
     ///
-    /// Default: [`UnitChanges::NONE`] (a non-atomic storage does not track units).
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    /// Default: [`UnitChanges::NONE`] (a non-atomic storage does not track units). `Err`: the
+    /// storage cannot tell now (a backend error); the run that asked fails with it.
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         let _ = mark;
-        UnitChanges::NONE
+        Ok(UnitChanges::NONE)
     }
 
     /// Attaches [`CommitMetadata`] (a principal, free attributes) to the open unit, so that the
@@ -1058,9 +1127,11 @@ pub trait GraphStorage: Send + Sync {
     /// nested unit only adds what is missing. Without an open unit the call is ignored.
     ///
     /// Default: ignores the metadata (a storage without change capture has nobody to report it
-    /// to).
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
+    /// to). `Err`: the storage could not attach it (a backend error); the transaction then
+    /// does not commit: it rolls its unit back and fails with the error.
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
         let _ = metadata;
+        Ok(())
     }
 
     /// Closes the innermost unit `mark` by undoing everything since it was opened WITHOUT
@@ -1086,7 +1157,8 @@ pub trait GraphStorage: Send + Sync {
         let error = GraphError::Unsupported {
             operation: DRY_RUN_OPERATION,
         };
-        self.rollback_unit(mark, &RollbackReason::failed(&error));
+        self.rollback_unit(mark, &RollbackReason::failed(&error))
+            .map_err(|rollback| GraphError::rollback_failed(&error, rollback))?;
         Err(error)
     }
 
@@ -1114,8 +1186,10 @@ pub trait GraphStorage: Send + Sync {
     ///
     /// Default: [`StorageCapabilities::none`]. An implementation must keep its claims
     /// consistent ([`StorageCapabilities::is_consistent`]): `change_capture` requires `atomic`.
-    fn capabilities(&self) -> StorageCapabilities {
-        StorageCapabilities::none()
+    /// `Err`: the storage cannot state them now (a backend it has to ask); the caller fails
+    /// with it and never assumes a capability.
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        Ok(StorageCapabilities::none())
     }
 
     /// Registers a [commit hook](crate::graph::CommitHook); hooks run in registration order
@@ -1142,9 +1216,9 @@ pub trait GraphStorage: Send + Sync {
     /// Together with a full export taken under the same read access (for example GraphML
     /// through a read lock of [`Graph`](crate::graph::Graph)) it is a snapshot with position: a
     /// server checkpoints the export and may truncate its write-ahead log up to this number.
-    /// Default: `0`.
-    fn last_commit_seq(&self) -> u64 {
-        0
+    /// Default: `Ok(0)`. `Err`: the storage cannot read its position now (a backend error).
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
+        Ok(0)
     }
 
     /// The start of the outermost open unit, in nanoseconds since the Unix epoch (UTC, the unit
@@ -1222,8 +1296,8 @@ pub(crate) fn apply_change_set_with<S: GraphStorage + ?Sized>(
     copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
 ) -> Result<(), GraphError> {
     let mut budget =
-        crate::traversal::memory_budget::UnitBudget::start(&*storage, None, CHANGE_SET_OPERATION);
-    let mark = storage.begin_unit();
+        crate::traversal::memory_budget::UnitBudget::start(&*storage, None, CHANGE_SET_OPERATION)?;
+    let mark = storage.begin_unit()?;
     let applied = close_on_unwind(
         storage,
         |this| {
@@ -1231,14 +1305,11 @@ pub(crate) fn apply_change_set_with<S: GraphStorage + ?Sized>(
             crate::traversal::memory_budget::check(&budget, &*this)?;
             this.raise_id_sequences(changes.node_sequence(), changes.edge_sequence())
         },
-        |this| this.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)),
+        |this| rollback_unwound(this, mark),
     );
     match applied {
         Ok(()) => storage.commit_unit(mark),
-        Err(err) => {
-            storage.rollback_unit(mark, &RollbackReason::failed(&err));
-            Err(err)
-        }
+        Err(err) => Err(rollback_failed_unit(storage, mark, err)),
     }
 }
 
@@ -1257,6 +1328,28 @@ pub(crate) const CHANGE_SET_OPERATION: &str = "change set apply";
 /// The [`RollbackReason`] message of a unit that a panic unwound through ([`close_on_unwind`]).
 pub(crate) const UNWOUND: &str =
     "a panic unwound through the unit (an engine bug); its changes were rolled back";
+
+/// Rolls back the unit `mark` that `cause` made fail and returns the error to report: `cause`
+/// itself, or, when the rollback fails too, [`GraphError::RollbackFailed`] naming both (the
+/// unit counts as closed either way, see [`GraphStorage::rollback_unit`]).
+pub(crate) fn rollback_failed_unit<S, E>(storage: &mut S, mark: UnitMark, cause: E) -> E
+where
+    S: GraphStorage + ?Sized,
+    E: std::fmt::Display + From<GraphError>,
+{
+    match storage.rollback_unit(mark, &RollbackReason::failed(&cause)) {
+        Ok(()) => cause,
+        Err(rollback) => E::from(GraphError::rollback_failed(&cause, rollback)),
+    }
+}
+
+/// Rolls back the unit `mark` a panic unwinds through ([`close_on_unwind`]'s `on_unwind`): a
+/// failing rollback cannot be reported there, so it is logged and the panic resumes.
+pub(crate) fn rollback_unwound<S: GraphStorage + ?Sized>(storage: &mut S, mark: UnitMark) {
+    if let Err(err) = storage.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)) {
+        tracing::error!("rolling back a unit a panic unwound through failed: {err}");
+    }
+}
 
 /// Runs `body` on `target`; when it unwinds, `on_unwind` closes the open unit (rolls it back)
 /// before the panic continues to the caller.
@@ -1493,8 +1586,8 @@ impl GraphStorage for TraversalGraph {
     }
 
     #[inline]
-    fn statistics(&self) -> Option<&GraphStatistics> {
-        Some(&self.statistics)
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
+        Ok(Some(&self.statistics))
     }
 
     /// The default's unit, with every added element's map copied `Shaped` into this graph's
@@ -2337,13 +2430,17 @@ impl GraphStorage for TraversalGraph {
     }
 
     #[inline]
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
-        self.definitions.iter()
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
+        Ok(self.definitions.iter())
     }
 
     #[inline]
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
-        self.definitions.get(kind, name)
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
+        Ok(self.definitions.get(kind, name))
     }
 
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
@@ -2358,8 +2455,11 @@ impl GraphStorage for TraversalGraph {
         Ok(self.recompress_rule(name))
     }
 
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
-        TraversalGraph::compression_stats(self, name)
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
+        Ok(TraversalGraph::compression_stats(self, name))
     }
 
     fn estimate_compression(
@@ -2369,8 +2469,8 @@ impl GraphStorage for TraversalGraph {
         Ok(TraversalGraph::estimate_compression(self, request))
     }
 
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
-        self.property_index_infos()
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
+        Ok(self.property_index_infos())
     }
 
     fn vertices_by_property_index<'a>(
@@ -2378,8 +2478,8 @@ impl GraphStorage for TraversalGraph {
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = VertexHandle> + 'a>> {
-        self.property_index_vertices(label, key, None, range)
+    ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
+        Ok(self.property_index_vertices(label, key, None, range))
     }
 
     fn vertices_by_transformed_property_index<'a>(
@@ -2388,8 +2488,8 @@ impl GraphStorage for TraversalGraph {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = VertexHandle> + 'a>> {
-        self.property_index_vertices(label, key, Some(transform), range)
+    ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
+        Ok(self.property_index_vertices(label, key, Some(transform), range))
     }
 
     fn edges_by_transformed_property_index<'a>(
@@ -2398,8 +2498,8 @@ impl GraphStorage for TraversalGraph {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>> {
-        self.property_index_edges(label, key, Some(transform), range)
+    ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
+        Ok(self.property_index_edges(label, key, Some(transform), range))
     }
 
     fn edges_by_property_index<'a>(
@@ -2407,14 +2507,14 @@ impl GraphStorage for TraversalGraph {
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>> {
-        self.property_index_edges(label, key, None, range)
+    ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
+        Ok(self.property_index_edges(label, key, None, range))
     }
 
     #[inline]
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         let active = self.schema.read();
-        (!active.is_empty()).then(|| active.clone())
+        Ok((!active.is_empty()).then(|| active.clone()))
     }
 
     #[inline]
@@ -2423,53 +2523,55 @@ impl GraphStorage for TraversalGraph {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
-        self.schema
+    ) -> Result<Option<PropertySchema>, GraphError> {
+        Ok(self
+            .schema
             .read()
             .declared_property(kind, labels, key)
-            .cloned()
+            .cloned())
     }
 
     #[inline]
-    fn shrink_to_fit(&mut self) {
-        self.shrink_to_fit();
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        TraversalGraph::shrink_to_fit(self);
+        Ok(())
     }
 
     #[inline]
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
-        Some(crate::graph::memory::compute(self))
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
+        Ok(Some(crate::graph::memory::compute(self)))
     }
 
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
-        Some(crate::graph::memory::structure(self))
-    }
-
-    #[inline]
-    fn memory_footprint_bytes(&self) -> Option<u64> {
-        Some(crate::graph::memory::footprint_bytes(self))
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
+        Ok(Some(crate::graph::memory::structure(self)))
     }
 
     #[inline]
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
-        self.execution_policy.clone()
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        Ok(Some(crate::graph::memory::footprint_bytes(self)))
+    }
+
+    #[inline]
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
+        Ok(self.execution_policy.clone())
     }
 
     /// Opens a unit of the undo log (see the `graph::undo` module): from now on every mutation
     /// records its inverse. The mark is the log position.
     #[inline]
-    fn begin_unit(&mut self) -> UnitMark {
-        self.begin_undo_unit()
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
+        Ok(self.begin_undo_unit())
     }
 
     /// The undo log's unit with `started_at` as its time (never earlier than the log's
     /// monotonic floor), see [`GraphStorage::begin_unit_at`].
     #[inline]
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
-        self.begin_undo_unit_at(started_at)
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
+        Ok(self.begin_undo_unit_at(started_at))
     }
 
-    fn next_unit_started_at(&self) -> Option<i128> {
-        Some(self.undo_next_started_at())
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(Some(self.undo_next_started_at()))
     }
 
     #[inline]
@@ -2478,19 +2580,21 @@ impl GraphStorage for TraversalGraph {
     }
 
     #[inline]
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
         self.rollback_undo_unit(mark, reason);
+        Ok(())
     }
 
     #[inline]
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
-        self.undo_unit_changes(mark)
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
+        Ok(self.undo_unit_changes(mark))
     }
 
     /// The undo log's metadata: while only the outermost unit is open the given metadata takes
     /// precedence over what nested units left; inside a nested unit it adds what is missing.
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
         self.set_undo_metadata(metadata);
+        Ok(())
     }
 
     /// Derives the unit's mutations from the undo log, then undoes them and closes the unit
@@ -2508,8 +2612,8 @@ impl GraphStorage for TraversalGraph {
     /// (readers and the writer are serialized by `&mut` or the lock of [`Graph`](crate::graph::Graph)), one writer,
     /// in memory only.
     #[inline]
-    fn capabilities(&self) -> StorageCapabilities {
-        TRAVERSAL_GRAPH_CAPABILITIES
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        Ok(TRAVERSAL_GRAPH_CAPABILITIES)
     }
 
     fn register_commit_hook(
@@ -2521,8 +2625,8 @@ impl GraphStorage for TraversalGraph {
     }
 
     #[inline]
-    fn last_commit_seq(&self) -> u64 {
-        self.commit_seq()
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
+        Ok(self.commit_seq())
     }
 
     /// The undo log's unit start; before the storage's unit opens, the time a
@@ -2696,7 +2800,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).contains_edge(edge)
     }
     #[inline]
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         (**self).statistics()
     }
 
@@ -2799,17 +2903,21 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         (**self).get_schema()
     }
 
     #[inline]
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         (**self).definitions()
     }
 
     #[inline]
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         (**self).definition(kind, name)
     }
 
@@ -2833,7 +2941,10 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
         (**self).compression_stats(name)
     }
 
@@ -2846,7 +2957,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
         (**self).property_indexes()
     }
 
@@ -2856,7 +2967,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_property_index(label, key, range)
     }
 
@@ -2866,7 +2977,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_property_index(label, key, range)
     }
 
@@ -2877,7 +2988,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_transformed_property_index(label, key, transform, range)
     }
 
@@ -2888,7 +2999,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
     }
 
@@ -2898,34 +3009,34 @@ impl<G: GraphStorage> GraphStorage for &G {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         (**self).declared_property_schema(kind, labels, key)
     }
 
     #[inline]
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
         (**self).memory_usage()
     }
 
     #[inline]
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         (**self).memory_structure()
     }
 
     #[inline]
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
     }
 
     #[inline]
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
         (**self).execution_policy()
     }
 
     /// A read-only view: claims nothing (no writes, so nothing to make atomic or capture).
     #[inline]
-    fn capabilities(&self) -> StorageCapabilities {
-        StorageCapabilities::none()
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        Ok(StorageCapabilities::none())
     }
 
     /// A read-only view writes no journal record.
@@ -2937,7 +3048,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         (**self).last_commit_seq()
     }
 
@@ -3037,7 +3148,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         (**self).statistics()
     }
 
@@ -3198,12 +3309,16 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         (**self).definitions()
     }
 
     #[inline]
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         (**self).definition(kind, name)
     }
 
@@ -3223,7 +3338,10 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
         (**self).compression_stats(name)
     }
 
@@ -3236,7 +3354,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
         (**self).property_indexes()
     }
 
@@ -3246,7 +3364,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_property_index(label, key, range)
     }
 
@@ -3256,7 +3374,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_property_index(label, key, range)
     }
 
@@ -3267,7 +3385,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_transformed_property_index(label, key, transform, range)
     }
 
@@ -3278,12 +3396,12 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
     }
 
     #[inline]
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         (**self).get_schema()
     }
 
@@ -3293,42 +3411,42 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         (**self).declared_property_schema(kind, labels, key)
     }
 
     #[inline]
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
         (**self).memory_usage()
     }
 
     #[inline]
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         (**self).memory_structure()
     }
 
     #[inline]
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
     }
 
     #[inline]
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
         (**self).execution_policy()
     }
 
     #[inline]
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         (**self).begin_unit()
     }
 
     #[inline]
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
         (**self).begin_unit_at(started_at)
     }
 
     #[inline]
-    fn next_unit_started_at(&self) -> Option<i128> {
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).next_unit_started_at()
     }
 
@@ -3338,18 +3456,18 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
-        (**self).rollback_unit(mark, reason);
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        (**self).rollback_unit(mark, reason)
     }
 
     #[inline]
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         (**self).unit_changes(mark)
     }
 
     #[inline]
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
-        (**self).set_unit_metadata(metadata);
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        (**self).set_unit_metadata(metadata)
     }
 
     #[inline]
@@ -3363,7 +3481,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         (**self).capabilities()
     }
 
@@ -3376,7 +3494,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         (**self).last_commit_seq()
     }
 
@@ -3490,7 +3608,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         (**self).statistics()
     }
 
@@ -3651,12 +3769,16 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
         (**self).definitions()
     }
 
     #[inline]
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
         (**self).definition(kind, name)
     }
 
@@ -3676,7 +3798,10 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
         (**self).compression_stats(name)
     }
 
@@ -3689,7 +3814,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
         (**self).property_indexes()
     }
 
@@ -3699,7 +3824,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_property_index(label, key, range)
     }
 
@@ -3709,7 +3834,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         label: &'b str,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_property_index(label, key, range)
     }
 
@@ -3720,7 +3845,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
         (**self).vertices_by_transformed_property_index(label, key, transform, range)
     }
 
@@ -3731,12 +3856,12 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>> {
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
     }
 
     #[inline]
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         (**self).get_schema()
     }
 
@@ -3746,42 +3871,42 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         (**self).declared_property_schema(kind, labels, key)
     }
 
     #[inline]
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
         (**self).memory_usage()
     }
 
     #[inline]
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         (**self).memory_structure()
     }
 
     #[inline]
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
     }
 
     #[inline]
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
         (**self).execution_policy()
     }
 
     #[inline]
-    fn begin_unit(&mut self) -> UnitMark {
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
         (**self).begin_unit()
     }
 
     #[inline]
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
         (**self).begin_unit_at(started_at)
     }
 
     #[inline]
-    fn next_unit_started_at(&self) -> Option<i128> {
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).next_unit_started_at()
     }
 
@@ -3791,18 +3916,18 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
-        (**self).rollback_unit(mark, reason);
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        (**self).rollback_unit(mark, reason)
     }
 
     #[inline]
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         (**self).unit_changes(mark)
     }
 
     #[inline]
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
-        (**self).set_unit_metadata(metadata);
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        (**self).set_unit_metadata(metadata)
     }
 
     #[inline]
@@ -3816,7 +3941,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         (**self).capabilities()
     }
 
@@ -3829,7 +3954,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         (**self).last_commit_seq()
     }
 
@@ -3960,7 +4085,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn statistics(&self) -> Option<&GraphStatistics> {
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         self.as_ref().statistics()
     }
 
@@ -4226,13 +4351,17 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn definitions(&self) -> impl Iterator<Item = &Definition> + '_ {
-        self.as_ref().definitions.iter()
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
+        Ok(self.as_ref().definitions.iter())
     }
 
     #[inline]
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<&Definition> {
-        self.as_ref().definitions.get(kind, name)
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
+        Ok(self.as_ref().definitions.get(kind, name))
     }
 
     #[inline]
@@ -4266,8 +4395,11 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn compression_stats(&self, name: &str) -> Option<crate::graph::CompressionStats> {
-        TraversalGraph::compression_stats(self, name)
+    fn compression_stats(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::CompressionStats>, GraphError> {
+        Ok(TraversalGraph::compression_stats(self, name))
     }
 
     fn estimate_compression(
@@ -4278,8 +4410,8 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
-        self.as_ref().property_index_infos()
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
+        Ok(self.as_ref().property_index_infos())
     }
 
     #[inline]
@@ -4288,9 +4420,10 @@ impl GraphStorage for Arc<TraversalGraph> {
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = VertexHandle> + 'a>> {
-        self.as_ref()
-            .property_index_vertices(label, key, None, range)
+    ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
+        Ok(self
+            .as_ref()
+            .property_index_vertices(label, key, None, range))
     }
 
     #[inline]
@@ -4299,8 +4432,8 @@ impl GraphStorage for Arc<TraversalGraph> {
         label: &'a str,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>> {
-        self.as_ref().property_index_edges(label, key, None, range)
+    ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
+        Ok(self.as_ref().property_index_edges(label, key, None, range))
     }
 
     #[inline]
@@ -4310,9 +4443,10 @@ impl GraphStorage for Arc<TraversalGraph> {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = VertexHandle> + 'a>> {
-        self.as_ref()
-            .property_index_vertices(label, key, Some(transform), range)
+    ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
+        Ok(self
+            .as_ref()
+            .property_index_vertices(label, key, Some(transform), range))
     }
 
     #[inline]
@@ -4322,13 +4456,14 @@ impl GraphStorage for Arc<TraversalGraph> {
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>> {
-        self.as_ref()
-            .property_index_edges(label, key, Some(transform), range)
+    ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
+        Ok(self
+            .as_ref()
+            .property_index_edges(label, key, Some(transform), range))
     }
 
     #[inline]
-    fn get_schema(&self) -> Option<GraphSchema> {
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         self.as_ref().get_schema()
     }
 
@@ -4338,47 +4473,48 @@ impl GraphStorage for Arc<TraversalGraph> {
         kind: GraphNodeType,
         labels: &[CompactString],
         key: &str,
-    ) -> Option<PropertySchema> {
+    ) -> Result<Option<PropertySchema>, GraphError> {
         self.as_ref().declared_property_schema(kind, labels, key)
     }
 
     #[inline]
-    fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
         self.as_ref().memory_usage()
     }
 
     #[inline]
-    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         self.as_ref().memory_structure()
     }
 
     #[inline]
-    fn memory_footprint_bytes(&self) -> Option<u64> {
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         self.as_ref().memory_footprint_bytes()
     }
 
     #[inline]
-    fn execution_policy(&self) -> crate::graph::ExecutionPolicy {
+    fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
         self.as_ref().execution_policy()
     }
 
     /// Forwarded while this `Arc` is the only owner (the only case in which it can mutate at
     /// all); a shared `Arc` is non-atomic like the trait default.
     #[inline]
-    fn begin_unit(&mut self) -> UnitMark {
-        Arc::get_mut(self).map_or_else(UnitMark::default, GraphStorage::begin_unit)
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
+        Arc::get_mut(self).map_or_else(|| Ok(UnitMark::default()), GraphStorage::begin_unit)
     }
 
     #[inline]
-    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
-        Arc::get_mut(self).map_or_else(UnitMark::default, |graph| {
-            GraphStorage::begin_unit_at(graph, started_at)
-        })
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
+        Arc::get_mut(self).map_or_else(
+            || Ok(UnitMark::default()),
+            |graph| GraphStorage::begin_unit_at(graph, started_at),
+        )
     }
 
     /// The clock of the shared graph while this handle is the only one (units open only then).
     #[inline]
-    fn next_unit_started_at(&self) -> Option<i128> {
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         GraphStorage::next_unit_started_at(self.as_ref())
     }
 
@@ -4391,21 +4527,23 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
-        if let Some(graph) = Arc::get_mut(self) {
-            GraphStorage::rollback_unit(graph, mark, reason);
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        match Arc::get_mut(self) {
+            Some(graph) => GraphStorage::rollback_unit(graph, mark, reason),
+            None => Ok(()),
         }
     }
 
     #[inline]
-    fn unit_changes(&self, mark: UnitMark) -> UnitChanges {
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         GraphStorage::unit_changes(self.as_ref(), mark)
     }
 
     #[inline]
-    fn set_unit_metadata(&mut self, metadata: CommitMetadata) {
-        if let Some(graph) = Arc::get_mut(self) {
-            GraphStorage::set_unit_metadata(graph, metadata);
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        match Arc::get_mut(self) {
+            Some(graph) => GraphStorage::set_unit_metadata(graph, metadata),
+            None => Ok(()),
         }
     }
 
@@ -4434,11 +4572,11 @@ impl GraphStorage for Arc<TraversalGraph> {
     /// The capabilities of [`TraversalGraph`] while this `Arc` is the only owner; a shared
     /// `Arc` cannot mutate at all and claims nothing.
     #[inline]
-    fn capabilities(&self) -> StorageCapabilities {
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         if Arc::strong_count(self) == 1 && Arc::weak_count(self) == 0 {
             self.as_ref().capabilities()
         } else {
-            StorageCapabilities::none()
+            Ok(StorageCapabilities::none())
         }
     }
 
@@ -4456,7 +4594,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn last_commit_seq(&self) -> u64 {
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(self.as_ref())
     }
 
@@ -4623,7 +4761,10 @@ mod tests {
         let unknown_e: Vec<_> = GraphStorage::edges_by_label(&tg, "unknown").collect();
         assert!(unknown_e.is_empty());
 
-        let stats = tg.statistics().expect("TraversalGraph keeps statistics");
+        let stats = tg
+            .statistics()
+            .unwrap()
+            .expect("TraversalGraph keeps statistics");
         assert_eq!(stats.vertex_label_count("person"), 2);
         assert_eq!(stats.vertex_label_count("software"), 1);
         assert_eq!(stats.edge_label_count("knows"), 1);
@@ -4790,8 +4931,8 @@ mod tests {
 
         /// What it really does: it writes, but keeps the default (no-op) units, so it is
         /// neither atomic nor capturing.
-        fn capabilities(&self) -> StorageCapabilities {
-            StorageCapabilities::none().with_writable(true)
+        fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+            Ok(StorageCapabilities::none().with_writable(true))
         }
     }
 
@@ -4800,19 +4941,19 @@ mod tests {
         let mut mock = MockStorage {
             tg: build_test_graph(),
         };
-        assert!(mock.capabilities().is_consistent());
-        assert!(!mock.capabilities().atomic);
+        assert!(mock.capabilities().unwrap().is_consistent());
+        assert!(!mock.capabilities().unwrap().atomic);
         struct Nop;
         impl crate::graph::CommitHook for Nop {}
         assert!(matches!(
             mock.register_commit_hook(Box::new(Nop)),
             Err(GraphError::Unsupported { .. })
         ));
-        let mark = mock.begin_unit();
+        let mark = mock.begin_unit().unwrap();
         mock.insert_vertex(Some("m".into()), vec![], PropertyMap::default())
             .expect("add");
         mock.commit_unit(mark).expect("commit");
-        assert_eq!(GraphStorage::last_commit_seq(&mock), 0);
+        assert_eq!(GraphStorage::last_commit_seq(&mock).unwrap(), 0);
         // The catalog defaults: nothing stored, writes unsupported.
         let query = Definition::query("q", crate::graph::QueryDefinition::new("fn q() { 1 }"));
         assert!(matches!(
@@ -4823,25 +4964,29 @@ mod tests {
             mock.remove_definition(DefinitionKind::QUERY, "q"),
             Err(GraphError::Unsupported { .. })
         ));
-        assert_eq!(mock.definitions().count(), 0);
-        assert!(mock.definition(DefinitionKind::QUERY, "q").is_none());
+        assert_eq!(mock.definitions().unwrap().count(), 0);
+        assert!(
+            mock.definition(DefinitionKind::QUERY, "q")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn traversal_graph_capabilities_are_consistent() {
         let graph = TraversalGraph::new();
-        let caps = GraphStorage::capabilities(&graph);
+        let caps = GraphStorage::capabilities(&graph).unwrap();
         assert!(caps.atomic && caps.change_capture && caps.writable && !caps.immutable);
         assert!(caps.is_consistent());
         assert_eq!(
-            GraphStorage::capabilities(&&graph),
+            GraphStorage::capabilities(&&graph).unwrap(),
             StorageCapabilities::none()
         );
         let shared = Arc::new(TraversalGraph::new());
-        assert_eq!(GraphStorage::capabilities(&shared), caps);
+        assert_eq!(GraphStorage::capabilities(&shared).unwrap(), caps);
         let second = shared.clone();
         assert_eq!(
-            GraphStorage::capabilities(&shared),
+            GraphStorage::capabilities(&shared).unwrap(),
             StorageCapabilities::none()
         );
         drop(second);
@@ -4867,7 +5012,7 @@ mod tests {
         assert!(unknown_edges.is_empty());
 
         // A storage without its own bookkeeping reports no statistics; they can be computed.
-        assert!(mock.statistics().is_none());
+        assert!(mock.statistics().unwrap().is_none());
         let stats = GraphStatistics::from_storage(&mock);
         assert_eq!(stats.vertex_label_count("person"), 2);
         assert_eq!(stats.edge_label_count("knows"), 1);

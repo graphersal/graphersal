@@ -179,7 +179,7 @@ fn a_clock_behind_the_last_commit_repeats_its_time() {
 fn every_change_set_carries_the_sequences_after_the_unit() {
     let mut graph = TraversalGraph::new();
     let journal = Journal::attach(&mut graph);
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let a = graph
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
@@ -191,12 +191,12 @@ fn every_change_set_carries_the_sequences_after_the_unit() {
         .unwrap();
     graph.commit_unit(mark).unwrap();
     // An explicit numeric id raises the sequence; a property write moves nothing.
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("40".into()), vec![], PropertyMap::default())
         .unwrap();
     graph.commit_unit(mark).unwrap();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .set_vertex_property(a, "k".into(), ElementProperty::from(1i64))
         .unwrap();
@@ -225,7 +225,7 @@ fn replay_never_reuses_an_id_of_a_dropped_or_rolled_back_element() {
         .to_list();
     assert!(failed.is_err());
     // An edge whose id is handed out and then dropped.
-    let mark = live.begin_unit();
+    let mark = live.begin_unit().unwrap();
     let (one, two) = (
         live.get_vertex_by_id("1").unwrap(),
         live.get_vertex_by_id("2").unwrap(),
@@ -247,7 +247,7 @@ fn replay_never_reuses_an_id_of_a_dropped_or_rolled_back_element() {
     // Neither 2 (dropped) nor 3 (rolled back) comes back; the same holds for the edge id.
     assert_eq!(add_vertex(&mut recovered, "new"), "4");
     assert_eq!(add_vertex(&mut live, "new"), "4");
-    let mark = recovered.begin_unit();
+    let mark = recovered.begin_unit().unwrap();
     let (one, four) = (
         recovered.get_vertex_by_id("1").unwrap(),
         recovered.get_vertex_by_id("4").unwrap(),
@@ -275,7 +275,7 @@ fn added_ids(changes: &ChangeSet) -> Vec<String> {
 fn apply_never_reuses_an_id_whose_add_and_drop_were_compacted_away() {
     let mut source = TraversalGraph::new();
     let journal = Journal::attach(&mut source);
-    let mark = source.begin_unit();
+    let mark = source.begin_unit().unwrap();
     let one = source
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
@@ -310,7 +310,7 @@ fn apply_never_reuses_an_id_whose_add_and_drop_were_compacted_away() {
     let applied = target_journal.change_sets().remove(0);
     assert_eq!((applied.node_sequence(), applied.edge_sequence()), (3, 2));
     assert_eq!(add_vertex(&mut target, "new"), "4");
-    let mark = target.begin_unit();
+    let mark = target.begin_unit().unwrap();
     let (one, four) = (
         target.get_vertex_by_id("1").unwrap(),
         target.get_vertex_by_id("4").unwrap(),
@@ -335,7 +335,7 @@ fn apply_never_reuses_an_id_of_a_unit_the_source_rolled_back() {
         .as_number(GType::LONG)
         .to_list();
     assert!(failed.is_err());
-    let mark = source.begin_unit();
+    let mark = source.begin_unit().unwrap();
     source
         .add_vertex(Some("x".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -354,7 +354,7 @@ fn apply_never_reuses_an_id_of_a_unit_the_source_rolled_back() {
 pub(crate) fn compacted_away_change_set() -> ChangeSet {
     let mut source = TraversalGraph::new();
     let journal = Journal::attach(&mut source);
-    let mark = source.begin_unit();
+    let mark = source.begin_unit().unwrap();
     let one = source
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
@@ -389,7 +389,12 @@ fn applying_a_compacted_away_change_set_is_a_sequence_only_commit() {
         (committed[0].node_sequence(), committed[0].edge_sequence()),
         (2, 1)
     );
-    assert!(target.statistics().is_some_and(|s| s.vertex_count() == 0));
+    assert!(
+        target
+            .statistics()
+            .unwrap()
+            .is_some_and(|s| s.vertex_count() == 0)
+    );
     // Replaying it into a fresh graph (a recovery) keeps the raise.
     let replayed = TraversalGraph::new().replay(&committed[0]).unwrap();
     assert_eq!((replayed.node_sequence(), replayed.edge_sequence()), (2, 1));
@@ -446,15 +451,17 @@ fn a_vetoed_sequence_only_commit_rolls_back_and_keeps_the_raise_in_memory() {
 fn a_rolled_back_raise_commits_nothing_and_stays_in_memory() {
     let mut target = TraversalGraph::new();
     let journal = Journal::attach(&mut target);
-    let mark = target.begin_unit();
+    let mark = target.begin_unit().unwrap();
     target.raise_id_sequences(5, 7).unwrap();
-    target.rollback_unit(mark, &RollbackReason::failed(&"stop"));
+    target
+        .rollback_unit(mark, &RollbackReason::failed(&"stop"))
+        .unwrap();
     assert!(journal.change_sets().is_empty());
     assert_eq!(journal.rollbacks(), ["stop"]);
     assert_eq!(target.last_commit_seq(), 0);
     assert_eq!((target.node_sequence(), target.edge_sequence()), (5, 7));
     // A later unit that changes nothing commits nothing (the raise belonged to the old unit).
-    let mark = target.begin_unit();
+    let mark = target.begin_unit().unwrap();
     target.commit_unit(mark).unwrap();
     assert!(journal.change_sets().is_empty());
 }
@@ -466,7 +473,7 @@ fn apply_never_lowers_a_sequence() {
     add_vertex(&mut source, "a");
     let changes = journal.change_sets().remove(0);
     let mut target = TraversalGraph::new();
-    let mark = target.begin_unit();
+    let mark = target.begin_unit().unwrap();
     target
         .add_vertex(Some("90".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -483,7 +490,7 @@ fn replay_never_lowers_a_sequence() {
     let changes = journal.change_sets().remove(0);
     assert_eq!(changes.node_sequence(), 1);
     let mut target = TraversalGraph::new();
-    let mark = target.begin_unit();
+    let mark = target.begin_unit().unwrap();
     target
         .add_vertex(Some("90".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -528,7 +535,7 @@ fn the_commit_sequence_reaches_its_maximum_once() {
 #[test]
 fn the_vertex_id_sequence_never_wraps() {
     let mut graph = TraversalGraph::new();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(
             Some(u64::MAX.to_string().into()),
@@ -541,7 +548,7 @@ fn the_vertex_id_sequence_never_wraps() {
     assert_overflow(&error, "vertex auto-id sequence");
     assert_eq!(graph.vertex_count(), 1);
     // Explicit ids still work.
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     graph
         .add_vertex(Some("p-1".into()), vec![], PropertyMap::default())
         .unwrap();
@@ -552,7 +559,7 @@ fn the_vertex_id_sequence_never_wraps() {
 #[test]
 fn the_edge_id_sequence_never_wraps() {
     let mut graph = TraversalGraph::new();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let a = graph
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
@@ -566,11 +573,13 @@ fn the_edge_id_sequence_never_wraps() {
         )
         .unwrap();
     graph.commit_unit(mark).unwrap();
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     let error = graph
         .add_edge(None, Some("e".into()), a, a, PropertyMap::default())
         .unwrap_err();
-    graph.rollback_unit(mark, &RollbackReason::failed(&error));
+    graph
+        .rollback_unit(mark, &RollbackReason::failed(&error))
+        .unwrap();
     match error {
         GraphError::SequenceOverflow { sequence, .. } => {
             assert_eq!(sequence, "edge auto-id sequence")

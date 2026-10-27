@@ -19,25 +19,30 @@ pub const SCHEMA_MAX_LABELS: usize = 300;
 /// graph's schema: the stored one (`source: "stored"`, `mode` its mode), or one inferred from the
 /// data (`source: "inferred"`, `mode: "inferred"`). `json` is the canonical schema format. Beyond
 /// [`SCHEMA_MAX_LABELS`] labels only the first ones are shown (`truncated: true`).
-pub fn schema_view<S: GraphStorage>(g: &S) -> Value {
-    match g.get_schema() {
+pub fn schema_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
+    match g.get_schema()? {
         Some(schema) => {
             let mode = schema.mode.as_str();
             schema_view_with(g, schema, mode, "stored")
         }
-        None => schema_view_with(g, g.infer_schema(), "inferred", "inferred"),
+        None => schema_view_with(g, g.infer_schema()?, "inferred", "inferred"),
     }
 }
 
 /// [`schema_view`] of a given schema (`source: "given"`, `mode` its mode), with the label
 /// counts of the graph `g`: what the playground draws for the schema its editor shows (a
 /// draft, or one inferred earlier), so the drawings always show what the tables show.
-pub fn schema_view_of<S: GraphStorage>(g: &S, schema: GraphSchema) -> Value {
+pub fn schema_view_of<S: GraphStorage>(g: &S, schema: GraphSchema) -> Result<Value, GraphError> {
     let mode = schema.mode.as_str();
     schema_view_with(g, schema, mode, "given")
 }
 
-fn schema_view_with<S: GraphStorage>(g: &S, full: GraphSchema, mode: &str, source: &str) -> Value {
+fn schema_view_with<S: GraphStorage>(
+    g: &S,
+    full: GraphSchema,
+    mode: &str,
+    source: &str,
+) -> Result<Value, GraphError> {
     let total_labels = full.vertices.len() + full.edges.len();
     let truncated = total_labels > SCHEMA_MAX_LABELS;
     let schema = if truncated {
@@ -54,7 +59,7 @@ fn schema_view_with<S: GraphStorage>(g: &S, full: GraphSchema, mode: &str, sourc
     } else {
         full
     };
-    let stats = g.statistics();
+    let stats = g.statistics()?;
     let type_map = |root: &PropertySchema| -> Value {
         Value::Object(
             root.properties
@@ -94,7 +99,7 @@ fn schema_view_with<S: GraphStorage>(g: &S, full: GraphSchema, mode: &str, sourc
     if wildcard {
         nodes.push(json!({"id": "L:*", "label": "* (any label)", "properties": {}}));
     }
-    json!({
+    Ok(json!({
         "mode": mode,
         "source": source,
         "table": schema_table(&schema),
@@ -103,7 +108,7 @@ fn schema_view_with<S: GraphStorage>(g: &S, full: GraphSchema, mode: &str, sourc
         "graph": {"nodes": nodes, "edges": edges},
         "truncated": truncated,
         "total_labels": total_labels,
-    })
+    }))
 }
 
 /// One row per (element kind, label, property path), nested keys as `address.zip`: `element,
@@ -282,9 +287,9 @@ pub const STATISTICS_MAX_LABELS: usize = 50;
 /// the label anywhere in their label set, `primary` those whose first label it is. Labels are
 /// ordered by count (largest first, then by name); beyond [`STATISTICS_MAX_LABELS`] per kind only
 /// the first are listed (`truncated: true`; the totals count all).
-pub fn statistics_view<S: GraphStorage>(g: &S) -> Value {
-    let Some(stats) = g.statistics() else {
-        return Value::Null;
+pub fn statistics_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
+    let Some(stats) = g.statistics()? else {
+        return Ok(Value::Null);
     };
     let mut vertex_labels = stats.vertex_label_counts();
     let mut edge_labels = stats.edge_label_counts();
@@ -309,7 +314,7 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Value {
         .take(STATISTICS_MAX_LABELS)
         .map(|(label, count)| json!({ "label": label, "count": count }))
         .collect();
-    json!({
+    Ok(json!({
         "vertex_count": stats.vertex_count(),
         "edge_count": stats.edge_count(),
         "vertex_labels": vertices,
@@ -317,7 +322,7 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Value {
         "vertex_label_total": vertex_labels.len(),
         "edge_label_total": edge_labels.len(),
         "truncated": truncated,
-    })
+    }))
 }
 
 /// `g.memory_usage()` as data: `{structure_bytes, index_bytes, property_bytes, total_bytes,
@@ -327,8 +332,8 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Value {
 /// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
 /// `workload_bytes` (the graph's workload statistics, held beside the storage) is not part of the
 /// total either and is `0` from a storage alone ([`SessionGraph::memory_view`] fills it in).
-pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
-    match g.memory_usage() {
+pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
+    Ok(match g.memory_usage()? {
         Some(stats) => json!({
             "structure_bytes": stats.structure_bytes,
             "index_bytes": stats.index_bytes,
@@ -347,7 +352,7 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
             "workload_bytes": stats.workload_bytes,
         }),
         None => Value::Null,
-    }
+    })
 }
 
 /// The request of a memory report spec `{sample_every?, max_elements?, max_rows?,
@@ -837,7 +842,7 @@ mod tests {
     #[test]
     fn schema_view_infers_without_a_stored_schema() {
         let graph = GraphSource::tinkerpop_modern();
-        let view = schema_view(&*graph.read());
+        let view = schema_view(&*graph.read()).unwrap();
         assert_eq!(view["mode"], "inferred");
         assert_eq!(view["source"], "inferred");
         assert_eq!(view["table"]["columns"][4], "required");
@@ -934,15 +939,15 @@ mod tests {
     #[test]
     fn views_on_a_foreign_storage_equal_those_of_a_traversal_graph() {
         let (tg, fw) = modern_pair();
-        assert_eq!(schema_view(&tg), schema_view(&fw));
+        assert_eq!(schema_view(&tg).unwrap(), schema_view(&fw).unwrap());
         let drawn = |g: CompactGraph| serde_json::to_value(g).unwrap();
         assert_eq!(drawn(graph_view(&tg, 4, 3)), drawn(graph_view(&fw, 4, 3)));
         assert_eq!(
             drawn(graph_view(&tg, 100, 100)),
             drawn(graph_view(&fw, 100, 100))
         );
-        assert_eq!(statistics_view(&tg), statistics_view(&fw));
-        assert!(statistics_view(&fw).is_object());
-        assert_eq!(memory_usage(&tg), memory_usage(&fw));
+        assert_eq!(statistics_view(&tg).unwrap(), statistics_view(&fw).unwrap());
+        assert!(statistics_view(&fw).unwrap().is_object());
+        assert_eq!(memory_usage(&tg).unwrap(), memory_usage(&fw).unwrap());
     }
 }

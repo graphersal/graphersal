@@ -215,9 +215,10 @@ pub trait StoreDir: Send + Sync + std::fmt::Debug {
     /// The physical space of a backend that keeps garbage (a single-file container, where a
     /// removal only frees space logically): `None` (the default) for a backend whose removals
     /// give the space back at once ([`FsDir`], [`MemDir`]). Must be cheap (bookkeeping only,
-    /// no data reads): it is polled.
-    fn space_usage(&self) -> Option<SpaceUsage> {
-        None
+    /// no data reads): it is polled. `Err`: the backend cannot read its bookkeeping now (an
+    /// I/O error, a poisoned lock); the Store operation that asked fails with it.
+    fn space_usage(&self) -> io::Result<Option<SpaceUsage>> {
+        Ok(None)
     }
 
     /// Gives the garbage back ([`StoreDir::space_usage`]): rewrites the live data compactly.
@@ -226,18 +227,32 @@ pub trait StoreDir: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    /// The free space of the file system the directory lives on, in bytes (`None`, the
-    /// default: unknown or not applicable).
-    fn free_space(&self) -> Option<u64> {
-        None
+    /// The free space of the file system the directory lives on, in bytes (`Ok(None)`, the
+    /// default: not applicable, for example memory). `Err`: the backend asked the file system
+    /// and the query failed (`statvfs`); the Store operation that consults it fails with it,
+    /// it never reads a failure as "unknown".
+    fn free_space(&self) -> io::Result<Option<u64>> {
+        Ok(None)
     }
 
     /// What the backend found about its OWN integrity when it opened (a container's tables and
     /// records, before any store file is read): damage makes the Store open in maintenance
     /// mode, warnings are reported. Empty (the default) for backends without own metadata.
-    fn check(&self) -> DirCheck {
-        DirCheck::default()
+    /// `Err`: the backend cannot check itself (an I/O error, a poisoned lock): the Store records
+    /// that as damage of the backend ("the backend could not check itself: ...") and opens in
+    /// maintenance mode, as for any other damage.
+    fn check(&self) -> io::Result<DirCheck> {
+        Ok(DirCheck::default())
     }
+}
+
+/// [`StoreDir::check`] as the Store reads it: a backend that cannot check itself is damaged
+/// (the Store opens in maintenance mode and names the error), never "found nothing".
+pub(crate) fn backend_check(dir: &dyn StoreDir) -> DirCheck {
+    dir.check().unwrap_or_else(|err| DirCheck {
+        damage: vec![format!("the backend could not check itself: {err}")],
+        warnings: Vec::new(),
+    })
 }
 
 /// The physical space of a store directory ([`StoreDir::space_usage`]).

@@ -57,7 +57,8 @@ impl<S: PersistentStorage> Store<S> {
             .graph
             .read_checked()
             .map_err(PersistError::Graph)?
-            .get_schema();
+            .get_schema()
+            .map_err(PersistError::Graph)?;
         let location = self.core.shared.dir.display();
         load(
             &self.core.shared.dir,

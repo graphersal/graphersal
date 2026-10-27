@@ -2491,7 +2491,7 @@ impl StoreDir for SingleFileDir {
         })))
     }
 
-    fn space_usage(&self) -> Option<SpaceUsage> {
+    fn space_usage(&self) -> io::Result<Option<SpaceUsage>> {
         self.inner
             .read(|open| {
                 Ok(SpaceUsage::new(
@@ -2499,27 +2499,19 @@ impl StoreDir for SingleFileDir {
                     open.tree.compacted_size().min(open.phys_len),
                 ))
             })
-            .ok()
+            .map(Some)
     }
 
     fn compact(&self) -> io::Result<Option<DirCompaction>> {
         self.inner.compact()
     }
 
-    fn free_space(&self) -> Option<u64> {
-        // `StoreDir::free_space` answers `Option` until the trait itself returns a `Result`
-        // (its methods change separately, part B of the result alignment): until then an
-        // unknown free space is all the trait can say.
-        free_space_at(&self.inner.path).ok().flatten()
+    fn free_space(&self) -> io::Result<Option<u64>> {
+        free_space_at(&self.inner.path)
     }
 
-    fn check(&self) -> DirCheck {
-        self.inner
-            .read(|open| Ok(open.check()))
-            .unwrap_or_else(|err| DirCheck {
-                damage: vec![format!("the file cannot be read: {err}")],
-                warnings: Vec::new(),
-            })
+    fn check(&self) -> io::Result<DirCheck> {
+        self.inner.read(|open| Ok(open.check()))
     }
 }
 
