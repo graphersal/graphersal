@@ -1846,42 +1846,65 @@ fn two_rollbacks_to_the_same_commit_get_their_own_attic_entries() {
     assert_eq!(graph_dump(&Store::open(&dir, options).unwrap()), before);
 }
 
-/// REPRO (branch `nonblocking-readers`, ai/roadmap/snapshot-reads.md section 1): a run that keeps
-/// its unit open between its per-traversal locks, as the playground session does (`begin_run` =
-/// `write().begin_unit()`, then one lock per traversal, then `commit_run`/`rollback_run`), and a
-/// checkpoint encoded from the graph in that window (`checkpoint_merge_bytes(0)`: always from the
-/// graph, as the automatic checkpoint falls back to when the WAL is too large to merge). The
-/// run then fails and rolls back. Nothing it wrote may survive a reopen.
-#[test]
-fn a_checkpoint_while_a_unit_is_open_keeps_no_uncommitted_data() {
-    let dir = TempDir::new("open-unit-checkpoint");
+/// A store whose every checkpoint is encoded from the graph (`checkpoint_merge_bytes(0)`, what
+/// the automatic checkpoint falls back to when the WAL is too large to merge), with one
+/// committed vertex `kept`.
+fn store_with_kept_vertex(dir: &TempDir) -> (Store, StoreOptions) {
     let options = StoreOptions::new()
         .with_checkpoint_after_bytes(0)
         .with_checkpoint_merge_bytes(0);
     let store = Store::create(dir.path(), options.clone()).unwrap();
-    let graph = store.graph().clone();
-    GraphTraversalSource::new(&mut *graph.write())
+    GraphTraversalSource::new(&mut *store.graph().write())
         .add_v("person")
         .property("name", "kept")
         .next()
         .unwrap();
+    (store, options)
+}
 
-    // The run: its unit stays open while the lock is free between its traversals.
-    let mark = graph.write().begin_unit();
+/// A run that keeps ONE unit over several locks, as the playground session does
+/// (`Graph::begin_unit`, one lock per traversal, then `Graph::rollback_unit` on the same
+/// thread), and a checkpoint of another thread (the Store's checkpoint thread) in that window.
+/// The unit wrote, so the checkpoint waits until it closes; the run fails and rolls back, and
+/// nothing it wrote survives a reopen.
+#[test]
+fn a_checkpoint_while_a_unit_is_open_keeps_no_uncommitted_data() {
+    let dir = TempDir::new("open-unit-checkpoint");
+    let (store, options) = store_with_kept_vertex(&dir);
+    let graph = store.graph().clone();
+
+    // The run: its unit stays open while it takes one lock per traversal.
+    let mark = graph.begin_unit();
     GraphTraversalSource::new(&mut *graph.write())
         .add_v("person")
         .property("name", "uncommitted")
         .next()
         .unwrap();
 
-    // Another thread (the Store's checkpoint thread) writes a checkpoint in the window.
-    let checkpointed = std::thread::scope(|s| s.spawn(|| store.checkpoint(None)).join().unwrap());
-
-    // The run fails: its unit is rolled back.
-    graph
-        .write()
-        .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"the script failed"));
-    assert_eq!(names(&graph.read()), ["kept"], "live graph after the rollback");
+    let checkpointed = std::thread::scope(|s| {
+        let checkpoint = s.spawn(|| store.checkpoint(None));
+        // A check, not a synchronization: the checkpoint locks the graph, which the unit holds
+        // exclusively since its write, so it cannot have finished.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !checkpoint.is_finished(),
+            "the checkpoint waits for the unit"
+        );
+        // The run fails: its unit is rolled back.
+        graph
+            .rollback_unit(
+                mark,
+                &graphersal::changes::RollbackReason::failed(&"the script failed"),
+            )
+            .unwrap();
+        checkpoint.join().unwrap()
+    });
+    assert!(checkpointed.is_ok(), "{checkpointed:?}");
+    assert_eq!(
+        names(&graph.read()),
+        ["kept"],
+        "live graph after the rollback"
+    );
     drop(graph);
     store.close().unwrap();
 
@@ -1889,6 +1912,49 @@ fn a_checkpoint_while_a_unit_is_open_keeps_no_uncommitted_data() {
     assert_eq!(
         names(&reopened.graph().read()),
         ["kept"],
-        "reopened store (the checkpoint written in the window: {checkpointed:?})"
+        "reopened store (the checkpoint written after the unit: {checkpointed:?})"
     );
+}
+
+/// The mirror case: the run COMMITS after a checkpoint of another thread was asked for. The
+/// checkpoint waits for the unit and then writes the committed state; the reopened store holds
+/// exactly the committed data and opens without failure.
+#[test]
+fn a_checkpoint_while_a_unit_is_open_keeps_the_committed_data() {
+    let dir = TempDir::new("open-unit-checkpoint-commit");
+    let (store, options) = store_with_kept_vertex(&dir);
+    let graph = store.graph().clone();
+
+    let mark = graph.begin_unit();
+    GraphTraversalSource::new(&mut *graph.write())
+        .add_v("person")
+        .property("name", "committed")
+        .next()
+        .unwrap();
+    let checkpointed = std::thread::scope(|s| {
+        let checkpoint = s.spawn(|| store.checkpoint(None));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !checkpoint.is_finished(),
+            "the checkpoint waits for the unit"
+        );
+        graph.commit_unit(mark).unwrap();
+        checkpoint.join().unwrap()
+    });
+    assert!(checkpointed.is_ok(), "{checkpointed:?}");
+    let mut live = names(&graph.read());
+    live.sort();
+    assert_eq!(live, ["committed", "kept"], "live graph after the commit");
+    drop(graph);
+    store.close().unwrap();
+
+    let reopened = Store::open(dir.path(), options).unwrap();
+    let mut stored = names(&reopened.graph().read());
+    stored.sort();
+    assert_eq!(
+        stored,
+        ["committed", "kept"],
+        "reopened store: {checkpointed:?}"
+    );
+    assert!(reopened.verify().unwrap().is_ok());
 }

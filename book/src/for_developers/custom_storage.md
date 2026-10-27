@@ -40,11 +40,11 @@ a parameter means `Graph<TraversalGraph>`.
    `add_vertex`/`add_edge` (`add_vertex_with`/`add_edge_with` with a pinned time), which fill the
    defaults in from `get_schema()` and then call your `insert_vertex`/`insert_edge` (override
    `add_vertex_with`/`add_edge_with` only to avoid that schema copy).
-2. **`Default`** (required by the DSL and the session). A whole script runs as one unit by moving
-   the storage out of the shared lock while the write lock is held (`std::mem::take`), which
-   leaves an empty instance behind. The session also builds every new graph (a sample, a file
-   load) by reading it into a `TraversalGraph` and copying it into an `S::default()` (through the
-   load sink of a `PersistentStorage`, through the write methods otherwise).
+2. **`Default`** (required by the DSL and the session). The session builds every new graph (a
+   sample, a file load) by reading it into a `TraversalGraph` and copying it into an
+   `S::default()` (through the load sink of a `PersistentStorage`, through the write methods
+   otherwise). A whole script runs as one unit that its thread holds across locks
+   (`Graph::begin_unit`), on your storage in place.
 3. **`Send + Sync + 'static`**, so the graph can be shared between threads.
 4. **Change capture** (optional; needed for commit hooks, dry runs and the Store). A storage that
    claims `change_capture` (and therefore `atomic`) in `capabilities()` builds the `ChangeSet` of

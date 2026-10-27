@@ -967,6 +967,12 @@ impl Session {
         // error leaves nothing behind. The session is single-threaded and owns the graph, so
         // nobody else writes between the statements.
         let mark = self.graph.begin_run();
+        // A panic in the run (an engine bug; the dev server catches it and keeps the session)
+        // rolls the unit back, so the thread does not keep holding it.
+        let unwind_guard = RunUnitGuard {
+            graph: self.graph.clone(),
+            mark: Some(mark),
+        };
         let mut out = match self.engine.eval_with_scope::<Dynamic>(&mut scope, script) {
             Ok(value) => self.classify(value, hint, options, &render),
             Err(err) => Outcome::failed(
@@ -978,6 +984,7 @@ impl Session {
             ),
         };
         drop(scope);
+        unwind_guard.disarm();
         let mut changes = Changes::default();
         let mut change_summary = None;
         if out.ok {
@@ -1702,6 +1709,31 @@ fn type_drift(saved: &GraphSchema, loaded: &GraphSchema) -> Vec<String> {
         }
     }
     out
+}
+
+/// Rolls a run's unit back when the run unwinds before closing it
+/// (`Session::execute_in_scope`); disarmed once the run closes the unit itself.
+struct RunUnitGuard {
+    graph: Arc<dyn SessionGraph>,
+    mark: Option<graphersal::storage::UnitMark>,
+}
+
+impl RunUnitGuard {
+    /// The run closes its unit itself from here on.
+    fn disarm(mut self) {
+        self.mark = None;
+    }
+}
+
+impl Drop for RunUnitGuard {
+    fn drop(&mut self) {
+        if let Some(mark) = self.mark.take() {
+            self.graph.rollback_run(
+                mark,
+                &RollbackReason::failed(&"a panic unwound through the playground run"),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

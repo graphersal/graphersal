@@ -323,8 +323,10 @@ pub fn eval_value_with_limits(
 ///   `before_commit` veto rolls everything back and fails the call with the diagnostic of
 ///   [`GraphError::CommitRejected`](crate::error::GraphError::CommitRejected).
 ///
-/// The graph's write lock is held for the whole script, so no other reader or writer of `graph`
-/// runs between its statements (serializable, no isolation levels). Auto-generated ids are never
+/// The calling thread holds the unit for the whole script ([`Graph::begin_unit`](crate::Graph::begin_unit)):
+/// no other writer (and no other whole-script unit) of `graph` runs between its statements
+/// (serializable, no isolation levels). Other readers go on while the script only reads; from
+/// its first write until it ends they wait, so nobody sees its uncommitted changes. Auto-generated ids are never
 /// reused, also after a rollback. A traversal the script returns without a terminal is not part
 /// of the unit: it runs when the caller renders it ([`render_value`]), after the commit, as a
 /// unit of its own.
@@ -358,14 +360,11 @@ pub fn eval_value_atomic(
     let mut params = Some(params);
     let mut authorizer = Some(authorizer);
     // The body runs once; the options only move the owned arguments into it.
-    let mut body = |private: &Arc<dyn AnyGraph>| {
+    let mut body = || {
         let (Some(params), Some(authorizer)) = (params.take(), authorizer.take()) else {
             return crate::script::plan::UnitBody(Err(body_ran_twice()));
         };
-        crate::script::plan::UnitBody(
-            eval_in_unit(private, script, params, limits, authorizer)
-                .map(|value| retarget_graph(value, private, &shared)),
-        )
+        crate::script::plan::UnitBody(eval_in_unit(&shared, script, params, limits, authorizer))
     };
     shared
         .run_unit(crate::script::plan::UnitKind::Atomic, &mut body)
@@ -386,12 +385,12 @@ pub(crate) fn eval_job_unit(
 ) -> Result<(), Box<rhai::EvalAltResult>> {
     let mut params = Some(params);
     let mut authorizer = Some(authorizer);
-    let mut body = |private: &Arc<dyn AnyGraph>| {
+    let mut body = || {
         let (Some(params), Some(authorizer)) = (params.take(), authorizer.take()) else {
             return crate::script::plan::UnitBody(Err(body_ran_twice()));
         };
         crate::script::plan::UnitBody(
-            eval_in_unit(private, script, params, limits, authorizer).and_then(|value| {
+            eval_in_unit(&shared, script, params, limits, authorizer).and_then(|value| {
                 materialize_traversals(value, limits.effective_max_value_depth())
             }),
         )
@@ -416,7 +415,9 @@ pub(crate) fn eval_job_unit(
 ///   does not move.
 /// - The whole script is one unit, as in [`eval_value_atomic`]: every traversal it runs is a
 ///   savepoint (a failing one that the script handles rolls back only itself and does not
-///   appear in the change set), and the graph's write lock is held for the whole script.
+///   appear in the change set). The calling thread holds the unit for the whole script, as
+///   there: other readers go on while it only reads and wait from its first write until it
+///   ends.
 /// - A failing script returns its error and no change set (everything is rolled back).
 /// - A result that holds a closure or function pointer fails with the diagnostic of
 ///   [`ScriptError::ReturnedClosure`](crate::error::ScriptError::ReturnedClosure).
@@ -453,12 +454,12 @@ pub fn eval_value_dry_run(
     let shared = graph.into_any_graph();
     let mut params = Some(params);
     let mut authorizer = Some(authorizer);
-    let mut body = |private: &Arc<dyn AnyGraph>| {
+    let mut body = || {
         let (Some(params), Some(authorizer)) = (params.take(), authorizer.take()) else {
             return crate::script::plan::UnitBody(Err(body_ran_twice()));
         };
         crate::script::plan::UnitBody(
-            eval_in_unit(private, script, params, limits, authorizer)
+            eval_in_unit(&shared, script, params, limits, authorizer)
                 .and_then(|value| materialize_traversals(value, limits.max_value_depth)),
         )
     };
@@ -484,26 +485,26 @@ fn body_ran_twice() -> Box<rhai::EvalAltResult> {
     }))
 }
 
-/// Evaluates `script` with `params` on the private graph of a whole-script unit
-/// ([`AnyGraph::run_unit`]) and rejects a result that holds a closure: a closure that captured
-/// `g` would point at the private graph, empty once the script ends, so it fails like a
-/// failing script (the caller rolls everything back).
+/// Evaluates `script` with `params` on `graph` inside a whole-script unit
+/// ([`AnyGraph::run_unit`]) and rejects a result that holds a closure: a closure would run
+/// after the unit closed (outside its atomicity, and after a dry run's changes were undone), so
+/// it fails like a failing script (the caller rolls everything back).
 fn eval_in_unit(
-    private: &Arc<dyn AnyGraph>,
+    graph: &Arc<dyn AnyGraph>,
     script: &str,
     params: std::collections::HashMap<String, ElementProperty>,
     limits: &ScriptLimits,
     authorizer: Arc<dyn crate::graph::Authorizer>,
 ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
     let engine = engine_with_limits(limits, authorizer.clone());
-    let mut scope = graph_scope_with_options(private.clone(), &[], authorizer);
+    let mut scope = graph_scope_with_options(graph.clone(), &[], authorizer);
     let max_depth = limits.effective_max_value_depth();
     let evaluated = push_named_params(&mut scope, params, max_depth).and_then(|()| {
         engine
             .eval_with_scope::<Dynamic>(&mut scope, script)
             .map_err(|err| map_eval_error(err, limits))
     })?;
-    // The result is walked recursively below (closures, retargeting, materializing).
+    // The result is walked recursively below (closures, materializing).
     if dynamic_exceeds_depth(&evaluated, max_depth) {
         return Err(script_error(Box::new(value_too_deep(max_depth))));
     }
@@ -598,35 +599,6 @@ fn returned_closure(value: &Dynamic, location: &str) -> Option<String> {
             .find_map(|(key, item)| returned_closure(item, &format!("{base}.{key}")));
     }
     None
-}
-
-/// Points every traversal source in `value` (also inside arrays and maps) that still refers to
-/// the private graph of a whole-script unit back to the shared graph, so a returned traversal
-/// without a terminal runs against the real graph when it is rendered.
-fn retarget_graph(
-    mut value: Dynamic,
-    private: &Arc<dyn AnyGraph>,
-    shared: &Arc<dyn AnyGraph>,
-) -> Dynamic {
-    if let Some(mut source) = value.write_lock::<ScriptGraphTraversalSource>() {
-        // Data pointers: a fat `Arc<dyn AnyGraph>` also carries a vtable pointer.
-        if source
-            .g
-            .as_ref()
-            .is_some_and(|g| super::plan::same_graph(g, private))
-        {
-            source.g = Some(shared.clone());
-        }
-    } else if let Ok(mut items) = value.as_array_mut() {
-        for item in items.iter_mut() {
-            *item = retarget_graph(std::mem::take(item), private, shared);
-        }
-    } else if let Ok(mut map) = value.as_map_mut() {
-        for item in map.values_mut() {
-            *item = retarget_graph(std::mem::take(item), private, shared);
-        }
-    }
-    value
 }
 
 /// Names [`graph_scope`] reserves for the DSL globals, which a parameter may not shadow. The

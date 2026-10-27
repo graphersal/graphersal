@@ -94,6 +94,7 @@ mod gql_temporal_tests;
 mod gql_tests;
 mod gql_write_integration_tests;
 mod gql_write_tests;
+mod graph_unit_lock_tests;
 mod graphml_edge_case_tests;
 mod graphml_empty_value_tests;
 mod graphml_roundtrip_tests;

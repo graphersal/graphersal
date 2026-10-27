@@ -1776,6 +1776,16 @@ pub enum GraphError {
         source: crate::graph::HookError,
     },
 
+    /// A unit of a [`Graph`](crate::Graph) was closed or asked about on a thread that holds
+    /// none: a unit opened with `Graph::begin_unit` belongs to the thread that opened it.
+    /// Nothing was closed. `operation` names what was asked.
+    #[error("Cannot {operation}: the current thread holds no unit of this graph")]
+    #[non_exhaustive]
+    UnitNotHeld {
+        /// What was asked ("commit a unit", "roll back a unit", ...).
+        operation: &'static str,
+    },
+
     /// The storage does not support an operation: a [`GraphStorage`] method the storage leaves
     /// at its refusing default (schemas, the catalog, compressed properties, commit hooks on a
     /// storage that is not atomic, see [`StorageCapabilities`](crate::graph::StorageCapabilities)),
@@ -2198,6 +2208,15 @@ impl DiagnosticError for GraphError {
                  it between queries, for example g.mark(\"before-import\"), not inside a \
                  transaction. A storage that keeps no journal (a custom GraphStorage without \
                  one) cannot set marks at all."
+                    .to_string(),
+            ),
+            GraphError::UnitNotHeld { .. } => Some(
+                "A unit opened with Graph::begin_unit belongs to the thread that opened it: \
+                 close it on that thread, innermost unit first, with Graph::commit_unit, \
+                 Graph::commit_unit_with, Graph::rollback_unit or Graph::discard_unit, passing \
+                 the mark begin_unit returned. To run work of another thread inside one unit, \
+                 send the work to the owning thread instead of the mark; for a unit inside one \
+                 lock, use Transactional::transaction on the guard of Graph::write."
                     .to_string(),
             ),
             GraphError::MarkRejected { .. } => Some(

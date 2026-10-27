@@ -52,10 +52,10 @@ mod sealed {
 /// path (the DSL, the session, the Store) and what stays `TraversalGraph`-only (scratch graphs,
 /// compressed properties, a `withSideEffect` subgraph target).
 ///
-/// **Why `Default`:** a front end runs a whole script as one unit by moving the storage out of
-/// the shared lock into a private one while it holds the write lock (`std::mem::take`), which
-/// leaves an empty storage behind. An in-memory storage can always be empty, so the bound is
-/// cheap (design decision 1).
+/// **Why `Default`:** the front ends build new graphs of the served storage (the session
+/// copies every sample and loaded file into an `S::default()`). An in-memory storage can always
+/// be empty, so the bound is cheap (design decision 1). (A whole script runs as one unit held by
+/// its thread across locks, `Graph::begin_unit`; it no longer needs the bound itself.)
 ///
 /// Every method is ONE operation on the locked graph: the reads take the read lock, the
 /// writes the write lock, for the duration of the call. The methods mirror what the script
@@ -279,16 +279,13 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     fn run_plan(&self, plan: &ScriptPlan<'_>, terminal: Terminal) -> TerminalOutput;
 
     /// Runs `body` as ONE unit over the whole script (`eval_value_atomic`,
-    /// `eval_value_dry_run`): holds the write lock, moves the storage into a private graph that
-    /// `body` gets as `Arc<dyn AnyGraph>`, closes the unit as `kind` says and moves the storage
-    /// back, also on unwind. Internal to the script layer like [`Self::run_plan`].
+    /// `eval_value_dry_run`, a writing saved-query call): the current thread holds the unit
+    /// across locks (`Graph::begin_unit`), `body` runs the script on this same graph (its
+    /// terminals get views of the held lock), and the unit closes as `kind` says, also on
+    /// unwind. Internal to the script layer like [`Self::run_plan`].
     #[cfg(feature = "script")]
     #[doc(hidden)]
-    fn run_unit(
-        &self,
-        kind: UnitKind,
-        body: &mut dyn FnMut(&Arc<dyn AnyGraph>) -> UnitBody,
-    ) -> UnitResult;
+    fn run_unit(&self, kind: UnitKind, body: &mut dyn FnMut() -> UnitBody) -> UnitResult;
 }
 
 impl<S> sealed::Sealed for Graph<S> where S: GraphStorage + Default + Send + Sync + 'static {}
@@ -503,11 +500,7 @@ where
     }
 
     #[cfg(feature = "script")]
-    fn run_unit(
-        &self,
-        kind: UnitKind,
-        body: &mut dyn FnMut(&Arc<dyn AnyGraph>) -> UnitBody,
-    ) -> UnitResult {
+    fn run_unit(&self, kind: UnitKind, body: &mut dyn FnMut() -> UnitBody) -> UnitResult {
         crate::script::plan::run_unit_on(self, kind, body)
     }
 }

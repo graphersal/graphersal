@@ -107,6 +107,16 @@ assert!(result.is_ok());
   commit with empty metadata.
 - **No isolation needed.** `&mut` excludes every other reader and writer for the duration; a
   shared `Graph` is used through its write lock (`graph.write().transaction(..)`).
+- **A unit lives inside one guard.** A unit opened on the storage through a write guard
+  (`graph.write().begin_unit()`) must be closed under that same guard: once the guard is dropped,
+  other threads read its uncommitted changes (a Store checkpoint could even write them to disk).
+  To keep one unit over several locks, open it on the shared graph with `Graph::begin_unit()` and
+  close it on the same thread with `Graph::commit_unit`, `commit_unit_with`, `rollback_unit` or
+  `discard_unit`: the thread then holds the unit, its own `read()`/`write()` calls run inside it,
+  other threads read on until its first write and wait from then on until it closes, other
+  writers wait for it, and a nested `begin_unit()` on that thread is a savepoint. Closing it from
+  another thread fails with `GraphError::UnitNotHeld`. This is what the whole-script units below
+  and the playground's runs use.
 - A rolled-back transaction leaves gaps in the automatic ids (they are never reused).
 
 `Execution::mutated()` (Rhai: `r.mutated`) of a traversal inside a transaction says whether it
@@ -165,13 +175,17 @@ g.V().values("name").asNumber(GType.LONG).toList();       // fails: the whole sc
   returned.
 - A script that ends normally commits once (one `ChangeSet`); a commit hook's veto rolls it back
   and is returned as the script's error.
-- The graph's write lock is held for the whole script: no other reader or writer of the same
-  graph runs between its statements.
+- The calling thread holds the unit for the whole script (`Graph::begin_unit`): no other writer
+  (and no other whole-script unit) of the same graph runs between its statements. Other readers
+  are not blocked while the script only reads: they go on and see the committed state. From the
+  script's first write until it ends they wait, so nobody ever sees its uncommitted changes.
+  Opening the unit and closing a unit that never wrote take the lock exclusively for a moment
+  (the storage's own `begin_unit`/`commit_unit` need it), waiting for the readers in flight.
 - A traversal the script returns without a terminal is not part of the unit: it runs when the
   host renders it, after the commit, as a unit of its own.
-- The script must not return a closure or function pointer (also inside an array or a map): a
-  closure that captured `g` would point at the empty private graph once the script ends. It fails
-  with `ScriptError::ReturnedClosure` and everything is rolled back; return data or a traversal.
+- The script must not return a closure or function pointer (also inside an array or a map): it
+  would run after the unit closed, outside its atomicity. It fails with
+  `ScriptError::ReturnedClosure` and everything is rolled back; return data or a traversal.
 - The authorizer is asked per traversal as everywhere else ([Permissions](permissions.md)).
 
 Front ends: the **playground** runs every script as one unit (it also counts the implicit
@@ -211,8 +225,9 @@ assert_eq!(graph.read().vertex_count(), 6); // untouched
 - The rules of [Dry run](#dry-run) apply: the graph is left as it was, no commit hook is called,
   `commit_seq()` is `0`, a failing traversal the script handles is a savepoint and is not in the
   change set, and a failing script returns its error and no change set.
-- As in a whole-script unit, the write lock is held for the whole script, and a returned closure
-  fails with `ScriptError::ReturnedClosure`.
+- As in a whole-script unit, the calling thread holds the unit for the whole script (other
+  readers go on while it only reads and wait from its first write until it ends), and a returned
+  closure fails with `ScriptError::ReturnedClosure`.
 - A traversal the script returns without a terminal (also inside an array or a map) runs
   **inside** the dry run, as if it ended in `toList()`, so its result reflects the previewed
   changes (`graphersal::script::materialize_traversals`).

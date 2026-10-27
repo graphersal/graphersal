@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::error::{BoxedTraverserError, GraphError, TraverserError, TraverserResult};
-use crate::graph::{AnyGraph, ChangeSet, Transactional};
+use crate::graph::{AnyGraph, ChangeSet};
 use crate::traversal::source::{ExecutedItems, ListItem};
 
 /// A script plan as a terminal hands it to [`AnyGraph::run_plan`]: the script source (its steps,
@@ -192,115 +192,65 @@ pub struct UnitBody(pub(crate) Result<Dynamic, Box<rhai::EvalAltResult>>);
 pub struct UnitResult(pub(crate) Result<(Dynamic, Option<ChangeSet>), Box<rhai::EvalAltResult>>);
 
 /// The body of [`AnyGraph::run_unit`] for every `Graph<S>`: the whole-script unit of
-/// `eval_value_atomic` / `eval_value_dry_run`.
+/// `eval_value_atomic` / `eval_value_dry_run` / `eval_job_unit` and of a writing saved-query
+/// call.
 ///
-/// The script's terminals lock their graph themselves, so the shared lock cannot simply be held
-/// while they run. Instead the shared write lock is held for the whole body (nobody else sees the
-/// graph in between), the storage is moved into a private `Graph<S>` (`std::mem::take`, hence
-/// `S: Default`), and the body runs on that one, whose locks are uncontended. The open unit lives
-/// in the storage and moves along; the storage moves back when the body returns, also when it
-/// unwinds ([`RestoreGraph`]), after the unit was closed.
+/// The unit is held by the current thread across the script's locks ([`Graph::begin_unit`]):
+/// the body's terminals lock the same shared graph and get views of the held lock, so the
+/// script runs inside the unit. Until its first write the unit holds the lock upgradable and
+/// other threads keep reading; from its first write on, the lock is exclusive until the unit
+/// closes, so nobody sees its uncommitted changes. Inside a unit the thread already holds (a
+/// saved query called by a whole-script unit) it is a savepoint. A panic in the body closes the
+/// unit (rollback, or discard for a dry run) before it continues, which also releases the lock.
 pub(crate) fn run_unit_on<S: GraphStorage + Default + Send + Sync + 'static>(
     graph: &Graph<S>,
     kind: UnitKind,
-    body: &mut dyn FnMut(&Arc<dyn AnyGraph>) -> UnitBody,
+    body: &mut dyn FnMut() -> UnitBody,
 ) -> UnitResult {
-    let mut shared = graph.write();
-    let (atomic, metadata) = match kind {
-        UnitKind::Atomic => (true, None),
-        UnitKind::Call(metadata) => (true, Some(metadata)),
-        UnitKind::DryRun => (false, None),
-    };
-    UnitResult(match atomic {
-        true => in_private_lock(graph, &mut *shared, |private, any| {
-            let mark = private.write().begin_unit();
-            // A panic (an engine bug) rolls the whole script back before it continues to the
-            // host; the storage then moves back into the shared lock.
-            let evaluated = crate::graph::storage::close_on_unwind(
-                &mut (),
-                |_| body(any).0,
-                |_| {
-                    private.write().rollback_unit(
-                        mark,
-                        &crate::graph::RollbackReason::failed(&crate::graph::storage::UNWOUND),
-                    )
-                },
-            );
-            match evaluated {
-                Ok(value) => {
-                    let committed = {
-                        let mut storage = private.write();
-                        if let Some(metadata) = metadata {
-                            storage.set_unit_metadata(metadata);
-                        }
-                        storage.commit_unit(mark)
-                    };
-                    match committed {
-                        Ok(()) => Ok((value, None)),
-                        Err(err) => Err(script_error(Box::new(TraverserError::from(err)))),
-                    }
-                }
-                Err(err) => {
-                    private
-                        .write()
-                        .rollback_unit(mark, &crate::graph::RollbackReason::failed(&err));
-                    Err(err)
-                }
-            }
-        }),
-        false => shared
-            .dry_run(|unit| {
-                in_private_lock(graph, unit, |_, any| body(any).0).map_err(DryRunFailure)
-            })
-            .map(|(value, changes)| (value, Some(changes)))
-            .map_err(|failure| failure.0),
+    let as_script_error = |err: GraphError| script_error(Box::new(TraverserError::from(err)));
+    let mark = graph.begin_unit();
+    let dry_run = kind == UnitKind::DryRun;
+    // A panic (an engine bug) closes the unit before it continues to the host. The close
+    // cannot fail here: this thread holds the unit it just opened.
+    let evaluated = crate::graph::storage::close_on_unwind(
+        &mut (),
+        |_| body().0,
+        |_| {
+            let _ = match dry_run {
+                true => graph.discard_unit(mark).map(|_| ()),
+                false => graph.rollback_unit(
+                    mark,
+                    &crate::graph::RollbackReason::failed(&crate::graph::storage::UNWOUND),
+                ),
+            };
+        },
+    );
+    UnitResult(match (kind, evaluated) {
+        (UnitKind::DryRun, Ok(value)) => graph
+            .discard_unit(mark)
+            .map(|changes| (value, Some(changes)))
+            .map_err(as_script_error),
+        (UnitKind::DryRun, Err(err)) => {
+            // The unit is closed the same way and its change set dropped; on a storage
+            // without change capture its `Unsupported` is dropped too: the script's own error
+            // is the one to report (as `Transactional::dry_run` does).
+            let _ = graph.discard_unit(mark);
+            Err(err)
+        }
+        (UnitKind::Atomic, Ok(value)) => graph
+            .commit_unit(mark)
+            .map(|()| (value, None))
+            .map_err(as_script_error),
+        (UnitKind::Call(metadata), Ok(value)) => graph
+            .commit_unit_with(mark, metadata)
+            .map(|()| (value, None))
+            .map_err(as_script_error),
+        (UnitKind::Atomic | UnitKind::Call(_), Err(err)) => {
+            // Cannot fail: this thread holds the unit (see above).
+            let _ = graph.rollback_unit(mark, &crate::graph::RollbackReason::failed(&err));
+            Err(err)
+        }
     })
-}
-
-/// The error of a script dry run: a script error, or the storage's own failure to discard the
-/// unit, as a script error ([`Transactional::dry_run`] needs `E: From<GraphError>`).
-struct DryRunFailure(Box<rhai::EvalAltResult>);
-
-impl From<GraphError> for DryRunFailure {
-    fn from(err: GraphError) -> Self {
-        DryRunFailure(script_error(Box::new(TraverserError::from(err))))
-    }
-}
-
-/// Runs `body` with the storage in `unit` moved into a private `Graph<S>` (given to `body` both
-/// typed and as `Arc<dyn AnyGraph>`), and moves it back when `body` returns, also when it
-/// unwinds ([`RestoreGraph`]). The caller closes its unit on unwind itself, so a panic never
-/// leaves a half-applied script behind. The private graph has the dyn-boundary capabilities of
-/// `template`, the shared graph (`Graph::new_like`: a persistent graph stays writable as a
-/// snapshot inside the unit).
-fn in_private_lock<S, R>(
-    template: &Graph<S>,
-    unit: &mut S,
-    body: impl FnOnce(&Arc<Graph<S>>, &Arc<dyn AnyGraph>) -> R,
-) -> R
-where
-    S: GraphStorage + Default + Send + Sync + 'static,
-{
-    let private: Arc<Graph<S>> = Arc::new(template.new_like(std::mem::take(unit)));
-    let any: Arc<dyn AnyGraph> = private.clone();
-    let _restore = RestoreGraph {
-        unit,
-        private: &private,
-    };
-    body(&private, &any)
-}
-
-/// Moves the storage of a whole-script unit back from its private lock into the shared one when
-/// [`in_private_lock`] ends, also when it unwinds.
-struct RestoreGraph<'a, S: GraphStorage> {
-    unit: &'a mut S,
-    private: &'a Arc<Graph<S>>,
-}
-
-impl<S: GraphStorage> Drop for RestoreGraph<'_, S> {
-    fn drop(&mut self) {
-        std::mem::swap(self.unit, &mut *self.private.write());
-    }
 }
 
 /// The graph a source without one (`g: None`, such as the `mergeV()` identity child) runs on:

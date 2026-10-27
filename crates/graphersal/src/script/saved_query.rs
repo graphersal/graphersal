@@ -759,36 +759,22 @@ fn run_returned_writes(
 }
 
 /// What a saved query that writes returns, made safe to use after its unit: every traversal in
-/// `value` (also inside arrays and maps, bounded by `levels`) that targets the unit's `private`
-/// graph is retargeted to the caller's `shared` one, and every traversal gets the read-only
-/// `access` (it runs outside the unit and outside the query's effects).
-fn seal_returned(
-    mut value: Dynamic,
-    private: &Arc<dyn AnyGraph>,
-    shared: &Arc<dyn AnyGraph>,
-    access: &Arc<access::ScriptAccess>,
-    levels: usize,
-) -> Dynamic {
+/// `value` (also inside arrays and maps, bounded by `levels`) gets the read-only `access` (it
+/// runs outside the unit and outside the query's effects).
+fn seal_returned(mut value: Dynamic, access: &Arc<access::ScriptAccess>, levels: usize) -> Dynamic {
     if let Some(mut source) = value.write_lock::<ScriptGraphTraversalSource>() {
-        if source
-            .g
-            .as_ref()
-            .is_some_and(|g| plan::same_graph(g, private))
-        {
-            source.g = Some(shared.clone());
-        }
         source.access = access.clone();
     } else if let Some(inner) = levels.checked_sub(1)
         && let Ok(mut items) = value.as_array_mut()
     {
         for item in items.iter_mut() {
-            *item = seal_returned(std::mem::take(item), private, shared, access, inner);
+            *item = seal_returned(std::mem::take(item), access, inner);
         }
     } else if let Some(inner) = levels.checked_sub(1)
         && let Ok(mut map) = value.as_map_mut()
     {
         for item in map.values_mut() {
-            *item = seal_returned(std::mem::take(item), private, shared, access, inner);
+            *item = seal_returned(std::mem::take(item), access, inner);
         }
     }
     value
@@ -1673,13 +1659,12 @@ impl ScriptGraphTraversalSource {
         let metadata = CommitMetadata::new()
             .with_attribute("saved_query", name)
             .with_attribute("saved_query_args", arguments.into_property());
-        // ONE unit over the whole body (a savepoint inside an open one): the storage moves into
-        // a private graph the body writes. A returned traversal that writes runs in the unit
-        // too and is replaced by a reading one over its results; what is returned is then
-        // retargeted to the caller's graph and keeps only the read-only access (a returned
-        // traversal runs after the unit).
+        // ONE unit over the whole body (a savepoint inside an open one), held by this thread
+        // across the body's locks. A returned traversal that writes runs in the unit too and is
+        // replaced by a reading one over its results; what is returned then keeps only the
+        // read-only access (a returned traversal runs after the unit).
         let mut values = Some(values);
-        let mut body = |private: &Arc<dyn AnyGraph>| {
+        let mut body = || {
             let Some(values) = values.take() else {
                 return plan::UnitBody(Err(fail(ScriptError::InvalidQueryBody {
                     query: name.to_string(),
@@ -1692,7 +1677,7 @@ impl ScriptGraphTraversalSource {
                     compiled,
                     query,
                     name,
-                    private,
+                    graph,
                     writing.clone(),
                     values,
                     &bound,
@@ -1707,7 +1692,7 @@ impl ScriptGraphTraversalSource {
                     })),
                     None => Ok(value),
                 })
-                .map(|value| seal_returned(value, private, graph, &read_only, depth)),
+                .map(|value| seal_returned(value, &read_only, depth)),
             )
         };
         graph

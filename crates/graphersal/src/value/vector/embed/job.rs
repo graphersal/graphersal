@@ -201,10 +201,13 @@ impl<S: GraphStorage> Graph<S> {
     /// slow embedder runs. `progress` gets the report after every page; `cancel` stops the job
     /// between pages and inside the embedder ([`EmbedContext::check`]).
     ///
-    /// When the storage is inside an open unit that spans locks (a whole-script unit of the
-    /// script layer), the job runs every phase under one write lock instead, the pages
-    /// becoming savepoints of that unit. Never call it while holding a lock of this graph
-    /// (a deadlock): inside a transaction use [`EmbedJob::run_in`].
+    /// When the current thread holds a unit of this graph ([`Graph::begin_unit`]: a
+    /// whole-script unit of the script layer), or the storage is inside an open unit that
+    /// spans locks opened without one, the job runs every phase under one write lock instead,
+    /// the pages becoming savepoints of that unit (inside a held unit, that write makes the
+    /// unit exclusive until it closes). A unit another thread holds is not this job's: each
+    /// page's write waits for it, as any writer does. Never call it while holding a guard of this graph (a deadlock): inside a
+    /// transaction use [`EmbedJob::run_in`].
     ///
     /// Fails with [`EmbedJobError`] carrying the partial report.
     pub fn embed_property(
@@ -214,7 +217,8 @@ impl<S: GraphStorage> Graph<S> {
         cancel: &CancelToken,
         progress: &mut dyn FnMut(&EmbedReport),
     ) -> Result<EmbedReport, EmbedJobError> {
-        if self.read().unit_started_at().is_some() {
+        // A unit another thread holds shows in `unit_started_at` too: not this job's unit.
+        if self.holds_unit() || (!self.unit_held() && self.read().unit_started_at().is_some()) {
             return job.run_in(&mut *self.write(), embedders, cancel, progress);
         }
         run(&mut Shared(self), job, embedders, cancel, progress)

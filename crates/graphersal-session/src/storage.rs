@@ -70,8 +70,8 @@ pub fn unsupported_text(what: &str, storage: &str) -> String {
 /// errors).
 ///
 /// Blanket-implemented for every [`Graph<S>`](Graph) with `S: GraphStorage + Default + Send +
-/// Sync + 'static` (the `Default` of [`AnyGraph`]: a whole-script unit moves the storage out of
-/// the lock). Internal like the rest of this crate: methods are added as the session needs
+/// Sync + 'static` (the `Default` of [`AnyGraph`]: the session builds new graphs of the served
+/// storage). Internal like the rest of this crate: methods are added as the session needs
 /// them.
 pub trait SessionGraph: AnyGraph {
     /// The number of vertices.
@@ -467,19 +467,25 @@ where
     }
 
     fn begin_run(&self) -> UnitMark {
-        self.write().begin_unit()
+        // Held by this thread across the run's locks (`Graph::begin_unit`): other threads (a
+        // Store's checkpoint) never see the run's uncommitted changes.
+        Graph::begin_unit(self)
     }
 
     fn run_changes(&self, mark: UnitMark) -> UnitChanges {
-        self.read().unit_changes(mark)
+        // `UnitNotHeld` only when called on another thread than `begin_run`: nothing changed
+        // in a unit this thread holds.
+        Graph::unit_changes(self, mark).unwrap_or_default()
     }
 
     fn commit_run(&self, mark: UnitMark) -> Result<(), GraphError> {
-        self.write().commit_unit(mark)
+        Graph::commit_unit(self, mark)
     }
 
     fn rollback_run(&self, mark: UnitMark, reason: &RollbackReason) {
-        self.write().rollback_unit(mark, reason);
+        // `UnitNotHeld` only when called on another thread than `begin_run`, where there is
+        // nothing to roll back.
+        let _ = Graph::rollback_unit(self, mark, reason);
     }
 
     fn register_hook(&self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
