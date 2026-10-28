@@ -370,32 +370,36 @@ fn a_bad_ai_file_stops_the_server_before_it_starts() {
     assert_eq!(res.code, 2);
     assert!(res.stderr.contains("--ai needs --server"), "{}", res.stderr);
 
-    let missing = temp_path("missing_ai.json");
-    let missing = missing.to_str().expect("utf-8 path");
-    let res = run(&["--server", "--port", "0", "--ai", missing], "");
-    assert_eq!(res.code, 2);
-    assert!(
-        res.stderr.contains("cannot read the --ai file"),
-        "{}",
-        res.stderr
-    );
+    // The checks of the file itself need the `ai` feature.
+    #[cfg(feature = "ai")]
+    {
+        let missing = temp_path("missing_ai.json");
+        let missing = missing.to_str().expect("utf-8 path");
+        let res = run(&["--server", "--port", "0", "--ai", missing], "");
+        assert_eq!(res.code, 2);
+        assert!(
+            res.stderr.contains("cannot read the --ai file"),
+            "{}",
+            res.stderr
+        );
 
-    let file = temp_path("bad_ai.json");
-    std::fs::write(
-        &file,
-        r#"{"provider": "openai", "model": "m", "api_key": "k", "readonly": true}"#,
-    )
-    .expect("write the --ai file");
-    let path = file.to_str().expect("utf-8 path");
-    let res = run(&["--server", "--port", "0", "--ai", path], "");
-    let _ = std::fs::remove_file(&file);
-    assert_eq!(res.code, 2);
-    assert!(
-        res.stderr.contains("did you mean \"read_only\"?"),
-        "{}",
-        res.stderr
-    );
-    assert!(!res.stdout.contains("http://"), "the server must not start");
+        let file = temp_path("bad_ai.json");
+        std::fs::write(
+            &file,
+            r#"{"provider": "openai", "model": "m", "api_key": "k", "readonly": true}"#,
+        )
+        .expect("write the --ai file");
+        let path = file.to_str().expect("utf-8 path");
+        let res = run(&["--server", "--port", "0", "--ai", path], "");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(res.code, 2);
+        assert!(
+            res.stderr.contains("did you mean \"read_only\"?"),
+            "{}",
+            res.stderr
+        );
+        assert!(!res.stdout.contains("http://"), "the server must not start");
+    }
 }
 
 #[test]
@@ -3663,13 +3667,16 @@ fn store_upgrade_converts_a_store_of_graphersal_0_1() {
         res.stderr
     );
     // The dev server does not start on it either, with the same help.
-    let res = run(&["--graph", &old, "--server", "--port", "0"], "");
-    assert_eq!(res.code, 1);
-    assert!(
-        res.stderr.contains("graphersal store upgrade"),
-        "{}",
-        res.stderr
-    );
+    #[cfg(feature = "dev-server")]
+    {
+        let res = run(&["--graph", &old, "--server", "--port", "0"], "");
+        assert_eq!(res.code, 1);
+        assert!(
+            res.stderr.contains("graphersal store upgrade"),
+            "{}",
+            res.stderr
+        );
+    }
     let res = run(&["store", "upgrade", &old], "");
     assert_eq!(
         res.code, 2,

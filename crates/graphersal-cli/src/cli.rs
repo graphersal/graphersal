@@ -157,23 +157,23 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
         |err: graphersal::vector::EmbedError| format!("{err}\nHelp: {}", err.help());
     #[allow(unused_mut)]
     let mut builder = graphersal::vector::Embedders::builder();
+    #[cfg(feature = "model2vec")]
     for (name, spec) in &cli.embedders {
-        #[cfg(feature = "model2vec")]
-        {
-            let model = crate::embed_model::load_embedder(name, spec)?;
-            let (repo, license) = crate::embed_model::embedder_license(spec);
-            serve_model(ServedModel {
-                name: name.clone(),
-                identity: graphersal::vector::Embedder::info(&model).model.to_string(),
-                label: repo.unwrap_or_else(|| spec.clone()),
-                license,
-                source: "--embedder".to_string(),
-            });
-            builder = builder
-                .with(Arc::new(model))
-                .map_err(|err| format!("--embedder {name}={spec}: {}", registry_error(err)))?;
-        }
-        #[cfg(not(feature = "model2vec"))]
+        let model = crate::embed_model::load_embedder(name, spec)?;
+        let (repo, license) = crate::embed_model::embedder_license(spec);
+        serve_model(ServedModel {
+            name: name.clone(),
+            identity: graphersal::vector::Embedder::info(&model).model.to_string(),
+            label: repo.unwrap_or_else(|| spec.clone()),
+            license,
+            source: "--embedder".to_string(),
+        });
+        builder = builder
+            .with(Arc::new(model))
+            .map_err(|err| format!("--embedder {name}={spec}: {}", registry_error(err)))?;
+    }
+    #[cfg(not(feature = "model2vec"))]
+    if let Some((name, spec)) = cli.embedders.first() {
         return Err(format!(
             "--embedder {name}={spec}: this graphersal was built without the `model2vec` \
              feature (real embedding models); only the built-in hash-ngram/1 is available"
@@ -313,6 +313,7 @@ fn register_stored_models(
 /// variable when it names one (optionally with a leading `:`), else the target of the
 /// `/etc/localtime` link (`.../zoneinfo/Europe/Berlin`); `None` when neither tells (the jobs
 /// then run in UTC).
+#[cfg(feature = "dev-server")]
 pub fn local_time_zone() -> Option<String> {
     if let Ok(tz) = std::env::var("TZ") {
         let name = tz.trim_start_matches(':');
