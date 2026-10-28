@@ -82,9 +82,18 @@ methods, `shrink_to_fit`, `execution_policy`, and on `PersistentStorage` `clear`
 instead of an empty or made-up answer; the defaults return `Ok` of what a storage without the
 feature reports. The engine reads these once per query or unit, never per traverser, and fails
 the query, import or transaction with the error, before anything executes where it can. A failed
-`rollback_unit` still closes the unit: the caller gets `GraphError::RollbackFailed` (naming the
-error that caused the rollback), the graph stays usable for the next operation, and what the
-backend holds afterwards is the storage's responsibility. `TraversalGraph` never fails an element
+`rollback_unit` still closes the unit and the caller gets `GraphError::RollbackFailed` (naming
+the error that caused the rollback), but a storage that returns `Err` from `rollback_unit` is
+treated as being in an unknown state: it must either have fully undone the unit (then it returns
+`Ok`) or consider itself failed. Behind a `Graph` the failure **poisons the graph**: every later
+read, write, unit, traversal, import and session operation on it fails with
+`GraphError::Poisoned` (whose help says to reopen or recover the storage), and `Graph::read()` /
+`write()` panic. The same holds for a `discard_unit` that fails other than with the `Unsupported`
+of a storage without change capture, and for a rollback during a panic's unwinding. There is no
+way back in place: the host drops the graph and reopens the storage; `Graph::is_poisoned()` and
+`Graph::poison_cause()` tell what happened, and `Graph::into_inner()` still hands the storage out
+to close or salvage it. A bare storage (a `&mut S` with `Transactional`) has no graph to poison:
+the caller only gets the error. `TraversalGraph` never fails an element
 read and its methods are inlined, so the `Result` costs nothing on the hot paths (measured with
 the Divan bench before the change). The conformance suite has a storage that fails each of these
 groups on purpose (`graphersal-storage-tests`, `failing`: element scans, property reads,

@@ -91,6 +91,11 @@ assert!(result.is_ok());
   on (TinkerPop / SQL behaviour).
 - **`Err` from the closure** rolls back everything the transaction changed. The commit hooks get
   `after_rollback` (`RollbackReason::Failed`) when it had changed something.
+- **A rollback that fails** (only a host's own storage can fail one; `TraversalGraph` and the
+  Store cannot) closes the unit and reports `GraphError::RollbackFailed`. The storage is then in
+  an unknown state, so a `Graph` holding it is **poisoned**: every later read and write fails
+  with `GraphError::Poisoned` until the host drops the graph and reopens the storage
+  (`Graph::is_poisoned()`; book page "Custom Storages").
 - **`Ok` commits once:** one commit sequence number and one `ChangeSet` for the whole transaction.
 - **A veto.** When a hook's `before_commit` refuses the change set, everything is rolled back and
   the call returns `E::from(GraphError::CommitRejected { hook, source })`; `source` is the hook's

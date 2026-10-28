@@ -91,6 +91,17 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `begin_unit_at`, `next_unit_started_at`, `rollback_unit`, `unit_changes`, `set_unit_metadata`,
   `capabilities`, `last_commit_seq`. A failed `rollback_unit` still closes the unit; the engine
   reports `GraphError::RollbackFailed`.
+- Behaviour (user decision 2026-10-28): a failed rollback POISONS the `Graph` (was: "the graph
+  stays usable"). When a host storage's `rollback_unit` (or `discard_unit`, other than the
+  `Unsupported` of a storage without change capture) fails in any unit the engine closes on a
+  `Graph` (a traversal, a transaction or dry run on a write view, an import, a change-set apply,
+  a held unit's close, a panic unwinding through a unit), the graph refuses every later data
+  operation with the new `GraphError::Poisoned { cause }` (`read_checked`, `write_checked`,
+  `try_write_checked`, `begin_unit`, the closes of a held unit, the `AnyGraph` methods, sessions;
+  `try_read`/`try_write` answer `None`) and `Graph::read()`/`write()` panic. No unpoison: drop the
+  graph and reopen the storage. `TraversalGraph` and the Store cannot get there (their rollback
+  cannot fail). Upgrade step for a host storage: return `Err` from `rollback_unit` only when the
+  storage really is in an unknown state.
 - `GraphStorage`, the element reads too: `vertex_count`/`edge_count` -> `Result<usize, _>`,
   `vertices`/`edges`/`out_edges`/`in_edges` -> `Result<impl Iterator, _>` (one `Result` per
   call, never per item), `vertices_by_label`/`edges_by_label` -> `Result<Box<dyn Iterator>, _>`
@@ -117,7 +128,9 @@ never answers a failure with an empty or default value. The upgrade step for eac
 - Added (not breaking): `Graph::try_write_checked`, `UserJobs`, `NotScheduledJob`,
   `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`,
   `GraphError::StorageFailed` (`GraphError::storage_failed`), `GraphError::RollbackFailed`
-  (`GraphError::rollback_failed`), `graphersal-storage-tests`' `failing::Failing`.
+  (`GraphError::rollback_failed`), `GraphError::Poisoned` (`GraphError::poisoned`),
+  `Graph::is_poisoned`, `Graph::poison_cause`, `graphersal-storage-tests`' `failing::Failing`
+  (with the `discard_unit` fault).
 
 `graphersal-session` (internal, listed for the CLI and the wasm crate):
 

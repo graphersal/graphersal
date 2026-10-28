@@ -1,6 +1,8 @@
 //! A storage whose backend fails ([`Failing`]): the engine reports the storage's error as the
 //! query's (or the unit's) error, never panics, never answers with made-up data, and the graph
-//! stays usable once the backend is back.
+//! stays usable once the backend is back. The exception is a failed rollback: behind a `Graph`
+//! it poisons the graph (the storage is in an unknown state), which then refuses every read and
+//! write; a bare storage is not poisoned (poisoning is a property of `Graph`).
 
 use std::error::Error as _;
 
@@ -169,7 +171,8 @@ fn a_failed_rollback_closes_the_unit_and_reports_both_errors() {
     );
     assert!(text.contains("failed to roll a unit back"), "{text}");
     Faults::set(&faults.rollback_unit, false);
-    // The unit is closed: the graph serves the next unit normally.
+    // The unit is closed. On a bare storage nothing is poisoned (see
+    // `a_failed_rollback_poisons_the_graph` for a `Graph`): this storage serves the next unit.
     assert_eq!(
         storage.vertex_count().unwrap(),
         6,
@@ -337,4 +340,206 @@ fn a_unit_clock_failure_fails_the_create_and_changes_nothing() {
     );
     Faults::set(&faults.unit_started_at, false);
     assert_eq!(storage.vertex_count().unwrap(), 6);
+}
+
+/// A traversal on a write view whose unit cannot be rolled back.
+fn fail_with_a_broken_rollback(graph: &Graph<Failing>) -> String {
+    let mut write = graph.write_checked().unwrap();
+    let err = GraphTraversalSource::new(&mut *write)
+        .add_v("ghost")
+        .constant("x")
+        .as_number(GType::LONG)
+        .iterate()
+        .unwrap_err();
+    chain(&*err)
+}
+
+/// `answer` is `GraphError::Poisoned` naming the failed rollback.
+fn assert_poisoned<T: std::fmt::Debug>(answer: Result<T, GraphError>) {
+    match answer {
+        Err(GraphError::Poisoned { cause, .. }) => {
+            assert!(cause.contains("failed to roll a unit back"), "{cause}")
+        }
+        other => panic!("expected Poisoned, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_rollback_poisons_the_graph() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    assert!(!graph.is_poisoned());
+    assert_eq!(graph.poison_cause(), None);
+    Faults::set(&faults.rollback_unit, true);
+    let text = fail_with_a_broken_rollback(&graph);
+    assert!(
+        text.contains("rolling the unit back failed as well"),
+        "{text}"
+    );
+    // The backend is back, but the storage's state is unknown: the graph refuses everything.
+    Faults::set(&faults.rollback_unit, false);
+    assert!(graph.is_poisoned());
+    assert!(
+        graph
+            .poison_cause()
+            .is_some_and(|cause| cause.contains("failed to roll a unit back")),
+        "{:?}",
+        graph.poison_cause()
+    );
+    assert_poisoned(graph.read_checked().map(|_| ()));
+    assert_poisoned(graph.write_checked().map(|_| ()));
+    assert_poisoned(graph.try_write_checked().map(|_| ()));
+    assert_poisoned(graph.begin_unit());
+    assert!(graph.try_read().is_none());
+    assert!(graph.try_write().is_none());
+    let err = graph.read_checked().map(|_| ()).unwrap_err();
+    assert!(
+        err.help()
+            .is_some_and(|help| help.contains("reopen the storage")),
+        "{:?}",
+        err.help()
+    );
+    // The infallible forms panic, as documented.
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = graph.read();
+    }));
+    assert!(read.is_err(), "read() panics on a poisoned graph");
+    let write = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = graph.write();
+    }));
+    assert!(write.is_err(), "write() panics on a poisoned graph");
+    // The storage can still be taken out to close or salvage it.
+    let storage = graph.into_inner();
+    assert_eq!(storage.vertex_count().unwrap(), 6);
+}
+
+#[test]
+fn a_failed_rollback_of_a_transaction_on_a_write_view_poisons_the_graph() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    Faults::set(&faults.rollback_unit, true);
+    let failed: Result<(), GraphError> = graph
+        .write_checked()
+        .unwrap()
+        .transaction(|_| Err(GraphError::unsupported("the closure's own failure")));
+    assert!(
+        matches!(failed, Err(GraphError::RollbackFailed { .. })),
+        "{failed:?}"
+    );
+    Faults::set(&faults.rollback_unit, false);
+    assert_poisoned(graph.read_checked().map(|_| ()));
+}
+
+#[test]
+fn a_panic_through_a_unit_whose_rollback_fails_poisons_the_graph() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    Faults::set(&faults.rollback_unit, true);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), GraphError> = graph.write_checked().unwrap().transaction(|g| {
+            GraphTraversalSource::new(&mut *g)
+                .add_v("person")
+                .iterate()
+                .unwrap();
+            panic!("an engine bug inside the unit")
+        });
+    }));
+    assert!(unwound.is_err());
+    Faults::set(&faults.rollback_unit, false);
+    assert!(graph.is_poisoned());
+    assert_poisoned(graph.write_checked().map(|_| ()));
+}
+
+#[test]
+fn a_dry_run_whose_discard_fails_poisons_the_graph() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    Faults::set(&faults.discard_unit, true);
+    let previewed: Result<((), _), GraphError> = graph.write_checked().unwrap().dry_run(|g| {
+        GraphTraversalSource::new(&mut *g)
+            .add_v("person")
+            .iterate()
+            .map_err(|_| GraphError::unsupported("this test"))
+    });
+    assert!(previewed.is_err(), "{previewed:?}");
+    Faults::set(&faults.discard_unit, false);
+    assert!(graph.is_poisoned());
+    match graph.read_checked().map(|_| ()) {
+        Err(GraphError::Poisoned { cause, .. }) => {
+            assert!(cause.contains("failed to discard a unit"), "{cause}")
+        }
+        other => panic!("expected Poisoned, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_rollback_of_a_held_unit_poisons_the_graph_and_releases_the_lock() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    let mark = graph.begin_unit().unwrap();
+    GraphTraversalSource::new(&mut *graph.write_checked().unwrap())
+        .add_v("person")
+        .iterate()
+        .unwrap();
+    Faults::set(&faults.rollback_unit, true);
+    let failed = graph.rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"test"));
+    assert!(
+        matches!(failed, Err(GraphError::StorageFailed { .. })),
+        "{failed:?}"
+    );
+    Faults::set(&faults.rollback_unit, false);
+    assert!(!graph.holds_unit(), "the unit is closed");
+    assert!(graph.is_poisoned());
+    // Another thread is refused instead of waiting for a lock nobody releases.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| assert_poisoned(graph.read_checked().map(|_| ())))
+            .join()
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_held_unit_poisoned_inside_refuses_its_commit_but_closes() {
+    let graph = Graph::new(modern());
+    let faults = graph.read().faults();
+    let mark = graph.begin_unit().unwrap();
+    Faults::set(&faults.rollback_unit, true);
+    // A failing traversal inside the unit: its savepoint cannot be rolled back.
+    let text = fail_with_a_broken_rollback(&graph);
+    assert!(text.contains("failed to roll a unit back"), "{text}");
+    Faults::set(&faults.rollback_unit, false);
+    assert!(graph.is_poisoned());
+    assert_poisoned(graph.write_checked().map(|_| ()));
+    // The commit is refused (nothing of an unknown state is committed), but the unit closes
+    // and the lock is released.
+    assert_poisoned(graph.commit_unit(mark));
+    assert!(!graph.holds_unit());
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| assert_poisoned(graph.write_checked().map(|_| ())))
+            .join()
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_failed_rollback_on_a_bare_storage_poisons_no_graph() {
+    // A rollback failing on a bare storage while no write view of a graph is open poisons
+    // nothing; a graph's own failure poisons only that graph.
+    let healthy = Graph::new(modern());
+    let mut bare = modern();
+    Faults::set(&bare.faults().rollback_unit, true);
+    let failed: Result<(), GraphError> =
+        bare.transaction(|_| Err(GraphError::unsupported("the closure's own failure")));
+    assert!(matches!(failed, Err(GraphError::RollbackFailed { .. })));
+    {
+        let _view = healthy.read_checked().unwrap();
+    }
+    let broken = Graph::new(modern());
+    Faults::set(&broken.read().faults().rollback_unit, true);
+    fail_with_a_broken_rollback(&broken);
+    assert!(broken.is_poisoned());
+    assert!(!healthy.is_poisoned());
+    assert_eq!(healthy.read_checked().unwrap().vertex_count().unwrap(), 6);
 }

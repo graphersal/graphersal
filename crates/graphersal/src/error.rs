@@ -1829,9 +1829,10 @@ pub enum GraphError {
     },
 
     /// A unit could not be rolled back after `cause` made it fail
-    /// ([`GraphStorage::rollback_unit`] returned `source`). The unit is closed; what the
-    /// storage holds now is up to the storage (see its own error). The graph stays usable for
-    /// the next operation.
+    /// ([`GraphStorage::rollback_unit`] returned `source`). The unit is closed, and the storage
+    /// is in an unknown state (it may be half rolled back): a [`Graph`](crate::graph::Graph)
+    /// that saw this is poisoned and refuses every further operation with
+    /// [`GraphError::Poisoned`] (see [`Graph::is_poisoned`](crate::graph::Graph::is_poisoned)).
     #[error("{cause}; rolling the unit back failed as well: {source}")]
     #[non_exhaustive]
     RollbackFailed {
@@ -1840,6 +1841,22 @@ pub enum GraphError {
         /// The storage's rollback error.
         #[source]
         source: Box<GraphError>,
+    },
+
+    /// The [`Graph`](crate::graph::Graph) is poisoned: a rollback of one of its units failed
+    /// earlier ([`GraphError::RollbackFailed`]; `cause` is its text), so its storage is in an
+    /// unknown state and the graph refuses every read and write. There is no way back in
+    /// place: drop the graph and reopen or recover the storage
+    /// ([`Graph::into_inner`](crate::graph::Graph::into_inner) hands it out for salvage).
+    /// Built with [`GraphError::poisoned`].
+    #[error(
+        "The graph is poisoned: a rollback failed earlier and its storage is in an unknown \
+         state ({cause})"
+    )]
+    #[non_exhaustive]
+    Poisoned {
+        /// The text of the failed rollback that poisoned the graph.
+        cause: String,
     },
 
     /// A `u64` counter of the graph is at its maximum and cannot advance: the commit sequence
@@ -2080,6 +2097,13 @@ impl GraphError {
         GraphError::RollbackFailed {
             cause: cause.to_string(),
             source: Box::new(rollback),
+        }
+    }
+
+    /// [`GraphError::Poisoned`]: the graph refuses work since a rollback failed with `cause`.
+    pub fn poisoned(cause: impl Into<String>) -> Self {
+        GraphError::Poisoned {
+            cause: cause.into(),
         }
     }
 
@@ -2329,12 +2353,23 @@ impl DiagnosticError for GraphError {
             }),
             GraphError::RollbackFailed { source, .. } => Some(format!(
                 "The operation failed (the first part of the message), and the storage could \
-                 not undo what it had done so far: the unit is closed, but what the storage \
-                 holds now is up to the storage. {}",
-                source.help().unwrap_or_else(|| "Check the storage's backend before the next \
-                     write."
+                 not undo what it had done so far: the unit is closed, but the storage is in \
+                 an unknown state, so a Graph holding it is poisoned and refuses every further \
+                 read and write (GraphError::Poisoned): drop it and reopen or recover the \
+                 storage. {}",
+                source.help().unwrap_or_else(|| "Check the storage's backend before reopening \
+                     it."
                     .to_string())
             )),
+            GraphError::Poisoned { .. } => Some(
+                "A rollback of this graph failed earlier, so its storage is in an unknown state \
+                 (possibly half rolled back) and the graph refuses every read and write. It \
+                 cannot be repaired in place: drop the graph (every Arc of it) and reopen the \
+                 storage, or recover it from its last good state (a Store reopens from its \
+                 snapshot and journal, which hold committed units only). Graph::into_inner \
+                 hands the storage out to close or salvage it."
+                    .to_string(),
+            ),
             GraphError::SequenceOverflow { sequence } if *sequence == COMMIT_SEQUENCE => Some(
                 "The graph was numbered close to the end of the commit sequence (for example by \
                  TraversalGraph::with_last_commit_seq(u64::MAX), or by replaying a change set with \
@@ -9156,6 +9191,27 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("Check the storage's backend"), "{help}");
+        assert!(help.contains("GraphError::Poisoned"), "{help}");
+    }
+
+    /// A poisoned graph names the failed rollback and tells the host to reopen the storage.
+    #[test]
+    fn a_poisoned_graph_says_to_reopen_the_storage() {
+        let poisoned = GraphError::poisoned("the step failed; rolling the unit back failed");
+        assert!(matches!(&poisoned, GraphError::Poisoned { cause } if cause.contains("the step")));
+        assert_eq!(
+            poisoned.to_string(),
+            "The graph is poisoned: a rollback failed earlier and its storage is in an unknown \
+             state (the step failed; rolling the unit back failed)"
+        );
+        let help = poisoned.help().unwrap();
+        assert!(help.contains("unknown state"), "{help}");
+        assert!(
+            help.contains("after") || help.contains("failed earlier"),
+            "{help}"
+        );
+        assert!(help.contains("reopen the storage"), "{help}");
+        assert!(help.contains("Graph::into_inner"), "{help}");
     }
 
     /// The denials of a saved query that writes which the inference prevents (it refuses such

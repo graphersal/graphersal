@@ -10,6 +10,7 @@
 use crate::error::GraphError;
 use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::hooks::RollbackReason;
+use crate::graph::shared::{close_failed, note_failed_rollback};
 use crate::graph::storage::{
     DRY_RUN_OPERATION, GraphStorage, close_on_unwind, rollback_failed_unit, rollback_unwound,
 };
@@ -108,7 +109,10 @@ pub trait Transactional: GraphStorage {
     /// storage that cannot attach the metadata fails it after rolling the unit back. A storage
     /// whose rollback fails (after `body` returned `Err`) closes the unit anyway, and the call
     /// fails with [`GraphError::RollbackFailed`] instead of `body`'s error (`E` has no text to
-    /// keep; the error names the closure's failure as its cause).
+    /// keep; the error names the closure's failure as its cause). Run on the guard of
+    /// [`Graph::write`](crate::graph::Graph::write), such a failure poisons that graph
+    /// ([`Graph::is_poisoned`](crate::graph::Graph::is_poisoned)); on a bare storage the error
+    /// is all there is.
     fn transaction_with<T, E>(
         &mut self,
         metadata: CommitMetadata,
@@ -131,10 +135,11 @@ pub trait Transactional: GraphStorage {
                 Ok(()) => Err(err),
                 // `E` carries no text to keep: the rollback failure, which names the closure's
                 // failure as its cause, is the error to report.
-                Err(rollback) => Err(E::from(GraphError::rollback_failed(
-                    &CLOSURE_FAILED,
-                    rollback,
-                ))),
+                Err(rollback) => {
+                    let failed = GraphError::rollback_failed(&CLOSURE_FAILED, rollback);
+                    note_failed_rollback(&failed);
+                    Err(E::from(failed))
+                }
             },
         }
     }
@@ -166,6 +171,10 @@ pub trait Transactional: GraphStorage {
     /// - Inside an enclosing transaction a dry run is a savepoint that is always rolled back:
     ///   its change set holds only its own changes, the enclosing unit's stay.
     /// - A panic inside `body` rolls everything back too, then continues to the caller.
+    /// - A storage that cannot discard the unit (an error other than the `Unsupported` of a
+    ///   storage without change capture) fails the dry run with that error; run on the guard of
+    ///   [`Graph::write`](crate::graph::Graph::write), it poisons that graph
+    ///   ([`Graph::is_poisoned`](crate::graph::Graph::is_poisoned)).
     ///
     /// ```rust
     /// use graphersal::prelude::*;
@@ -193,15 +202,21 @@ pub trait Transactional: GraphStorage {
             // Unwinding: only the unit is closed; its change set is not wanted, and a failure
             // to close it cannot be reported (the panic continues).
             match this.discard_unit(mark) {
-                Ok(_) | Err(GraphError::Unsupported { .. }) => {}
+                Ok(_) => {}
+                Err(err) if !close_failed(&err) => {}
                 Err(err) => {
                     tracing::error!("closing a dry run a panic unwound through failed: {err}");
+                    note_failed_rollback(&err);
                 }
             }
         });
         match outcome {
             Ok(value) => {
-                let changes = self.discard_unit(mark)?;
+                let changes = self.discard_unit(mark).inspect_err(|err| {
+                    if close_failed(err) {
+                        note_failed_rollback(err);
+                    }
+                })?;
                 debug_assert!(
                     self.capabilities().is_ok_and(|c| c.change_capture),
                     "a storage that overrides discard_unit must claim change_capture"
@@ -218,10 +233,11 @@ pub trait Transactional: GraphStorage {
                 }
                 // The storage could not undo the dry run: that is the error to report (it names
                 // the closure's failure as its cause).
-                Err(failed) => Err(E::from(GraphError::rollback_failed(
-                    &CLOSURE_FAILED,
-                    failed,
-                ))),
+                Err(failed) => {
+                    let failed = GraphError::rollback_failed(&CLOSURE_FAILED, failed);
+                    note_failed_rollback(&failed);
+                    Err(E::from(failed))
+                }
             },
         }
     }

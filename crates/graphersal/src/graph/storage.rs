@@ -320,7 +320,8 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 ///   [`Self::last_commit_seq`], [`Self::statistics`], the schema, catalog, compression, property
 ///   index and memory methods, [`Self::shrink_to_fit`], [`Self::execution_policy`]): the engine
 ///   reads these once per query or unit (never per traverser) and fails the query, import or
-///   transaction with the error; a failed [`Self::rollback_unit`] still closes the unit (see
+///   transaction with the error; a failed [`Self::rollback_unit`] still closes the unit and
+///   poisons a [`Graph`](crate::graph::Graph) holding the storage (see
 ///   there).
 ///
 /// [`TraversalGraph`] never fails an element read; its methods are `#[inline]`, so the `Result`
@@ -1149,14 +1150,22 @@ pub trait GraphStorage: Send + Sync {
     ///
     /// `Err` when the storage could not undo the unit (a backend error,
     /// [`GraphError::StorageFailed`]). **The unit counts as closed either way**: the caller
-    /// never retries the rollback nor closes the mark again, and the storage is responsible
-    /// for its own state afterwards (a durable backend typically refuses further writes until
-    /// it has recovered). The engine closes the unit, keeps the graph usable for the next
-    /// operation, and reports the failure to the caller of the traversal, import or
-    /// transaction: as [`GraphError::RollbackFailed`] carrying the error that caused the
-    /// rollback, or as the storage's error itself when nothing else had failed (a dry run, an
-    /// explicit `rollback_unit`). A rollback during a panic's unwinding cannot report anything:
-    /// the engine logs it (`tracing::error!`) and resumes the panic.
+    /// never retries the rollback nor closes the mark again. **A storage that returns `Err`
+    /// here is treated as being in an unknown state**: it must either have fully undone the
+    /// unit anyway (then it should return `Ok`) or consider itself failed (a durable backend
+    /// refuses further work until it has been reopened or recovered). The engine closes the
+    /// unit and reports the failure to the caller of the traversal, import or transaction: as
+    /// [`GraphError::RollbackFailed`] carrying the error that caused the rollback, or as the
+    /// storage's error itself when nothing else had failed (a dry run, an explicit
+    /// `rollback_unit`). A rollback during a panic's unwinding cannot report anything: the
+    /// engine logs it (`tracing::error!`) and resumes the panic. Behind a
+    /// [`Graph`](crate::graph::Graph), every such failure of a rollback the engine runs (also
+    /// [`Self::discard_unit`] failing other than with the `Unsupported` of a storage without
+    /// change capture, and the unwinding case) **poisons the graph**: it refuses every further
+    /// read and write with [`GraphError::Poisoned`] until the host drops it and reopens the
+    /// storage ([`Graph::is_poisoned`](crate::graph::Graph::is_poisoned)). On a bare storage (a
+    /// `&mut S` with [`Transactional`](crate::graph::Transactional)) there is no graph to
+    /// poison: the error is all the caller gets.
     fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
         let _ = (mark, reason);
         Ok(())
@@ -1402,7 +1411,9 @@ pub(crate) const UNWOUND: &str =
 
 /// Rolls back the unit `mark` that `cause` made fail and returns the error to report: `cause`
 /// itself, or, when the rollback fails too, [`GraphError::RollbackFailed`] naming both (the
-/// unit counts as closed either way, see [`GraphStorage::rollback_unit`]).
+/// unit counts as closed either way, see [`GraphStorage::rollback_unit`]) and the failure is
+/// noted for the [`Graph`](crate::graph::Graph) whose write view runs this, which is poisoned
+/// (`graph::shared::note_failed_rollback`).
 pub(crate) fn rollback_failed_unit<S, E>(storage: &mut S, mark: UnitMark, cause: E) -> E
 where
     S: GraphStorage + ?Sized,
@@ -1410,15 +1421,22 @@ where
 {
     match storage.rollback_unit(mark, &RollbackReason::failed(&cause)) {
         Ok(()) => cause,
-        Err(rollback) => E::from(GraphError::rollback_failed(&cause, rollback)),
+        Err(rollback) => {
+            let failed = GraphError::rollback_failed(&cause, rollback);
+            crate::graph::shared::note_failed_rollback(&failed);
+            E::from(failed)
+        }
     }
 }
 
 /// Rolls back the unit `mark` a panic unwinds through ([`close_on_unwind`]'s `on_unwind`): a
-/// failing rollback cannot be reported there, so it is logged and the panic resumes.
+/// failing rollback cannot be reported there, so it is logged, noted for the
+/// [`Graph`](crate::graph::Graph) whose write view runs this (poisoned when the view drops during
+/// the unwinding), and the panic resumes.
 pub(crate) fn rollback_unwound<S: GraphStorage + ?Sized>(storage: &mut S, mark: UnitMark) {
     if let Err(err) = storage.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)) {
         tracing::error!("rolling back a unit a panic unwound through failed: {err}");
+        crate::graph::shared::note_failed_rollback(&GraphError::rollback_failed(&UNWOUND, err));
     }
 }
 

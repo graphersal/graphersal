@@ -513,3 +513,35 @@ fn session_graph_reads_answer_a_forbidden_view_with_its_error() {
         .rollback_run(mark, &graphersal::changes::RollbackReason::failed(&"test"))
         .unwrap();
 }
+
+#[test]
+fn a_poisoned_graph_answers_every_operation_with_its_error_and_help() {
+    use graphersal_storage_tests::failing::{Failing, Faults};
+
+    let shared = Arc::new(Graph::new(Failing::new(TraversalGraph::tinkerpop_modern())));
+    let faults = shared.read().faults();
+    let mut session = Session::new();
+    session
+        .load_shared(shared.clone(), "failing", "host")
+        .unwrap();
+    Faults::set(&faults.rollback_unit, true);
+    let failed = run(
+        &mut session,
+        r#"g.add_v("ghost").constant("x").as_number(GType.LONG).iterate()"#,
+    );
+    assert_eq!(failed["ok"], false, "{failed}");
+    assert!(
+        failed.to_string().contains("rolling the unit back failed"),
+        "{failed}"
+    );
+    Faults::set(&faults.rollback_unit, false);
+    assert!(shared.is_poisoned());
+    // The next run, a read included, is refused with the poison's text and help.
+    let refused = run(&mut session, "g.v().count().next()");
+    assert_eq!(refused["ok"], false, "{refused}");
+    let text = refused.to_string();
+    assert!(text.contains("The graph is poisoned"), "{text}");
+    assert!(text.contains("reopen the storage"), "{text}");
+    assert!(session.info().is_err());
+    assert!(session.statistics().is_err());
+}

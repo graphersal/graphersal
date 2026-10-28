@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::lock_api::{RawRwLock as _, RawRwLockUpgrade as _};
@@ -110,6 +110,131 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     workload: OnceLock<Arc<WorkloadStats>>,
     /// The unit a thread holds across locks ([`Graph::begin_unit`]).
     unit: UnitOwner,
+    /// Set for good when a rollback of one of the graph's units failed ([`Graph::is_poisoned`]).
+    poison: Poison,
+}
+
+/// The poison of a [`Graph`]: set once a rollback of one of its units failed, never cleared.
+///
+/// `cause` is written before `flag`, so a reader that sees the flag also sees the cause.
+#[derive(Default)]
+struct Poison {
+    flag: AtomicBool,
+    cause: OnceLock<String>,
+}
+
+impl Poison {
+    /// Poisons the graph with the text of the failed rollback (the first cause stays).
+    #[cold]
+    fn set(&self, cause: String) {
+        tracing::error!("the graph is poisoned: a rollback failed: {cause}");
+        let _ = self.cause.set(cause);
+        self.flag.store(true, Ordering::Release);
+    }
+
+    /// `Err(`[`GraphError::Poisoned`]`)` once the graph is poisoned: one atomic load.
+    #[inline]
+    fn check(&self) -> Result<(), GraphError> {
+        match self.flag.load(Ordering::Acquire) {
+            false => Ok(()),
+            true => Err(self.error()),
+        }
+    }
+
+    #[cold]
+    fn error(&self) -> GraphError {
+        GraphError::poisoned(self.cause.get().cloned().unwrap_or_default())
+    }
+}
+
+thread_local! {
+    /// The rollback watches open on this thread, innermost last ([`RollbackWatch`]).
+    static ROLLBACK_WATCHES: std::cell::RefCell<RollbackWatches> =
+        const { std::cell::RefCell::new(RollbackWatches { next: 1, open: Vec::new() }) };
+}
+
+/// The rollback watches of one thread: the next id and the open watches (id, the cause of the
+/// first failed rollback noted while the watch was the innermost one).
+struct RollbackWatches {
+    next: u64,
+    open: Vec<(u64, Option<String>)>,
+}
+
+/// How a [`Graph`] learns that a rollback of its storage failed, wherever the engine ran it.
+///
+/// Every write view of a graph ([`GraphWrite`]) and every storage call that closes a held unit
+/// opens a watch on its thread; the engine's rollback paths
+/// (`graph::storage::rollback_failed_unit`, `rollback_unwound`,
+/// `Transactional::transaction_with` and `dry_run`, the closes of held units) report a failure
+/// with [`note_failed_rollback`] to the innermost open watch, and the graph is poisoned when
+/// that watch ends (before the view releases the lock, also while a panic unwinds). A rollback
+/// on a bare storage with no write view of a graph open on the thread poisons nothing:
+/// poisoning is a property of [`Graph`]. The cost is one thread-local push and pop per write
+/// view, never per element.
+struct RollbackWatch(u64);
+
+impl RollbackWatch {
+    /// Opens a watch as the thread's innermost one (id 0: the thread is exiting, nothing is
+    /// watched).
+    fn start() -> Self {
+        let id = ROLLBACK_WATCHES
+            .try_with(|watches| match watches.try_borrow_mut() {
+                Ok(mut watches) => {
+                    let id = watches.next;
+                    watches.next = watches.next.wrapping_add(1).max(1);
+                    watches.open.push((id, None));
+                    id
+                }
+                Err(_) => 0,
+            })
+            .unwrap_or(0);
+        RollbackWatch(id)
+    }
+
+    /// Ends the watch: the cause of a failed rollback noted while it was the innermost one.
+    fn finish(&mut self) -> Option<String> {
+        let id = std::mem::replace(&mut self.0, 0);
+        if id == 0 {
+            return None;
+        }
+        ROLLBACK_WATCHES
+            .try_with(|watches| {
+                let mut watches = watches.try_borrow_mut().ok()?;
+                let at = watches.open.iter().rposition(|(open, _)| *open == id)?;
+                watches.open.remove(at).1
+            })
+            .ok()
+            .flatten()
+    }
+}
+
+impl Drop for RollbackWatch {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+/// Reports a failed rollback (or discard) of a unit to the innermost [`RollbackWatch`] of the
+/// thread, so the [`Graph`] whose write view or held unit it belongs to is poisoned when the
+/// watch ends. Without an open watch (a bare storage) nothing happens.
+#[cold]
+pub(crate) fn note_failed_rollback(cause: &dyn fmt::Display) {
+    let _ = ROLLBACK_WATCHES.try_with(|watches| {
+        if let Ok(mut watches) = watches.try_borrow_mut()
+            && let Some((_, slot)) = watches.open.last_mut()
+            && slot.is_none()
+        {
+            *slot = Some(cause.to_string());
+        }
+    });
+}
+
+/// Whether a failed close of a unit (a rollback or a discard) leaves the storage in an unknown
+/// state: every error except the `Unsupported` of a dry run on a storage without change capture,
+/// which closes the unit by a successful rollback ([`GraphStorage::discard_unit`]'s default).
+pub(crate) fn close_failed(err: &GraphError) -> bool {
+    !matches!(err, GraphError::Unsupported { operation }
+        if *operation == crate::graph::storage::DRY_RUN_OPERATION)
 }
 
 /// The owner of the unit a thread holds across locks ([`Graph::begin_unit`]) and its state.
@@ -218,6 +343,27 @@ fn view_panic(err: &GraphError) -> ! {
     )
 }
 
+/// The panic of the infallible [`Graph::read`] / [`Graph::write`] on a poisoned graph (their
+/// "Panics" section).
+#[cold]
+#[track_caller]
+fn poison_panic(err: &GraphError) -> ! {
+    panic!(
+        "Graph: {err} (Graph::read_checked, Graph::write_checked and Graph::is_poisoned report \
+         it instead)"
+    )
+}
+
+/// The panic of [`Graph::read`] / [`Graph::write`] for an error of the checked forms.
+#[cold]
+#[track_caller]
+fn checked_panic(err: &GraphError) -> ! {
+    match err {
+        GraphError::Poisoned { .. } => poison_panic(err),
+        _ => view_panic(err),
+    }
+}
+
 /// The decrement of a held view's counter when the view is dropped (also on unwind).
 struct HeldView<'a> {
     unit: &'a UnitOwner,
@@ -314,6 +460,11 @@ pub struct GraphRead<'a, S: GraphStorage = TraversalGraph> {
 /// dropped; with workload statistics attached, the time it was held is counted then.
 pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph> {
     guard: WriteAccess<'a, S>,
+    /// Learns about a failed rollback while the view lives; the drop poisons the graph then,
+    /// before `guard` releases the lock.
+    watch: RollbackWatch,
+    /// The poison of the graph the view belongs to.
+    poison: &'a Poison,
     /// When the lock was acquired and where the hold time goes (statistics attached only).
     held: Option<(Instant, &'a Arc<WorkloadStats>)>,
     /// Makes the graph's statistics the thread's while the guard lives.
@@ -379,6 +530,7 @@ impl<S: GraphStorage> Graph<S> {
             snapshot_writer: None,
             workload: OnceLock::new(),
             unit: UnitOwner::default(),
+            poison: Poison::default(),
         }
     }
 
@@ -480,49 +632,52 @@ impl<S: GraphStorage> Graph<S> {
     /// commits): a shared view would alias the `&mut S`. [`Self::read_checked`] returns
     /// [`GraphError::GraphViewHeld`] instead, [`Self::try_read`] `None`. (Outside a unit the
     /// same situation deadlocks, because the lock is not reentrant.)
+    ///
+    /// Also when the graph is poisoned ([`Self::is_poisoned`]: a rollback failed earlier, the
+    /// storage is in an unknown state); [`Self::read_checked`] returns [`GraphError::Poisoned`]
+    /// instead.
     #[track_caller]
     pub fn read(&self) -> GraphRead<'_, S> {
         match self.read_checked() {
             Ok(guard) => guard,
-            Err(err) => view_panic(&err),
+            Err(err) => checked_panic(&err),
         }
     }
 
     /// [`Self::read`], but a view the current thread may not have
-    /// ([`read`](Self::read)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic.
-    /// Blocks like `read()`.
+    /// ([`read`](Self::read)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic,
+    /// and a poisoned graph [`GraphError::Poisoned`]. Blocks like `read()`.
     pub fn read_checked(&self) -> Result<GraphRead<'_, S>, GraphError> {
-        let attached = self.attached();
         if self.holds_unit() {
+            self.poison.check()?;
             return Ok(GraphRead {
                 guard: self.held_read()?,
-                _attached: attached,
+                _attached: self.attached(),
             });
         }
-        let Some((stats, key)) = lock_series(&self.workload, "read.wait") else {
-            return Ok(GraphRead {
-                guard: ReadAccess::Locked(self.lock.read()),
-                _attached: attached,
-            });
+        let guard = match lock_series(&self.workload, "read.wait") {
+            None => self.lock.read(),
+            Some((stats, key)) => match self.lock.try_read() {
+                // Uncontended: no clock read, nothing counted.
+                Some(guard) => guard,
+                None => {
+                    let asked = Instant::now();
+                    let guard = self.lock.read();
+                    let wait = asked.elapsed().as_micros() as u64;
+                    stats.record(
+                        key,
+                        now_micros(),
+                        crate::graph::workload::Sample::new(0, wait),
+                    );
+                    guard
+                }
+            },
         };
-        // Uncontended: no clock read, nothing counted.
-        if let Some(guard) = self.lock.try_read() {
-            return Ok(GraphRead {
-                guard: ReadAccess::Locked(guard),
-                _attached: attached,
-            });
-        }
-        let asked = Instant::now();
-        let guard = self.lock.read();
-        let wait = asked.elapsed().as_micros() as u64;
-        stats.record(
-            key,
-            now_micros(),
-            crate::graph::workload::Sample::new(0, wait),
-        );
+        // Checked under the lock: a poison set by the writer this reader waited for is seen.
+        self.poison.check()?;
         Ok(GraphRead {
             guard: ReadAccess::Locked(guard),
-            _attached: attached,
+            _attached: self.attached(),
         })
     }
 
@@ -532,15 +687,18 @@ impl<S: GraphStorage> Graph<S> {
     /// deadlock), and on the thread that holds a unit of this graph while a
     /// [`write`](Self::write) view of it is alive there. On the thread that holds a unit it
     /// returns a view of the unit's lock otherwise, as [`Self::read`] does. A successful
-    /// `try_read` counts no wait.
+    /// `try_read` counts no wait. A poisoned graph ([`Self::is_poisoned`]) answers `None` too;
+    /// [`Self::read_checked`] tells it apart ([`GraphError::Poisoned`]).
     pub fn try_read(&self) -> Option<GraphRead<'_, S>> {
         if self.holds_unit() {
+            self.poison.check().ok()?;
             return self.held_read().ok().map(|guard| GraphRead {
                 guard,
                 _attached: self.attached(),
             });
         }
         let guard = self.lock.try_read()?;
+        self.poison.check().ok()?;
         Some(GraphRead {
             guard: ReadAccess::Locked(guard),
             _attached: self.attached(),
@@ -569,31 +727,31 @@ impl<S: GraphStorage> Graph<S> {
     /// [`Self::write_checked`] returns [`GraphError::GraphViewHeld`] instead,
     /// [`Self::try_write`] `None`. (Outside a unit the same situation deadlocks, because the
     /// lock is not reentrant.)
+    ///
+    /// Also when the graph is poisoned ([`Self::is_poisoned`]: a rollback failed earlier, the
+    /// storage is in an unknown state); [`Self::write_checked`] returns
+    /// [`GraphError::Poisoned`] instead.
     #[track_caller]
     pub fn write(&self) -> GraphWrite<'_, S> {
         match self.write_checked() {
             Ok(guard) => guard,
-            Err(err) => view_panic(&err),
+            Err(err) => checked_panic(&err),
         }
     }
 
     /// [`Self::write`], but a view the current thread may not have
-    /// ([`write`](Self::write)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic.
-    /// Blocks like `write()`.
+    /// ([`write`](Self::write)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic,
+    /// and a poisoned graph [`GraphError::Poisoned`]. Blocks like `write()`.
     pub fn write_checked(&self) -> Result<GraphWrite<'_, S>, GraphError> {
         if self.holds_unit() {
-            return Ok(GraphWrite {
-                guard: self.held_write()?,
-                held: None,
-                _attached: self.attached(),
-            });
+            // Before the held view: a poisoned graph opens no storage unit.
+            self.poison.check()?;
+            return Ok(self.write_view(self.held_write()?, None));
         }
         let Some((stats, key)) = lock_series(&self.workload, "write.wait") else {
-            return Ok(GraphWrite {
-                guard: WriteAccess::Locked(self.lock.write()),
-                held: None,
-                _attached: self.attached(),
-            });
+            let guard = self.lock.write();
+            self.poison.check()?;
+            return Ok(self.write_view(WriteAccess::Locked(guard), None));
         };
         let asked = Instant::now();
         let guard = self.lock.write();
@@ -604,11 +762,23 @@ impl<S: GraphStorage> Graph<S> {
             now_micros(),
             crate::graph::workload::Sample::new(0, wait),
         );
-        Ok(GraphWrite {
-            guard: WriteAccess::Locked(guard),
-            held: Some((acquired, stats)),
+        self.poison.check()?;
+        Ok(self.write_view(WriteAccess::Locked(guard), Some((acquired, stats))))
+    }
+
+    /// The write view over `guard`, watching for a failed rollback while it lives.
+    fn write_view<'a>(
+        &'a self,
+        guard: WriteAccess<'a, S>,
+        held: Option<(Instant, &'a Arc<WorkloadStats>)>,
+    ) -> GraphWrite<'a, S> {
+        GraphWrite {
+            guard,
+            watch: RollbackWatch::start(),
+            poison: &self.poison,
+            held,
             _attached: self.attached(),
-        })
+        }
     }
 
     /// Locks the graph for writing if nobody holds it right now, else returns `None` without
@@ -618,8 +788,8 @@ impl<S: GraphStorage> Graph<S> {
     /// opens, as at the unit's first [`write`](Self::write)), `None` while other threads read or
     /// the thread holds another view of the graph.
     ///
-    /// `None` means both "busy" and "not allowed on this thread"; [`Self::try_write_checked`]
-    /// tells them apart.
+    /// `None` means "busy", "not allowed on this thread" and "poisoned" alike;
+    /// [`Self::try_write_checked`] tells them apart.
     pub fn try_write(&self) -> Option<GraphWrite<'_, S>> {
         self.try_write_checked().ok().flatten()
     }
@@ -632,7 +802,8 @@ impl<S: GraphStorage> Graph<S> {
     /// [`GraphError::GraphViewHeld`] when the current thread holds a unit of this graph and
     /// another view of it is alive on this thread (a [`read`](Self::read) or `write` view, also
     /// a commit hook or an embedder reaching back into the graph): waiting would not help, the
-    /// view has to go first. Never blocks, never panics. The error type is
+    /// view has to go first. A poisoned graph ([`Self::is_poisoned`]) is
+    /// [`GraphError::Poisoned`]. Never blocks, never panics. The error type is
     /// `#[non_exhaustive]`, so new refusals can be reported later.
     ///
     /// ```rust
@@ -658,22 +829,49 @@ impl<S: GraphStorage> Graph<S> {
     /// ```
     pub fn try_write_checked(&self) -> Result<Option<GraphWrite<'_, S>>, GraphError> {
         if self.holds_unit() {
-            return Ok(self.try_held_write()?.map(|guard| GraphWrite {
-                guard,
-                held: None,
-                _attached: self.attached(),
-            }));
+            self.poison.check()?;
+            return Ok(self
+                .try_held_write()?
+                .map(|guard| self.write_view(guard, None)));
         }
         let Some(guard) = self.lock.try_write() else {
             return Ok(None);
         };
+        self.poison.check()?;
         let held =
             lock_series(&self.workload, "write.hold").map(|(stats, _)| (Instant::now(), stats));
-        Ok(Some(GraphWrite {
-            guard: WriteAccess::Locked(guard),
-            held,
-            _attached: self.attached(),
-        }))
+        Ok(Some(self.write_view(WriteAccess::Locked(guard), held)))
+    }
+
+    /// Whether the graph is poisoned: a rollback of one of its units failed (a host storage's
+    /// [`GraphStorage::rollback_unit`] or [`GraphStorage::discard_unit`] returned `Err` while
+    /// the engine closed a unit of this graph), so its storage is in an unknown state. A
+    /// poisoned graph refuses every data operation with [`GraphError::Poisoned`]
+    /// ([`Self::read_checked`], [`Self::write_checked`], [`Self::try_write_checked`],
+    /// [`Self::begin_unit`], the closes of a held unit, every traversal, import and front-end
+    /// operation on it), and [`Self::read`] / [`Self::write`] panic. The poison is never lifted
+    /// in place: drop the graph and reopen or recover the storage ([`Self::into_inner`] /
+    /// [`Self::get_mut`] still hand the storage out, to close or salvage it).
+    ///
+    /// The engine learns of a failed rollback in the rollbacks it runs itself (a traversal, a
+    /// transaction or dry run on a write view, an import, a change-set apply, the closes of a
+    /// held unit, a panic unwinding through a unit). A host that calls
+    /// [`GraphStorage::rollback_unit`] on the storage through a [`Self::write`] guard itself
+    /// gets the error directly and decides on its own.
+    ///
+    /// Reads only the poison flag (one atomic load), so it cannot fail and never blocks, also
+    /// while another thread holds the lock: a diagnostic, not a data operation.
+    pub fn is_poisoned(&self) -> bool {
+        self.poison.flag.load(Ordering::Acquire)
+    }
+
+    /// The text of the failed rollback that poisoned the graph ([`Self::is_poisoned`]), `None`
+    /// while it is not poisoned. Reads only the poison, never the storage or the lock.
+    pub fn poison_cause(&self) -> Option<&str> {
+        match self.is_poisoned() {
+            true => self.poison.cause.get().map(String::as_str),
+            false => None,
+        }
     }
 
     /// Whether the current thread holds a unit of this graph: one opened by
@@ -703,10 +901,12 @@ impl<S: GraphStorage> Graph<S> {
     ///
     /// Fails with [`GraphError::GraphViewHeld`] when the thread holds a unit of this graph and a
     /// view of it is alive (a [`read`](Self::read) or [`write`](Self::write) guard, a commit
-    /// hook of its unit), and with [`GraphError::Unsupported`] while the thread is exiting
+    /// hook of its unit), with [`GraphError::Poisoned`] on a poisoned graph
+    /// ([`Self::is_poisoned`]), and with [`GraphError::Unsupported`] while the thread is exiting
     /// (its thread-locals destroyed); nothing is opened then.
     pub fn begin_unit(&self) -> Result<UnitMark, GraphError> {
         if self.holds_unit() {
+            self.poison.check()?;
             return self.begin_nested_unit();
         }
         let Some(token) = thread_token() else {
@@ -717,6 +917,8 @@ impl<S: GraphStorage> Graph<S> {
         let raw = self.raw();
         raw.lock_upgradable();
         let abandon = AbandonBegin(raw);
+        // Checked under the lock (`abandon` releases it), like the views.
+        self.poison.check()?;
         // SAFETY: this thread holds the lock upgradable, which keeps every writer out, so no
         // thread has a `&mut S`; it holds no unit, so it has no view of its own.
         let base = unsafe { &*self.lock.data_ptr() };
@@ -832,7 +1034,13 @@ impl<S: GraphStorage> Graph<S> {
         self.close_held_unit(
             "roll back a unit",
             false,
-            |storage, mark| storage.rollback_unit(mark, reason),
+            |storage, mark| {
+                let rolled_back = storage.rollback_unit(mark, reason);
+                if let Err(err) = &rolled_back {
+                    note_failed_rollback(err);
+                }
+                rolled_back
+            },
             || Ok(()),
         )?
     }
@@ -850,7 +1058,15 @@ impl<S: GraphStorage> Graph<S> {
         self.close_held_unit(
             "discard a unit",
             true,
-            |storage, mark| storage.discard_unit(mark),
+            |storage, mark| {
+                let discarded = storage.discard_unit(mark);
+                if let Err(err) = &discarded
+                    && close_failed(err)
+                {
+                    note_failed_rollback(err);
+                }
+                discarded
+            },
             || {
                 Err(GraphError::unsupported(
                     "discarding a unit the storage did not open",
@@ -1043,6 +1259,13 @@ impl<S: GraphStorage> Graph<S> {
             let level = held.depth.saturating_sub(1) as usize;
             (level, held.marks.get(level).is_some())
         };
+        if let Err(poisoned) = self.poison.check() {
+            // The storage is in an unknown state: it is not asked to commit or undo anything,
+            // but the level is closed (the outermost close releases the lock), so the owner
+            // can always let go of a poisoned graph.
+            drop(FinishClose { graph: self });
+            return Err(poisoned);
+        }
         if !opened && !always_storage {
             drop(FinishClose { graph: self });
             return Ok(skip());
@@ -1078,19 +1301,28 @@ impl<S: GraphStorage> Graph<S> {
             drop(finish);
             return Ok(skip());
         };
+        // A failed rollback inside `close` (an explicit rollback or discard, the rollback of a
+        // commit whose metadata the storage refused) poisons the graph.
+        let mut watch = RollbackWatch::start();
         // SAFETY: this thread holds the lock exclusively and no view of it (checked above).
         let closed = close(unsafe { &mut *self.lock.data_ptr() }, mark);
+        if let Some(cause) = watch.finish() {
+            self.poison.set(cause);
+        }
         drop(call);
         drop(finish);
         Ok(closed)
     }
 
     /// The storage itself, without locking: the exclusive borrow proves nobody else holds it.
+    /// Also on a poisoned graph ([`Self::is_poisoned`]), so a host can close or salvage the
+    /// storage; what it holds after a failed rollback is up to the storage.
     pub fn get_mut(&mut self) -> &mut S {
         self.lock.get_mut()
     }
 
-    /// Unwraps the storage.
+    /// Unwraps the storage. Also on a poisoned graph ([`Self::is_poisoned`]): the way to close
+    /// or salvage the storage before reopening it.
     pub fn into_inner(self) -> S {
         self.lock.into_inner()
     }
@@ -1126,6 +1358,7 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
             snapshot_writer: Some(write::<S>),
             workload: OnceLock::new(),
             unit: UnitOwner::default(),
+            poison: Poison::default(),
         }
     }
 }
@@ -1162,8 +1395,12 @@ impl<S: GraphStorage> Deref for GraphRead<'_, S> {
 }
 
 impl<S: GraphStorage> Drop for GraphWrite<'_, S> {
-    /// Counts the hold time (`write.hold`) when statistics are attached.
+    /// Poisons the graph when a rollback failed while the view lived (before the lock is
+    /// released), and counts the hold time (`write.hold`) when statistics are attached.
     fn drop(&mut self) {
+        if let Some(cause) = self.watch.finish() {
+            self.poison.set(cause);
+        }
         if let Some((acquired, stats)) = self.held.take()
             && let Some(key) = lock_key(stats, "write.hold")
         {

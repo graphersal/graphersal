@@ -49,7 +49,7 @@ pub(crate) mod replay;
 pub mod schema;
 /// Interned property key lists shared by the stored property maps.
 pub(crate) mod shape;
-mod shared;
+pub(crate) mod shared;
 mod statistics;
 /// The [`GraphStorage`] trait and its implementations.
 pub mod storage;

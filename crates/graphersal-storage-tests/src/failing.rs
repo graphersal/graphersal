@@ -4,8 +4,9 @@
 //! **EXPERIMENTAL**, like the rest of this crate. It wraps a [`Forwarding`] (so it is not
 //! `TraversalGraph` either) and forwards every method; a [`Faults`] switch makes one group of
 //! methods return [`GraphError::StorageFailed`]: the statistics, the property indexes, the index
-//! lookups, opening a unit, rolling a unit back (the wrapped graph IS rolled back, then the
-//! failure is reported, like a backend whose undo half failed), the execution policy, the schema,
+//! lookups, opening a unit, rolling a unit back or discarding it (the wrapped graph IS rolled
+//! back, then the failure is reported, like a backend whose undo half failed; behind a `Graph`
+//! that poisons the graph), the execution policy, the schema,
 //! the element scans, the property reads of single elements, the adjacency of a vertex and the
 //! unit clock.
 //! The switches are shared ([`Failing::faults`]), so a test can turn a fault on while the storage
@@ -41,6 +42,8 @@ pub struct Faults {
     pub begin_unit: AtomicBool,
     /// `rollback_unit` (after the wrapped graph rolled back).
     pub rollback_unit: AtomicBool,
+    /// `discard_unit` (after the wrapped graph discarded the unit).
+    pub discard_unit: AtomicBool,
     /// `execution_policy`.
     pub execution_policy: AtomicBool,
     /// `get_schema`.
@@ -512,7 +515,10 @@ impl GraphStorage for Failing {
     }
 
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
-        GraphStorage::discard_unit(&mut self.inner, mark)
+        let discarded = GraphStorage::discard_unit(&mut self.inner, mark);
+        self.faults
+            .check(&self.faults.discard_unit, "discard a unit")?;
+        discarded
     }
 
     fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {

@@ -251,31 +251,32 @@ impl<S: GraphStorage> Graph<S> {
 }
 
 /// How the job reaches the storage: through the graph's locks, phase by phase, or through an
-/// access the caller holds for the whole job.
+/// access the caller holds for the whole job. `Err`: the graph refuses the lock (a poisoned
+/// graph, [`GraphError::Poisoned`]).
 trait Access<S: GraphStorage> {
-    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> R;
-    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> R;
+    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> Result<R, GraphError>;
+    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> Result<R, GraphError>;
 }
 
 struct Shared<'a, S: GraphStorage>(&'a Graph<S>);
 
 impl<S: GraphStorage> Access<S> for Shared<'_, S> {
-    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> R {
-        f(&self.0.read())
+    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
+        Ok(f(&*self.0.read_checked()?))
     }
-    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> R {
-        f(&mut self.0.write())
+    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> Result<R, GraphError> {
+        Ok(f(&mut *self.0.write_checked()?))
     }
 }
 
 struct Held<'a, S: GraphStorage>(&'a mut S);
 
 impl<S: GraphStorage> Access<S> for Held<'_, S> {
-    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> R {
-        f(self.0)
+    fn read<R>(&mut self, f: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
+        Ok(f(self.0))
     }
-    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> R {
-        f(self.0)
+    fn write<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> Result<R, GraphError> {
+        Ok(f(self.0))
     }
 }
 
@@ -507,6 +508,9 @@ fn run<S: GraphStorage, A: Access<S>>(
         }
         Ok::<_, Box<TraverserError>>((plan, ids))
     });
+    let collected = collected
+        .map_err(|err| Box::new(TraverserError::from(err)))
+        .and_then(|collected| collected);
     let (plan, ids) = match collected {
         Ok(collected) => collected,
         Err(err) => return Err(fail(err, &report)),
@@ -549,7 +553,7 @@ fn run<S: GraphStorage, A: Access<S>>(
             }
             Ok(())
         });
-        if let Err(err) = read {
+        if let Err(err) = read.and_then(|read| read) {
             return Err(fail(Box::new(TraverserError::from(err)), &report));
         }
         // Phase 1.2: the embedder, without any lock.
@@ -600,7 +604,7 @@ fn run<S: GraphStorage, A: Access<S>>(
                 Ok::<_, PageError>(counts)
             })
         });
-        match written {
+        match written.map_err(PageError::from).and_then(|written| written) {
             Ok(counts) => {
                 report.embedded += counts.embedded;
                 report.skipped_changed += counts.changed;
