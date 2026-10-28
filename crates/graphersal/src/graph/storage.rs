@@ -1301,6 +1301,23 @@ pub trait GraphStorage: Send + Sync {
         Ok(0)
     }
 
+    /// The address that identifies this storage's state, for telling which
+    /// [`Graph`](crate::graph::Graph) a failed rollback belongs to: a failed
+    /// [`Self::rollback_unit`] or [`Self::discard_unit`] the engine runs poisons exactly the
+    /// graph whose storage has this identity (or lies inside its memory), never another one, and
+    /// nothing when no graph holds the storage. Read once per write view and when a rollback
+    /// fails, never per element.
+    ///
+    /// Default: the address of `self`, which is right for every storage that owns its state.
+    /// A wrapper that forwards to a storage it borrows or owns elsewhere (as the shipped
+    /// `&G`, `&mut G`, `Box<G>` and `Arc<TraversalGraph>` impls do) returns the identity of that
+    /// storage, so a temporary wrapper over a graph's storage is attributed to that graph. Never
+    /// return any other address: an address inside another graph's storage would poison that
+    /// graph.
+    fn storage_identity(&self) -> *const () {
+        (self as *const Self).cast::<()>()
+    }
+
     /// The start of the outermost open unit, in nanoseconds since the Unix epoch (UTC, the unit
     /// of [`DateTime::from_nanos`](crate::temporal::DateTime::from_nanos)): the time
     /// `defaultFunction` `now`/`today` store for the elements a query creates in it
@@ -1412,8 +1429,8 @@ pub(crate) const UNWOUND: &str =
 /// Rolls back the unit `mark` that `cause` made fail and returns the error to report: `cause`
 /// itself, or, when the rollback fails too, [`GraphError::RollbackFailed`] naming both (the
 /// unit counts as closed either way, see [`GraphStorage::rollback_unit`]) and the failure is
-/// noted for the [`Graph`](crate::graph::Graph) whose write view runs this, which is poisoned
-/// (`graph::shared::note_failed_rollback`).
+/// noted for the [`Graph`](crate::graph::Graph) that holds `storage`, which is poisoned
+/// (`graph::shared::note_failed_rollback`; nothing for a bare storage).
 pub(crate) fn rollback_failed_unit<S, E>(storage: &mut S, mark: UnitMark, cause: E) -> E
 where
     S: GraphStorage + ?Sized,
@@ -1423,7 +1440,7 @@ where
         Ok(()) => cause,
         Err(rollback) => {
             let failed = GraphError::rollback_failed(&cause, rollback);
-            crate::graph::shared::note_failed_rollback(&failed);
+            crate::graph::shared::note_failed_rollback(storage.storage_identity(), &failed);
             E::from(failed)
         }
     }
@@ -1431,12 +1448,15 @@ where
 
 /// Rolls back the unit `mark` a panic unwinds through ([`close_on_unwind`]'s `on_unwind`): a
 /// failing rollback cannot be reported there, so it is logged, noted for the
-/// [`Graph`](crate::graph::Graph) whose write view runs this (poisoned when the view drops during
-/// the unwinding), and the panic resumes.
+/// [`Graph`](crate::graph::Graph) that holds `storage` (poisoned when its view drops during the
+/// unwinding), and the panic resumes.
 pub(crate) fn rollback_unwound<S: GraphStorage + ?Sized>(storage: &mut S, mark: UnitMark) {
     if let Err(err) = storage.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)) {
         tracing::error!("rolling back a unit a panic unwound through failed: {err}");
-        crate::graph::shared::note_failed_rollback(&GraphError::rollback_failed(&UNWOUND, err));
+        crate::graph::shared::note_failed_rollback(
+            storage.storage_identity(),
+            &GraphError::rollback_failed(&UNWOUND, err),
+        );
     }
 }
 
@@ -3181,6 +3201,11 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).last_commit_seq()
     }
 
+    #[inline]
+    fn storage_identity(&self) -> *const () {
+        (**self).storage_identity()
+    }
+
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).unit_started_at()
     }
@@ -3637,6 +3662,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         (**self).last_commit_seq()
+    }
+
+    #[inline]
+    fn storage_identity(&self) -> *const () {
+        (**self).storage_identity()
     }
 
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
@@ -4109,6 +4139,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         (**self).last_commit_seq()
+    }
+
+    #[inline]
+    fn storage_identity(&self) -> *const () {
+        (**self).storage_identity()
     }
 
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
@@ -4761,6 +4796,11 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(self.as_ref())
+    }
+
+    #[inline]
+    fn storage_identity(&self) -> *const () {
+        GraphStorage::storage_identity(self.as_ref())
     }
 
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {

@@ -137,7 +137,7 @@ pub trait Transactional: GraphStorage {
                 // failure as its cause, is the error to report.
                 Err(rollback) => {
                     let failed = GraphError::rollback_failed(&CLOSURE_FAILED, rollback);
-                    note_failed_rollback(&failed);
+                    note_failed_rollback(self.storage_identity(), &failed);
                     Err(E::from(failed))
                 }
             },
@@ -206,17 +206,19 @@ pub trait Transactional: GraphStorage {
                 Err(err) if !close_failed(&err) => {}
                 Err(err) => {
                     tracing::error!("closing a dry run a panic unwound through failed: {err}");
-                    note_failed_rollback(&err);
+                    note_failed_rollback(this.storage_identity(), &err);
                 }
             }
         });
         match outcome {
             Ok(value) => {
-                let changes = self.discard_unit(mark).inspect_err(|err| {
-                    if close_failed(err) {
-                        note_failed_rollback(err);
-                    }
-                })?;
+                let discarded = self.discard_unit(mark);
+                if let Err(err) = &discarded
+                    && close_failed(err)
+                {
+                    note_failed_rollback(self.storage_identity(), err);
+                }
+                let changes = discarded?;
                 debug_assert!(
                     self.capabilities().is_ok_and(|c| c.change_capture),
                     "a storage that overrides discard_unit must claim change_capture"
@@ -235,7 +237,7 @@ pub trait Transactional: GraphStorage {
                 // the closure's failure as its cause).
                 Err(failed) => {
                     let failed = GraphError::rollback_failed(&CLOSURE_FAILED, failed);
-                    note_failed_rollback(&failed);
+                    note_failed_rollback(self.storage_identity(), &failed);
                     Err(E::from(failed))
                 }
             },

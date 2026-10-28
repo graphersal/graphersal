@@ -153,36 +153,93 @@ thread_local! {
         const { std::cell::RefCell::new(RollbackWatches { next: 1, open: Vec::new() }) };
 }
 
-/// The rollback watches of one thread: the next id and the open watches (id, the cause of the
-/// first failed rollback noted while the watch was the innermost one).
+/// The rollback watches of one thread: the next id and the open watches, innermost last.
 struct RollbackWatches {
     next: u64,
-    open: Vec<(u64, Option<String>)>,
+    open: Vec<OpenWatch>,
 }
 
-/// How a [`Graph`] learns that a rollback of its storage failed, wherever the engine ran it.
+/// One open [`RollbackWatch`]: which storage it watches and the cause of the first failed
+/// rollback of that storage noted while it was open.
+struct OpenWatch {
+    id: u64,
+    storage: WatchedStorage,
+    cause: Option<String>,
+}
+
+/// The storage of one [`Graph`], as a [`RollbackWatch`] recognizes it: its
+/// [`GraphStorage::storage_identity`] and the memory of the `S` inside the graph's lock.
+#[derive(Clone, Copy)]
+struct WatchedStorage {
+    /// [`GraphStorage::storage_identity`] of the graph's storage.
+    identity: usize,
+    /// The address of the `S` inside the graph's lock.
+    start: usize,
+    /// `size_of::<S>()`.
+    len: usize,
+}
+
+impl WatchedStorage {
+    /// The storage of `graph`, read through `storage` (the graph's own `S`, borrowed from a view
+    /// that holds the lock).
+    fn of<S: GraphStorage>(graph: &Graph<S>, storage: &S) -> Self {
+        Self {
+            identity: storage.storage_identity() as usize,
+            start: graph.lock.data_ptr() as usize,
+            len: std::mem::size_of::<S>(),
+        }
+    }
+
+    /// Whether the storage with identity `identity` is this graph's storage: the same identity,
+    /// or an address inside the graph's `S` (a storage nested inline in the graph's storage,
+    /// such as the graph a wrapper storage forwards to, rolling back on its own). The `S` of two
+    /// live graphs never overlap, so at most one graph matches.
+    fn contains(&self, identity: usize) -> bool {
+        identity == self.identity || identity.wrapping_sub(self.start) < self.len
+    }
+}
+
+/// How a [`Graph`] learns that a rollback of ITS storage failed, wherever the engine ran it.
 ///
 /// Every write view of a graph ([`GraphWrite`]) and every storage call that closes a held unit
-/// opens a watch on its thread; the engine's rollback paths
-/// (`graph::storage::rollback_failed_unit`, `rollback_unwound`,
+/// opens a watch on its thread, naming the graph's storage ([`WatchedStorage`]); the engine's
+/// rollback paths (`graph::storage::rollback_failed_unit`, `rollback_unwound`,
 /// `Transactional::transaction_with` and `dry_run`, the closes of held units) report a failure
-/// with [`note_failed_rollback`] to the innermost open watch, and the graph is poisoned when
-/// that watch ends (before the view releases the lock, also while a panic unwinds). A rollback
-/// on a bare storage with no write view of a graph open on the thread poisons nothing:
-/// poisoning is a property of [`Graph`]. The cost is one thread-local push and pop per write
-/// view, never per element.
+/// with [`note_failed_rollback`], naming the storage that failed by its
+/// [`GraphStorage::storage_identity`], and the graph is poisoned when the watch of THAT storage
+/// ends (before the view releases the lock, also while a panic unwinds).
+///
+/// Why the storage's identity and not the innermost watch, a token passed down, or the
+/// graph observing results: a process holds many independent graphs, and one thread may have
+/// write views of several graphs open (nested, dropped out of order) or roll back a bare
+/// storage beside them; only the failing storage itself says reliably which graph it belongs
+/// to. A token would have to travel through every storage-generic engine path
+/// (`GraphTraversalSource` holds a plain `S`, `Transactional` runs on any `&mut S`) and the
+/// graph cannot see the outcome of what a host runs on its write guard. The identity comes
+/// from the storage after the wrapper impls (`&mut G`, `&G`, `Box<G>`, ...) forwarded, so the
+/// same storage gives the same identity on the watch's side and on the rollback's side;
+/// containment in the graph's `S` covers a storage nested inline that rolls back on its own.
+/// A rollback of a storage no open watch names (a bare storage, a storage taken out with
+/// `get_mut`) poisons nothing: poisoning is a property of [`Graph`].
+///
+/// The cost is one thread-local push and pop and one `storage_identity` call per write view;
+/// the search over the open watches happens only when a rollback fails, never per element.
 struct RollbackWatch(u64);
 
 impl RollbackWatch {
-    /// Opens a watch as the thread's innermost one (id 0: the thread is exiting, nothing is
-    /// watched).
-    fn start() -> Self {
+    /// Opens a watch of `storage` as the thread's innermost one (id 0: the thread is exiting,
+    /// nothing is watched).
+    fn start(storage: WatchedStorage) -> Self {
         let id = ROLLBACK_WATCHES
             .try_with(|watches| match watches.try_borrow_mut() {
                 Ok(mut watches) => {
                     let id = watches.next;
                     watches.next = watches.next.wrapping_add(1).max(1);
-                    watches.open.push((id, None));
+                    watches.open.push(OpenWatch {
+                        id,
+                        storage,
+                        cause: None,
+                    });
                     id
                 }
                 Err(_) => 0,
@@ -191,7 +248,7 @@ impl RollbackWatch {
         RollbackWatch(id)
     }
 
-    /// Ends the watch: the cause of a failed rollback noted while it was the innermost one.
+    /// Ends the watch: the cause of a failed rollback of its storage noted while it was open.
     fn finish(&mut self) -> Option<String> {
         let id = std::mem::replace(&mut self.0, 0);
         if id == 0 {
@@ -200,8 +257,8 @@ impl RollbackWatch {
         ROLLBACK_WATCHES
             .try_with(|watches| {
                 let mut watches = watches.try_borrow_mut().ok()?;
-                let at = watches.open.iter().rposition(|(open, _)| *open == id)?;
-                watches.open.remove(at).1
+                let at = watches.open.iter().rposition(|open| open.id == id)?;
+                watches.open.remove(at).cause
             })
             .ok()
             .flatten()
@@ -214,17 +271,24 @@ impl Drop for RollbackWatch {
     }
 }
 
-/// Reports a failed rollback (or discard) of a unit to the innermost [`RollbackWatch`] of the
-/// thread, so the [`Graph`] whose write view or held unit it belongs to is poisoned when the
-/// watch ends. Without an open watch (a bare storage) nothing happens.
+/// Reports a failed rollback (or discard) of a unit of the storage with identity `storage`
+/// ([`GraphStorage::storage_identity`]) to the innermost open [`RollbackWatch`] of that storage
+/// on this thread, so exactly the [`Graph`] that holds the storage is poisoned when the watch
+/// ends. Without such a watch (a bare storage, or a graph with no write view open on this
+/// thread) nothing happens; the watches of other graphs are never touched.
 #[cold]
-pub(crate) fn note_failed_rollback(cause: &dyn fmt::Display) {
+pub(crate) fn note_failed_rollback(storage: *const (), cause: &dyn fmt::Display) {
+    let identity = storage as usize;
     let _ = ROLLBACK_WATCHES.try_with(|watches| {
         if let Ok(mut watches) = watches.try_borrow_mut()
-            && let Some((_, slot)) = watches.open.last_mut()
-            && slot.is_none()
+            && let Some(open) = watches
+                .open
+                .iter_mut()
+                .rev()
+                .find(|open| open.storage.contains(identity))
+            && open.cause.is_none()
         {
-            *slot = Some(cause.to_string());
+            open.cause = Some(cause.to_string());
         }
     });
 }
@@ -772,9 +836,13 @@ impl<S: GraphStorage> Graph<S> {
         guard: WriteAccess<'a, S>,
         held: Option<(Instant, &'a Arc<WorkloadStats>)>,
     ) -> GraphWrite<'a, S> {
+        let storage = match &guard {
+            WriteAccess::Locked(locked) => WatchedStorage::of(self, locked),
+            WriteAccess::Held(held, _) => WatchedStorage::of(self, held),
+        };
         GraphWrite {
             guard,
-            watch: RollbackWatch::start(),
+            watch: RollbackWatch::start(storage),
             poison: &self.poison,
             held,
             _attached: self.attached(),
@@ -1037,7 +1105,7 @@ impl<S: GraphStorage> Graph<S> {
             |storage, mark| {
                 let rolled_back = storage.rollback_unit(mark, reason);
                 if let Err(err) = &rolled_back {
-                    note_failed_rollback(err);
+                    note_failed_rollback(storage.storage_identity(), err);
                 }
                 rolled_back
             },
@@ -1063,7 +1131,7 @@ impl<S: GraphStorage> Graph<S> {
                 if let Err(err) = &discarded
                     && close_failed(err)
                 {
-                    note_failed_rollback(err);
+                    note_failed_rollback(storage.storage_identity(), err);
                 }
                 discarded
             },
@@ -1303,9 +1371,10 @@ impl<S: GraphStorage> Graph<S> {
         };
         // A failed rollback inside `close` (an explicit rollback or discard, the rollback of a
         // commit whose metadata the storage refused) poisons the graph.
-        let mut watch = RollbackWatch::start();
         // SAFETY: this thread holds the lock exclusively and no view of it (checked above).
-        let closed = close(unsafe { &mut *self.lock.data_ptr() }, mark);
+        let storage = unsafe { &mut *self.lock.data_ptr() };
+        let mut watch = RollbackWatch::start(WatchedStorage::of(self, storage));
+        let closed = close(storage, mark);
         if let Some(cause) = watch.finish() {
             self.poison.set(cause);
         }

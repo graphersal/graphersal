@@ -543,3 +543,219 @@ fn a_failed_rollback_on_a_bare_storage_poisons_no_graph() {
     assert!(!healthy.is_poisoned());
     assert_eq!(healthy.read_checked().unwrap().vertex_count().unwrap(), 6);
 }
+
+// Poison isolation: a failed rollback poisons exactly the graph whose storage failed, never
+// another graph on the same thread, and nothing for a bare storage.
+
+/// A traversal on `storage` (a graph's write view or a bare storage) whose unit fails and is
+/// rolled back.
+fn fail_a_traversal_on<S: GraphStorage>(storage: &mut S) -> String {
+    let err = GraphTraversalSource::new(storage)
+        .add_v("ghost")
+        .constant("x")
+        .as_number(GType::LONG)
+        .iterate()
+        .unwrap_err();
+    chain(&*err)
+}
+
+/// Two graphs, each with its rollback switch on.
+fn two_broken_graphs() -> (Graph<Failing>, Graph<Failing>) {
+    let a = Graph::new(modern());
+    let b = Graph::new(modern());
+    Faults::set(&a.read().faults().rollback_unit, true);
+    Faults::set(&b.read().faults().rollback_unit, true);
+    (a, b)
+}
+
+#[test]
+fn nested_write_views_of_two_graphs_poison_only_the_inner_failing_one() {
+    let (outer, inner) = two_broken_graphs();
+    {
+        let _outer_view = outer.write_checked().unwrap();
+        let mut inner_view = inner.write_checked().unwrap();
+        fail_a_traversal_on(&mut *inner_view);
+    }
+    assert!(inner.is_poisoned());
+    assert!(!outer.is_poisoned());
+    assert_eq!(outer.read_checked().unwrap().vertex_count().unwrap(), 6);
+}
+
+#[test]
+fn nested_write_views_of_two_graphs_poison_only_the_outer_failing_one() {
+    let (outer, inner) = two_broken_graphs();
+    {
+        let mut outer_view = outer.write_checked().unwrap();
+        let _inner_view = inner.write_checked().unwrap();
+        // The outer graph's storage fails while the inner graph's view is the innermost one.
+        fail_a_traversal_on(&mut *outer_view);
+    }
+    assert!(outer.is_poisoned());
+    assert!(!inner.is_poisoned());
+    assert_eq!(inner.read_checked().unwrap().vertex_count().unwrap(), 6);
+}
+
+#[test]
+fn write_views_dropped_out_of_order_poison_only_their_own_graph() {
+    // The first graph's view fails and is dropped first, while the second one's is still open.
+    let (first, second) = two_broken_graphs();
+    let mut first_view = first.write_checked().unwrap();
+    let second_view = second.write_checked().unwrap();
+    fail_a_traversal_on(&mut *first_view);
+    drop(first_view);
+    assert!(first.is_poisoned());
+    assert!(!second.is_poisoned());
+    drop(second_view);
+    assert!(!second.is_poisoned());
+
+    // The second graph's view fails, the first graph's (opened before it) is dropped first.
+    let (first, second) = two_broken_graphs();
+    let first_view = first.write_checked().unwrap();
+    let mut second_view = second.write_checked().unwrap();
+    fail_a_traversal_on(&mut *second_view);
+    drop(first_view);
+    assert!(!first.is_poisoned());
+    assert!(!second.is_poisoned(), "poisoned when its own view ends");
+    drop(second_view);
+    assert!(second.is_poisoned());
+    assert!(!first.is_poisoned());
+}
+
+#[test]
+fn a_bare_storage_failing_beside_a_graphs_write_view_poisons_nothing() {
+    let graph = Graph::new(modern());
+    let mut bare = modern();
+    Faults::set(&bare.faults().rollback_unit, true);
+    {
+        let _view = graph.write_checked().unwrap();
+        let text = fail_a_traversal_on(&mut bare);
+        assert!(text.contains("failed to roll a unit back"), "{text}");
+        let failed: Result<(), GraphError> =
+            bare.transaction(|_| Err(GraphError::unsupported("the closure's own failure")));
+        assert!(matches!(failed, Err(GraphError::RollbackFailed { .. })));
+        let previewed: Result<((), _), GraphError> = bare.dry_run(|_| Ok(()));
+        assert!(
+            previewed.is_ok(),
+            "the discard switch is off: {previewed:?}"
+        );
+    }
+    assert!(!graph.is_poisoned());
+    assert_eq!(graph.read_checked().unwrap().vertex_count().unwrap(), 6);
+}
+
+#[test]
+fn a_failure_in_a_held_unit_poisons_only_its_graph_beside_another_held_unit() {
+    let (a, b) = two_broken_graphs();
+    let mark_b = b.begin_unit().unwrap();
+    GraphTraversalSource::new(&mut *b.write_checked().unwrap())
+        .add_v("person")
+        .iterate()
+        .unwrap();
+    let mark_a = a.begin_unit().unwrap();
+    {
+        // B's write view stays open while A's savepoint fails to roll back.
+        let _b_view = b.write_checked().unwrap();
+        fail_a_traversal_on(&mut *a.write_checked().unwrap());
+    }
+    assert!(a.is_poisoned());
+    assert!(!b.is_poisoned());
+    assert_poisoned(a.commit_unit(mark_a));
+    b.commit_unit(mark_b).unwrap();
+    assert_eq!(b.read_checked().unwrap().vertex_count().unwrap(), 7);
+
+    // The close of A's held unit fails while B holds a unit with a write view open.
+    let (a, b) = two_broken_graphs();
+    let mark_b = b.begin_unit().unwrap();
+    let mark_a = a.begin_unit().unwrap();
+    GraphTraversalSource::new(&mut *a.write_checked().unwrap())
+        .add_v("person")
+        .iterate()
+        .unwrap();
+    {
+        let _b_view = b.write_checked().unwrap();
+        let failed = a.rollback_unit(
+            mark_a,
+            &graphersal::changes::RollbackReason::failed(&"test"),
+        );
+        assert!(matches!(failed, Err(GraphError::StorageFailed { .. })));
+    }
+    assert!(a.is_poisoned());
+    assert!(!b.is_poisoned());
+    b.commit_unit(mark_b).unwrap();
+}
+
+#[test]
+fn a_failure_on_one_thread_poisons_only_that_threads_graph() {
+    let (broken, healthy) = two_broken_graphs();
+    Faults::set(&healthy.read().faults().rollback_unit, false);
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut view = broken.write_checked().unwrap();
+            barrier.wait();
+            fail_a_traversal_on(&mut *view);
+        });
+        scope.spawn(|| {
+            let mut view = healthy.write_checked().unwrap();
+            barrier.wait();
+            let err = GraphTraversalSource::new(&mut *view)
+                .add_v("ghost")
+                .constant("x")
+                .as_number(GType::LONG)
+                .iterate();
+            assert!(err.is_err(), "fails, but rolls back cleanly");
+        });
+    });
+    assert!(broken.is_poisoned());
+    assert!(!healthy.is_poisoned());
+    assert_eq!(healthy.read_checked().unwrap().vertex_count().unwrap(), 6);
+}
+
+#[test]
+fn graphs_of_different_storage_types_on_one_thread_stay_isolated() {
+    let failing = Graph::new(modern());
+    Faults::set(&failing.read().faults().rollback_unit, true);
+    let plain = Graph::new(TraversalGraph::tinkerpop_modern());
+    // The plain graph's view is the innermost one while the failing graph's storage fails.
+    {
+        let mut failing_view = failing.write_checked().unwrap();
+        let _plain_view = plain.write_checked().unwrap();
+        fail_a_traversal_on(&mut *failing_view);
+    }
+    assert!(failing.is_poisoned());
+    assert!(!plain.is_poisoned());
+    // And the other way round: a plain graph's failing traversal (its rollback succeeds) inside
+    // a failing graph's view poisons neither.
+    let failing = Graph::new(modern());
+    {
+        let _failing_view = failing.write_checked().unwrap();
+        let mut plain_view = plain.write_checked().unwrap();
+        fail_a_traversal_on(&mut *plain_view);
+    }
+    assert!(!failing.is_poisoned());
+    assert!(!plain.is_poisoned());
+}
+
+#[test]
+fn a_boxed_storage_is_attributed_to_its_graph() {
+    // `Box<G>` forwards `storage_identity` to the boxed storage; a traversal on the box (or on
+    // the boxed storage itself) is attributed to the graph that holds the box.
+    let other = Graph::new(modern());
+    Faults::set(&other.read().faults().rollback_unit, true);
+    let boxed = Graph::new(Box::new(modern()));
+    Faults::set(&boxed.read().faults().rollback_unit, true);
+    {
+        let _other_view = other.write_checked().unwrap();
+        let mut view = boxed.write_checked().unwrap();
+        fail_a_traversal_on(&mut **view);
+    }
+    assert!(boxed.is_poisoned());
+    assert!(!other.is_poisoned());
+    let boxed = Graph::new(Box::new(modern()));
+    Faults::set(&boxed.read().faults().rollback_unit, true);
+    {
+        let mut view = boxed.write_checked().unwrap();
+        fail_a_traversal_on(&mut *view);
+    }
+    assert!(boxed.is_poisoned());
+}
