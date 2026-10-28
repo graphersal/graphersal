@@ -160,10 +160,15 @@ graphersal --graph g.graphml --schema schema.json --server   # a graph file load
 graphersal --graph large --server --timeout 5000 --memory-limit auto   # limits apply to every query
 graphersal --graph modern --server --ui-dir ~/src/graphersal/playground # its files win over the embedded UI
 graphersal --graph modern --server --embedder potion=minishlab/potion-base-8M   # a Model2Vec model for every query
+graphersal --graph db.gstore --read-only --server --mcp --mcp-read-only   # every write refused; the store is not written
+graphersal health                                        # exit 0 when http://127.0.0.1:8080/healthz answers 200
+graphersal health --ready --port 9000                    # /readyz: 503 while loading or stopping
+curl -s http://127.0.0.1:8080/healthz                    # {"status":"ok"} (any Host header, no lock)
+docker build -t graphersal . && docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/db.gstore:/data/graph.gstore:ro" graphersal
 ```
 
-Stop it with **Ctrl+C**: a running query is cancelled and an open store is closed cleanly. A
-second Ctrl+C exits at once. The display options (`--format`, `--max-rows`, ...) and `-e`/`--in`
+Stop it with **Ctrl+C** or SIGTERM (`docker stop`, also as PID 1): a running query is cancelled
+and an open store is closed cleanly (exit code 0). A second Ctrl+C exits at once. The display options (`--format`, `--max-rows`, ...) and `-e`/`--in`
 are refused with `--server` (exit 2).
 
 ## MCP: an AI agent on the same graph

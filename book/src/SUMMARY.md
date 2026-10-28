@@ -27,6 +27,7 @@
 - [Python Quick Start](library/python.md)
 - [Web Playground](users_guide/web_playground.md)
 - [Dev Server and MCP](persistence/dev_server.md)
+  - [Running in Docker](persistence/docker.md)
 - [GraphSON](users_guide/graphson.md)
 - [Generating Test Data](users_guide/generating_test_data.md)
 - [Running Queries Safely](library/safety.md)

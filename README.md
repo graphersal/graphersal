@@ -165,6 +165,17 @@ The result goes to stdout, a diagnostic to stderr, and a failing query exits wit
 script or a CI job can check a graph. See [The Command Line](https://graphersal.dev/getting_started/cli.html)
 and [Dev Server, MCP and AI Chat](https://graphersal.dev/getting_started/server_mcp_ai.html).
 
+### In Docker
+
+The repository's `Dockerfile` builds a small image of the command line; by default it serves a
+single-file Store read-only with a read-only MCP endpoint (no authentication: keep it on a
+private network). See [Running in Docker](https://graphersal.dev/persistence/docker.html).
+
+```bash
+docker build -t graphersal .
+docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/my.gstore:/data/graph.gstore:ro" graphersal
+```
+
 ### From Rust
 
 ```toml

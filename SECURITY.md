@@ -42,9 +42,10 @@ In scope, among others:
 - **The dev server** (`graphersal --server`) listens on the loopback interface (inside a container
   on every interface, or where `--host` says) and refuses requests whose `Host` or `Origin` is not
   its own (on a network address it accepts IP literals, `localhost`, dotless names and the
-  `--host` name and refuses other host names, against DNS rebinding). A way for a web page or another host to reach
-  it, to bypass `--mcp-read-only` or `--mcp-token`, or to make it reveal the AI Chat API key is in
-  scope.
+  `--host` name and refuses other host names, against DNS rebinding; only `/healthz` and
+  `/readyz`, which reveal nothing, skip these checks). A way for a web page or another host to
+  reach it, to bypass `--read-only`, `--mcp-read-only` or `--mcp-token`, or to make it reveal the
+  AI Chat API key is in scope.
 - **The playground** must not send a user's graph or queries anywhere (apart from the AI Chat of
   the dev server, which goes to the provider the user configured).
 
@@ -54,6 +55,8 @@ Out of scope:
   host installs them);
 - the command line tool run on your own scripts: it is a trusted local tool and runs without script
   limits unless asked;
-- the dev server's lack of authentication on the loopback interface, which is documented: it is a
-  development tool for one user on one machine;
+- the dev server's lack of authentication, which is documented: on the loopback interface it is a
+  development tool for one user on one machine, and listening on a network address (an explicit
+  `--host` or the container default) is the user's deliberate choice, which the server
+  announces with a warning;
 - what an LLM provider does with the data the AI Chat sends to it.

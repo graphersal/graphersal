@@ -33,6 +33,16 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
   "dev mode, unstable, local only" banner goes to stderr.
 - `--host <ADDR>` (default `127.0.0.1`, inside a container `0.0.0.0`): the address to listen on,
   see [Listening address and Docker](#listening-address-and-docker).
+- `--read-only`: every write is refused (queries, schema, catalog, "Save to file"; MCP offers
+  only its reading tools) and a Store is loaded without its lock and without writing anything,
+  so a read-only file or file system works ([Running in Docker](docker.md#read-only)). A Store
+  the process may not write is served that way anyway, with a note.
+- `GET /healthz` (liveness) and `GET /readyz` (readiness: 503 while the graph loads or the
+  server stops) answer without a lock and under any `Host`, for container health checks;
+  `graphersal health [--ready]` probes them ([Health checks](docker.md#health-checks)). The
+  server listens before the graph loads and answers every other request with 503 until then.
+- Ctrl+C or SIGTERM stops the server: the running query is cancelled, a Store is closed
+  cleanly, the exit code is 0 ([Stopping](docker.md#stopping)).
 - The playground UI is **embedded in the binary** (its static files: `index.html`, `css/`, `js/`,
   `assets/`, `reset/`), so `graphersal` serves it on its own, from any working directory.
   `--ui-dir <DIR>` names a directory whose files win over the embedded copy (for working on the
@@ -232,9 +242,11 @@ on the same port (the `listening` row on stderr then names both addresses; if th
 server stays on IPv4, silently). Only programs on the same machine reach it.
 
 Inside a container the loopback is useless: a published port (`docker run -p 8080:8080`) arrives
-on the container's network interface. So when the server finds `/.dockerenv` (Docker) or
-`/run/.containerenv` (Podman), its default is `0.0.0.0`, every interface of the container, and
-`docker run -p` works without flags:
+on the container's network interface. So when the server finds `/.dockerenv` (Docker),
+`/run/.containerenv` (Podman) or the variable `KUBERNETES_SERVICE_HOST` (a Kubernetes pod), its
+default is `0.0.0.0`, every interface of the container, and `docker run -p` works without flags.
+The repository's `Dockerfile`, health checks, read-only serving, SIGTERM and Kubernetes probes:
+[Running in Docker](docker.md).
 
 ```bash
 # an image that has the graphersal binary; the Store lives in a volume

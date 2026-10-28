@@ -62,7 +62,10 @@ its queries in this process: tables, the graph drawing, schema, profile, Stop, a
 back to the `--graph` file. `--args-file FILE` (or `@FILE`) reads flags from a JSON file. `--mcp` adds a Model Context Protocol endpoint on the same graph, so an
 AI agent works next to you in the browser (`--mcp-read-only`, `--mcp-token <secret>`, `--mcp-instructions FILE`); the page
 reloads when the agent changed the graph. `--ai config.json` enables the playground's AI Chat tab
-with your own LLM provider (experimental). There is no authentication and the HTTP API changes
+with your own LLM provider (experimental). `--read-only` refuses every write and reads a Store
+without writing to it. `GET /healthz` and `/readyz` are health checks, `graphersal health` probes
+them, and SIGTERM stops the server cleanly ([Running in Docker](https://graphersal.dev/persistence/docker.html)).
+There is no authentication and the HTTP API changes
 without notice. See [Dev Server, MCP and AI Chat](https://graphersal.dev/getting_started/server_mcp_ai.html).
 
 ## The Store

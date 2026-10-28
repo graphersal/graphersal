@@ -1,0 +1,20 @@
+# The build context of the Dockerfile: the workspace sources only (every member's manifest is
+# needed, and playground/ is embedded into the binary).
+.git
+.github
+.vscode
+**/.DS_Store
+/target
+/target-*
+/ai
+/data
+/book
+/deploy
+/playground/pkg
+/playground/node_modules
+/bindings/py-graphersal/.venv
+/bindings/py-graphersal/.pytest_cache
+**/__pycache__
+# Graph data never goes into the build context (a derived image copies its own).
+**/*.gstore
+**/*.gsnap

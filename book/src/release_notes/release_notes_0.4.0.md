@@ -92,7 +92,30 @@ schema format and the storage formats are unchanged; scripts and stores of 0.3 w
   `docker run -p 8080:8080 ... graphersal --server --port 8080` works without flags. A
   non-loopback address prints a warning that the server has no authentication; on the loopback
   the Host/Origin checks stay as strict as before, and on a network address they still refuse
-  DNS-rebinding requests.
+  DNS-rebinding requests. A Kubernetes pod (`KUBERNETES_SERVICE_HOST`) counts as a container.
+- **Running in Docker and Kubernetes** ([Running in Docker](../persistence/docker.md)): a
+  `Dockerfile` in the repository builds the static `graphersal` binary into a small
+  distroless image (non-root, `HEALTHCHECK`, `STOPSIGNAL SIGTERM`) whose default command serves
+  `/data/graph.gstore` read-only with a read-only MCP endpoint.
+  - **Health endpoints**: `GET`/`HEAD /healthz` (liveness: 200 while the process answers HTTP)
+    and `/readyz` (readiness: 200 when the graph is loaded, 503 while it loads or the server
+    stops). They take no lock, never wait for a running query and are exempt from the
+    Host/Origin checks, so Kubernetes probes and Docker health checks work in every bind mode.
+    The server listens before the graph loads: during a long Store open `/healthz` answers 200,
+    `/readyz` and the API 503.
+  - **`graphersal health [--ready] [--host ADDR] [--port N] [--timeout MS]`**: the probe for
+    images without curl or wget (exit 0 when the endpoint answers 200, 1 otherwise).
+  - **SIGTERM**: the dev server always stops on SIGINT/SIGTERM, also as PID 1 of a container
+    (where a process without a handler ignores SIGTERM and `docker stop` waits for its kill):
+    the running query is cancelled, `/readyz` turns 503, a Store is closed cleanly, and the
+    process exits with 0. As PID 1, a one-shot script and the REPL exit with 130 on them too.
+  - **`--read-only`**: the served graph refuses every write (queries, schema, catalog, "Save to
+    file"; MCP offers only reading tools), and a Store is loaded without its lock and without
+    writing anything, so a `:ro` mount, a read-only root file system or a file without write
+    permission works, models included. A Store that cannot be opened for writing falls back to
+    it with a note. Rust: `Store::stored_embedders_dir` (the models of a store loaded with
+    `Store::open_read_only`); a single-file store on a read-only file system now reads like
+    one without write permission.
 - **Dev server**: the start output is grouped in sections (Store, Graph, Embedding models,
   Server) and names every embedding model with its repository, licence and source; the
   playground shows no Examples menu with the dev server (the examples are written for the sample
