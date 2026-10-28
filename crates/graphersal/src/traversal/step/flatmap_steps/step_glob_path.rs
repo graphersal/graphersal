@@ -399,21 +399,35 @@ fn start_vertex<S: GraphStorage>(value: &TraverserValue<S>) -> TraverserResult<S
     vertex.ok_or_else(|| Box::new(TraverserError::cast_exception(VERTEX_INPUT, value)))
 }
 
+/// A storage read of the walk. The success path is a plain `match` (no call, no conversion per
+/// edge); a failure leaves the enclosing function with the read's error.
+macro_rules! read {
+    ($e:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(err) => return Err(BoxedTraverserError::from(err)),
+        }
+    };
+}
+
 /// The automaton transition for `child`, reading its match key only when a live state needs it.
+/// `labels` is the child's label set when the caller has read it already (for the vertex-label
+/// filter), so a `T.label` key does not read it twice.
+#[inline]
 fn transition<S: GraphStorage>(
     storage: &S,
     pattern: &GlobPattern,
     key: &MatchKey,
     mask: u64,
     child: S::VertexId,
-) -> Result<u64, GraphError> {
+    labels: Option<&[CompactString]>,
+) -> TraverserResult<u64> {
     if mask & pattern.needs_key() == 0 {
         return Ok(pattern.step(mask, None));
     }
     Ok(match key {
         MatchKey::Property(key) => {
-            let value = storage
-                .vertex_properties(child)?
+            let value = read!(storage.vertex_properties(child))
                 .and_then(|properties| properties.get(key.as_str()));
             // A compressed string is matched on its text.
             if let Some(ElementProperty::Compressed(text)) = value {
@@ -437,9 +451,12 @@ fn transition<S: GraphStorage>(
             });
             pattern.step(mask, value)
         }
-        MatchKey::Id => pattern.step(mask, storage.vertex_id(child)?),
+        MatchKey::Id => pattern.step(mask, read!(storage.vertex_id(child))),
         MatchKey::Label => {
-            let labels = storage.vertex_labels(child)?;
+            let labels = match labels {
+                Some(labels) => labels,
+                None => read!(storage.vertex_labels(child)),
+            };
             if labels.is_empty() {
                 return Ok(pattern.step(mask, None));
             }
@@ -542,24 +559,31 @@ impl<'g, S: GraphStorage + 'g> Walk<'_, 'g, S> {
             // Expand children only while the vertex is at a depth whose children may be pushed.
             let expandable = max_depth.is_none_or(|max| child_depth < max);
             let storage: &S = &*context.storage;
-            for edge in storage.out_edges(vertex)? {
-                let Some((_, child)) = storage.edge_endpoints(edge)? else {
+            for edge in read!(storage.out_edges(vertex)) {
+                let Some((_, child)) = read!(storage.edge_endpoints(edge)) else {
                     continue;
                 };
                 tick_deadline(&mut context.deadline)?;
-                if let Some(labels) = filter
-                    && !has_any_label(storage, child, labels)?
-                {
-                    continue;
-                }
-                let mut next = transition(storage, pattern, key, mask, child)?;
+                // The vertex-label filter reads the child's label set once (not once per filter
+                // label) and hands it on to a `T.label` transition.
+                let child_labels = match filter {
+                    Some(filter) => {
+                        let labels = read!(storage.vertex_labels(child));
+                        if !labels.iter().any(|label| filter.contains(label)) {
+                            continue;
+                        }
+                        Some(labels)
+                    }
+                    None => None,
+                };
+                let mut next = transition(storage, pattern, key, mask, child, child_labels)?;
                 if next == 0 {
                     continue;
                 }
                 // Cycles and diamonds can only close at the start or at a vertex with
                 // in-degree >= 2, so only those carry seen-state bookkeeping; a tree tracks
                 // nothing.
-                if child == start || storage.in_edges(child)?.nth(1).is_some() {
+                if child == start || read!(storage.in_edges(child)).nth(1).is_some() {
                     if max_depth.is_some() {
                         // A state seen only deeper must be expanded again from here: the
                         // remaining depth budget is larger, so more of the subtree is in reach.
@@ -613,20 +637,6 @@ impl<'g, S: GraphStorage + 'g> Walk<'_, 'g, S> {
         }
         Ok(reexpanded)
     }
-}
-
-/// Whether `vertex` carries one of `labels` (stops at the first).
-fn has_any_label<S: GraphStorage>(
-    storage: &S,
-    vertex: S::VertexId,
-    labels: &[CompactString],
-) -> Result<bool, GraphError> {
-    for label in labels {
-        if storage.vertex_has_label(vertex, label)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Calls `f` with the index of every set bit of `mask`.
