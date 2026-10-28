@@ -375,6 +375,7 @@ pub fn eval_value_atomic(
 /// [`eval_value_atomic`] for a scheduled job: the script is one unit carrying `metadata` to its
 /// commit (the job's name), and a traversal it returns runs inside that unit (a job's result is
 /// not shown: what it does is its writes).
+#[cfg(feature = "persist")]
 pub(crate) fn eval_job_unit(
     shared: Arc<dyn AnyGraph>,
     script: &str,

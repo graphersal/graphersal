@@ -27,6 +27,7 @@ pub(crate) fn capped(n: usize) -> usize {
 }
 
 /// A `u64` count (a bulk) as an up-front capacity: at most [`MAX_UPFRONT_CAPACITY`].
+#[cfg(any(feature = "gql", test))]
 #[inline]
 pub(crate) fn capped_u64(n: u64) -> usize {
     usize::try_from(n).map_or(MAX_UPFRONT_CAPACITY, capped)

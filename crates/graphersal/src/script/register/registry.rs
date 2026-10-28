@@ -11,7 +11,7 @@
 //! (checked by `surface_tests.rs`).
 
 use std::any::TypeId;
-#[cfg(test)]
+#[cfg(all(test, feature = "io", feature = "serde"))]
 use std::collections::HashSet;
 
 use rhai::packages::{Package, StandardPackage};
@@ -33,10 +33,10 @@ pub(crate) struct Registry {
     docs: super::docs::DocIndex,
     /// Every registered `(name, parameter types)`, to report a registration that replaces an
     /// earlier one with the same signature (the later one wins, so their order would matter).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "io", feature = "serde"))]
     seen: HashSet<(String, Vec<TypeId>)>,
     /// The replaced signatures (see `seen`); a test keeps it empty.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "io", feature = "serde"))]
     replaced: Vec<String>,
 }
 
@@ -49,7 +49,7 @@ pub(crate) struct SharedRegistrations {
     globals: Vec<Shared<Module>>,
     statics: Vec<(&'static str, Shared<Module>)>,
     /// The replaced signatures found while building (see [`Registry`]).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "io", feature = "serde"))]
     replaced: Vec<String>,
 }
 
@@ -61,9 +61,9 @@ impl Registry {
             statics: Vec::new(),
             names: Engine::new_raw(),
             docs: super::docs::DocIndex::new(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "io", feature = "serde"))]
             seen: HashSet::new(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "io", feature = "serde"))]
             replaced: Vec::new(),
         }
     }
@@ -93,7 +93,7 @@ impl Registry {
         FUNC: RhaiNativeFunc<A, N, X, R, F> + 'static,
     {
         let name = name.as_ref();
-        #[cfg(test)]
+        #[cfg(all(test, feature = "io", feature = "serde"))]
         if !self
             .seen
             .insert((name.to_string(), FUNC::param_types().to_vec()))
@@ -222,7 +222,7 @@ impl Registry {
             namespace: self.namespace.into(),
             globals: self.globals,
             statics: self.statics,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "io", feature = "serde"))]
             replaced: self.replaced,
         }
     }
@@ -374,7 +374,7 @@ pub(crate) fn display_type_names_in(text: &str) -> String {
 }
 
 /// The replaced signatures of this thread's registrations (see [`Registry`]).
-#[cfg(test)]
+#[cfg(all(test, feature = "io", feature = "serde"))]
 pub(crate) fn replaced_signatures() -> Vec<String> {
     SHARED.with(|shared| shared.replaced.clone())
 }

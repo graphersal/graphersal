@@ -110,6 +110,7 @@ impl Channel {
             .find(|channel| channel.name() == name)
     }
 
+    #[cfg(feature = "persist")]
     fn code(self) -> u8 {
         match self {
             Channel::Host => 0,
@@ -121,6 +122,7 @@ impl Channel {
         }
     }
 
+    #[cfg(feature = "persist")]
     fn from_code(code: u8) -> Option<Channel> {
         Channel::ALL
             .into_iter()
@@ -175,6 +177,7 @@ impl AccessKind {
         }
     }
 
+    #[cfg(feature = "persist")]
     pub(crate) fn code(self) -> u8 {
         match self {
             AccessKind::FilterScan => 0,
@@ -187,6 +190,7 @@ impl AccessKind {
         }
     }
 
+    #[cfg(feature = "persist")]
     pub(crate) fn from_code(code: u8) -> Option<AccessKind> {
         AccessKind::ALL.into_iter().find(|kind| kind.code() == code)
     }

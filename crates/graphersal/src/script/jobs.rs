@@ -411,6 +411,7 @@ impl ScriptGraphTraversalSource {
 /// One run of a `query` job (`Store::user_jobs`): calls the saved query `query` with `args` as
 /// one unit carrying `{job: <job>}` in its commit metadata, under an authorizer limited to the
 /// job's stored `effects`; a traversal the query returns runs inside the unit.
+#[cfg(feature = "persist")]
 pub(crate) fn run_query_job(
     graph: Arc<dyn AnyGraph>,
     job: &str,

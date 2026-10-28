@@ -13,8 +13,11 @@
 //! catalog definitions.
 //!
 
+// The authorizer of a query job, which only a Store runs (`script::run_query_job`).
+#[cfg(all(feature = "script", feature = "persist"))]
 mod authorizer;
 mod cron;
+#[cfg(all(feature = "script", feature = "persist"))]
 pub(crate) use authorizer::JobAuthorizer;
 mod definition;
 pub(crate) mod limits;

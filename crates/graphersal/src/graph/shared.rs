@@ -1084,6 +1084,7 @@ impl<S: GraphStorage> Graph<S> {
     /// storage without a unit clock): what [`GraphStorage::unit_started_at`] reports once the
     /// storage's unit is open. The script layer pins its traversals inside a held unit to it, so
     /// they read it also before the unit's first write.
+    #[cfg(feature = "script")]
     pub(crate) fn held_unit_started_at(&self) -> Option<i128> {
         match self.holds_unit() {
             true => self.unit.state.lock().started_at,

@@ -214,6 +214,7 @@ impl<N, E> Topology<N, E> {
     /// Tries to make room for exactly `nodes` more vertices and `edges` more edges (a load that
     /// knows its counts allocates once, without spare capacity). The counts may come from a
     /// file: a reservation the allocator refuses is skipped, never an abort.
+    #[cfg(any(feature = "persist", test))]
     pub(crate) fn reserve_exact(&mut self, nodes: usize, edges: usize) {
         let _ = self.nodes.try_reserve_exact(nodes);
         let _ = self.edges.try_reserve_exact(edges);
@@ -434,6 +435,7 @@ impl<N, E> Topology<N, E> {
     }
 
     /// The indices of the live edges in slot order.
+    #[cfg(feature = "persist")]
     pub(crate) fn edge_indices(&self) -> impl Iterator<Item = EdgeIndex> + '_ {
         self.edge_references().map(|edge| edge.index)
     }

@@ -150,6 +150,7 @@ pub(crate) struct ResolvedCall {
     /// The call has no parentheses: a standalone call reading its arguments from the caller's
     /// parameters of the same names. Resolved without the catalog
     /// ([`Resolver::deferred`]) the names it reads are not known.
+    #[cfg(feature = "script")]
     pub(crate) implicit_arguments: bool,
 }
 
@@ -428,6 +429,7 @@ impl Pass<'_, '_> {
                 .map(|(name, column)| (CompactString::new(&name.name), *column))
                 .collect(),
             unit: shape.unit,
+            #[cfg(feature = "script")]
             implicit_arguments: call.args.is_none(),
         });
         Ok((clause, ret))
@@ -477,6 +479,7 @@ impl Pass<'_, '_> {
                 .map(|(name, column)| (CompactString::new(&name.name), *column))
                 .collect(),
             unit,
+            #[cfg(feature = "script")]
             implicit_arguments: call.args.is_none(),
         });
         Ok((clause, ret))

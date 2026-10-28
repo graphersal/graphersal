@@ -1779,6 +1779,9 @@ impl ScriptGraphTraversalSource {
             anonymous: false,
             now: None,
         };
+        // Without `gql` the body has the one variant `Rhai`; the match keeps the arm the
+        // feature adds next to it.
+        #[cfg_attr(not(feature = "gql"), allow(clippy::infallible_destructuring_match))]
         let ast = match &compiled.body {
             Body::Rhai(ast) => ast,
             #[cfg(feature = "gql")]

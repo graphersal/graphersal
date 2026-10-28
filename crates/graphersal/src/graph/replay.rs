@@ -56,6 +56,7 @@ fn edge_of<S: GraphStorage + ?Sized>(storage: &S, id: &str) -> Result<S::EdgeId,
         .ok_or_else(|| GraphError::EdgeNotFound { id: id.to_string() })
 }
 
+#[cfg(feature = "persist")]
 pub(crate) fn apply_mutation<S: GraphStorage + ?Sized>(
     storage: &mut S,
     mutation: &Mutation,

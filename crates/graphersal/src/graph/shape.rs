@@ -490,6 +490,7 @@ impl ShapeTable {
     }
 
     /// The last shape interned or adopted, when its keys are exactly `keys` (no hashing).
+    #[cfg(any(feature = "io", test))]
     #[inline]
     fn last_with_keys<'a>(
         &self,
@@ -532,6 +533,7 @@ impl ShapeTable {
 /// its own (one per element kind, so each keeps its last shape), which the target graph does
 /// not own: it adopts the shape through its foreign-shape memo, one comparison per element
 /// while the elements repeat a key sequence, and the shape works the same for any storage.
+#[cfg(any(feature = "io", test))]
 #[derive(Default)]
 pub(crate) struct MapBuilder {
     /// The keys in arrival order (a repeated key appears again).
@@ -540,6 +542,7 @@ pub(crate) struct MapBuilder {
     values: Vec<ElementProperty>,
 }
 
+#[cfg(any(feature = "io", test))]
 impl MapBuilder {
     /// Adds `key` with `value` (a repeated key: see the type docs).
     #[inline]
