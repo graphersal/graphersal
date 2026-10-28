@@ -345,7 +345,11 @@ fn header_slots_and_tables_fall_back_to_the_older_generation() {
         opened.inner.mutate(|open| open.write_table()).unwrap();
         drop(opened);
         let again = unshared(&path);
-        assert!(again.check().unwrap().is_ok(), "{what}: {:?}", again.check());
+        assert!(
+            again.check().unwrap().is_ok(),
+            "{what}: {:?}",
+            again.check()
+        );
         let _ = fs::remove_file(&path);
     }
     // Both slots damaged: every record from the start.
