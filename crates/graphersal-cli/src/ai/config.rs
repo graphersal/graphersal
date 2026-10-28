@@ -155,8 +155,8 @@ impl AiConfig {
         Self::parse_in(text, None, env)
     }
 
-    /// Like [`AiConfig::parse`]; a relative `system_prompt_file` is read from `base` (the
-    /// directory of the config file; the current directory when `None`).
+    /// Parses and validates the text of an `--ai` file; a relative `system_prompt_file` is read
+    /// from `base` (the directory of the config file; the current directory when `None`).
     pub fn parse_in(
         text: &str,
         base: Option<&std::path::Path>,

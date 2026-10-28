@@ -4,9 +4,9 @@
 //! head`, a REPL whose terminal went away), since Rust ignores SIGPIPE and every write then
 //! fails with `EPIPE`.
 //!
-//! - stderr ([`errln!`]) is best effort: a failed write is ignored, and after a broken pipe
+//! - stderr (`errln!`) is best effort: a failed write is ignored, and after a broken pipe
 //!   nothing more is tried. The dev server keeps serving without its log reader.
-//! - stdout ([`out!`], [`outln!`]) is the result: the first failed write is remembered and
+//! - stdout (`out!`, `outln!`) is the result: the first failed write is remembered and
 //!   every later write is dropped. A one-shot run stops at the next script boundary, the REPL
 //!   ends, and [`exit_code`] turns a broken pipe into [`EXIT_CLOSED_PIPE`] (any other write
 //!   error into exit code 1, reported once on stderr). The process never resets SIGPIPE to its

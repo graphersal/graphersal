@@ -505,7 +505,7 @@ impl Session {
     /// vetoes it); the editor says why before the user types.
     ///
     /// Fails when the store cannot say whether it is read-only (a poisoned store lock,
-    /// [`graphersal::persist::StoreFailure::LockPoisoned`]); [`Self::write_refusal`] turns that
+    /// [`graphersal::persist::StoreFailure::LockPoisoned`]); the editor's write refusal turns that
     /// into a refusal.
     pub fn read_only_reason(&self) -> Result<Option<String>, SessionError> {
         if !self.store_view().is_null() {

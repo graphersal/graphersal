@@ -344,7 +344,8 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
 /// dedup_table_bytes, shape_bytes, workload_bytes}`, or `null`. `shape_bytes` and
 /// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
 /// `workload_bytes` (the graph's workload statistics, held beside the storage) is not part of the
-/// total either and is `0` from a storage alone ([`SessionGraph::memory_view`] fills it in).
+/// total either and is `0` from a storage alone
+/// ([`crate::storage::SessionGraph::memory_view`] fills it in).
 pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
     Ok(match g.memory_usage()? {
         Some(stats) => json!({
