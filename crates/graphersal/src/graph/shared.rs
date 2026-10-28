@@ -765,7 +765,7 @@ impl<S: GraphStorage> Graph<S> {
     ///
     /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
     /// let answer = match graph.try_read() {
-    ///     Some(view) => format!("{} vertices", view.vertex_count().unwrap()),
+    ///     Some(view) => format!("{} vertices", view.vertex_count()),
     ///     // `None`: busy (retry later) or poisoned (never again).
     ///     None if graph.is_poisoned() => "poisoned: reopen the storage".to_string(),
     ///     None => "busy: try again later".to_string(),
