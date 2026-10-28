@@ -326,6 +326,46 @@ fn an_adjacency_failure_fails_the_query_at_the_expanding_step() {
 }
 
 #[test]
+fn a_read_failure_inside_the_glob_path_walk_fails_the_query_at_the_step() {
+    let storage = modern();
+    let faults = storage.faults();
+    let walk = |storage: &Failing, labels: &[&str]| {
+        GraphTraversalSource::new(storage)
+            .v("1")
+            // A literal part, so every child's name is read (a bare `*` reads none).
+            .glob_path("*o*")
+            .by("name")
+            .by(labels.to_vec())
+            .count()
+            .next()
+    };
+    let all = ["person", "software"];
+    for (switch, read) in [
+        (
+            &faults.adjacency,
+            "failed to read the outgoing edges of a vertex",
+        ),
+        (
+            &faults.element_read,
+            "failed to read the properties of a vertex",
+        ),
+    ] {
+        Faults::set(switch, true);
+        let err = walk(&storage, &all).unwrap_err();
+        let text = chain(&*err);
+        assert!(text.contains(read), "{text}");
+        assert!(
+            text.contains("glob_path("),
+            "located at glob_path(): {text}"
+        );
+        Faults::set(switch, false);
+    }
+    // marko's children are lop (software), vadas and josh (person).
+    assert_eq!(walk(&storage, &all).unwrap(), Some(2i64.into()));
+    assert_eq!(walk(&storage, &["software"]).unwrap(), Some(1i64.into()));
+}
+
+#[test]
 fn a_unit_clock_failure_fails_the_create_and_changes_nothing() {
     let mut storage = modern();
     let faults = storage.faults();
