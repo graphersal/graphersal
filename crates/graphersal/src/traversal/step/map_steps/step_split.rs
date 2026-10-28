@@ -190,7 +190,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSplit {
             }
         };
         // TinkerPop: a `null` maps to `null`.
-        let result = if is_null(context, &value) {
+        let result = if is_null(context, &value)? {
             ElementProperty::Null
         } else {
             match Traverser::as_string_ref(context, &value)? {
@@ -198,7 +198,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSplit {
                 None => {
                     return Err(Box::new(TraverserError::cast_exception_str(
                         &["string"],
-                        Traverser::observed_type_name(context, &value),
+                        Traverser::observed_type_name(context, &value)?,
                     )));
                 }
             }

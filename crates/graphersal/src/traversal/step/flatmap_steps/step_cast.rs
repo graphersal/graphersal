@@ -444,7 +444,7 @@ impl StepCast {
                 self.convert(context, &TraverserValue::Computed(stored.clone(), None))?
             }
             LocalItem::Value(value) => {
-                if is_null(context, value) {
+                if is_null(context, value)? {
                     return Err(null_element());
                 }
                 self.convert(context, value)?
@@ -534,8 +534,8 @@ pub(crate) fn element_text<S: GraphStorage>(
         }
         TraverserValue::Edge(edge) => {
             let id = crate::graph::storage::stored_edge_id(storage, *edge)?;
-            let label = storage.edge_label(*edge).unwrap_or_default();
-            match storage.edge_endpoints(*edge) {
+            let label = storage.edge_label(*edge)?.unwrap_or_default();
+            match storage.edge_endpoints(*edge)? {
                 Some((out, into)) => format!(
                     "e[{id}][{}-{label}->{}]",
                     crate::graph::storage::stored_vertex_id(storage, out)?,
@@ -549,13 +549,13 @@ pub(crate) fn element_text<S: GraphStorage>(
         }
         TraverserValue::VertexProperty(key, vertex, PropertyHandleKind::Element) => {
             let stored = storage
-                .vertex_properties(*vertex)
+                .vertex_properties(*vertex)?
                 .and_then(|p| p.get(key.as_str()));
             format!("vp[{key}->{}]", property_text(stored)?)
         }
         TraverserValue::EdgeProperty(key, edge, PropertyHandleKind::Element) => {
             let stored = storage
-                .edge_properties(*edge)
+                .edge_properties(*edge)?
                 .and_then(|p| p.get(key.as_str()));
             format!("p[{key}->{}]", property_text(stored)?)
         }
@@ -613,7 +613,7 @@ fn read_value<S: GraphStorage>(
             }
             let value = context
                 .storage
-                .vertex_properties(*vertex_index)
+                .vertex_properties(*vertex_index)?
                 .and_then(|p| p.get(prop.as_str()))
                 .map(ElementProperty::to_logical)
                 .unwrap_or(ElementProperty::Null);
@@ -627,7 +627,7 @@ fn read_value<S: GraphStorage>(
             }
             let value = context
                 .storage
-                .edge_properties(*edge_index)
+                .edge_properties(*edge_index)?
                 .and_then(|p| p.get(prop.as_str()))
                 .map(ElementProperty::to_logical)
                 .unwrap_or(ElementProperty::Null);
@@ -659,12 +659,12 @@ fn enrich<S: GraphStorage>(
     match err {
         TraverserError::Value(ValueError::CastException {
             expected, actual, ..
-        }) => TraverserError::cast_exception_target(
-            expected,
-            actual,
-            value.map(preview),
-            origin.origin(context),
-        ),
+        }) => match origin.origin(context) {
+            Ok(origin) => {
+                TraverserError::cast_exception_target(expected, actual, value.map(preview), origin)
+            }
+            Err(error) => error.into(),
+        },
         other => other,
     }
 }

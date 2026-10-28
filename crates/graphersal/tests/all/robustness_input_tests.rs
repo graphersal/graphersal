@@ -3951,10 +3951,11 @@ fn random_gql_2e_queries_never_panic_and_equal_their_rewrites() {
 fn gql_3a_vertex<G: graphersal::storage::GraphStorage>(g: &G, v: G::VertexId) -> String {
     let mut props: Vec<String> = g
         .vertex_properties(v)
+        .unwrap()
         .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
         .unwrap_or_default();
     props.sort();
-    format!("{:?} {{{}}}", g.vertex_labels(v), props.join(", "))
+    format!("{:?} {{{}}}", g.vertex_labels(v).unwrap(), props.join(", "))
 }
 
 /// The canonical state of `g`, independent of element ids: every vertex (labels, properties)
@@ -3963,21 +3964,24 @@ fn gql_3a_vertex<G: graphersal::storage::GraphStorage>(g: &G, v: G::VertexId) ->
 fn gql_3a_dump<G: graphersal::storage::GraphStorage>(g: &G) -> Vec<String> {
     let mut lines: Vec<String> = g
         .vertices()
+        .unwrap()
         .map(|v| format!("V {}", gql_3a_vertex(g, v)))
         .collect();
-    for e in g.edges() {
+    for e in g.edges().unwrap() {
         let mut props: Vec<String> = g
             .edge_properties(e)
+            .unwrap()
             .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         props.sort();
         let ends = g
             .edge_endpoints(e)
+            .unwrap()
             .map(|(from, to)| format!("{} -> {}", gql_3a_vertex(g, from), gql_3a_vertex(g, to)))
             .unwrap_or_default();
         lines.push(format!(
             "E {} {{{}}} {ends}",
-            g.edge_label(e).unwrap_or_default(),
+            g.edge_label(e).unwrap().unwrap_or_default(),
             props.join(", ")
         ));
     }

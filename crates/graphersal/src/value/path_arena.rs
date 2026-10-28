@@ -222,13 +222,13 @@ impl<S: GraphStorage> PathArena<S> {
         path: PathRef,
         label: &str,
         pop: Pop,
-    ) -> Option<TraverserValue<S>> {
+    ) -> Result<Option<TraverserValue<S>>, crate::error::GraphError> {
         let has = |node: &&PathNode<S>| {
             node.labels
                 .as_ref()
                 .is_some_and(|labels| labels.iter().any(|l| l == label))
         };
-        match pop {
+        Ok(match pop {
             Pop::Last => self.iter_rev(path).find(has).map(|node| node.value.clone()),
             Pop::First => self
                 .iter_rev(path)
@@ -242,7 +242,7 @@ impl<S: GraphStorage> PathArena<S> {
                     .map(|node| node.value.clone())
                     .collect();
                 if found.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
                 found.reverse();
                 Some(TraverserValue::Array(found))
@@ -258,7 +258,7 @@ impl<S: GraphStorage> PathArena<S> {
                     0 => None,
                     1 => found.pop(),
                     _ => {
-                        if let Some(mut items) = list_items(storage, &found[0]) {
+                        if let Some(mut items) = list_items(storage, &found[0])? {
                             items.extend(found.drain(1..));
                             Some(TraverserValue::Array(items))
                         } else {
@@ -267,7 +267,7 @@ impl<S: GraphStorage> PathArena<S> {
                     }
                 }
             }
-        }
+        })
     }
 
     /// Appends `path`'s objects into `buf`, **last position first** (matching [`Self::iter_rev`]),
@@ -308,19 +308,19 @@ impl<S: GraphStorage> PathArena<S> {
         storage: &S,
         path: PathRef,
         scratch: &mut Vec<(u64, PathRef)>,
-    ) -> bool {
+    ) -> Result<bool, crate::error::GraphError> {
         use std::hash::{Hash, Hasher};
 
         scratch.clear();
         let mut current = path;
         while let Some(node) = self.node(current) {
             let mut hasher = fnv::FnvHasher::default();
-            PathObject::resolve(storage, &node.value).hash(&mut hasher);
+            PathObject::resolve(storage, &node.value)?.hash(&mut hasher);
             scratch.push((hasher.finish(), current));
             current = node.parent;
         }
         if scratch.len() < 2 {
-            return true;
+            return Ok(true);
         }
         scratch.sort_unstable_by_key(|(hash, _)| *hash);
 
@@ -336,16 +336,16 @@ impl<S: GraphStorage> PathArena<S> {
                     else {
                         continue;
                     };
-                    if PathObject::resolve(storage, &a.value)
-                        == PathObject::resolve(storage, &b.value)
+                    if PathObject::resolve(storage, &a.value)?
+                        == PathObject::resolve(storage, &b.value)?
                     {
-                        return false;
+                        return Ok(false);
                     }
                 }
             }
             start = end;
         }
-        true
+        Ok(true)
     }
 }
 
@@ -355,28 +355,28 @@ impl<S: GraphStorage> PathArena<S> {
 fn list_items<S: GraphStorage>(
     storage: &S,
     value: &TraverserValue<S>,
-) -> Option<Vec<TraverserValue<S>>> {
+) -> Result<Option<Vec<TraverserValue<S>>>, crate::error::GraphError> {
     let from_property = |property: Option<&ElementProperty>| match property {
         Some(ElementProperty::Array(items)) => {
             Some(items.iter().map(TraverserValue::from).collect())
         }
         _ => None,
     };
-    match value {
+    Ok(match value {
         TraverserValue::Array(items) => Some(items.clone()),
         TraverserValue::Computed(property, _) => from_property(Some(property)),
         TraverserValue::VertexProperty(key, vertex, PropertyHandleKind::Value) => from_property(
             storage
-                .vertex_properties(*vertex)
+                .vertex_properties(*vertex)?
                 .and_then(|p| p.get(key.as_str())),
         ),
         TraverserValue::EdgeProperty(key, edge, PropertyHandleKind::Value) => from_property(
             storage
-                .edge_properties(*edge)
+                .edge_properties(*edge)?
                 .and_then(|p| p.get(key.as_str())),
         ),
         _ => None,
-    }
+    })
 }
 
 /// Tests whether no object repeats in `values` (the objects of a windowed, projected path), with
@@ -385,21 +385,18 @@ fn list_items<S: GraphStorage>(
 pub(crate) fn is_simple_values<S: GraphStorage>(
     storage: &S,
     values: &[&TraverserValue<S>],
-) -> bool {
+) -> Result<bool, crate::error::GraphError> {
     use std::hash::{Hash, Hasher};
 
     if values.len() < 2 {
-        return true;
+        return Ok(true);
     }
-    let mut hashed: Vec<(u64, usize)> = values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let mut hasher = fnv::FnvHasher::default();
-            PathObject::resolve(storage, value).hash(&mut hasher);
-            (hasher.finish(), index)
-        })
-        .collect();
+    let mut hashed: Vec<(u64, usize)> = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let mut hasher = fnv::FnvHasher::default();
+        PathObject::resolve(storage, value)?.hash(&mut hasher);
+        hashed.push((hasher.finish(), index));
+    }
     hashed.sort_unstable_by_key(|(hash, _)| *hash);
     let mut start = 0;
     while start < hashed.len() {
@@ -409,16 +406,16 @@ pub(crate) fn is_simple_values<S: GraphStorage>(
         }
         for i in start..end {
             for j in (i + 1)..end {
-                if PathObject::resolve(storage, values[hashed[i].1])
-                    == PathObject::resolve(storage, values[hashed[j].1])
+                if PathObject::resolve(storage, values[hashed[i].1])?
+                    == PathObject::resolve(storage, values[hashed[j].1])?
                 {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
         start = end;
     }
-    true
+    Ok(true)
 }
 
 /// Iterator over the nodes of one path, last position first.
@@ -448,20 +445,23 @@ enum PathObject<'a, S: GraphStorage> {
 }
 
 impl<'a, S: GraphStorage> PathObject<'a, S> {
-    fn resolve(storage: &'a S, value: &'a TraverserValue<S>) -> Self {
-        match value {
+    fn resolve(
+        storage: &'a S,
+        value: &'a TraverserValue<S>,
+    ) -> Result<Self, crate::error::GraphError> {
+        Ok(match value {
             TraverserValue::Computed(property, _) => PathObject::Value(property),
             TraverserValue::VertexProperty(key, vertex, kind)
                 if !matches!(kind, PropertyHandleKind::Id | PropertyHandleKind::Labels) =>
             {
                 if *kind == PropertyHandleKind::Label {
-                    return match storage.vertex_label(*vertex) {
+                    return Ok(match storage.vertex_label(*vertex)? {
                         Some(label) => PathObject::Str(label),
                         None => PathObject::Raw(value),
-                    };
+                    });
                 }
                 match storage
-                    .vertex_properties(*vertex)
+                    .vertex_properties(*vertex)?
                     .and_then(|p| p.get(key.as_str()))
                 {
                     Some(property) => PathObject::Value(property),
@@ -472,13 +472,13 @@ impl<'a, S: GraphStorage> PathObject<'a, S> {
                 if !matches!(kind, PropertyHandleKind::Id | PropertyHandleKind::Labels) =>
             {
                 if *kind == PropertyHandleKind::Label {
-                    return match storage.edge_label(*edge) {
+                    return Ok(match storage.edge_label(*edge)? {
                         Some(label) => PathObject::Str(label),
                         None => PathObject::Raw(value),
-                    };
+                    });
                 }
                 match storage
-                    .edge_properties(*edge)
+                    .edge_properties(*edge)?
                     .and_then(|p| p.get(key.as_str()))
                 {
                     Some(property) => PathObject::Value(property),
@@ -486,7 +486,7 @@ impl<'a, S: GraphStorage> PathObject<'a, S> {
                 }
             }
             other => PathObject::Raw(other),
-        }
+        })
     }
 }
 
@@ -576,7 +576,7 @@ mod tests {
         // one position carrying two labels is one node, hence one occurrence of `a`
         let p2 = arena.push(p1, vertex(2), Some(ab)).unwrap();
         let p3 = arena.push(p2, vertex(3), Some(a)).unwrap();
-        let all = |path, label, pop| arena.labelled(&storage, path, label, pop);
+        let all = |path, label, pop| arena.labelled(&storage, path, label, pop).unwrap();
         assert_eq!(all(p3, "a", Pop::First), Some(vertex(0)));
         assert_eq!(all(p3, "a", Pop::Last), Some(vertex(3)));
         assert_eq!(
@@ -618,19 +618,22 @@ mod tests {
         let p1 = arena.push(p0, vertex(2), Some(a)).unwrap();
         // TinkerPop's `Path.get(label)` appends to the list-valued first occurrence
         assert_eq!(
-            arena.labelled(&storage, p1, "a", Pop::Mixed),
+            arena.labelled(&storage, p1, "a", Pop::Mixed).unwrap(),
             Some(TraverserValue::Array(vec![vertex(0), vertex(1), vertex(2)]))
         );
         // `all` keeps the occurrences apart; `first`/`last` do not unwrap
         assert_eq!(
-            arena.labelled(&storage, p1, "a", Pop::All),
+            arena.labelled(&storage, p1, "a", Pop::All).unwrap(),
             Some(TraverserValue::Array(vec![list.clone(), vertex(2)]))
         );
         assert_eq!(
-            arena.labelled(&storage, p1, "a", Pop::First),
+            arena.labelled(&storage, p1, "a", Pop::First).unwrap(),
             Some(list.clone())
         );
-        assert_eq!(arena.labelled(&storage, p0, "a", Pop::Mixed), Some(list));
+        assert_eq!(
+            arena.labelled(&storage, p0, "a", Pop::Mixed).unwrap(),
+            Some(list)
+        );
     }
 
     #[test]
@@ -671,15 +674,15 @@ mod tests {
         let mut scratch = Vec::new();
         let a = arena.push(PathRef::NONE, vertex(0), None).unwrap();
         let b = arena.push(a, vertex(1), None).unwrap();
-        assert!(arena.is_simple(&graph, b, &mut scratch));
+        assert!(arena.is_simple(&graph, b, &mut scratch).unwrap());
         let c = arena.push(b, vertex(0), None).unwrap();
-        assert!(!arena.is_simple(&graph, c, &mut scratch));
+        assert!(!arena.is_simple(&graph, c, &mut scratch).unwrap());
         let text: TraverserValue<TraversalGraph> =
             TraverserValue::Computed(ElementProperty::String("x".into()), None);
         let d = arena.push(b, text.clone(), None).unwrap();
         let e = arena.push(d, text, None).unwrap();
-        assert!(arena.is_simple(&graph, d, &mut scratch));
-        assert!(!arena.is_simple(&graph, e, &mut scratch));
+        assert!(arena.is_simple(&graph, d, &mut scratch).unwrap());
+        assert!(!arena.is_simple(&graph, e, &mut scratch).unwrap());
     }
 
     fn recorded(query: impl FnOnce(&TraversalGraph) -> usize) -> usize {

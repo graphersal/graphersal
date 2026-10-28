@@ -91,8 +91,8 @@ fn a_snapshot_loads_into_another_storage_type_and_is_rewritten_byte_for_byte() {
         )
         .unwrap();
         let loaded = persist::read_snapshot(original.as_slice(), &ReadOptions::new()).unwrap();
-        assert_eq!(forwarded.vertex_count(), graph.vertex_count());
-        assert_eq!(forwarded.edge_count(), graph.edge_count());
+        assert_eq!(forwarded.vertex_count().unwrap(), graph.vertex_count());
+        assert_eq!(forwarded.edge_count().unwrap(), graph.edge_count());
         assert_eq!(forwarded.graph_id(), graph.graph_id());
         assert_eq!(
             forwarded.last_commit_seq().unwrap(),
@@ -136,7 +136,7 @@ fn a_snapshot_is_not_loaded_into_a_storage_that_holds_elements() {
     cleared.clear().unwrap();
     let loaded =
         persist::read_snapshot_into(original.as_slice(), &ReadOptions::new(), cleared).unwrap();
-    assert_eq!(loaded.vertex_count(), 6);
+    assert_eq!(loaded.vertex_count().unwrap(), 6);
 }
 
 /// A base snapshot and the journal of a few commits after it (labels, properties, edges,
@@ -169,8 +169,8 @@ fn snapshot_and_journal() -> (Vec<u8>, Vec<u8>, TraversalGraph) {
                 "all",
                 QueryDefinition::new("fn all() { g.v() }"),
             ))?;
-            let a = g.get_vertex_by_id("2").unwrap();
-            let b = g.get_vertex_by_id("3").unwrap();
+            let a = g.get_vertex_by_id("2").unwrap().unwrap();
+            let b = g.get_vertex_by_id("3").unwrap().unwrap();
             g.add_edge(None, Some("likes".into()), a, b, PropertyMap::new())?;
             g.add_vertex_label(a, "friend".into())?;
             Ok::<_, GraphError>(())
@@ -232,7 +232,7 @@ fn recovery_into_another_storage_type_without_a_snapshot_starts_from_the_journal
         .journal(wal.as_slice())
         .run()
         .unwrap();
-    assert_eq!(forwarded.graph.vertex_count(), 2);
+    assert_eq!(forwarded.graph.vertex_count().unwrap(), 2);
     assert_eq!(forwarded.graph.graph_id(), graph.graph_id());
     assert_eq!(forwarded.graph.last_commit_seq().unwrap(), 2);
     // Into a storage that holds elements: refused.

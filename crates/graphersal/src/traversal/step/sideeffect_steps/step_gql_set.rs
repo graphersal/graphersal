@@ -250,7 +250,7 @@ impl WriteItems {
         match value {
             None | Some(TraverserValue::Computed(ElementProperty::Null, _)) => Ok(Resolved::Null),
             Some(TraverserValue::Vertex(vertex)) => {
-                if context.storage.contains_vertex(vertex) {
+                if context.storage.contains_vertex(vertex)? {
                     Ok(Resolved::Vertex(vertex))
                 } else {
                     Err(Box::new(
@@ -259,7 +259,7 @@ impl WriteItems {
                 }
             }
             Some(TraverserValue::Edge(edge)) => {
-                if context.storage.contains_edge(edge) {
+                if context.storage.contains_edge(edge)? {
                     Ok(Resolved::Edge(edge))
                 } else {
                     Err(Box::new(
@@ -368,15 +368,18 @@ pub(crate) fn remove_property<S: GraphStorage>(
 }
 
 /// The property keys `target` carries now.
-fn keys_of<S: GraphStorage>(storage: &S, target: &Resolved<S>) -> Vec<CompactString> {
+fn keys_of<S: GraphStorage>(
+    storage: &S,
+    target: &Resolved<S>,
+) -> Result<Vec<CompactString>, GraphError> {
     let properties = match target {
         Resolved::Null => None,
-        Resolved::Vertex(v) => storage.vertex_properties(*v),
-        Resolved::Edge(e) => storage.edge_properties(*e),
+        Resolved::Vertex(v) => storage.vertex_properties(*v)?,
+        Resolved::Edge(e) => storage.edge_properties(*e)?,
     };
-    properties
+    Ok(properties
         .map(|map| map.keys().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Sets the value of a `SET` item clause: the entries of the map an `=` / `+=` item applies,
@@ -564,20 +567,20 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
                 Ok(out)
             }
             Value::Element(GqlElement::Vertex(v)) => {
-                if !context.storage.contains_vertex(v) {
+                if !context.storage.contains_vertex(v)? {
                     return Err(Box::new(
                         GraphError::element_removed(GraphNodeType::Vertex).into(),
                     ));
                 }
-                Ok(copy(context.storage.vertex_properties(v)))
+                Ok(copy(context.storage.vertex_properties(v)?))
             }
             Value::Element(GqlElement::Edge(e)) => {
-                if !context.storage.contains_edge(e) {
+                if !context.storage.contains_edge(e)? {
                     return Err(Box::new(
                         GraphError::element_removed(GraphNodeType::Edge).into(),
                     ));
                 }
-                Ok(copy(context.storage.edge_properties(e)))
+                Ok(copy(context.storage.edge_properties(e)?))
             }
             Value::Null => Err(Box::new(self.null_map(item, value_expr))),
             Value::Scalar(_) | Value::List(_) | Value::Path(_) => {
@@ -753,7 +756,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
                 let evaluated = self.evaluate(context, row, answers, value)?;
                 let entries = self.entries(context, index, value, evaluated)?;
                 if matches!(item, GqlSetItem::Replace { .. }) {
-                    for key in keys_of(&*context.storage, &target) {
+                    for key in keys_of(&*context.storage, &target)? {
                         let kept = entries
                             .iter()
                             .any(|(k, value)| *k == key && value.is_some());

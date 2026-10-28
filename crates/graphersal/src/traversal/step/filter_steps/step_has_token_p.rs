@@ -145,14 +145,14 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
             (Token::Label, TraverserValue::Vertex(node)) => {
                 // The label set is borrowed from storage while the predicate needs `context`
                 // mutably, so the (short) set is copied once per traverser.
-                let labels: Vec<CompactString> = context.storage.vertex_labels(*node).to_vec();
+                let labels: Vec<CompactString> = context.storage.vertex_labels(*node)?.to_vec();
                 self.test_set(
                     context,
                     &labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
                 )
             }
             (Token::Label, TraverserValue::Edge(edge)) => {
-                let label = context.storage.edge_label(*edge).map(CompactString::new);
+                let label = context.storage.edge_label(*edge)?.map(CompactString::new);
                 self.test_set(
                     context,
                     &label.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
@@ -166,7 +166,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                 self.test_set(context, &[prop.0.as_str()])
             }
             (Token::Key, TraverserValue::Vertex(node)) => {
-                let keys: Vec<CompactString> = match context.storage.vertex_properties(*node) {
+                let keys: Vec<CompactString> = match context.storage.vertex_properties(*node)? {
                     Some(properties) => properties
                         .keys()
                         .map(|k| CompactString::new(k.as_str()))
@@ -179,7 +179,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                 )
             }
             (Token::Key, TraverserValue::Edge(edge)) => {
-                let keys: Vec<CompactString> = match context.storage.edge_properties(*edge) {
+                let keys: Vec<CompactString> = match context.storage.edge_properties(*edge)? {
                     Some(properties) => properties
                         .keys()
                         .map(|k| CompactString::new(k.as_str()))

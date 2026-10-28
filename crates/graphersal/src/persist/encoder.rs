@@ -125,30 +125,34 @@ pub(crate) struct KindTotals {
 
 impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     /// Sorts the graph's element ids (the only allocation that grows with the graph).
-    pub(crate) fn new(graph: &'g S, options: &'g WriteOptions) -> Self {
+    /// `Err` when the storage cannot read its elements.
+    pub(crate) fn new(
+        graph: &'g S,
+        options: &'g WriteOptions,
+    ) -> Result<Self, crate::error::GraphError> {
         // Sized up front: the index is allocated once, at its final size.
-        let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(graph.vertex_count());
-        vertices.extend(
-            graph
-                .vertices()
-                .filter_map(|vertex| Some((graph.vertex_id(vertex)?, vertex))),
-        );
+        let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(graph.vertex_count()?);
+        for vertex in graph.vertices()? {
+            if let Some(id) = graph.vertex_id(vertex)? {
+                vertices.push((id, vertex));
+            }
+        }
         vertices.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(graph.edge_count());
-        edges.extend(
-            graph
-                .edges()
-                .filter_map(|edge| Some((graph.edge_id(edge)?, edge))),
-        );
+        let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(graph.edge_count()?);
+        for edge in graph.edges()? {
+            if let Some(id) = graph.edge_id(edge)? {
+                edges.push((id, edge));
+            }
+        }
         edges.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        Self {
+        Ok(Self {
             graph,
             options,
             vertices,
             edges,
             peak: Cell::new(0),
             chunks_encoded: Cell::new(0),
-        }
+        })
     }
 
     pub(crate) fn stats(&self) -> EncodeStats {
@@ -179,21 +183,21 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
         let graph = self.graph;
         if kind == KIND_VERTEX {
             let (id, vertex) = self.vertices[position];
-            let Some(properties) = graph.vertex_properties(vertex) else {
+            let Some(properties) = graph.vertex_properties(vertex)? else {
                 return Ok((None, 0));
             };
-            let chunk = encoder.vertex(id, graph.vertex_labels(vertex), properties)?;
+            let chunk = encoder.vertex(id, graph.vertex_labels(vertex)?, properties)?;
             Ok((chunk, properties.len() as u64))
         } else {
             let (id, edge) = self.edges[position];
-            let Some((from, to)) = graph.edge_endpoints(edge) else {
+            let Some((from, to)) = graph.edge_endpoints(edge)? else {
                 return Ok((None, 0));
             };
-            let (Some(out_id), Some(in_id)) = (graph.vertex_id(from), graph.vertex_id(to)) else {
+            let (Some(out_id), Some(in_id)) = (graph.vertex_id(from)?, graph.vertex_id(to)?) else {
                 return Ok((None, 0));
             };
-            let properties = graph.edge_properties(edge);
-            let chunk = encoder.edge(id, graph.edge_label(edge), out_id, in_id, properties)?;
+            let properties = graph.edge_properties(edge)?;
+            let chunk = encoder.edge(id, graph.edge_label(edge)?, out_id, in_id, properties)?;
             Ok((chunk, properties.map_or(0, |p| p.len() as u64)))
         }
     }
@@ -309,8 +313,8 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
                 last_commit_at: graph.last_committed_at(),
                 node_sequence,
                 edge_sequence,
-                vertex_count: graph.vertex_count() as u64,
-                edge_count: graph.edge_count() as u64,
+                vertex_count: graph.vertex_count()? as u64,
+                edge_count: graph.edge_count()? as u64,
                 vertex_property_count,
                 edge_property_count,
                 memory_bytes: graph.memory_usage()?.map_or(0, |usage| usage.total_bytes()),

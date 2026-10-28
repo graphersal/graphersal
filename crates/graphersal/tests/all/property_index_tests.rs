@@ -370,7 +370,7 @@ fn looked_up(
         .vertices_by_property_index(label, key, range)
         .unwrap()
         .expect("an index")
-        .filter_map(|v| graph.vertex_id(v).map(str::to_string))
+        .filter_map(|v| graph.vertex_id(v).unwrap().map(str::to_string))
         .collect();
     ids.sort();
     ids
@@ -415,7 +415,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
                 vec!["p".into()],
                 props(&[("title", "CEO".into())])
             )
-            .unwrap_or_else(|_| graph.get_vertex_by_id("v").unwrap())
+            .unwrap_or_else(|_| graph.get_vertex_by_id("v").unwrap().unwrap())
     );
     assert_eq!(looked_up(&graph, "p", "title", &ceo), ["v"]);
     let w = graph
@@ -481,7 +481,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
                 w,
                 props(&[("since", 2020.into())])
             )
-            .unwrap_or_else(|_| graph.get_edge_by_id("e").unwrap())
+            .unwrap_or_else(|_| graph.get_edge_by_id("e").unwrap().unwrap())
     );
     let since = PropertyIndexRange::equal(2020.into());
     let edges = |graph: &TraversalGraph| {
@@ -521,7 +521,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
         .unwrap();
     check(&graph);
     assert_eq!(edges(&graph), 1);
-    let w = graph.get_vertex_by_id("w").unwrap();
+    let w = graph.get_vertex_by_id("w").unwrap().unwrap();
     graph.drop_vertex(w).unwrap();
     check(&graph);
     assert_eq!(edges(&graph), 0);
@@ -533,7 +533,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
         .unwrap();
     check(&graph);
     assert_eq!(looked_up(&graph, "p", "title", &ceo), ["v"]);
-    let v = graph.get_vertex_by_id("v").unwrap();
+    let v = graph.get_vertex_by_id("v").unwrap().unwrap();
     graph.drop_vertex(v).unwrap();
     check(&graph);
     assert!(looked_up(&graph, "p", "title", &ceo).is_empty());

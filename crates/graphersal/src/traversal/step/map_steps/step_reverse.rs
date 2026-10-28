@@ -66,10 +66,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepReverse {
             bulk,
             sack,
         } = source;
-        if is_null(context, &value) {
+        if is_null(context, &value)? {
             return Ok(Traverser::with_parts(value, path, bulk, sack));
         }
-        let value = match kind_of(context, &value) {
+        let value = match kind_of(context, &value)? {
             Kind::List => {
                 let mut items = list_items(context, value)?;
                 items.reverse();

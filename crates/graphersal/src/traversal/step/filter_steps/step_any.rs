@@ -103,7 +103,7 @@ pub(crate) fn list_items<S: GraphStorage>(
         TraverserValue::Array(_) | TraverserValue::Computed(ElementProperty::Array(_), _) => true,
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
             matches!(
-                crate::traversal::step::local_scope::stored_value(context, value),
+                crate::traversal::step::local_scope::stored_value(context, value)?,
                 Some(ElementProperty::Array(_))
             )
         }

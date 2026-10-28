@@ -45,22 +45,38 @@
 //!     type VertexId = u32;
 //!     type EdgeId = u32;
 //!
-//!     fn vertex_count(&self) -> usize { 0 }
-//!     fn edge_count(&self) -> usize { 0 }
-//!     fn vertices(&self) -> impl Iterator<Item = u32> + '_ { std::iter::empty() }
-//!     fn edges(&self) -> impl Iterator<Item = u32> + '_ { std::iter::empty() }
-//!     fn get_vertex_by_id(&self, _id: &str) -> Option<u32> { None }
-//!     fn get_edge_by_id(&self, _id: &str) -> Option<u32> { None }
-//!     fn out_edges(&self, _node: u32) -> impl Iterator<Item = u32> + '_ { std::iter::empty() }
-//!     fn in_edges(&self, _node: u32) -> impl Iterator<Item = u32> + '_ { std::iter::empty() }
-//!     fn vertex_id(&self, _node: u32) -> Option<&str> { None }
-//!     fn edge_id(&self, _edge: u32) -> Option<&str> { None }
-//!     fn vertex_label(&self, _node: u32) -> Option<&str> { None }
-//!     fn edge_label(&self, _edge: u32) -> Option<&str> { None }
-//!     fn vertex_labels(&self, _node: u32) -> &[CompactString] { &[] }
-//!     fn vertex_properties(&self, _node: u32) -> Option<&PropertyMap> { None }
-//!     fn edge_properties(&self, _edge: u32) -> Option<&PropertyMap> { None }
-//!     fn edge_endpoints(&self, _edge: u32) -> Option<(u32, u32)> { None }
+//!     // Every read returns a `Result`: a backend that cannot answer returns
+//!     // `GraphError::storage_failed(..)`, never an empty answer.
+//!     fn vertex_count(&self) -> Result<usize, GraphError> { Ok(0) }
+//!     fn edge_count(&self) -> Result<usize, GraphError> { Ok(0) }
+//!     fn vertices(&self) -> Result<impl Iterator<Item = u32> + '_, GraphError> {
+//!         Ok(std::iter::empty())
+//!     }
+//!     fn edges(&self) -> Result<impl Iterator<Item = u32> + '_, GraphError> {
+//!         Ok(std::iter::empty())
+//!     }
+//!     fn get_vertex_by_id(&self, _id: &str) -> Result<Option<u32>, GraphError> { Ok(None) }
+//!     fn get_edge_by_id(&self, _id: &str) -> Result<Option<u32>, GraphError> { Ok(None) }
+//!     fn out_edges(&self, _node: u32) -> Result<impl Iterator<Item = u32> + '_, GraphError> {
+//!         Ok(std::iter::empty())
+//!     }
+//!     fn in_edges(&self, _node: u32) -> Result<impl Iterator<Item = u32> + '_, GraphError> {
+//!         Ok(std::iter::empty())
+//!     }
+//!     fn vertex_id(&self, _node: u32) -> Result<Option<&str>, GraphError> { Ok(None) }
+//!     fn edge_id(&self, _edge: u32) -> Result<Option<&str>, GraphError> { Ok(None) }
+//!     fn vertex_label(&self, _node: u32) -> Result<Option<&str>, GraphError> { Ok(None) }
+//!     fn edge_label(&self, _edge: u32) -> Result<Option<&str>, GraphError> { Ok(None) }
+//!     fn vertex_labels(&self, _node: u32) -> Result<&[CompactString], GraphError> { Ok(&[]) }
+//!     fn vertex_properties(&self, _node: u32) -> Result<Option<&PropertyMap>, GraphError> {
+//!         Ok(None)
+//!     }
+//!     fn edge_properties(&self, _edge: u32) -> Result<Option<&PropertyMap>, GraphError> {
+//!         Ok(None)
+//!     }
+//!     fn edge_endpoints(&self, _edge: u32) -> Result<Option<(u32, u32)>, GraphError> {
+//!         Ok(None)
+//!     }
 //!
 //!     // The contract's write checks are public helpers (`check_properties`,
 //!     // `normalize_vertex_labels`, `write_path`, ...): run them first, so a bad value gets the

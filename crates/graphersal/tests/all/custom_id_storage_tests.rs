@@ -70,70 +70,83 @@ impl GraphStorage for CustomIdStorage {
     type VertexId = CustomVertexId;
     type EdgeId = CustomEdgeId;
 
-    fn vertex_count(&self) -> usize {
-        self.inner.vertex_count()
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::vertex_count(&self.inner)
     }
 
-    fn edge_count(&self) -> usize {
-        self.inner.edge_count()
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::edge_count(&self.inner)
     }
 
-    fn vertices(&self) -> impl Iterator<Item = CustomVertexId> + '_ {
-        GraphStorage::vertices(&self.inner).map(|n| self.cv(n))
+    fn vertices(&self) -> Result<impl Iterator<Item = CustomVertexId> + '_, GraphError> {
+        Ok(GraphStorage::vertices(&self.inner)?.map(|n| self.cv(n)))
     }
 
-    fn edges(&self) -> impl Iterator<Item = CustomEdgeId> + '_ {
-        GraphStorage::edges(&self.inner).map(|e| self.ce(e))
+    fn edges(&self) -> Result<impl Iterator<Item = CustomEdgeId> + '_, GraphError> {
+        Ok(GraphStorage::edges(&self.inner)?.map(|e| self.ce(e)))
     }
 
-    fn get_vertex_by_id(&self, id: &str) -> Option<CustomVertexId> {
-        GraphStorage::get_vertex_by_id(&self.inner, id).map(|n| self.cv(n))
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<CustomVertexId>, GraphError> {
+        Ok(GraphStorage::get_vertex_by_id(&self.inner, id)?.map(|n| self.cv(n)))
     }
 
-    fn get_edge_by_id(&self, id: &str) -> Option<CustomEdgeId> {
-        GraphStorage::get_edge_by_id(&self.inner, id).map(|e| self.ce(e))
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<CustomEdgeId>, GraphError> {
+        Ok(GraphStorage::get_edge_by_id(&self.inner, id)?.map(|e| self.ce(e)))
     }
 
-    fn out_edges(&self, node: CustomVertexId) -> impl Iterator<Item = CustomEdgeId> + '_ {
-        self.inner.out_edges(self.vh(node)).map(|e| self.ce(e))
+    fn out_edges(
+        &self,
+        node: CustomVertexId,
+    ) -> Result<impl Iterator<Item = CustomEdgeId> + '_, GraphError> {
+        Ok(self.inner.out_edges(self.vh(node))?.map(|e| self.ce(e)))
     }
 
-    fn in_edges(&self, node: CustomVertexId) -> impl Iterator<Item = CustomEdgeId> + '_ {
-        self.inner.in_edges(self.vh(node)).map(|e| self.ce(e))
+    fn in_edges(
+        &self,
+        node: CustomVertexId,
+    ) -> Result<impl Iterator<Item = CustomEdgeId> + '_, GraphError> {
+        Ok(self.inner.in_edges(self.vh(node))?.map(|e| self.ce(e)))
     }
 
-    fn vertex_id(&self, node: CustomVertexId) -> Option<&str> {
+    fn vertex_id(&self, node: CustomVertexId) -> Result<Option<&str>, GraphError> {
         self.inner.vertex_id(self.vh(node))
     }
 
-    fn edge_id(&self, edge: CustomEdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: CustomEdgeId) -> Result<Option<&str>, GraphError> {
         self.inner.edge_id(self.eh(edge))
     }
 
-    fn vertex_label(&self, node: CustomVertexId) -> Option<&str> {
+    fn vertex_label(&self, node: CustomVertexId) -> Result<Option<&str>, GraphError> {
         self.inner.vertex_label(self.vh(node))
     }
 
-    fn edge_label(&self, edge: CustomEdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: CustomEdgeId) -> Result<Option<&str>, GraphError> {
         self.inner.edge_label(self.eh(edge))
     }
 
-    fn vertex_labels(&self, node: CustomVertexId) -> &[compact_str::CompactString] {
+    fn vertex_labels(
+        &self,
+        node: CustomVertexId,
+    ) -> Result<&[compact_str::CompactString], GraphError> {
         self.inner.vertex_labels(self.vh(node))
     }
 
-    fn vertex_properties(&self, node: CustomVertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: CustomVertexId) -> Result<Option<&PropertyMap>, GraphError> {
         self.inner.vertex_properties(self.vh(node))
     }
 
-    fn edge_properties(&self, edge: CustomEdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: CustomEdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         self.inner.edge_properties(self.eh(edge))
     }
 
-    fn edge_endpoints(&self, edge: CustomEdgeId) -> Option<(CustomVertexId, CustomVertexId)> {
-        self.inner
-            .edge_endpoints(self.eh(edge))
-            .map(|(from, to)| (self.cv(from), self.cv(to)))
+    fn edge_endpoints(
+        &self,
+        edge: CustomEdgeId,
+    ) -> Result<Option<(CustomVertexId, CustomVertexId)>, GraphError> {
+        Ok(self
+            .inner
+            .edge_endpoints(self.eh(edge))?
+            .map(|(from, to)| (self.cv(from), self.cv(to))))
     }
 
     fn insert_vertex(
@@ -343,9 +356,10 @@ fn test_custom_id_storage_jpath_writes_use_the_default_trait_methods() {
         .property(path("info.since"), 2020)
         .to_list()
         .unwrap();
-    let marko = storage.get_vertex_by_id("1").unwrap();
+    let marko = storage.get_vertex_by_id("1").unwrap().unwrap();
     let meta = storage
         .vertex_properties(marko)
+        .unwrap()
         .unwrap()
         .get("meta")
         .cloned();
@@ -356,9 +370,14 @@ fn test_custom_id_storage_jpath_writes_use_the_default_trait_methods() {
         ])
     };
     assert_eq!(meta, Some(meta_of(vec!["a".into()])));
-    let knows = storage.get_edge_by_id("10").unwrap();
+    let knows = storage.get_edge_by_id("10").unwrap().unwrap();
     assert_eq!(
-        storage.edge_properties(knows).unwrap().get("info").cloned(),
+        storage
+            .edge_properties(knows)
+            .unwrap()
+            .unwrap()
+            .get("info")
+            .cloned(),
         Some(ElementProperty::from_entries(vec![(
             "since".into(),
             2020.into()
@@ -381,11 +400,17 @@ fn test_custom_id_storage_jpath_writes_use_the_default_trait_methods() {
     let meta = storage
         .vertex_properties(marko)
         .unwrap()
+        .unwrap()
         .get("meta")
         .cloned();
     assert_eq!(meta, Some(meta_of(vec![])));
     assert_eq!(
-        storage.edge_properties(knows).unwrap().get("info").cloned(),
+        storage
+            .edge_properties(knows)
+            .unwrap()
+            .unwrap()
+            .get("info")
+            .cloned(),
         Some(ElementProperty::from_entries(Vec::<(
             ElementProperty,
             ElementProperty

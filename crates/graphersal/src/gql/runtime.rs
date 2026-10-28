@@ -119,7 +119,10 @@ pub(crate) fn removed_error<S: GraphStorage>(element: &GqlElement<S>) -> BoxedTr
 }
 
 /// Whether `element` is still in the graph.
-pub(crate) fn is_live<S: GraphStorage>(storage: &S, element: &GqlElement<S>) -> bool {
+pub(crate) fn is_live<S: GraphStorage>(
+    storage: &S,
+    element: &GqlElement<S>,
+) -> Result<bool, GraphError> {
     match element {
         GqlElement::Vertex(v) => storage.contains_vertex(*v),
         GqlElement::Edge(e) => storage.contains_edge(*e),
@@ -144,12 +147,12 @@ pub(crate) fn check_returned<S: GraphStorage>(
     while let Some(value) = stack.pop() {
         match value {
             TraverserValue::Vertex(v) => {
-                if !storage.contains_vertex(*v) {
+                if !storage.contains_vertex(*v)? {
                     return Err(removed_error(&GqlElement::<S>::Vertex(*v)));
                 }
             }
             TraverserValue::Edge(e) => {
-                if !storage.contains_edge(*e) {
+                if !storage.contains_edge(*e)? {
                     return Err(removed_error(&GqlElement::<S>::Edge(*e)));
                 }
             }
@@ -520,10 +523,35 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
     /// common path.
     #[inline(never)]
     fn removed(&self, element: &GqlElement<S>) {
-        if !is_live(&*self.context.storage, element) {
-            self.failure
-                .borrow_mut()
-                .get_or_insert_with(|| removed_error(element));
+        match is_live(&*self.context.storage, element) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.failure
+                    .borrow_mut()
+                    .get_or_insert_with(|| removed_error(element));
+            }
+            Err(error) => self.storage_failed(error),
+        }
+    }
+
+    /// Keeps a storage read error for [`Self::finish`] (the `Env` methods answer plain values;
+    /// the hosting step fails with the error once the evaluation returns).
+    #[inline(never)]
+    fn storage_failed(&self, error: GraphError) {
+        self.failure
+            .borrow_mut()
+            .get_or_insert_with(|| Box::new(error.into()));
+    }
+
+    /// The value of a storage read, or `None` with its error kept for [`Self::finish`].
+    #[inline]
+    fn read<T>(&self, result: Result<T, GraphError>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.storage_failed(error);
+                None
+            }
         }
     }
 
@@ -778,6 +806,9 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_id(*v),
             GqlElement::Edge(e) => storage.edge_id(*e),
         };
+        let Some(id) = self.read(id) else {
+            return CompactString::default();
+        };
         match id {
             Some(id) => CompactString::from(id),
             None => {
@@ -793,7 +824,7 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_properties(*v),
             GqlElement::Edge(e) => storage.edge_properties(*e),
         };
-        match properties {
+        match self.read(properties)? {
             Some(properties) => properties.get(key).cloned(),
             None => {
                 self.removed(element);
@@ -806,7 +837,10 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
         let storage = &*self.context.storage;
         let found = match element {
             GqlElement::Vertex(v) => storage.vertex_has_label(*v, label),
-            GqlElement::Edge(e) => storage.edge_label(*e) == Some(label),
+            GqlElement::Edge(e) => storage.edge_label(*e).map(|l| l == Some(label)),
+        };
+        let Some(found) = self.read(found) else {
+            return false;
         };
         if !found {
             self.removed(element);
@@ -817,8 +851,13 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     fn has_any_label(&self, element: &GqlElement<S>) -> bool {
         let storage = &*self.context.storage;
         let found = match element {
-            GqlElement::Vertex(v) => !storage.vertex_labels(*v).is_empty(),
-            GqlElement::Edge(e) => storage.edge_label(*e).is_some_and(|l| !l.is_empty()),
+            GqlElement::Vertex(v) => storage.vertex_labels(*v).map(|l| !l.is_empty()),
+            GqlElement::Edge(e) => storage
+                .edge_label(*e)
+                .map(|l| l.is_some_and(|l| !l.is_empty())),
+        };
+        let Some(found) = self.read(found) else {
+            return false;
         };
         if !found {
             self.removed(element);
@@ -829,11 +868,15 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     fn labels(&self, element: &GqlElement<S>) -> Vec<CompactString> {
         let storage = &*self.context.storage;
         let labels = match element {
-            GqlElement::Vertex(v) => storage.vertex_labels(*v).to_vec(),
-            GqlElement::Edge(e) => storage
-                .edge_label(*e)
-                .map(|label| vec![CompactString::from(label)])
-                .unwrap_or_default(),
+            GqlElement::Vertex(v) => storage.vertex_labels(*v).map(<[_]>::to_vec),
+            GqlElement::Edge(e) => storage.edge_label(*e).map(|label| {
+                label
+                    .map(|label| vec![CompactString::from(label)])
+                    .unwrap_or_default()
+            }),
+        };
+        let Some(labels) = self.read(labels) else {
+            return Vec::new();
         };
         if labels.is_empty() {
             self.removed(element);
@@ -847,7 +890,7 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     fn edge_type(&self, edge: &GqlElement<S>) -> Option<CompactString> {
         match edge {
             GqlElement::Vertex(_) => None,
-            GqlElement::Edge(e) => match self.context.storage.edge_label(*e) {
+            GqlElement::Edge(e) => match self.read(self.context.storage.edge_label(*e))? {
                 Some(label) => Some(CompactString::from(label)),
                 None => match self.context.gql_deleted.edge_types.get(e) {
                     Some(label) => Some(label.clone()),
@@ -866,6 +909,9 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_properties(*v),
             GqlElement::Edge(e) => storage.edge_properties(*e),
         };
+        let Some(properties) = self.read(properties) else {
+            return Vec::new();
+        };
         match properties {
             Some(map) => map
                 .iter()
@@ -881,7 +927,7 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     fn endpoints(&self, edge: &GqlElement<S>) -> Option<(GqlElement<S>, GqlElement<S>)> {
         match edge {
             GqlElement::Vertex(_) => None,
-            GqlElement::Edge(e) => match self.context.storage.edge_endpoints(*e) {
+            GqlElement::Edge(e) => match self.read(self.context.storage.edge_endpoints(*e))? {
                 Some((source, target)) => {
                     Some((GqlElement::Vertex(source), GqlElement::Vertex(target)))
                 }
@@ -930,15 +976,24 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     /// one execution reads the same instant.
     fn now(&self) -> crate::value::temporal::DateTime {
         let context = self.context;
-        *context
-            .gql_now
-            .get_or_init(|| match context.create_context {
-                Some(create) => create.now(),
-                None => {
-                    crate::graph::schema::defaults::CreateContext::for_storage(&*context.storage)
-                        .now()
+        if let Some(now) = context.gql_now.get() {
+            return *now;
+        }
+        let now = match context.create_context {
+            Some(create) => create.now(),
+            None => {
+                match crate::graph::schema::defaults::CreateContext::for_storage(&*context.storage)
+                {
+                    Ok(create) => create.now(),
+                    // Kept for `finish()`; the instant is not pinned, the step fails.
+                    Err(error) => {
+                        self.storage_failed(error);
+                        return crate::value::temporal::DateTime::EPOCH;
+                    }
                 }
-            })
+            }
+        };
+        *context.gql_now.get_or_init(|| now)
     }
 }
 

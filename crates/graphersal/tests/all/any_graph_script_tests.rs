@@ -31,52 +31,61 @@ impl GraphStorage for Wrapped {
     type VertexId = VertexHandle;
     type EdgeId = EdgeHandle;
 
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         GraphStorage::vertex_count(&self.0)
     }
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         GraphStorage::edge_count(&self.0)
     }
-    fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
         GraphStorage::vertices(&self.0)
     }
-    fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::edges(&self.0)
     }
-    fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
         GraphStorage::get_vertex_by_id(&self.0, id)
     }
-    fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
         GraphStorage::get_edge_by_id(&self.0, id)
     }
-    fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn out_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::out_edges(&self.0, node)
     }
-    fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn in_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::in_edges(&self.0, node)
     }
-    fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+    fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_id(&self.0, node)
     }
-    fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+    fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_id(&self.0, edge)
     }
-    fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+    fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_label(&self.0, node)
     }
-    fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+    fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_label(&self.0, edge)
     }
-    fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+    fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
         GraphStorage::vertex_labels(&self.0, node)
     }
-    fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: VertexHandle) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::vertex_properties(&self.0, node)
     }
-    fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::edge_properties(&self.0, edge)
     }
-    fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+    fn edge_endpoints(
+        &self,
+        edge: EdgeHandle,
+    ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
         GraphStorage::edge_endpoints(&self.0, edge)
     }
     fn insert_vertex(
@@ -194,7 +203,7 @@ fn scripts_read_and_write_a_foreign_graph() {
     )
     .unwrap();
     assert_eq!(int(count), 5);
-    assert_eq!(graph.read().vertex_count(), 7);
+    assert_eq!(graph.read().vertex_count().unwrap(), 7);
     // `Arc<dyn AnyGraph>` is accepted as well.
     let any: Arc<dyn AnyGraph> = graph.clone();
     let names = eval_value_with_limits(
@@ -218,7 +227,7 @@ fn an_atomic_script_on_a_foreign_graph_commits_or_rolls_back_as_a_whole() {
     )
     .unwrap();
     assert_eq!(int(committed), 7);
-    assert_eq!(graph.read().vertex_count(), 7);
+    assert_eq!(graph.read().vertex_count().unwrap(), 7);
     let seq = graph.read().last_commit_seq().unwrap();
 
     let failed = eval_value_atomic(
@@ -229,7 +238,7 @@ fn an_atomic_script_on_a_foreign_graph_commits_or_rolls_back_as_a_whole() {
         &ScriptLimits::default(),
     );
     assert!(failed.is_err());
-    assert_eq!(graph.read().vertex_count(), 7);
+    assert_eq!(graph.read().vertex_count().unwrap(), 7);
     assert_eq!(graph.read().last_commit_seq().unwrap(), seq);
 }
 
@@ -245,7 +254,7 @@ fn a_dry_run_on_a_foreign_graph_reports_and_undoes_its_changes() {
     .unwrap();
     assert_eq!(int(count), 7);
     assert_eq!(changes.len(), 1);
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
     assert_eq!(graph.read().last_commit_seq().unwrap(), 0);
 }
 
@@ -266,8 +275,8 @@ fn a_panic_in_an_atomic_script_rolls_back_and_moves_the_storage_back() {
     );
     // The storage is back in the shared lock (not the empty one left by the move), and the
     // script's change is gone.
-    assert_eq!(graph.read().vertex_count(), 6);
-    assert_eq!(graph.read().edge_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
+    assert_eq!(graph.read().edge_count().unwrap(), 6);
     // The unit was closed: the next whole-script unit is the outermost one and commits.
     let count = eval_value_atomic(
         graph.clone(),
@@ -330,7 +339,7 @@ fn a_closure_returned_by_an_atomic_script_still_fails() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("cannot return a closure"), "{err}");
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
 }
 
 #[test]
@@ -345,7 +354,7 @@ fn a_panic_in_a_dry_run_discards_and_moves_the_storage_back() {
         )
     }));
     assert!(outcome.is_err());
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
     let (count, changes) = eval_value_dry_run(
         graph.clone(),
         r#"g.addV("person").next(); g.V().count().next()"#,
@@ -355,7 +364,7 @@ fn a_panic_in_a_dry_run_discards_and_moves_the_storage_back() {
     .unwrap();
     assert_eq!(int(count), 7);
     assert_eq!(changes.len(), 1);
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
 }
 
 #[test]
@@ -376,7 +385,7 @@ fn with_side_effect_into_a_foreign_graph_is_unsupported() {
         err.contains("Help: subgraph() writes only into a TraversalGraph"),
         "{err}"
     );
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
 }
 
 #[test]
@@ -418,5 +427,5 @@ fn scratch_graphs_of_a_script_on_a_foreign_graph_stay_traversal_graphs() {
         int(run(r#"GraphSource::tinkerpop_modern().V().count().next()"#)),
         6
     );
-    assert_eq!(graph.read().vertex_count(), 6);
+    assert_eq!(graph.read().vertex_count().unwrap(), 6);
 }

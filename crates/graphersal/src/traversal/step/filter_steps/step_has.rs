@@ -62,30 +62,32 @@ fn has_step<'g, S: GraphStorage + 'g>(key: PropKey, value: ElementProperty) -> G
 
 /// Whether vertex `node` has the property `key` equal to `value` — the equality of
 /// `has(key, value)`, shared with the lookup of `mergeV()`.
+#[inline]
 pub(crate) fn vertex_has<S: GraphStorage>(
     storage: &S,
     node: S::VertexId,
     key: &str,
     value: &ElementProperty,
-) -> bool {
-    storage
-        .vertex_properties(node)
+) -> Result<bool, GraphError> {
+    Ok(storage
+        .vertex_properties(node)?
         .and_then(|properties| properties.get(key))
-        .is_some_and(|stored| stored.eq(value))
+        .is_some_and(|stored| stored.eq(value)))
 }
 
 /// Whether edge `edge` has the property `key` equal to `value` — the equality of
 /// `has(key, value)`, shared with the lookup of `mergeE()`.
+#[inline]
 pub(crate) fn edge_has<S: GraphStorage>(
     storage: &S,
     edge: S::EdgeId,
     key: &str,
     value: &ElementProperty,
-) -> bool {
-    storage
-        .edge_properties(edge)
+) -> Result<bool, GraphError> {
+    Ok(storage
+        .edge_properties(edge)?
         .and_then(|properties| properties.get(key))
-        .is_some_and(|stored| stored.eq(value))
+        .is_some_and(|stored| stored.eq(value)))
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
@@ -113,7 +115,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
     ) -> TraverserResult<bool> {
         match &source.value {
             TraverserValue::Vertex(v) => {
-                Ok(vertex_has(context.storage, *v, &self.key, &self.value))
+                Ok(vertex_has(context.storage, *v, &self.key, &self.value)?)
             }
 
             TraverserValue::Computed(vertex, _) => match vertex {
@@ -133,7 +135,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 if let Some(vertex) = vertex {
                     let value = vertex.get(&prop_name);
                     match value {
@@ -164,7 +166,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
 
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop_name = prop_name.clone();
-                let edge = context.storage.edge_properties(*edge_index);
+                let edge = context.storage.edge_properties(*edge_index)?;
                 match edge {
                     Some(edge) => {
                         let value = edge.get(&prop_name);
@@ -195,7 +197,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_map = context.storage.edge_properties(*edge_index);
+                let edge_map = context.storage.edge_properties(*edge_index)?;
                 match edge_map {
                     Some(edge_map) => {
                         let value: Option<_> = edge_map.get(self.key.as_str());

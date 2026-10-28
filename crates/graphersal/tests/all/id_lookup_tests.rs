@@ -27,15 +27,15 @@ fn drop_and_re_add_the_same_id_resolves_the_new_element() {
     let first = add(&mut graph, &uuid_id(1));
     let other = add(&mut graph, &uuid_id(2));
     GraphStorage::drop_vertex(&mut graph, first).expect("drop");
-    assert_eq!(graph.get_vertex_by_id(&uuid_id(1)), None);
-    assert_eq!(graph.get_vertex_by_id(&uuid_id(2)), Some(other));
+    assert_eq!(graph.get_vertex_by_id(&uuid_id(1)).unwrap(), None);
+    assert_eq!(graph.get_vertex_by_id(&uuid_id(2)).unwrap(), Some(other));
 
     let again = add(&mut graph, &uuid_id(1));
     assert_ne!(again, first);
-    assert_eq!(graph.get_vertex_by_id(&uuid_id(1)), Some(again));
-    assert_eq!(graph.vertex_id(again), Some(uuid_id(1).as_str()));
+    assert_eq!(graph.get_vertex_by_id(&uuid_id(1)).unwrap(), Some(again));
+    assert_eq!(graph.vertex_id(again).unwrap(), Some(uuid_id(1).as_str()));
     // The old handle stays removed.
-    assert_eq!(graph.vertex_id(first), None);
+    assert_eq!(graph.vertex_id(first).unwrap(), None);
 }
 
 #[test]
@@ -65,10 +65,10 @@ fn a_reused_slot_does_not_answer_for_the_dropped_id() {
             PropertyMap::default(),
         )
         .expect("edge");
-    assert_eq!(graph.get_vertex_by_id("a"), None);
-    assert_eq!(graph.get_vertex_by_id("c"), Some(c));
-    assert_eq!(graph.get_edge_by_id("e1"), None);
-    assert_eq!(graph.get_edge_by_id("e2"), Some(f));
+    assert_eq!(graph.get_vertex_by_id("a").unwrap(), None);
+    assert_eq!(graph.get_vertex_by_id("c").unwrap(), Some(c));
+    assert_eq!(graph.get_edge_by_id("e1").unwrap(), None);
+    assert_eq!(graph.get_edge_by_id("e2").unwrap(), Some(f));
 }
 
 #[test]
@@ -99,13 +99,19 @@ fn rollback_of_adds_and_drops_restores_the_lookups() {
         .unwrap();
 
     for id in [uuid_id(10), uuid_id(11)] {
-        let handle = graph.get_vertex_by_id(&id).expect("restored vertex");
-        assert_eq!(graph.vertex_id(handle), Some(id.as_str()));
+        let handle = graph
+            .get_vertex_by_id(&id)
+            .unwrap()
+            .expect("restored vertex");
+        assert_eq!(graph.vertex_id(handle).unwrap(), Some(id.as_str()));
     }
-    let edge = graph.get_edge_by_id(&uuid_id(12)).expect("restored edge");
-    assert_eq!(graph.edge_id(edge), Some(uuid_id(12).as_str()));
-    assert_eq!(graph.get_vertex_by_id(&uuid_id(13)), None);
-    assert_eq!(graph.get_edge_by_id(&uuid_id(14)), None);
+    let edge = graph
+        .get_edge_by_id(&uuid_id(12))
+        .unwrap()
+        .expect("restored edge");
+    assert_eq!(graph.edge_id(edge).unwrap(), Some(uuid_id(12).as_str()));
+    assert_eq!(graph.get_vertex_by_id(&uuid_id(13)).unwrap(), None);
+    assert_eq!(graph.get_edge_by_id(&uuid_id(14)).unwrap(), None);
     assert_eq!((graph.vertex_count(), graph.edge_count()), (2, 1));
 }
 
@@ -118,7 +124,10 @@ fn traversal_by_long_ids_after_churn() {
             add(&mut guard, &uuid_id(i));
         }
         for i in (0..2_000).step_by(2) {
-            let handle = guard.get_vertex_by_id(&uuid_id(i)).expect("present");
+            let handle = guard
+                .get_vertex_by_id(&uuid_id(i))
+                .unwrap()
+                .expect("present");
             GraphStorage::drop_vertex(&mut *guard, handle).expect("drop");
         }
     }

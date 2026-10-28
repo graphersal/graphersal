@@ -41,9 +41,9 @@ fn test_index_uniqueness_and_lifecycle_via_traversal() {
     {
         let guard = graph.read();
         let storage = &*guard;
-        let persons: Vec<_> = storage.vertices_by_label("person").collect();
+        let persons: Vec<_> = storage.vertices_by_label("person").unwrap().collect();
         assert_eq!(persons.len(), 2);
-        let unknown: Vec<_> = storage.vertices_by_label("software").collect();
+        let unknown: Vec<_> = storage.vertices_by_label("software").unwrap().collect();
         assert!(unknown.is_empty());
     }
 }

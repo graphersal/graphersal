@@ -163,49 +163,49 @@ impl<S: GraphStorage> Traverser<S> {
     pub(crate) fn observed_type_name(
         context: &TraverserContext<'_, S>,
         traverser_value: &TraverserValue<S>,
-    ) -> String {
+    ) -> TraverserResult<String> {
         let stored = match traverser_value {
             TraverserValue::Computed(value, _) => Some(value),
             TraverserValue::VertexProperty(prop, vertex_index, kind) => {
                 match kind {
                     PropertyHandleKind::Id | PropertyHandleKind::Label => {
-                        return "string".to_string();
+                        return Ok("string".to_string());
                     }
-                    PropertyHandleKind::Labels => return "array".to_string(),
+                    PropertyHandleKind::Labels => return Ok("array".to_string()),
                     PropertyHandleKind::Element | PropertyHandleKind::Value => {}
                 }
                 match context
                     .storage
-                    .vertex_properties(*vertex_index)
+                    .vertex_properties(*vertex_index)?
                     .and_then(|p| p.get(prop.as_str()))
                 {
                     Some(value) => Some(value),
-                    None => return "null".to_string(),
+                    None => return Ok("null".to_string()),
                 }
             }
             TraverserValue::EdgeProperty(prop, edge_index, kind) => {
                 match kind {
                     PropertyHandleKind::Id | PropertyHandleKind::Label => {
-                        return "string".to_string();
+                        return Ok("string".to_string());
                     }
-                    PropertyHandleKind::Labels => return "array".to_string(),
+                    PropertyHandleKind::Labels => return Ok("array".to_string()),
                     PropertyHandleKind::Element | PropertyHandleKind::Value => {}
                 }
                 match context
                     .storage
-                    .edge_properties(*edge_index)
+                    .edge_properties(*edge_index)?
                     .and_then(|p| p.get(prop.as_str()))
                 {
                     Some(value) => Some(value),
-                    None => return "null".to_string(),
+                    None => return Ok("null".to_string()),
                 }
             }
             _ => None,
         };
-        match stored {
+        Ok(match stored {
             Some(value) => crate::graph::schema::value_type_name(value),
             None => traverser_value.type_name().to_string(),
-        }
+        })
     }
 
     /// The string a stream value holds, borrowed: a string property, an element id or label
@@ -226,7 +226,7 @@ impl<S: GraphStorage> Traverser<S> {
                 if *kind == PropertyHandleKind::Label {
                     Ok(context
                         .storage
-                        .vertex_label(*vertex_index)
+                        .vertex_label(*vertex_index)?
                         .map(Cow::Borrowed))
                 } else if *kind == PropertyHandleKind::Id {
                     let id = Cow::Borrowed(crate::graph::storage::stored_vertex_id(
@@ -239,7 +239,7 @@ impl<S: GraphStorage> Traverser<S> {
                 } else {
                     let value = context
                         .storage
-                        .vertex_properties(*vertex_index)
+                        .vertex_properties(*vertex_index)?
                         .and_then(|p| p.get(prop.as_str()))
                         .and_then(|p| p.text());
                     Ok(value)
@@ -247,7 +247,7 @@ impl<S: GraphStorage> Traverser<S> {
             }
             TraverserValue::EdgeProperty(prop, edge_index, kind) => {
                 if *kind == PropertyHandleKind::Label {
-                    Ok(context.storage.edge_label(*edge_index).map(Cow::Borrowed))
+                    Ok(context.storage.edge_label(*edge_index)?.map(Cow::Borrowed))
                 } else if *kind == PropertyHandleKind::Id {
                     let id = Cow::Borrowed(crate::graph::storage::stored_edge_id(
                         &*context.storage,
@@ -259,7 +259,7 @@ impl<S: GraphStorage> Traverser<S> {
                 } else {
                     let value = context
                         .storage
-                        .edge_properties(*edge_index)
+                        .edge_properties(*edge_index)?
                         .and_then(|p| p.get(prop.as_str()))
                         .and_then(|p| p.text());
                     Ok(value)

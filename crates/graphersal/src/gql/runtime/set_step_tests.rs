@@ -289,9 +289,11 @@ fn help(error: &TraverserError) -> String {
 fn named(graph: &TraversalGraph, name: &str) -> VertexHandle {
     graph
         .vertices()
+        .unwrap()
         .find(|v| {
             graph
                 .vertex_properties(*v)
+                .unwrap()
                 .and_then(|p| p.get("name"))
                 .and_then(ElementProperty::as_string)
                 == Some(name)
@@ -304,6 +306,7 @@ fn props(graph: &TraversalGraph, name: &str) -> Vec<(String, ElementProperty)> {
     let v = named(graph, name);
     graph
         .vertex_properties(v)
+        .unwrap()
         .map(|p| p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
         .unwrap_or_default()
 }
@@ -323,18 +326,18 @@ fn marko<'g>(graph: &'g mut TraversalGraph) -> GraphTraversalSource<'g, &'g mut 
 /// label and properties.
 fn dump(graph: &TraversalGraph) -> String {
     let mut out = Vec::new();
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         out.push(format!(
             "v {:?} {:?}",
-            graph.vertex_labels(v),
-            graph.vertex_properties(v)
+            graph.vertex_labels(v).unwrap(),
+            graph.vertex_properties(v).unwrap()
         ));
     }
-    for e in graph.edges() {
+    for e in graph.edges().unwrap() {
         out.push(format!(
             "e {:?} {:?}",
-            graph.edge_label(e),
-            graph.edge_properties(e)
+            graph.edge_label(e).unwrap(),
+            graph.edge_properties(e).unwrap()
         ));
     }
     out.sort();
@@ -392,8 +395,15 @@ fn property_items_set_and_a_null_value_removes() {
     .unwrap();
     let knows: Vec<PropertyMap> = graph
         .edges()
-        .filter(|e| graph.edge_label(*e) == Some("knows"))
-        .map(|e| graph.edge_properties(e).cloned().unwrap_or_default())
+        .unwrap()
+        .filter(|e| graph.edge_label(*e).unwrap() == Some("knows"))
+        .map(|e| {
+            graph
+                .edge_properties(e)
+                .unwrap()
+                .cloned()
+                .unwrap_or_default()
+        })
         .collect();
     assert_eq!(knows.len(), 2);
     for p in knows {
@@ -486,6 +496,7 @@ fn replace_and_merge() {
     assert!(
         graph
             .vertex_properties(marko_v)
+            .unwrap()
             .is_none_or(PropertyMap::is_empty)
     );
 }
@@ -494,14 +505,17 @@ fn replace_and_merge() {
 fn props_of_copy(graph: &TraversalGraph) -> Vec<(CompactString, ElementProperty)> {
     let copy = graph
         .vertices()
+        .unwrap()
         .find(|v| {
             graph
                 .vertex_properties(*v)
+                .unwrap()
                 .is_some_and(|p| p.contains_key("copied"))
         })
         .unwrap();
     graph
         .vertex_properties(copy)
+        .unwrap()
         .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default()
 }
@@ -559,17 +573,17 @@ fn labels_are_added_and_removed() {
         )
         .iterate()
         .unwrap();
-        assert_eq!(graph.vertex_labels(marko_v), ["person", "A", "B"]);
+        assert_eq!(graph.vertex_labels(marko_v).unwrap(), ["person", "A", "B"]);
     }
     // REMOVE: a missing label is a no-op; the last label may go.
     remove(marko(&mut graph), &[It::Labels("n", &["A", "nope"])])
         .iterate()
         .unwrap();
-    assert_eq!(graph.vertex_labels(marko_v), ["person", "B"]);
+    assert_eq!(graph.vertex_labels(marko_v).unwrap(), ["person", "B"]);
     remove(marko(&mut graph), &[It::Labels("n", &["person", "B"])])
         .iterate()
         .unwrap();
-    assert!(graph.vertex_labels(marko_v).is_empty());
+    assert!(graph.vertex_labels(marko_v).unwrap().is_empty());
     // An edge has one label: 22G03 naming set_label(), for SET and REMOVE.
     for result in [
         set_with(
@@ -616,8 +630,12 @@ fn remove_properties() {
     assert!(
         graph
             .edges()
-            .filter(|e| graph.edge_label(*e) == Some("created"))
-            .all(|e| graph.edge_properties(e).is_none_or(PropertyMap::is_empty))
+            .unwrap()
+            .filter(|e| graph.edge_label(*e).unwrap() == Some("created"))
+            .all(|e| graph
+                .edge_properties(e)
+                .unwrap()
+                .is_none_or(PropertyMap::is_empty))
     );
 }
 
@@ -717,7 +735,7 @@ fn a_removed_or_non_element_target_is_an_error() {
             "{message}"
         );
     }
-    assert_eq!(graph.vertices().count(), 6);
+    assert_eq!(graph.vertices().unwrap().count(), 6);
 }
 
 const SCHEMA: &str = r#"{

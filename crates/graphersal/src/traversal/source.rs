@@ -1316,7 +1316,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     }
 
     fn validation(&self, schema: GraphSchema) -> TraverserResult<SchemaValidation> {
-        let violations = crate::graph::schema::apply::scan_storage(&self.storage, &schema);
+        let violations = crate::graph::schema::apply::scan_storage(&self.storage, &schema)?;
         let diff = SchemaDiff::between(self.storage.get_schema()?.as_ref(), &schema);
         Ok(SchemaValidation {
             schema,
@@ -2892,6 +2892,676 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         }
     }
 
+    /// One `v()`/`e()` step of [`Self::execute_optimized_steps`]: the elements it finds become
+    /// `source` (a mid-traversal step crosses them with the incoming traversers); returns the
+    /// step's output count. Out of line, so the frame of the executor, which nested child
+    /// traversals re-enter recursively, does not carry the source step's locals.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_init_step(
+        context: &mut TraverserContext<'_, S>,
+        step: &(dyn crate::traversal::step::GraphStepInit<'g, S> + 'g),
+        source: &mut Vec<Traverser<S>>,
+        physical: usize,
+        steps: &[GraphStep<'g, S>],
+        level: Option<&LevelPlan<'g, S>>,
+        step_at: StepAt,
+        logical_step_idx: usize,
+        is_count_next_step: bool,
+        collapsed: &mut Option<usize>,
+        mode: &PathMode,
+    ) -> TraverserResult<usize> {
+        let mut count_out: usize;
+        // A storage read of this source step fails it, located at the step.
+        // The success path stays a plain match (no call per element).
+        macro_rules! located {
+            ($e:expr) => {
+                match $e {
+                    Ok(value) => Ok(value),
+                    Err(err) => Err(err).with_step_frame(
+                        || step.get_name(),
+                        step_at,
+                        || plan_frame(steps, level, logical_step_idx),
+                    ),
+                }
+            };
+        }
+        // Mid-traversal (`g.V("1").as("a").V("2")`, or `__.V()` in a child that
+        // receives a traverser), each incoming traverser maps to every element the
+        // step finds, as in TinkerPop; only the first step of a traversal that
+        // receives nothing is a start step.
+        let incoming = (physical > 0 || !source.is_empty()).then(|| std::mem::take(source));
+        let init_result: (GraphNodeType, &Option<Vec<String>>) = step.process(context);
+        let init_labels = step.labels();
+        let init_ids = step.ids();
+        // Folded `has(key, value)` conditions: checked while scanning, before a
+        // traverser exists (never together with a fused count, see the rules).
+        let property_filters = step.property_filters();
+        let count_only = step.is_count_only();
+        let group_count_by_label = step.is_group_count_by_label();
+        // A fused `count()`/`groupCount()` counts one pass over the graph. Mid-
+        // traversal every incoming traverser makes its own pass (`union(__.V().count())`
+        // counts incoming x elements), so the counts are scaled by the incoming bulk
+        // instead of crossing the single count traverser with the stream.
+        let fused_factor = match &incoming {
+            Some(incoming) if count_only || group_count_by_label => {
+                Some(bulk::total_bulk(context, incoming, "count")?)
+            }
+            _ => None,
+        };
+
+        match init_result.0 {
+            GraphNodeType::Vertex => {
+                if group_count_by_label {
+                    let mut tmp: IndexMap<String, usize, FnvBuildHasher> = IndexMap::default();
+                    if let Some(ids) = init_ids {
+                        for id_value in ids {
+                            if let Some(node_index) =
+                                located!(context.storage.get_vertex_by_id(id_value))?
+                                && let Some(v_lbl) =
+                                    located!(context.storage.vertex_label(node_index))?
+                            {
+                                if let Some(labels) = init_labels
+                                    && !located!(crate::graph::storage::vertex_has_any_label(
+                                        &*context.storage,
+                                        node_index,
+                                        labels
+                                    ))?
+                                {
+                                    continue;
+                                }
+                                *tmp.entry(v_lbl.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    } else if let Some(labels) = init_labels {
+                        // D5, Bug 2: a vertex carrying more than one of the requested
+                        // labels must be counted once, grouped under its own primary
+                        // label — not once per requested label it happens to match.
+                        let mut seen: std::collections::HashSet<S::VertexId> =
+                            std::collections::HashSet::new();
+                        for label in labels {
+                            for node_index in located!(context.storage.vertices_by_label(label))? {
+                                if seen.insert(node_index)
+                                    && let Some(v_lbl) =
+                                        located!(context.storage.vertex_label(node_index))?
+                                {
+                                    *tmp.entry(v_lbl.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        // `label()` is the primary label: a multi-label vertex
+                        // counts once, under its first label, exactly as the
+                        // unoptimized `group_count().by(T.label)` groups it. Read
+                        // from the storage's statistics; a storage without them is
+                        // scanned instead.
+                        match context.storage.statistics().with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )? {
+                            Some(stats) => {
+                                for (label, cnt) in stats.primary_vertex_label_counts() {
+                                    tmp.insert(label.to_string(), cnt);
+                                }
+                            }
+                            None => {
+                                for node in located!(context.storage.vertices())? {
+                                    if let Some(label) =
+                                        located!(context.storage.vertex_label(node))?
+                                    {
+                                        *tmp.entry(label.to_string()).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(factor) = fused_factor {
+                        for count in tmp.values_mut() {
+                            *count = scale_fused(*count, factor)?;
+                        }
+                        tmp.retain(|_, count| *count > 0);
+                    }
+                    if is_count_next_step {
+                        *source = vec![Traverser::start(
+                            context,
+                            TraverserValue::Computed(ElementProperty::Number(1.into()), None),
+                        )];
+                    } else {
+                        let mut count_result = StreamMap::with_capacity(tmp.len());
+                        for (label, count) in tmp {
+                            count_result.insert(
+                                TraverserValue::Computed(
+                                    ElementProperty::String(label.into()),
+                                    None,
+                                ),
+                                TraverserValue::Computed(
+                                    ElementProperty::Number(count.into()),
+                                    None,
+                                ),
+                            );
+                        }
+                        *source = vec![Traverser::start(
+                            context,
+                            TraverserValue::Object(count_result),
+                        )];
+                    }
+                    count_out = 1;
+                } else if count_only {
+                    let count = if let Some(ids) = init_ids {
+                        let mut cnt = 0;
+                        for id_value in ids {
+                            if let Some(node_index) =
+                                located!(context.storage.get_vertex_by_id(id_value))?
+                            {
+                                if let Some(labels) = init_labels
+                                    && !located!(crate::graph::storage::vertex_has_any_label(
+                                        &*context.storage,
+                                        node_index,
+                                        labels
+                                    ))?
+                                {
+                                    continue;
+                                }
+                                cnt += 1;
+                            }
+                        }
+                        cnt
+                    } else if let Some(labels) = init_labels {
+                        match (
+                            single_label(labels),
+                            context.storage.statistics().with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?,
+                        ) {
+                            // One label: the statistics hold its count.
+                            (Some(label), Some(stats)) => stats.vertex_label_count(label),
+                            (Some(label), None) => {
+                                located!(context.storage.vertices_by_label(label))?.count()
+                            }
+                            // D5, Bug 2: a vertex matching more than one requested
+                            // label must be counted once, not once per matching label.
+                            (None, _) => {
+                                let mut seen: std::collections::HashSet<S::VertexId> =
+                                    std::collections::HashSet::new();
+                                for label in labels {
+                                    for node_index in
+                                        located!(context.storage.vertices_by_label(label))?
+                                    {
+                                        seen.insert(node_index);
+                                    }
+                                }
+                                seen.len()
+                            }
+                        }
+                    } else {
+                        located!(context.storage.vertex_count())?
+                    };
+                    let count = match fused_factor {
+                        Some(factor) => scale_fused(count, factor)?,
+                        None => count,
+                    };
+
+                    *source = vec![Traverser::start(
+                        context,
+                        TraverserValue::Computed(ElementProperty::Number(count.into()), None),
+                    )];
+                    count_out = count;
+                } else if let Some(ids) = init_ids {
+                    for id_value in ids {
+                        if let Some(node_index) =
+                            located!(context.storage.get_vertex_by_id(id_value))?
+                        {
+                            if let Some(labels) = init_labels
+                                && !located!(crate::graph::storage::vertex_has_any_label(
+                                    &*context.storage,
+                                    node_index,
+                                    labels
+                                ))?
+                            {
+                                continue;
+                            }
+                            tick_deadline(&mut context.deadline).with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?;
+                            if !(property_filters.is_empty()
+                                || located!(crate::traversal::step::PropertyFilter::all_vertex(
+                                    property_filters,
+                                    &*context.storage,
+                                    node_index,
+                                ))?)
+                            {
+                                continue;
+                            }
+                            let v1 = TraverserValue::Vertex(node_index);
+                            source.push(Traverser::start(context, v1));
+                        }
+                    }
+                    count_out = source.len();
+                } else if let Some(candidates) = match (init_labels, step.index_access()) {
+                    (Some(labels), Some(access)) => {
+                        index_vertices(&*context.storage, labels, access).with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?
+                    }
+                    _ => None,
+                } {
+                    // A property index serves a condition (book page "Property
+                    // Indexes"): its candidates (a superset) are checked like the
+                    // label scan's elements.
+                    for node_index in candidates {
+                        tick_deadline(&mut context.deadline).with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?;
+                        if !(property_filters.is_empty()
+                            || located!(crate::traversal::step::PropertyFilter::all_vertex(
+                                property_filters,
+                                &*context.storage,
+                                node_index,
+                            ))?)
+                        {
+                            continue;
+                        }
+                        let v1 = TraverserValue::Vertex(node_index);
+                        source.push(Traverser::start(context, v1));
+                    }
+                    count_out = source.len();
+                } else if let Some(labels) = init_labels {
+                    let single = single_label(labels);
+                    if let Some(stats) = context.storage.statistics().with_step_frame(
+                        || step.get_name(),
+                        step_at,
+                        || plan_frame(steps, level, logical_step_idx),
+                    )? && property_filters.is_empty()
+                    {
+                        let expected: usize = match single {
+                            Some(label) => stats.vertex_label_count(label),
+                            None => labels
+                                .iter()
+                                .map(|label| stats.vertex_label_count(label))
+                                .sum(),
+                        };
+                        source.reserve(expected);
+                    }
+                    // D5, Bug 2: a vertex carrying more than one requested label must
+                    // be pushed exactly once, not once per matching label — otherwise
+                    // `has_label("a","b").count()` over-counts a `{a,b}`-tagged vertex.
+                    // One label needs no such check: the index holds a vertex once.
+                    let mut seen: std::collections::HashSet<S::VertexId> =
+                        std::collections::HashSet::new();
+                    let labels: &[String] = match single {
+                        Some(_) => &labels[..1],
+                        None => labels,
+                    };
+                    for label in labels {
+                        for node_index in located!(context.storage.vertices_by_label(label))? {
+                            if single.is_none() && !seen.insert(node_index) {
+                                continue;
+                            }
+                            tick_deadline(&mut context.deadline).with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?;
+                            if !(property_filters.is_empty()
+                                || located!(crate::traversal::step::PropertyFilter::all_vertex(
+                                    property_filters,
+                                    &*context.storage,
+                                    node_index,
+                                ))?)
+                            {
+                                continue;
+                            }
+                            let v1 = TraverserValue::Vertex(node_index);
+                            source.push(Traverser::start(context, v1));
+                        }
+                    }
+                    count_out = source.len();
+                } else {
+                    let v_count = located!(context.storage.vertex_count())?;
+                    if property_filters.is_empty() {
+                        source.reserve(v_count);
+                    }
+                    for node_index in located!(context.storage.vertices())? {
+                        tick_deadline(&mut context.deadline).with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?;
+                        if !(property_filters.is_empty()
+                            || located!(crate::traversal::step::PropertyFilter::all_vertex(
+                                property_filters,
+                                &*context.storage,
+                                node_index,
+                            ))?)
+                        {
+                            continue;
+                        }
+                        let v1 = TraverserValue::Vertex(node_index);
+                        source.push(Traverser::start(context, v1));
+                    }
+                    count_out = source.len();
+                }
+            }
+            GraphNodeType::Edge => {
+                if group_count_by_label {
+                    let mut tmp: IndexMap<String, usize, FnvBuildHasher> = IndexMap::default();
+                    if let Some(ids) = init_ids {
+                        for id_value in ids {
+                            if let Some(edge_index) =
+                                located!(context.storage.get_edge_by_id(id_value))?
+                                && let Some(e_lbl) =
+                                    located!(context.storage.edge_label(edge_index))?
+                            {
+                                if let Some(labels) = init_labels
+                                    && !labels.iter().any(|target| target == e_lbl)
+                                {
+                                    continue;
+                                }
+                                *tmp.entry(e_lbl.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    } else if let Some(labels) = init_labels {
+                        for label in labels {
+                            let cnt = located!(context.storage.edges_by_label(label))?.count();
+                            if cnt > 0 {
+                                *tmp.entry(label.clone()).or_insert(0) += cnt;
+                            }
+                        }
+                    } else {
+                        match context.storage.statistics().with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )? {
+                            Some(stats) => {
+                                for (label, cnt) in stats.edge_label_counts() {
+                                    tmp.insert(label.to_string(), cnt);
+                                }
+                            }
+                            None => {
+                                for edge in located!(context.storage.edges())? {
+                                    if let Some(label) = located!(context.storage.edge_label(edge))?
+                                    {
+                                        *tmp.entry(label.to_string()).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(factor) = fused_factor {
+                        for count in tmp.values_mut() {
+                            *count = scale_fused(*count, factor)?;
+                        }
+                        tmp.retain(|_, count| *count > 0);
+                    }
+                    if is_count_next_step {
+                        *source = vec![Traverser::start(
+                            context,
+                            TraverserValue::Computed(ElementProperty::Number(1.into()), None),
+                        )];
+                    } else {
+                        let mut count_result = StreamMap::with_capacity(tmp.len());
+                        for (label, count) in tmp {
+                            count_result.insert(
+                                TraverserValue::Computed(
+                                    ElementProperty::String(label.into()),
+                                    None,
+                                ),
+                                TraverserValue::Computed(
+                                    ElementProperty::Number(count.into()),
+                                    None,
+                                ),
+                            );
+                        }
+                        *source = vec![Traverser::start(
+                            context,
+                            TraverserValue::Object(count_result),
+                        )];
+                    }
+                    count_out = 1;
+                } else if count_only {
+                    let count = if let Some(ids) = init_ids {
+                        let mut cnt = 0;
+                        for id_value in ids {
+                            if let Some(edge_index) =
+                                located!(context.storage.get_edge_by_id(id_value))?
+                            {
+                                if let Some(labels) = init_labels {
+                                    let e_lbl = located!(context.storage.edge_label(edge_index))?;
+                                    if !e_lbl
+                                        .is_some_and(|l| labels.iter().any(|target| target == l))
+                                    {
+                                        continue;
+                                    }
+                                }
+                                cnt += 1;
+                            }
+                        }
+                        cnt
+                    } else if let Some(labels) = init_labels {
+                        // An edge has exactly one label: the counts of the distinct
+                        // requested labels add up.
+                        let mut distinct: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+                        distinct.sort_unstable();
+                        distinct.dedup();
+                        match context.storage.statistics().with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )? {
+                            Some(stats) => distinct
+                                .iter()
+                                .map(|label| stats.edge_label_count(label))
+                                .sum(),
+                            None => distinct
+                                .iter()
+                                .map(|label| {
+                                    located!(context.storage.edges_by_label(label))
+                                        .map(Iterator::count)
+                                })
+                                .sum::<TraverserResult<usize>>()?,
+                        }
+                    } else {
+                        located!(context.storage.edge_count())?
+                    };
+                    let count = match fused_factor {
+                        Some(factor) => scale_fused(count, factor)?,
+                        None => count,
+                    };
+
+                    *source = vec![Traverser::start(
+                        context,
+                        TraverserValue::Computed(ElementProperty::Number(count.into()), None),
+                    )];
+                    count_out = count;
+                } else if let Some(ids) = init_ids {
+                    for id_value in ids {
+                        if let Some(edge_index) =
+                            located!(context.storage.get_edge_by_id(id_value))?
+                        {
+                            if let Some(labels) = init_labels {
+                                let e_lbl = located!(context.storage.edge_label(edge_index))?;
+                                if !e_lbl.is_some_and(|l| labels.iter().any(|target| target == l)) {
+                                    continue;
+                                }
+                            }
+                            tick_deadline(&mut context.deadline).with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?;
+                            if !(property_filters.is_empty()
+                                || located!(crate::traversal::step::PropertyFilter::all_edge(
+                                    property_filters,
+                                    &*context.storage,
+                                    edge_index,
+                                ))?)
+                            {
+                                continue;
+                            }
+                            let v1 = TraverserValue::Edge(edge_index);
+                            source.push(Traverser::start(context, v1));
+                        }
+                    }
+                    count_out = source.len();
+                } else if let Some(candidates) = match (init_labels, step.index_access()) {
+                    (Some(labels), Some(access)) => index_edges(&*context.storage, labels, access)
+                        .with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?,
+                    _ => None,
+                } {
+                    // A property index serves a condition (see the vertex case).
+                    for edge_index in candidates {
+                        tick_deadline(&mut context.deadline).with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?;
+                        if !(property_filters.is_empty()
+                            || located!(crate::traversal::step::PropertyFilter::all_edge(
+                                property_filters,
+                                &*context.storage,
+                                edge_index,
+                            ))?)
+                        {
+                            continue;
+                        }
+                        let v1 = TraverserValue::Edge(edge_index);
+                        source.push(Traverser::start(context, v1));
+                    }
+                    count_out = source.len();
+                } else if let Some(labels) = init_labels {
+                    for label in labels {
+                        for edge_index in located!(context.storage.edges_by_label(label))? {
+                            tick_deadline(&mut context.deadline).with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?;
+                            if !(property_filters.is_empty()
+                                || located!(crate::traversal::step::PropertyFilter::all_edge(
+                                    property_filters,
+                                    &*context.storage,
+                                    edge_index,
+                                ))?)
+                            {
+                                continue;
+                            }
+                            let v1 = TraverserValue::Edge(edge_index);
+                            source.push(Traverser::start(context, v1));
+                        }
+                    }
+                    count_out = source.len();
+                } else {
+                    let e_count = located!(context.storage.edge_count())?;
+                    if property_filters.is_empty() {
+                        source.reserve(e_count);
+                    }
+                    for edge_index in located!(context.storage.edges())? {
+                        tick_deadline(&mut context.deadline).with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )?;
+                        if !(property_filters.is_empty()
+                            || located!(crate::traversal::step::PropertyFilter::all_edge(
+                                property_filters,
+                                &*context.storage,
+                                edge_index,
+                            ))?)
+                        {
+                            continue;
+                        }
+                        let v1 = TraverserValue::Edge(edge_index);
+                        source.push(Traverser::start(context, v1));
+                    }
+                    count_out = source.len();
+                }
+            }
+        }
+        // A bare `count()` immediately after this `Init` step, not folded into it by
+        // `CountPushdownRule` — either the rule is disabled for this execution
+        // (`optimizer.disabled`), or a future rule ever stops firing here for some
+        // other reason. `count_only`/`group_count_by_label` already produce a single
+        // count traverser directly above without ever materializing a full element
+        // list, so this only applies to the plain id/label/unfiltered fetch branches,
+        // matching the same `is_count_next_step` collapse every other step category
+        // already performs (see `GraphStep::Append`/`GraphStep::Map` below). Keeps a
+        // disabled `count_pushdown` correct, just less optimal: still counts, just via
+        // materializing first instead of the index-backed fast path.
+        if let Some(incoming) = incoming.filter(|_| fused_factor.is_none()) {
+            let found = std::mem::take(source);
+            // The cross product leaves `incoming x found` traversers alive: check it
+            // against `traversal.max_traversers` (and the memory budget) BEFORE
+            // building it, then reserve exactly that many, fallibly: a product the
+            // allocator cannot provide (the limit raised to "unlimited") is an error,
+            // never an abort of the process.
+            let product = incoming.len().saturating_mul(found.len());
+            context
+                .check_traverser_limit(product)
+                .and_then(|()| context.check_memory_budget(product))
+                .and_then(|()| crate::traversal::capacity::try_reserve_exact(source, product))
+                .with_step_frame(
+                    || step.get_name(),
+                    step_at,
+                    || plan_frame(steps, level, logical_step_idx),
+                )?;
+            for traverser in &incoming {
+                tick_deadline(&mut context.deadline).with_step_frame(
+                    || step.get_name(),
+                    step_at,
+                    || plan_frame(steps, level, logical_step_idx),
+                )?;
+                for element in &found {
+                    let mut next = Traverser::with_parts(
+                        element.value.clone(),
+                        traverser.path,
+                        traverser.bulk,
+                        traverser.sack,
+                    );
+                    next.extend_path(&mut context.paths, mode)?;
+                    source.push(next);
+                }
+            }
+            count_out = source.len();
+        }
+        if is_count_next_step && !count_only && !group_count_by_label {
+            let materialized = bulk::total_bulk(context, source, "count")?;
+            *source = vec![Traverser::start(
+                context,
+                TraverserValue::Computed(
+                    bulk::count_property(note_collapsed(collapsed, materialized), "count")?,
+                    None,
+                ),
+            )];
+            count_out = 1;
+        }
+        // New traversers start their path here; ones already on the stream keep theirs.
+        if matches!(mode, PathMode::Full) {
+            for traverser in source.iter_mut() {
+                if traverser.path.is_none() {
+                    traverser.path =
+                        context
+                            .paths
+                            .push(PathRef::NONE, traverser.value.clone(), None)?;
+                }
+            }
+        }
+        Ok(count_out)
+    }
+
     pub(crate) fn execute_optimized_steps(
         steps: &[GraphStep<'g, S>],
         initial_source: Vec<Traverser<S>>,
@@ -2985,639 +3655,19 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
 
             match current_step {
                 GraphStep::Init(_, step) => {
-                    // Mid-traversal (`g.V("1").as("a").V("2")`, or `__.V()` in a child that
-                    // receives a traverser), each incoming traverser maps to every element the
-                    // step finds, as in TinkerPop; only the first step of a traversal that
-                    // receives nothing is a start step.
-                    let incoming =
-                        (physical > 0 || !source.is_empty()).then(|| std::mem::take(&mut source));
-                    let init_result: (GraphNodeType, &Option<Vec<String>>) = step.process(context);
-                    let init_labels = step.labels();
-                    let init_ids = step.ids();
-                    // Folded `has(key, value)` conditions: checked while scanning, before a
-                    // traverser exists (never together with a fused count, see the rules).
-                    let property_filters = step.property_filters();
-                    let count_only = step.is_count_only();
-                    let group_count_by_label = step.is_group_count_by_label();
-                    // A fused `count()`/`groupCount()` counts one pass over the graph. Mid-
-                    // traversal every incoming traverser makes its own pass (`union(__.V().count())`
-                    // counts incoming x elements), so the counts are scaled by the incoming bulk
-                    // instead of crossing the single count traverser with the stream.
-                    let fused_factor = match &incoming {
-                        Some(incoming) if count_only || group_count_by_label => {
-                            Some(bulk::total_bulk(context, incoming, "count")?)
-                        }
-                        _ => None,
-                    };
-
-                    match init_result.0 {
-                        GraphNodeType::Vertex => {
-                            if group_count_by_label {
-                                let mut tmp: IndexMap<String, usize, FnvBuildHasher> =
-                                    IndexMap::default();
-                                if let Some(ids) = init_ids {
-                                    for id_value in ids {
-                                        if let Some(node_index) =
-                                            context.storage.get_vertex_by_id(id_value)
-                                            && let Some(v_lbl) =
-                                                context.storage.vertex_label(node_index)
-                                        {
-                                            if let Some(labels) = init_labels
-                                                && !labels.iter().any(|target| {
-                                                    context
-                                                        .storage
-                                                        .vertex_has_label(node_index, target)
-                                                })
-                                            {
-                                                continue;
-                                            }
-                                            *tmp.entry(v_lbl.to_string()).or_insert(0) += 1;
-                                        }
-                                    }
-                                } else if let Some(labels) = init_labels {
-                                    // D5, Bug 2: a vertex carrying more than one of the requested
-                                    // labels must be counted once, grouped under its own primary
-                                    // label — not once per requested label it happens to match.
-                                    let mut seen: std::collections::HashSet<S::VertexId> =
-                                        std::collections::HashSet::new();
-                                    for label in labels {
-                                        for node_index in context.storage.vertices_by_label(label) {
-                                            if seen.insert(node_index)
-                                                && let Some(v_lbl) =
-                                                    context.storage.vertex_label(node_index)
-                                            {
-                                                *tmp.entry(v_lbl.to_string()).or_insert(0) += 1;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // `label()` is the primary label: a multi-label vertex
-                                    // counts once, under its first label, exactly as the
-                                    // unoptimized `group_count().by(T.label)` groups it. Read
-                                    // from the storage's statistics; a storage without them is
-                                    // scanned instead.
-                                    match context.storage.statistics().with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )? {
-                                        Some(stats) => {
-                                            for (label, cnt) in stats.primary_vertex_label_counts()
-                                            {
-                                                tmp.insert(label.to_string(), cnt);
-                                            }
-                                        }
-                                        None => {
-                                            for node in context.storage.vertices() {
-                                                if let Some(label) =
-                                                    context.storage.vertex_label(node)
-                                                {
-                                                    *tmp.entry(label.to_string()).or_insert(0) += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(factor) = fused_factor {
-                                    for count in tmp.values_mut() {
-                                        *count = scale_fused(*count, factor)?;
-                                    }
-                                    tmp.retain(|_, count| *count > 0);
-                                }
-                                if is_count_next_step {
-                                    source = vec![Traverser::start(
-                                        context,
-                                        TraverserValue::Computed(
-                                            ElementProperty::Number(1.into()),
-                                            None,
-                                        ),
-                                    )];
-                                } else {
-                                    let mut count_result = StreamMap::with_capacity(tmp.len());
-                                    for (label, count) in tmp {
-                                        count_result.insert(
-                                            TraverserValue::Computed(
-                                                ElementProperty::String(label.into()),
-                                                None,
-                                            ),
-                                            TraverserValue::Computed(
-                                                ElementProperty::Number(count.into()),
-                                                None,
-                                            ),
-                                        );
-                                    }
-                                    source = vec![Traverser::start(
-                                        context,
-                                        TraverserValue::Object(count_result),
-                                    )];
-                                }
-                                count_out = 1;
-                            } else if count_only {
-                                let count = if let Some(ids) = init_ids {
-                                    let mut cnt = 0;
-                                    for id_value in ids {
-                                        if let Some(node_index) =
-                                            context.storage.get_vertex_by_id(id_value)
-                                        {
-                                            if let Some(labels) = init_labels
-                                                && !labels.iter().any(|target| {
-                                                    context
-                                                        .storage
-                                                        .vertex_has_label(node_index, target)
-                                                })
-                                            {
-                                                continue;
-                                            }
-                                            cnt += 1;
-                                        }
-                                    }
-                                    cnt
-                                } else if let Some(labels) = init_labels {
-                                    match (
-                                        single_label(labels),
-                                        context.storage.statistics().with_step_frame(
-                                            || step.get_name(),
-                                            step_at,
-                                            || plan_frame(steps, level, logical_step_idx),
-                                        )?,
-                                    ) {
-                                        // One label: the statistics hold its count.
-                                        (Some(label), Some(stats)) => {
-                                            stats.vertex_label_count(label)
-                                        }
-                                        (Some(label), None) => {
-                                            context.storage.vertices_by_label(label).count()
-                                        }
-                                        // D5, Bug 2: a vertex matching more than one requested
-                                        // label must be counted once, not once per matching label.
-                                        (None, _) => {
-                                            let mut seen: std::collections::HashSet<S::VertexId> =
-                                                std::collections::HashSet::new();
-                                            for label in labels {
-                                                for node_index in
-                                                    context.storage.vertices_by_label(label)
-                                                {
-                                                    seen.insert(node_index);
-                                                }
-                                            }
-                                            seen.len()
-                                        }
-                                    }
-                                } else {
-                                    context.storage.vertex_count()
-                                };
-                                let count = match fused_factor {
-                                    Some(factor) => scale_fused(count, factor)?,
-                                    None => count,
-                                };
-
-                                source = vec![Traverser::start(
-                                    context,
-                                    TraverserValue::Computed(
-                                        ElementProperty::Number(count.into()),
-                                        None,
-                                    ),
-                                )];
-                                count_out = count;
-                            } else if let Some(ids) = init_ids {
-                                for id_value in ids {
-                                    if let Some(node_index) =
-                                        context.storage.get_vertex_by_id(id_value)
-                                    {
-                                        if let Some(labels) = init_labels
-                                            && !labels.iter().any(|target| {
-                                                context.storage.vertex_has_label(node_index, target)
-                                            })
-                                        {
-                                            continue;
-                                        }
-                                        tick_deadline(&mut context.deadline).with_step_frame(
-                                            || step.get_name(),
-                                            step_at,
-                                            || plan_frame(steps, level, logical_step_idx),
-                                        )?;
-                                        if !property_filters.iter().all(|filter| {
-                                            filter.vertex_matches(context.storage, node_index)
-                                        }) {
-                                            continue;
-                                        }
-                                        let v1 = TraverserValue::Vertex(node_index);
-                                        source.push(Traverser::start(context, v1));
-                                    }
-                                }
-                                count_out = source.len();
-                            } else if let Some(candidates) =
-                                match (init_labels, step.index_access()) {
-                                    (Some(labels), Some(access)) => {
-                                        index_vertices(&*context.storage, labels, access)
-                                            .with_step_frame(
-                                                || step.get_name(),
-                                                step_at,
-                                                || plan_frame(steps, level, logical_step_idx),
-                                            )?
-                                    }
-                                    _ => None,
-                                }
-                            {
-                                // A property index serves a condition (book page "Property
-                                // Indexes"): its candidates (a superset) are checked like the
-                                // label scan's elements.
-                                for node_index in candidates {
-                                    tick_deadline(&mut context.deadline).with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )?;
-                                    if !property_filters.iter().all(|filter| {
-                                        filter.vertex_matches(context.storage, node_index)
-                                    }) {
-                                        continue;
-                                    }
-                                    let v1 = TraverserValue::Vertex(node_index);
-                                    source.push(Traverser::start(context, v1));
-                                }
-                                count_out = source.len();
-                            } else if let Some(labels) = init_labels {
-                                let single = single_label(labels);
-                                if let Some(stats) = context.storage.statistics().with_step_frame(
-                                    || step.get_name(),
-                                    step_at,
-                                    || plan_frame(steps, level, logical_step_idx),
-                                )? && property_filters.is_empty()
-                                {
-                                    let expected: usize = match single {
-                                        Some(label) => stats.vertex_label_count(label),
-                                        None => labels
-                                            .iter()
-                                            .map(|label| stats.vertex_label_count(label))
-                                            .sum(),
-                                    };
-                                    source.reserve(expected);
-                                }
-                                // D5, Bug 2: a vertex carrying more than one requested label must
-                                // be pushed exactly once, not once per matching label — otherwise
-                                // `has_label("a","b").count()` over-counts a `{a,b}`-tagged vertex.
-                                // One label needs no such check: the index holds a vertex once.
-                                let mut seen: std::collections::HashSet<S::VertexId> =
-                                    std::collections::HashSet::new();
-                                let labels: &[String] = match single {
-                                    Some(_) => &labels[..1],
-                                    None => labels,
-                                };
-                                for label in labels {
-                                    for node_index in context.storage.vertices_by_label(label) {
-                                        if single.is_none() && !seen.insert(node_index) {
-                                            continue;
-                                        }
-                                        tick_deadline(&mut context.deadline).with_step_frame(
-                                            || step.get_name(),
-                                            step_at,
-                                            || plan_frame(steps, level, logical_step_idx),
-                                        )?;
-                                        if !property_filters.iter().all(|filter| {
-                                            filter.vertex_matches(context.storage, node_index)
-                                        }) {
-                                            continue;
-                                        }
-                                        let v1 = TraverserValue::Vertex(node_index);
-                                        source.push(Traverser::start(context, v1));
-                                    }
-                                }
-                                count_out = source.len();
-                            } else {
-                                let v_count = context.storage.vertex_count();
-                                if property_filters.is_empty() {
-                                    source.reserve(v_count);
-                                }
-                                for node_index in context.storage.vertices() {
-                                    tick_deadline(&mut context.deadline).with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )?;
-                                    if !property_filters.iter().all(|filter| {
-                                        filter.vertex_matches(context.storage, node_index)
-                                    }) {
-                                        continue;
-                                    }
-                                    let v1 = TraverserValue::Vertex(node_index);
-                                    source.push(Traverser::start(context, v1));
-                                }
-                                count_out = source.len();
-                            }
-                        }
-                        GraphNodeType::Edge => {
-                            if group_count_by_label {
-                                let mut tmp: IndexMap<String, usize, FnvBuildHasher> =
-                                    IndexMap::default();
-                                if let Some(ids) = init_ids {
-                                    for id_value in ids {
-                                        if let Some(edge_index) =
-                                            context.storage.get_edge_by_id(id_value)
-                                            && let Some(e_lbl) =
-                                                context.storage.edge_label(edge_index)
-                                        {
-                                            if let Some(labels) = init_labels
-                                                && !labels.iter().any(|target| target == e_lbl)
-                                            {
-                                                continue;
-                                            }
-                                            *tmp.entry(e_lbl.to_string()).or_insert(0) += 1;
-                                        }
-                                    }
-                                } else if let Some(labels) = init_labels {
-                                    for label in labels {
-                                        let cnt = context.storage.edges_by_label(label).count();
-                                        if cnt > 0 {
-                                            *tmp.entry(label.clone()).or_insert(0) += cnt;
-                                        }
-                                    }
-                                } else {
-                                    match context.storage.statistics().with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )? {
-                                        Some(stats) => {
-                                            for (label, cnt) in stats.edge_label_counts() {
-                                                tmp.insert(label.to_string(), cnt);
-                                            }
-                                        }
-                                        None => {
-                                            for edge in context.storage.edges() {
-                                                if let Some(label) =
-                                                    context.storage.edge_label(edge)
-                                                {
-                                                    *tmp.entry(label.to_string()).or_insert(0) += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(factor) = fused_factor {
-                                    for count in tmp.values_mut() {
-                                        *count = scale_fused(*count, factor)?;
-                                    }
-                                    tmp.retain(|_, count| *count > 0);
-                                }
-                                if is_count_next_step {
-                                    source = vec![Traverser::start(
-                                        context,
-                                        TraverserValue::Computed(
-                                            ElementProperty::Number(1.into()),
-                                            None,
-                                        ),
-                                    )];
-                                } else {
-                                    let mut count_result = StreamMap::with_capacity(tmp.len());
-                                    for (label, count) in tmp {
-                                        count_result.insert(
-                                            TraverserValue::Computed(
-                                                ElementProperty::String(label.into()),
-                                                None,
-                                            ),
-                                            TraverserValue::Computed(
-                                                ElementProperty::Number(count.into()),
-                                                None,
-                                            ),
-                                        );
-                                    }
-                                    source = vec![Traverser::start(
-                                        context,
-                                        TraverserValue::Object(count_result),
-                                    )];
-                                }
-                                count_out = 1;
-                            } else if count_only {
-                                let count = if let Some(ids) = init_ids {
-                                    let mut cnt = 0;
-                                    for id_value in ids {
-                                        if let Some(edge_index) =
-                                            context.storage.get_edge_by_id(id_value)
-                                        {
-                                            if let Some(labels) = init_labels {
-                                                let e_lbl = context.storage.edge_label(edge_index);
-                                                if !e_lbl.is_some_and(|l| {
-                                                    labels.iter().any(|target| target == l)
-                                                }) {
-                                                    continue;
-                                                }
-                                            }
-                                            cnt += 1;
-                                        }
-                                    }
-                                    cnt
-                                } else if let Some(labels) = init_labels {
-                                    // An edge has exactly one label: the counts of the distinct
-                                    // requested labels add up.
-                                    let mut distinct: Vec<&str> =
-                                        labels.iter().map(|l| l.as_str()).collect();
-                                    distinct.sort_unstable();
-                                    distinct.dedup();
-                                    match context.storage.statistics().with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )? {
-                                        Some(stats) => distinct
-                                            .iter()
-                                            .map(|label| stats.edge_label_count(label))
-                                            .sum(),
-                                        None => distinct
-                                            .iter()
-                                            .map(|label| {
-                                                context.storage.edges_by_label(label).count()
-                                            })
-                                            .sum(),
-                                    }
-                                } else {
-                                    context.storage.edge_count()
-                                };
-                                let count = match fused_factor {
-                                    Some(factor) => scale_fused(count, factor)?,
-                                    None => count,
-                                };
-
-                                source = vec![Traverser::start(
-                                    context,
-                                    TraverserValue::Computed(
-                                        ElementProperty::Number(count.into()),
-                                        None,
-                                    ),
-                                )];
-                                count_out = count;
-                            } else if let Some(ids) = init_ids {
-                                for id_value in ids {
-                                    if let Some(edge_index) =
-                                        context.storage.get_edge_by_id(id_value)
-                                    {
-                                        if let Some(labels) = init_labels {
-                                            let e_lbl = context.storage.edge_label(edge_index);
-                                            if !e_lbl.is_some_and(|l| {
-                                                labels.iter().any(|target| target == l)
-                                            }) {
-                                                continue;
-                                            }
-                                        }
-                                        tick_deadline(&mut context.deadline).with_step_frame(
-                                            || step.get_name(),
-                                            step_at,
-                                            || plan_frame(steps, level, logical_step_idx),
-                                        )?;
-                                        if !property_filters.iter().all(|filter| {
-                                            filter.edge_matches(context.storage, edge_index)
-                                        }) {
-                                            continue;
-                                        }
-                                        let v1 = TraverserValue::Edge(edge_index);
-                                        source.push(Traverser::start(context, v1));
-                                    }
-                                }
-                                count_out = source.len();
-                            } else if let Some(candidates) =
-                                match (init_labels, step.index_access()) {
-                                    (Some(labels), Some(access)) => {
-                                        index_edges(&*context.storage, labels, access)
-                                            .with_step_frame(
-                                                || step.get_name(),
-                                                step_at,
-                                                || plan_frame(steps, level, logical_step_idx),
-                                            )?
-                                    }
-                                    _ => None,
-                                }
-                            {
-                                // A property index serves a condition (see the vertex case).
-                                for edge_index in candidates {
-                                    tick_deadline(&mut context.deadline).with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )?;
-                                    if !property_filters.iter().all(|filter| {
-                                        filter.edge_matches(context.storage, edge_index)
-                                    }) {
-                                        continue;
-                                    }
-                                    let v1 = TraverserValue::Edge(edge_index);
-                                    source.push(Traverser::start(context, v1));
-                                }
-                                count_out = source.len();
-                            } else if let Some(labels) = init_labels {
-                                for label in labels {
-                                    for edge_index in context.storage.edges_by_label(label) {
-                                        tick_deadline(&mut context.deadline).with_step_frame(
-                                            || step.get_name(),
-                                            step_at,
-                                            || plan_frame(steps, level, logical_step_idx),
-                                        )?;
-                                        if !property_filters.iter().all(|filter| {
-                                            filter.edge_matches(context.storage, edge_index)
-                                        }) {
-                                            continue;
-                                        }
-                                        let v1 = TraverserValue::Edge(edge_index);
-                                        source.push(Traverser::start(context, v1));
-                                    }
-                                }
-                                count_out = source.len();
-                            } else {
-                                let e_count = context.storage.edge_count();
-                                if property_filters.is_empty() {
-                                    source.reserve(e_count);
-                                }
-                                for edge_index in context.storage.edges() {
-                                    tick_deadline(&mut context.deadline).with_step_frame(
-                                        || step.get_name(),
-                                        step_at,
-                                        || plan_frame(steps, level, logical_step_idx),
-                                    )?;
-                                    if !property_filters.iter().all(|filter| {
-                                        filter.edge_matches(context.storage, edge_index)
-                                    }) {
-                                        continue;
-                                    }
-                                    let v1 = TraverserValue::Edge(edge_index);
-                                    source.push(Traverser::start(context, v1));
-                                }
-                                count_out = source.len();
-                            }
-                        }
-                    }
-                    // A bare `count()` immediately after this `Init` step, not folded into it by
-                    // `CountPushdownRule` — either the rule is disabled for this execution
-                    // (`optimizer.disabled`), or a future rule ever stops firing here for some
-                    // other reason. `count_only`/`group_count_by_label` already produce a single
-                    // count traverser directly above without ever materializing a full element
-                    // list, so this only applies to the plain id/label/unfiltered fetch branches,
-                    // matching the same `is_count_next_step` collapse every other step category
-                    // already performs (see `GraphStep::Append`/`GraphStep::Map` below). Keeps a
-                    // disabled `count_pushdown` correct, just less optimal: still counts, just via
-                    // materializing first instead of the index-backed fast path.
-                    if let Some(incoming) = incoming.filter(|_| fused_factor.is_none()) {
-                        let found = std::mem::take(&mut source);
-                        // The cross product leaves `incoming x found` traversers alive: check it
-                        // against `traversal.max_traversers` (and the memory budget) BEFORE
-                        // building it, then reserve exactly that many, fallibly: a product the
-                        // allocator cannot provide (the limit raised to "unlimited") is an error,
-                        // never an abort of the process.
-                        let product = incoming.len().saturating_mul(found.len());
-                        context
-                            .check_traverser_limit(product)
-                            .and_then(|()| context.check_memory_budget(product))
-                            .and_then(|()| {
-                                crate::traversal::capacity::try_reserve_exact(&mut source, product)
-                            })
-                            .with_step_frame(
-                                || step.get_name(),
-                                step_at,
-                                || plan_frame(steps, level, logical_step_idx),
-                            )?;
-                        for traverser in &incoming {
-                            tick_deadline(&mut context.deadline).with_step_frame(
-                                || step.get_name(),
-                                step_at,
-                                || plan_frame(steps, level, logical_step_idx),
-                            )?;
-                            for element in &found {
-                                let mut next = Traverser::with_parts(
-                                    element.value.clone(),
-                                    traverser.path,
-                                    traverser.bulk,
-                                    traverser.sack,
-                                );
-                                next.extend_path(&mut context.paths, mode)?;
-                                source.push(next);
-                            }
-                        }
-                        count_out = source.len();
-                    }
-                    if is_count_next_step && !count_only && !group_count_by_label {
-                        let materialized = bulk::total_bulk(context, &source, "count")?;
-                        source = vec![Traverser::start(
-                            context,
-                            TraverserValue::Computed(
-                                bulk::count_property(
-                                    note_collapsed(&mut collapsed, materialized),
-                                    "count",
-                                )?,
-                                None,
-                            ),
-                        )];
-                        count_out = 1;
-                    }
-                    // New traversers start their path here; ones already on the stream keep theirs.
-                    if matches!(mode, PathMode::Full) {
-                        for traverser in source.iter_mut() {
-                            if traverser.path.is_none() {
-                                traverser.path = context.paths.push(
-                                    PathRef::NONE,
-                                    traverser.value.clone(),
-                                    None,
-                                )?;
-                            }
-                        }
-                    }
+                    count_out = Self::execute_init_step(
+                        context,
+                        &**step,
+                        &mut source,
+                        physical,
+                        steps,
+                        level,
+                        step_at,
+                        logical_step_idx,
+                        is_count_next_step,
+                        &mut collapsed,
+                        mode,
+                    )?;
                 }
                 GraphStep::Append(_name, step) => {
                     let added = step.process(context).with_step_frame(

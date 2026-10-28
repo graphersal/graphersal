@@ -187,7 +187,8 @@ impl MemoryBudget {
             });
         }
         let base = storage.memory_footprint_bytes()?.unwrap_or(0);
-        let elements = (storage.vertex_count() as u64).saturating_add(storage.edge_count() as u64);
+        let elements =
+            (storage.vertex_count()? as u64).saturating_add(storage.edge_count()? as u64);
         let element_bytes = base
             .checked_div(elements)
             .unwrap_or(0)
@@ -240,20 +241,21 @@ impl MemoryBudget {
         let traversers = (alive as u64).saturating_mul(std::mem::size_of::<
             crate::traversal::traverser::Traverser<S>,
         >() as u64);
-        self.check(traversers.saturating_add(self.grown_bytes(storage)))
+        self.check(traversers.saturating_add(self.grown_bytes(storage)?))
     }
 
     /// Estimated: the elements added to `storage` since the start (net), at the average
     /// element size. Tracked: 0 (the live heap holds them).
     #[inline]
-    fn grown_bytes<S: GraphStorage + ?Sized>(&self, storage: &S) -> u64 {
+    fn grown_bytes<S: GraphStorage + ?Sized>(&self, storage: &S) -> Result<u64, GraphError> {
         if self.tracked {
-            return 0;
+            return Ok(0);
         }
-        let elements = (storage.vertex_count() as u64).saturating_add(storage.edge_count() as u64);
-        elements
+        let elements =
+            (storage.vertex_count()? as u64).saturating_add(storage.edge_count()? as u64);
+        Ok(elements
             .saturating_sub(self.elements_at_start)
-            .saturating_mul(self.element_bytes)
+            .saturating_mul(self.element_bytes))
     }
 
     /// The check of a unit that is not a traversal (an import, an applied change set, the
@@ -273,7 +275,7 @@ impl MemoryBudget {
             let live = tracked_live_bytes().unwrap_or(0);
             (live, live > self.live_at_start)
         } else {
-            let grown = self.grown_bytes(storage);
+            let grown = self.grown_bytes(storage)?;
             (self.base.saturating_add(grown), grown > 0)
         };
         if grew && total > self.limit {

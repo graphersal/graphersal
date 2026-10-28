@@ -227,8 +227,8 @@ fn replay_never_reuses_an_id_of_a_dropped_or_rolled_back_element() {
     // An edge whose id is handed out and then dropped.
     let mark = live.begin_unit().unwrap();
     let (one, two) = (
-        live.get_vertex_by_id("1").unwrap(),
-        live.get_vertex_by_id("2").unwrap(),
+        live.get_vertex_by_id("1").unwrap().unwrap(),
+        live.get_vertex_by_id("2").unwrap().unwrap(),
     );
     live.add_edge(None, Some("e".into()), one, two, PropertyMap::default())
         .unwrap();
@@ -249,14 +249,14 @@ fn replay_never_reuses_an_id_of_a_dropped_or_rolled_back_element() {
     assert_eq!(add_vertex(&mut live, "new"), "4");
     let mark = recovered.begin_unit().unwrap();
     let (one, four) = (
-        recovered.get_vertex_by_id("1").unwrap(),
-        recovered.get_vertex_by_id("4").unwrap(),
+        recovered.get_vertex_by_id("1").unwrap().unwrap(),
+        recovered.get_vertex_by_id("4").unwrap().unwrap(),
     );
     let edge = recovered
         .add_edge(None, Some("e".into()), one, four, PropertyMap::default())
         .unwrap();
     recovered.commit_unit(mark).unwrap();
-    assert_eq!(recovered.edge_id(edge).unwrap(), "2");
+    assert_eq!(recovered.edge_id(edge).unwrap().unwrap(), "2");
 }
 
 /// The vertex and edge ids a change set mentions in its add mutations.
@@ -312,14 +312,14 @@ fn apply_never_reuses_an_id_whose_add_and_drop_were_compacted_away() {
     assert_eq!(add_vertex(&mut target, "new"), "4");
     let mark = target.begin_unit().unwrap();
     let (one, four) = (
-        target.get_vertex_by_id("1").unwrap(),
-        target.get_vertex_by_id("4").unwrap(),
+        target.get_vertex_by_id("1").unwrap().unwrap(),
+        target.get_vertex_by_id("4").unwrap().unwrap(),
     );
     let edge = target
         .add_edge(None, Some("e".into()), one, four, PropertyMap::default())
         .unwrap();
     target.commit_unit(mark).unwrap();
-    assert_eq!(target.edge_id(edge).unwrap(), "3");
+    assert_eq!(target.edge_id(edge).unwrap().unwrap(), "3");
 }
 
 #[test]

@@ -347,7 +347,7 @@ fn load_shared_serves_a_graph_of_any_storage() {
     assert_eq!(run(&mut session, r#"g.add_v("person").next()"#)["ok"], true);
     // The host's own handle sees the commit.
     assert_eq!(
-        graphersal::storage::GraphStorage::vertex_count(&*graph.read()),
+        graphersal::storage::GraphStorage::vertex_count(&*graph.read()).unwrap(),
         7
     );
 }

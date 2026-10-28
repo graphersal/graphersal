@@ -147,26 +147,29 @@ impl<'g, S: GraphStorage + 'g> StepGqlDelete<'g, S> {
         value: RowValue<S>,
         out: &mut Collected<S>,
     ) -> TraverserResult<()> {
-        let add = |element: GqlElement<S>, out: &mut Collected<S>| match element {
-            GqlElement::Vertex(v) => {
-                if storage.contains_vertex(v) && out.seen.insert(element) {
-                    out.vertices.push((v, target));
+        let add = |element: GqlElement<S>, out: &mut Collected<S>| -> Result<(), GraphError> {
+            match element {
+                GqlElement::Vertex(v) => {
+                    if storage.contains_vertex(v)? && out.seen.insert(element) {
+                        out.vertices.push((v, target));
+                    }
+                }
+                GqlElement::Edge(e) => {
+                    if storage.contains_edge(e)? && out.seen.insert(element) {
+                        out.edges.push(e);
+                    }
                 }
             }
-            GqlElement::Edge(e) => {
-                if storage.contains_edge(e) && out.seen.insert(element) {
-                    out.edges.push(e);
-                }
-            }
+            Ok(())
         };
         let mut stack = vec![value];
         while let Some(value) = stack.pop() {
             match value {
                 Value::Null => {}
-                Value::Element(element) => add(element, out),
+                Value::Element(element) => add(element, out)?,
                 Value::Path(elements) => {
                     for element in elements {
-                        add(element, out);
+                        add(element, out)?;
                     }
                 }
                 // Reversed onto the stack, so the items come off it in list order.
@@ -234,17 +237,24 @@ impl<'g, S: GraphStorage + 'g> StepGqlDelete<'g, S> {
 
     /// The first node of `collected` (and the target that gave it) with an edge the clause
     /// does not delete, and the edges looked at.
-    fn first_attached(&self, storage: &S, collected: &Collected<S>) -> (Option<usize>, usize) {
+    fn first_attached(
+        &self,
+        storage: &S,
+        collected: &Collected<S>,
+    ) -> Result<(Option<usize>, usize), GraphError> {
         let mut looked = 0usize;
         for (vertex, target) in &collected.vertices {
-            for edge in storage.out_edges(*vertex).chain(storage.in_edges(*vertex)) {
+            for edge in storage
+                .out_edges(*vertex)?
+                .chain(storage.in_edges(*vertex)?)
+            {
                 looked = looked.saturating_add(1);
                 if !collected.seen.contains(&GqlElement::Edge(edge)) {
-                    return (Some(*target), looked);
+                    return Ok((Some(*target), looked));
                 }
             }
         }
-        (None, looked)
+        Ok((None, looked))
     }
 }
 
@@ -365,7 +375,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlDelete<'g,
             }
         }
         if !self.detach {
-            let (attached, looked) = self.first_attached(&*context.storage, &collected);
+            let (attached, looked) = self.first_attached(&*context.storage, &collected)?;
             context.tick_n(looked)?;
             if let Some(target) = attached {
                 return Err(Box::new(self.edges_still_exist(target)));
@@ -376,7 +386,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlDelete<'g,
         let mut removed_any = false;
         for edge in &collected.edges {
             context.tick()?;
-            if let Some(label) = context.storage.edge_label(*edge).map(CompactString::from) {
+            if let Some(label) = context.storage.edge_label(*edge)?.map(CompactString::from) {
                 context.gql_deleted.edge_types.insert(*edge, label);
             }
             context.storage.drop_edge(*edge)?;
@@ -388,12 +398,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlDelete<'g,
             if self.detach {
                 let storage = &*context.storage;
                 incident.clear();
-                incident.extend(
-                    storage
-                        .out_edges(*vertex)
-                        .chain(storage.in_edges(*vertex))
-                        .filter_map(|e| Some((e, CompactString::from(storage.edge_label(e)?)))),
-                );
+                for e in storage
+                    .out_edges(*vertex)?
+                    .chain(storage.in_edges(*vertex)?)
+                {
+                    if let Some(label) = storage.edge_label(e)? {
+                        incident.push((e, CompactString::from(label)));
+                    }
+                }
                 context.tick_n(incident.len())?;
                 context.gql_deleted.edge_types.extend(incident.drain(..));
             }

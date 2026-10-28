@@ -35,9 +35,15 @@ fn shared_reference_is_read_only_for<S: GraphStorage>(mut storage: S) {
     let mut read_only = &storage;
     contract::read_only_rejects_writes(&mut read_only, a, e);
     // Reads still work through the same wrapper.
-    assert_eq!(GraphStorage::vertex_count(&read_only), 2);
-    assert_eq!(GraphStorage::get_vertex_by_id(&read_only, "b"), Some(b));
-    assert_eq!(GraphStorage::edge_endpoints(&read_only, e), Some((a, b)));
+    assert_eq!(GraphStorage::vertex_count(&read_only).unwrap(), 2);
+    assert_eq!(
+        GraphStorage::get_vertex_by_id(&read_only, "b").unwrap(),
+        Some(b)
+    );
+    assert_eq!(
+        GraphStorage::edge_endpoints(&read_only, e).unwrap(),
+        Some((a, b))
+    );
     // A read-only view claims no capability and refuses commit hooks.
     graphersal_storage_tests::extension::capabilities_are_consistent(&mut read_only);
     graphersal_storage_tests::extension::commit_hooks_follow_the_capability(&mut read_only);

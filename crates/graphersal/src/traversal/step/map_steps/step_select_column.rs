@@ -113,13 +113,13 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSelectColumn {
             TraverserValue::VertexProperty(prop, index, _) => Some(
                 context
                     .storage
-                    .vertex_properties(*index)
+                    .vertex_properties(*index)?
                     .and_then(|p| p.get(prop.as_str())),
             ),
             TraverserValue::EdgeProperty(prop, index, _) => Some(
                 context
                     .storage
-                    .edge_properties(*index)
+                    .edge_properties(*index)?
                     .and_then(|p| p.get(prop.as_str())),
             ),
             _ => None,

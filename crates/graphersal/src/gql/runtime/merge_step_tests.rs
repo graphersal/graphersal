@@ -208,8 +208,15 @@ fn rows<'g>(
 fn vertices_of(graph: &TraversalGraph, label: &str) -> Vec<PropertyMap> {
     graph
         .vertices()
-        .filter(|v| graph.vertex_labels(*v).iter().any(|l| l == label))
-        .map(|v| graph.vertex_properties(v).cloned().unwrap_or_default())
+        .unwrap()
+        .filter(|v| graph.vertex_labels(*v).unwrap().iter().any(|l| l == label))
+        .map(|v| {
+            graph
+                .vertex_properties(v)
+                .unwrap()
+                .cloned()
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -338,7 +345,7 @@ fn a_null_property_value_is_22004_before_anything_runs() {
     let help = error.help().unwrap_or_default();
     assert!(help.contains("FILTER x IS NOT NULL"), "{help}");
     assert!(help.contains("coalesce(x, 0)"), "{help}");
-    assert!(graph.vertices().next().is_none());
+    assert!(graph.vertices().unwrap().next().is_none());
 }
 
 #[test]
@@ -350,7 +357,10 @@ fn a_failing_later_row_leaves_nothing() {
     };
     let error = root(merge(rows(&mut graph, vec![1, 2, 3]), failing).iterate());
     assert_eq!(gql_status(&error), "22004");
-    assert!(graph.vertices().next().is_none(), "rows 1 and 2 were kept");
+    assert!(
+        graph.vertices().unwrap().next().is_none(),
+        "rows 1 and 2 were kept"
+    );
     // An error of an ON item fails it the same way.
     let dividing = Merge {
         on_match: &[("q", "1 / 0")],
@@ -358,7 +368,7 @@ fn a_failing_later_row_leaves_nothing() {
     };
     let error = root(merge(rows(&mut graph, vec![1, 1]), dividing).iterate());
     assert_eq!(gql_status(&error), "22012");
-    assert!(graph.vertices().next().is_none());
+    assert!(graph.vertices().unwrap().next().is_none());
 }
 
 #[test]

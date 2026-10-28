@@ -426,8 +426,8 @@ pub(crate) fn compute<S: GraphStorage>(
     request: &MemoryReportRequest,
 ) -> Result<(MemoryReport, bool), crate::error::GraphError> {
     let started = web_time::Instant::now();
-    let vertex_total = storage.vertex_count() as u64;
-    let total = vertex_total + storage.edge_count() as u64;
+    let vertex_total = storage.vertex_count()? as u64;
+    let total = vertex_total + storage.edge_count()? as u64;
     let step = request.step_for(total);
     let cancel = request.cancel_token();
     let mut walk = Walk::default();
@@ -445,23 +445,23 @@ pub(crate) fn compute<S: GraphStorage>(
         true
     };
 
-    for vertex in storage.vertices() {
+    for vertex in storage.vertices()? {
         passed += 1;
         if !tick(passed) {
             cancelled = true;
             break;
         }
-        let labels = storage.vertex_labels(vertex);
+        let labels = storage.vertex_labels(vertex)?;
         let label = walk.label_index(ElementKind::Vertex, labels.first().map(|l| l.as_str()));
         if !walk.take(label, step) {
             continue;
         }
         visited += 1;
-        let out = storage.out_edges(vertex).count() as u64;
-        let incoming = storage.in_edges(vertex).count() as u64;
+        let out = storage.out_edges(vertex)?.count() as u64;
+        let incoming = storage.in_edges(vertex)?.count() as u64;
         if let Some(acc) = walk.labels.get_mut(label) {
             acc.visited += 1;
-            acc.id_heap += storage.vertex_id(vertex).map_or(0, |id| id_heap(id.len()));
+            acc.id_heap += storage.vertex_id(vertex)?.map_or(0, |id| id_heap(id.len()));
             acc.label_bytes += labels.len() as u64 * INLINE_ID as u64
                 + labels
                     .iter()
@@ -472,27 +472,27 @@ pub(crate) fn compute<S: GraphStorage>(
             acc.degrees
                 .push(u32::try_from(out + incoming).unwrap_or(u32::MAX));
         }
-        if let Some(map) = storage.vertex_properties(vertex) {
+        if let Some(map) = storage.vertex_properties(vertex)? {
             walk.add_map(label, map);
         }
     }
     if !cancelled {
-        for edge in storage.edges() {
+        for edge in storage.edges()? {
             passed += 1;
             if !tick(passed) {
                 cancelled = true;
                 break;
             }
-            let label = walk.label_index(ElementKind::Edge, storage.edge_label(edge));
+            let label = walk.label_index(ElementKind::Edge, storage.edge_label(edge)?);
             if !walk.take(label, step) {
                 continue;
             }
             visited += 1;
             if let Some(acc) = walk.labels.get_mut(label) {
                 acc.visited += 1;
-                acc.id_heap += storage.edge_id(edge).map_or(0, |id| id_heap(id.len()));
+                acc.id_heap += storage.edge_id(edge)?.map_or(0, |id| id_heap(id.len()));
             }
-            if let Some(map) = storage.edge_properties(edge) {
+            if let Some(map) = storage.edge_properties(edge)? {
                 walk.add_map(label, map);
             }
         }

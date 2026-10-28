@@ -406,18 +406,18 @@ fn transition<S: GraphStorage>(
     key: &MatchKey,
     mask: u64,
     child: S::VertexId,
-) -> u64 {
+) -> Result<u64, GraphError> {
     if mask & pattern.needs_key() == 0 {
-        return pattern.step(mask, None);
+        return Ok(pattern.step(mask, None));
     }
-    match key {
+    Ok(match key {
         MatchKey::Property(key) => {
             let value = storage
-                .vertex_properties(child)
+                .vertex_properties(child)?
                 .and_then(|properties| properties.get(key.as_str()));
             // A compressed string is matched on its text.
             if let Some(ElementProperty::Compressed(text)) = value {
-                return text.with_text(|text| pattern.step(mask, Some(text)));
+                return Ok(text.with_text(|text| pattern.step(mask, Some(text))));
             }
             let value = value.and_then(|value| match value {
                 ElementProperty::String(value) => Some(value.as_str()),
@@ -437,17 +437,17 @@ fn transition<S: GraphStorage>(
             });
             pattern.step(mask, value)
         }
-        MatchKey::Id => pattern.step(mask, storage.vertex_id(child)),
+        MatchKey::Id => pattern.step(mask, storage.vertex_id(child)?),
         MatchKey::Label => {
-            let labels = storage.vertex_labels(child);
+            let labels = storage.vertex_labels(child)?;
             if labels.is_empty() {
-                return pattern.step(mask, None);
+                return Ok(pattern.step(mask, None));
             }
             labels.iter().fold(0u64, |next, label| {
                 next | pattern.step(mask, Some(label.as_str()))
             })
         }
-    }
+    })
 }
 
 /// The DFS stack of the walk: a vertex, the automaton states live at it and its depth.
@@ -542,26 +542,24 @@ impl<'g, S: GraphStorage + 'g> Walk<'_, 'g, S> {
             // Expand children only while the vertex is at a depth whose children may be pushed.
             let expandable = max_depth.is_none_or(|max| child_depth < max);
             let storage: &S = &*context.storage;
-            for edge in storage.out_edges(vertex) {
-                let Some((_, child)) = storage.edge_endpoints(edge) else {
+            for edge in storage.out_edges(vertex)? {
+                let Some((_, child)) = storage.edge_endpoints(edge)? else {
                     continue;
                 };
                 tick_deadline(&mut context.deadline)?;
                 if let Some(labels) = filter
-                    && !labels
-                        .iter()
-                        .any(|label| storage.vertex_has_label(child, label))
+                    && !has_any_label(storage, child, labels)?
                 {
                     continue;
                 }
-                let mut next = transition(storage, pattern, key, mask, child);
+                let mut next = transition(storage, pattern, key, mask, child)?;
                 if next == 0 {
                     continue;
                 }
                 // Cycles and diamonds can only close at the start or at a vertex with
                 // in-degree >= 2, so only those carry seen-state bookkeeping; a tree tracks
                 // nothing.
-                if child == start || storage.in_edges(child).nth(1).is_some() {
+                if child == start || storage.in_edges(child)?.nth(1).is_some() {
                     if max_depth.is_some() {
                         // A state seen only deeper must be expanded again from here: the
                         // remaining depth budget is larger, so more of the subtree is in reach.
@@ -615,6 +613,20 @@ impl<'g, S: GraphStorage + 'g> Walk<'_, 'g, S> {
         }
         Ok(reexpanded)
     }
+}
+
+/// Whether `vertex` carries one of `labels` (stops at the first).
+fn has_any_label<S: GraphStorage>(
+    storage: &S,
+    vertex: S::VertexId,
+    labels: &[CompactString],
+) -> Result<bool, GraphError> {
+    for label in labels {
+        if storage.vertex_has_label(vertex, label)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Calls `f` with the index of every set bit of `mask`.

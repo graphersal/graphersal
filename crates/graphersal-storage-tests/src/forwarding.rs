@@ -56,7 +56,7 @@ pub struct ForwardEdgeId(EdgeHandle);
 /// use graphersal_storage_tests::forwarding::Forwarding;
 ///
 /// let storage = Forwarding::new(TraversalGraph::tinkerpop_modern());
-/// assert_eq!(storage.vertex_count(), 6);
+/// assert_eq!(storage.vertex_count().unwrap(), 6);
 /// assert_eq!(storage.into_inner().edge_count(), 6);
 /// ```
 #[derive(Default)]
@@ -78,72 +78,85 @@ impl GraphStorage for Forwarding {
     type VertexId = ForwardVertexId;
     type EdgeId = ForwardEdgeId;
 
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         GraphStorage::vertex_count(&self.0)
     }
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         GraphStorage::edge_count(&self.0)
     }
-    fn vertices(&self) -> impl Iterator<Item = ForwardVertexId> + '_ {
-        GraphStorage::vertices(&self.0).map(ForwardVertexId)
+    fn vertices(&self) -> Result<impl Iterator<Item = ForwardVertexId> + '_, GraphError> {
+        Ok(GraphStorage::vertices(&self.0)?.map(ForwardVertexId))
     }
-    fn edges(&self) -> impl Iterator<Item = ForwardEdgeId> + '_ {
-        GraphStorage::edges(&self.0).map(ForwardEdgeId)
+    fn edges(&self) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        Ok(GraphStorage::edges(&self.0)?.map(ForwardEdgeId))
     }
-    fn get_vertex_by_id(&self, id: &str) -> Option<ForwardVertexId> {
-        GraphStorage::get_vertex_by_id(&self.0, id).map(ForwardVertexId)
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<ForwardVertexId>, GraphError> {
+        Ok(GraphStorage::get_vertex_by_id(&self.0, id)?.map(ForwardVertexId))
     }
-    fn get_edge_by_id(&self, id: &str) -> Option<ForwardEdgeId> {
-        GraphStorage::get_edge_by_id(&self.0, id).map(ForwardEdgeId)
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<ForwardEdgeId>, GraphError> {
+        Ok(GraphStorage::get_edge_by_id(&self.0, id)?.map(ForwardEdgeId))
     }
-    fn out_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
-        GraphStorage::out_edges(&self.0, node.0).map(ForwardEdgeId)
+    fn out_edges(
+        &self,
+        node: ForwardVertexId,
+    ) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        Ok(GraphStorage::out_edges(&self.0, node.0)?.map(ForwardEdgeId))
     }
-    fn in_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
-        GraphStorage::in_edges(&self.0, node.0).map(ForwardEdgeId)
+    fn in_edges(
+        &self,
+        node: ForwardVertexId,
+    ) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        Ok(GraphStorage::in_edges(&self.0, node.0)?.map(ForwardEdgeId))
     }
-    fn vertex_id(&self, node: ForwardVertexId) -> Option<&str> {
+    fn vertex_id(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_id(&self.0, node.0)
     }
-    fn edge_id(&self, edge: ForwardEdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_id(&self.0, edge.0)
     }
-    fn vertex_label(&self, node: ForwardVertexId) -> Option<&str> {
+    fn vertex_label(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_label(&self.0, node.0)
     }
-    fn edge_label(&self, edge: ForwardEdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_label(&self.0, edge.0)
     }
-    fn vertex_labels(&self, node: ForwardVertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: ForwardVertexId) -> Result<&[CompactString], GraphError> {
         GraphStorage::vertex_labels(&self.0, node.0)
     }
-    fn vertex_properties(&self, node: ForwardVertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: ForwardVertexId) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::vertex_properties(&self.0, node.0)
     }
-    fn edge_properties(&self, edge: ForwardEdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: ForwardEdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::edge_properties(&self.0, edge.0)
     }
-    fn edge_endpoints(&self, edge: ForwardEdgeId) -> Option<(ForwardVertexId, ForwardVertexId)> {
-        GraphStorage::edge_endpoints(&self.0, edge.0)
-            .map(|(from, to)| (ForwardVertexId(from), ForwardVertexId(to)))
+    fn edge_endpoints(
+        &self,
+        edge: ForwardEdgeId,
+    ) -> Result<Option<(ForwardVertexId, ForwardVertexId)>, GraphError> {
+        Ok(GraphStorage::edge_endpoints(&self.0, edge.0)?
+            .map(|(from, to)| (ForwardVertexId(from), ForwardVertexId(to))))
     }
-    fn contains_vertex(&self, node: ForwardVertexId) -> bool {
+    fn contains_vertex(&self, node: ForwardVertexId) -> Result<bool, GraphError> {
         GraphStorage::contains_vertex(&self.0, node.0)
     }
-    fn contains_edge(&self, edge: ForwardEdgeId) -> bool {
+    fn contains_edge(&self, edge: ForwardEdgeId) -> Result<bool, GraphError> {
         GraphStorage::contains_edge(&self.0, edge.0)
     }
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = ForwardVertexId> + 'a> {
-        Box::new(GraphStorage::vertices_by_label(&self.0, label).map(ForwardVertexId))
+    ) -> Result<Box<dyn Iterator<Item = ForwardVertexId> + 'a>, GraphError> {
+        Ok(Box::new(
+            GraphStorage::vertices_by_label(&self.0, label)?.map(ForwardVertexId),
+        ))
     }
     fn edges_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = ForwardEdgeId> + 'a> {
-        Box::new(GraphStorage::edges_by_label(&self.0, label).map(ForwardEdgeId))
+    ) -> Result<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>, GraphError> {
+        Ok(Box::new(
+            GraphStorage::edges_by_label(&self.0, label)?.map(ForwardEdgeId),
+        ))
     }
     fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         GraphStorage::statistics(&self.0)
@@ -401,7 +414,7 @@ impl GraphStorage for Forwarding {
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(&self.0)
     }
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         GraphStorage::unit_started_at(&self.0)
     }
     fn raise_id_sequences(

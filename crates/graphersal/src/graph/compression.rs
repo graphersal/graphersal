@@ -33,9 +33,9 @@ use std::sync::Arc;
 use compact_str::CompactString;
 
 use crate::error::{DefinitionError, GraphError};
+use crate::graph::TraversalGraph;
 use crate::graph::definition::{Definition, DefinitionBody, DefinitionKind};
 use crate::graph::schema::ElementKind;
-use crate::graph::{GraphStorage, TraversalGraph};
 use crate::value::compressed::{CompressedText, CompressionDictionary, MAX_DICTIONARY_BYTES};
 use crate::value::deduped::{DEDUP_ENTRY_OVERHEAD, DedupedText};
 use crate::value::json_path::JsonPathSegment;
@@ -1272,14 +1272,14 @@ impl TraversalGraph {
         let mut ids: Vec<(&str, &PropertyMap)> = Vec::new();
         match element {
             ElementKind::Vertex => {
-                for node in self.vertices_by_label(label) {
+                for node in self.index.get_nodes_by_label(label).into_iter().flatten() {
                     if let Some(vertex) = self.vertex_weight(node) {
                         ids.push((vertex.0.as_str(), &vertex.2));
                     }
                 }
             }
             ElementKind::Edge => {
-                for edge in self.edges_by_label(label) {
+                for edge in self.index.get_edges_by_label(label).into_iter().flatten() {
                     if let Some(weight) = self.edge_weight(edge)
                         && let Some(properties) = weight.2.as_ref()
                     {
@@ -1314,13 +1314,23 @@ impl TraversalGraph {
     fn compression_normalize_label(&mut self, element: ElementKind, label: &str, force: bool) {
         match element {
             ElementKind::Vertex => {
-                let nodes: Vec<_> = self.vertices_by_label(label).collect();
+                let nodes: Vec<_> = self
+                    .index
+                    .get_nodes_by_label(label)
+                    .into_iter()
+                    .flatten()
+                    .collect();
                 for node in nodes {
                     self.compression_normalize_vertex_forced(node, force);
                 }
             }
             ElementKind::Edge => {
-                let edges: Vec<_> = self.edges_by_label(label).collect();
+                let edges: Vec<_> = self
+                    .index
+                    .get_edges_by_label(label)
+                    .into_iter()
+                    .flatten()
+                    .collect();
                 for edge in edges {
                     self.compression_normalize_edge_forced(edge, force);
                 }
@@ -1440,14 +1450,24 @@ impl TraversalGraph {
         };
         match rule.element {
             ElementKind::Vertex => {
-                for node in self.vertices_by_label(&rule.label) {
+                for node in self
+                    .index
+                    .get_nodes_by_label(&rule.label)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(vertex) = self.vertex_weight(node) {
                         count(&vertex.2);
                     }
                 }
             }
             ElementKind::Edge => {
-                for edge in self.edges_by_label(&rule.label) {
+                for edge in self
+                    .index
+                    .get_edges_by_label(&rule.label)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(properties) = self.edge_weight(edge).and_then(|w| w.2.as_ref()) {
                         count(properties);
                     }
@@ -1707,11 +1727,11 @@ mod tests {
             .unwrap();
         graph.check_compression_invariant().unwrap();
         assert!(matches!(
-            graph.vertex_properties(v).unwrap().get("bio"),
+            graph.vertex_properties(v).unwrap().unwrap().get("bio"),
             Some(ElementProperty::Compressed(_))
         ));
         assert_eq!(
-            graph.vertex_properties(v).unwrap().get("bio"),
+            graph.vertex_properties(v).unwrap().unwrap().get("bio"),
             Some(&ElementProperty::from(cv(1)))
         );
         graph
@@ -1727,7 +1747,7 @@ mod tests {
             .unwrap();
         graph.check_compression_invariant().unwrap();
         assert!(matches!(
-            graph.vertex_properties(v).unwrap().get("bio"),
+            graph.vertex_properties(v).unwrap().unwrap().get("bio"),
             Some(ElementProperty::String(_))
         ));
     }

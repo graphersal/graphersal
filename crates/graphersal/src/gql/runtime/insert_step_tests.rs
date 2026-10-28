@@ -125,8 +125,15 @@ fn insert_edge<'g, S: GraphStorage + 'g>(
 fn vertices_of(graph: &TraversalGraph, label: &str) -> Vec<PropertyMap> {
     graph
         .vertices()
-        .filter(|v| graph.vertex_labels(*v).iter().any(|l| l == label))
-        .map(|v| graph.vertex_properties(v).cloned().unwrap_or_default())
+        .unwrap()
+        .filter(|v| graph.vertex_labels(*v).unwrap().iter().any(|l| l == label))
+        .map(|v| {
+            graph
+                .vertex_properties(v)
+                .unwrap()
+                .cloned()
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -135,6 +142,7 @@ fn edges_of(graph: &TraversalGraph, label: &str) -> Vec<(String, String, Propert
     let name = |v| {
         graph
             .vertex_properties(v)
+            .unwrap()
             .and_then(|p| p.get("name"))
             .and_then(ElementProperty::as_string)
             .unwrap_or("?")
@@ -142,13 +150,18 @@ fn edges_of(graph: &TraversalGraph, label: &str) -> Vec<(String, String, Propert
     };
     graph
         .edges()
-        .filter(|e| graph.edge_label(*e) == Some(label))
+        .unwrap()
+        .filter(|e| graph.edge_label(*e).unwrap() == Some(label))
         .map(|e| {
-            let (from, to) = graph.edge_endpoints(e).unwrap();
+            let (from, to) = graph.edge_endpoints(e).unwrap().unwrap();
             (
                 name(from),
                 name(to),
-                graph.edge_properties(e).cloned().unwrap_or_default(),
+                graph
+                    .edge_properties(e)
+                    .unwrap()
+                    .cloned()
+                    .unwrap_or_default(),
             )
         })
         .collect()
@@ -171,7 +184,10 @@ fn help(error: &TraverserError) -> String {
 }
 
 fn counts(graph: &TraversalGraph) -> (usize, usize) {
-    (graph.vertices().count(), graph.edges().count())
+    (
+        graph.vertices().unwrap().count(),
+        graph.edges().unwrap().count(),
+    )
 }
 
 fn gql_status(error: &TraverserError) -> (GqlErrorKind, String, String) {
@@ -198,9 +214,9 @@ fn insert_node_creates_one_vertex_with_every_label_and_property() {
     .next()
     .unwrap();
     assert_eq!(created, Some(int(1)));
-    let v = graph.vertices().next().unwrap();
-    assert_eq!(graph.vertex_labels(v), ["Person", "Admin"]);
-    let stored = graph.vertex_properties(v).unwrap();
+    let v = graph.vertices().unwrap().next().unwrap();
+    assert_eq!(graph.vertex_labels(v).unwrap(), ["Person", "Admin"]);
+    let stored = graph.vertex_properties(v).unwrap().unwrap();
     assert_eq!(stored.get("name"), Some(&ElementProperty::from("ann")));
     assert_eq!(stored.get("n"), Some(&int(3)));
     // W21: maps and mixed / nested lists are stored as they are (a deviation from Neo4j).

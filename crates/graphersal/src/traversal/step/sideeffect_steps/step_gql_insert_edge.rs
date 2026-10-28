@@ -95,7 +95,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlInsertEdge<'g, S> {
             .map(std::borrow::Cow::into_owned);
         match value {
             Some(TraverserValue::Vertex(vertex)) => {
-                if context.storage.contains_vertex(vertex) {
+                if context.storage.contains_vertex(vertex)? {
                     Ok(vertex)
                 } else {
                     Err(Box::new(
@@ -234,7 +234,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlInsertEd
             let from = self.endpoint(context, &row, 0)?;
             let to = self.endpoint(context, &row, 1)?;
             let properties = self.properties.evaluate(context, &row)?;
-            let create = context.create_context_or(self.create_time);
+            let create = context.create_context_or(self.create_time)?;
             let edge = context.storage.add_edge_with(
                 None,
                 Some(self.label.clone()),

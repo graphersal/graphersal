@@ -568,8 +568,13 @@ pub struct CompactGraph {
 
 impl CompactGraph {
     /// The columns of `vertices` and `edges`; an edge whose endpoint is not among `vertices` is
-    /// left out. `truncated` and the totals are the caller's.
-    pub fn build<S: GraphStorage>(g: &S, vertices: &[S::VertexId], edges: &[S::EdgeId]) -> Self {
+    /// left out. `truncated` and the totals are the caller's. `Err` when the storage cannot read
+    /// an element.
+    pub fn build<S: GraphStorage>(
+        g: &S,
+        vertices: &[S::VertexId],
+        edges: &[S::EdgeId],
+    ) -> Result<Self, GraphError> {
         let mut view = CompactGraph {
             vertex_ids: Vec::with_capacity(vertices.len()),
             vertex_label: Vec::with_capacity(vertices.len()),
@@ -588,53 +593,55 @@ impl CompactGraph {
             };
             position.insert(*v, index);
             view.vertex_ids
-                .push(g.vertex_id(*v).unwrap_or_default().to_string());
-            let label = g.vertex_labels(*v).first().map_or("", |l| l.as_str());
+                .push(g.vertex_id(*v)?.unwrap_or_default().to_string());
+            let label = g.vertex_labels(*v)?.first().map_or("", |l| l.as_str());
             view.vertex_label.push(labels.index(label));
             view.vertex_name.push(
-                g.vertex_properties(*v)
+                g.vertex_properties(*v)?
                     .and_then(|p| p.get("name"))
                     .and_then(caption_text),
             );
         }
         for e in edges {
-            let Some((s, t)) = g.edge_endpoints(*e) else {
+            let Some((s, t)) = g.edge_endpoints(*e)? else {
                 continue;
             };
             let (Some(s), Some(t)) = (position.get(&s), position.get(&t)) else {
                 continue;
             };
             view.edge_ids
-                .push(g.edge_id(*e).unwrap_or_default().to_string());
+                .push(g.edge_id(*e)?.unwrap_or_default().to_string());
             view.edge_source.push(*s);
             view.edge_target.push(*t);
             view.edge_label
-                .push(labels.index(g.edge_label(*e).unwrap_or_default()));
+                .push(labels.index(g.edge_label(*e)?.unwrap_or_default()));
         }
         view.labels = labels.names;
-        view
+        Ok(view)
     }
 }
 
 impl CompactGraph {
     /// Adds the `vertexInDegree` / `vertexOutDegree` columns: each vertex's edges in the whole
     /// graph, counted from its adjacency like the inspector's `inDegree`/`outDegree` (a vertex
-    /// dropped since has 0).
-    pub fn add_degrees<S: GraphStorage>(&mut self, g: &S) {
+    /// dropped since has 0). `Err` when the storage cannot read the adjacency.
+    pub fn add_degrees<S: GraphStorage>(&mut self, g: &S) -> Result<(), GraphError> {
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         let (mut ins, mut outs) = (
             Vec::with_capacity(self.vertex_ids.len()),
             Vec::with_capacity(self.vertex_ids.len()),
         );
         for id in &self.vertex_ids {
-            let (i, o) = g
-                .get_vertex_by_id(id)
-                .map_or((0, 0), |v| (g.in_edges(v).count(), g.out_edges(v).count()));
+            let (i, o) = match g.get_vertex_by_id(id)? {
+                Some(v) => (g.in_edges(v)?.count(), g.out_edges(v)?.count()),
+                None => (0, 0),
+            };
             ins.push(count(i));
             outs.push(count(o));
         }
         self.vertex_in_degree = Some(ins);
         self.vertex_out_degree = Some(outs);
+        Ok(())
     }
 }
 
@@ -697,30 +704,42 @@ pub struct InspectedVertex {
     pub out_degree: usize,
 }
 
-/// The element of `kind` with `id`, or `None` when there is none (dropped since it was drawn).
-pub fn element_of<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Option<InspectedElement> {
-    Some(match kind {
+/// The element of `kind` with `id`, or `None` when there is none (dropped since it was drawn);
+/// `Err` when the storage cannot read it.
+pub fn element_of<S: GraphStorage>(
+    g: &S,
+    kind: ElementKind,
+    id: &str,
+) -> Result<Option<InspectedElement>, GraphError> {
+    Ok(Some(match kind {
         ElementKind::Vertex => {
-            let v = g.get_vertex_by_id(id)?;
+            let Some(v) = g.get_vertex_by_id(id)? else {
+                return Ok(None);
+            };
             InspectedElement::Vertex(InspectedVertex {
-                node: node_of(g, v),
-                in_degree: g.in_edges(v).count(),
-                out_degree: g.out_edges(v).count(),
+                node: node_of(g, v)?,
+                in_degree: g.in_edges(v)?.count(),
+                out_degree: g.out_edges(v)?.count(),
             })
         }
-        ElementKind::Edge => InspectedElement::Edge(edge_of(g, g.get_edge_by_id(id)?)),
-    })
+        ElementKind::Edge => {
+            let Some(e) = g.get_edge_by_id(id)? else {
+                return Ok(None);
+            };
+            InspectedElement::Edge(edge_of(g, e)?)
+        }
+    }))
 }
 
-/// A vertex as the playground draws it.
-pub fn node_of<S: GraphStorage>(g: &S, v: S::VertexId) -> Node {
-    let labels: Vec<String> = g.vertex_labels(v).iter().map(|l| l.to_string()).collect();
-    Node {
-        id: g.vertex_id(v).unwrap_or_default().to_string(),
+/// A vertex as the playground draws it; `Err` when the storage cannot read it.
+pub fn node_of<S: GraphStorage>(g: &S, v: S::VertexId) -> Result<Node, GraphError> {
+    let labels: Vec<String> = g.vertex_labels(v)?.iter().map(|l| l.to_string()).collect();
+    Ok(Node {
+        id: g.vertex_id(v)?.unwrap_or_default().to_string(),
         label: labels.first().cloned().unwrap_or_default(),
         labels,
-        properties: inspected_properties(g.vertex_properties(v)),
-    }
+        properties: inspected_properties(g.vertex_properties(v)?),
+    })
 }
 
 /// A copy of an element's properties for the inspector, non-finite floats typed ([`json_safe`]).
@@ -730,35 +749,33 @@ fn inspected_properties(properties: Option<&PropertyMap>) -> PropertyMap {
     properties
 }
 
-/// An edge as the playground draws it.
-pub fn edge_of<S: GraphStorage>(g: &S, e: S::EdgeId) -> Edge {
-    let (source, target) = g
-        .edge_endpoints(e)
-        .map(|(s, t)| {
-            (
-                g.vertex_id(s).unwrap_or_default().to_string(),
-                g.vertex_id(t).unwrap_or_default().to_string(),
-            )
-        })
-        .unwrap_or_default();
-    Edge {
-        id: g.edge_id(e).unwrap_or_default().to_string(),
-        label: g.edge_label(e).unwrap_or_default().to_string(),
+/// An edge as the playground draws it; `Err` when the storage cannot read it.
+pub fn edge_of<S: GraphStorage>(g: &S, e: S::EdgeId) -> Result<Edge, GraphError> {
+    let (source, target) = match g.edge_endpoints(e)? {
+        Some((s, t)) => (
+            g.vertex_id(s)?.unwrap_or_default().to_string(),
+            g.vertex_id(t)?.unwrap_or_default().to_string(),
+        ),
+        None => Default::default(),
+    };
+    Ok(Edge {
+        id: g.edge_id(e)?.unwrap_or_default().to_string(),
+        label: g.edge_label(e)?.unwrap_or_default().to_string(),
         source,
         target,
-        properties: inspected_properties(g.edge_properties(e)),
-    }
+        properties: inspected_properties(g.edge_properties(e)?),
+    })
 }
 
 /// Estimated JSON bytes of a vertex in the columns: its id, its caption and the separators and
 /// index digits around them.
-fn vertex_bytes<S: GraphStorage>(g: &S, v: S::VertexId) -> usize {
+fn vertex_bytes<S: GraphStorage>(g: &S, v: S::VertexId) -> Result<usize, GraphError> {
     let name = g
-        .vertex_properties(v)
+        .vertex_properties(v)?
         .and_then(|p| p.get("name"))
         .and_then(ElementProperty::as_str)
         .map_or(4, str::len);
-    g.vertex_id(v).map_or(0, str::len) + name + 12
+    Ok(g.vertex_id(v)?.map_or(0, str::len) + name + 12)
 }
 
 /// The vertices and edges `results` refer to, as a [`CompactGraph`]: every vertex or edge value,
@@ -772,7 +789,7 @@ pub fn collect_subgraph<S: GraphStorage>(
     g: &S,
     results: &[ElementProperty],
     max_elements: usize,
-) -> Option<CompactGraph> {
+) -> Result<Option<CompactGraph>, GraphError> {
     let max_elements = max_elements.min(SUBGRAPH_MAX_ELEMENTS);
     let mut vertices = Vec::new();
     let mut edges = Vec::new();
@@ -819,26 +836,29 @@ pub fn collect_subgraph<S: GraphStorage>(
         };
         if let (Some(id), Some(label)) = (id, label) {
             if is_edge {
-                if let Some(e) = g.get_edge_by_id(id)
-                    && g.edge_label(e).filter(|l| !l.is_empty()) == label.filter(|l| !l.is_empty())
+                if let Some(e) = g.get_edge_by_id(id)?
+                    && g.edge_label(e)?.filter(|l| !l.is_empty()) == label.filter(|l| !l.is_empty())
                     && seen_e.insert(e)
                 {
                     edges.push(e);
                     bytes += id.len() + 24;
-                    if let Some((s, t)) = g.edge_endpoints(e) {
+                    if let Some((s, t)) = g.edge_endpoints(e)? {
                         for v in [s, t] {
                             if seen_v.insert(v) {
-                                bytes += vertex_bytes(g, v);
+                                bytes += vertex_bytes(g, v)?;
                                 vertices.push(v);
                             }
                         }
                     }
                 }
-            } else if let Some(v) = g.get_vertex_by_id(id)
-                && label.map_or(g.vertex_labels(v).is_empty(), |l| g.vertex_has_label(v, l))
+            } else if let Some(v) = g.get_vertex_by_id(id)?
+                && match label {
+                    Some(l) => g.vertex_has_label(v, l)?,
+                    None => g.vertex_labels(v)?.is_empty(),
+                }
                 && seen_v.insert(v)
             {
-                bytes += vertex_bytes(g, v);
+                bytes += vertex_bytes(g, v)?;
                 vertices.push(v);
             }
         }
@@ -847,15 +867,15 @@ pub fn collect_subgraph<S: GraphStorage>(
         }
     }
     if vertices.is_empty() && edges.is_empty() {
-        return None;
+        return Ok(None);
     }
     let (total_nodes, total_edges) = (vertices.len(), edges.len());
-    let mut view = CompactGraph::build(g, &vertices, &edges);
+    let mut view = CompactGraph::build(g, &vertices, &edges)?;
     view.truncated = stopped_by.is_some();
     view.stopped_by = stopped_by;
     view.total_nodes = total_nodes;
     view.total_edges = total_edges;
-    Some(view)
+    Ok(Some(view))
 }
 
 #[cfg(test)]
@@ -917,8 +937,8 @@ mod tests {
             (ElementKind::Vertex, "none"),
         ] {
             assert_eq!(
-                serde_json::to_value(element_of(&tg, kind, id)).unwrap(),
-                serde_json::to_value(element_of(&fw, kind, id)).unwrap()
+                serde_json::to_value(element_of(&tg, kind, id).unwrap()).unwrap(),
+                serde_json::to_value(element_of(&fw, kind, id).unwrap()).unwrap()
             );
         }
         let element = |pairs: &[(&str, &str)]| {
@@ -940,8 +960,8 @@ mod tests {
                 ),
             ))]),
         ];
-        let tg_view = collect_subgraph(&tg, &results, 100).unwrap();
-        let fw_view = collect_subgraph(&fw, &results, 100).unwrap();
+        let tg_view = collect_subgraph(&tg, &results, 100).unwrap().unwrap();
+        let fw_view = collect_subgraph(&fw, &results, 100).unwrap().unwrap();
         assert_eq!(tg_view.vertex_ids, ["4", "1", "2"]);
         assert_eq!(
             serde_json::to_value(tg_view).unwrap(),

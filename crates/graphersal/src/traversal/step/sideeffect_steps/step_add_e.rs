@@ -274,7 +274,7 @@ fn resolve_vertex<S: GraphStorage>(
     };
     context
         .storage
-        .get_vertex_by_id(&id)
+        .get_vertex_by_id(&id)?
         .ok_or_else(|| not_a_vertex("null"))
 }
 
@@ -301,7 +301,7 @@ fn resolve_name<S: GraphStorage>(
     }
     context
         .storage
-        .get_vertex_by_id(name)
+        .get_vertex_by_id(name)?
         .ok_or_else(|| not_a_vertex("null"))
 }
 
@@ -322,7 +322,7 @@ fn incoming_vertex<S: GraphStorage>(
         }
     };
     // A vertex dropped earlier in the query (its handle is stale) cannot be an endpoint.
-    if !context.storage.contains_vertex(index) {
+    if !context.storage.contains_vertex(index)? {
         return Err(Box::new(GraphError::vertex_removed().into()));
     }
     Ok(index)
@@ -463,7 +463,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
             },
         };
 
-        let create = context.create_context_or(self.create_time);
+        let create = context.create_context_or(self.create_time)?;
         for index_from in &from_ids {
             for index_to in &to_ids {
                 let index = context.storage.add_edge_with(

@@ -67,41 +67,51 @@ fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
 }
 
 fn snapshot(graph: &TraversalGraph) -> Snapshot {
-    let vid = |v: VertexHandle| graph.vertex_id(v).expect("live vertex").to_string();
-    let eid = |e: EdgeHandle| graph.edge_id(e).expect("live edge").to_string();
+    let vid = |v: VertexHandle| {
+        graph
+            .vertex_id(v)
+            .unwrap()
+            .expect("live vertex")
+            .to_string()
+    };
+    let eid = |e: EdgeHandle| graph.edge_id(e).unwrap().expect("live edge").to_string();
     let mut vertices: Vec<_> = GraphStorage::vertices(graph)
+        .unwrap()
         .map(|v| {
             (
                 vid(v),
                 graph
                     .vertex_labels(v)
+                    .unwrap()
                     .iter()
                     .map(|l| l.to_string())
                     .collect(),
-                entries(graph.vertex_properties(v).expect("properties")),
+                entries(graph.vertex_properties(v).unwrap().expect("properties")),
             )
         })
         .collect();
     vertices.sort_by(|a, b| a.0.cmp(&b.0));
     let mut edges: Vec<_> = GraphStorage::edges(graph)
+        .unwrap()
         .map(|e| {
-            let (from, to) = graph.edge_endpoints(e).expect("endpoints");
+            let (from, to) = graph.edge_endpoints(e).unwrap().expect("endpoints");
             (
                 eid(e),
-                graph.edge_label(e).map(str::to_string),
+                graph.edge_label(e).unwrap().map(str::to_string),
                 vid(from),
                 vid(to),
-                graph.edge_properties(e).map(entries),
+                graph.edge_properties(e).unwrap().map(entries),
             )
         })
         .collect();
     edges.sort_by(|a, b| a.0.cmp(&b.0));
     let mut adjacency: Vec<_> = GraphStorage::vertices(graph)
+        .unwrap()
         .map(|v| {
             (
                 vid(v),
-                sorted(graph.out_edges(v).map(eid).collect()),
-                sorted(graph.in_edges(v).map(eid).collect()),
+                sorted(graph.out_edges(v).unwrap().map(eid).collect()),
+                sorted(graph.in_edges(v).unwrap().map(eid).collect()),
             )
         })
         .collect();
@@ -111,7 +121,7 @@ fn snapshot(graph: &TraversalGraph) -> Snapshot {
         .statistics()
         .unwrap()
         .expect("TraversalGraph keeps statistics");
-    assert_eq!(stats, &GraphStatistics::from_storage(graph));
+    assert_eq!(stats, &GraphStatistics::from_storage(graph).unwrap());
     let owned = |counts: Vec<(&str, usize)>| -> Vec<(String, usize)> {
         counts
             .into_iter()
@@ -126,7 +136,7 @@ fn snapshot(graph: &TraversalGraph) -> Snapshot {
         .map(|(label, _)| {
             (
                 label.clone(),
-                sorted(graph.vertices_by_label(label).map(vid).collect()),
+                sorted(graph.vertices_by_label(label).unwrap().map(vid).collect()),
             )
         })
         .collect();
@@ -135,18 +145,18 @@ fn snapshot(graph: &TraversalGraph) -> Snapshot {
         .map(|(label, _)| {
             (
                 label.clone(),
-                sorted(graph.edges_by_label(label).map(eid).collect()),
+                sorted(graph.edges_by_label(label).unwrap().map(eid).collect()),
             )
         })
         .collect();
     // Every id resolves through the id index to the element carrying it.
     for (id, _, _) in &vertices {
-        let handle = graph.get_vertex_by_id(id).expect("id index entry");
-        assert_eq!(graph.vertex_id(handle), Some(id.as_str()));
+        let handle = graph.get_vertex_by_id(id).unwrap().expect("id index entry");
+        assert_eq!(graph.vertex_id(handle).unwrap(), Some(id.as_str()));
     }
     for (id, ..) in &edges {
-        let handle = graph.get_edge_by_id(id).expect("id index entry");
-        assert_eq!(graph.edge_id(handle), Some(id.as_str()));
+        let handle = graph.get_edge_by_id(id).unwrap().expect("id index entry");
+        assert_eq!(graph.edge_id(handle).unwrap(), Some(id.as_str()));
     }
     Snapshot {
         vertices,
@@ -178,11 +188,11 @@ fn assert_rolled_back(
 }
 
 fn v(graph: &TraversalGraph, id: &str) -> VertexHandle {
-    graph.get_vertex_by_id(id).expect("vertex")
+    graph.get_vertex_by_id(id).unwrap().expect("vertex")
 }
 
 fn e(graph: &TraversalGraph, id: &str) -> EdgeHandle {
-    graph.get_edge_by_id(id).expect("edge")
+    graph.get_edge_by_id(id).unwrap().expect("edge")
 }
 
 /// The id the next auto-id vertex gets (added and rolled back in a unit of its own).
@@ -191,7 +201,7 @@ fn next_vertex_id(graph: &mut TraversalGraph) -> String {
     let handle = graph
         .add_vertex(None, vec![], PropertyMap::default())
         .unwrap();
-    let id = graph.vertex_id(handle).unwrap().to_string();
+    let id = graph.vertex_id(handle).unwrap().unwrap().to_string();
     graph
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
@@ -205,7 +215,7 @@ fn next_edge_id(graph: &mut TraversalGraph) -> String {
     let handle = graph
         .add_edge(None, None, a, a, PropertyMap::default())
         .unwrap();
-    let id = graph.edge_id(handle).unwrap().to_string();
+    let id = graph.edge_id(handle).unwrap().unwrap().to_string();
     graph
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
@@ -234,7 +244,7 @@ fn add_vertex_is_rolled_back_but_its_id_is_never_reused() {
         next,
         "an auto id once handed out is never reused"
     );
-    assert!(graph.get_vertex_by_id("500").is_none());
+    assert!(graph.get_vertex_by_id("500").unwrap().is_none());
 }
 
 #[test]
@@ -269,12 +279,15 @@ fn drop_vertex_with_edges_is_restored() {
         g.drop_vertex(marko)
     });
     // The restored vertex is a new element: the handle from before the drop stays stale.
-    assert!(!graph.contains_vertex(old));
-    assert_eq!(graph.vertex_properties(old), None);
+    assert!(!graph.contains_vertex(old).unwrap());
+    assert_eq!(graph.vertex_properties(old).unwrap(), None);
     let marko = v(&graph, "1");
-    assert_eq!(graph.out_edges(marko).count(), 3);
+    assert_eq!(graph.out_edges(marko).unwrap().count(), 3);
     assert_eq!(
-        graph.edge_endpoints(e(&graph, "0")).map(|(s, _)| s),
+        graph
+            .edge_endpoints(e(&graph, "0"))
+            .unwrap()
+            .map(|(s, _)| s),
         Some(marko)
     );
 }
@@ -306,7 +319,7 @@ fn drop_edge_is_restored() {
         let edge = e(g, "2");
         g.drop_edge(edge)
     });
-    assert!(!graph.contains_edge(old));
+    assert!(!graph.contains_edge(old).unwrap());
 }
 
 #[test]
@@ -412,7 +425,7 @@ fn schema_change_is_rolled_back() {
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
     assert_eq!(graph.get_schema().unwrap(), before);
-    assert!(graph.get_vertex_by_id("x").is_none());
+    assert!(graph.get_vertex_by_id("x").unwrap().is_none());
 }
 
 #[test]
@@ -474,9 +487,9 @@ fn nested_units_are_savepoints() {
         .unwrap();
     graph.commit_unit(inner).expect("commit");
     graph.commit_unit(outer).expect("commit");
-    assert!(graph.get_vertex_by_id("kept").is_some());
-    assert!(graph.get_vertex_by_id("inner").is_some());
-    assert!(graph.get_vertex_by_id("undone").is_none());
+    assert!(graph.get_vertex_by_id("kept").unwrap().is_some());
+    assert!(graph.get_vertex_by_id("inner").unwrap().is_some());
+    assert!(graph.get_vertex_by_id("undone").unwrap().is_none());
 
     let before = snapshot(&graph);
     let outer = graph.begin_unit().unwrap();
@@ -504,7 +517,7 @@ fn a_committed_unit_is_final() {
     graph
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
-    assert!(graph.get_vertex_by_id("x").is_some());
+    assert!(graph.get_vertex_by_id("x").unwrap().is_some());
 }
 
 #[test]
@@ -527,7 +540,7 @@ fn units_are_forwarded_by_box_and_arc() {
     boxed
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
-    assert!(boxed.get_vertex_by_id("b").is_none());
+    assert!(boxed.get_vertex_by_id("b").unwrap().is_none());
 
     let mut shared = std::sync::Arc::new(TraversalGraph::tinkerpop_modern());
     let mark = shared.begin_unit().unwrap();
@@ -541,7 +554,7 @@ fn units_are_forwarded_by_box_and_arc() {
     shared
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
-    assert!(shared.get_vertex_by_id("a").is_none());
+    assert!(shared.get_vertex_by_id("a").unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -592,7 +605,7 @@ fn a_failing_traversal_leaves_nothing_behind() {
 fn a_successful_traversal_is_committed() {
     let mut graph = TraversalGraph::tinkerpop_modern();
     graph.traversal_mut().v("1").drop().to_list().unwrap();
-    assert!(graph.get_vertex_by_id("1").is_none());
+    assert!(graph.get_vertex_by_id("1").unwrap().is_none());
     assert_eq!(graph.edge_count(), 3);
 }
 
@@ -1135,7 +1148,7 @@ mod explicit {
             peter,
             PropertyMap::default(),
         )?;
-        Ok(g.vertex_count())
+        Ok(g.vertex_count().unwrap())
     }
 
     #[test]
@@ -1265,14 +1278,14 @@ mod explicit {
             Err(GraphError::unsupported("test"))
         });
         assert!(failed.is_err());
-        assert!(storage.get_vertex_by_id("kept").is_some());
-        assert!(storage.get_vertex_by_id("undone").is_none());
-        let count = storage.vertex_count();
+        assert!(storage.get_vertex_by_id("kept").unwrap().is_some());
+        assert!(storage.get_vertex_by_id("undone").unwrap().is_none());
+        let count = storage.vertex_count().unwrap();
         let ((), changes) = storage
             .dry_run(|s| add_named(s, "previewed"))
             .expect("dry run");
-        assert_eq!(storage.vertex_count(), count);
-        assert!(storage.get_vertex_by_id("previewed").is_none());
+        assert_eq!(storage.vertex_count().unwrap(), count);
+        assert!(storage.get_vertex_by_id("previewed").unwrap().is_none());
         changes
     }
 

@@ -173,7 +173,7 @@ fn read_path_values<S: GraphStorage>(
             TraverserValue::Vertex(node) => {
                 if context
                     .storage
-                    .vertex_properties(*node)
+                    .vertex_properties(*node)?
                     .is_some_and(|props| props.contains_key(key.as_str()))
                 {
                     output.push(Traverser::with_parts(
@@ -192,7 +192,7 @@ fn read_path_values<S: GraphStorage>(
             TraverserValue::Edge(edge) => {
                 if context
                     .storage
-                    .edge_properties(*edge)
+                    .edge_properties(*edge)?
                     .is_some_and(|props| props.contains_key(key.as_str()))
                 {
                     output.push(Traverser::with_parts(
@@ -207,7 +207,7 @@ fn read_path_values<S: GraphStorage>(
             _ => {}
         }
     }
-    if let Some(leaf) = TraverserValue::resolve_json_path(context, &source.value, segments) {
+    if let Some(leaf) = TraverserValue::resolve_json_path(context, &source.value, segments)? {
         output.push(Traverser::with_parts(
             leaf,
             source.path,
@@ -236,7 +236,8 @@ fn read_path_properties<S: GraphStorage>(
             &source.value,
         )));
     }
-    if let Some(leaf) = TraverserValue::resolve_json_path(context, &source.value, path.segments()) {
+    if let Some(leaf) = TraverserValue::resolve_json_path(context, &source.value, path.segments())?
+    {
         let leaf = leaf.into_node_property(context.storage)?;
         output.push(Traverser::with_parts(
             TraverserValue::PathProperty(Box::new((CompactString::new(path.to_string()), leaf))),

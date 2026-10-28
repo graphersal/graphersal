@@ -45,10 +45,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLabel {
         match &source.value {
             // A removed element has no label to return (`GraphError::ElementRemoved`; a deviation
             // from TinkerGraph, which still knows it).
-            TraverserValue::Vertex(node_index) if !context.storage.contains_vertex(*node_index) => {
+            TraverserValue::Vertex(node_index)
+                if !context.storage.contains_vertex(*node_index)? =>
+            {
                 Err(Box::new(GraphError::vertex_removed().into()))
             }
-            TraverserValue::Edge(edge_index) if !context.storage.contains_edge(*edge_index) => {
+            TraverserValue::Edge(edge_index) if !context.storage.contains_edge(*edge_index)? => {
                 Err(Box::new(GraphError::edge_removed().into()))
             }
             TraverserValue::Vertex(node_index) => Ok(Traverser::with_parts(

@@ -153,9 +153,9 @@ fn edges_among<S: GraphStorage>(
     let mut hidden = 0usize;
     let mut cut = 0usize;
     for v in vertices {
-        for e in g.out_edges(*v) {
+        for e in g.out_edges(*v)? {
             ticker.tick()?;
-            match g.edge_endpoints(e) {
+            match g.edge_endpoints(e)? {
                 Some((_, t)) if inside.contains(&t) => {
                     if edges.len() < max_edges {
                         edges.push(e);
@@ -167,9 +167,9 @@ fn edges_among<S: GraphStorage>(
                 None => {}
             }
         }
-        for e in g.in_edges(*v) {
+        for e in g.in_edges(*v)? {
             ticker.tick()?;
-            if let Some((s, _)) = g.edge_endpoints(e)
+            if let Some((s, _)) = g.edge_endpoints(e)?
                 && !inside.contains(&s)
             {
                 hidden += 1;
@@ -186,11 +186,11 @@ fn view_of<S: GraphStorage>(
     edges: &[S::EdgeId],
     seeds: &[S::VertexId],
     truncated: bool,
-) -> (CompactGraph, Vec<u32>) {
-    let mut graph = CompactGraph::build(g, vertices, edges);
+) -> Result<(CompactGraph, Vec<u32>), GraphError> {
+    let mut graph = CompactGraph::build(g, vertices, edges)?;
     graph.truncated = truncated;
-    graph.total_nodes = g.vertex_count();
-    graph.total_edges = g.edge_count();
+    graph.total_nodes = g.vertex_count()?;
+    graph.total_edges = g.edge_count()?;
     let position: HashMap<S::VertexId, u32> = vertices
         .iter()
         .enumerate()
@@ -200,7 +200,7 @@ fn view_of<S: GraphStorage>(
         .iter()
         .filter_map(|s| position.get(s).copied())
         .collect();
-    (graph, seeds)
+    Ok((graph, seeds))
 }
 
 /// Which edges lead to a vertex's neighbours: `both` (default), `out` (the vertex is the edge's
@@ -262,18 +262,23 @@ fn neighbours<S: GraphStorage>(
     g: &S,
     v: S::VertexId,
     direction: Direction,
-) -> impl Iterator<Item = S::VertexId> + '_ {
-    let out = matches!(direction, Direction::Both | Direction::Out);
-    let inn = matches!(direction, Direction::Both | Direction::In);
-    let outs = g
-        .out_edges(v)
-        .filter(move |_| out)
-        .filter_map(|e| g.edge_endpoints(e).map(|(_, t)| t));
-    let ins = g
-        .in_edges(v)
-        .filter(move |_| inn)
-        .filter_map(|e| g.edge_endpoints(e).map(|(s, _)| s));
-    outs.chain(ins)
+) -> Result<Vec<S::VertexId>, GraphError> {
+    let mut found = Vec::new();
+    if matches!(direction, Direction::Both | Direction::Out) {
+        for e in g.out_edges(v)? {
+            if let Some((_, t)) = g.edge_endpoints(e)? {
+                found.push(t);
+            }
+        }
+    }
+    if matches!(direction, Direction::Both | Direction::In) {
+        for e in g.in_edges(v)? {
+            if let Some((s, _)) = g.edge_endpoints(e)? {
+                found.push(s);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The neighbourhood of a request, breadth first (nearer vertices before farther ones; `keep`
@@ -311,7 +316,7 @@ pub fn neighbourhood<S: GraphStorage>(
         true
     };
     for id in &request.keep {
-        match g.get_vertex_by_id(id) {
+        match g.get_vertex_by_id(id)? {
             Some(v) => {
                 add(v, &mut vertices, &mut left_out);
             }
@@ -320,7 +325,7 @@ pub fn neighbourhood<S: GraphStorage>(
     }
     let mut seeds = Vec::new();
     for id in &request.ids {
-        match g.get_vertex_by_id(id) {
+        match g.get_vertex_by_id(id)? {
             Some(v) => {
                 seeds.push(v);
                 add(v, &mut vertices, &mut left_out);
@@ -339,7 +344,7 @@ pub fn neighbourhood<S: GraphStorage>(
     'hops: for _ in 0..hops {
         let mut next = Vec::new();
         for v in &frontier {
-            for w in neighbours(g, *v, request.direction) {
+            for w in neighbours(g, *v, request.direction)? {
                 ticker.tick()?;
                 if add(w, &mut vertices, &mut left_out) {
                     if left_out >= LEFT_OUT_COUNT_MAX {
@@ -369,22 +374,26 @@ pub fn neighbourhood<S: GraphStorage>(
         unfiltered = Some(Unfiltered {
             nodes: vertices.len(),
             edges: edges.len(),
-            vertex_ids: vertices
-                .iter()
-                .filter_map(|v| g.vertex_id(*v))
-                .map(str::to_string)
-                .collect(),
+            vertex_ids: {
+                let mut ids = Vec::with_capacity(vertices.len());
+                for v in &vertices {
+                    if let Some(id) = g.vertex_id(*v)? {
+                        ids.push(id.to_string());
+                    }
+                }
+                ids
+            },
         });
         (vertices, edges) = filter_drawing(g, filter, vertices, edges)?;
         hidden_edges = edges_leading_out(g, filter, &vertices, &mut ticker)?;
     }
-    let (mut graph, seeds) = view_of(g, &vertices, &edges, &seeds, truncated);
+    let (mut graph, seeds) = view_of(g, &vertices, &edges, &seeds, truncated)?;
     if filter.is_some() {
         graph.matched_nodes = Some(vertices.len());
         graph.matched_edges = Some(edges.len());
     }
     if request.degrees {
-        graph.add_degrees(g);
+        graph.add_degrees(g)?;
     }
     Ok(SelectionView {
         graph,
@@ -413,9 +422,9 @@ fn edges_leading_out<S: GraphStorage>(
     let inside: HashSet<S::VertexId> = vertices.iter().copied().collect();
     let mut leading: Vec<(S::EdgeId, S::VertexId)> = Vec::new();
     for v in vertices {
-        for e in g.out_edges(*v).chain(g.in_edges(*v)) {
+        for e in g.out_edges(*v)?.chain(g.in_edges(*v)?) {
             ticker.tick()?;
-            if let Some((s, t)) = g.edge_endpoints(e) {
+            if let Some((s, t)) = g.edge_endpoints(e)? {
                 let far = if s == *v { t } else { s };
                 if !inside.contains(&far) {
                     leading.push((e, far));
@@ -466,21 +475,22 @@ fn filter_drawing<S: GraphStorage>(
 ) -> Result<Drawing<S>, SessionError> {
     let vertices = filter.vertices(g, Some(&vertices))?.unwrap_or(vertices);
     let visible: HashSet<S::VertexId> = vertices.iter().copied().collect();
-    let edges: Vec<S::EdgeId> = filter
-        .edges(g, Some(&edges))?
-        .unwrap_or(edges)
-        .into_iter()
-        .filter(|e| {
-            g.edge_endpoints(*e)
-                .is_some_and(|(s, t)| visible.contains(&s) && visible.contains(&t))
-        })
-        .collect();
+    let mut kept: Vec<S::EdgeId> = Vec::new();
+    for e in filter.edges(g, Some(&edges))?.unwrap_or(edges) {
+        if let Some((s, t)) = g.edge_endpoints(e)?
+            && visible.contains(&s)
+            && visible.contains(&t)
+        {
+            kept.push(e);
+        }
+    }
+    let edges = kept;
     if !filter.hide_isolated() {
         return Ok((vertices, edges));
     }
     let mut touched = HashSet::with_capacity(edges.len());
     for e in &edges {
-        if let Some((s, t)) = g.edge_endpoints(*e) {
+        if let Some((s, t)) = g.edge_endpoints(*e)? {
             touched.insert(s);
             touched.insert(t);
         }
@@ -541,8 +551,8 @@ pub struct SampleRequest {
     pub degrees: bool,
 }
 
-fn primary<S: GraphStorage>(g: &S, v: S::VertexId) -> &str {
-    g.vertex_labels(v).first().map_or("", |l| l.as_str())
+fn primary<S: GraphStorage>(g: &S, v: S::VertexId) -> Result<&str, GraphError> {
+    Ok(g.vertex_labels(v)?.first().map_or("", |l| l.as_str()))
 }
 
 /// A sample of a label or a label pair: the FIRST matching elements in storage order (not a
@@ -559,9 +569,9 @@ pub fn label_sample<S: GraphStorage>(
         (Some(filter), None) => {
             let mut vertices = Vec::new();
             let mut total = 0usize;
-            for v in g.vertices() {
+            for v in g.vertices()? {
                 ticker.tick()?;
-                if filter.matches(primary(g, v)) {
+                if filter.matches(primary(g, v)?) {
                     total += 1;
                     if vertices.len() < max_nodes {
                         vertices.push(v);
@@ -570,9 +580,9 @@ pub fn label_sample<S: GraphStorage>(
             }
             let (edges, hidden_edges, cut) = edges_among(g, &vertices, max_edges, &mut ticker)?;
             let shown = vertices.len();
-            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total || cut > 0);
+            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total || cut > 0)?;
             if request.degrees {
-                graph.add_degrees(g);
+                graph.add_degrees(g)?;
             }
             Ok(SelectionView {
                 graph,
@@ -601,16 +611,16 @@ pub fn label_sample<S: GraphStorage>(
             let mut edges = Vec::new();
             let mut total = 0usize;
             let mut full = false;
-            for e in g.edges() {
+            for e in g.edges()? {
                 ticker.tick()?;
                 // An edge without a label has the empty label (as in the meta-graph).
-                if g.edge_label(e).unwrap_or("") != filter.label {
+                if g.edge_label(e)?.unwrap_or("") != filter.label {
                     continue;
                 }
-                let Some((s, t)) = g.edge_endpoints(e) else {
+                let Some((s, t)) = g.edge_endpoints(e)? else {
                     continue;
                 };
-                if !from.matches(primary(g, s)) || !to.matches(primary(g, t)) {
+                if !from.matches(primary(g, s)?) || !to.matches(primary(g, t)?) {
                     continue;
                 }
                 total += 1;
@@ -631,15 +641,15 @@ pub fn label_sample<S: GraphStorage>(
                 edges.push(e);
             }
             let shown = edges.len();
-            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total);
+            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total)?;
             if request.degrees {
-                graph.add_degrees(g);
+                graph.add_degrees(g)?;
             }
             // Edges of the drawn vertices that are not drawn: their degree minus the drawn edges.
-            let degree: usize = vertices
-                .iter()
-                .map(|v| g.out_edges(*v).count() + g.in_edges(*v).count())
-                .sum();
+            let mut degree = 0usize;
+            for v in &vertices {
+                degree += g.out_edges(*v)?.count() + g.in_edges(*v)?.count();
+            }
             Ok(SelectionView {
                 graph,
                 seeds,
@@ -734,9 +744,9 @@ pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGr
             .collect(),
         None => {
             let mut map: HashMap<String, usize> = HashMap::new();
-            for v in g.vertices() {
+            for v in g.vertices()? {
                 ticker.tick()?;
-                *map.entry(primary(g, v).to_string()).or_default() += 1;
+                *map.entry(primary(g, v)?.to_string()).or_default() += 1;
             }
             map.into_iter().collect()
         }
@@ -755,20 +765,22 @@ pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGr
         .enumerate()
         .map(|(i, (l, _))| (l.as_str(), u32::try_from(i).unwrap_or(u32::MAX)))
         .collect();
-    let bucket = |v: S::VertexId| index.get(primary(g, v)).copied().unwrap_or(other_index);
+    let bucket = |v: S::VertexId| -> Result<u32, GraphError> {
+        Ok(index.get(primary(g, v)?).copied().unwrap_or(other_index))
+    };
     let mut pairs: HashMap<(u32, &str, u32), usize> = HashMap::new();
     let mut scanned = 0usize;
-    for e in g.edges() {
+    for e in g.edges()? {
         if scanned >= META_SCAN_MAX_EDGES {
             break;
         }
         ticker.tick()?;
         scanned += 1;
-        let Some((s, t)) = g.edge_endpoints(e) else {
+        let Some((s, t)) = g.edge_endpoints(e)? else {
             continue;
         };
-        let label = g.edge_label(e).unwrap_or("");
-        *pairs.entry((bucket(s), label, bucket(t))).or_default() += 1;
+        let label = g.edge_label(e)?.unwrap_or("");
+        *pairs.entry((bucket(s)?, label, bucket(t)?)).or_default() += 1;
     }
     let mut pairs: Vec<((u32, &str, u32), usize)> = pairs.into_iter().collect();
     pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -791,10 +803,10 @@ pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGr
         other_pairs: hidden.len(),
         other_edges: hidden.iter().map(|(_, c)| c).sum(),
         label_total,
-        vertex_count: g.vertex_count(),
-        edge_count: g.edge_count(),
+        vertex_count: g.vertex_count()?,
+        edge_count: g.edge_count()?,
         scanned_edges: scanned,
-        complete: scanned >= g.edge_count(),
+        complete: scanned >= g.edge_count()?,
     })
 }
 

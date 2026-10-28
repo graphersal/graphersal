@@ -111,7 +111,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepJsonPath {
             }
         };
 
-        let resolved = TraverserValue::resolve_json_path(context, &source.value, path.segments());
+        let resolved = TraverserValue::resolve_json_path(context, &source.value, path.segments())?;
         if let Some(value) = resolved {
             output.push(Traverser::with_parts(
                 value,

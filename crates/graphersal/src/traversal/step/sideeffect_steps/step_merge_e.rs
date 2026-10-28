@@ -155,7 +155,7 @@ impl<'g, S: GraphStorage + 'g> StepMergeE<'g, S> {
         let token = token_name(direction);
         match endpoint {
             None => Ok(None),
-            Some(EndpointRef::Id(id)) => Ok(Some(Self::vertex_by_id(context, id))),
+            Some(EndpointRef::Id(id)) => Ok(Some(Self::vertex_by_id(context, id)?)),
             Some(EndpointRef::Placeholder) => {
                 let option = match direction {
                     Direction::In => &self.in_v,
@@ -170,7 +170,7 @@ impl<'g, S: GraphStorage + 'g> StepMergeE<'g, S> {
                         ),
                     )),
                     Some(MergeArg::Constant(map)) => {
-                        let found = find_vertices(&*context.storage, map);
+                        let found = find_vertices(&*context.storage, map)?;
                         match found.as_slice() {
                             [node] => Ok(Some(Endpoint::Vertex(*node))),
                             [] => Err(unresolved(
@@ -205,11 +205,14 @@ impl<'g, S: GraphStorage + 'g> StepMergeE<'g, S> {
     }
 
     /// The vertex with id `id`, or [`Endpoint::Unknown`].
-    fn vertex_by_id(context: &TraverserContext<'_, S>, id: &str) -> Endpoint<S::VertexId> {
-        match context.storage.get_vertex_by_id(id) {
+    fn vertex_by_id(
+        context: &TraverserContext<'_, S>,
+        id: &str,
+    ) -> Result<Endpoint<S::VertexId>, GraphError> {
+        Ok(match context.storage.get_vertex_by_id(id)? {
             Some(node) => Endpoint::Vertex(node),
             None => Endpoint::Unknown(CompactString::from(id)),
-        }
+        })
     }
 
     /// The vertex an `option(Merge.outV|inV, traversal)` result names: a vertex or a vertex id.
@@ -227,7 +230,7 @@ impl<'g, S: GraphStorage + 'g> StepMergeE<'g, S> {
             other => id_text(other),
         };
         match id {
-            Some(id) => Ok(Some(Self::vertex_by_id(context, &id))),
+            Some(id) => Ok(Some(Self::vertex_by_id(context, &id)?)),
             None => Err(unresolved(
                 direction,
                 format!(
@@ -309,7 +312,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepMergeE<'g, 
         let out_v = self.resolve(&merge.out_v, Direction::Out, context, &source)?;
         let in_v = self.resolve(&merge.in_v, Direction::In, context, &source)?;
 
-        let matches = find_edges(&*context.storage, &merge, out_v.as_ref(), in_v.as_ref());
+        let matches = find_edges(&*context.storage, &merge, out_v.as_ref(), in_v.as_ref())?;
         if !matches.is_empty() {
             let mut output = Vec::with_capacity(matches.len());
             for edge in matches {
@@ -357,7 +360,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepMergeE<'g, 
         };
         let out_v = Self::require(out_v, Direction::Out)?;
         let in_v = Self::require(in_v, Direction::In)?;
-        let create = context.create_context_or(self.create_time);
+        let create = context.create_context_or(self.create_time)?;
         let edge = create_edge(context.storage, &created, out_v, in_v, &create)?;
         Ok(vec![Traverser::with_parts(
             TraverserValue::Edge(edge),

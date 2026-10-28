@@ -139,7 +139,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepRemovePrope
                     None => {
                         let keys: Vec<CompactString> = context
                             .storage
-                            .vertex_properties(node)
+                            .vertex_properties(node)?
                             .map(|element| element.keys().cloned().collect())
                             .unwrap_or_default();
                         for key in &keys {
@@ -166,7 +166,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepRemovePrope
                     None => {
                         let keys: Vec<CompactString> = context
                             .storage
-                            .edge_properties(edge)
+                            .edge_properties(edge)?
                             .map(|element| element.keys().cloned().collect())
                             .unwrap_or_default();
                         for key in &keys {

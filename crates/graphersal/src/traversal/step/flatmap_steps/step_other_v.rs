@@ -197,7 +197,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOtherV {
             }
         };
 
-        match context.storage.edge_endpoints(edge_index) {
+        match context.storage.edge_endpoints(edge_index)? {
             Some((from, to)) => {
                 let other = if origin == from { to } else { from };
                 output.push(Traverser::with_parts(
@@ -209,7 +209,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOtherV {
                 Ok(())
             }
             // A removed edge (stale handle) has no endpoints: nothing to emit.
-            None if !context.storage.contains_edge(edge_index) => Ok(()),
+            None if !context.storage.contains_edge(edge_index)? => Ok(()),
             None => Err(Box::new(TraverserError::Graph(GraphError::EdgeNotFound {
                 id: format!("{:?}", edge_index),
             }))),

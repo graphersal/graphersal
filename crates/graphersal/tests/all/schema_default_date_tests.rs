@@ -72,11 +72,13 @@ fn run(graph: impl IntoAnyGraph, script: &str) -> Dynamic {
 fn stamps<S: GraphStorage>(g: &S, edges: bool) -> Vec<(Option<DateTime>, Option<Date>)> {
     let maps: Vec<PropertyMap> = if edges {
         g.edges()
-            .filter_map(|e| g.edge_properties(e).cloned())
+            .unwrap()
+            .filter_map(|e| g.edge_properties(e).unwrap().cloned())
             .collect()
     } else {
         g.vertices()
-            .filter_map(|v| g.vertex_properties(v).cloned())
+            .unwrap()
+            .filter_map(|v| g.vertex_properties(v).unwrap().cloned())
             .collect()
     };
     maps.iter()
@@ -181,11 +183,13 @@ fn two_units_get_non_decreasing_times() {
         let at = tg
             .get_vertex_by_id(
                 &tg.vertices()
+                    .unwrap()
                     .last()
-                    .map(|v| tg.vertex_id(v).unwrap().to_string())
+                    .map(|v| tg.vertex_id(v).unwrap().unwrap().to_string())
                     .unwrap(),
             )
-            .and_then(|v| datetime(tg.vertex_properties(v).unwrap().get("at")))
+            .unwrap()
+            .and_then(|v| datetime(tg.vertex_properties(v).unwrap().unwrap().get("at")))
             .unwrap();
         if let Some(previous) = previous {
             assert!(at >= previous, "{at} after {previous}");
@@ -229,7 +233,7 @@ fn an_explicit_transaction_is_one_unit_with_one_time() {
             .iterate()
             .map_err(|_| GraphError::unsupported("x"))?;
         // The trait's create path reads the same unit start.
-        let create = CreateContext::for_storage(&*g);
+        let create = CreateContext::for_storage(&*g).unwrap();
         g.add_vertex_with(None, vec!["event".into()], PropertyMap::default(), &create)?;
         Ok(())
     })
@@ -237,7 +241,7 @@ fn an_explicit_transaction_is_one_unit_with_one_time() {
     assert_eq!(tg.vertex_count(), 3);
     the_one_time(&tg);
     // Outside a unit there is no unit start.
-    assert_eq!(tg.unit_started_at(), None);
+    assert_eq!(tg.unit_started_at().unwrap(), None);
 }
 
 #[test]
@@ -435,8 +439,9 @@ fn the_change_set_carries_the_time_and_replay_and_import_never_compute_it() {
         .unwrap();
     let e1 = tg
         .vertices()
+        .unwrap()
         .next()
-        .and_then(|v| tg.vertex_id(v).map(str::to_string))
+        .and_then(|v| tg.vertex_id(v).unwrap().map(str::to_string))
         .unwrap();
     let recorded = RECORDED.with(|r| std::mem::take(&mut *r.borrow_mut()));
     assert_eq!(recorded.len(), 2, "set_schema, then add_v");
@@ -458,7 +463,8 @@ fn the_change_set_carries_the_time_and_replay_and_import_never_compute_it() {
     }
     let props = replayed
         .get_vertex_by_id(&e1)
-        .and_then(|v| replayed.vertex_properties(v).cloned())
+        .unwrap()
+        .and_then(|v| replayed.vertex_properties(v).unwrap().cloned())
         .unwrap();
     assert_eq!(props, added);
 
@@ -469,7 +475,8 @@ fn the_change_set_carries_the_time_and_replay_and_import_never_compute_it() {
     target.apply_change_set(&builder.build().unwrap()).unwrap();
     let props = target
         .get_vertex_by_id("x")
-        .and_then(|v| target.vertex_properties(v).cloned())
+        .unwrap()
+        .and_then(|v| target.vertex_properties(v).unwrap().cloned())
         .unwrap();
     assert!(
         !props.contains_key("at") && !props.contains_key("day"),
@@ -504,7 +511,7 @@ fn a_foreign_storage_gets_the_unit_time() {
     storage
         .transaction(|s| -> Result<(), GraphError> {
             assert!(
-                s.unit_started_at().is_some(),
+                s.unit_started_at().unwrap().is_some(),
                 "Forwarding forwards the unit start"
             );
             for _ in 0..3 {
@@ -519,8 +526,11 @@ fn a_foreign_storage_gets_the_unit_time() {
         .unwrap();
     let rust: Vec<DateTime> = storage
         .vertices()
-        .filter(|v| storage.vertex_properties(*v).unwrap().get("name") == Some(&"rust".into()))
-        .map(|v| datetime(storage.vertex_properties(v).unwrap().get("at")).unwrap())
+        .unwrap()
+        .filter(|v| {
+            storage.vertex_properties(*v).unwrap().unwrap().get("name") == Some(&"rust".into())
+        })
+        .map(|v| datetime(storage.vertex_properties(v).unwrap().unwrap().get("at")).unwrap())
         .collect();
     assert_eq!(rust.len(), 3);
     assert!(rust.iter().all(|at| *at == rust[0]));

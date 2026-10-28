@@ -26,13 +26,16 @@ fn t2_add_vertex_with_multiple_labels_rust() {
         .unwrap();
 
     assert_eq!(
-        GraphStorage::vertex_labels(&tg, idx),
+        GraphStorage::vertex_labels(&tg, idx).unwrap(),
         &[
             compact_str::CompactString::new("Person"),
             compact_str::CompactString::new("Admin")
         ][..]
     );
-    assert_eq!(GraphStorage::vertex_label(&tg, idx), Some("Person"));
+    assert_eq!(
+        GraphStorage::vertex_label(&tg, idx).unwrap(),
+        Some("Person")
+    );
 
     let g = tg.traversal();
     let label = g.v("1").label().to_list().unwrap();
@@ -241,7 +244,7 @@ fn t5_add_vertex_label_is_idempotent_and_updates_index() {
 
     assert!(tg.add_vertex_label(idx, "Admin".into()).unwrap());
     assert_eq!(
-        GraphStorage::vertex_labels(&tg, idx),
+        GraphStorage::vertex_labels(&tg, idx).unwrap(),
         &[
             compact_str::CompactString::new("Person"),
             compact_str::CompactString::new("Admin")
@@ -250,7 +253,7 @@ fn t5_add_vertex_label_is_idempotent_and_updates_index() {
 
     // Re-adding the same label is a no-op, not an error.
     assert!(!tg.add_vertex_label(idx, "Admin".into()).unwrap());
-    assert_eq!(GraphStorage::vertex_labels(&tg, idx).len(), 2);
+    assert_eq!(GraphStorage::vertex_labels(&tg, idx).unwrap().len(), 2);
 
     // The label index is consistent with the vertex's label vec.
     let g = tg.traversal();
@@ -278,14 +281,14 @@ fn t5_remove_vertex_label_to_zero_labels_stays_queryable_by_id() {
         .unwrap();
 
     assert!(tg.remove_vertex_label(idx, "Person").unwrap());
-    assert!(GraphStorage::vertex_labels(&tg, idx).is_empty());
-    assert_eq!(GraphStorage::vertex_label(&tg, idx), None);
+    assert!(GraphStorage::vertex_labels(&tg, idx).unwrap().is_empty());
+    assert_eq!(GraphStorage::vertex_label(&tg, idx).unwrap(), None);
 
     // Removing an absent label is a no-op, not an error.
     assert!(!tg.remove_vertex_label(idx, "Person").unwrap());
 
     // Still queryable by ID.
-    assert!(GraphStorage::get_vertex_by_id(&tg, "1").is_some());
+    assert!(GraphStorage::get_vertex_by_id(&tg, "1").unwrap().is_some());
 
     // But absent from every label bucket.
     let g = tg.traversal();
@@ -435,22 +438,32 @@ mod graphml {
         let _ = std::fs::remove_file(&temp_path);
 
         let lock = imported.read();
-        let single_idx = GraphStorage::get_vertex_by_id(&*lock, "1").unwrap();
-        let multi_idx = GraphStorage::get_vertex_by_id(&*lock, "2").unwrap();
-        let unlabeled_idx = GraphStorage::get_vertex_by_id(&*lock, "3").unwrap();
+        let single_idx = GraphStorage::get_vertex_by_id(&*lock, "1")
+            .unwrap()
+            .unwrap();
+        let multi_idx = GraphStorage::get_vertex_by_id(&*lock, "2")
+            .unwrap()
+            .unwrap();
+        let unlabeled_idx = GraphStorage::get_vertex_by_id(&*lock, "3")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
-            GraphStorage::vertex_labels(&*lock, single_idx),
+            GraphStorage::vertex_labels(&*lock, single_idx).unwrap(),
             &[compact_str::CompactString::new("Person")][..]
         );
         assert_eq!(
-            GraphStorage::vertex_labels(&*lock, multi_idx),
+            GraphStorage::vertex_labels(&*lock, multi_idx).unwrap(),
             &[
                 compact_str::CompactString::new("Person"),
                 compact_str::CompactString::new("Admin")
             ][..]
         );
-        assert!(GraphStorage::vertex_labels(&*lock, unlabeled_idx).is_empty());
+        assert!(
+            GraphStorage::vertex_labels(&*lock, unlabeled_idx)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

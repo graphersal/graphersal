@@ -43,7 +43,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlNotSelfLoop {
         match &source.value {
             TraverserValue::Edge(edge) => Ok(context
                 .storage
-                .edge_endpoints(*edge)
+                .edge_endpoints(*edge)?
                 .is_some_and(|(from, to)| from != to)),
             _ => Ok(true),
         }

@@ -84,7 +84,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepToUpper {
             },
         };
         // TinkerPop: a `null` maps to `null` (`inject("a", null).toUpper()` → "A", null).
-        if crate::traversal::step::local_scope::is_null(context, &value) {
+        if crate::traversal::step::local_scope::is_null(context, &value)? {
             return Ok(Traverser::with_parts(
                 TraverserValue::Computed(ElementProperty::Null, None),
                 path,
@@ -101,7 +101,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepToUpper {
             )),
             None => Err(Box::new(TraverserError::cast_exception_str(
                 &["string"],
-                Traverser::observed_type_name(context, &value),
+                Traverser::observed_type_name(context, &value)?,
             ))),
         }
     }

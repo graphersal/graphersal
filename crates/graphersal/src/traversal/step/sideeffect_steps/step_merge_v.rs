@@ -162,7 +162,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepMergeV<'g, 
 
         let merge = merge_map(&self.merge, context, &source, KIND)?;
 
-        let matches = find_vertices(&*context.storage, &merge);
+        let matches = find_vertices(&*context.storage, &merge)?;
         if !matches.is_empty() {
             let mut output = Vec::with_capacity(matches.len());
             for node in matches {
@@ -195,7 +195,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepMergeV<'g, 
                 }
                 None => merge.into_owned(),
             };
-        let create = context.create_context_or(self.create_time);
+        let create = context.create_context_or(self.create_time)?;
         let node = create_vertex(context.storage, &created, &create)?;
         Ok(vec![Traverser::with_parts(
             TraverserValue::Vertex(node),

@@ -239,7 +239,7 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
             (Some(start), _) => (start, true),
             (None, Some(reader)) => (read_snapshot_into(reader, &options, empty)?, true),
             (None, None) => {
-                if empty.vertex_count() != 0 || empty.edge_count() != 0 {
+                if empty.vertex_count()? != 0 || empty.edge_count()? != 0 {
                     return Err(PersistError::Graph(crate::error::GraphError::unsupported(
                         "recovering into a storage that holds elements",
                     )));
@@ -549,10 +549,10 @@ mod tests {
                 QueryDefinition::new("fn all() { g.v() }"),
             ))?;
             let marko = g
-                .get_vertex_by_id("1")
+                .get_vertex_by_id("1")?
                 .ok_or(GraphError::unsupported("marko"))?;
             let lop = g
-                .get_vertex_by_id("3")
+                .get_vertex_by_id("3")?
                 .ok_or(GraphError::unsupported("lop"))?;
             g.set_vertex_property(marko, "age".into(), 30i64.into())?;
             g.add_vertex_label(marko, "friend".into())?;
@@ -563,10 +563,12 @@ mod tests {
         .unwrap();
         live.transaction(|g| {
             let josh = g
-                .get_vertex_by_id("4")
+                .get_vertex_by_id("4")?
                 .ok_or(GraphError::unsupported("josh"))?;
             g.drop_vertex(josh)?;
-            let created = g.get_edge_by_id("1").ok_or(GraphError::unsupported("e1"))?;
+            let created = g
+                .get_edge_by_id("1")?
+                .ok_or(GraphError::unsupported("e1"))?;
             g.drop_edge_property("weight", created)?;
             Ok::<_, GraphError>(())
         })

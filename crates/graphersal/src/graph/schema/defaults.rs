@@ -48,12 +48,14 @@ impl CreateContext {
     /// The context of a create on `storage` that no caller pinned: the start of its outermost
     /// open unit ([`GraphStorage::unit_started_at`](crate::storage::GraphStorage::unit_started_at)),
     /// or the system clock when the storage reports none (no unit open, or a storage that does
-    /// not track it).
-    pub fn for_storage<S: crate::graph::GraphStorage + ?Sized>(storage: &S) -> Self {
+    /// not track it). `Err` when the storage cannot read its unit clock.
+    pub fn for_storage<S: crate::graph::GraphStorage + ?Sized>(
+        storage: &S,
+    ) -> Result<Self, crate::error::GraphError> {
         let nanos = storage
-            .unit_started_at()
+            .unit_started_at()?
             .unwrap_or_else(crate::graph::undo::now_nanos);
-        CreateContext::at(datetime_of_nanos(nanos))
+        Ok(CreateContext::at(datetime_of_nanos(nanos)))
     }
 
     /// The time of `defaultFunction: "now"`.

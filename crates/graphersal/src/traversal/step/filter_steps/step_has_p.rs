@@ -174,7 +174,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
     ) -> TraverserResult<bool> {
         match &source.value {
             TraverserValue::Vertex(node_index) => {
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 if let Some(vertex) = vertex {
                     let value = vertex.get(self.key.as_str());
                     if value.is_some() {
@@ -210,7 +210,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 match vertex {
                     Some(vertex) => {
                         let value = vertex.get(prop_name.as_str());
@@ -249,7 +249,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop_name = prop_name.clone();
-                let edge = context.storage.edge_properties(*edge_index);
+                let edge = context.storage.edge_properties(*edge_index)?;
                 match edge {
                     Some(edge) => {
                         let value = edge.get(prop_name.as_str());
@@ -287,7 +287,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_map = context.storage.edge_properties(*edge_index);
+                let edge_map = context.storage.edge_properties(*edge_index)?;
                 match edge_map {
                     Some(edge_map) => {
                         let value: Option<_> = edge_map.get(self.key.as_str());

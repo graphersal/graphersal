@@ -38,11 +38,11 @@ fn numbered(keys: &[&str]) -> PropertyMap {
 }
 
 fn v(graph: &TraversalGraph, id: &str) -> VertexHandle {
-    graph.get_vertex_by_id(id).expect("vertex")
+    graph.get_vertex_by_id(id).unwrap().expect("vertex")
 }
 
 fn e(graph: &TraversalGraph, id: &str) -> EdgeHandle {
-    graph.get_edge_by_id(id).expect("edge")
+    graph.get_edge_by_id(id).unwrap().expect("edge")
 }
 
 fn keys_of(map: &PropertyMap) -> Vec<String> {
@@ -88,6 +88,7 @@ fn element_map_property_keys(map: &PropertyMap) -> Vec<String> {
 fn vertex_view(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementProperty)> {
     let stored = graph
         .vertex_properties(v(graph, id))
+        .unwrap()
         .expect("vertex properties");
     let stored_keys = keys_of(stored);
     let value_map = single_map(graph.traversal().v(id).value_map(None).to_list().unwrap());
@@ -125,6 +126,7 @@ fn vertex_view(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementProperty
 fn edge_view(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementProperty)> {
     let stored = graph
         .edge_properties(e(graph, id))
+        .unwrap()
         .map(entries_of)
         .unwrap_or_default();
     let stored_keys: Vec<String> = stored.iter().map(|(k, _)| k.clone()).collect();
@@ -175,16 +177,18 @@ type OrderDump = (
 
 fn dump(graph: &TraversalGraph) -> OrderDump {
     let mut vertices: Vec<_> = GraphStorage::vertices(graph)
+        .unwrap()
         .map(|h| {
-            let id = graph.vertex_id(h).unwrap().to_string();
+            let id = graph.vertex_id(h).unwrap().unwrap().to_string();
             let view = vertex_view(graph, &id);
             (id, view)
         })
         .collect();
     vertices.sort_by(|a, b| a.0.cmp(&b.0));
     let mut edges: Vec<_> = GraphStorage::edges(graph)
+        .unwrap()
         .map(|h| {
-            let id = graph.edge_id(h).unwrap().to_string();
+            let id = graph.edge_id(h).unwrap().unwrap().to_string();
             let view = edge_view(graph, &id);
             (id, view)
         })
@@ -825,7 +829,7 @@ fn wide_elements_keep_order_through_get_insert_remove_and_rollback() {
         for key in &keys {
             let value = ElementProperty::from(key[1..].parse::<i64>().unwrap());
             assert_eq!(
-                graph.vertex_properties(w).unwrap().get(key),
+                graph.vertex_properties(w).unwrap().unwrap().get(key),
                 Some(&value),
                 "{key}"
             );
@@ -891,7 +895,7 @@ fn wide_elements_keep_order_through_get_insert_remove_and_rollback() {
                 .unwrap(),
             vec![ElementProperty::from(7)]
         );
-        assert_eq!(graph.vertex_properties(w).unwrap().len(), n - 2);
+        assert_eq!(graph.vertex_properties(w).unwrap().unwrap().len(), n - 2);
     }
 }
 

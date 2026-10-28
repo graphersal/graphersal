@@ -460,7 +460,7 @@ impl TraversalGraph {
     /// its own (recorded, captured as a [`Mutation::SetSchema`], seen by the commit hooks, which
     /// may veto it with [`GraphError::CommitRejected`]).
     pub(crate) fn store_schema(&self, schema: GraphSchema) -> Result<(), crate::error::GraphError> {
-        let report = crate::graph::schema::apply::scan_storage(self, &schema);
+        let report = crate::graph::schema::apply::scan_storage(self, &schema)?;
         if !report.is_empty() {
             return Err(SchemaError::ExistingDataViolatesSchema {
                 report: Box::new(report),

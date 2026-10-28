@@ -145,9 +145,10 @@ fn invariant(graph: &TraversalGraph) {
 /// The logical content of a graph by id (shared values compare as their strings).
 fn content(graph: &TraversalGraph) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         let mut props: Vec<(String, String)> = graph
             .vertex_properties(v)
+            .unwrap()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.to_string(), format!("{:?}", v.to_logical())))
@@ -155,13 +156,14 @@ fn content(graph: &TraversalGraph) -> Vec<String> {
         props.sort();
         out.push(format!(
             "v {} {:?} {props:?}",
-            graph.vertex_id(v).unwrap(),
-            graph.vertex_labels(v)
+            graph.vertex_id(v).unwrap().unwrap(),
+            graph.vertex_labels(v).unwrap()
         ));
     }
-    for e in graph.edges() {
+    for e in graph.edges().unwrap() {
         let mut props: Vec<(String, String)> = graph
             .edge_properties(e)
+            .unwrap()
             .map(|p| {
                 p.iter()
                     .map(|(k, v)| (k.to_string(), format!("{:?}", v.to_logical())))
@@ -171,8 +173,8 @@ fn content(graph: &TraversalGraph) -> Vec<String> {
         props.sort();
         out.push(format!(
             "e {} {:?} {props:?}",
-            graph.edge_id(e).unwrap(),
-            graph.edge_label(e)
+            graph.edge_id(e).unwrap().unwrap(),
+            graph.edge_label(e).unwrap()
         ));
     }
     out.sort();
@@ -203,9 +205,9 @@ fn numbers(c: &CandidateEstimate) -> (u64, u64, u64, u64, u64) {
 
 /// Whether the stored value of vertex `id` at top-level `key` is a shared (dedup) value.
 fn is_shared(graph: &TraversalGraph, id: &str, key: &str) -> bool {
-    let v = graph.get_vertex_by_id(id).unwrap();
+    let v = graph.get_vertex_by_id(id).unwrap().unwrap();
     matches!(
-        graph.vertex_properties(v).unwrap().get(key),
+        graph.vertex_properties(v).unwrap().unwrap().get(key),
         Some(ElementProperty::Deduped(_))
     )
 }
@@ -309,11 +311,12 @@ fn a_dedup_rule_shares_long_repeated_values_and_reads_them_plain() {
 #[test]
 fn shared_values_compare_hash_and_order_as_their_strings() {
     let graph = deduped_graph(30);
-    let s2 = graph.get_vertex_by_id("s2").unwrap();
+    let s2 = graph.get_vertex_by_id("s2").unwrap().unwrap();
     // s11 holds source_path(4).
-    let s11 = graph.get_vertex_by_id("s11").unwrap();
+    let s11 = graph.get_vertex_by_id("s11").unwrap().unwrap();
     let stored = graph
         .vertex_properties(s2)
+        .unwrap()
         .unwrap()
         .get("path")
         .unwrap()
@@ -334,7 +337,12 @@ fn shared_values_compare_hash_and_order_as_their_strings() {
     assert_eq!(stored.text().as_deref(), Some(source_path(2).as_str()));
     assert!(stored.is_text());
     assert!(stored.holds_compressed());
-    let other = graph.vertex_properties(s11).unwrap().get("path").unwrap();
+    let other = graph
+        .vertex_properties(s11)
+        .unwrap()
+        .unwrap()
+        .get("path")
+        .unwrap();
     assert_ne!(&stored, other);
     assert_ne!(stored, ElementProperty::from("lib.rs"));
     // A shared value against an lz4-compressed one of the same text.
@@ -356,7 +364,13 @@ fn shared_values_compare_hash_and_order_as_their_strings() {
             props(vec![("p", long.as_str().into())]),
         )
         .unwrap();
-    let compressed = lz4.vertex_properties(v).unwrap().get("p").unwrap().clone();
+    let compressed = lz4
+        .vertex_properties(v)
+        .unwrap()
+        .unwrap()
+        .get("p")
+        .unwrap()
+        .clone();
     assert!(matches!(compressed, ElementProperty::Compressed(_)));
     let mut dedup = TraversalGraph::new();
     dedup
@@ -372,6 +386,7 @@ fn shared_values_compare_hash_and_order_as_their_strings() {
         .unwrap();
     let deduped = dedup
         .vertex_properties(w)
+        .unwrap()
         .unwrap()
         .get("p")
         .unwrap()
@@ -629,7 +644,7 @@ fn a_label_change_shares_and_unshares() {
 #[test]
 fn overwrites_never_grow_a_table_without_bound() {
     let mut graph = deduped_graph(10);
-    let s2 = graph.get_vertex_by_id("s2").unwrap();
+    let s2 = graph.get_vertex_by_id("s2").unwrap().unwrap();
     for i in 0..3000 {
         graph
             .set_vertex_property(
@@ -694,7 +709,7 @@ fn rollbacks_restore_the_data_the_invariant_and_sweep_the_tables() {
         g.remove_definition(DefinitionKind::COMPRESSION, "site")?;
         let inner: Result<(), Failure> = g.transaction(|g| {
             g.remove_definition(DefinitionKind::COMPRESSION, "file")?;
-            let s20 = g.get_vertex_by_id("s20").unwrap();
+            let s20 = g.get_vertex_by_id("s20").unwrap().unwrap();
             g.drop_vertex(s20)?;
             Err("inner".into())
         });

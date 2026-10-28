@@ -64,9 +64,10 @@ fn random_graph(n: usize, dimension: usize, element: VectorElement) -> Graph {
 fn naive(graph: &Graph, q: &Vector, k: usize, metric: VectorMetric) -> Vec<String> {
     let graph = graph.read();
     let mut scored: Vec<(f64, String)> = Vec::new();
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         if let Some(ElementProperty::Vector(stored)) = graph
             .vertex_properties(v)
+            .unwrap()
             .and_then(|props| props.get("emb"))
         {
             let score = stored.similarity(q, metric).unwrap();
@@ -75,7 +76,7 @@ fn naive(graph: &Graph, q: &Vector, k: usize, metric: VectorMetric) -> Vec<Strin
             } else {
                 score
             };
-            scored.push((rank, graph.vertex_id(v).unwrap().to_string()));
+            scored.push((rank, graph.vertex_id(v).unwrap().unwrap().to_string()));
         }
     }
     scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());

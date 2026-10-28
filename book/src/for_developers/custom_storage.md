@@ -63,8 +63,17 @@ a parameter means `Graph<TraversalGraph>`.
    lineage id, the commit position, a load sink outside units, `clear`, the journal slot and
    replay. See [Your Own Storage](../persistence/store_own_storage.md).
 
-**Errors of a backend.** Every trait method that reads or changes state beyond single elements
-returns a `Result` (since 0.4.0): the unit methods (`begin_unit`, `begin_unit_at`,
+**Errors of a backend.** Every trait method that reads or changes state returns a `Result`
+(since 0.4.0). The element reads (`vertex_count`, `edge_count`, `vertices`, `edges`,
+`vertices_by_label`, `edges_by_label`, `get_vertex_by_id`, `get_edge_by_id`, `out_edges`,
+`in_edges`, `vertex_id`, `edge_id`, `vertex_label`, `edge_label`, `vertex_labels`,
+`vertex_has_label`, `vertex_properties`, `edge_properties`, `edge_endpoints`, `contains_vertex`,
+`contains_edge`) and `unit_started_at` answer `Ok(None)` / `Ok(false)` / an empty label set for
+what does not exist and `Err` only when the backend cannot answer; an iterating one returns
+`Result<impl Iterator>`, one `Result` for starting the iteration, never one per item (a backend
+that can fail mid-iteration collects first, like the defaults of `vertices_by_label` and
+`edges_by_label`). The query that read fails with the error, located at its step. The methods
+beyond single elements are the unit methods (`begin_unit`, `begin_unit_at`,
 `next_unit_started_at`, `rollback_unit`, `unit_changes`, `set_unit_metadata`), `capabilities`,
 `last_commit_seq`, `statistics`, the schema, catalog, compression, property index and memory
 methods, `shrink_to_fit`, `execution_policy`, and on `PersistentStorage` `clear`, `set_graph_id`,
@@ -75,9 +84,11 @@ feature reports. The engine reads these once per query or unit, never per traver
 the query, import or transaction with the error, before anything executes where it can. A failed
 `rollback_unit` still closes the unit: the caller gets `GraphError::RollbackFailed` (naming the
 error that caused the rollback), the graph stays usable for the next operation, and what the
-backend holds afterwards is the storage's responsibility. The hot element reads (`vertices`,
-`out_edges`, `vertex_properties`, ...) stay infallible. The conformance suite has a storage that
-fails each of these on purpose (`graphersal-storage-tests`, `failing`).
+backend holds afterwards is the storage's responsibility. `TraversalGraph` never fails an element
+read and its methods are inlined, so the `Result` costs nothing on the hot paths (measured with
+the Divan bench before the change). The conformance suite has a storage that fails each of these
+groups on purpose (`graphersal-storage-tests`, `failing`: element scans, property reads,
+adjacency, the unit clock, and the methods beyond single elements).
 
 Units and transactions come for free: the `Transactional` extension trait (`transaction`,
 `transaction_with`, `dry_run`) is implemented for every `GraphStorage` on top of the trait's

@@ -268,7 +268,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepRangeLocal {
     ) -> TraverserResult<Traverser<S>> {
         self.mode.validate()?;
         let mode = self.mode;
-        match slice_local(context, source.value, |len| mode.bounds(len)) {
+        match slice_local(context, source.value, |len| mode.bounds(len))? {
             LocalSlice::Value(value) => Ok(Traverser::with_parts(
                 value,
                 source.path,

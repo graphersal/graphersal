@@ -194,9 +194,10 @@ fn compressed_count(graph: &TraversalGraph) -> u64 {
 /// (compressed values compare as their strings).
 fn content(graph: &TraversalGraph) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         let mut props: Vec<(String, String)> = graph
             .vertex_properties(v)
+            .unwrap()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.to_string(), format!("{:?}", v.to_logical())))
@@ -204,13 +205,14 @@ fn content(graph: &TraversalGraph) -> Vec<String> {
         props.sort();
         out.push(format!(
             "v {} {:?} {props:?}",
-            graph.vertex_id(v).unwrap(),
-            graph.vertex_labels(v)
+            graph.vertex_id(v).unwrap().unwrap(),
+            graph.vertex_labels(v).unwrap()
         ));
     }
-    for e in graph.edges() {
+    for e in graph.edges().unwrap() {
         let mut props: Vec<(String, String)> = graph
             .edge_properties(e)
+            .unwrap()
             .map(|p| {
                 p.iter()
                     .map(|(k, v)| (k.to_string(), format!("{:?}", v.to_logical())))
@@ -220,8 +222,8 @@ fn content(graph: &TraversalGraph) -> Vec<String> {
         props.sort();
         out.push(format!(
             "e {} {:?} {props:?}",
-            graph.edge_id(e).unwrap(),
-            graph.edge_label(e)
+            graph.edge_id(e).unwrap().unwrap(),
+            graph.edge_label(e).unwrap()
         ));
     }
     out.sort();
@@ -261,8 +263,13 @@ fn no_compressed_inside(value: &ElementProperty) -> bool {
 fn the_value_stays_one_word_and_compares_logically() {
     assert_eq!(std::mem::size_of::<ElementProperty>(), 32);
     let graph = compressed_graph();
-    let c0 = graph.get_vertex_by_id("c0").unwrap();
-    let stored = graph.vertex_properties(c0).unwrap().get("bio").unwrap();
+    let c0 = graph.get_vertex_by_id("c0").unwrap().unwrap();
+    let stored = graph
+        .vertex_properties(c0)
+        .unwrap()
+        .unwrap()
+        .get("bio")
+        .unwrap();
     assert!(
         matches!(stored, ElementProperty::Compressed(_)),
         "{stored:?}"
@@ -321,7 +328,12 @@ fn thresholds_multibyte_text_and_incompressible_text() {
                 props(vec![("text", text.as_str().into())]),
             )
             .unwrap();
-        let stored = graph.vertex_properties(v).unwrap().get("text").unwrap();
+        let stored = graph
+            .vertex_properties(v)
+            .unwrap()
+            .unwrap()
+            .get("text")
+            .unwrap();
         assert_eq!(
             matches!(stored, ElementProperty::Compressed(_)),
             expect_compressed[i],
@@ -330,7 +342,7 @@ fn thresholds_multibyte_text_and_incompressible_text() {
         );
         let read = graph
             .traversal()
-            .v(vec![graph.vertex_id(v).unwrap()])
+            .v(vec![graph.vertex_id(v).unwrap().unwrap()])
             .values("text")
             .to_list()
             .unwrap();
@@ -498,13 +510,13 @@ fn the_invariant_holds_after_every_kind_of_write() {
 fn a_label_change_compresses_and_decompresses() {
     let mut graph = compressed_graph();
     // c1 is a customer, not a vip: its summary (none) - give it one first.
-    let c1 = graph.get_vertex_by_id("c1").unwrap();
+    let c1 = graph.get_vertex_by_id("c1").unwrap().unwrap();
     graph
         .set_vertex_property(c1, "summary".into(), cv(1, 600).into())
         .unwrap();
     let is_compressed = |graph: &TraversalGraph| {
         matches!(
-            graph.vertex_properties(c1).unwrap().get("summary"),
+            graph.vertex_properties(c1).unwrap().unwrap().get("summary"),
             Some(ElementProperty::Compressed(_))
         )
     };
@@ -550,7 +562,7 @@ fn the_first_label_wins_a_shared_path() {
         .unwrap();
     let compressed = |v| {
         matches!(
-            graph.vertex_properties(v).unwrap().get("text"),
+            graph.vertex_properties(v).unwrap().unwrap().get("text"),
             Some(ElementProperty::Compressed(_))
         )
     };
@@ -679,7 +691,7 @@ fn rollbacks_restore_the_logical_data_and_the_invariant() {
         // A nested savepoint that is rolled back on its own.
         let inner: Result<(), Failure> = g.transaction(|g| {
             g.remove_definition(DefinitionKind::COMPRESSION, "career_cv")?;
-            let c2 = g.get_vertex_by_id("c2").unwrap();
+            let c2 = g.get_vertex_by_id("c2").unwrap().unwrap();
             g.drop_vertex(c2)?;
             Err("inner".into())
         });
@@ -1047,7 +1059,8 @@ fn schema_scans_and_writes_see_the_text() {
     invariant(&graph);
     assert!(matches!(
         graph
-            .vertex_properties(graph.get_vertex_by_id("c0").unwrap())
+            .vertex_properties(graph.get_vertex_by_id("c0").unwrap().unwrap())
+            .unwrap()
             .unwrap()
             .get("bio"),
         Some(ElementProperty::Compressed(_))
@@ -1150,7 +1163,7 @@ impl Rng {
 /// Applies one random operation to `graph` (with rules: `rules` true) or to the oracle.
 fn random_op(graph: &mut TraversalGraph, op: usize, arg: usize, rules: bool) {
     let id = format!("c{}", arg % 12);
-    let Some(v) = graph.get_vertex_by_id(&id) else {
+    let Some(v) = graph.get_vertex_by_id(&id).unwrap() else {
         return;
     };
     match op {

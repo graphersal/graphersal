@@ -26,10 +26,11 @@ use graphersal::storage::GraphStorage;
 fn vertex_text<G: GraphStorage>(g: &G, v: G::VertexId) -> String {
     let mut props: Vec<String> = g
         .vertex_properties(v)
+        .unwrap()
         .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
         .unwrap_or_default();
     props.sort();
-    format!("{:?} {{{}}}", g.vertex_labels(v), props.join(", "))
+    format!("{:?} {{{}}}", g.vertex_labels(v).unwrap(), props.join(", "))
 }
 
 /// The canonical state of `g`: every vertex (labels, properties) and every edge (label,
@@ -37,18 +38,20 @@ fn vertex_text<G: GraphStorage>(g: &G, v: G::VertexId) -> String {
 fn dump<G: GraphStorage>(g: &G) -> Vec<String> {
     let mut lines: Vec<String> = g
         .vertices()
+        .unwrap()
         .map(|v| format!("V {}", vertex_text(g, v)))
         .collect();
-    for e in g.edges() {
+    for e in g.edges().unwrap() {
         let mut props: Vec<String> = g
             .edge_properties(e)
+            .unwrap()
             .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         props.sort();
-        let (from, to) = g.edge_endpoints(e).expect("an edge has ends");
+        let (from, to) = g.edge_endpoints(e).unwrap().expect("an edge has ends");
         lines.push(format!(
             "E {} {{{}}} from {} to {}",
-            g.edge_label(e).unwrap_or_default(),
+            g.edge_label(e).unwrap().unwrap_or_default(),
             props.join(", "),
             vertex_text(g, from),
             vertex_text(g, to)
@@ -77,14 +80,16 @@ fn after(query: &str) -> (TraversalGraph, Vec<ElementProperty>) {
 fn count_label(graph: &TraversalGraph, label: &str) -> usize {
     graph
         .vertices()
-        .filter(|&v| graph.vertex_has_label(v, label))
+        .unwrap()
+        .filter(|&v| graph.vertex_has_label(v, label).unwrap())
         .count()
 }
 
 fn count_edges(graph: &TraversalGraph, label: &str) -> usize {
     graph
         .edges()
-        .filter(|&e| graph.edge_label(e) == Some(label))
+        .unwrap()
+        .filter(|&e| graph.edge_label(e).unwrap() == Some(label))
         .count()
 }
 
@@ -252,10 +257,10 @@ fn every_clause_sees_the_writes_before_it_only() {
     // Each clause reads the whole input before the write step runs.
     let (graph, _) = after("MATCH (n) INSERT (:N)");
     assert_eq!(count_label(&graph, "N"), 6);
-    assert_eq!(graph.vertices().count(), 12);
+    assert_eq!(graph.vertices().unwrap().count(), 12);
     let (graph, _) = after("MATCH (a)-[e]->(b) INSERT (a)-[:X]->(b)");
     assert_eq!(count_edges(&graph, "X"), 6);
-    assert_eq!(graph.edges().count(), 12);
+    assert_eq!(graph.edges().unwrap().count(), 12);
     let (graph, _) = after("FOR i IN range(1, 3) MATCH (n) INSERT (:Y)");
     assert_eq!(count_label(&graph, "Y"), 18);
     // A later MATCH sees the writes of every row before it.
@@ -793,16 +798,24 @@ mod script {
         graphersal::script::pin_now(&mut engine, None);
         let read = graph.read();
         let mut stamps = 0;
-        for v in read.vertices() {
-            let at = read.vertex_properties(v).and_then(|p| p.get("at")).cloned();
+        for v in read.vertices().unwrap() {
+            let at = read
+                .vertex_properties(v)
+                .unwrap()
+                .and_then(|p| p.get("at"))
+                .cloned();
             assert_eq!(
                 at,
                 Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
             );
             stamps += 1;
         }
-        for e in read.edges() {
-            let at = read.edge_properties(e).and_then(|p| p.get("at")).cloned();
+        for e in read.edges().unwrap() {
+            let at = read
+                .edge_properties(e)
+                .unwrap()
+                .and_then(|p| p.get("at"))
+                .cloned();
             assert_eq!(
                 at,
                 Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
@@ -1207,16 +1220,24 @@ mod script {
         graphersal::script::pin_now(&mut engine, None);
         let read = graph.read();
         let mut stamps = 0;
-        for v in read.vertices() {
-            let at = read.vertex_properties(v).and_then(|p| p.get("at")).cloned();
+        for v in read.vertices().unwrap() {
+            let at = read
+                .vertex_properties(v)
+                .unwrap()
+                .and_then(|p| p.get("at"))
+                .cloned();
             assert_eq!(
                 at,
                 Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
             );
             stamps += 1;
         }
-        for e in read.edges() {
-            let at = read.edge_properties(e).and_then(|p| p.get("at")).cloned();
+        for e in read.edges().unwrap() {
+            let at = read
+                .edge_properties(e)
+                .unwrap()
+                .and_then(|p| p.get("at"))
+                .cloned();
             assert_eq!(
                 at,
                 Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
@@ -1441,8 +1462,12 @@ fn the_schema_coerces_and_refuses_set_values() {
     );
     // Write-time coercion: an integer for a number is stored as a float.
     write(&mut graph, "MATCH (p:person) SET p.w = 2");
-    for v in graph.vertices() {
-        let w = graph.vertex_properties(v).and_then(|p| p.get("w")).cloned();
+    for v in graph.vertices().unwrap() {
+        let w = graph
+            .vertex_properties(v)
+            .unwrap()
+            .and_then(|p| p.get("w"))
+            .cloned();
         assert_eq!(w, Some(ElementProperty::from(2.0)));
     }
     let before = dump(&graph);
@@ -1699,6 +1724,7 @@ fn edge_names(graph: &TraversalGraph, label: &str) -> Vec<String> {
     let name = |v| {
         graph
             .vertex_properties(v)
+            .unwrap()
             .and_then(|map| {
                 map.iter()
                     .find(|(k, _)| k.as_str() == "name")
@@ -1708,8 +1734,9 @@ fn edge_names(graph: &TraversalGraph, label: &str) -> Vec<String> {
     };
     let mut out: Vec<String> = graph
         .edges()
-        .filter(|&e| graph.edge_label(e) == Some(label))
-        .filter_map(|e| graph.edge_endpoints(e))
+        .unwrap()
+        .filter(|&e| graph.edge_label(e).unwrap() == Some(label))
+        .filter_map(|e| graph.edge_endpoints(e).unwrap())
         .map(|(a, b)| format!("{}-{label}->{}", name(a), name(b)))
         .collect();
     out.sort();

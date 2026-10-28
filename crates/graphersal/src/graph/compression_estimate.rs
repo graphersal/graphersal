@@ -29,13 +29,13 @@ use std::sync::Arc;
 use compact_str::CompactString;
 
 use crate::error::DefinitionError;
+use crate::graph::TraversalGraph;
 use crate::graph::compression::{
     Codec, CompressionDefinition, CompressionStats, dedup_qualifies, dictionary_from, path_problem,
     value_at,
 };
 use crate::graph::definition::DefinitionKind;
 use crate::graph::schema::ElementKind;
-use crate::graph::{GraphStorage, TraversalGraph};
 use crate::traversal::cancel::CancelToken;
 use crate::value::compressed::{CompressedText, CompressionDictionary};
 use crate::value::deduped::DEDUP_ENTRY_OVERHEAD;
@@ -686,7 +686,10 @@ impl TraversalGraph {
         // An edge without properties is not among `elements`, but it carries the label.
         estimate.elements = match request.element {
             ElementKind::Vertex => elements.len() as u64,
-            ElementKind::Edge => self.edges_by_label(&request.label).count() as u64,
+            ElementKind::Edge => self
+                .index
+                .get_edges_by_label(&request.label)
+                .map_or(0, Iterator::count) as u64,
         };
         let mut strings: Vec<&ElementProperty> = Vec::new();
         let mut lengths: Vec<usize> = Vec::new();

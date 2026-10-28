@@ -943,52 +943,64 @@ mod lookup {
         type VertexId = VertexHandle;
         type EdgeId = EdgeHandle;
 
-        fn vertex_count(&self) -> usize {
+        fn vertex_count(&self) -> Result<usize, GraphError> {
             GraphStorage::vertex_count(&self.0)
         }
-        fn edge_count(&self) -> usize {
+        fn edge_count(&self) -> Result<usize, GraphError> {
             GraphStorage::edge_count(&self.0)
         }
-        fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+        fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
             GraphStorage::vertices(&self.0)
         }
-        fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::edges(&self.0)
         }
-        fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+        fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
             GraphStorage::get_vertex_by_id(&self.0, id)
         }
-        fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+        fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
             GraphStorage::get_edge_by_id(&self.0, id)
         }
-        fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn out_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::out_edges(&self.0, node)
         }
-        fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn in_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::in_edges(&self.0, node)
         }
-        fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             GraphStorage::vertex_id(&self.0, node)
         }
-        fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             GraphStorage::edge_id(&self.0, edge)
         }
-        fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             GraphStorage::vertex_label(&self.0, node)
         }
-        fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             GraphStorage::edge_label(&self.0, edge)
         }
-        fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+        fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
             GraphStorage::vertex_labels(&self.0, node)
         }
-        fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+        fn vertex_properties(
+            &self,
+            node: VertexHandle,
+        ) -> Result<Option<&PropertyMap>, GraphError> {
             GraphStorage::vertex_properties(&self.0, node)
         }
-        fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+        fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
             GraphStorage::edge_properties(&self.0, edge)
         }
-        fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+        fn edge_endpoints(
+            &self,
+            edge: EdgeHandle,
+        ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
             GraphStorage::edge_endpoints(&self.0, edge)
         }
         fn insert_vertex(

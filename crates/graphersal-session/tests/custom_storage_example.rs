@@ -39,7 +39,7 @@ fn a_host_plugs_its_own_storage_into_every_front_end() -> Result<(), Box<dyn std
         GraphTraversalSource::new(&mut *g).add_v("robot").next()?;
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
-    assert_eq!(storage.vertex_count(), 7);
+    assert_eq!(storage.vertex_count().unwrap(), 7);
 
     // 2. The DSL and saved queries take any `Arc<Graph<S>>` (`impl IntoAnyGraph`).
     //    `new_persistent` also gives the DSL's `g.export_snapshot(path)`.
@@ -69,7 +69,7 @@ fn a_host_plugs_its_own_storage_into_every_front_end() -> Result<(), Box<dyn std
     store.close()?;
     // `open_in` takes how to build the empty instance the snapshot is loaded into.
     let store: Store<MyStorage> = Store::open_in(&dir, StoreOptions::new(), MyStorage::default)?;
-    assert_eq!(store.graph().read().vertex_count(), 7);
+    assert_eq!(store.graph().read().vertex_count().unwrap(), 7);
 
     // 4. A session over the storage: every graph it builds (samples, loads, stores in memory,
     //    forks) is a `MyStorage`; here it serves the Store opened above.

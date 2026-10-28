@@ -10578,7 +10578,10 @@ mod gql {
 
     /// Element counts of a graph.
     fn counts(graph: &TraversalGraph) -> (usize, usize) {
-        (graph.vertices().count(), graph.edges().count())
+        (
+            graph.vertices().unwrap().count(),
+            graph.edges().unwrap().count(),
+        )
     }
 
     #[test]
@@ -10917,19 +10920,20 @@ mod gql {
         };
         let mut lines: Vec<String> = graph
             .vertices()
+            .unwrap()
             .map(|v| {
                 format!(
                     "V {:?} {}",
-                    graph.vertex_labels(v),
-                    props(graph.vertex_properties(v))
+                    graph.vertex_labels(v).unwrap(),
+                    props(graph.vertex_properties(v).unwrap())
                 )
             })
             .collect();
-        lines.extend(graph.edges().map(|e| {
+        lines.extend(graph.edges().unwrap().map(|e| {
             format!(
                 "E {:?} {}",
-                graph.edge_label(e),
-                props(graph.edge_properties(e))
+                graph.edge_label(e).unwrap(),
+                props(graph.edge_properties(e).unwrap())
             )
         }));
         lines.sort();

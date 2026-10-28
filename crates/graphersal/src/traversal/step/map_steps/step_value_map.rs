@@ -392,22 +392,22 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepValueMap<'g, S> {
                     let id =
                         crate::graph::storage::stored_vertex_id(&*context.storage, *node_index)?
                             .to_string();
-                    Some((id, context.storage.vertex_label(*node_index)))
+                    Some((id, context.storage.vertex_label(*node_index)?))
                 } else {
                     None
                 };
-                let collected = self.collect(head, context.storage.vertex_properties(*node_index));
+                let collected = self.collect(head, context.storage.vertex_properties(*node_index)?);
                 self.build(context, &source, collected)?
             }
             TraverserValue::Edge(edge_index) => {
                 let head = if self.tokens != 0 {
                     let id = crate::graph::storage::stored_edge_id(&*context.storage, *edge_index)?
                         .to_string();
-                    Some((id, context.storage.edge_label(*edge_index)))
+                    Some((id, context.storage.edge_label(*edge_index)?))
                 } else {
                     None
                 };
-                let collected = self.collect(head, context.storage.edge_properties(*edge_index));
+                let collected = self.collect(head, context.storage.edge_properties(*edge_index)?);
                 self.build(context, &source, collected)?
             }
             v => {

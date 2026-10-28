@@ -1260,7 +1260,8 @@ fn damaged_candidate(dir: &Path) -> Vec<String> {
     let unit = |body: &dyn Fn(&mut TraversalGraph) -> Result<(), GraphError>| {
         store.graph().write().transaction(|g| body(g)).unwrap();
     };
-    let vertex = |g: &TraversalGraph, i: usize| g.get_vertex_by_id(&format!("v{i:02}")).unwrap();
+    let vertex =
+        |g: &TraversalGraph, i: usize| g.get_vertex_by_id(&format!("v{i:02}")).unwrap().unwrap();
     unit(&|g| {
         for i in 0..30 {
             let mut element = graphersal::prelude::PropertyMap::default();
@@ -1307,7 +1308,7 @@ fn damaged_candidate(dir: &Path) -> Vec<String> {
     });
     unit(&|g| {
         for i in 0..29 {
-            let e = g.get_edge_by_id(&format!("e{i:02}")).unwrap();
+            let e = g.get_edge_by_id(&format!("e{i:02}")).unwrap().unwrap();
             g.set_edge_property(e, "w".into(), ElementProperty::from(2i64))?;
         }
         Ok(())
@@ -1318,8 +1319,11 @@ fn damaged_candidate(dir: &Path) -> Vec<String> {
     unit(&|g| {
         let late = g
             .vertices()
+            .unwrap()
             .find(|v| {
-                g.vertex_properties(*v).and_then(|p| p.get("name").cloned())
+                g.vertex_properties(*v)
+                    .unwrap()
+                    .and_then(|p| p.get("name").cloned())
                     == Some(ElementProperty::from("late"))
             })
             .unwrap();

@@ -1320,14 +1320,52 @@ pub(crate) struct PropertyFilter {
 impl PropertyFilter {
     /// Whether vertex `node` satisfies the condition.
     #[inline]
-    pub(crate) fn vertex_matches<S: GraphStorage>(&self, storage: &S, node: S::VertexId) -> bool {
+    pub(crate) fn vertex_matches<S: GraphStorage>(
+        &self,
+        storage: &S,
+        node: S::VertexId,
+    ) -> Result<bool, crate::error::GraphError> {
         filter_steps::step_has::vertex_has(storage, node, &self.key, &self.value)
     }
 
     /// Whether edge `edge` satisfies the condition.
     #[inline]
-    pub(crate) fn edge_matches<S: GraphStorage>(&self, storage: &S, edge: S::EdgeId) -> bool {
+    pub(crate) fn edge_matches<S: GraphStorage>(
+        &self,
+        storage: &S,
+        edge: S::EdgeId,
+    ) -> Result<bool, crate::error::GraphError> {
         filter_steps::step_has::edge_has(storage, edge, &self.key, &self.value)
+    }
+
+    /// Whether vertex `node` satisfies every condition of `filters` (stops at the first miss).
+    #[inline(always)]
+    pub(crate) fn all_vertex<S: GraphStorage>(
+        filters: &[PropertyFilter],
+        storage: &S,
+        node: S::VertexId,
+    ) -> Result<bool, crate::error::GraphError> {
+        for filter in filters {
+            if !filter.vertex_matches(storage, node)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether edge `edge` satisfies every condition of `filters` (stops at the first miss).
+    #[inline(always)]
+    pub(crate) fn all_edge<S: GraphStorage>(
+        filters: &[PropertyFilter],
+        storage: &S,
+        edge: S::EdgeId,
+    ) -> Result<bool, crate::error::GraphError> {
+        for filter in filters {
+            if !filter.edge_matches(storage, edge)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

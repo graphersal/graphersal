@@ -230,11 +230,15 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     /// The [`CreateContext`](crate::graph::schema::defaults::CreateContext) of the elements this
     /// execution creates: pinned, else the storage's unit start (or the system clock), taken
     /// once, so every element of one execution gets the same time.
-    pub(crate) fn create_context(&mut self) -> crate::graph::schema::defaults::CreateContext {
-        let storage = &*self.storage;
-        *self.create_context.get_or_insert_with(|| {
-            crate::graph::schema::defaults::CreateContext::for_storage(storage)
-        })
+    pub(crate) fn create_context(
+        &mut self,
+    ) -> Result<crate::graph::schema::defaults::CreateContext, crate::error::GraphError> {
+        if let Some(create) = self.create_context {
+            return Ok(create);
+        }
+        let create = crate::graph::schema::defaults::CreateContext::for_storage(&*self.storage)?;
+        self.create_context = Some(create);
+        Ok(create)
     }
 
     /// The [`CreateContext`](crate::graph::schema::defaults::CreateContext) of a creating step:
@@ -243,9 +247,9 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     pub(crate) fn create_context_or(
         &mut self,
         pinned: Option<crate::value::temporal::DateTime>,
-    ) -> crate::graph::schema::defaults::CreateContext {
+    ) -> Result<crate::graph::schema::defaults::CreateContext, crate::error::GraphError> {
         match pinned {
-            Some(now) => crate::graph::schema::defaults::CreateContext::at(now),
+            Some(now) => Ok(crate::graph::schema::defaults::CreateContext::at(now)),
             None => self.create_context(),
         }
     }

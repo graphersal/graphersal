@@ -83,7 +83,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
     ) -> TraverserResult<bool> {
         match &source.value {
             TraverserValue::Vertex(v) => {
-                let vertex = context.storage.vertex_properties(*v);
+                let vertex = context.storage.vertex_properties(*v)?;
                 match vertex {
                     Some(vertex) => Ok(!vertex.contains_key(self.key.as_str())),
                     None => Ok(true),
@@ -100,7 +100,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 match vertex {
                     Some(vertex) => match vertex.get(&prop_name) {
                         Some(value) => match value {
@@ -124,7 +124,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
 
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop_name = prop_name.clone();
-                let edge = context.storage.edge_properties(*edge_index);
+                let edge = context.storage.edge_properties(*edge_index)?;
                 match edge {
                     Some(edge) => match edge.get(&prop_name) {
                         Some(value) => match value {
@@ -147,7 +147,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_map = context.storage.edge_properties(*edge_index);
+                let edge_map = context.storage.edge_properties(*edge_index)?;
                 match edge_map {
                     Some(edge_map) => Ok(!edge_map.contains_key(self.key.as_str())),
                     None => Err(Box::new(TraverserError::cast_exception_str(

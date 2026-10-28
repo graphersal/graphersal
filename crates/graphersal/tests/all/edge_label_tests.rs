@@ -45,11 +45,11 @@ fn props(entries: &[(&str, ElementProperty)]) -> PropertyMap {
 }
 
 fn e(graph: &TraversalGraph, id: &str) -> EdgeHandle {
-    graph.get_edge_by_id(id).expect("edge")
+    graph.get_edge_by_id(id).unwrap().expect("edge")
 }
 
 fn label_of(graph: &TraversalGraph, id: &str) -> Option<String> {
-    graph.edge_label(e(graph, id)).map(str::to_string)
+    graph.edge_label(e(graph, id)).unwrap().map(str::to_string)
 }
 
 fn edge_label_count(graph: &TraversalGraph, label: &str) -> usize {
@@ -122,7 +122,7 @@ fn relabel_updates_label_index_and_statistics() {
     assert_eq!(edge_label_count(&graph, "likes"), 1);
     assert_eq!(
         graph.statistics().unwrap().cloned(),
-        Some(GraphStatistics::from_storage(&graph))
+        Some(GraphStatistics::from_storage(&graph).unwrap())
     );
     // The traversal sees the new label through the label index.
     let ids = graph
@@ -176,9 +176,9 @@ fn rollback_restores_the_label_and_the_statistics() {
     assert_eq!(label_of(&graph, "ab").as_deref(), Some("created"));
     assert_eq!(label_of(&graph, "ac"), None, "unlabeled again");
     assert_eq!(graph.statistics().unwrap().cloned(), before);
-    assert_eq!(graph.edges_by_label("made").count(), 0);
-    assert_eq!(graph.edges_by_label("knows").count(), 0);
-    assert_eq!(graph.edges_by_label("created").count(), 1);
+    assert_eq!(graph.edges_by_label("made").unwrap().count(), 0);
+    assert_eq!(graph.edges_by_label("knows").unwrap().count(), 0);
+    assert_eq!(graph.edges_by_label("created").unwrap().count(), 1);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -243,8 +243,8 @@ fn compact_merges_and_drops_label_changes() {
             g.set_edge_label(e(g, "ab"), "made".into())?;
             g.set_edge_label(e(g, "ab"), "created".into())?;
             // A new edge absorbs its label change.
-            let a = g.get_vertex_by_id("a").unwrap();
-            let b = g.get_vertex_by_id("b").unwrap();
+            let a = g.get_vertex_by_id("a").unwrap().unwrap();
+            let b = g.get_vertex_by_id("b").unwrap().unwrap();
             let new = g.add_edge(
                 Some("new".into()),
                 Some("old".into()),
@@ -452,7 +452,10 @@ fn open_schema_checks_required_keys_and_types_of_the_new_label() {
         .set_edge_property(edge, "stars".into(), 5.into())
         .unwrap();
     assert_eq!(
-        graph.edge_properties(edge).and_then(|p| p.get("stars")),
+        graph
+            .edge_properties(edge)
+            .unwrap()
+            .and_then(|p| p.get("stars")),
         Some(&ElementProperty::from(5.0))
     );
 }

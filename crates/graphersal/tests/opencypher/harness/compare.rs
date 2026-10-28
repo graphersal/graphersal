@@ -92,15 +92,17 @@ pub fn to_tck<S: GraphStorage>(graph: &S, value: &ElementProperty) -> TckValue {
                 .collect(),
         ),
         ElementProperty::Vertex(vertex) => {
-            TckValue::Node(match graph.get_vertex_by_id(vertex.id()) {
+            TckValue::Node(match graph.get_vertex_by_id(vertex.id()).unwrap() {
                 Some(handle) => TckNode {
                     labels: graph
                         .vertex_labels(handle)
+                        .unwrap()
                         .iter()
                         .map(|l| l.to_string())
                         .collect(),
                     properties: graph
                         .vertex_properties(handle)
+                        .unwrap()
                         .map(|props| {
                             props
                                 .iter()
@@ -123,11 +125,16 @@ pub fn to_tck<S: GraphStorage>(graph: &S, value: &ElementProperty) -> TckValue {
         }
         ElementProperty::Edge(edge) => {
             let snapshot_ends = (edge.out_v().id().to_string(), edge.in_v().id().to_string());
-            TckValue::Relationship(match graph.get_edge_by_id(edge.id()) {
+            TckValue::Relationship(match graph.get_edge_by_id(edge.id()).unwrap() {
                 Some(handle) => TckRelationship {
-                    rel_type: graph.edge_label(handle).unwrap_or_default().to_string(),
+                    rel_type: graph
+                        .edge_label(handle)
+                        .unwrap()
+                        .unwrap_or_default()
+                        .to_string(),
                     properties: graph
                         .edge_properties(handle)
+                        .unwrap()
                         .map(|props| {
                             props
                                 .iter()
@@ -138,10 +145,11 @@ pub fn to_tck<S: GraphStorage>(graph: &S, value: &ElementProperty) -> TckValue {
                     ends: Some(
                         graph
                             .edge_endpoints(handle)
+                            .unwrap()
                             .and_then(|(out_v, in_v)| {
                                 Some((
-                                    graph.vertex_id(out_v)?.to_string(),
-                                    graph.vertex_id(in_v)?.to_string(),
+                                    graph.vertex_id(out_v).unwrap()?.to_string(),
+                                    graph.vertex_id(in_v).unwrap()?.to_string(),
                                 ))
                             })
                             .unwrap_or(snapshot_ends),

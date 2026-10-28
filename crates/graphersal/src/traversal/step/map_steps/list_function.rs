@@ -274,14 +274,14 @@ pub(crate) fn input_error(
 pub(crate) fn kind_name<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: &TraverserValue<S>,
-) -> String {
-    if is_null(context, value) {
-        return "null".to_string();
+) -> Result<String, crate::error::GraphError> {
+    if is_null(context, value)? {
+        return Ok("null".to_string());
     }
-    match value {
+    Ok(match value {
         TraverserValue::Computed(property, _) => crate::graph::schema::value_type_name(property),
         TraverserValue::VertexProperty(..) | TraverserValue::EdgeProperty(..) => {
-            match stored_value(context, value) {
+            match stored_value(context, value)? {
                 Some(stored) => crate::graph::schema::value_type_name(stored),
                 None => value.type_name().to_string(),
             }
@@ -289,7 +289,7 @@ pub(crate) fn kind_name<S: GraphStorage>(
         TraverserValue::Array(_) => "array".to_string(),
         TraverserValue::Object(_) | TraverserValue::Record { .. } => "map".to_string(),
         _ => value.type_name().to_string(),
-    }
+    })
 }
 
 /// The collection kind of a value, read without taking it apart.
@@ -305,7 +305,7 @@ pub(crate) enum Kind {
 pub(crate) fn kind_of<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: &TraverserValue<S>,
-) -> Kind {
+) -> Result<Kind, crate::error::GraphError> {
     let of_property = |property: &ElementProperty| match property {
         ElementProperty::Array(_) => Kind::List,
         ElementProperty::Object(_) | ElementProperty::Map(_) => Kind::Map,
@@ -321,12 +321,12 @@ pub(crate) fn kind_of<S: GraphStorage>(
         | ElementProperty::Vertex(_)
         | ElementProperty::Edge(_) => Kind::Other,
     };
-    match value {
+    Ok(match value {
         TraverserValue::Array(_) | TraverserValue::Path(_) => Kind::List,
         TraverserValue::Object(_) | TraverserValue::Record { .. } => Kind::Map,
         TraverserValue::Computed(property, _) => of_property(property),
         TraverserValue::VertexProperty(..) | TraverserValue::EdgeProperty(..) => {
-            stored_value(context, value).map_or(Kind::Other, of_property)
+            stored_value(context, value)?.map_or(Kind::Other, of_property)
         }
         TraverserValue::Vertex(_)
         | TraverserValue::Edge(_)
@@ -334,7 +334,7 @@ pub(crate) fn kind_of<S: GraphStorage>(
         | TraverserValue::Entry(_)
         | TraverserValue::Schema(_)
         | TraverserValue::Graph(_) => Kind::Other,
-    }
+    })
 }
 
 /// The elements of a value [`kind_of`] reported as a list (a path's objects included).
@@ -449,7 +449,7 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                 step,
                 "argument",
                 expected,
-                kind_name(context, &TraverserValue::Computed(value.clone(), None)),
+                kind_name(context, &TraverserValue::Computed(value.clone(), None))?,
             )),
             Operand::Traversal(traversal) => {
                 let Some(first) = traversal.first(context, source)? else {
@@ -460,13 +460,13 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                         "no result (the traversal yielded nothing)".to_string(),
                     ));
                 };
-                let kind = kind_of(context, &first.value);
+                let kind = kind_of(context, &first.value)?;
                 if kind != incoming {
                     return Err(input_error(
                         step,
                         "traversal argument",
                         expected,
-                        kind_name(context, &first.value),
+                        kind_name(context, &first.value)?,
                     ));
                 }
                 if incoming == Kind::Map {
@@ -569,7 +569,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepListFunction<'g, S> {
         source: Traverser<S>,
     ) -> TraverserResult<Option<Traverser<S>>> {
         let step = self.kind.name();
-        let incoming = kind_of(context, &source.value);
+        let incoming = kind_of(context, &source.value)?;
         let accepted =
             incoming == Kind::List || (incoming == Kind::Map && self.kind == ListFunction::Merge);
         if !accepted {
@@ -582,7 +582,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepListFunction<'g, S> {
                 step,
                 "incoming value",
                 expected,
-                kind_name(context, &source.value),
+                kind_name(context, &source.value)?,
             ));
         }
         // The child traversal runs on the whole incoming traverser before its value is taken

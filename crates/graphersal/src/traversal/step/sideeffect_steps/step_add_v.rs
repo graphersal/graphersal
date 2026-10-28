@@ -141,7 +141,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
             .into_iter()
             .map(CompactString::from)
             .collect();
-        let create = context.create_context_or(self.create_time);
+        let create = context.create_context_or(self.create_time)?;
         let node_index = context.storage.add_vertex_with(
             self.id.clone(),
             labels,
@@ -328,7 +328,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddVBy<'g, 
                 )));
             }
         };
-        let create = context.create_context_or(self.create_time);
+        let create = context.create_context_or(self.create_time)?;
         let node_index = context.storage.add_vertex_with(
             self.id.clone(),
             vec![label],
@@ -502,8 +502,10 @@ mod tests {
             }
             _ => panic!(),
         }
-        let idx = GraphStorage::get_vertex_by_id(&graph, "1").unwrap();
-        let labels = GraphStorage::vertex_labels(&graph, idx);
+        let idx = GraphStorage::get_vertex_by_id(&graph, "1")
+            .unwrap()
+            .unwrap();
+        let labels = GraphStorage::vertex_labels(&graph, idx).unwrap();
         assert_eq!(
             labels,
             &[CompactString::new("Person"), CompactString::new("Admin")][..]

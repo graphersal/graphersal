@@ -587,11 +587,11 @@ fn source_steps_stay_untouched_by_the_optimizer() {
 #[test]
 fn path_values_convert_to_and_from_traverser_paths() {
     let graph = graph();
-    let mut vertices = graph.vertices();
+    let mut vertices = graph.vertices().unwrap();
     let (Some(a), Some(b)) = (vertices.next(), vertices.next()) else {
         panic!("no vertices");
     };
-    let Some(e) = graph.edges().next() else {
+    let Some(e) = graph.edges().unwrap().next() else {
         panic!("no edges");
     };
     let path: RowValue<TraversalGraph> = Value::Path(vec![
@@ -619,7 +619,7 @@ fn compare_values_is_the_order_by_order() {
     use std::collections::HashMap;
 
     let mut graph = graph();
-    let Some(v) = graph.vertices().next() else {
+    let Some(v) = graph.vertices().unwrap().next() else {
         panic!("no vertices");
     };
     let context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());
@@ -667,19 +667,20 @@ fn row_reads_properties_endpoints_and_reserves() {
     use std::collections::HashMap;
 
     let mut graph = graph();
-    let marko = graph.vertices().find(|v| {
+    let marko = graph.vertices().unwrap().find(|v| {
         graph
             .vertex_properties(*v)
+            .unwrap()
             .and_then(|properties| properties.get("name"))
             == Some(&ElementProperty::from("marko"))
     });
     let Some(marko) = marko else {
         panic!("no marko");
     };
-    let Some(edge) = graph.edges().next() else {
+    let Some(edge) = graph.edges().unwrap().next() else {
         panic!("no edges");
     };
-    let Some((source, target)) = graph.edge_endpoints(edge) else {
+    let Some((source, target)) = graph.edge_endpoints(edge).unwrap() else {
         panic!("no endpoints");
     };
     let mut context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());

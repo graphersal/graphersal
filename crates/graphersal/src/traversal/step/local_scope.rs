@@ -30,12 +30,12 @@ pub(crate) enum LocalShape<S: GraphStorage> {
 /// property the element does not carry).
 ///
 /// Borrowed from the graph storage, so a caller that only reads the value (a length, the numbers
-/// of a list) does not clone it.
+/// of a list) does not clone it. `Err` when the storage cannot read the element's properties.
 pub(crate) fn stored_value<'c, S: GraphStorage>(
     context: &'c TraverserContext<'_, S>,
     value: &TraverserValue<S>,
-) -> Option<&'c ElementProperty> {
-    match value {
+) -> Result<Option<&'c ElementProperty>, crate::error::GraphError> {
+    Ok(match value {
         // An `id()`/`label()`/`labels()` handle reads no stored property.
         TraverserValue::VertexProperty(_, _, kind) | TraverserValue::EdgeProperty(_, _, kind)
             if !kind.reads_property() =>
@@ -44,11 +44,11 @@ pub(crate) fn stored_value<'c, S: GraphStorage>(
         }
         TraverserValue::VertexProperty(property, node, _) => context
             .storage
-            .vertex_properties(*node)
+            .vertex_properties(*node)?
             .and_then(|properties| properties.get(property)),
         TraverserValue::EdgeProperty(property, edge, _) => context
             .storage
-            .edge_properties(*edge)
+            .edge_properties(*edge)?
             .and_then(|properties| properties.get(property)),
         TraverserValue::Computed(_, _)
         | TraverserValue::Vertex(_)
@@ -61,7 +61,7 @@ pub(crate) fn stored_value<'c, S: GraphStorage>(
         | TraverserValue::Array(_)
         | TraverserValue::Schema(_)
         | TraverserValue::Graph(_) => None,
-    }
+    })
 }
 
 /// Classifies an owned materialized value: a list or a map is unpacked, anything else becomes a
@@ -131,7 +131,7 @@ pub(crate) fn classify<S: GraphStorage>(
             TraverserValue::Computed(property, node)
         }),
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-            match stored_value(context, &value) {
+            match stored_value(context, &value)? {
                 Some(
                     stored @ (ElementProperty::Array(_)
                     | ElementProperty::Object(_)
@@ -185,7 +185,7 @@ pub(crate) fn local_len<S: GraphStorage>(
         TraverserValue::Path(path) => path.len(),
         TraverserValue::Computed(property, _) => property_len(property),
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-            stored_value(context, value).map_or(1, property_len)
+            stored_value(context, value)?.map_or(1, property_len)
         }
         TraverserValue::Vertex(_)
         | TraverserValue::Edge(_)
@@ -282,8 +282,8 @@ pub(crate) fn slice_local<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: TraverserValue<S>,
     bounds: impl FnOnce(usize) -> (usize, usize),
-) -> LocalSlice<S> {
-    LocalSlice::Value(match value {
+) -> Result<LocalSlice<S>, crate::error::GraphError> {
+    Ok(LocalSlice::Value(match value {
         TraverserValue::Array(mut items) => {
             let (start, end) = bounds(items.len());
             keep_vec(&mut items, start, end);
@@ -321,9 +321,9 @@ pub(crate) fn slice_local<S: GraphStorage>(
             keep_map(entries.indexed_mut(), start, end);
             TraverserValue::Computed(ElementProperty::Object(entries), node)
         }
-        TraverserValue::Path(_) => return LocalSlice::Path,
+        TraverserValue::Path(_) => return Ok(LocalSlice::Path),
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-            match stored_value(context, &value).and_then(|stored| slice_stored(stored, bounds)) {
+            match stored_value(context, &value)?.and_then(|stored| slice_stored(stored, bounds)) {
                 Some(sliced) => sliced,
                 None => value,
             }
@@ -335,7 +335,7 @@ pub(crate) fn slice_local<S: GraphStorage>(
         | TraverserValue::Entry(_)
         | TraverserValue::Schema(_)
         | TraverserValue::Graph(_) => value,
-    })
+    }))
 }
 
 /// True when `value` is a null: a computed `null`, or a property handle whose element does not
@@ -343,14 +343,14 @@ pub(crate) fn slice_local<S: GraphStorage>(
 pub(crate) fn is_null<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: &TraverserValue<S>,
-) -> bool {
-    match value {
+) -> Result<bool, crate::error::GraphError> {
+    Ok(match value {
         TraverserValue::Computed(property, _) => matches!(property, ElementProperty::Null),
         TraverserValue::VertexProperty(key, _, _) | TraverserValue::EdgeProperty(key, _, _) => {
             key != "id"
                 && key != "label"
                 && matches!(
-                    stored_value(context, value),
+                    stored_value(context, value)?,
                     None | Some(ElementProperty::Null)
                 )
         }
@@ -364,7 +364,7 @@ pub(crate) fn is_null<S: GraphStorage>(
         | TraverserValue::Array(_)
         | TraverserValue::Schema(_)
         | TraverserValue::Graph(_) => false,
-    }
+    })
 }
 
 /// One element of the list a per-element `Scope::Local` step transforms.
@@ -408,7 +408,7 @@ pub(crate) fn map_local_elements<S: GraphStorage>(
             .map(|(index, item)| map(index, LocalItem::Stored(item)))
             .collect::<TraverserResult<Vec<_>>>()?,
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-            match stored_value(context, &value) {
+            match stored_value(context, &value)? {
                 Some(ElementProperty::Array(items)) => items
                     .iter()
                     .enumerate()
@@ -477,7 +477,7 @@ fn local_string_item<S: GraphStorage>(
             crate::graph::schema::value_type_name(other),
         ))),
         LocalItem::Value(value) => {
-            if is_null(context, value) {
+            if is_null(context, value)? {
                 return Ok(ElementProperty::Null);
             }
             let text = match value {
@@ -504,7 +504,7 @@ fn local_string_item<S: GraphStorage>(
                     step,
                     STRING_ACCEPTS,
                     index,
-                    Traverser::observed_type_name(context, value),
+                    Traverser::observed_type_name(context, value)?,
                 ))),
             }
         }
@@ -537,7 +537,7 @@ pub(crate) fn map_local_strings<S: GraphStorage>(
     step: &'static str,
     f: impl Fn(&str) -> TraverserResult<ElementProperty>,
 ) -> TraverserResult<LocalMapped<S>> {
-    if is_null(context, &value) {
+    if is_null(context, &value)? {
         return Ok(LocalMapped::Done(TraverserValue::Computed(
             ElementProperty::Null,
             None,
@@ -588,8 +588,12 @@ mod tests {
     #[test]
     fn classify_every_kind() {
         let mut storage = modern_with_collections();
-        let node = GraphStorage::get_vertex_by_id(&storage, "1").expect("vertex 1");
-        let edge = GraphStorage::get_edge_by_id(&storage, "0").expect("edge 0");
+        let node = GraphStorage::get_vertex_by_id(&storage, "1")
+            .unwrap()
+            .expect("vertex 1");
+        let edge = GraphStorage::get_edge_by_id(&storage, "0")
+            .unwrap()
+            .expect("edge 0");
         let context =
             TraverserContext::new(&mut storage, TraversalStrategy::none(), Default::default());
 
@@ -663,7 +667,9 @@ mod tests {
     #[test]
     fn scalar_property_stays_lazy() {
         let mut storage = TraversalGraph::tinkerpop_modern();
-        let node = GraphStorage::get_vertex_by_id(&storage, "1").expect("vertex 1");
+        let node = GraphStorage::get_vertex_by_id(&storage, "1")
+            .unwrap()
+            .expect("vertex 1");
         let context =
             TraverserContext::new(&mut storage, TraversalStrategy::none(), Default::default());
         let shape = classify(

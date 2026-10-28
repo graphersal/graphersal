@@ -436,7 +436,7 @@ fn a_unit_that_does_not_grow_the_graph_commits_over_the_budget() {
         .unwrap_err();
     assert_eq!(unit_limit(&err).0, "commit");
     assert_untouched(&graph);
-    let vertex = graph.get_vertex_by_id("1").unwrap();
+    let vertex = graph.get_vertex_by_id("1").unwrap().unwrap();
     graph.transaction(|g| g.drop_vertex(vertex)).unwrap();
     assert_eq!(graph.vertex_count(), 5);
 }

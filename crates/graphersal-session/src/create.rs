@@ -149,18 +149,25 @@ fn parse_properties(request: &Value) -> Result<PropertyMap, Vec<FieldError>> {
 }
 
 /// An id no element of `kind` has, for a dry run.
-fn dry_run_id<S: GraphStorage>(g: &S, kind: ElementKind) -> CompactString {
-    let taken = |id: &str| match kind {
-        ElementKind::Vertex => g.get_vertex_by_id(id).is_some(),
-        ElementKind::Edge => g.get_edge_by_id(id).is_some(),
+fn dry_run_id<S: GraphStorage>(g: &S, kind: ElementKind) -> Result<CompactString, GraphError> {
+    let taken = |id: &str| -> Result<bool, GraphError> {
+        Ok(match kind {
+            ElementKind::Vertex => g.get_vertex_by_id(id)?.is_some(),
+            ElementKind::Edge => g.get_edge_by_id(id)?.is_some(),
+        })
     };
     let mut id = DRY_RUN_ID.to_string();
     let mut n = 1u32;
-    while taken(&id) {
+    while taken(&id)? {
         n = n.saturating_add(1);
         id = format!("{DRY_RUN_ID}-{n}");
     }
-    CompactString::from(id)
+    Ok(CompactString::from(id))
+}
+
+/// A storage error of a creation as its `general` field error.
+fn general(err: GraphError) -> Vec<FieldError> {
+    vec![FieldError::new("general", err.to_string())]
 }
 
 /// What a creation writes.
@@ -187,18 +194,18 @@ fn add<S: GraphStorage>(
 ) -> Result<String, Vec<FieldError>> {
     let mut errors: Vec<FieldError> = Vec::new();
     // `defaultFunction` `now`/`today`: the start of the caller's unit, as for a query.
-    let create = CreateContext::for_storage(&*g);
+    let create = CreateContext::for_storage(&*g).map_err(general)?;
     // At most one attempt per property, plus the last one.
     for _ in 0..=properties.len() {
         let attempt = match what {
             Create::Vertex { id, labels } => {
                 let id = match (id, dry_run) {
                     (Some(id), _) => Some(id.clone()),
-                    (None, true) => Some(dry_run_id(g, ElementKind::Vertex)),
+                    (None, true) => Some(dry_run_id(g, ElementKind::Vertex).map_err(general)?),
                     (None, false) => None,
                 };
                 g.add_vertex_with(id, labels.clone(), properties.clone(), &create)
-                    .map(|v| g.vertex_id(v).unwrap_or_default().to_string())
+                    .and_then(|v| Ok(g.vertex_id(v)?.unwrap_or_default().to_string()))
             }
             Create::Edge {
                 id,
@@ -206,15 +213,15 @@ fn add<S: GraphStorage>(
                 from,
                 to,
             } => {
-                let Some(source) = g.get_vertex_by_id(from) else {
+                let Some(source) = g.get_vertex_by_id(from).map_err(general)? else {
                     return Err(vec![gone_endpoint("from", from)]);
                 };
-                let Some(target) = g.get_vertex_by_id(to) else {
+                let Some(target) = g.get_vertex_by_id(to).map_err(general)? else {
                     return Err(vec![gone_endpoint("to", to)]);
                 };
                 let id = match (id, dry_run) {
                     (Some(id), _) => Some(id.clone()),
-                    (None, true) => Some(dry_run_id(g, ElementKind::Edge)),
+                    (None, true) => Some(dry_run_id(g, ElementKind::Edge).map_err(general)?),
                     (None, false) => None,
                 };
                 g.add_edge_with(
@@ -225,7 +232,7 @@ fn add<S: GraphStorage>(
                     properties.clone(),
                     &create,
                 )
-                .map(|e| g.edge_id(e).unwrap_or_default().to_string())
+                .and_then(|e| Ok(g.edge_id(e)?.unwrap_or_default().to_string()))
             }
         };
         let err = match attempt {
@@ -315,9 +322,9 @@ pub fn label_choices_in<S: GraphStorage>(g: &S, request: &Value) -> Result<Value
                 let id = id_text(request.get(field))
                     .ok_or_else(|| format!("an edge's label choices need \"{field}\""))?;
                 let v = g
-                    .get_vertex_by_id(&id)
+                    .get_vertex_by_id(&id)?
                     .ok_or_else(|| format!("the vertex {id} does not exist"))?;
-                Ok(g.vertex_labels(v).iter().map(|l| l.to_string()).collect())
+                Ok(g.vertex_labels(v)?.iter().map(|l| l.to_string()).collect())
             };
             let (from, to) = (endpoint("from")?, endpoint("to")?);
             let matches = |declared: &str, labels: &[String]| {
@@ -384,62 +391,67 @@ fn create_in<S: GraphStorage>(
 }
 
 /// `{kind, id, label, caption, source?, target?}` of the element `id` of `kind` in `g`, as the
-/// graph view draws it; `null` when there is none.
-pub fn drawn_in<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Value {
-    match kind {
+/// graph view draws it; `null` when there is none, `Err` when the storage cannot read it.
+pub fn drawn_in<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Result<Value, GraphError> {
+    Ok(match kind {
         ElementKind::Vertex => {
-            let Some(v) = g.get_vertex_by_id(id) else {
-                return Value::Null;
+            let Some(v) = g.get_vertex_by_id(id)? else {
+                return Ok(Value::Null);
             };
             json!({
                 "kind": "vertex",
                 "id": id,
-                "label": g.vertex_labels(v).first().map_or("", |l| l.as_str()),
-                "caption": g.vertex_properties(v)
+                "label": g.vertex_labels(v)?.first().map_or("", |l| l.as_str()),
+                "caption": g.vertex_properties(v)?
                     .and_then(|p| p.get("name"))
                     .and_then(|value| caption_text(value.logical().as_ref())),
             })
         }
         ElementKind::Edge => {
-            let Some(e) = g.get_edge_by_id(id) else {
-                return Value::Null;
+            let Some(e) = g.get_edge_by_id(id)? else {
+                return Ok(Value::Null);
             };
-            let (source, target) = g
-                .edge_endpoints(e)
-                .map(|(s, t)| {
-                    (
-                        g.vertex_id(s).unwrap_or_default().to_string(),
-                        g.vertex_id(t).unwrap_or_default().to_string(),
-                    )
-                })
-                .unwrap_or_default();
+            let (source, target) = match g.edge_endpoints(e)? {
+                Some((s, t)) => (
+                    g.vertex_id(s)?.unwrap_or_default().to_string(),
+                    g.vertex_id(t)?.unwrap_or_default().to_string(),
+                ),
+                None => Default::default(),
+            };
             json!({
                 "kind": "edge",
                 "id": id,
-                "label": g.edge_label(e).unwrap_or_default(),
+                "label": g.edge_label(e)?.unwrap_or_default(),
                 "caption": null,
                 "source": source,
                 "target": target,
             })
         }
-    }
+    })
 }
 
 /// How many edges deleting the element `id` of `kind` in `g` takes with it (a vertex's
-/// incident edges, a loop once; 0 for an edge); `None` when there is no such element.
-pub fn incident_edges<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Option<usize> {
-    match kind {
+/// incident edges, a loop once; 0 for an edge); `None` when there is no such element, `Err`
+/// when the storage cannot read it.
+pub fn incident_edges<S: GraphStorage>(
+    g: &S,
+    kind: ElementKind,
+    id: &str,
+) -> Result<Option<usize>, GraphError> {
+    Ok(match kind {
         ElementKind::Vertex => {
-            let v = g.get_vertex_by_id(id)?;
+            let Some(v) = g.get_vertex_by_id(id)? else {
+                return Ok(None);
+            };
             // A loop is one edge, met from both ends.
             let mut ids: HashSet<String> = HashSet::new();
-            for e in g.out_edges(v).chain(g.in_edges(v)) {
-                ids.insert(g.edge_id(e).unwrap_or_default().to_string());
+            for e in g.out_edges(v)?.chain(g.in_edges(v)?) {
+                ids.insert(g.edge_id(e)?.unwrap_or_default().to_string());
             }
             Some(ids.len())
         }
-        ElementKind::Edge => g.get_edge_by_id(id).map(|_| 0),
-    }
+        ElementKind::Edge => g.get_edge_by_id(id)?.map(|_| 0),
+    })
 }
 
 /// Deletes the element `id` of `kind` (a vertex with its edges) from `g` as ONE unit
@@ -453,11 +465,11 @@ pub fn delete_in<S: GraphStorage>(
 ) -> Result<bool, GraphError> {
     let drop = |g: &mut S| -> Result<(), GraphError> {
         match kind {
-            ElementKind::Vertex => match g.get_vertex_by_id(id) {
+            ElementKind::Vertex => match g.get_vertex_by_id(id)? {
                 Some(v) => g.drop_vertex(v),
                 None => Ok(()),
             },
-            ElementKind::Edge => match g.get_edge_by_id(id) {
+            ElementKind::Edge => match g.get_edge_by_id(id)? {
                 Some(e) => g.drop_edge(e),
                 None => Ok(()),
             },
@@ -940,26 +952,33 @@ mod tests {
         }
         let id = tg
             .edges()
+            .unwrap()
             .last()
-            .and_then(|e| tg.edge_id(e))
+            .and_then(|e| tg.edge_id(e).unwrap())
             .unwrap()
             .to_string();
         assert_eq!(
-            drawn_in(&tg, ElementKind::Edge, &id),
-            drawn_in(&fw, ElementKind::Edge, &id)
+            drawn_in(&tg, ElementKind::Edge, &id).unwrap(),
+            drawn_in(&fw, ElementKind::Edge, &id).unwrap()
         );
         assert_eq!(
-            drawn_in(&tg, ElementKind::Vertex, "1"),
-            drawn_in(&fw, ElementKind::Vertex, "1")
+            drawn_in(&tg, ElementKind::Vertex, "1").unwrap(),
+            drawn_in(&fw, ElementKind::Vertex, "1").unwrap()
         );
-        assert_eq!(incident_edges(&fw, ElementKind::Vertex, "1"), Some(4));
+        assert_eq!(
+            incident_edges(&fw, ElementKind::Vertex, "1").unwrap(),
+            Some(4)
+        );
         for validate_only in [true, false] {
             let a = delete_in(&mut tg, ElementKind::Vertex, "1", validate_only).ok();
             let b = delete_in(&mut fw, ElementKind::Vertex, "1", validate_only).ok();
             assert_eq!(a, Some(!validate_only));
             assert_eq!(b, Some(!validate_only));
         }
-        assert_eq!((fw.vertex_count(), fw.edge_count()), (5, 3));
-        assert_eq!(incident_edges(&fw, ElementKind::Vertex, "1"), None);
+        assert_eq!(
+            (fw.vertex_count().unwrap(), fw.edge_count().unwrap()),
+            (5, 3)
+        );
+        assert_eq!(incident_edges(&fw, ElementKind::Vertex, "1").unwrap(), None);
     }
 }

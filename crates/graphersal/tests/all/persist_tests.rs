@@ -57,28 +57,35 @@ fn element_text(element: &PropertyMap) -> String {
 /// Every vertex and edge of `graph` as one line each, sorted.
 pub(crate) fn dump(graph: &TraversalGraph) -> Vec<String> {
     let mut lines = Vec::new();
-    for v in graph.vertices() {
-        let labels: Vec<&str> = graph.vertex_labels(v).iter().map(|l| l.as_str()).collect();
+    for v in graph.vertices().unwrap() {
+        let labels: Vec<&str> = graph
+            .vertex_labels(v)
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str())
+            .collect();
         lines.push(format!(
             "v {} {:?} {}",
-            graph.vertex_id(v).unwrap_or("?"),
+            graph.vertex_id(v).unwrap().unwrap_or("?"),
             labels,
             graph
                 .vertex_properties(v)
+                .unwrap()
                 .map(element_text)
                 .unwrap_or_default()
         ));
     }
-    for e in graph.edges() {
-        let (from, to) = graph.edge_endpoints(e).expect("endpoints");
+    for e in graph.edges().unwrap() {
+        let (from, to) = graph.edge_endpoints(e).unwrap().expect("endpoints");
         lines.push(format!(
             "e {} {:?} {}->{} {}",
-            graph.edge_id(e).unwrap_or("?"),
-            graph.edge_label(e),
-            graph.vertex_id(from).unwrap_or("?"),
-            graph.vertex_id(to).unwrap_or("?"),
+            graph.edge_id(e).unwrap().unwrap_or("?"),
+            graph.edge_label(e).unwrap(),
+            graph.vertex_id(from).unwrap().unwrap_or("?"),
+            graph.vertex_id(to).unwrap().unwrap_or("?"),
             graph
                 .edge_properties(e)
+                .unwrap()
                 .map(element_text)
                 .unwrap_or_default()
         ));
@@ -210,10 +217,13 @@ fn add_person(graph: &mut TraversalGraph, name: &str) {
 pub(crate) fn names(graph: &TraversalGraph) -> Vec<String> {
     let mut names: Vec<String> = graph
         .vertices()
-        .filter_map(|v| match graph.vertex_properties(v)?.get("name")? {
-            ElementProperty::String(s) => Some(s.to_string()),
-            _ => None,
-        })
+        .unwrap()
+        .filter_map(
+            |v| match graph.vertex_properties(v).unwrap()?.get("name")? {
+                ElementProperty::String(s) => Some(s.to_string()),
+                _ => None,
+            },
+        )
         .collect();
     names.sort();
     names
@@ -242,7 +252,7 @@ fn snapshot_round_trip_keeps_every_value_type_and_shape() {
     // Statistics and indexes are rebuilt.
     assert_eq!(
         loaded.statistics().unwrap().cloned(),
-        Some(GraphStatistics::from_storage(&loaded))
+        Some(GraphStatistics::from_storage(&loaded).unwrap())
     );
     assert_eq!(loaded.statistics().unwrap(), graph.statistics().unwrap());
     let count = |g: GraphTraversalSource<'_, &TraversalGraph>| g.count().next().unwrap();
@@ -327,7 +337,8 @@ fn snapshot_restores_schema_position_sequences_and_lineage() {
     assert!(loaded.last_committed_at() >= time);
     let ids: Vec<String> = loaded
         .vertices()
-        .filter_map(|v| loaded.vertex_id(v).map(str::to_string))
+        .unwrap()
+        .filter_map(|v| loaded.vertex_id(v).unwrap().map(str::to_string))
         .collect();
     assert!(ids.contains(&(nodes + 1).to_string()), "{ids:?}");
 }
@@ -466,7 +477,7 @@ fn journal_records_are_the_lossless_change_sets() {
                 .with_principal("alice")
                 .with_attribute("ticket", 42i64),
             |g| -> Result<(), GraphError> {
-                let v = g.get_vertex_by_id("1").unwrap();
+                let v = g.get_vertex_by_id("1").unwrap().unwrap();
                 g.add_vertex_label(v, "admin".into())?;
                 g.drop_vertex_property("nested", v)?;
                 Ok(())

@@ -353,12 +353,12 @@ mod gql {
 #[test]
 fn the_unit_clock_is_in_nanoseconds() {
     let mut graph = TraversalGraph::new();
-    assert_eq!(graph.unit_started_at(), None);
+    assert_eq!(graph.unit_started_at().unwrap(), None);
     let before = system_nanos();
     let (first, context) = graph
         .transaction(|g| {
-            let started = g.unit_started_at().expect("inside a unit");
-            Ok::<_, GraphError>((started, CreateContext::for_storage(&*g)))
+            let started = g.unit_started_at().unwrap().expect("inside a unit");
+            Ok::<_, GraphError>((started, CreateContext::for_storage(&*g).unwrap()))
         })
         .unwrap();
     let after = system_nanos();
@@ -369,12 +369,15 @@ fn the_unit_clock_is_in_nanoseconds() {
     assert_eq!(context.now().epoch_nanos(), first);
     assert_eq!(context.now().offset_seconds(), 0);
     let second = graph
-        .transaction(|g| Ok::<_, GraphError>(g.unit_started_at().expect("inside a unit")))
+        .transaction(|g| Ok::<_, GraphError>(g.unit_started_at().unwrap().expect("inside a unit")))
         .unwrap();
     assert!(second >= first);
-    assert_eq!(graph.unit_started_at(), None);
+    assert_eq!(graph.unit_started_at().unwrap(), None);
     // Outside a unit a create reads the system clock.
-    let outside = CreateContext::for_storage(&graph).now().epoch_nanos();
+    let outside = CreateContext::for_storage(&graph)
+        .unwrap()
+        .now()
+        .epoch_nanos();
     assert!(outside >= before - 1_000_000);
 }
 
@@ -409,8 +412,8 @@ mod persist {
         }
         let read = |store: &Store, id: &str| {
             let lock = store.graph().read();
-            let v = lock.get_vertex_by_id(id).unwrap();
-            match lock.vertex_properties(v).unwrap().get("d") {
+            let v = lock.get_vertex_by_id(id).unwrap().unwrap();
+            match lock.vertex_properties(v).unwrap().unwrap().get("d") {
                 Some(ElementProperty::Temporal(Temporal::Duration(d))) => {
                     (d.months(), d.days(), d.nanos())
                 }

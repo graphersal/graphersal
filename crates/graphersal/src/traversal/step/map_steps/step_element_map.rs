@@ -136,7 +136,7 @@ fn push_vertex_tokens<S: GraphStorage>(
         ElementProperty::String(CompactString::new(id)),
         None,
     ));
-    if let Some(label) = storage.vertex_label(vertex) {
+    if let Some(label) = storage.vertex_label(vertex)? {
         keys.push(RecordKey::Label);
         values.push(TraverserValue::Computed(
             ElementProperty::String(CompactString::new(label)),
@@ -181,7 +181,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
     ) -> TraverserResult<Traverser<S>> {
         match &source.value {
             TraverserValue::Vertex(node_index) => {
-                let props = context.storage.vertex_properties(*node_index);
+                let props = context.storage.vertex_properties(*node_index)?;
                 let mut keys: Vec<RecordKey> =
                     Vec::with_capacity(props.map(|p| p.len()).unwrap_or(0) + 2);
                 let mut values: Vec<TraverserValue<S>> = Vec::with_capacity(keys.capacity());
@@ -192,8 +192,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
 
             TraverserValue::Edge(edge_index) => {
                 let id = crate::graph::storage::stored_edge_id(&*context.storage, *edge_index)?;
-                let label = context.storage.edge_label(*edge_index);
-                let props = context.storage.edge_properties(*edge_index);
+                let label = context.storage.edge_label(*edge_index)?;
+                let props = context.storage.edge_properties(*edge_index)?;
 
                 let mut keys: Vec<RecordKey> =
                     Vec::with_capacity(props.map(|p| p.len()).unwrap_or(0) + 4);
@@ -213,7 +213,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
                 }
                 // The endpoints, as TinkerPop's `Direction.OUT`/`Direction.IN` entries: a map of
                 // the vertex's `T.id` and `T.label`.
-                if let Some((out_vertex, in_vertex)) = context.storage.edge_endpoints(*edge_index) {
+                if let Some((out_vertex, in_vertex)) =
+                    context.storage.edge_endpoints(*edge_index)?
+                {
                     for (direction, vertex) in
                         [(RecordKey::Out, out_vertex), (RecordKey::In, in_vertex)]
                     {
@@ -255,7 +257,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
                         }
                     }
                     if let Some(path_keys) = &self.path_keys {
-                        path_keys.append_from_value(context, &source.value, &mut keys, &mut values);
+                        path_keys.append_from_value(
+                            context,
+                            &source.value,
+                            &mut keys,
+                            &mut values,
+                        )?;
                     }
                     Ok(Traverser::with_parts(
                         TraverserValue::Record {
@@ -299,7 +306,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
                     }
                 }
                 if let Some(path_keys) = &self.path_keys {
-                    path_keys.append_from_value(context, &source.value, &mut keys, &mut values);
+                    path_keys.append_from_value(context, &source.value, &mut keys, &mut values)?;
                 }
                 Ok(Traverser::with_parts(
                     TraverserValue::Record {

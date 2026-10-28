@@ -33,12 +33,12 @@ fn exact(graph: &TraversalGraph) -> GraphStatistics {
         .statistics()
         .unwrap()
         .expect("TraversalGraph keeps statistics");
-    assert_eq!(kept, &GraphStatistics::from_storage(graph));
+    assert_eq!(kept, &GraphStatistics::from_storage(graph).unwrap());
     kept.clone()
 }
 
 fn v(graph: &TraversalGraph, id: &str) -> VertexHandle {
-    graph.get_vertex_by_id(id).expect("vertex")
+    graph.get_vertex_by_id(id).unwrap().expect("vertex")
 }
 
 #[test]

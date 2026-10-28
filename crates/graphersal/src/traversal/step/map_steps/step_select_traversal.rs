@@ -145,8 +145,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSelectTraversal<'g, S
             return Ok(None);
         };
         let key_value =
-            StepSelect::<'_, S>::resolve_lazy(context, &first.value).unwrap_or(first.value);
-        let resolved = StepSelect::<'_, S>::resolve_lazy(context, &source.value);
+            StepSelect::<'_, S>::resolve_lazy(context, &first.value)?.unwrap_or(first.value);
+        let resolved = StepSelect::<'_, S>::resolve_lazy(context, &source.value)?;
         let map = resolved.as_ref().unwrap_or(&source.value);
         let value = match &key_value {
             TraverserValue::Computed(ElementProperty::String(key), _) => {

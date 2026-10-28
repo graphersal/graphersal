@@ -362,7 +362,7 @@ pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
     writer: W,
     options: &WriteOptions,
 ) -> Result<(SnapshotInfo, EncodeStats), PersistError> {
-    let encoder = SnapshotEncoder::new(graph, options);
+    let encoder = SnapshotEncoder::new(graph, options)?;
     let mut plans = Vec::new();
     let vertices = encoder.plan_kind(KIND_VERTEX, &mut |plan| {
         plans.push(plan);
@@ -1202,7 +1202,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     options: &ReadOptions,
     graph: &mut S,
 ) -> Result<(), PersistError> {
-    if graph.vertex_count() != 0 || graph.edge_count() != 0 {
+    if graph.vertex_count()? != 0 || graph.edge_count()? != 0 {
         return Err(PersistError::Graph(crate::error::GraphError::unsupported(
             "loading a snapshot into a storage that holds elements",
         )));
@@ -1358,8 +1358,8 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
             ));
         }
     }
-    if graph.vertex_count() as u64 != fixed.vertex_count
-        || graph.edge_count() as u64 != fixed.edge_count
+    if graph.vertex_count()? as u64 != fixed.vertex_count
+        || graph.edge_count()? as u64 != fixed.edge_count
         || vertex_properties != fixed.vertex_property_count
         || edge_properties != fixed.edge_property_count
     {
