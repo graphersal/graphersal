@@ -79,8 +79,9 @@ fn fails(graph: impl IntoAnyGraph, script: &str) -> String {
 fn vertex_props<S: GraphStorage>(graph: &Graph<S>, label: &str) -> Vec<PropertyMap> {
     let g = graph.read();
     g.vertices()
-        .filter(|v| g.vertex_labels(*v).iter().any(|l| l == label))
-        .map(|v| g.vertex_properties(v).cloned().unwrap_or_default())
+        .unwrap()
+        .filter(|v| g.vertex_labels(*v).unwrap().iter().any(|l| l == label))
+        .map(|v| g.vertex_properties(v).unwrap().cloned().unwrap_or_default())
         .collect()
 }
 
@@ -93,7 +94,8 @@ fn one_vertex<S: GraphStorage>(graph: &Graph<S>, label: &str) -> PropertyMap {
 fn edge_props<S: GraphStorage>(graph: &Graph<S>) -> Vec<PropertyMap> {
     let g = graph.read();
     g.edges()
-        .map(|e| g.edge_properties(e).cloned().unwrap_or_default())
+        .unwrap()
+        .map(|e| g.edge_properties(e).unwrap().cloned().unwrap_or_default())
         .collect()
 }
 
@@ -203,7 +205,7 @@ fn the_rust_api_creates_with_defaults() {
         .to_list()
         .unwrap();
     // The trait's create path too; the primitive `insert_vertex` stores exactly what it is given.
-    let create = CreateContext::for_storage(&tg);
+    let create = CreateContext::for_storage(&tg).unwrap();
     tg.add_vertex_with(
         Some("c".into()),
         vec!["person".into()],
@@ -223,7 +225,8 @@ fn the_rust_api_creates_with_defaults() {
     let raw = g
         .read()
         .get_vertex_by_id("raw")
-        .and_then(|v| g.read().vertex_properties(v).cloned())
+        .unwrap()
+        .and_then(|v| g.read().vertex_properties(v).unwrap().cloned())
         .unwrap();
     assert!(raw.is_empty(), "insert_vertex applies no default: {raw:?}");
     for props in all.iter().filter(|p| !p.is_empty()) {
@@ -300,7 +303,8 @@ fn multi_label_vertices_take_the_first_declaring_label() {
     let props = |id: &str| {
         let r = g.read();
         r.get_vertex_by_id(id)
-            .and_then(|v| r.vertex_properties(v).cloned())
+            .unwrap()
+            .and_then(|v| r.vertex_properties(v).unwrap().cloned())
             .unwrap()
     };
     assert_eq!(props("ab").get("x"), Some(&"from A".into()));
@@ -466,8 +470,9 @@ fn the_change_set_records_the_stored_defaults_and_replay_reproduces_them() {
     tg.traversal_mut().add_v("person").to_list().unwrap();
     let id = tg
         .vertices()
+        .unwrap()
         .next()
-        .and_then(|v| tg.vertex_id(v).map(str::to_string))
+        .and_then(|v| tg.vertex_id(v).unwrap().map(str::to_string))
         .unwrap();
     let recorded = RECORDED.with(|r| std::mem::take(&mut *r.borrow_mut()));
     assert_eq!(recorded.len(), 2, "set_schema, then add_v");
@@ -482,7 +487,8 @@ fn the_change_set_records_the_stored_defaults_and_replay_reproduces_them() {
     assert_fixed_defaults(&added);
     let stored = tg
         .get_vertex_by_id(&id)
-        .and_then(|v| tg.vertex_properties(v).cloned())
+        .unwrap()
+        .and_then(|v| tg.vertex_properties(v).unwrap().cloned())
         .unwrap();
     assert_eq!(added, stored, "the change set holds the generated values");
 
@@ -493,7 +499,8 @@ fn the_change_set_records_the_stored_defaults_and_replay_reproduces_them() {
     }
     let again = replayed
         .get_vertex_by_id(&id)
-        .and_then(|v| replayed.vertex_properties(v).cloned())
+        .unwrap()
+        .and_then(|v| replayed.vertex_properties(v).unwrap().cloned())
         .unwrap();
     assert_eq!(again, stored);
 }
@@ -503,12 +510,12 @@ fn a_rolled_back_create_leaves_nothing() {
     let mut tg = TraversalGraph::new();
     tg.traversal_mut().set_schema(schema(SCHEMA)).unwrap();
     let result: Result<(), GraphError> = tg.transaction(|g| {
-        let create = CreateContext::for_storage(&*g);
+        let create = CreateContext::for_storage(&*g).unwrap();
         g.add_vertex_with(None, vec!["person".into()], PropertyMap::default(), &create)?;
         Err(GraphError::unsupported("veto"))
     });
     assert!(result.is_err());
-    assert_eq!(tg.vertices().count(), 0);
+    assert_eq!(tg.vertices().unwrap().count(), 0);
     // A failing traversal after the create rolls back too.
     let g = graph(schema(SCHEMA));
     fails(

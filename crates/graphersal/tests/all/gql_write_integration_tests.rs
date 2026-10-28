@@ -24,22 +24,28 @@ fn dump<G: GraphStorage>(g: &G) -> Vec<String> {
     let text = |v: G::VertexId| {
         let mut props: Vec<String> = g
             .vertex_properties(v)
+            .unwrap()
             .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         props.sort();
-        format!("{:?} {{{}}}", g.vertex_labels(v), props.join(", "))
+        format!("{:?} {{{}}}", g.vertex_labels(v).unwrap(), props.join(", "))
     };
-    let mut lines: Vec<String> = g.vertices().map(|v| format!("V {}", text(v))).collect();
-    for e in g.edges() {
+    let mut lines: Vec<String> = g
+        .vertices()
+        .unwrap()
+        .map(|v| format!("V {}", text(v)))
+        .collect();
+    for e in g.edges().unwrap() {
         let mut props: Vec<String> = g
             .edge_properties(e)
+            .unwrap()
             .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         props.sort();
-        let (from, to) = g.edge_endpoints(e).expect("an edge has ends");
+        let (from, to) = g.edge_endpoints(e).unwrap().expect("an edge has ends");
         lines.push(format!(
             "E {} {{{}}} from {} to {}",
-            g.edge_label(e).unwrap_or_default(),
+            g.edge_label(e).unwrap().unwrap_or_default(),
             props.join(", "),
             text(from),
             text(to)
@@ -226,7 +232,7 @@ fn the_statistics_stay_exact_after_inserts() {
         .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
-    assert_eq!(kept, GraphStatistics::from_storage(&graph));
+    assert_eq!(kept, GraphStatistics::from_storage(&graph).unwrap());
     assert_eq!((kept.vertex_count(), kept.edge_count()), (14, 10));
     assert_eq!(kept.vertex_label_count("Pet"), 4);
     assert_eq!(kept.vertex_label_count("Cat"), 4);
@@ -303,7 +309,7 @@ fn the_statistics_stay_exact_after_deletes() {
         .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
-    assert_eq!(kept, GraphStatistics::from_storage(&graph));
+    assert_eq!(kept, GraphStatistics::from_storage(&graph).unwrap());
     assert_eq!((kept.vertex_count(), kept.edge_count()), (4, 0));
     assert_eq!(kept.vertex_label_count("software"), 0);
     assert_eq!(kept.vertex_label_count("person"), 4);
@@ -417,7 +423,7 @@ fn the_statistics_stay_exact_after_merges() {
         .unwrap()
         .expect("TraversalGraph keeps statistics")
         .clone();
-    assert_eq!(kept, GraphStatistics::from_storage(&graph));
+    assert_eq!(kept, GraphStatistics::from_storage(&graph).unwrap());
     assert_eq!((kept.vertex_count(), kept.edge_count()), (11, 10));
     assert_eq!(kept.vertex_label_count("Pet"), 4);
     assert_eq!(kept.primary_vertex_label_count("Cat"), 0);
@@ -469,9 +475,10 @@ fn open_mode_coerces_declared_values_on_write_and_refuses_wrong_ones() {
     );
     let person = graph
         .vertices()
-        .find(|&v| graph.vertex_has_label(v, "person"))
+        .unwrap()
+        .find(|&v| graph.vertex_has_label(v, "person").unwrap())
         .unwrap();
-    let props = graph.vertex_properties(person).unwrap();
+    let props = graph.vertex_properties(person).unwrap().unwrap();
     assert_eq!(
         props.get("uid"),
         Some(&ElementProperty::Uuid(
@@ -584,9 +591,13 @@ fn merge_creates_with_schema_defaults_and_a_violation_leaves_nothing() {
         ]
     );
     // Coerced to the declared `number` (as INSERT, open mode test above).
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         assert_eq!(
-            graph.vertex_properties(v).and_then(|p| p.get("w")).cloned(),
+            graph
+                .vertex_properties(v)
+                .unwrap()
+                .and_then(|p| p.get("w"))
+                .cloned(),
             Some(ElementProperty::from(2.0))
         );
     }

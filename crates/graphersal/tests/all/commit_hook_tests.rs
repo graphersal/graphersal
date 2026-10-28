@@ -160,29 +160,32 @@ fn sorted(element: Option<&PropertyMap>) -> Vec<(String, ElementProperty)> {
 fn content<S: GraphStorage>(graph: &S) -> Content {
     let mut vertices: Vec<_> = graph
         .vertices()
+        .unwrap()
         .map(|h| {
             (
-                graph.vertex_id(h).unwrap().to_string(),
+                graph.vertex_id(h).unwrap().unwrap().to_string(),
                 graph
                     .vertex_labels(h)
+                    .unwrap()
                     .iter()
                     .map(|l| l.to_string())
                     .collect(),
-                sorted(graph.vertex_properties(h)),
+                sorted(graph.vertex_properties(h).unwrap()),
             )
         })
         .collect();
     vertices.sort_by(|a, b| a.0.cmp(&b.0));
     let mut edges: Vec<_> = graph
         .edges()
+        .unwrap()
         .map(|h| {
-            let (from, to) = graph.edge_endpoints(h).unwrap();
+            let (from, to) = graph.edge_endpoints(h).unwrap().unwrap();
             (
-                graph.edge_id(h).unwrap().to_string(),
-                graph.edge_label(h).map(str::to_string),
-                graph.vertex_id(from).unwrap().to_string(),
-                graph.vertex_id(to).unwrap().to_string(),
-                sorted(graph.edge_properties(h)),
+                graph.edge_id(h).unwrap().unwrap().to_string(),
+                graph.edge_label(h).unwrap().map(str::to_string),
+                graph.vertex_id(from).unwrap().unwrap().to_string(),
+                graph.vertex_id(to).unwrap().unwrap().to_string(),
+                sorted(graph.edge_properties(h).unwrap()),
             )
         })
         .collect();
@@ -494,7 +497,7 @@ fn schema_and_data_of_one_traversal_roll_back_together_on_a_veto() {
     a.set_veto(true);
     let mark = graph.begin_unit().unwrap();
     graph.set_schema(person_schema(SchemaMode::Open)).unwrap();
-    let marko = graph.get_vertex_by_id("1").unwrap();
+    let marko = graph.get_vertex_by_id("1").unwrap().unwrap();
     graph
         .set_vertex_property(marko, "name".into(), "MARKO".into())
         .unwrap();
@@ -528,7 +531,7 @@ fn journal() -> (TraversalGraph, Vec<ChangeSet>) {
         .drop()
         .to_list()
         .unwrap();
-    let marko = graph.get_vertex_by_id("1").unwrap();
+    let marko = graph.get_vertex_by_id("1").unwrap().unwrap();
     let ann = graph
         .traversal()
         .v(None::<()>)
@@ -537,7 +540,7 @@ fn journal() -> (TraversalGraph, Vec<ChangeSet>) {
         .next()
         .unwrap();
     let ann = match ann {
-        Some(ElementProperty::String(id)) => graph.get_vertex_by_id(&id).unwrap(),
+        Some(ElementProperty::String(id)) => graph.get_vertex_by_id(&id).unwrap().unwrap(),
         other => panic!("unexpected id {other:?}"),
     };
     let mark = graph.begin_unit().unwrap();

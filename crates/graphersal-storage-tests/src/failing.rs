@@ -5,7 +5,9 @@
 //! `TraversalGraph` either) and forwards every method; a [`Faults`] switch makes one group of
 //! methods return [`GraphError::StorageFailed`]: the statistics, the property indexes, the index
 //! lookups, opening a unit, rolling a unit back (the wrapped graph IS rolled back, then the
-//! failure is reported, like a backend whose undo half failed), the execution policy, the schema.
+//! failure is reported, like a backend whose undo half failed), the execution policy, the schema,
+//! the element scans, the property reads of single elements, the adjacency of a vertex and the
+//! unit clock.
 //! The switches are shared ([`Failing::faults`]), so a test can turn a fault on while the storage
 //! sits inside a `Graph`. The [`failing`](self) contract functions use it.
 //!
@@ -43,6 +45,14 @@ pub struct Faults {
     pub execution_policy: AtomicBool,
     /// `get_schema`.
     pub get_schema: AtomicBool,
+    /// The element scans: `vertices`, `edges`, `vertices_by_label`, `edges_by_label`.
+    pub element_scan: AtomicBool,
+    /// The property reads of single elements: `vertex_properties`, `edge_properties`.
+    pub element_read: AtomicBool,
+    /// The adjacency of a vertex: `out_edges`, `in_edges`.
+    pub adjacency: AtomicBool,
+    /// `unit_started_at` (read when an element is created).
+    pub unit_started_at: AtomicBool,
 }
 
 impl Faults {
@@ -101,89 +111,118 @@ impl GraphStorage for Failing {
     type VertexId = ForwardVertexId;
     type EdgeId = ForwardEdgeId;
 
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         GraphStorage::vertex_count(&self.inner)
     }
 
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         GraphStorage::edge_count(&self.inner)
     }
 
-    fn vertices(&self) -> impl Iterator<Item = ForwardVertexId> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = ForwardVertexId> + '_, GraphError> {
+        self.faults
+            .check(&self.faults.element_scan, "scan its vertices")?;
         GraphStorage::vertices(&self.inner)
     }
 
-    fn edges(&self) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        self.faults
+            .check(&self.faults.element_scan, "scan its edges")?;
         GraphStorage::edges(&self.inner)
     }
 
-    fn get_vertex_by_id(&self, id: &str) -> Option<ForwardVertexId> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<ForwardVertexId>, GraphError> {
         GraphStorage::get_vertex_by_id(&self.inner, id)
     }
 
-    fn get_edge_by_id(&self, id: &str) -> Option<ForwardEdgeId> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<ForwardEdgeId>, GraphError> {
         GraphStorage::get_edge_by_id(&self.inner, id)
     }
 
-    fn out_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+    fn out_edges(
+        &self,
+        node: ForwardVertexId,
+    ) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        self.faults.check(
+            &self.faults.adjacency,
+            "read the outgoing edges of a vertex",
+        )?;
         GraphStorage::out_edges(&self.inner, node)
     }
 
-    fn in_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+    fn in_edges(
+        &self,
+        node: ForwardVertexId,
+    ) -> Result<impl Iterator<Item = ForwardEdgeId> + '_, GraphError> {
+        self.faults.check(
+            &self.faults.adjacency,
+            "read the incoming edges of a vertex",
+        )?;
         GraphStorage::in_edges(&self.inner, node)
     }
 
-    fn vertex_id(&self, node: ForwardVertexId) -> Option<&str> {
+    fn vertex_id(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_id(&self.inner, node)
     }
 
-    fn edge_id(&self, edge: ForwardEdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_id(&self.inner, edge)
     }
 
-    fn vertex_label(&self, node: ForwardVertexId) -> Option<&str> {
+    fn vertex_label(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_label(&self.inner, node)
     }
 
-    fn edge_label(&self, edge: ForwardEdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_label(&self.inner, edge)
     }
 
-    fn vertex_labels(&self, node: ForwardVertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: ForwardVertexId) -> Result<&[CompactString], GraphError> {
         GraphStorage::vertex_labels(&self.inner, node)
     }
 
-    fn vertex_properties(&self, node: ForwardVertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: ForwardVertexId) -> Result<Option<&PropertyMap>, GraphError> {
+        self.faults
+            .check(&self.faults.element_read, "read the properties of a vertex")?;
         GraphStorage::vertex_properties(&self.inner, node)
     }
 
-    fn edge_properties(&self, edge: ForwardEdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: ForwardEdgeId) -> Result<Option<&PropertyMap>, GraphError> {
+        self.faults
+            .check(&self.faults.element_read, "read the properties of an edge")?;
         GraphStorage::edge_properties(&self.inner, edge)
     }
 
-    fn edge_endpoints(&self, edge: ForwardEdgeId) -> Option<(ForwardVertexId, ForwardVertexId)> {
+    fn edge_endpoints(
+        &self,
+        edge: ForwardEdgeId,
+    ) -> Result<Option<(ForwardVertexId, ForwardVertexId)>, GraphError> {
         GraphStorage::edge_endpoints(&self.inner, edge)
     }
 
-    fn contains_vertex(&self, node: ForwardVertexId) -> bool {
+    fn contains_vertex(&self, node: ForwardVertexId) -> Result<bool, GraphError> {
         GraphStorage::contains_vertex(&self.inner, node)
     }
 
-    fn contains_edge(&self, edge: ForwardEdgeId) -> bool {
+    fn contains_edge(&self, edge: ForwardEdgeId) -> Result<bool, GraphError> {
         GraphStorage::contains_edge(&self.inner, edge)
     }
 
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = ForwardVertexId> + 'a> {
+    ) -> Result<Box<dyn Iterator<Item = ForwardVertexId> + 'a>, GraphError> {
+        self.faults
+            .check(&self.faults.element_scan, "scan its vertices by label")?;
         GraphStorage::vertices_by_label(&self.inner, label)
     }
 
     fn edges_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = ForwardEdgeId> + 'a> {
+    ) -> Result<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>, GraphError> {
+        self.faults
+            .check(&self.faults.element_scan, "scan its edges by label")?;
         GraphStorage::edges_by_label(&self.inner, label)
     }
 
@@ -492,7 +531,9 @@ impl GraphStorage for Failing {
         GraphStorage::last_commit_seq(&self.inner)
     }
 
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        self.faults
+            .check(&self.faults.unit_started_at, "read the unit clock")?;
         GraphStorage::unit_started_at(&self.inner)
     }
 

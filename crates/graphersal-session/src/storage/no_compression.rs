@@ -25,65 +25,71 @@ impl GraphStorage for NoCompression {
     type VertexId = Fv;
     type EdgeId = Fe;
 
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         GraphStorage::vertex_count(&self.0)
     }
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         GraphStorage::edge_count(&self.0)
     }
-    fn vertices(&self) -> impl Iterator<Item = Fv> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = Fv> + '_, GraphError> {
         GraphStorage::vertices(&self.0)
     }
-    fn edges(&self) -> impl Iterator<Item = Fe> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = Fe> + '_, GraphError> {
         GraphStorage::edges(&self.0)
     }
-    fn get_vertex_by_id(&self, id: &str) -> Option<Fv> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Fv>, GraphError> {
         GraphStorage::get_vertex_by_id(&self.0, id)
     }
-    fn get_edge_by_id(&self, id: &str) -> Option<Fe> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Fe>, GraphError> {
         GraphStorage::get_edge_by_id(&self.0, id)
     }
-    fn out_edges(&self, node: Fv) -> impl Iterator<Item = Fe> + '_ {
+    fn out_edges(&self, node: Fv) -> Result<impl Iterator<Item = Fe> + '_, GraphError> {
         GraphStorage::out_edges(&self.0, node)
     }
-    fn in_edges(&self, node: Fv) -> impl Iterator<Item = Fe> + '_ {
+    fn in_edges(&self, node: Fv) -> Result<impl Iterator<Item = Fe> + '_, GraphError> {
         GraphStorage::in_edges(&self.0, node)
     }
-    fn vertex_id(&self, node: Fv) -> Option<&str> {
+    fn vertex_id(&self, node: Fv) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_id(&self.0, node)
     }
-    fn edge_id(&self, edge: Fe) -> Option<&str> {
+    fn edge_id(&self, edge: Fe) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_id(&self.0, edge)
     }
-    fn vertex_label(&self, node: Fv) -> Option<&str> {
+    fn vertex_label(&self, node: Fv) -> Result<Option<&str>, GraphError> {
         GraphStorage::vertex_label(&self.0, node)
     }
-    fn edge_label(&self, edge: Fe) -> Option<&str> {
+    fn edge_label(&self, edge: Fe) -> Result<Option<&str>, GraphError> {
         GraphStorage::edge_label(&self.0, edge)
     }
-    fn vertex_labels(&self, node: Fv) -> &[CompactString] {
+    fn vertex_labels(&self, node: Fv) -> Result<&[CompactString], GraphError> {
         GraphStorage::vertex_labels(&self.0, node)
     }
-    fn vertex_properties(&self, node: Fv) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: Fv) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::vertex_properties(&self.0, node)
     }
-    fn edge_properties(&self, edge: Fe) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: Fe) -> Result<Option<&PropertyMap>, GraphError> {
         GraphStorage::edge_properties(&self.0, edge)
     }
-    fn edge_endpoints(&self, edge: Fe) -> Option<(Fv, Fv)> {
+    fn edge_endpoints(&self, edge: Fe) -> Result<Option<(Fv, Fv)>, GraphError> {
         GraphStorage::edge_endpoints(&self.0, edge)
     }
-    fn contains_vertex(&self, node: Fv) -> bool {
+    fn contains_vertex(&self, node: Fv) -> Result<bool, GraphError> {
         GraphStorage::contains_vertex(&self.0, node)
     }
-    fn contains_edge(&self, edge: Fe) -> bool {
+    fn contains_edge(&self, edge: Fe) -> Result<bool, GraphError> {
         GraphStorage::contains_edge(&self.0, edge)
     }
-    fn vertices_by_label<'a>(&'a self, label: &'a str) -> Box<dyn Iterator<Item = Fv> + 'a> {
-        Box::new(GraphStorage::vertices_by_label(&self.0, label))
+    fn vertices_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = Fv> + 'a>, GraphError> {
+        GraphStorage::vertices_by_label(&self.0, label)
     }
-    fn edges_by_label<'a>(&'a self, label: &'a str) -> Box<dyn Iterator<Item = Fe> + 'a> {
-        Box::new(GraphStorage::edges_by_label(&self.0, label))
+    fn edges_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = Fe> + 'a>, GraphError> {
+        GraphStorage::edges_by_label(&self.0, label)
     }
     fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
         GraphStorage::statistics(&self.0)

@@ -27,29 +27,29 @@ pub(crate) fn peek_path<S: GraphStorage, R>(
     match value {
         TraverserValue::Vertex(node) => Ok(context
             .storage
-            .vertex_properties(*node)
+            .vertex_properties(*node)?
             .and_then(|props| descend_properties(props, segments))
             .map(f)),
         TraverserValue::Edge(edge) => Ok(context
             .storage
-            .edge_properties(*edge)
+            .edge_properties(*edge)?
             .and_then(|props| descend_properties(props, segments))
             .map(f)),
         TraverserValue::Computed(root, _) => Ok(descend_property(root, segments).map(f)),
         TraverserValue::VertexProperty(name, node, _) => Ok(context
             .storage
-            .vertex_properties(*node)
+            .vertex_properties(*node)?
             .and_then(|props| props.get(name.as_str()))
             .and_then(|root| descend_property(root, segments))
             .map(f)),
         TraverserValue::EdgeProperty(name, edge, _) => Ok(context
             .storage
-            .edge_properties(*edge)
+            .edge_properties(*edge)?
             .and_then(|props| props.get(name.as_str()))
             .and_then(|root| descend_property(root, segments))
             .map(f)),
         TraverserValue::Object(_) | TraverserValue::Record { .. } => {
-            match TraverserValue::resolve_json_path(context, value, segments) {
+            match TraverserValue::resolve_json_path(context, value, segments)? {
                 Some(leaf) => {
                     let leaf = leaf.into_node_property(context.storage)?;
                     Ok(Some(f(&leaf)))
@@ -139,12 +139,14 @@ impl PathKeys {
         value: &TraverserValue<S>,
         keys: &mut Vec<RecordKey>,
         values: &mut Vec<TraverserValue<S>>,
-    ) {
+    ) -> Result<(), crate::error::GraphError> {
         for (path, text) in &self.paths {
-            if let Some(leaf) = TraverserValue::resolve_json_path(context, value, path.segments()) {
+            if let Some(leaf) = TraverserValue::resolve_json_path(context, value, path.segments())?
+            {
                 keys.push(RecordKey::Name(text.clone()));
                 values.push(leaf);
             }
         }
+        Ok(())
     }
 }

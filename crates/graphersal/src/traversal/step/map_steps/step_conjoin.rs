@@ -109,12 +109,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConjoin {
         context: &mut TraverserContext<'_, S>,
         source: Traverser<S>,
     ) -> TraverserResult<Option<Traverser<S>>> {
-        if kind_of(context, &source.value) != Kind::List {
+        if kind_of(context, &source.value)? != Kind::List {
             return Err(input_error(
                 "conjoin",
                 "incoming value",
                 "list",
-                kind_name(context, &source.value),
+                kind_name(context, &source.value)?,
             ));
         }
         let Traverser {
@@ -129,7 +129,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConjoin {
         // long delimiter multiplies the length.
         let max = context.options.max_string_bytes;
         for item in list_items(context, value)? {
-            if is_null(context, &item) {
+            if is_null(context, &item)? {
                 continue;
             }
             let text = element_string(context, &item)?;

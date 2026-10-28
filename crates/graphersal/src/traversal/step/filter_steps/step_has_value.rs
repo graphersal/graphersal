@@ -95,7 +95,7 @@ impl StepHasValue {
     ) -> TraverserResult<bool> {
         match source {
             TraverserValue::Vertex(v) => {
-                let vertex = context.storage.vertex_properties(*v);
+                let vertex = context.storage.vertex_properties(*v)?;
                 match vertex {
                     Some(vertex) => Ok(vertex.values().any(|r| self.matches_scalar_or_nested(r))),
                     None => Ok(false),
@@ -107,7 +107,7 @@ impl StepHasValue {
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 match vertex {
                     Some(vertex) => {
                         let value = vertex.get(prop_name.as_str());
@@ -132,7 +132,7 @@ impl StepHasValue {
 
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop_name = prop_name.clone();
-                let edge = context.storage.edge_properties(*edge_index);
+                let edge = context.storage.edge_properties(*edge_index)?;
                 match edge {
                     Some(edge) => {
                         let value = edge.get(prop_name.as_str());
@@ -156,7 +156,7 @@ impl StepHasValue {
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_map = context.storage.edge_properties(*edge_index);
+                let edge_map = context.storage.edge_properties(*edge_index)?;
                 match edge_map {
                     Some(edge_map) => {
                         Ok(edge_map.values().any(|r| self.matches_scalar_or_nested(r)))
@@ -402,7 +402,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
             TraverserValue::Vertex(v) => {
                 let values: Option<Vec<ElementProperty>> = context
                     .storage
-                    .vertex_properties(*v)
+                    .vertex_properties(*v)?
                     .map(|vertex| vertex.values().map(ElementProperty::to_logical).collect());
                 match values {
                     Some(values) => {
@@ -424,7 +424,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 let prop_name = prop_name.clone();
                 let value = context
                     .storage
-                    .vertex_properties(*node_index)
+                    .vertex_properties(*node_index)?
                     .and_then(|vertex| vertex.get(prop_name.as_str()))
                     .cloned();
                 match value {
@@ -440,7 +440,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 let prop_name = prop_name.clone();
                 let value = context
                     .storage
-                    .edge_properties(*edge_index)
+                    .edge_properties(*edge_index)?
                     .and_then(|edge| edge.get(prop_name.as_str()))
                     .cloned();
                 match value {
@@ -455,7 +455,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
             TraverserValue::Edge(edge_index) => {
                 let values: Option<Vec<ElementProperty>> = context
                     .storage
-                    .edge_properties(*edge_index)
+                    .edge_properties(*edge_index)?
                     .map(|edge| edge.values().map(ElementProperty::to_logical).collect());
                 match values {
                     Some(values) => {
@@ -657,7 +657,7 @@ impl StepHasValueAny {
     ) -> TraverserResult<bool> {
         match source {
             TraverserValue::Vertex(v) => {
-                let vertex = context.storage.vertex_properties(*v);
+                let vertex = context.storage.vertex_properties(*v)?;
                 match vertex {
                     Some(vertex) => Ok(vertex.values().any(|r| self.matches_scalar_or_nested(r))),
                     None => Ok(false),
@@ -669,7 +669,7 @@ impl StepHasValueAny {
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 match vertex {
                     Some(vertex) => {
                         let value = vertex.get(prop_name.as_str());
@@ -690,7 +690,7 @@ impl StepHasValueAny {
 
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop_name = prop_name.clone();
-                let edge = context.storage.edge_properties(*edge_index);
+                let edge = context.storage.edge_properties(*edge_index)?;
                 match edge {
                     Some(edge) => {
                         let value = edge.get(prop_name.as_str());
@@ -710,7 +710,7 @@ impl StepHasValueAny {
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_map = context.storage.edge_properties(*edge_index);
+                let edge_map = context.storage.edge_properties(*edge_index)?;
                 match edge_map {
                     Some(edge_map) => {
                         Ok(edge_map.values().any(|r| self.matches_scalar_or_nested(r)))

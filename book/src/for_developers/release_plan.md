@@ -90,7 +90,20 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `memory_structure`, `memory_footprint_bytes`, `execution_policy`, `begin_unit`,
   `begin_unit_at`, `next_unit_started_at`, `rollback_unit`, `unit_changes`, `set_unit_metadata`,
   `capabilities`, `last_commit_seq`. A failed `rollback_unit` still closes the unit; the engine
-  reports `GraphError::RollbackFailed`. The hot element reads and `unit_started_at` stay plain.
+  reports `GraphError::RollbackFailed`.
+- `GraphStorage`, the element reads too: `vertex_count`/`edge_count` -> `Result<usize, _>`,
+  `vertices`/`edges`/`out_edges`/`in_edges` -> `Result<impl Iterator, _>` (one `Result` per
+  call, never per item), `vertices_by_label`/`edges_by_label` -> `Result<Box<dyn Iterator>, _>`
+  (their defaults now collect the matches first, so a failing label read is the call's error),
+  `get_vertex_by_id`/`get_edge_by_id`/`vertex_id`/`edge_id`/`vertex_label`/`edge_label`/
+  `vertex_properties`/`edge_properties`/`edge_endpoints` -> `Result<Option<_>, _>`,
+  `vertex_labels` -> `Result<&[CompactString], _>`, `vertex_has_label`/`contains_vertex`/
+  `contains_edge` -> `Result<bool, _>`, `unit_started_at` -> `Result<Option<i128>, _>`. The
+  engine fails the reading query with the error, located at its step. `TraversalGraph`'s own
+  inherent `vertex_count()`/`edge_count()` stay plain `usize` (an in-memory count that cannot
+  fail).
+- `CreateContext::for_storage` and `GraphStatistics::from_storage` return
+  `Result<_, GraphError>` (they read the storage).
 - `PersistentStorage` (EXPERIMENTAL): `set_graph_id`, `raise_position`, `reserve_load`,
   `finish_load`, `clear` return `Result<(), GraphError>`.
 - `StoreDir` (EXPERIMENTAL): `space_usage() -> io::Result<Option<SpaceUsage>>`,
@@ -100,7 +113,7 @@ never answers a failure with an empty or default value. The upgrade step for eac
   for an unreadable file).
 - `GraphTraversalSource::statistics() -> TraverserResult<Option<&GraphStatistics>>` and
   `memory_usage() -> TraverserResult<Option<MemoryStats>>` (were the plain values).
-- `CreateContext::for_storage` is unchanged (it reads the plain `unit_started_at`).
+
 - Added (not breaking): `Graph::try_write_checked`, `UserJobs`, `NotScheduledJob`,
   `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`,
   `GraphError::StorageFailed` (`GraphError::storage_failed`), `GraphError::RollbackFailed`
@@ -122,6 +135,11 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `subgraph`, `element_view`, `drawn`, `incident_edges`, `queries`, `query`, `count_kind`,
   `catalog_text`, `compressions`, `compression`, `indexes`, `index`, `run_changes`, `rollback_run`
   return `Result<_, GraphError>`.
+- The generic helpers over a storage's element reads return `Result<_, GraphError>` too:
+  `CompactGraph::build`, `CompactGraph::add_degrees`, `display::element_of`
+  (`Result<Option<_>, _>`), `display::node_of`, `display::edge_of`, `display::collect_subgraph`
+  (`Result<Option<_>, _>`), `views::graph_view`, `create::drawn_in`, `create::incident_edges`
+  (`Result<Option<usize>, _>`), `edit::element_view`.
 - `SessionStore`: `read_only_reason`, `damage_found`, `damage_policy`,
   `last_auto_checkpoint_error`, `user_jobs` return `Result<_, PersistError>` like `Store`.
 - The generic helpers `compressions_in`, `compression_in`, `indexes_in`, `index_in`,

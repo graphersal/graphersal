@@ -119,9 +119,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOutE {
 
         match node_index {
             Some(node_index) => {
-                for edge in context.storage.out_edges(node_index) {
+                for edge in context.storage.out_edges(node_index)? {
                     let mut found = false;
-                    let edge_label = context.storage.edge_label(edge);
+                    let edge_label = context.storage.edge_label(edge)?;
 
                     match &self.labels {
                         Some(labels) => {
@@ -219,9 +219,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOutE {
         match node_index {
             Some(node_index) => {
                 let mut count = 0u64;
-                for edge in context.storage.out_edges(node_index) {
+                for edge in context.storage.out_edges(node_index)? {
                     let mut found = false;
-                    let edge_label = context.storage.edge_label(edge);
+                    let edge_label = context.storage.edge_label(edge)?;
 
                     match &self.labels {
                         Some(labels) => {

@@ -133,13 +133,24 @@ fn temporal_graph() -> TraversalGraph {
 }
 
 fn vertex_map(graph: &TraversalGraph, id: &str) -> PropertyMap {
-    let v = graph.get_vertex_by_id(id).expect("vertex");
-    graph.vertex_properties(v).cloned().unwrap_or_default()
+    let v = graph.get_vertex_by_id(id).unwrap().expect("vertex");
+    graph
+        .vertex_properties(v)
+        .unwrap()
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn edge_since(graph: &TraversalGraph) -> String {
-    let e = graph.get_edge_by_id("e").expect("edge");
-    exact(graph.edge_properties(e).unwrap().get("since").unwrap())
+    let e = graph.get_edge_by_id("e").unwrap().expect("edge");
+    exact(
+        graph
+            .edge_properties(e)
+            .unwrap()
+            .unwrap()
+            .get("since")
+            .unwrap(),
+    )
 }
 
 fn assert_holds_edge_values(graph: &TraversalGraph) {
@@ -218,12 +229,16 @@ mod binary {
         assert_eq!(graph.edge_count(), 6);
         let thing = graph
             .vertices()
+            .unwrap()
             .find(|&v| {
-                graph.vertex_properties(v).and_then(|p| p.get("name"))
+                graph
+                    .vertex_properties(v)
+                    .unwrap()
+                    .and_then(|p| p.get("name"))
                     == Some(&ElementProperty::from("thing"))
             })
             .expect("the thing vertex");
-        let props = graph.vertex_properties(thing).unwrap();
+        let props = graph.vertex_properties(thing).unwrap().unwrap();
         assert_eq!(
             props.get("u"),
             Some(&ElementProperty::Uuid(
@@ -476,7 +491,7 @@ mod binary {
         {
             let lock = store.graph().read();
             assert_eq!(exact_map(&vertex_map(&lock, "t")), exact_map(&edge_map()));
-            assert!(lock.get_vertex_by_id("later").is_none());
+            assert!(lock.get_vertex_by_id("later").unwrap().is_none());
         }
         store.close().unwrap();
         let store = Store::open(&dir, StoreOptions::new()).unwrap();
@@ -503,7 +518,14 @@ mod binary {
         match Store::open(&dir, StoreOptions::new()) {
             Ok(store) => {
                 assert!(store.maintenance().is_some(), "opened without damage");
-                assert!(store.graph().read().get_vertex_by_id("t").is_none());
+                assert!(
+                    store
+                        .graph()
+                        .read()
+                        .get_vertex_by_id("t")
+                        .unwrap()
+                        .is_none()
+                );
             }
             Err(err) => assert!(matches!(err, PersistError::Corrupt { .. }), "{err}"),
         }
@@ -861,9 +883,16 @@ mod graphson {
         );
         let (graph, report) = load(text);
         assert!(!report.has_skips(), "{report}");
-        let e = graph.get_edge_by_id("e").unwrap();
+        let e = graph.get_edge_by_id("e").unwrap().unwrap();
         assert_eq!(
-            exact(graph.edge_properties(e).unwrap().get("since").unwrap()),
+            exact(
+                graph
+                    .edge_properties(e)
+                    .unwrap()
+                    .unwrap()
+                    .get("since")
+                    .unwrap()
+            ),
             "date(2001-02-03)"
         );
         let meta = vertex_map(&graph, "a");
@@ -1016,7 +1045,9 @@ mod schema {
         props.insert(key, value);
         lock.transaction(|g| {
             let v = g.add_vertex(None, vec!["e".into()], props)?;
-            Ok(exact(g.vertex_properties(v).unwrap().get(key).unwrap()))
+            Ok(exact(
+                g.vertex_properties(v).unwrap().unwrap().get(key).unwrap(),
+            ))
         })
     }
 
@@ -1213,11 +1244,16 @@ mod schema {
         assert!(err.to_string().contains("not a datetime"), "{err}");
         // A jpath write coerces its leaf to the declared type.
         let mut lock = graph.write();
-        let v = lock.vertices().next().unwrap();
+        let v = lock.vertices().unwrap().next().unwrap();
         let path: JsonPath = "meta.window.from".parse().unwrap();
         lock.transaction(|g| g.set_vertex_property_path(v, &path, "2024-03-01".into()))
             .unwrap();
-        let meta = lock.vertex_properties(v).unwrap().get("meta").unwrap();
+        let meta = lock
+            .vertex_properties(v)
+            .unwrap()
+            .unwrap()
+            .get("meta")
+            .unwrap();
         assert!(
             exact(meta).contains("window: {from: date(2024-03-01)}"),
             "{}",

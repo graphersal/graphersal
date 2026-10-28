@@ -138,7 +138,7 @@ impl StepReduceLocal {
     ) -> TraverserResult<Option<ElementProperty>> {
         let mut reducer = Reducer::new(self.kind);
         // A stored list property is read in place, without cloning it.
-        if let Some(ElementProperty::Array(items)) = stored_value(context, &value) {
+        if let Some(ElementProperty::Array(items)) = stored_value(context, &value)? {
             let source = match &value {
                 TraverserValue::VertexProperty(property, node, _) => {
                     ValueSource::Vertex(*node, Some(property.clone()))

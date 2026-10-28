@@ -217,7 +217,7 @@ pub(crate) fn write_graph_snapshot<S: PersistentStorage + ?Sized>(
     graph: &S,
     options: &WriteOptions,
 ) -> Result<EncodeStats, PersistError> {
-    let encoder = SnapshotEncoder::new(graph, options);
+    let encoder = SnapshotEncoder::new(graph, options)?;
     let mut index = Vec::new();
     let mut property_counts = [0u64; 2];
     for (slot, kind) in [KIND_VERTEX, KIND_EDGE].into_iter().enumerate() {

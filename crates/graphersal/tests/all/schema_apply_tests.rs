@@ -333,8 +333,8 @@ fn group_storage_is_bounded() {
 fn a_failed_application_leaves_graph_and_schema_unchanged() {
     let mut g = violating_graph();
     let (p0, c0) = (
-        g.get_vertex_by_id("p0").unwrap(),
-        g.get_vertex_by_id("c0").unwrap(),
+        g.get_vertex_by_id("p0").unwrap().unwrap(),
+        g.get_vertex_by_id("c0").unwrap().unwrap(),
     );
     g.add_edge(None, Some("knows".into()), p0, c0, PropertyMap::default())
         .unwrap();
@@ -351,7 +351,7 @@ fn a_failed_application_leaves_graph_and_schema_unchanged() {
         );
         // the data is untouched: no coercion, no removal
         assert_eq!(
-            g.vertex_properties(p0).and_then(|p| p.get("name")),
+            g.vertex_properties(p0).unwrap().and_then(|p| p.get("name")),
             Some(&s("x"))
         );
     }
@@ -376,7 +376,7 @@ fn a_failed_application_leaves_graph_and_schema_unchanged() {
     let ib = b
         .add_vertex(None, vec!["Alien".into()], PropertyMap::default())
         .unwrap();
-    assert_eq!(a.vertex_id(ia), b.vertex_id(ib));
+    assert_eq!(a.vertex_id(ia).unwrap(), b.vertex_id(ib).unwrap());
 }
 
 #[test]
@@ -790,7 +790,7 @@ fn label_changes_recheck_incident_edge_topology_atomically_in_closed() {
     // removing Person leaves no matching label on the source of two edges
     let err = g.remove_vertex_label(a, "Person").unwrap_err();
     assert!(err.to_string().contains("not defined in schema"), "{err}");
-    assert_eq!(g.vertex_labels(a).len(), 2, "unchanged");
+    assert_eq!(g.vertex_labels(a).unwrap().len(), 2, "unchanged");
     // as target: the Company side
     g.add_edge(
         Some("g".into()),

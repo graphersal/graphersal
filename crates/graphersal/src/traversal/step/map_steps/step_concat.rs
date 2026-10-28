@@ -202,7 +202,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConcat<'g, S> {
         };
         // Whether any part (the incoming value included) was not `null`.
         let mut any = false;
-        if !is_null(context, &source.value) {
+        if !is_null(context, &source.value)? {
             match Traverser::as_string_ref(context, &source.value)? {
                 Some(text) => {
                     fits(&out, text.len())?;
@@ -211,7 +211,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConcat<'g, S> {
                 None => {
                     return Err(Box::new(TraverserError::cast_exception_str(
                         &["string"],
-                        Traverser::observed_type_name(context, &source.value),
+                        Traverser::observed_type_name(context, &source.value)?,
                     )));
                 }
             }
@@ -238,7 +238,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConcat<'g, S> {
                             "no result (the traversal yielded nothing)".to_string(),
                         ));
                     };
-                    if is_null(context, &first.value) {
+                    if is_null(context, &first.value)? {
                         continue;
                     }
                     let text = match &first.value {
@@ -267,7 +267,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConcat<'g, S> {
                         None => {
                             return Err(argument_error(
                                 "traversal argument",
-                                kind_name(context, &first.value),
+                                kind_name(context, &first.value)?,
                             ));
                         }
                     }

@@ -39,10 +39,10 @@ where
     let mut vertices: HashMap<S::VertexId, T::VertexId> = HashMap::new();
     for edge in edges {
         let edge_id = stored_edge_id(source, edge)?;
-        if target.get_edge_by_id(edge_id).is_some() {
+        if target.get_edge_by_id(edge_id)?.is_some() {
             continue;
         }
-        let (from, to) = source.edge_endpoints(edge).ok_or_else(|| {
+        let (from, to) = source.edge_endpoints(edge)?.ok_or_else(|| {
             Box::new(TraverserError::QueryExecution {
                 query: "subgraph".to_string(),
                 reason: format!("edge '{edge_id}' has no endpoints"),
@@ -52,11 +52,11 @@ where
         let to = ensure_vertex(source, target, &mut vertices, to)?;
         target.insert_edge(
             Some(CompactString::new(edge_id)),
-            source.edge_label(edge).map(CompactString::new),
+            source.edge_label(edge)?.map(CompactString::new),
             from,
             to,
             source
-                .edge_properties(edge)
+                .edge_properties(edge)?
                 .map(crate::value::logical_element)
                 .unwrap_or_default(),
         )?;
@@ -86,13 +86,13 @@ where
         return Ok(*existing);
     }
     let id = stored_vertex_id(source, vertex)?;
-    let handle = match target.get_vertex_by_id(id) {
+    let handle = match target.get_vertex_by_id(id)? {
         Some(existing) => existing,
         None => target.insert_vertex(
             Some(CompactString::new(id)),
-            source.vertex_labels(vertex).to_vec(),
+            source.vertex_labels(vertex)?.to_vec(),
             source
-                .vertex_properties(vertex)
+                .vertex_properties(vertex)?
                 .map(crate::value::logical_element)
                 .unwrap_or_default(),
         )?,
@@ -122,12 +122,12 @@ pub(crate) fn graph_listing<S: GraphStorage>(
 ) -> TraverserResult<ElementProperty> {
     use crate::value::TraverserValue;
     let keep = keep.unwrap_or(usize::MAX);
-    let mut vertices = Vec::with_capacity(graph.vertex_count().min(keep));
-    for vertex in graph.vertices().take(keep) {
+    let mut vertices = Vec::with_capacity(graph.vertex_count()?.min(keep));
+    for vertex in graph.vertices()?.take(keep) {
         vertices.push(TraverserValue::<S>::Vertex(vertex).into_node_property(graph)?);
     }
-    let mut edges = Vec::with_capacity(graph.edge_count().min(keep));
-    for edge in graph.edges().take(keep) {
+    let mut edges = Vec::with_capacity(graph.edge_count()?.min(keep));
+    for edge in graph.edges()?.take(keep) {
         edges.push(TraverserValue::<S>::Edge(edge).into_node_property(graph)?);
     }
     let mut map = PropertyMap::default();

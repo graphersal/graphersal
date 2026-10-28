@@ -146,14 +146,19 @@ impl<S: GraphStorage> StepGqlLookup<S> {
     }
 
     /// Whether vertex `v` satisfies `lookup = value` with GQL `=` (TRUE only).
-    fn holds(&self, storage: &S, v: S::VertexId, value: &RowValue<S>) -> bool {
+    fn holds(
+        &self,
+        storage: &S,
+        v: S::VertexId,
+        value: &RowValue<S>,
+    ) -> Result<bool, crate::error::GraphError> {
         let found = match &self.key {
             GqlLookupKey::Id => storage
-                .vertex_id(v)
+                .vertex_id(v)?
                 .map(|id| Value::Scalar(ElementProperty::String(CompactString::from(id)))),
             GqlLookupKey::Property(key) => {
                 let stored = storage
-                    .vertex_properties(v)
+                    .vertex_properties(v)?
                     .and_then(|properties| properties.get(key.as_str()));
                 // A plain number, string or boolean against a scalar: GQL `=` is the scalar
                 // comparison, without cloning the stored value (the candidate loop of a lookup
@@ -167,12 +172,12 @@ impl<S: GraphStorage> StepGqlLookup<S> {
                     Value::Scalar(wanted),
                 ) = (stored, value)
                 {
-                    return compare_scalars(stored, wanted) == Some(std::cmp::Ordering::Equal);
+                    return Ok(compare_scalars(stored, wanted) == Some(std::cmp::Ordering::Equal));
                 }
                 stored.map(|stored| Value::from_property(stored.clone()))
             }
         };
-        equals(&found.unwrap_or(Value::Null), value) == Truth::True
+        Ok(equals(&found.unwrap_or(Value::Null), value) == Truth::True)
     }
 
     /// The vertices of the property index slice `[value, value]` of every scan label, each
@@ -223,12 +228,12 @@ impl<S: GraphStorage> StepGqlLookup<S> {
         mut check: impl FnMut(S::VertexId) -> TraverserResult<()>,
     ) -> TraverserResult<()> {
         match &self.labels[..] {
-            [] => storage.vertices().try_for_each(check),
-            [label] => storage.vertices_by_label(label).try_for_each(check),
+            [] => storage.vertices()?.try_for_each(check),
+            [label] => storage.vertices_by_label(label)?.try_for_each(check),
             labels => {
                 let mut seen = std::collections::HashSet::new();
                 for label in labels {
-                    for v in storage.vertices_by_label(label) {
+                    for v in storage.vertices_by_label(label)? {
                         if seen.insert(v) {
                             check(v)?;
                         }
@@ -302,7 +307,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlLookup<S> {
         let candidates = match (&self.key, &value) {
             (GqlLookupKey::Id, Value::Scalar(ElementProperty::String(id))) => {
                 // The vertex with that id is the only one whose `element_id` equals it.
-                if let Some(v) = storage.get_vertex_by_id(id) {
+                if let Some(v) = storage.get_vertex_by_id(id)? {
                     emit(v);
                 }
                 return Ok(());
@@ -314,7 +319,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlLookup<S> {
             Some(candidates) => {
                 for v in candidates {
                     tick_deadline(deadline)?;
-                    if self.holds(storage, v, &value) {
+                    if self.holds(storage, v, &value)? {
                         emit(v);
                     }
                 }
@@ -322,7 +327,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlLookup<S> {
             }
             None => self.scan(storage, |v| {
                 tick_deadline(deadline)?;
-                if self.holds(storage, v, &value) {
+                if self.holds(storage, v, &value)? {
                     emit(v);
                 }
                 Ok(())

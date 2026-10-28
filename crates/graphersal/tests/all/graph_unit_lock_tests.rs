@@ -513,20 +513,20 @@ fn the_storage_opens_a_unit_at_the_time_it_is_given() {
     let mut storage = TraversalGraph::tinkerpop_modern();
     let at = storage.next_unit_started_at().unwrap().unwrap();
     let mark = storage.begin_unit_at(at).unwrap();
-    assert_eq!(storage.unit_started_at(), Some(at));
+    assert_eq!(storage.unit_started_at().unwrap(), Some(at));
     let inner = storage.begin_unit_at(at + 1_000_000_000).unwrap();
     assert_eq!(
-        storage.unit_started_at(),
+        storage.unit_started_at().unwrap(),
         Some(at),
         "a nested unit keeps it"
     );
     storage.commit_unit(inner).unwrap();
     storage.commit_unit(mark).unwrap();
-    assert_eq!(storage.unit_started_at(), None);
+    assert_eq!(storage.unit_started_at().unwrap(), None);
     assert!(storage.next_unit_started_at().unwrap().unwrap() >= at);
     // A time before the floor is raised to it.
     let mark = storage.begin_unit_at(at - 1_000_000_000).unwrap();
-    assert!(storage.unit_started_at().unwrap() >= at);
+    assert!(storage.unit_started_at().unwrap().unwrap() >= at);
     storage.rollback_unit(mark, &reason()).unwrap();
 }
 
@@ -545,11 +545,15 @@ fn the_unit_clock_is_one_value_before_and_after_the_first_write() {
         .set_schema(schema)
         .unwrap();
     let mark = graph.begin_unit().unwrap();
-    let before = graph.read().unit_started_at().expect("pinned at the begin");
+    let before = graph
+        .read()
+        .unit_started_at()
+        .unwrap()
+        .expect("pinned at the begin");
     // Other threads see no unit of theirs.
     let other = graph.clone();
     assert_eq!(
-        on_thread(move || other.read().unit_started_at())
+        on_thread(move || other.read().unit_started_at().unwrap())
             .recv_timeout(PROGRESS)
             .unwrap(),
         None
@@ -559,7 +563,7 @@ fn the_unit_clock_is_one_value_before_and_after_the_first_write() {
         .add_v("event")
         .iterate()
         .unwrap();
-    assert_eq!(graph.read().unit_started_at(), Some(before));
+    assert_eq!(graph.read().unit_started_at().unwrap(), Some(before));
     let stored = graph
         .read()
         .traversal()
@@ -571,7 +575,7 @@ fn the_unit_clock_is_one_value_before_and_after_the_first_write() {
     let expected = graphersal::temporal::DateTime::from_nanos(before, 0).unwrap();
     assert_eq!(stored, Some(ElementProperty::Temporal(expected.into())));
     graph.commit_unit(mark).unwrap();
-    assert_eq!(graph.read().unit_started_at(), None);
+    assert_eq!(graph.read().unit_started_at().unwrap(), None);
 }
 
 /// The GQL clock read through the owner's views is the same before and after the unit's first
@@ -927,7 +931,7 @@ mod script {
     fn a_script_in_a_held_unit_reads_the_pinned_clock_before_the_first_write() {
         let graph = modern();
         let mark = graph.begin_unit().unwrap();
-        let pinned = graph.read().unit_started_at().unwrap();
+        let pinned = graph.read().unit_started_at().unwrap().unwrap();
         let read = eval_value_atomic(
             graph.clone(),
             r#"g.V().count().next()"#,
@@ -937,9 +941,9 @@ mod script {
         )
         .unwrap();
         assert_eq!(read.as_int().unwrap(), 6);
-        assert_eq!(graph.read().unit_started_at(), Some(pinned));
+        assert_eq!(graph.read().unit_started_at().unwrap(), Some(pinned));
         add_person(&graph, "x");
-        assert_eq!(graph.read().unit_started_at(), Some(pinned));
+        assert_eq!(graph.read().unit_started_at().unwrap(), Some(pinned));
         graph.commit_unit(mark).unwrap();
     }
 }

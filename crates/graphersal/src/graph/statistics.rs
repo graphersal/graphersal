@@ -87,16 +87,19 @@ impl GraphStatistics {
 
     /// Computes the statistics of `storage` with one full scan of its vertices and edges: the
     /// reference an incrementally maintained [`GraphStatistics`] must always equal, and a way for
-    /// a storage without its own bookkeeping to produce one.
-    pub fn from_storage<S: GraphStorage + ?Sized>(storage: &S) -> Self {
+    /// a storage without its own bookkeeping to produce one. `Err` when the storage cannot read
+    /// its elements.
+    pub fn from_storage<S: GraphStorage + ?Sized>(
+        storage: &S,
+    ) -> Result<Self, crate::error::GraphError> {
         let mut stats = Self::new();
-        for vertex in storage.vertices() {
-            stats.vertex_added(storage.vertex_labels(vertex));
+        for vertex in storage.vertices()? {
+            stats.vertex_added(storage.vertex_labels(vertex)?);
         }
-        for edge in storage.edges() {
-            stats.edge_added(storage.edge_label(edge));
+        for edge in storage.edges()? {
+            stats.edge_added(storage.edge_label(edge)?);
         }
-        stats
+        Ok(stats)
     }
 
     /// The number of vertices.

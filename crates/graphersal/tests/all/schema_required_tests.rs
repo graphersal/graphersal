@@ -391,6 +391,7 @@ fn removal_in_none_mode_is_unconstrained() {
 fn labels(graph: &TraversalGraph, v: graphersal::storage::VertexHandle) -> Vec<String> {
     graph
         .vertex_labels(v)
+        .unwrap()
         .iter()
         .map(|l| l.to_string())
         .collect()

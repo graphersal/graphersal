@@ -70,7 +70,7 @@ fn the_rhai_memory_map_reports_shape_bytes() {
 fn a_stored_map_handed_out_behaves_like_any_map() {
     let mut graph = TraversalGraph::new();
     let a = person(&mut graph, "a", &["name", "age"]);
-    let stored = graph.vertex_properties(a).unwrap().clone();
+    let stored = graph.vertex_properties(a).unwrap().unwrap().clone();
     let built = PropertyMap::from([
         ("age", ElementProperty::from(1)),
         ("name", ElementProperty::from(0)),
@@ -86,15 +86,16 @@ fn a_stored_map_handed_out_behaves_like_any_map() {
         copy.keys().map(|k| k.as_str()).collect::<Vec<_>>(),
         ["age", "city"]
     );
-    assert_eq!(graph.vertex_properties(a).unwrap(), &stored);
+    assert_eq!(graph.vertex_properties(a).unwrap().unwrap(), &stored);
     // Inserting the changed copy into another element shares that element's key order.
     let c = graph
         .insert_vertex(Some("c".into()), vec![], copy.clone())
         .unwrap();
-    assert_eq!(graph.vertex_properties(c).unwrap(), &copy);
+    assert_eq!(graph.vertex_properties(c).unwrap().unwrap(), &copy);
     assert_eq!(
         graph
             .vertex_properties(c)
+            .unwrap()
             .unwrap()
             .keys()
             .map(|k| k.as_str())
@@ -112,7 +113,7 @@ fn wide_elements_read_every_key() {
     let b = person(&mut graph, "b", &refs);
     for (i, key) in keys.iter().enumerate() {
         assert_eq!(
-            graph.vertex_properties(a).unwrap().get(key),
+            graph.vertex_properties(a).unwrap().unwrap().get(key),
             Some(&ElementProperty::from(i as i64))
         );
     }
@@ -123,13 +124,14 @@ fn wide_elements_read_every_key() {
     let order: Vec<&str> = graph
         .vertex_properties(b)
         .unwrap()
+        .unwrap()
         .keys()
         .map(|k| k.as_str())
         .collect();
     assert_eq!(order.last(), Some(&"field_7"));
     assert_eq!(order.len(), 40);
     assert_eq!(
-        graph.vertex_properties(b).unwrap().get("field_8"),
+        graph.vertex_properties(b).unwrap().unwrap().get("field_8"),
         Some(&ElementProperty::from(8))
     );
 }

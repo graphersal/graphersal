@@ -67,11 +67,11 @@ fn path(text: &str) -> JsonPath {
 }
 
 fn v(graph: &TraversalGraph, id: &str) -> graphersal::storage::VertexHandle {
-    graph.get_vertex_by_id(id).expect("vertex")
+    graph.get_vertex_by_id(id).unwrap().expect("vertex")
 }
 
 fn e(graph: &TraversalGraph, id: &str) -> graphersal::storage::EdgeHandle {
-    graph.get_edge_by_id(id).expect("edge")
+    graph.get_edge_by_id(id).unwrap().expect("edge")
 }
 
 /// The modern graph with capture on.
@@ -141,28 +141,31 @@ fn sorted_props(element: Option<&PropertyMap>) -> Vec<(String, ElementProperty)>
 
 fn content(graph: &TraversalGraph) -> Content {
     let mut vertices: Vec<_> = GraphStorage::vertices(graph)
+        .unwrap()
         .map(|h| {
             (
-                graph.vertex_id(h).unwrap().to_string(),
+                graph.vertex_id(h).unwrap().unwrap().to_string(),
                 graph
                     .vertex_labels(h)
+                    .unwrap()
                     .iter()
                     .map(|l| l.to_string())
                     .collect(),
-                sorted_props(graph.vertex_properties(h)),
+                sorted_props(graph.vertex_properties(h).unwrap()),
             )
         })
         .collect();
     vertices.sort_by(|a, b| a.0.cmp(&b.0));
     let mut edges: Vec<_> = GraphStorage::edges(graph)
+        .unwrap()
         .map(|h| {
-            let (from, to) = graph.edge_endpoints(h).unwrap();
+            let (from, to) = graph.edge_endpoints(h).unwrap().unwrap();
             (
-                graph.edge_id(h).unwrap().to_string(),
-                graph.edge_label(h).map(str::to_string),
-                graph.vertex_id(from).unwrap().to_string(),
-                graph.vertex_id(to).unwrap().to_string(),
-                sorted_props(graph.edge_properties(h)),
+                graph.edge_id(h).unwrap().unwrap().to_string(),
+                graph.edge_label(h).unwrap().map(str::to_string),
+                graph.vertex_id(from).unwrap().unwrap().to_string(),
+                graph.vertex_id(to).unwrap().unwrap().to_string(),
+                sorted_props(graph.edge_properties(h).unwrap()),
             )
         })
         .collect();
@@ -181,7 +184,10 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
                 properties,
                 ..
             } => {
-                assert!(graph.get_vertex_by_id(id).is_none(), "{id} is free");
+                assert!(
+                    graph.get_vertex_by_id(id).unwrap().is_none(),
+                    "{id} is free"
+                );
                 let labels = labels.iter().map(|l| l.as_str().into()).collect();
                 graph
                     .add_vertex(Some(id.as_str().into()), labels, properties.clone())
@@ -191,17 +197,18 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
                 let h = v(graph, id);
                 let labels: Vec<String> = graph
                     .vertex_labels(h)
+                    .unwrap()
                     .iter()
                     .map(|l| l.to_string())
                     .collect();
                 assert_eq!(labels, before.labels, "labels of {id} before its drop");
                 assert_eq!(
-                    graph.vertex_properties(h),
+                    graph.vertex_properties(h).unwrap(),
                     Some(&before.properties),
                     "properties of {id} before its drop"
                 );
                 assert_eq!(
-                    graph.out_edges(h).count() + graph.in_edges(h).count(),
+                    graph.out_edges(h).unwrap().count() + graph.in_edges(h).unwrap().count(),
                     0,
                     "the cascade was listed before the vertex drop"
                 );
@@ -229,15 +236,15 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
             Mutation::DropEdge { id, before, .. } => {
                 let h = e(graph, id);
                 assert_eq!(
-                    graph.edge_label(h).map(str::to_string),
+                    graph.edge_label(h).unwrap().map(str::to_string),
                     before.label,
                     "label of {id}"
                 );
-                let (from, to) = graph.edge_endpoints(h).unwrap();
-                assert_eq!(graph.vertex_id(from), Some(before.out_id.as_str()));
-                assert_eq!(graph.vertex_id(to), Some(before.in_id.as_str()));
+                let (from, to) = graph.edge_endpoints(h).unwrap().unwrap();
+                assert_eq!(graph.vertex_id(from).unwrap(), Some(before.out_id.as_str()));
+                assert_eq!(graph.vertex_id(to).unwrap(), Some(before.in_id.as_str()));
                 assert_eq!(
-                    sorted_props(graph.edge_properties(h)),
+                    sorted_props(graph.edge_properties(h).unwrap()),
                     sorted_props(Some(&before.properties))
                 );
                 graph.drop_edge(h).unwrap();
@@ -251,7 +258,10 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
             } => match element.kind {
                 ElementKind::Vertex => {
                     let h = v(graph, &element.id);
-                    let current = graph.vertex_properties(h).and_then(|p| p.get(key.as_str()));
+                    let current = graph
+                        .vertex_properties(h)
+                        .unwrap()
+                        .and_then(|p| p.get(key.as_str()));
                     assert_eq!(current, before.as_ref(), "before of {}.{key}", element.id);
                     graph
                         .set_vertex_property(h, key.as_str().into(), after.clone())
@@ -259,7 +269,10 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
                 }
                 ElementKind::Edge => {
                     let h = e(graph, &element.id);
-                    let current = graph.edge_properties(h).and_then(|p| p.get(key.as_str()));
+                    let current = graph
+                        .edge_properties(h)
+                        .unwrap()
+                        .and_then(|p| p.get(key.as_str()));
                     assert_eq!(current, before.as_ref(), "before of {}.{key}", element.id);
                     graph
                         .set_edge_property(h, key.as_str().into(), after.clone())
@@ -274,13 +287,19 @@ fn replay(graph: &mut TraversalGraph, mutations: &[Mutation]) {
             } => match element.kind {
                 ElementKind::Vertex => {
                     let h = v(graph, &element.id);
-                    let current = graph.vertex_properties(h).and_then(|p| p.get(key.as_str()));
+                    let current = graph
+                        .vertex_properties(h)
+                        .unwrap()
+                        .and_then(|p| p.get(key.as_str()));
                     assert_eq!(current, Some(before));
                     graph.drop_vertex_property(key, h).unwrap();
                 }
                 ElementKind::Edge => {
                     let h = e(graph, &element.id);
-                    let current = graph.edge_properties(h).and_then(|p| p.get(key.as_str()));
+                    let current = graph
+                        .edge_properties(h)
+                        .unwrap()
+                        .and_then(|p| p.get(key.as_str()));
                     assert_eq!(current, Some(before));
                     graph.drop_edge_property(key, h).unwrap();
                 }
@@ -366,7 +385,7 @@ fn add_vertex_records_the_auto_id() {
     let Mutation::AddVertex { id, .. } = &set.mutations()[0] else {
         panic!("an add");
     };
-    assert!(graph.get_vertex_by_id(id).is_some());
+    assert!(graph.get_vertex_by_id(id).unwrap().is_some());
 }
 
 #[test]
@@ -743,7 +762,7 @@ fn compact_restores_the_original_image_of_a_changed_then_dropped_vertex() {
             assert_eq!(before.labels, ["person"]);
             assert_eq!(
                 sorted_props(Some(&before.properties)),
-                sorted_props(original.vertex_properties(v(&original, "1")))
+                sorted_props(original.vertex_properties(v(&original, "1")).unwrap())
             );
         }
         other => panic!("unexpected {other:?}"),

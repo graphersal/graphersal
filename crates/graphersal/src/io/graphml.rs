@@ -645,9 +645,9 @@ impl GraphMLExport {
         let empty = PropertyMap::default();
         let mut node_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
             IndexMap::new();
-        for vertex in g.vertices() {
-            let labels = g.vertex_labels(vertex);
-            let properties = g.vertex_properties(vertex).unwrap_or(&empty);
+        for vertex in g.vertices()? {
+            let labels = g.vertex_labels(vertex)?;
+            let properties = g.vertex_properties(vertex)?.unwrap_or(&empty);
             if labels.is_empty() {
                 observe_key_types(
                     node_types.entry(CompactString::new("")).or_default(),
@@ -660,11 +660,11 @@ impl GraphMLExport {
         }
         let mut edge_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
             IndexMap::new();
-        for edge in g.edges() {
-            let label = CompactString::new(g.edge_label(edge).unwrap_or(""));
+        for edge in g.edges()? {
+            let label = CompactString::new(g.edge_label(edge)?.unwrap_or(""));
             observe_key_types(
                 edge_types.entry(label).or_default(),
-                g.edge_properties(edge).unwrap_or(&empty),
+                g.edge_properties(edge)?.unwrap_or(&empty),
             );
         }
 
@@ -876,12 +876,12 @@ impl GraphMLExport {
                 message: e.to_string(),
             })?;
 
-        for v_idx in g.vertices() {
-            if let Some(v_id) = g.vertex_id(v_idx) {
+        for v_idx in g.vertices()? {
+            if let Some(v_id) = g.vertex_id(v_idx)? {
                 // Multiple labels are joined into a single "::"-delimited `labelV` value (D9). A
                 // single-label vertex writes an unqualified value with no delimiter, byte-for-byte
                 // identical to the pre-multi-label output.
-                let v_labels = g.vertex_labels(v_idx);
+                let v_labels = g.vertex_labels(v_idx)?;
                 let joined_label = if v_labels.is_empty() {
                     None
                 } else {
@@ -894,7 +894,7 @@ impl GraphMLExport {
                     )
                 };
                 let default_props = PropertyMap::default();
-                let v_props = g.vertex_properties(v_idx).unwrap_or(&default_props);
+                let v_props = g.vertex_properties(v_idx)?.unwrap_or(&default_props);
 
                 let mut node_elem = BytesStart::new("node");
                 node_elem.push_attribute(("id", v_id));
@@ -935,16 +935,16 @@ impl GraphMLExport {
             }
         }
 
-        for e_idx in g.edges() {
-            if let Some((src_idx, tgt_idx)) = g.edge_endpoints(e_idx)
-                && let (Some(src_id), Some(tgt_id)) = (g.vertex_id(src_idx), g.vertex_id(tgt_idx))
+        for e_idx in g.edges()? {
+            if let Some((src_idx, tgt_idx)) = g.edge_endpoints(e_idx)?
+                && let (Some(src_id), Some(tgt_id)) = (g.vertex_id(src_idx)?, g.vertex_id(tgt_idx)?)
             {
-                let e_label = g.edge_label(e_idx);
-                let e_props_opt = g.edge_properties(e_idx);
+                let e_label = g.edge_label(e_idx)?;
+                let e_props_opt = g.edge_properties(e_idx)?;
 
                 let mut edge_elem = BytesStart::new("edge");
                 // GraphML's edge `id` is optional: an edge without a stored id omits it.
-                if let Some(e_id) = g.edge_id(e_idx) {
+                if let Some(e_id) = g.edge_id(e_idx)? {
                     edge_elem.push_attribute(("id", e_id));
                 }
                 edge_elem.push_attribute(("source", src_id));
@@ -1398,15 +1398,19 @@ mod tests {
         assert_eq!(g.vertex_count(), 2);
         assert_eq!(g.edge_count(), 1);
 
-        let v1_idx = GraphStorage::get_vertex_by_id(&g, "1").unwrap();
-        let v1_props = GraphStorage::vertex_properties(&g, v1_idx).unwrap();
+        let v1_idx = GraphStorage::get_vertex_by_id(&g, "1").unwrap().unwrap();
+        let v1_props = GraphStorage::vertex_properties(&g, v1_idx)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             v1_props.get("active"),
             Some(&ElementProperty::Boolean(true))
         );
 
-        let v2_idx = GraphStorage::get_vertex_by_id(&g, "2").unwrap();
-        let v2_props = GraphStorage::vertex_properties(&g, v2_idx).unwrap();
+        let v2_idx = GraphStorage::get_vertex_by_id(&g, "2").unwrap().unwrap();
+        let v2_props = GraphStorage::vertex_properties(&g, v2_idx)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             v2_props.get("active"),
             Some(&ElementProperty::Boolean(false))
@@ -1436,8 +1440,10 @@ mod tests {
         assert!(res.is_ok());
         let g = res.unwrap();
 
-        let v1_idx = GraphStorage::get_vertex_by_id(&g, "1").unwrap();
-        let v1_props = GraphStorage::vertex_properties(&g, v1_idx).unwrap();
+        let v1_idx = GraphStorage::get_vertex_by_id(&g, "1").unwrap().unwrap();
+        let v1_props = GraphStorage::vertex_properties(&g, v1_idx)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             v1_props.get("active"),
             Some(&ElementProperty::Boolean(true))
@@ -1447,8 +1453,10 @@ mod tests {
             Some(&ElementProperty::String("admin".into()))
         );
 
-        let v2_idx = GraphStorage::get_vertex_by_id(&g, "2").unwrap();
-        let v2_props = GraphStorage::vertex_properties(&g, v2_idx).unwrap();
+        let v2_idx = GraphStorage::get_vertex_by_id(&g, "2").unwrap().unwrap();
+        let v2_props = GraphStorage::vertex_properties(&g, v2_idx)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             v2_props.get("active"),
             Some(&ElementProperty::Boolean(true))
@@ -1535,12 +1543,16 @@ mod tests {
         assert_eq!(imported_g.vertex_count(), 2);
         assert_eq!(imported_g.edge_count(), 1);
 
-        let v1_idx = GraphStorage::get_vertex_by_id(&imported_g, "1").unwrap();
+        let v1_idx = GraphStorage::get_vertex_by_id(&imported_g, "1")
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            GraphStorage::vertex_label(&imported_g, v1_idx),
+            GraphStorage::vertex_label(&imported_g, v1_idx).unwrap(),
             Some("person")
         );
-        let v1_props = GraphStorage::vertex_properties(&imported_g, v1_idx).unwrap();
+        let v1_props = GraphStorage::vertex_properties(&imported_g, v1_idx)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             v1_props.get("name"),
             Some(&ElementProperty::String("Alice".into()))

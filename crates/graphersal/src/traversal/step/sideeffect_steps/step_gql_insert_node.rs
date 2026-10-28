@@ -327,7 +327,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlInsertNo
         for row in rows {
             context.tick()?;
             let properties = self.properties.evaluate(context, &row)?;
-            let create = context.create_context_or(self.create_time);
+            let create = context.create_context_or(self.create_time)?;
             let vertex =
                 context
                     .storage

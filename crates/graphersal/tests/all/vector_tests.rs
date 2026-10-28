@@ -54,8 +54,8 @@ fn vector_graph() -> TraversalGraph {
             .add_vertex(Some(name.into()), vec!["doc".into()], props)
             .unwrap();
     }
-    let a = graph.get_vertex_by_id("f32").unwrap();
-    let b = graph.get_vertex_by_id("i8").unwrap();
+    let a = graph.get_vertex_by_id("f32").unwrap().unwrap();
+    let b = graph.get_vertex_by_id("i8").unwrap().unwrap();
     let mut props = PropertyMap::default();
     props.insert("w", ElementProperty::Vector(f32v(&[1.0, 2.0])));
     graph
@@ -68,18 +68,18 @@ fn vector_graph() -> TraversalGraph {
 fn vectors_of(graph: &TraversalGraph) -> Vec<String> {
     let mut out = Vec::new();
     for (name, _) in every_kind() {
-        let v = graph.get_vertex_by_id(name).expect("vertex");
-        let props = graph.vertex_properties(v).unwrap();
+        let v = graph.get_vertex_by_id(name).unwrap().expect("vertex");
+        let props = graph.vertex_properties(v).unwrap().unwrap();
         out.push(format!("{name}.emb = {}", exact(props.get("emb").unwrap())));
         out.push(format!(
             "{name}.meta = {}",
             exact(props.get("meta").unwrap())
         ));
     }
-    let e = graph.get_edge_by_id("e").unwrap();
+    let e = graph.get_edge_by_id("e").unwrap().unwrap();
     out.push(format!(
         "e.w = {}",
-        exact(graph.edge_properties(e).unwrap().get("w").unwrap())
+        exact(graph.edge_properties(e).unwrap().unwrap().get("w").unwrap())
     ));
     out
 }
@@ -680,7 +680,7 @@ mod schema {
         assert!(err.to_string().contains("vector<f32, 2>"), "{err}");
 
         let mut graph = vector_graph();
-        let inferred = graphersal::schema::SchemaInferer::infer_from_storage(&graph);
+        let inferred = graphersal::schema::SchemaInferer::infer_from_storage(&graph).unwrap();
         let emb = &inferred.vertices["doc"].schema.properties["emb"];
         // Several element kinds at one position: one anyOf member per kind.
         let members = emb.any_of.as_ref().expect("an anyOf");
@@ -739,23 +739,23 @@ mod binary {
                 let ((), changes) = scratch
                     .dry_run(|g| {
                         for (name, vector) in every_kind() {
-                            let v = source.get_vertex_by_id(name).unwrap();
+                            let v = source.get_vertex_by_id(name).unwrap().unwrap();
                             g.add_vertex(
                                 Some(name.into()),
                                 vec!["doc".into()],
-                                source.vertex_properties(v).unwrap().clone(),
+                                source.vertex_properties(v).unwrap().unwrap().clone(),
                             )?;
                             let _ = vector;
                         }
-                        let a = g.get_vertex_by_id("f32").unwrap();
-                        let b = g.get_vertex_by_id("i8").unwrap();
-                        let e = source.get_edge_by_id("e").unwrap();
+                        let a = g.get_vertex_by_id("f32").unwrap().unwrap();
+                        let b = g.get_vertex_by_id("i8").unwrap().unwrap();
+                        let e = source.get_edge_by_id("e").unwrap().unwrap();
                         g.add_edge(
                             Some("e".into()),
                             Some("near".into()),
                             a,
                             b,
-                            source.edge_properties(e).unwrap().clone(),
+                            source.edge_properties(e).unwrap().unwrap().clone(),
                         )?;
                         Ok::<_, GraphError>(())
                     })
@@ -1057,9 +1057,10 @@ mod io {
     }
 
     fn emb(graph: &TraversalGraph) -> ElementProperty {
-        let v = graph.get_vertex_by_id("v").unwrap();
+        let v = graph.get_vertex_by_id("v").unwrap().unwrap();
         graph
             .vertex_properties(v)
+            .unwrap()
             .unwrap()
             .get("emb")
             .unwrap()

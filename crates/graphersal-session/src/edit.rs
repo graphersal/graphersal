@@ -286,8 +286,10 @@ fn apply<S: GraphStorage>(
     let mut errors = Vec::new();
     match kind {
         ElementKind::Vertex => {
-            let Some(v) = graph.get_vertex_by_id(id) else {
-                return vec![gone(kind)];
+            let v = match graph.get_vertex_by_id(id) {
+                Ok(Some(v)) => v,
+                Ok(None) => return vec![gone(kind)],
+                Err(err) => return vec![field_error("general", &err)],
             };
             for op in ops {
                 let (key, result) = match op {
@@ -303,8 +305,10 @@ fn apply<S: GraphStorage>(
             }
         }
         ElementKind::Edge => {
-            let Some(e) = graph.get_edge_by_id(id) else {
-                return vec![gone(kind)];
+            let e = match graph.get_edge_by_id(id) {
+                Ok(Some(e)) => e,
+                Ok(None) => return vec![gone(kind)],
+                Err(err) => return vec![field_error("general", &err)],
             };
             for op in ops {
                 let (key, result) = match op {
@@ -397,45 +401,50 @@ fn parse_ops(request: &Value) -> Result<Vec<Op>, Vec<FieldError>> {
 }
 
 /// The element `id` of `kind` in `g` as the property editor's edit view (module docs) without
-/// `readOnly` (the session's to add); `Value::Null` when there is none.
-pub fn element_view<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Value {
+/// `readOnly` (the session's to add); `Value::Null` when there is none, `Err` when the storage
+/// cannot read it.
+pub fn element_view<S: GraphStorage>(
+    g: &S,
+    kind: ElementKind,
+    id: &str,
+) -> Result<Value, GraphError> {
     let mut view = Map::new();
     view.insert("kind".into(), json!(kind.as_str()));
     match kind {
         ElementKind::Vertex => {
-            let Some(v) = g.get_vertex_by_id(id) else {
-                return Value::Null;
+            let Some(v) = g.get_vertex_by_id(id)? else {
+                return Ok(Value::Null);
             };
-            let labels: Vec<&str> = g.vertex_labels(v).iter().map(|l| l.as_str()).collect();
-            view.insert("id".into(), json!(g.vertex_id(v).unwrap_or_default()));
+            let labels: Vec<&str> = g.vertex_labels(v)?.iter().map(|l| l.as_str()).collect();
+            view.insert("id".into(), json!(g.vertex_id(v)?.unwrap_or_default()));
             view.insert(
                 "label".into(),
                 json!(labels.first().copied().unwrap_or_default()),
             );
             view.insert("labels".into(), json!(labels));
             let props = g
-                .vertex_properties(v)
+                .vertex_properties(v)?
                 .map(typed_entries)
                 .unwrap_or_default();
             view.insert("properties".into(), Value::Array(props));
         }
         ElementKind::Edge => {
-            let Some(e) = g.get_edge_by_id(id) else {
-                return Value::Null;
+            let Some(e) = g.get_edge_by_id(id)? else {
+                return Ok(Value::Null);
             };
-            let label = g.edge_label(e).unwrap_or_default();
-            view.insert("id".into(), json!(g.edge_id(e).unwrap_or_default()));
+            let label = g.edge_label(e)?.unwrap_or_default();
+            view.insert("id".into(), json!(g.edge_id(e)?.unwrap_or_default()));
             view.insert("label".into(), json!(label));
             view.insert("labels".into(), json!([label]));
-            if let Some((s, t)) = g.edge_endpoints(e) {
-                view.insert("source".into(), json!(g.vertex_id(s).unwrap_or_default()));
-                view.insert("target".into(), json!(g.vertex_id(t).unwrap_or_default()));
+            if let Some((s, t)) = g.edge_endpoints(e)? {
+                view.insert("source".into(), json!(g.vertex_id(s)?.unwrap_or_default()));
+                view.insert("target".into(), json!(g.vertex_id(t)?.unwrap_or_default()));
             }
-            let props = g.edge_properties(e).map(typed_entries).unwrap_or_default();
+            let props = g.edge_properties(e)?.map(typed_entries).unwrap_or_default();
             view.insert("properties".into(), Value::Array(props));
         }
     }
-    Value::Object(view)
+    Ok(Value::Object(view))
 }
 
 /// Writes `ops` to the element `id` of `kind` in `g` as ONE unit (`validate_only`: a dry run,
@@ -835,12 +844,12 @@ mod tests {
     fn edits_on_a_foreign_storage_equal_those_of_a_traversal_graph() {
         let (mut tg, mut fw) = modern_pair();
         assert_eq!(
-            element_view(&tg, ElementKind::Vertex, "1"),
-            element_view(&fw, ElementKind::Vertex, "1")
+            element_view(&tg, ElementKind::Vertex, "1").unwrap(),
+            element_view(&fw, ElementKind::Vertex, "1").unwrap()
         );
         assert_eq!(
-            element_view(&tg, ElementKind::Edge, "0"),
-            element_view(&fw, ElementKind::Edge, "0")
+            element_view(&tg, ElementKind::Edge, "0").unwrap(),
+            element_view(&fw, ElementKind::Edge, "0").unwrap()
         );
         let ops = [
             Op::Set("age".into(), ElementProperty::from(30i64)),
@@ -853,8 +862,8 @@ mod tests {
             assert_eq!(a.as_ref().ok(), Some(&!validate_only));
             assert_eq!(b.as_ref().ok(), Some(&!validate_only));
             assert_eq!(
-                element_view(&tg, ElementKind::Vertex, "1"),
-                element_view(&fw, ElementKind::Vertex, "1")
+                element_view(&tg, ElementKind::Vertex, "1").unwrap(),
+                element_view(&fw, ElementKind::Vertex, "1").unwrap()
             );
         }
         assert_eq!(fw.last_commit_seq().unwrap(), tg.last_commit_seq());

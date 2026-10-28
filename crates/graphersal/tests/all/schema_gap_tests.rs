@@ -326,7 +326,7 @@ fn gap3_add_unknown_label_is_rejected_in_closed() {
         )
         .unwrap();
     assert!(graph.add_vertex_label(v, "Alien".into()).is_err());
-    assert_eq!(graph.vertex_labels(v).len(), 1);
+    assert_eq!(graph.vertex_labels(v).unwrap().len(), 1);
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn gap3_removing_the_last_label_is_rejected_in_closed() {
         )
         .unwrap();
     assert!(graph.remove_vertex_label(v, "Company").is_err());
-    assert_eq!(graph.vertex_labels(v).len(), 1);
+    assert_eq!(graph.vertex_labels(v).unwrap().len(), 1);
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn gap3_added_label_re_checks_existing_required_properties() {
             graph.add_vertex_label(v, "Person".into()).is_err(),
             "{mode:?}"
         );
-        assert_eq!(graph.vertex_labels(v).len(), 1, "{mode:?}");
+        assert_eq!(graph.vertex_labels(v).unwrap().len(), 1, "{mode:?}");
     }
 }
 

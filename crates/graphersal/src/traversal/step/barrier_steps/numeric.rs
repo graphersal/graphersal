@@ -82,21 +82,25 @@ pub(crate) enum ValueSource<S: GraphStorage> {
 }
 
 impl<S: GraphStorage> ValueSource<S> {
-    /// Materializes the provenance for a diagnostic message.
-    pub(crate) fn origin(&self, context: &TraverserContext<'_, S>) -> Option<ValueOrigin> {
-        match self {
+    /// Materializes the provenance for a diagnostic message. `Err` when the storage cannot read
+    /// the element's id or label: the caller reports that error instead of its own.
+    pub(crate) fn origin(
+        &self,
+        context: &TraverserContext<'_, S>,
+    ) -> Result<Option<ValueOrigin>, crate::error::GraphError> {
+        Ok(match self {
             ValueSource::Anonymous => None,
             ValueSource::Vertex(node, property) => Some(ValueOrigin::vertex(
-                context.storage.vertex_id(*node).map(|id| id.to_string()),
-                context.storage.vertex_label(*node).map(|l| l.to_string()),
+                context.storage.vertex_id(*node)?.map(|id| id.to_string()),
+                context.storage.vertex_label(*node)?.map(|l| l.to_string()),
                 property.as_ref().map(|p| p.to_string()),
             )),
             ValueSource::Edge(edge, property) => Some(ValueOrigin::edge(
-                context.storage.edge_id(*edge).map(|id| id.to_string()),
-                context.storage.edge_label(*edge).map(|l| l.to_string()),
+                context.storage.edge_id(*edge)?.map(|id| id.to_string()),
+                context.storage.edge_label(*edge)?.map(|l| l.to_string()),
                 property.as_ref().map(|p| p.to_string()),
             )),
-        }
+        })
     }
 }
 
@@ -122,7 +126,7 @@ pub(crate) fn number_of<S: GraphStorage>(
             &["number"],
             crate::graph::schema::value_type_name(other),
             Some(preview(other)),
-            source.origin(context),
+            source.origin(context)?,
         ))),
     }
 }
@@ -155,7 +159,7 @@ pub(crate) fn resolve_value_number<S: GraphStorage>(
         TraverserValue::VertexProperty(property, node, _) => {
             let value = context
                 .storage
-                .vertex_properties(node)
+                .vertex_properties(node)?
                 .and_then(|properties| properties.get(&property));
             match value {
                 Some(value) => {
@@ -168,7 +172,7 @@ pub(crate) fn resolve_value_number<S: GraphStorage>(
         TraverserValue::EdgeProperty(property, edge, _) => {
             let value = context
                 .storage
-                .edge_properties(edge)
+                .edge_properties(edge)?
                 .and_then(|properties| properties.get(&property));
             match value {
                 Some(value) => {
@@ -454,12 +458,16 @@ fn incomparable<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     source: &ValueSource<S>,
 ) -> crate::error::BoxedTraverserError {
+    let origin = match source.origin(context) {
+        Ok(origin) => origin,
+        Err(error) => return error.into(),
+    };
     Box::new(TraverserError::Value(ValueError::IncomparableValues {
         step,
         expected: expected.join(" or "),
         actual: crate::graph::schema::value_type_name(offending),
         value: Some(preview(offending)),
-        origin: source.origin(context).map(Box::new),
+        origin: origin.map(Box::new),
     }))
 }
 
@@ -481,7 +489,7 @@ pub(crate) fn push_extremum_value<S: GraphStorage>(
         TraverserValue::VertexProperty(property, node, _) => {
             let value = context
                 .storage
-                .vertex_properties(node)
+                .vertex_properties(node)?
                 .and_then(|properties| properties.get(&property));
             match value {
                 Some(value) => {
@@ -494,7 +502,7 @@ pub(crate) fn push_extremum_value<S: GraphStorage>(
         TraverserValue::EdgeProperty(property, edge, _) => {
             let value = context
                 .storage
-                .edge_properties(edge)
+                .edge_properties(edge)?
                 .and_then(|properties| properties.get(&property));
             match value {
                 Some(value) => {

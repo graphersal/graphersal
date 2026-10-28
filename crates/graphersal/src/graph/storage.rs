@@ -29,9 +29,9 @@ pub(crate) fn stored_vertex_id<S: GraphStorage>(
     storage: &S,
     vertex: S::VertexId,
 ) -> Result<&str, GraphError> {
-    match storage.vertex_id(vertex) {
+    match storage.vertex_id(vertex)? {
         Some(id) => Ok(id),
-        None if !storage.contains_vertex(vertex) => Err(GraphError::vertex_removed()),
+        None if !storage.contains_vertex(vertex)? => Err(GraphError::vertex_removed()),
         None => Err(GraphError::InvalidElementState {
             reason: "vertex has no id".to_string(),
         }),
@@ -43,9 +43,9 @@ pub(crate) fn stored_edge_id<S: GraphStorage>(
     storage: &S,
     edge: S::EdgeId,
 ) -> Result<&str, GraphError> {
-    match storage.edge_id(edge) {
+    match storage.edge_id(edge)? {
         Some(id) => Ok(id),
-        None if !storage.contains_edge(edge) => Err(GraphError::edge_removed()),
+        None if !storage.contains_edge(edge)? => Err(GraphError::edge_removed()),
         None => Err(GraphError::InvalidElementState {
             reason: "edge has no id".to_string(),
         }),
@@ -84,11 +84,26 @@ pub(crate) fn stored_vertex_label<S: GraphStorage>(
     storage: &S,
     vertex: S::VertexId,
 ) -> Result<Option<&str>, GraphError> {
-    match storage.vertex_label(vertex) {
+    match storage.vertex_label(vertex)? {
         Some(label) => Ok(Some(label)),
-        None if !storage.contains_vertex(vertex) => Err(GraphError::vertex_removed()),
+        None if !storage.contains_vertex(vertex)? => Err(GraphError::vertex_removed()),
         None => Ok(None),
     }
+}
+
+/// Whether `vertex` carries one of `labels` (stops at the first found).
+#[inline]
+pub(crate) fn vertex_has_any_label<S: GraphStorage + ?Sized, L: AsRef<str>>(
+    storage: &S,
+    vertex: S::VertexId,
+    labels: &[L],
+) -> Result<bool, GraphError> {
+    for label in labels {
+        if storage.vertex_has_label(vertex, label.as_ref())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The label set of a vertex for `labels()`; see [`stored_vertex_label`].
@@ -96,8 +111,8 @@ pub(crate) fn stored_vertex_labels<S: GraphStorage>(
     storage: &S,
     vertex: S::VertexId,
 ) -> Result<&[CompactString], GraphError> {
-    let labels = storage.vertex_labels(vertex);
-    if labels.is_empty() && !storage.contains_vertex(vertex) {
+    let labels = storage.vertex_labels(vertex)?;
+    if labels.is_empty() && !storage.contains_vertex(vertex)? {
         return Err(GraphError::vertex_removed());
     }
     Ok(labels)
@@ -108,9 +123,9 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
     storage: &S,
     edge: S::EdgeId,
 ) -> Result<Option<&str>, GraphError> {
-    match storage.edge_label(edge) {
+    match storage.edge_label(edge)? {
         Some(label) => Ok(Some(label)),
-        None if !storage.contains_edge(edge) => Err(GraphError::edge_removed()),
+        None if !storage.contains_edge(edge)? => Err(GraphError::edge_removed()),
         None => Ok(None),
     }
 }
@@ -158,11 +173,11 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// [`Self::VertexId`] / [`Self::EdgeId`] are opaque, storage-local handles; the pipeline never
 /// looks inside. A handle to a removed element must **never alias** another element, also not
 /// one the storage later puts in the same place (slot reuse): reads through such a stale handle
-/// behave as "removed" ([`Self::contains_vertex`] / [`Self::contains_edge`] are `false`, ids,
-/// labels and properties are `None`, adjacency is empty), writes fail with
+/// behave as "removed" ([`Self::contains_vertex`] / [`Self::contains_edge`] are `Ok(false)`,
+/// ids, labels and properties are `Ok(None)`, adjacency is empty), writes fail with
 /// [`GraphError::ElementRemoved`], and a second drop is a no-op. [`TraversalGraph`] meets this
 /// with generational handles ([`VertexHandle`] / [`EdgeHandle`]: slot plus generation). Override
-/// `contains_*` when the default (`vertex_properties` / `edge_endpoints` is `Some`) is not cheap
+/// `contains_*` when the default (`vertex_properties` / `edge_endpoints` is `Ok(Some)`) is not cheap
 /// or not exact for your storage. Checked by `stale_handle_never_aliases`.
 ///
 /// ## Write checks and errors
@@ -283,27 +298,41 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// [`UnitChanges::definitions`] and captured as a
 /// [`Mutation::SetDefinition`](crate::graph::Mutation::SetDefinition).
 ///
-/// ## Errors of the non-element methods
+/// ## Errors of the storage methods
 ///
-/// Every method that reads or changes the storage's state beyond single elements returns a
-/// `Result` (the unit methods, [`Self::capabilities`], [`Self::last_commit_seq`],
-/// [`Self::statistics`], the schema, catalog, compression, property index and memory methods,
-/// [`Self::shrink_to_fit`], [`Self::execution_policy`]), so a storage whose state lives behind
-/// a backend (a remote service, a file, a lock of its own) can report a failure instead of
-/// answering with an empty or made-up value. Return
+/// Every method that reads or changes the storage's state returns a `Result`, so a storage
+/// whose state lives behind a backend (a remote service, a file, a lock of its own) can report a
+/// failure instead of answering with an empty or made-up value. Return
 /// [`GraphError::storage_failed`] for such a backend error, never an empty answer. The defaults
-/// return `Ok` of what a storage without the feature reports. The engine reads these once per
-/// query or unit (never per traverser) and fails the query, import or transaction with the
-/// error; a failed [`Self::rollback_unit`] still closes the unit (see there). The hot element
-/// access methods (`vertices`, `out_edges`, `vertex_properties`, ...) stay infallible.
+/// return `Ok` of what a storage without the feature reports.
+///
+/// - **Element reads** (the counts, [`Self::vertices`] / [`Self::edges`], the label scans, the
+///   id lookups, [`Self::out_edges`] / [`Self::in_edges`], ids, labels, properties, endpoints,
+///   `contains_*`, [`Self::unit_started_at`]): a single lookup answers `Ok(None)` (or
+///   `Ok(false)`, an empty label set) for what does not exist, `Err` only when the backend
+///   cannot answer. An iterating method returns `Result<impl Iterator>`: the `Result` covers
+///   starting the iteration, once per call, never one per item (an item the backend cannot
+///   deliver mid-iteration has no error channel: such a storage collects first, as the defaults
+///   of [`Self::vertices_by_label`] / [`Self::edges_by_label`] do). The engine fails the query
+///   that read with the error, located at the step that read; the [`Graph`](crate::graph::Graph)
+///   unit rolls back as for any failing query.
+/// - **State beyond single elements** (the unit methods, [`Self::capabilities`],
+///   [`Self::last_commit_seq`], [`Self::statistics`], the schema, catalog, compression, property
+///   index and memory methods, [`Self::shrink_to_fit`], [`Self::execution_policy`]): the engine
+///   reads these once per query or unit (never per traverser) and fails the query, import or
+///   transaction with the error; a failed [`Self::rollback_unit`] still closes the unit (see
+///   there).
+///
+/// [`TraversalGraph`] never fails an element read; its methods are `#[inline]`, so the `Result`
+/// costs a generic caller nothing once inlined.
 pub trait GraphStorage: Send + Sync {
     /// Opaque, storage-local vertex handle.
     ///
     /// **Contract:** a handle to a removed vertex must never resolve to another vertex, also not
     /// to one that a backend stores in the same place later (slot reuse). Reads through such a
-    /// *stale* handle behave as "removed": [`Self::contains_vertex`] is `false`, `vertex_id`,
-    /// `vertex_label` and `vertex_properties` are `None`, `vertex_labels` is empty, adjacency is
-    /// empty; writes fail with [`GraphError::ElementRemoved`] and `drop_vertex` is a no-op.
+    /// *stale* handle behave as "removed": [`Self::contains_vertex`] is `Ok(false)`, `vertex_id`,
+    /// `vertex_label` and `vertex_properties` are `Ok(None)`, `vertex_labels` is empty, adjacency
+    /// is empty; writes fail with [`GraphError::ElementRemoved`] and `drop_vertex` is a no-op.
     /// [`TraversalGraph`] meets this with generational handles
     /// ([`VertexHandle`]). Checked by `stale_handle_never_aliases` in
     /// `graphersal-storage-tests`.
@@ -313,92 +342,134 @@ pub trait GraphStorage: Send + Sync {
     type EdgeId: Eq + std::hash::Hash + Clone + Copy + Send + Sync + std::fmt::Debug;
 
     /// The number of vertices currently stored.
-    fn vertex_count(&self) -> usize;
-    /// The number of edges currently stored.
-    fn edge_count(&self) -> usize;
+    ///
+    /// `Err` when the backend cannot answer now ([`GraphError::StorageFailed`]); see "Errors of
+    /// the storage methods" on the trait.
+    fn vertex_count(&self) -> Result<usize, GraphError>;
+    /// The number of edges currently stored. `Err` as for [`Self::vertex_count`].
+    fn edge_count(&self) -> Result<usize, GraphError>;
 
-    /// Iterates every vertex handle.
-    fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_;
-    /// Iterates every edge handle.
-    fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_;
+    /// Iterates every vertex handle. The `Result` covers starting the scan (once per call, never
+    /// per item); `Err` as for [`Self::vertex_count`].
+    fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError>;
+    /// Iterates every edge handle. `Err` as for [`Self::vertices`].
+    fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError>;
 
-    /// Looks up a vertex handle by its stored string id.
-    fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId>;
-    /// Looks up an edge handle by its stored string id.
-    fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId>;
+    /// Looks up a vertex handle by its stored string id: `Ok(None)` when no vertex has it, `Err`
+    /// when the backend cannot answer.
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError>;
+    /// Looks up an edge handle by its stored string id; see [`Self::get_vertex_by_id`].
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError>;
 
-    /// Iterates the outgoing edges of `node`.
-    fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_;
-    /// Iterates the incoming edges of `node`.
-    fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_;
+    /// Iterates the outgoing edges of `node` (empty for a stale handle). The `Result` covers
+    /// starting the iteration, once per vertex; `Err` when the backend cannot answer.
+    fn out_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError>;
+    /// Iterates the incoming edges of `node`; see [`Self::out_edges`].
+    fn in_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError>;
 
-    /// The stored string id of a vertex, or `None` for an invalid handle.
-    fn vertex_id(&self, node: Self::VertexId) -> Option<&str>;
-    /// The stored string id of an edge, or `None` for an invalid handle.
-    fn edge_id(&self, edge: Self::EdgeId) -> Option<&str>;
+    /// The stored string id of a vertex, `Ok(None)` for a stale handle, `Err` when the backend
+    /// cannot answer.
+    fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError>;
+    /// The stored string id of an edge; see [`Self::vertex_id`].
+    fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError>;
 
     /// Returns the vertex's *primary* label — the first label ever assigned, or `None` for an
     /// unlabeled vertex. TinkerPop's single-valued `label()`/`elementMap()` contract is built on
     /// this; a vertex that carries more than one label (see [`Self::vertex_labels`]) still returns
-    /// exactly one value here.
-    fn vertex_label(&self, node: Self::VertexId) -> Option<&str>;
-    /// The edge's label, or `None` for an unlabeled edge.
-    fn edge_label(&self, edge: Self::EdgeId) -> Option<&str>;
+    /// exactly one value here. `Err` when the backend cannot answer.
+    fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError>;
+    /// The edge's label, or `None` for an unlabeled edge; `Err` as for [`Self::vertex_label`].
+    fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError>;
 
-    /// Returns the vertex's full ordered, deduplicated label set. Empty means no labels; a
-    /// non-empty set's first entry is the vertex's primary label, the one [`Self::vertex_label`]
-    /// returns. This is the storage-level primitive behind the `labels()` step and a future
-    /// Cypher/GQL front end's `(n:A:B)` pattern.
-    fn vertex_labels(&self, node: Self::VertexId) -> &[CompactString];
+    /// Returns the vertex's full ordered, deduplicated label set. Empty means no labels (or a
+    /// stale handle); a non-empty set's first entry is the vertex's primary label, the one
+    /// [`Self::vertex_label`] returns. This is the storage-level primitive behind the `labels()`
+    /// step and GQL's `(n:A:B)` pattern. `Err` when the backend cannot answer.
+    fn vertex_labels(&self, node: Self::VertexId) -> Result<&[CompactString], GraphError>;
 
     /// Returns `true` iff `label` is one of the vertex's labels (see [`Self::vertex_labels`]).
     #[inline]
-    fn vertex_has_label(&self, node: Self::VertexId, label: &str) -> bool {
-        self.vertex_labels(node).iter().any(|l| l.as_str() == label)
+    fn vertex_has_label(&self, node: Self::VertexId, label: &str) -> Result<bool, GraphError> {
+        Ok(self
+            .vertex_labels(node)?
+            .iter()
+            .any(|l| l.as_str() == label))
     }
 
-    /// The vertex's property map, or `None` for an invalid handle.
-    fn vertex_properties(&self, node: Self::VertexId) -> Option<&PropertyMap>;
-    /// The edge's property map, or `None` for an invalid handle.
-    fn edge_properties(&self, edge: Self::EdgeId) -> Option<&PropertyMap>;
+    /// The vertex's property map, `Ok(None)` for a stale handle, `Err` when the backend cannot
+    /// answer.
+    fn vertex_properties(&self, node: Self::VertexId) -> Result<Option<&PropertyMap>, GraphError>;
+    /// The edge's property map; see [`Self::vertex_properties`].
+    fn edge_properties(&self, edge: Self::EdgeId) -> Result<Option<&PropertyMap>, GraphError>;
 
-    /// The `(source, target)` vertex handles of an edge, or `None` for an invalid handle.
-    fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)>;
+    /// The `(source, target)` vertex handles of an edge, `Ok(None)` for a stale handle, `Err`
+    /// when the backend cannot answer.
+    #[allow(clippy::type_complexity)]
+    fn edge_endpoints(
+        &self,
+        edge: Self::EdgeId,
+    ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError>;
 
     /// `true` iff `node` refers to a vertex that still exists (see [`Self::VertexId`]). Lets the
     /// pipeline tell a removed vertex from a live one without an id or label (`id()`/`label()` of
-    /// a removed vertex fail with [`GraphError::ElementRemoved`]).
+    /// a removed vertex fail with [`GraphError::ElementRemoved`]). `Err` when the backend cannot
+    /// answer.
     ///
     /// Default: [`Self::vertex_properties`] is `Some`, which every live vertex has.
-    fn contains_vertex(&self, node: Self::VertexId) -> bool {
-        self.vertex_properties(node).is_some()
+    #[inline]
+    fn contains_vertex(&self, node: Self::VertexId) -> Result<bool, GraphError> {
+        Ok(self.vertex_properties(node)?.is_some())
     }
 
     /// `true` iff `edge` refers to an edge that still exists; see [`Self::contains_vertex`].
     ///
     /// Default: [`Self::edge_endpoints`] is `Some`, which every live edge has.
-    fn contains_edge(&self, edge: Self::EdgeId) -> bool {
-        self.edge_endpoints(edge).is_some()
+    #[inline]
+    fn contains_edge(&self, edge: Self::EdgeId) -> Result<bool, GraphError> {
+        Ok(self.edge_endpoints(edge)?.is_some())
     }
 
     /// Vertices whose label set contains `label` — under multi-label this is set membership, not
     /// primary-label equality, so a vertex tagged with `label` alongside others is still returned.
+    /// `Err` when the backend cannot answer.
+    ///
+    /// Default: [`Self::vertices`] filtered by [`Self::vertex_has_label`], collected first so that
+    /// a failing label read is this call's `Err` (an iterator has no per-item error channel). A
+    /// storage with a label index, or one that wants the scan lazy, overrides it.
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = Self::VertexId> + 'a> {
-        Box::new(
-            self.vertices()
-                .filter(move |&n| self.vertex_has_label(n, label)),
-        )
+    ) -> Result<Box<dyn Iterator<Item = Self::VertexId> + 'a>, GraphError> {
+        let mut found = Vec::new();
+        for node in self.vertices()? {
+            if self.vertex_has_label(node, label)? {
+                found.push(node);
+            }
+        }
+        Ok(Box::new(found.into_iter()))
     }
 
-    /// Edges whose label equals `label`.
-    fn edges_by_label<'a>(&'a self, label: &'a str) -> Box<dyn Iterator<Item = Self::EdgeId> + 'a> {
-        Box::new(
-            self.edges()
-                .filter(move |&e| self.edge_label(e) == Some(label)),
-        )
+    /// Edges whose label equals `label`. `Err` when the backend cannot answer.
+    ///
+    /// Default: [`Self::edges`] filtered by [`Self::edge_label`], collected first like
+    /// [`Self::vertices_by_label`].
+    fn edges_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = Self::EdgeId> + 'a>, GraphError> {
+        let mut found = Vec::new();
+        for edge in self.edges()? {
+            if self.edge_label(edge)? == Some(label) {
+                found.push(edge);
+            }
+        }
+        Ok(Box::new(found.into_iter()))
     }
 
     /// The element counts this storage keeps up to date (see [`GraphStatistics`]), or `None` if
@@ -420,7 +491,7 @@ pub trait GraphStorage: Send + Sync {
     where
         Self: Sized,
     {
-        Ok(SchemaInferer::infer_from_storage(self))
+        SchemaInferer::infer_from_storage(self)
     }
 
     /// Replaces the stored schema. In mode `Open`/`Closed` an implementation validates ALL
@@ -709,7 +780,7 @@ pub trait GraphStorage: Send + Sync {
         labels: Vec<CompactString>,
         properties: PropertyMap,
     ) -> Result<Self::VertexId, GraphError> {
-        let context = CreateContext::for_storage(self);
+        let context = CreateContext::for_storage(self)?;
         self.add_vertex_with(id, labels, properties, &context)
     }
 
@@ -723,7 +794,7 @@ pub trait GraphStorage: Send + Sync {
         to: Self::VertexId,
         properties: PropertyMap,
     ) -> Result<Self::EdgeId, GraphError> {
-        let context = CreateContext::for_storage(self);
+        let context = CreateContext::for_storage(self)?;
         self.add_edge_with(id, label, from, to, properties, &context)
     }
 
@@ -822,7 +893,7 @@ pub trait GraphStorage: Send + Sync {
     ) -> Result<(), GraphError> {
         let name = path_property_name(path)?;
         let existing = self
-            .vertex_properties(node)
+            .vertex_properties(node)?
             .and_then(|props| props.get(name.as_str()));
         let (key, resulting) = write_path(existing, path, value)?;
         self.set_vertex_property(node, key, resulting)
@@ -837,7 +908,7 @@ pub trait GraphStorage: Send + Sync {
     ) -> Result<(), GraphError> {
         let name = path_property_name(path)?;
         let existing = self
-            .edge_properties(edge)
+            .edge_properties(edge)?
             .and_then(|props| props.get(name.as_str()));
         let (key, resulting) = write_path(existing, path, value)?;
         self.set_edge_property(edge, key, resulting)
@@ -861,7 +932,7 @@ pub trait GraphStorage: Send + Sync {
         if let Some(name) = single_segment_name(path) {
             return self.drop_vertex_property(name, node);
         }
-        let Some(props) = self.vertex_properties(node) else {
+        let Some(props) = self.vertex_properties(node)? else {
             return Err(GraphError::vertex_removed());
         };
         let existing = match path.segments().first() {
@@ -885,7 +956,7 @@ pub trait GraphStorage: Send + Sync {
         }
         let existing = match path.segments().first() {
             Some(crate::value::json_path::JsonPathSegment::Key(name)) => self
-                .edge_properties(edge)
+                .edge_properties(edge)?
                 .and_then(|props| props.get(name.as_str())),
             _ => None,
         };
@@ -1231,10 +1302,10 @@ pub trait GraphStorage: Send + Sync {
     /// [`TraversalGraph`] takes it once when the outermost unit opens from the system clock
     /// (with the digits the platform gives: see the book page "Dates and Times", "Clock
     /// precision"), never earlier than the previous unit's start or the last commit time (so
-    /// later units never get an earlier time). Default: `None` (the caller then reads the
-    /// system clock).
-    fn unit_started_at(&self) -> Option<i128> {
-        None
+    /// later units never get an earlier time). Default: `Ok(None)` (the caller then reads the
+    /// system clock). `Err` when the backend cannot answer; the element write that asked fails.
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(None)
     }
 
     /// Raises the vertex and edge auto-id sequences to at least `node_sequence` and
@@ -1455,134 +1526,160 @@ impl GraphStorage for TraversalGraph {
     type EdgeId = EdgeHandle;
 
     #[inline]
-    fn vertex_count(&self) -> usize {
-        self.graph.node_count()
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        Ok(self.graph.node_count())
     }
 
     #[inline]
-    fn edge_count(&self) -> usize {
-        self.graph.edge_count()
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        Ok(self.graph.edge_count())
     }
 
     #[inline]
-    fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
-        self.graph
+    fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
+        Ok(self
+            .graph
             .node_references()
-            .map(|(index, vertex)| VertexHandle::new(index, vertex.3))
+            .map(|(index, vertex)| VertexHandle::new(index, vertex.3)))
     }
 
     #[inline]
-    fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
-        self.graph
+    fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
+        Ok(self
+            .graph
             .edge_references()
-            .map(|edge| EdgeHandle::new(edge.id(), edge.weight().3.own))
+            .map(|edge| EdgeHandle::new(edge.id(), edge.weight().3.own)))
     }
 
     #[inline]
-    fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
-        self.index.get_node(&self.graph, id)
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
+        Ok(self.index.get_node(&self.graph, id))
     }
 
     #[inline]
-    fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
-        self.index.get_edge(&self.graph, id)
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
+        Ok(self.index.get_edge(&self.graph, id))
     }
 
     #[inline]
-    fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn out_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         // A stale handle iterates the edges of no slot (`NodeIndex::end()` is never occupied).
         let index = self.resolve_vertex(node).unwrap_or_else(NodeIndex::end);
-        self.graph
+        Ok(self
+            .graph
             .edges_directed(index, Direction::Outgoing)
-            .map(|e| EdgeHandle::new(e.id(), e.weight().3.own))
+            .map(|e| EdgeHandle::new(e.id(), e.weight().3.own)))
     }
 
     #[inline]
-    fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn in_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         let index = self.resolve_vertex(node).unwrap_or_else(NodeIndex::end);
-        self.graph
+        Ok(self
+            .graph
             .edges_directed(index, Direction::Incoming)
-            .map(|e| EdgeHandle::new(e.id(), e.weight().3.own))
+            .map(|e| EdgeHandle::new(e.id(), e.weight().3.own)))
     }
 
     #[inline]
-    fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
-        self.vertex_weight(node).map(|v| v.0.as_str())
+    fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
+        Ok(self.vertex_weight(node).map(|v| v.0.as_str()))
     }
 
     #[inline]
-    fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
-        self.edge_weight(edge).map(|e| e.0.as_str())
+    fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
+        Ok(self.edge_weight(edge).map(|e| e.0.as_str()))
     }
 
     #[inline]
-    fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
-        self.vertex_weight(node)
+    fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
+        Ok(self
+            .vertex_weight(node)
             .and_then(|v| self.labels.set(v.1).first())
-            .map(|l| l.as_str())
+            .map(|l| l.as_str()))
     }
 
     #[inline]
-    fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
-        self.edge_weight(edge)
-            .and_then(|e| self.labels.name_str(e.1))
+    fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
+        Ok(self
+            .edge_weight(edge)
+            .and_then(|e| self.labels.name_str(e.1)))
     }
 
     #[inline]
-    fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
-        self.vertex_weight(node)
+    fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
+        Ok(self
+            .vertex_weight(node)
             .map(|v| self.labels.set(v.1))
-            .unwrap_or(&[])
+            .unwrap_or(&[]))
     }
 
     #[inline]
-    fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
-        self.vertex_weight(node).map(|v| &v.2)
+    fn vertex_properties(&self, node: VertexHandle) -> Result<Option<&PropertyMap>, GraphError> {
+        Ok(self.vertex_weight(node).map(|v| &v.2))
     }
 
     #[inline]
-    fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
-        self.edge_weight(edge).and_then(|e| e.2.as_ref())
+    fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
+        Ok(self.edge_weight(edge).and_then(|e| e.2.as_ref()))
     }
 
     #[inline]
-    fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+    fn edge_endpoints(
+        &self,
+        edge: EdgeHandle,
+    ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
         // The endpoint generations were recorded when the edge was created: no vertex load.
-        let generations = self.edge_weight(edge)?.3;
-        let (source, target) = self.graph.edge_endpoints(edge.index())?;
-        Some((
-            VertexHandle::new(source, generations.source),
-            VertexHandle::new(target, generations.target),
-        ))
+        let Some(weight) = self.edge_weight(edge) else {
+            return Ok(None);
+        };
+        let generations = weight.3;
+        Ok(self
+            .graph
+            .edge_endpoints(edge.index())
+            .map(|(source, target)| {
+                (
+                    VertexHandle::new(source, generations.source),
+                    VertexHandle::new(target, generations.target),
+                )
+            }))
     }
 
     #[inline]
-    fn contains_vertex(&self, node: VertexHandle) -> bool {
-        self.resolve_vertex(node).is_some()
+    fn contains_vertex(&self, node: VertexHandle) -> Result<bool, GraphError> {
+        Ok(self.resolve_vertex(node).is_some())
     }
 
     #[inline]
-    fn contains_edge(&self, edge: EdgeHandle) -> bool {
-        self.resolve_edge(edge).is_some()
+    fn contains_edge(&self, edge: EdgeHandle) -> Result<bool, GraphError> {
+        Ok(self.resolve_edge(edge).is_some())
     }
 
     #[inline]
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
-    ) -> Box<dyn Iterator<Item = VertexHandle> + 'a> {
-        match self.index.get_nodes_by_label(label) {
+    ) -> Result<Box<dyn Iterator<Item = VertexHandle> + 'a>, GraphError> {
+        Ok(match self.index.get_nodes_by_label(label) {
             Some(nodes) => Box::new(nodes),
             None => Box::new(std::iter::empty()),
-        }
+        })
     }
 
     #[inline]
-    fn edges_by_label<'a>(&'a self, label: &'a str) -> Box<dyn Iterator<Item = EdgeHandle> + 'a> {
-        match self.index.get_edges_by_label(label) {
+    fn edges_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = EdgeHandle> + 'a>, GraphError> {
+        Ok(match self.index.get_edges_by_label(label) {
             Some(edges) => Box::new(edges),
             None => Box::new(std::iter::empty()),
-        }
+        })
     }
 
     #[inline]
@@ -2632,9 +2729,11 @@ impl GraphStorage for TraversalGraph {
     /// The undo log's unit start; before the storage's unit opens, the time a
     /// [`Graph`](crate::graph::Graph) pinned for the unit the CURRENT thread holds on this
     /// storage (`Graph::begin_unit` opens the storage's unit only at the unit's first write).
-    fn unit_started_at(&self) -> Option<i128> {
-        self.undo_unit_started_at()
-            .or_else(|| crate::graph::shared::held_unit_clock((self as *const Self).cast::<()>()))
+    #[inline]
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(self
+            .undo_unit_started_at()
+            .or_else(|| crate::graph::shared::held_unit_clock((self as *const Self).cast::<()>())))
     }
 
     /// `max` of each sequence and the given value; nothing is recorded (sequences are never
@@ -2713,90 +2812,102 @@ impl<G: GraphStorage> GraphStorage for &G {
     type EdgeId = G::EdgeId;
 
     #[inline]
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         (**self).vertex_count()
     }
     #[inline]
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         (**self).edge_count()
     }
     #[inline]
-    fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError> {
         (**self).vertices()
     }
     #[inline]
-    fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).edges()
     }
     #[inline]
-    fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError> {
         (**self).get_vertex_by_id(id)
     }
     #[inline]
-    fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError> {
         (**self).get_edge_by_id(id)
     }
     #[inline]
-    fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn out_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).out_edges(node)
     }
     #[inline]
-    fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn in_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).in_edges(node)
     }
     #[inline]
     fn vertices_by_label<'b>(
         &'b self,
         label: &'b str,
-    ) -> Box<dyn Iterator<Item = Self::VertexId> + 'b> {
+    ) -> Result<Box<dyn Iterator<Item = Self::VertexId> + 'b>, GraphError> {
         (**self).vertices_by_label(label)
     }
     #[inline]
-    fn edges_by_label<'b>(&'b self, label: &'b str) -> Box<dyn Iterator<Item = Self::EdgeId> + 'b> {
+    fn edges_by_label<'b>(
+        &'b self,
+        label: &'b str,
+    ) -> Result<Box<dyn Iterator<Item = Self::EdgeId> + 'b>, GraphError> {
         (**self).edges_by_label(label)
     }
     #[inline]
-    fn vertex_id(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_id(node)
     }
     #[inline]
-    fn edge_id(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_id(edge)
     }
     #[inline]
-    fn vertex_label(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_label(node)
     }
     #[inline]
-    fn edge_label(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_label(edge)
     }
     #[inline]
-    fn vertex_labels(&self, node: Self::VertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: Self::VertexId) -> Result<&[CompactString], GraphError> {
         (**self).vertex_labels(node)
     }
     #[inline]
-    fn vertex_has_label(&self, node: Self::VertexId, label: &str) -> bool {
+    fn vertex_has_label(&self, node: Self::VertexId, label: &str) -> Result<bool, GraphError> {
         (**self).vertex_has_label(node, label)
     }
     #[inline]
-    fn vertex_properties(&self, node: Self::VertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: Self::VertexId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).vertex_properties(node)
     }
     #[inline]
-    fn edge_properties(&self, edge: Self::EdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: Self::EdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).edge_properties(edge)
     }
     #[inline]
-    fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)> {
+    fn edge_endpoints(
+        &self,
+        edge: Self::EdgeId,
+    ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError> {
         (**self).edge_endpoints(edge)
     }
     #[inline]
-    fn contains_vertex(&self, node: Self::VertexId) -> bool {
+    fn contains_vertex(&self, node: Self::VertexId) -> Result<bool, GraphError> {
         (**self).contains_vertex(node)
     }
     #[inline]
-    fn contains_edge(&self, edge: Self::EdgeId) -> bool {
+    fn contains_edge(&self, edge: Self::EdgeId) -> Result<bool, GraphError> {
         (**self).contains_edge(edge)
     }
     #[inline]
@@ -3052,7 +3163,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).unit_started_at()
     }
 }
@@ -3062,88 +3173,100 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     type EdgeId = G::EdgeId;
 
     #[inline]
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         (**self).vertex_count()
     }
     #[inline]
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         (**self).edge_count()
     }
     #[inline]
-    fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError> {
         (**self).vertices()
     }
     #[inline]
-    fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).edges()
     }
     #[inline]
-    fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError> {
         (**self).get_vertex_by_id(id)
     }
     #[inline]
-    fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError> {
         (**self).get_edge_by_id(id)
     }
     #[inline]
-    fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn out_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).out_edges(node)
     }
     #[inline]
-    fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn in_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).in_edges(node)
     }
     #[inline]
     fn vertices_by_label<'b>(
         &'b self,
         label: &'b str,
-    ) -> Box<dyn Iterator<Item = Self::VertexId> + 'b> {
+    ) -> Result<Box<dyn Iterator<Item = Self::VertexId> + 'b>, GraphError> {
         (**self).vertices_by_label(label)
     }
     #[inline]
-    fn edges_by_label<'b>(&'b self, label: &'b str) -> Box<dyn Iterator<Item = Self::EdgeId> + 'b> {
+    fn edges_by_label<'b>(
+        &'b self,
+        label: &'b str,
+    ) -> Result<Box<dyn Iterator<Item = Self::EdgeId> + 'b>, GraphError> {
         (**self).edges_by_label(label)
     }
     #[inline]
-    fn vertex_id(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_id(node)
     }
     #[inline]
-    fn edge_id(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_id(edge)
     }
     #[inline]
-    fn vertex_label(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_label(node)
     }
     #[inline]
-    fn edge_label(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_label(edge)
     }
     #[inline]
-    fn vertex_labels(&self, node: Self::VertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: Self::VertexId) -> Result<&[CompactString], GraphError> {
         (**self).vertex_labels(node)
     }
     #[inline]
-    fn vertex_properties(&self, node: Self::VertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: Self::VertexId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).vertex_properties(node)
     }
     #[inline]
-    fn edge_properties(&self, edge: Self::EdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: Self::EdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).edge_properties(edge)
     }
     #[inline]
-    fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)> {
+    fn edge_endpoints(
+        &self,
+        edge: Self::EdgeId,
+    ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError> {
         (**self).edge_endpoints(edge)
     }
 
     #[inline]
-    fn contains_vertex(&self, node: Self::VertexId) -> bool {
+    fn contains_vertex(&self, node: Self::VertexId) -> Result<bool, GraphError> {
         (**self).contains_vertex(node)
     }
 
     #[inline]
-    fn contains_edge(&self, edge: Self::EdgeId) -> bool {
+    fn contains_edge(&self, edge: Self::EdgeId) -> Result<bool, GraphError> {
         (**self).contains_edge(edge)
     }
 
@@ -3498,7 +3621,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).unit_started_at()
     }
 
@@ -3522,88 +3645,100 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     type EdgeId = G::EdgeId;
 
     #[inline]
-    fn vertex_count(&self) -> usize {
+    fn vertex_count(&self) -> Result<usize, GraphError> {
         (**self).vertex_count()
     }
     #[inline]
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> Result<usize, GraphError> {
         (**self).edge_count()
     }
     #[inline]
-    fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError> {
         (**self).vertices()
     }
     #[inline]
-    fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).edges()
     }
     #[inline]
-    fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError> {
         (**self).get_vertex_by_id(id)
     }
     #[inline]
-    fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError> {
         (**self).get_edge_by_id(id)
     }
     #[inline]
-    fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn out_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).out_edges(node)
     }
     #[inline]
-    fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn in_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         (**self).in_edges(node)
     }
     #[inline]
     fn vertices_by_label<'b>(
         &'b self,
         label: &'b str,
-    ) -> Box<dyn Iterator<Item = Self::VertexId> + 'b> {
+    ) -> Result<Box<dyn Iterator<Item = Self::VertexId> + 'b>, GraphError> {
         (**self).vertices_by_label(label)
     }
     #[inline]
-    fn edges_by_label<'b>(&'b self, label: &'b str) -> Box<dyn Iterator<Item = Self::EdgeId> + 'b> {
+    fn edges_by_label<'b>(
+        &'b self,
+        label: &'b str,
+    ) -> Result<Box<dyn Iterator<Item = Self::EdgeId> + 'b>, GraphError> {
         (**self).edges_by_label(label)
     }
     #[inline]
-    fn vertex_id(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_id(node)
     }
     #[inline]
-    fn edge_id(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_id(edge)
     }
     #[inline]
-    fn vertex_label(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         (**self).vertex_label(node)
     }
     #[inline]
-    fn edge_label(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         (**self).edge_label(edge)
     }
     #[inline]
-    fn vertex_labels(&self, node: Self::VertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: Self::VertexId) -> Result<&[CompactString], GraphError> {
         (**self).vertex_labels(node)
     }
     #[inline]
-    fn vertex_properties(&self, node: Self::VertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: Self::VertexId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).vertex_properties(node)
     }
     #[inline]
-    fn edge_properties(&self, edge: Self::EdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: Self::EdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         (**self).edge_properties(edge)
     }
     #[inline]
-    fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)> {
+    fn edge_endpoints(
+        &self,
+        edge: Self::EdgeId,
+    ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError> {
         (**self).edge_endpoints(edge)
     }
 
     #[inline]
-    fn contains_vertex(&self, node: Self::VertexId) -> bool {
+    fn contains_vertex(&self, node: Self::VertexId) -> Result<bool, GraphError> {
         (**self).contains_vertex(node)
     }
 
     #[inline]
-    fn contains_edge(&self, edge: Self::EdgeId) -> bool {
+    fn contains_edge(&self, edge: Self::EdgeId) -> Result<bool, GraphError> {
         (**self).contains_edge(edge)
     }
 
@@ -3958,7 +4093,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         (**self).unit_started_at()
     }
 
@@ -3982,92 +4117,101 @@ impl GraphStorage for Arc<TraversalGraph> {
     type EdgeId = EdgeHandle;
 
     #[inline]
-    fn vertex_count(&self) -> usize {
-        self.as_ref().vertex_count()
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::vertex_count(&**self)
     }
 
     #[inline]
-    fn edge_count(&self) -> usize {
-        self.as_ref().edge_count()
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::edge_count(&**self)
     }
 
     #[inline]
-    fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
         GraphStorage::vertices(self.as_ref())
     }
 
     #[inline]
-    fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::edges(self.as_ref())
     }
 
     #[inline]
-    fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
         GraphStorage::get_vertex_by_id(self.as_ref(), id)
     }
 
     #[inline]
-    fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
         GraphStorage::get_edge_by_id(self.as_ref(), id)
     }
 
     #[inline]
-    fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn out_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::out_edges(self.as_ref(), node)
     }
 
     #[inline]
-    fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+    fn in_edges(
+        &self,
+        node: VertexHandle,
+    ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
         GraphStorage::in_edges(self.as_ref(), node)
     }
 
     #[inline]
-    fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+    fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
         self.as_ref().vertex_id(node)
     }
 
     #[inline]
-    fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+    fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
         self.as_ref().edge_id(edge)
     }
 
     #[inline]
-    fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+    fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
         self.as_ref().vertex_label(node)
     }
 
     #[inline]
-    fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+    fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
         self.as_ref().edge_label(edge)
     }
 
     #[inline]
-    fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+    fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
         self.as_ref().vertex_labels(node)
     }
 
     #[inline]
-    fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: VertexHandle) -> Result<Option<&PropertyMap>, GraphError> {
         self.as_ref().vertex_properties(node)
     }
 
     #[inline]
-    fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
         self.as_ref().edge_properties(edge)
     }
 
     #[inline]
-    fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+    fn edge_endpoints(
+        &self,
+        edge: EdgeHandle,
+    ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
         self.as_ref().edge_endpoints(edge)
     }
 
     #[inline]
-    fn contains_vertex(&self, node: VertexHandle) -> bool {
+    fn contains_vertex(&self, node: VertexHandle) -> Result<bool, GraphError> {
         self.as_ref().contains_vertex(node)
     }
 
     #[inline]
-    fn contains_edge(&self, edge: EdgeHandle) -> bool {
+    fn contains_edge(&self, edge: EdgeHandle) -> Result<bool, GraphError> {
         self.as_ref().contains_edge(edge)
     }
 
@@ -4075,12 +4219,15 @@ impl GraphStorage for Arc<TraversalGraph> {
     fn vertices_by_label<'b>(
         &'b self,
         label: &'b str,
-    ) -> Box<dyn Iterator<Item = VertexHandle> + 'b> {
+    ) -> Result<Box<dyn Iterator<Item = VertexHandle> + 'b>, GraphError> {
         self.as_ref().vertices_by_label(label)
     }
 
     #[inline]
-    fn edges_by_label<'b>(&'b self, label: &'b str) -> Box<dyn Iterator<Item = EdgeHandle> + 'b> {
+    fn edges_by_label<'b>(
+        &'b self,
+        label: &'b str,
+    ) -> Result<Box<dyn Iterator<Item = EdgeHandle> + 'b>, GraphError> {
         self.as_ref().edges_by_label(label)
     }
 
@@ -4598,7 +4745,7 @@ impl GraphStorage for Arc<TraversalGraph> {
         GraphStorage::last_commit_seq(self.as_ref())
     }
 
-    fn unit_started_at(&self) -> Option<i128> {
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         GraphStorage::unit_started_at(self.as_ref())
     }
 
@@ -4623,23 +4770,32 @@ mod tests {
     use super::*;
 
     fn test_generic_storage<S: GraphStorage>(storage: &S) {
-        assert_eq!(storage.vertex_count(), 2);
-        assert_eq!(storage.edge_count(), 1);
+        assert_eq!(storage.vertex_count().unwrap(), 2);
+        assert_eq!(storage.edge_count().unwrap(), 1);
 
-        let v1 = storage.get_vertex_by_id("v1").expect("v1 should exist");
-        let v2 = storage.get_vertex_by_id("v2").expect("v2 should exist");
+        let v1 = storage
+            .get_vertex_by_id("v1")
+            .unwrap()
+            .expect("v1 should exist");
+        let v2 = storage
+            .get_vertex_by_id("v2")
+            .unwrap()
+            .expect("v2 should exist");
 
-        assert_eq!(storage.vertex_label(v1), Some("person"));
-        assert_eq!(storage.vertex_label(v2), Some("person"));
+        assert_eq!(storage.vertex_label(v1).unwrap(), Some("person"));
+        assert_eq!(storage.vertex_label(v2).unwrap(), Some("person"));
 
-        let e1 = storage.get_edge_by_id("e1").expect("e1 should exist");
-        assert_eq!(storage.edge_label(e1), Some("knows"));
-        assert_eq!(storage.edge_endpoints(e1), Some((v1, v2)));
+        let e1 = storage
+            .get_edge_by_id("e1")
+            .unwrap()
+            .expect("e1 should exist");
+        assert_eq!(storage.edge_label(e1).unwrap(), Some("knows"));
+        assert_eq!(storage.edge_endpoints(e1).unwrap(), Some((v1, v2)));
 
-        let out_e: Vec<_> = storage.out_edges(v1).collect();
+        let out_e: Vec<_> = storage.out_edges(v1).unwrap().collect();
         assert_eq!(out_e, vec![e1]);
 
-        let in_e: Vec<_> = storage.in_edges(v2).collect();
+        let in_e: Vec<_> = storage.in_edges(v2).unwrap().collect();
         assert_eq!(in_e, vec![e1]);
     }
 
@@ -4684,7 +4840,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(graph.vertex_count(), 3);
-        assert_eq!(graph.vertex_label(v3), Some("software"));
+        assert_eq!(graph.vertex_label(v3).unwrap(), Some("software"));
     }
 
     #[test]
@@ -4747,18 +4903,30 @@ mod tests {
             .unwrap();
 
         // Check TraversalGraph direct implementation
-        let persons: Vec<_> = GraphStorage::vertices_by_label(&tg, "person").collect();
+        let persons: Vec<_> = GraphStorage::vertices_by_label(&tg, "person")
+            .unwrap()
+            .collect();
         assert_eq!(persons, vec![v1, v2]);
-        let softwares: Vec<_> = GraphStorage::vertices_by_label(&tg, "software").collect();
+        let softwares: Vec<_> = GraphStorage::vertices_by_label(&tg, "software")
+            .unwrap()
+            .collect();
         assert_eq!(softwares, vec![v3]);
-        let unknown_v: Vec<_> = GraphStorage::vertices_by_label(&tg, "unknown").collect();
+        let unknown_v: Vec<_> = GraphStorage::vertices_by_label(&tg, "unknown")
+            .unwrap()
+            .collect();
         assert!(unknown_v.is_empty());
 
-        let knows_edges: Vec<_> = GraphStorage::edges_by_label(&tg, "knows").collect();
+        let knows_edges: Vec<_> = GraphStorage::edges_by_label(&tg, "knows")
+            .unwrap()
+            .collect();
         assert_eq!(knows_edges, vec![e1]);
-        let created_edges: Vec<_> = GraphStorage::edges_by_label(&tg, "created").collect();
+        let created_edges: Vec<_> = GraphStorage::edges_by_label(&tg, "created")
+            .unwrap()
+            .collect();
         assert_eq!(created_edges, vec![e2]);
-        let unknown_e: Vec<_> = GraphStorage::edges_by_label(&tg, "unknown").collect();
+        let unknown_e: Vec<_> = GraphStorage::edges_by_label(&tg, "unknown")
+            .unwrap()
+            .collect();
         assert!(unknown_e.is_empty());
 
         let stats = tg
@@ -4769,41 +4937,61 @@ mod tests {
         assert_eq!(stats.vertex_label_count("software"), 1);
         assert_eq!(stats.edge_label_count("knows"), 1);
         assert_eq!(stats.edge_label_count("created"), 1);
-        assert_eq!(stats, &GraphStatistics::from_storage(&tg));
+        assert_eq!(stats, &GraphStatistics::from_storage(&tg).unwrap());
 
         // Check forwarding through &TraversalGraph and Box
         {
             let ref_tg: &TraversalGraph = &tg;
             assert_eq!(
-                ref_tg.vertices_by_label("person").collect::<Vec<_>>(),
+                ref_tg
+                    .vertices_by_label("person")
+                    .unwrap()
+                    .collect::<Vec<_>>(),
                 vec![v1, v2]
             );
-            assert_eq!(ref_tg.edges_by_label("knows").collect::<Vec<_>>(), vec![e1]);
+            assert_eq!(
+                ref_tg.edges_by_label("knows").unwrap().collect::<Vec<_>>(),
+                vec![e1]
+            );
 
             let boxed: Box<&TraversalGraph> = Box::new(ref_tg);
             assert_eq!(
-                boxed.vertices_by_label("person").collect::<Vec<_>>(),
+                boxed
+                    .vertices_by_label("person")
+                    .unwrap()
+                    .collect::<Vec<_>>(),
                 vec![v1, v2]
             );
-            assert_eq!(boxed.edges_by_label("knows").collect::<Vec<_>>(), vec![e1]);
+            assert_eq!(
+                boxed.edges_by_label("knows").unwrap().collect::<Vec<_>>(),
+                vec![e1]
+            );
         }
 
         // Test drop edge and label index removal
         tg.drop_edge(e1).unwrap();
-        let knows_after_drop: Vec<_> = GraphStorage::edges_by_label(&tg, "knows").collect();
+        let knows_after_drop: Vec<_> = GraphStorage::edges_by_label(&tg, "knows")
+            .unwrap()
+            .collect();
         assert!(knows_after_drop.is_empty());
         assert_eq!(
-            GraphStorage::edges_by_label(&tg, "created").collect::<Vec<_>>(),
+            GraphStorage::edges_by_label(&tg, "created")
+                .unwrap()
+                .collect::<Vec<_>>(),
             vec![e2]
         );
 
         // Test drop vertex and label index removal
         tg.drop_vertex(v2).unwrap();
-        let persons_after_drop: Vec<_> = GraphStorage::vertices_by_label(&tg, "person").collect();
+        let persons_after_drop: Vec<_> = GraphStorage::vertices_by_label(&tg, "person")
+            .unwrap()
+            .collect();
         assert_eq!(persons_after_drop, vec![v1]);
 
         tg.drop_vertex(v1).unwrap();
-        let persons_empty: Vec<_> = GraphStorage::vertices_by_label(&tg, "person").collect();
+        let persons_empty: Vec<_> = GraphStorage::vertices_by_label(&tg, "person")
+            .unwrap()
+            .collect();
         assert!(persons_empty.is_empty());
     }
 
@@ -4816,52 +5004,64 @@ mod tests {
         type VertexId = VertexHandle;
         type EdgeId = EdgeHandle;
 
-        fn vertex_count(&self) -> usize {
-            self.tg.vertex_count()
+        fn vertex_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::vertex_count(&self.tg)
         }
-        fn edge_count(&self) -> usize {
-            self.tg.edge_count()
+        fn edge_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::edge_count(&self.tg)
         }
-        fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+        fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
             GraphStorage::vertices(&self.tg)
         }
-        fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::edges(&self.tg)
         }
-        fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+        fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
             GraphStorage::get_vertex_by_id(&self.tg, id)
         }
-        fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+        fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
             GraphStorage::get_edge_by_id(&self.tg, id)
         }
-        fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn out_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::out_edges(&self.tg, node)
         }
-        fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn in_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::in_edges(&self.tg, node)
         }
-        fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.tg.vertex_id(node)
         }
-        fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             self.tg.edge_id(edge)
         }
-        fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.tg.vertex_label(node)
         }
-        fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             self.tg.edge_label(edge)
         }
-        fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+        fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
             self.tg.vertex_labels(node)
         }
-        fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+        fn vertex_properties(
+            &self,
+            node: VertexHandle,
+        ) -> Result<Option<&PropertyMap>, GraphError> {
             self.tg.vertex_properties(node)
         }
-        fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+        fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
             self.tg.edge_properties(edge)
         }
-        fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+        fn edge_endpoints(
+            &self,
+            edge: EdgeHandle,
+        ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
             self.tg.edge_endpoints(edge)
         }
         fn insert_vertex(
@@ -4998,22 +5198,22 @@ mod tests {
         let mock = MockStorage { tg };
 
         // Test default vertices_by_label implementation
-        let persons: Vec<_> = mock.vertices_by_label("person").collect();
+        let persons: Vec<_> = mock.vertices_by_label("person").unwrap().collect();
         assert_eq!(persons.len(), 2);
 
-        let unknown: Vec<_> = mock.vertices_by_label("non_existent").collect();
+        let unknown: Vec<_> = mock.vertices_by_label("non_existent").unwrap().collect();
         assert!(unknown.is_empty());
 
         // Test default edges_by_label implementation
-        let knows: Vec<_> = mock.edges_by_label("knows").collect();
+        let knows: Vec<_> = mock.edges_by_label("knows").unwrap().collect();
         assert_eq!(knows.len(), 1);
 
-        let unknown_edges: Vec<_> = mock.edges_by_label("non_existent").collect();
+        let unknown_edges: Vec<_> = mock.edges_by_label("non_existent").unwrap().collect();
         assert!(unknown_edges.is_empty());
 
         // A storage without its own bookkeeping reports no statistics; they can be computed.
         assert!(mock.statistics().unwrap().is_none());
-        let stats = GraphStatistics::from_storage(&mock);
+        let stats = GraphStatistics::from_storage(&mock).unwrap();
         assert_eq!(stats.vertex_label_count("person"), 2);
         assert_eq!(stats.edge_label_count("knows"), 1);
     }

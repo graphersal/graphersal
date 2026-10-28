@@ -1205,7 +1205,7 @@ impl<S: GraphStorage> Importer<'_, S> {
             .g
             .insert_vertex(id, labels, data)
             .map_err(IOError::Graph)?;
-        let vertex_id = match self.g.vertex_id(handle) {
+        let vertex_id = match self.g.vertex_id(handle)? {
             Some(text) => CompactString::from(text),
             None => CompactString::default(),
         };
@@ -1558,8 +1558,8 @@ impl<S: GraphStorage> Importer<'_, S> {
         edge: PendingEdge,
         seen: &mut HashMap<CompactString, (CompactString, CompactString, CompactString)>,
     ) -> Result<(), IOError> {
-        let from = self.endpoint(&edge.from);
-        let to = self.endpoint(&edge.to);
+        let from = self.endpoint(&edge.from)?;
+        let to = self.endpoint(&edge.to)?;
         let (Some(from), Some(to)) = (from, to) else {
             let at = self.location(edge.record);
             let shown = edge.id.clone().unwrap_or_default();
@@ -1584,11 +1584,11 @@ impl<S: GraphStorage> Importer<'_, S> {
     }
 
     /// An edge endpoint: a vertex of the file, else one already in the target graph.
-    fn endpoint(&self, id: &str) -> Option<S::VertexId> {
-        self.vertices
-            .get(id)
-            .copied()
-            .or_else(|| self.g.get_vertex_by_id(id))
+    fn endpoint(&self, id: &str) -> Result<Option<S::VertexId>, IOError> {
+        match self.vertices.get(id) {
+            Some(vertex) => Ok(Some(*vertex)),
+            None => self.g.get_vertex_by_id(id).map_err(IOError::Graph),
+        }
     }
 }
 
@@ -1645,10 +1645,10 @@ impl GraphSONExport {
     ) -> Result<(), IOError> {
         let mut line = String::new();
         let mut property_id: i64 = 0;
-        for vertex in g.vertices() {
+        for vertex in g.vertices()? {
             line.clear();
             if write_vertex(g, vertex, &mut property_id, &mut line)
-                .map_err(physical_to_io)?
+                .map_err(write_error_to_io)?
                 .is_none()
             {
                 continue;
@@ -1675,20 +1675,51 @@ fn physical_to_io(err: PhysicalError) -> IOError {
     }
 }
 
+/// A failure while writing one vertex line: the JSON writer's, or the storage's read error.
+enum WriteError {
+    Physical(PhysicalError),
+    Storage(crate::error::GraphError),
+}
+
+impl From<PhysicalError> for WriteError {
+    fn from(err: PhysicalError) -> Self {
+        WriteError::Physical(err)
+    }
+}
+
+impl From<crate::error::GraphError> for WriteError {
+    fn from(err: crate::error::GraphError) -> Self {
+        WriteError::Storage(err)
+    }
+}
+
+impl From<std::fmt::Error> for WriteError {
+    fn from(err: std::fmt::Error) -> Self {
+        WriteError::Physical(err.into())
+    }
+}
+
+fn write_error_to_io(err: WriteError) -> IOError {
+    match err {
+        WriteError::Physical(err) => physical_to_io(err),
+        WriteError::Storage(err) => IOError::Graph(err),
+    }
+}
+
 /// Writes one vertex line (without the newline); `None` for a vertex without an id.
 fn write_vertex<S: GraphStorage>(
     g: &S,
     vertex: S::VertexId,
     property_id: &mut i64,
     out: &mut String,
-) -> Result<Option<()>, PhysicalError> {
-    let Some(id) = g.vertex_id(vertex) else {
+) -> Result<Option<()>, WriteError> {
+    let Some(id) = g.vertex_id(vertex)? else {
         return Ok(None);
     };
     out.push_str("{\"id\":");
     write_json_string(id, out)?;
     out.push_str(",\"label\":");
-    let labels = g.vertex_labels(vertex);
+    let labels = g.vertex_labels(vertex)?;
     if labels.is_empty() {
         write_json_string(DEFAULT_VERTEX_LABEL, out)?;
     } else {
@@ -1699,11 +1730,11 @@ fn write_vertex<S: GraphStorage>(
             .join("::");
         write_json_string(&joined, out)?;
     }
-    write_edges(g, g.in_edges(vertex).collect(), false, out)?;
-    write_edges(g, g.out_edges(vertex).collect(), true, out)?;
+    write_edges(g, g.in_edges(vertex)?.collect(), false, out)?;
+    write_edges(g, g.out_edges(vertex)?.collect(), true, out)?;
 
     let empty = PropertyMap::default();
-    let props = g.vertex_properties(vertex).unwrap_or(&empty);
+    let props = g.vertex_properties(vertex)?.unwrap_or(&empty);
     let plan = meta_plan(props);
     let mut first = true;
     for (key, value) in props {
@@ -1784,10 +1815,10 @@ fn write_edges<S: GraphStorage>(
     edges: Vec<S::EdgeId>,
     out_direction: bool,
     out: &mut String,
-) -> Result<(), PhysicalError> {
+) -> Result<(), WriteError> {
     let mut groups: IndexMap<&str, Vec<S::EdgeId>> = IndexMap::new();
     for edge in edges {
-        let label = g.edge_label(edge).unwrap_or(DEFAULT_EDGE_LABEL);
+        let label = g.edge_label(edge)?.unwrap_or(DEFAULT_EDGE_LABEL);
         groups.entry(label).or_default().push(edge);
     }
     if groups.is_empty() {
@@ -1806,11 +1837,11 @@ fn write_edges<S: GraphStorage>(
         out.push_str(":[");
         let mut first = true;
         for edge in list {
-            let Some((from, to)) = g.edge_endpoints(*edge) else {
+            let Some((from, to)) = g.edge_endpoints(*edge)? else {
                 continue;
             };
             let other = if out_direction { to } else { from };
-            let Some(other_id) = g.vertex_id(other) else {
+            let Some(other_id) = g.vertex_id(other)? else {
                 continue;
             };
             if !first {
@@ -1818,7 +1849,7 @@ fn write_edges<S: GraphStorage>(
             }
             first = false;
             out.push('{');
-            if let Some(id) = g.edge_id(*edge) {
+            if let Some(id) = g.edge_id(*edge)? {
                 out.push_str("\"id\":");
                 write_json_string(id, out)?;
                 out.push(',');
@@ -1829,7 +1860,7 @@ fn write_edges<S: GraphStorage>(
                 "\"outV\":"
             });
             write_json_string(other_id, out)?;
-            if let Some(props) = g.edge_properties(*edge)
+            if let Some(props) = g.edge_properties(*edge)?
                 && !props.is_empty()
             {
                 out.push_str(",\"properties\":");
@@ -2071,8 +2102,12 @@ mod tests {
     fn typed_scalars_decode() {
         let line = r#"{"id":{"@type":"g:Int32","@value":1},"label":"x","properties":{"a":[{"id":{"@type":"g:Int64","@value":0},"value":{"@type":"g:Int32","@value":7}}],"b":[{"value":{"@type":"g:Double","@value":"NaN"}}]}}"#;
         let (g, report) = import(line);
-        let v = GraphStorage::get_vertex_by_id(&g, "1").expect("vertex");
-        let props = GraphStorage::vertex_properties(&g, v).expect("props");
+        let v = GraphStorage::get_vertex_by_id(&g, "1")
+            .unwrap()
+            .expect("vertex");
+        let props = GraphStorage::vertex_properties(&g, v)
+            .unwrap()
+            .expect("props");
         assert_eq!(props.get("a"), Some(&ElementProperty::from(7i64)));
         assert!(
             matches!(props.get("b"), Some(ElementProperty::Number(n)) if n.as_f64().is_some_and(f64::is_nan))

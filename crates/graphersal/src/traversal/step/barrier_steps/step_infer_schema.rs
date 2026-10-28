@@ -38,19 +38,19 @@ impl<'g, S: GraphStorage + 'g> GraphStepBarrier<'g, S> for StepInferSchema {
                 | TraverserValue::VertexProperty(_, node, _)
                 | TraverserValue::Computed(_, Some(node)) => {
                     inferer.observe_vertex(
-                        context.storage.vertex_labels(*node),
-                        context.storage.vertex_properties(*node).unwrap_or(&empty),
+                        context.storage.vertex_labels(*node)?,
+                        context.storage.vertex_properties(*node)?.unwrap_or(&empty),
                     );
                 }
                 TraverserValue::Edge(edge) | TraverserValue::EdgeProperty(_, edge, _) => {
-                    let Some((from, to)) = context.storage.edge_endpoints(*edge) else {
+                    let Some((from, to)) = context.storage.edge_endpoints(*edge)? else {
                         continue;
                     };
                     inferer.observe_edge(
-                        context.storage.edge_label(*edge),
-                        context.storage.vertex_labels(from),
-                        context.storage.vertex_labels(to),
-                        context.storage.edge_properties(*edge).unwrap_or(&empty),
+                        context.storage.edge_label(*edge)?,
+                        context.storage.vertex_labels(from)?,
+                        context.storage.vertex_labels(to)?,
+                        context.storage.edge_properties(*edge)?.unwrap_or(&empty),
                     );
                 }
                 _ => {}

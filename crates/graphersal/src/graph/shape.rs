@@ -848,6 +848,7 @@ mod graph_tests {
     fn keys(graph: &TraversalGraph, handle: VertexHandle) -> Vec<String> {
         graph
             .vertex_properties(handle)
+            .unwrap()
             .expect("live")
             .keys()
             .map(|k| k.to_string())
@@ -942,7 +943,7 @@ mod graph_tests {
     fn a_map_from_another_graph_gets_this_graphs_shape() {
         let mut one = TraversalGraph::new();
         let a = person(&mut one, "ann", 30);
-        let copy = one.vertex_properties(a).expect("live").clone();
+        let copy = one.vertex_properties(a).unwrap().expect("live").clone();
         let mut two = TraversalGraph::new();
         let b = two.insert_vertex(None, vec![], copy).expect("insert");
         let local = person(&mut two, "bob", 40);
@@ -1113,8 +1114,8 @@ mod import_tests {
     fn assert_shared(graph: &TraversalGraph, how: &str) {
         let mut shared: Option<Arc<Shape>> = None;
         let mut sharing = 0;
-        for v in GraphStorage::vertices(graph) {
-            let shape = shape_of(graph.vertex_properties(v).expect("live"));
+        for v in GraphStorage::vertices(graph).unwrap() {
+            let shape = shape_of(graph.vertex_properties(v).unwrap().expect("live"));
             assert_eq!(shape.owner, graph.shapes.id, "{how}");
             let keys: Vec<&str> = shape.keys.iter().map(CompactString::as_str).collect();
             if keys == ["z", "a", "m"] {
@@ -1127,8 +1128,8 @@ mod import_tests {
         }
         assert!(sharing > 2, "{how}");
         let mut edges = 0;
-        for e in GraphStorage::edges(graph) {
-            if let Some(map) = graph.edge_properties(e).filter(|m| !m.is_empty()) {
+        for e in GraphStorage::edges(graph).unwrap() {
+            if let Some(map) = graph.edge_properties(e).unwrap().filter(|m| !m.is_empty()) {
                 assert_eq!(shape_of(map).owner, graph.shapes.id, "{how}");
                 edges += 1;
             }

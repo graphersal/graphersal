@@ -59,31 +59,37 @@ pub(crate) fn exact(graph: &TraversalGraph) -> Vec<String> {
         out.push(format!("definition {definition:?}"));
     }
     let mut elements = Vec::new();
-    for v in graph.vertices() {
-        let id = graph.vertex_id(v).unwrap().to_string();
-        assert_eq!(graph.get_vertex_by_id(&id), Some(v), "index of {id}");
+    for v in graph.vertices().unwrap() {
+        let id = graph.vertex_id(v).unwrap().unwrap().to_string();
+        assert_eq!(
+            graph.get_vertex_by_id(&id).unwrap(),
+            Some(v),
+            "index of {id}"
+        );
         let properties: Vec<String> = graph
             .vertex_properties(v)
+            .unwrap()
             .map(|p| p.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         elements.push(format!(
             "v {id:?} {:?} {properties:?}",
-            graph.vertex_labels(v)
+            graph.vertex_labels(v).unwrap()
         ));
     }
-    for e in graph.edges() {
-        let id = graph.edge_id(e).unwrap().to_string();
-        assert_eq!(graph.get_edge_by_id(&id), Some(e), "index of {id}");
-        let (from, to) = graph.edge_endpoints(e).unwrap();
+    for e in graph.edges().unwrap() {
+        let id = graph.edge_id(e).unwrap().unwrap().to_string();
+        assert_eq!(graph.get_edge_by_id(&id).unwrap(), Some(e), "index of {id}");
+        let (from, to) = graph.edge_endpoints(e).unwrap().unwrap();
         let properties: Vec<String> = graph
             .edge_properties(e)
+            .unwrap()
             .map(|p| p.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
             .unwrap_or_default();
         elements.push(format!(
             "e {id:?} {:?} {:?}->{:?} {properties:?}",
-            graph.edge_label(e),
-            graph.vertex_id(from).unwrap(),
-            graph.vertex_id(to).unwrap()
+            graph.edge_label(e).unwrap(),
+            graph.vertex_id(from).unwrap().unwrap(),
+            graph.vertex_id(to).unwrap().unwrap()
         ));
     }
     elements.sort();
@@ -259,7 +265,8 @@ pub(crate) fn fake_data(graph: &Arc<Graph>, seed: u64, people: usize) {
 fn vertex_ids(graph: &TraversalGraph) -> Vec<String> {
     let mut ids: Vec<String> = graph
         .vertices()
-        .filter_map(|v| graph.vertex_id(v).map(str::to_string))
+        .unwrap()
+        .filter_map(|v| graph.vertex_id(v).unwrap().map(str::to_string))
         .collect();
     ids.sort();
     ids
@@ -268,7 +275,8 @@ fn vertex_ids(graph: &TraversalGraph) -> Vec<String> {
 fn edge_ids(graph: &TraversalGraph) -> Vec<String> {
     let mut ids: Vec<String> = graph
         .edges()
-        .filter_map(|e| graph.edge_id(e).map(str::to_string))
+        .unwrap()
+        .filter_map(|e| graph.edge_id(e).unwrap().map(str::to_string))
         .collect();
     ids.sort();
     ids
@@ -373,7 +381,7 @@ pub(crate) fn mutate(graph: &Arc<Graph>, kind: &str, rng: &mut Rng, round: usize
                 let label = ["admin", "person", "vip"][seed as usize % 3];
                 let add = kind == "add_label";
                 tx(&mut |g| {
-                    let Some(v) = g.get_vertex_by_id(&a) else {
+                    let Some(v) = g.get_vertex_by_id(&a).unwrap() else {
                         return Ok(());
                     };
                     if add {
@@ -389,7 +397,7 @@ pub(crate) fn mutate(graph: &Arc<Graph>, kind: &str, rng: &mut Rng, round: usize
             if let Some(e) = edge {
                 let label = ["knows", "likes", "rated"][seed as usize % 3];
                 tx(&mut |g| {
-                    if let Some(edge) = g.get_edge_by_id(&e) {
+                    if let Some(edge) = g.get_edge_by_id(&e).unwrap() {
                         g.set_edge_label(edge, label.into())?;
                     }
                     Ok(())

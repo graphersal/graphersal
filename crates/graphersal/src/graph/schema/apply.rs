@@ -589,29 +589,29 @@ impl<'a> SchemaViolationScanner<'a> {
 pub(crate) fn scan_storage<S: GraphStorage>(
     storage: &S,
     schema: &GraphSchema,
-) -> SchemaViolationReport {
+) -> Result<SchemaViolationReport, crate::error::GraphError> {
     let mut scanner = SchemaViolationScanner::new(schema);
     let empty = PropertyMap::default();
-    for vertex in storage.vertices() {
+    for vertex in storage.vertices()? {
         scanner.scan_vertex(
-            storage.vertex_id(vertex).unwrap_or(""),
-            storage.vertex_labels(vertex),
-            storage.vertex_properties(vertex).unwrap_or(&empty),
+            storage.vertex_id(vertex)?.unwrap_or(""),
+            storage.vertex_labels(vertex)?,
+            storage.vertex_properties(vertex)?.unwrap_or(&empty),
         );
     }
-    for edge in storage.edges() {
-        let Some((from, to)) = storage.edge_endpoints(edge) else {
+    for edge in storage.edges()? {
+        let Some((from, to)) = storage.edge_endpoints(edge)? else {
             continue;
         };
         scanner.scan_edge(
-            storage.edge_id(edge).unwrap_or(""),
-            storage.edge_label(edge),
-            storage.vertex_labels(from),
-            storage.vertex_labels(to),
-            storage.edge_properties(edge).unwrap_or(&empty),
+            storage.edge_id(edge)?.unwrap_or(""),
+            storage.edge_label(edge)?,
+            storage.vertex_labels(from)?,
+            storage.vertex_labels(to)?,
+            storage.edge_properties(edge)?.unwrap_or(&empty),
         );
     }
-    scanner.finish()
+    Ok(scanner.finish())
 }
 
 impl ViolationKind {

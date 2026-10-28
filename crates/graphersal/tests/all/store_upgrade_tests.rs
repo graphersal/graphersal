@@ -232,8 +232,8 @@ fn open_holds(dir: impl graphersal::persist::IntoStoreDir + Clone) -> Holds {
 }
 
 fn age_of(graph: &TraversalGraph, name: &str) -> Option<ElementProperty> {
-    graph.vertices().find_map(|v| {
-        let props = graph.vertex_properties(v)?;
+    graph.vertices().unwrap().find_map(|v| {
+        let props = graph.vertex_properties(v).unwrap()?;
         (props.get("name")? == &ElementProperty::from(name))
             .then(|| props.get("age").cloned())
             .flatten()

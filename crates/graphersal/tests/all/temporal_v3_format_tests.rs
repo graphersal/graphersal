@@ -185,8 +185,13 @@ fn v3_graph() -> TraversalGraph {
 fn vertex_map(graph: &TraversalGraph, id: &str) -> PropertyMap {
     let v = graph
         .get_vertex_by_id(id)
+        .unwrap()
         .unwrap_or_else(|| panic!("vertex {id}"));
-    graph.vertex_properties(v).cloned().unwrap_or_default()
+    graph
+        .vertex_properties(v)
+        .unwrap()
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[track_caller]
@@ -197,9 +202,16 @@ fn assert_holds_v3_values(graph: &TraversalGraph, id: &str) {
 #[track_caller]
 fn assert_v3_graph(graph: &TraversalGraph) {
     assert_holds_v3_values(graph, "t");
-    let e = graph.get_edge_by_id("e").expect("edge");
+    let e = graph.get_edge_by_id("e").unwrap().expect("edge");
     assert_eq!(
-        exact(graph.edge_properties(e).unwrap().get("since").unwrap()),
+        exact(
+            graph
+                .edge_properties(e)
+                .unwrap()
+                .unwrap()
+                .get("since")
+                .unwrap()
+        ),
         exact(&dt(EDGE_VALUE))
     );
 }
@@ -297,9 +309,10 @@ fn journal_value(bytes: &[u8]) -> Result<ElementProperty, PersistError> {
             graph.apply_change_set(&changes).unwrap();
         }
     }
-    let v = graph.get_vertex_by_id("x").unwrap();
+    let v = graph.get_vertex_by_id("x").unwrap().unwrap();
     Ok(graph
         .vertex_properties(v)
+        .unwrap()
         .unwrap()
         .get("v")
         .unwrap()
@@ -458,7 +471,7 @@ fn a_store_keeps_every_temporal_value_through_every_path() {
         .read_only_at(RecoveryTarget::Mark("after-w".into()))
         .unwrap();
     assert_holds_v3_values(&past.graph, "w");
-    assert!(past.graph.get_vertex_by_id("later").is_none());
+    assert!(past.graph.get_vertex_by_id("later").unwrap().is_none());
 
     // A verified backup, opened read-only.
     let backup = MemDir::new();
@@ -521,7 +534,7 @@ fn a_store_keeps_every_temporal_value_through_every_path() {
         let lock = store.graph().read();
         assert_v3_graph(&lock);
         assert_holds_v3_values(&lock, "w");
-        assert!(lock.get_vertex_by_id("later").is_none());
+        assert!(lock.get_vertex_by_id("later").unwrap().is_none());
     }
     let entries = store.attic_list().unwrap();
     assert_eq!(entries.len(), 1);
@@ -609,12 +622,16 @@ fn fixture_values() -> PropertyMap {
 fn thing(graph: &TraversalGraph, name: &str) -> PropertyMap {
     let v = graph
         .vertices()
+        .unwrap()
         .find(|&v| {
-            graph.vertex_properties(v).and_then(|p| p.get("name"))
+            graph
+                .vertex_properties(v)
+                .unwrap()
+                .and_then(|p| p.get("name"))
                 == Some(&ElementProperty::from(name))
         })
         .unwrap_or_else(|| panic!("vertex {name}"));
-    graph.vertex_properties(v).cloned().unwrap()
+    graph.vertex_properties(v).unwrap().cloned().unwrap()
 }
 
 /// The fixture graph as `make.sh` left it (commit 4).
@@ -628,9 +645,16 @@ fn assert_fixture_graph(graph: &TraversalGraph) {
     expected.insert("name", ElementProperty::from("wal"));
     assert_eq!(exact_map(&thing(graph, "wal")), exact_map(&expected));
     assert_eq!(graph.edge_count(), 1);
-    let e = graph.edges().next().unwrap();
+    let e = graph.edges().unwrap().next().unwrap();
     assert_eq!(
-        exact(graph.edge_properties(e).unwrap().get("when").unwrap()),
+        exact(
+            graph
+                .edge_properties(e)
+                .unwrap()
+                .unwrap()
+                .get("when")
+                .unwrap()
+        ),
         exact(&local("1969-12-31T23:59:59.999999"))
     );
 }
@@ -800,7 +824,14 @@ fn a_nanosecond_tag_in_a_version_1_or_2_file_is_damage() {
     match Store::open(&dir, StoreOptions::new()) {
         Ok(store) => {
             assert!(store.maintenance().is_some(), "opened without damage");
-            assert!(store.graph().read().get_vertex_by_id("x").is_none());
+            assert!(
+                store
+                    .graph()
+                    .read()
+                    .get_vertex_by_id("x")
+                    .unwrap()
+                    .is_none()
+            );
         }
         Err(err) => assert!(matches!(err, PersistError::Corrupt { .. }), "{err}"),
     }

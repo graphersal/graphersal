@@ -46,13 +46,13 @@ pub(crate) fn clone_map<S: ?Sized>(_: &mut S, map: &PropertyMap) -> PropertyMap 
 
 fn vertex_of<S: GraphStorage + ?Sized>(storage: &S, id: &str) -> Result<S::VertexId, GraphError> {
     storage
-        .get_vertex_by_id(id)
+        .get_vertex_by_id(id)?
         .ok_or_else(|| GraphError::VertexNotFound { id: id.to_string() })
 }
 
 fn edge_of<S: GraphStorage + ?Sized>(storage: &S, id: &str) -> Result<S::EdgeId, GraphError> {
     storage
-        .get_edge_by_id(id)
+        .get_edge_by_id(id)?
         .ok_or_else(|| GraphError::EdgeNotFound { id: id.to_string() })
 }
 
@@ -329,90 +329,14 @@ pub(crate) fn before_mismatch<S: GraphStorage + ?Sized>(
     mutation: &Mutation,
     check_schema: bool,
 ) -> Option<String> {
-    let vertex = |id: &str| storage.get_vertex_by_id(id);
-    let edge = |id: &str| storage.get_edge_by_id(id);
-    let property = |element: &ElementRef, key: &str| -> Result<Option<ElementProperty>, String> {
-        match element.kind {
-            ElementKind::Vertex => vertex(&element.id)
-                .map(|v| {
-                    storage
-                        .vertex_properties(v)
-                        .and_then(|p| p.get(key).cloned())
-                })
-                .ok_or_else(|| "the vertex is missing".to_string()),
-            ElementKind::Edge => edge(&element.id)
-                .map(|e| storage.edge_properties(e).and_then(|p| p.get(key).cloned()))
-                .ok_or_else(|| "the edge is missing".to_string()),
-        }
-    };
+    // A storage that cannot read an element fails the check with its error: the before image
+    // cannot be confirmed (as for the schema and the catalog below).
+    match element_before_mismatch(storage, mutation) {
+        Ok(Some(found)) => return found,
+        Ok(None) => {}
+        Err(err) => return Some(format!("the element cannot be read: {err}")),
+    }
     match mutation {
-        Mutation::AddVertex { id, .. } => vertex(id).map(|_| "the vertex exists already".into()),
-        Mutation::AddEdge { id, .. } => edge(id).map(|_| "the edge exists already".into()),
-        Mutation::DropVertex { id, before } => match vertex(id) {
-            None => Some("the vertex is missing".into()),
-            Some(v) => {
-                let labels: Vec<&str> = storage
-                    .vertex_labels(v)
-                    .iter()
-                    .map(CompactString::as_str)
-                    .collect();
-                let expected: Vec<&str> = before.labels.iter().map(String::as_str).collect();
-                let properties = storage.vertex_properties(v).cloned().unwrap_or_default();
-                (labels != expected || properties != before.properties)
-                    .then(|| "its labels or properties differ from the dropped ones".into())
-            }
-        },
-        Mutation::DropEdge { id, before } => match edge(id) {
-            None => Some("the edge is missing".into()),
-            Some(e) => {
-                let properties = storage.edge_properties(e).cloned().unwrap_or_default();
-                let same_ends = storage.edge_endpoints(e).is_some_and(|(out_v, in_v)| {
-                    storage.vertex_id(out_v) == Some(before.out_id.as_str())
-                        && storage.vertex_id(in_v) == Some(before.in_id.as_str())
-                });
-                (storage.edge_label(e) != before.label.as_deref()
-                    || !same_ends
-                    || properties != before.properties)
-                    .then(|| {
-                        "its label, endpoints or properties differ from the dropped ones".into()
-                    })
-            }
-        },
-        Mutation::SetProperty {
-            element,
-            key,
-            before,
-            ..
-        } => match property(element, key) {
-            Err(reason) => Some(reason),
-            Ok(current) => (current != *before)
-                .then(|| format!("property '{key}' differs from the recorded before value")),
-        },
-        Mutation::RemoveProperty {
-            element,
-            key,
-            before,
-        } => match property(element, key) {
-            Err(reason) => Some(reason),
-            Ok(current) => (current.as_ref() != Some(before))
-                .then(|| format!("property '{key}' differs from the recorded before value")),
-        },
-        Mutation::AddLabel { id, label } => match vertex(id) {
-            None => Some("the vertex is missing".into()),
-            Some(v) => storage
-                .vertex_has_label(v, label)
-                .then(|| format!("the vertex has the label '{label}' already")),
-        },
-        Mutation::RemoveLabel { id, label } => match vertex(id) {
-            None => Some("the vertex is missing".into()),
-            Some(v) => (!storage.vertex_has_label(v, label))
-                .then(|| format!("the vertex lacks the label '{label}'")),
-        },
-        Mutation::SetEdgeLabel { id, before, .. } => match edge(id) {
-            None => Some("the edge is missing".into()),
-            Some(e) => (storage.edge_label(e) != before.as_deref())
-                .then(|| "its label differs from the recorded before label".into()),
-        },
         // A storage that cannot read its schema or catalog fails the check with its error: the
         // before image cannot be confirmed.
         Mutation::SetSchema { before, .. } if check_schema => match storage.get_schema() {
@@ -428,5 +352,120 @@ pub(crate) fn before_mismatch<S: GraphStorage + ?Sized>(
                 .then(|| format!("the {kind} '{name}' differs from the recorded before image")),
             Err(err) => Some(format!("the {kind} '{name}' cannot be read: {err}")),
         },
+        // Answered by `element_before_mismatch` above.
+        Mutation::AddVertex { .. }
+        | Mutation::AddEdge { .. }
+        | Mutation::DropVertex { .. }
+        | Mutation::DropEdge { .. }
+        | Mutation::SetProperty { .. }
+        | Mutation::RemoveProperty { .. }
+        | Mutation::AddLabel { .. }
+        | Mutation::RemoveLabel { .. }
+        | Mutation::SetEdgeLabel { .. } => None,
     }
+}
+
+/// The element part of [`before_mismatch`]: `Ok(Some(reason))` for an element mutation
+/// (`reason` `None`: it matches), `Ok(None)` for a schema or catalog mutation, `Err` when the
+/// storage cannot read the element.
+fn element_before_mismatch<S: GraphStorage + ?Sized>(
+    storage: &S,
+    mutation: &Mutation,
+) -> Result<Option<Option<String>>, GraphError> {
+    let property = |element: &ElementRef,
+                    key: &str|
+     -> Result<Result<Option<ElementProperty>, String>, GraphError> {
+        Ok(match element.kind {
+            ElementKind::Vertex => match storage.get_vertex_by_id(&element.id)? {
+                Some(v) => Ok(storage
+                    .vertex_properties(v)?
+                    .and_then(|p| p.get(key).cloned())),
+                None => Err("the vertex is missing".to_string()),
+            },
+            ElementKind::Edge => match storage.get_edge_by_id(&element.id)? {
+                Some(e) => Ok(storage
+                    .edge_properties(e)?
+                    .and_then(|p| p.get(key).cloned())),
+                None => Err("the edge is missing".to_string()),
+            },
+        })
+    };
+    let found = match mutation {
+        Mutation::AddVertex { id, .. } => storage
+            .get_vertex_by_id(id)?
+            .map(|_| "the vertex exists already".into()),
+        Mutation::AddEdge { id, .. } => storage
+            .get_edge_by_id(id)?
+            .map(|_| "the edge exists already".into()),
+        Mutation::DropVertex { id, before } => match storage.get_vertex_by_id(id)? {
+            None => Some("the vertex is missing".into()),
+            Some(v) => {
+                let labels: Vec<&str> = storage
+                    .vertex_labels(v)?
+                    .iter()
+                    .map(CompactString::as_str)
+                    .collect();
+                let expected: Vec<&str> = before.labels.iter().map(String::as_str).collect();
+                let properties = storage.vertex_properties(v)?.cloned().unwrap_or_default();
+                (labels != expected || properties != before.properties)
+                    .then(|| "its labels or properties differ from the dropped ones".into())
+            }
+        },
+        Mutation::DropEdge { id, before } => match storage.get_edge_by_id(id)? {
+            None => Some("the edge is missing".into()),
+            Some(e) => {
+                let properties = storage.edge_properties(e)?.cloned().unwrap_or_default();
+                let same_ends = match storage.edge_endpoints(e)? {
+                    Some((out_v, in_v)) => {
+                        storage.vertex_id(out_v)? == Some(before.out_id.as_str())
+                            && storage.vertex_id(in_v)? == Some(before.in_id.as_str())
+                    }
+                    None => false,
+                };
+                (storage.edge_label(e)? != before.label.as_deref()
+                    || !same_ends
+                    || properties != before.properties)
+                    .then(|| {
+                        "its label, endpoints or properties differ from the dropped ones".into()
+                    })
+            }
+        },
+        Mutation::SetProperty {
+            element,
+            key,
+            before,
+            ..
+        } => match property(element, key)? {
+            Err(reason) => Some(reason),
+            Ok(current) => (current != *before)
+                .then(|| format!("property '{key}' differs from the recorded before value")),
+        },
+        Mutation::RemoveProperty {
+            element,
+            key,
+            before,
+        } => match property(element, key)? {
+            Err(reason) => Some(reason),
+            Ok(current) => (current.as_ref() != Some(before))
+                .then(|| format!("property '{key}' differs from the recorded before value")),
+        },
+        Mutation::AddLabel { id, label } => match storage.get_vertex_by_id(id)? {
+            None => Some("the vertex is missing".into()),
+            Some(v) => storage
+                .vertex_has_label(v, label)?
+                .then(|| format!("the vertex has the label '{label}' already")),
+        },
+        Mutation::RemoveLabel { id, label } => match storage.get_vertex_by_id(id)? {
+            None => Some("the vertex is missing".into()),
+            Some(v) => (!storage.vertex_has_label(v, label)?)
+                .then(|| format!("the vertex lacks the label '{label}'")),
+        },
+        Mutation::SetEdgeLabel { id, before, .. } => match storage.get_edge_by_id(id)? {
+            None => Some("the edge is missing".into()),
+            Some(e) => (storage.edge_label(e)? != before.as_deref())
+                .then(|| "its label differs from the recorded before label".into()),
+        },
+        Mutation::SetSchema { .. } | Mutation::SetDefinition { .. } => return Ok(None),
+    };
+    Ok(Some(found))
 }

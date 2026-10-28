@@ -219,11 +219,22 @@ impl<S: GraphStorage> Graph<S> {
     ) -> Result<EmbedReport, EmbedJobError> {
         // A unit another thread holds shows in `unit_started_at` too: not this job's unit.
         // Outside a held unit `read_checked` never fails (it only can on the owning thread).
-        let held = self.holds_unit()
-            || (!self.unit_held()
-                && self
-                    .read_checked()
-                    .is_ok_and(|graph| graph.unit_started_at().is_some()));
+        let held = if self.holds_unit() {
+            true
+        } else if self.unit_held() {
+            false
+        } else {
+            match self.read_checked() {
+                Ok(graph) => graph
+                    .unit_started_at()
+                    .map_err(|err| EmbedJobError {
+                        error: Box::new(TraverserError::from(err)),
+                        report: EmbedReport::default(),
+                    })?
+                    .is_some(),
+                Err(_) => false,
+            }
+        };
         if held {
             // Inside a held unit, a view this thread may not have (the job started by a commit
             // hook of the unit it would write into) is the job's error, never a panic.
@@ -324,15 +335,17 @@ fn element<'s, S: GraphStorage>(
     storage: &'s S,
     kind: ElementKind,
     id: &str,
-) -> Option<Option<&'s PropertyMap>> {
-    match kind {
-        ElementKind::Vertex => storage
-            .get_vertex_by_id(id)
-            .map(|v| storage.vertex_properties(v)),
-        ElementKind::Edge => storage
-            .get_edge_by_id(id)
-            .map(|e| storage.edge_properties(e)),
-    }
+) -> Result<Option<Option<&'s PropertyMap>>, GraphError> {
+    Ok(match kind {
+        ElementKind::Vertex => match storage.get_vertex_by_id(id)? {
+            Some(v) => Some(storage.vertex_properties(v)?),
+            None => None,
+        },
+        ElementKind::Edge => match storage.get_edge_by_id(id)? {
+            Some(e) => Some(storage.edge_properties(e)?),
+            None => None,
+        },
+    })
 }
 
 fn elapsed_ms(started: web_time::Instant) -> u64 {
@@ -465,18 +478,33 @@ fn run<S: GraphStorage, A: Access<S>>(
         let keep = |properties: Option<&PropertyMap>| {
             !job.only_missing || !properties.is_some_and(|p| p.contains_key(&job.to))
         };
-        let ids: Vec<CompactString> = match job.element {
-            ElementKind::Vertex => storage
-                .vertices_by_label(&job.label)
-                .filter(|v| keep(storage.vertex_properties(*v)))
-                .filter_map(|v| storage.vertex_id(v).map(CompactString::new))
-                .collect(),
-            ElementKind::Edge => storage
-                .edges_by_label(&job.label)
-                .filter(|e| keep(storage.edge_properties(*e)))
-                .filter_map(|e| storage.edge_id(e).map(CompactString::new))
-                .collect(),
-        };
+        let mut ids: Vec<CompactString> = Vec::new();
+        match job.element {
+            ElementKind::Vertex => {
+                for v in storage
+                    .vertices_by_label(&job.label)
+                    .map_err(TraverserError::from)?
+                {
+                    if keep(storage.vertex_properties(v).map_err(TraverserError::from)?)
+                        && let Some(id) = storage.vertex_id(v).map_err(TraverserError::from)?
+                    {
+                        ids.push(CompactString::new(id));
+                    }
+                }
+            }
+            ElementKind::Edge => {
+                for e in storage
+                    .edges_by_label(&job.label)
+                    .map_err(TraverserError::from)?
+                {
+                    if keep(storage.edge_properties(e).map_err(TraverserError::from)?)
+                        && let Some(id) = storage.edge_id(e).map_err(TraverserError::from)?
+                    {
+                        ids.push(CompactString::new(id));
+                    }
+                }
+            }
+        }
         Ok::<_, Box<TraverserError>>((plan, ids))
     });
     let (plan, ids) = match collected {
@@ -508,9 +536,9 @@ fn run<S: GraphStorage, A: Access<S>>(
         }
         // Phase 1.1: the texts (read lock, short).
         let mut items: Vec<(CompactString, String)> = Vec::with_capacity(page.len());
-        access.read(|storage| {
+        let read = access.read(|storage| -> Result<(), GraphError> {
             for id in page {
-                match element(storage, job.element, id) {
+                match element(storage, job.element, id)? {
                     None => report.skipped_removed += 1,
                     Some(properties) => match text_at(properties, &job.from) {
                         SourceText::Absent => report.skipped_no_text += 1,
@@ -519,7 +547,11 @@ fn run<S: GraphStorage, A: Access<S>>(
                     },
                 }
             }
+            Ok(())
         });
+        if let Err(err) = read {
+            return Err(fail(Box::new(TraverserError::from(err)), &report));
+        }
         // Phase 1.2: the embedder, without any lock.
         let vectors = match embed_page(
             &*embedder,
@@ -539,7 +571,7 @@ fn run<S: GraphStorage, A: Access<S>>(
                     ..PageCounts::default()
                 };
                 for ((id, text), vector) in items.iter().zip(vectors) {
-                    let current = match element(storage, job.element, id) {
+                    let current = match element(storage, job.element, id)? {
                         None => {
                             counts.removed += 1;
                             continue;
@@ -553,12 +585,12 @@ fn run<S: GraphStorage, A: Access<S>>(
                     let value = ElementProperty::Vector(vector);
                     match job.element {
                         ElementKind::Vertex => {
-                            if let Some(v) = storage.get_vertex_by_id(id) {
+                            if let Some(v) = storage.get_vertex_by_id(id)? {
                                 storage.set_vertex_property(v, job.to.clone(), value)?;
                             }
                         }
                         ElementKind::Edge => {
-                            if let Some(e) = storage.get_edge_by_id(id) {
+                            if let Some(e) = storage.get_edge_by_id(id)? {
                                 storage.set_edge_property(e, job.to.clone(), value)?;
                             }
                         }

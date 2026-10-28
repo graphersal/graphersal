@@ -159,7 +159,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepUnfold {
                 } else {
                     context
                         .storage
-                        .vertex_properties(node)
+                        .vertex_properties(node)?
                         .and_then(|p| p.get(prop.as_str()))
                         .map(ElementProperty::to_logical)
                 };
@@ -183,7 +183,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepUnfold {
                 } else {
                     context
                         .storage
-                        .edge_properties(edge)
+                        .edge_properties(edge)?
                         .and_then(|p| p.get(prop.as_str()))
                         .map(ElementProperty::to_logical)
                 };

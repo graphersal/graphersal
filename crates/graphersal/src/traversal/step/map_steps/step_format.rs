@@ -159,10 +159,10 @@ impl<'g, S: GraphStorage + 'g> StepFormat<'g, S> {
         context: &TraverserContext<'_, S>,
         value: &TraverserValue<S>,
         name: &str,
-    ) -> Option<ElementProperty> {
+    ) -> Result<Option<ElementProperty>, GraphError> {
         let properties = match value {
-            TraverserValue::Vertex(vertex) => context.storage.vertex_properties(*vertex),
-            TraverserValue::Edge(edge) => context.storage.edge_properties(*edge),
+            TraverserValue::Vertex(vertex) => context.storage.vertex_properties(*vertex)?,
+            TraverserValue::Edge(edge) => context.storage.edge_properties(*edge)?,
             TraverserValue::Computed(_, _)
             | TraverserValue::VertexProperty(_, _, _)
             | TraverserValue::EdgeProperty(_, _, _)
@@ -174,8 +174,8 @@ impl<'g, S: GraphStorage + 'g> StepFormat<'g, S> {
             | TraverserValue::Array(_)
             | TraverserValue::Schema(_)
             | TraverserValue::Graph(_) => None,
-        }?;
-        properties.get(name).map(ElementProperty::to_logical)
+        };
+        Ok(properties.and_then(|properties| properties.get(name).map(ElementProperty::to_logical)))
     }
 }
 
@@ -211,7 +211,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepFormat<'g, S> {
                 Segment::Var(name) => name,
             };
             if name != FROM_BY
-                && let Some(property) = Self::element_property(context, &source.value, name)
+                && let Some(property) = Self::element_property(context, &source.value, name)?
             {
                 if property == ElementProperty::Null {
                     // TinkerPop appends the present property's `null` value: the text `null`.
@@ -236,7 +236,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepFormat<'g, S> {
                 scope_value(context, &source, name)?
             };
             match value {
-                Some(value) if !is_null(context, &value) => {
+                Some(value) if !is_null(context, &value)? => {
                     out.push_str(&element_string(context, &value)?);
                 }
                 // Unproductive: TinkerPop's `EmptyTraverser`.

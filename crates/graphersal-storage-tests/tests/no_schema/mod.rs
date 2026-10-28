@@ -20,69 +20,81 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
     type VertexId = G::VertexId;
     type EdgeId = G::EdgeId;
 
-    fn vertex_count(&self) -> usize {
-        self.0.vertex_count()
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::vertex_count(&self.0)
     }
-    fn edge_count(&self) -> usize {
-        self.0.edge_count()
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        GraphStorage::edge_count(&self.0)
     }
-    fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_ {
+    fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError> {
         self.0.vertices()
     }
-    fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         self.0.edges()
     }
-    fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId> {
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError> {
         self.0.get_vertex_by_id(id)
     }
-    fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId> {
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError> {
         self.0.get_edge_by_id(id)
     }
-    fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn out_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         self.0.out_edges(node)
     }
-    fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+    fn in_edges(
+        &self,
+        node: Self::VertexId,
+    ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
         self.0.in_edges(node)
     }
     fn vertices_by_label<'b>(
         &'b self,
         label: &'b str,
-    ) -> Box<dyn Iterator<Item = Self::VertexId> + 'b> {
+    ) -> Result<Box<dyn Iterator<Item = Self::VertexId> + 'b>, GraphError> {
         self.0.vertices_by_label(label)
     }
-    fn edges_by_label<'b>(&'b self, label: &'b str) -> Box<dyn Iterator<Item = Self::EdgeId> + 'b> {
+    fn edges_by_label<'b>(
+        &'b self,
+        label: &'b str,
+    ) -> Result<Box<dyn Iterator<Item = Self::EdgeId> + 'b>, GraphError> {
         self.0.edges_by_label(label)
     }
-    fn vertex_id(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         self.0.vertex_id(node)
     }
-    fn edge_id(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         self.0.edge_id(edge)
     }
-    fn vertex_label(&self, node: Self::VertexId) -> Option<&str> {
+    fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
         self.0.vertex_label(node)
     }
-    fn edge_label(&self, edge: Self::EdgeId) -> Option<&str> {
+    fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
         self.0.edge_label(edge)
     }
-    fn vertex_labels(&self, node: Self::VertexId) -> &[CompactString] {
+    fn vertex_labels(&self, node: Self::VertexId) -> Result<&[CompactString], GraphError> {
         self.0.vertex_labels(node)
     }
-    fn vertex_properties(&self, node: Self::VertexId) -> Option<&PropertyMap> {
+    fn vertex_properties(&self, node: Self::VertexId) -> Result<Option<&PropertyMap>, GraphError> {
         self.0.vertex_properties(node)
     }
-    fn edge_properties(&self, edge: Self::EdgeId) -> Option<&PropertyMap> {
+    fn edge_properties(&self, edge: Self::EdgeId) -> Result<Option<&PropertyMap>, GraphError> {
         self.0.edge_properties(edge)
     }
-    fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)> {
+    fn edge_endpoints(
+        &self,
+        edge: Self::EdgeId,
+    ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError> {
         self.0.edge_endpoints(edge)
     }
 
-    fn contains_vertex(&self, node: Self::VertexId) -> bool {
+    fn contains_vertex(&self, node: Self::VertexId) -> Result<bool, GraphError> {
         self.0.contains_vertex(node)
     }
 
-    fn contains_edge(&self, edge: Self::EdgeId) -> bool {
+    fn contains_edge(&self, edge: Self::EdgeId) -> Result<bool, GraphError> {
         self.0.contains_edge(edge)
     }
 

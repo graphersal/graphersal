@@ -16,9 +16,10 @@ use graphersal::storage::{ElementKind, PropertyIndexRange};
 
 /// The properties of vertex `id` in stored order.
 fn vertex_entries(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementProperty)> {
-    let v = graph.get_vertex_by_id(id).expect("vertex");
+    let v = graph.get_vertex_by_id(id).unwrap().expect("vertex");
     graph
         .vertex_properties(v)
+        .unwrap()
         .expect("live")
         .iter()
         .map(|(k, val)| (k.to_string(), val.to_logical()))
@@ -27,9 +28,10 @@ fn vertex_entries(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementPrope
 
 /// The properties of edge `id` in stored order.
 fn edge_entries(graph: &TraversalGraph, id: &str) -> Vec<(String, ElementProperty)> {
-    let e = graph.get_edge_by_id(id).expect("edge");
+    let e = graph.get_edge_by_id(id).unwrap().expect("edge");
     graph
         .edge_properties(e)
+        .unwrap()
         .expect("live")
         .iter()
         .map(|(k, val)| (k.to_string(), val.to_logical()))
@@ -45,19 +47,19 @@ fn entries(list: &[(&str, ElementProperty)]) -> Vec<(String, ElementProperty)> {
 /// Every vertex and edge with labels and properties (in stored order), sorted by id.
 fn content(graph: &TraversalGraph) -> Vec<String> {
     let mut out = Vec::new();
-    for v in GraphStorage::vertices(graph) {
-        let id = graph.vertex_id(v).unwrap_or_default().to_string();
+    for v in GraphStorage::vertices(graph).unwrap() {
+        let id = graph.vertex_id(v).unwrap().unwrap_or_default().to_string();
         out.push(format!(
             "v {id} {:?} {:?}",
-            graph.vertex_labels(v),
+            graph.vertex_labels(v).unwrap(),
             vertex_entries(graph, &id)
         ));
     }
-    for e in GraphStorage::edges(graph) {
-        let id = graph.edge_id(e).unwrap_or_default().to_string();
+    for e in GraphStorage::edges(graph).unwrap() {
+        let id = graph.edge_id(e).unwrap().unwrap_or_default().to_string();
         out.push(format!(
             "e {id} {:?} {:?}",
-            graph.edge_label(e),
+            graph.edge_label(e).unwrap(),
             edge_entries(graph, &id)
         ));
     }
@@ -208,7 +210,7 @@ fn imports_and_change_sets_coerce_against_the_schema() {
 {{"id":"r","label":"person","properties":{{"id_card":[{{"value":"not a uuid"}}]}}}}"#
     );
     assert!(graph.import_graphson_reader(bad.as_bytes()).is_err());
-    assert!(graph.get_vertex_by_id("q").is_none());
+    assert!(graph.get_vertex_by_id("q").unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -248,14 +250,14 @@ fn graphml_keeps_the_data_order_and_merges_repeats() {
         vertex_entries(&graph, "2"),
         entries(&[("m", int(6)), ("z", int(5))])
     );
-    let v2 = graph.get_vertex_by_id("2").unwrap();
-    assert_eq!(graph.vertex_labels(v2), ["q"]);
+    let v2 = graph.get_vertex_by_id("2").unwrap().unwrap();
+    assert_eq!(graph.vertex_labels(v2).unwrap(), ["q"]);
     assert_eq!(
         edge_entries(&graph, "e1"),
         entries(&[("c", int(3)), ("w", int(2))])
     );
-    let e1 = graph.get_edge_by_id("e1").unwrap();
-    assert_eq!(graph.edge_label(e1), Some("e"));
+    let e1 = graph.get_edge_by_id("e1").unwrap().unwrap();
+    assert_eq!(graph.edge_label(e1).unwrap(), Some("e"));
 }
 
 #[test]
@@ -313,7 +315,7 @@ fn ages(graph: &TraversalGraph, age: i64) -> Vec<String> {
         .vertices_by_property_index("p", "age", &PropertyIndexRange::equal(int(age)))
         .unwrap()
         .expect("an index")
-        .filter_map(|v| graph.vertex_id(v).map(str::to_string))
+        .filter_map(|v| graph.vertex_id(v).unwrap().map(str::to_string))
         .collect();
     ids.sort();
     ids
@@ -505,7 +507,7 @@ fn a_live_import_shares_the_shapes_the_graph_already_has() {
     );
     graph.import_graphml_reader(xml.as_bytes()).unwrap();
     assert_eq!(graph.memory_usage().unwrap().unwrap().shape_bytes, before);
-    assert_eq!(GraphStorage::vertices(&graph).count(), 55);
+    assert_eq!(GraphStorage::vertices(&graph).unwrap().count(), 55);
 }
 
 #[test]

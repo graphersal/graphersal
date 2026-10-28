@@ -727,52 +727,64 @@ mod id_less {
         type VertexId = VertexHandle;
         type EdgeId = EdgeHandle;
 
-        fn vertex_count(&self) -> usize {
-            self.inner.vertex_count()
+        fn vertex_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::vertex_count(&self.inner)
         }
-        fn edge_count(&self) -> usize {
-            self.inner.edge_count()
+        fn edge_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::edge_count(&self.inner)
         }
-        fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+        fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
             GraphStorage::vertices(&self.inner)
         }
-        fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::edges(&self.inner)
         }
-        fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+        fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
             self.inner.get_vertex_by_id(id)
         }
-        fn get_edge_by_id(&self, _id: &str) -> Option<EdgeHandle> {
-            None
+        fn get_edge_by_id(&self, _id: &str) -> Result<Option<EdgeHandle>, GraphError> {
+            Ok(None)
         }
-        fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn out_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::out_edges(&self.inner, node)
         }
-        fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn in_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::in_edges(&self.inner, node)
         }
-        fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.inner.vertex_id(node)
         }
-        fn edge_id(&self, _edge: EdgeHandle) -> Option<&str> {
-            None
+        fn edge_id(&self, _edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
+            Ok(None)
         }
-        fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.inner.vertex_label(node)
         }
-        fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             self.inner.edge_label(edge)
         }
-        fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+        fn vertex_labels(&self, node: VertexHandle) -> Result<&[CompactString], GraphError> {
             self.inner.vertex_labels(node)
         }
-        fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+        fn vertex_properties(
+            &self,
+            node: VertexHandle,
+        ) -> Result<Option<&PropertyMap>, GraphError> {
             self.inner.vertex_properties(node)
         }
-        fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+        fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
             self.inner.edge_properties(edge)
         }
-        fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+        fn edge_endpoints(
+            &self,
+            edge: EdgeHandle,
+        ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
             self.inner.edge_endpoints(edge)
         }
 
@@ -884,25 +896,31 @@ mod schema_set_separately {
         let g: &TraversalGraph = &guard;
         let mut vertices: Vec<VertexRow> = g
             .vertices()
+            .unwrap()
             .map(|v| {
                 (
-                    g.vertex_id(v).unwrap_or_default().to_string(),
-                    g.vertex_labels(v).iter().map(|l| l.to_string()).collect(),
-                    g.vertex_properties(v).cloned().unwrap_or_default(),
+                    g.vertex_id(v).unwrap().unwrap_or_default().to_string(),
+                    g.vertex_labels(v)
+                        .unwrap()
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect(),
+                    g.vertex_properties(v).unwrap().cloned().unwrap_or_default(),
                 )
             })
             .collect();
         vertices.sort_by(|a, b| a.0.cmp(&b.0));
         let mut edges: Vec<EdgeRow> = g
             .edges()
+            .unwrap()
             .map(|e| {
-                let (out_v, in_v) = g.edge_endpoints(e).expect("endpoints");
+                let (out_v, in_v) = g.edge_endpoints(e).unwrap().expect("endpoints");
                 (
-                    g.edge_id(e).unwrap_or_default().to_string(),
-                    g.edge_label(e).unwrap_or_default().to_string(),
-                    g.vertex_id(out_v).unwrap_or_default().to_string(),
-                    g.vertex_id(in_v).unwrap_or_default().to_string(),
-                    g.edge_properties(e).cloned().unwrap_or_default(),
+                    g.edge_id(e).unwrap().unwrap_or_default().to_string(),
+                    g.edge_label(e).unwrap().unwrap_or_default().to_string(),
+                    g.vertex_id(out_v).unwrap().unwrap_or_default().to_string(),
+                    g.vertex_id(in_v).unwrap().unwrap_or_default().to_string(),
+                    g.edge_properties(e).unwrap().cloned().unwrap_or_default(),
                 )
             })
             .collect();
@@ -946,7 +964,7 @@ mod schema_set_separately {
             .nullable();
         person.properties.insert("config".to_string(), config);
         graph.write().set_schema(schema).expect("schema applies");
-        let marko = graph.read().get_vertex_by_id("1").expect("marko");
+        let marko = graph.read().get_vertex_by_id("1").unwrap().expect("marko");
         let mut runtime = PropertyMap::default();
         runtime.insert("cpu", 2i64.into());
         runtime.insert("ratio", 0.5f64.into());
@@ -1055,7 +1073,8 @@ mod schema_set_separately {
         assert!(
             loaded
                 .read()
-                .vertex_properties(loaded.read().get_vertex_by_id("1").unwrap())
+                .vertex_properties(loaded.read().get_vertex_by_id("1").unwrap().unwrap())
+                .unwrap()
                 .is_none_or(|p| p.is_empty())
         );
     }

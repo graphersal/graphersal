@@ -273,7 +273,7 @@ impl<'g, S: GraphStorage + 'g> SimplicityFilter<'g, S> {
                 &*context.storage,
                 source.path,
                 &mut context.scratch_path,
-            )));
+            )?));
         }
         self.plan_check(step)?;
         let mut path = context.paths.materialize(source.path);
@@ -285,6 +285,6 @@ impl<'g, S: GraphStorage + 'g> SimplicityFilter<'g, S> {
         Ok(Some(crate::value::path_arena::is_simple_values(
             &*context.storage,
             &values,
-        )))
+        )?))
     }
 }

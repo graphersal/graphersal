@@ -428,7 +428,7 @@ fn the_schema_declares_and_coerces_an_offset_time() {
         .transaction(|g| g.add_vertex(None, vec!["e".into()], props))
         .unwrap();
     assert_eq!(
-        graph.vertex_properties(v).unwrap().get("t"),
+        graph.vertex_properties(v).unwrap().unwrap().get("t"),
         Some(&ElementProperty::Temporal(Temporal::OffsetTime(
             "10:00+01:00".parse().unwrap()
         )))
@@ -482,8 +482,8 @@ fn graphson_round_trips_both_forms() {
         .import_reader(&mut back, text.as_bytes())
         .unwrap();
     assert!(report.notes.is_empty(), "{report}");
-    let v = back.get_vertex_by_id("v").unwrap();
-    let props = back.vertex_properties(v).unwrap();
+    let v = back.get_vertex_by_id("v").unwrap().unwrap();
+    let props = back.vertex_properties(v).unwrap().unwrap();
     let z = props
         .get("z")
         .and_then(ElementProperty::as_temporal)
@@ -563,9 +563,15 @@ mod persist {
             let lock = store.graph().read();
             assert_eq!(lock.vertex_count(), expected.len() + 1);
             for (id, text) in &expected {
-                let v = lock.get_vertex_by_id(id.as_str()).unwrap();
+                let v = lock.get_vertex_by_id(id.as_str()).unwrap().unwrap();
                 assert_eq!(
-                    &exact(lock.vertex_properties(v).unwrap().get("at").unwrap()),
+                    &exact(
+                        lock.vertex_properties(v)
+                            .unwrap()
+                            .unwrap()
+                            .get("at")
+                            .unwrap()
+                    ),
                     text
                 );
             }

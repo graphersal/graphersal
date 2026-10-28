@@ -96,7 +96,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepProperties {
     ) -> TraverserResult<()> {
         match source.value {
             TraverserValue::Vertex(node_index) => {
-                if let Some(node) = context.storage.vertex_properties(node_index) {
+                if let Some(node) = context.storage.vertex_properties(node_index)? {
                     emit_matching_property_refs(
                         node,
                         &self.args,
@@ -116,34 +116,36 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepProperties {
                 Ok(())
             }
 
-            TraverserValue::Edge(edge_index) => match context.storage.edge_properties(edge_index) {
-                Some(edge) => {
-                    emit_matching_property_refs(
-                        edge,
-                        &self.args,
-                        source.path,
-                        source.bulk,
-                        source.sack,
-                        output,
-                        |key| {
-                            TraverserValue::EdgeProperty(
-                                key,
-                                edge_index,
-                                PropertyHandleKind::Element,
-                            )
+            TraverserValue::Edge(edge_index) => {
+                match context.storage.edge_properties(edge_index)? {
+                    Some(edge) => {
+                        emit_matching_property_refs(
+                            edge,
+                            &self.args,
+                            source.path,
+                            source.bulk,
+                            source.sack,
+                            output,
+                            |key| {
+                                TraverserValue::EdgeProperty(
+                                    key,
+                                    edge_index,
+                                    PropertyHandleKind::Element,
+                                )
+                            },
+                        );
+                        Ok(())
+                    }
+                    // A removed edge has no properties (stale handle): nothing to emit.
+                    None if !context.storage.contains_edge(edge_index)? => Ok(()),
+                    None => Err(Box::new(TraverserError::Value(
+                        ValueError::PropertyNotFound {
+                            key: "properties".to_string(),
+                            element_type: "edge",
                         },
-                    );
-                    Ok(())
+                    ))),
                 }
-                // A removed edge has no properties (stale handle): nothing to emit.
-                None if !context.storage.contains_edge(edge_index) => Ok(()),
-                None => Err(Box::new(TraverserError::Value(
-                    ValueError::PropertyNotFound {
-                        key: "properties".to_string(),
-                        element_type: "edge",
-                    },
-                ))),
-            },
+            }
 
             v => Err(Box::new(TraverserError::cast_exception(
                 &["vertex", "edge"],

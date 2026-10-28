@@ -162,7 +162,7 @@ impl TextQuery {
         };
         let (declared, label) = match value {
             TraverserValue::Vertex(node) => {
-                let labels = context.storage.vertex_labels(*node);
+                let labels = context.storage.vertex_labels(*node)?;
                 (
                     context.storage.declared_property_schema(
                         GraphNodeType::Vertex,
@@ -173,7 +173,7 @@ impl TextQuery {
                 )
             }
             TraverserValue::Edge(edge) => {
-                let label = CompactString::new(context.storage.edge_label(*edge).unwrap_or(""));
+                let label = CompactString::new(context.storage.edge_label(*edge)?.unwrap_or(""));
                 (
                     context.storage.declared_property_schema(
                         GraphNodeType::Edge,
@@ -474,10 +474,10 @@ fn element_metric<S: GraphStorage>(
     let declared = match value {
         TraverserValue::Vertex(node) => storage.declared_property_schema(
             GraphNodeType::Vertex,
-            storage.vertex_labels(*node),
+            storage.vertex_labels(*node)?,
             name,
         )?,
-        TraverserValue::Edge(edge) => match storage.edge_label(*edge) {
+        TraverserValue::Edge(edge) => match storage.edge_label(*edge)? {
             Some(label) => storage.declared_property_schema(
                 GraphNodeType::Edge,
                 &[CompactString::new(label)],

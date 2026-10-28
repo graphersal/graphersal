@@ -136,7 +136,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLength {
             TraverserValue::Computed(value, _) => string_length_of(value)?,
             TraverserValue::VertexProperty(prop, vertex_node, kind) => {
                 if *kind == crate::value::PropertyHandleKind::Label {
-                    context.storage.vertex_label(*vertex_node).map(char_count)
+                    context.storage.vertex_label(*vertex_node)?.map(char_count)
                 } else if *kind == crate::value::PropertyHandleKind::Id {
                     Some(char_count(crate::graph::storage::stored_vertex_id(
                         &*context.storage,
@@ -147,7 +147,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLength {
                 } else {
                     match context
                         .storage
-                        .vertex_properties(*vertex_node)
+                        .vertex_properties(*vertex_node)?
                         .and_then(|vertex| vertex.get(prop).map(string_length_of))
                     {
                         Some(length) => length?,
@@ -157,7 +157,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLength {
             }
             TraverserValue::EdgeProperty(prop, edge_index, kind) => {
                 if *kind == crate::value::PropertyHandleKind::Label {
-                    context.storage.edge_label(*edge_index).map(char_count)
+                    context.storage.edge_label(*edge_index)?.map(char_count)
                 } else if *kind == crate::value::PropertyHandleKind::Id {
                     Some(char_count(crate::graph::storage::stored_edge_id(
                         &*context.storage,
@@ -168,7 +168,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLength {
                 } else {
                     match context
                         .storage
-                        .edge_properties(*edge_index)
+                        .edge_properties(*edge_index)?
                         .and_then(|edge| edge.get(prop).map(string_length_of))
                     {
                         Some(length) => length?,

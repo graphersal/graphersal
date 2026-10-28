@@ -153,24 +153,45 @@ pub fn schema_table(schema: &GraphSchema) -> Table {
 }
 /// The whole graph to draw, as columns ([`CompactGraph`]): at most `max_nodes` vertices (the
 /// first ones) and the edges between them (at most `max_edges`). Properties are fetched per
-/// element by the inspector ([`crate::display::element_of`]).
-pub fn graph_view<S: GraphStorage>(g: &S, max_nodes: usize, max_edges: usize) -> CompactGraph {
-    let vertices: Vec<_> = g.vertices().take(max_nodes).collect();
+/// element by the inspector ([`crate::display::element_of`]). `Err` when the storage cannot
+/// read its elements.
+pub fn graph_view<S: GraphStorage>(
+    g: &S,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<CompactGraph, GraphError> {
+    let vertices: Vec<_> = g.vertices()?.take(max_nodes).collect();
     let ids: std::collections::HashSet<_> = vertices.iter().copied().collect();
-    let edges: Vec<_> = g
-        .edges()
-        .filter(|e| {
-            g.edge_endpoints(*e)
-                .is_some_and(|(s, t)| ids.contains(&s) && ids.contains(&t))
-        })
-        .take(max_edges)
-        .collect();
-    let (total_nodes, total_edges) = (g.vertex_count(), g.edge_count());
-    let mut view = CompactGraph::build(g, &vertices, &edges);
+    let edges = edges_between(g, g.edges()?, max_edges, |s, t| {
+        ids.contains(&s) && ids.contains(&t)
+    })?;
+    let (total_nodes, total_edges) = (g.vertex_count()?, g.edge_count()?);
+    let mut view = CompactGraph::build(g, &vertices, &edges)?;
     view.truncated = vertices.len() < total_nodes || edges.len() < total_edges;
     view.total_nodes = total_nodes;
     view.total_edges = total_edges;
-    view
+    Ok(view)
+}
+
+/// At most `max` of `edges` whose endpoints `keep` accepts, in order.
+fn edges_between<S: GraphStorage>(
+    g: &S,
+    edges: impl IntoIterator<Item = S::EdgeId>,
+    max: usize,
+    keep: impl Fn(S::VertexId, S::VertexId) -> bool,
+) -> Result<Vec<S::EdgeId>, GraphError> {
+    let mut found = Vec::new();
+    for e in edges {
+        if found.len() >= max {
+            break;
+        }
+        if let Some((s, t)) = g.edge_endpoints(e)?
+            && keep(s, t)
+        {
+            found.push(e);
+        }
+    }
+    Ok(found)
 }
 
 /// A Graph panel request (`engine.graphView(limits, filter)`): `{maxNodes?, maxEdges?,
@@ -200,14 +221,14 @@ pub fn graph_view_request<S: GraphStorage>(
     let max_nodes = request.max_nodes.unwrap_or(500);
     let max_edges = request.max_edges.unwrap_or(1000);
     let mut view = match request.filter.as_ref().filter(|f| !f.is_null()) {
-        None => graph_view(g, max_nodes, max_edges),
+        None => graph_view(g, max_nodes, max_edges)?,
         Some(spec) => {
             let filter = crate::filter::GraphFilter::compile(g, spec)?;
             filtered_graph_view(g, &filter, max_nodes, max_edges)?
         }
     };
     if request.degrees {
-        view.add_degrees(g);
+        view.add_degrees(g)?;
     }
     Ok(view)
 }
@@ -225,48 +246,40 @@ fn filtered_graph_view<S: GraphStorage>(
     let listed_set: Option<HashSet<S::VertexId>> =
         listed.as_ref().map(|l| l.iter().copied().collect());
     let visible = |v: &S::VertexId| listed_set.as_ref().is_none_or(|set| set.contains(v));
-    let endpoints_visible = |e: &S::EdgeId| {
-        g.edge_endpoints(*e)
-            .is_some_and(|(s, t)| visible(&s) && visible(&t))
-    };
+    let endpoints_visible = |s: S::VertexId, t: S::VertexId| visible(&s) && visible(&t);
     // Visible edges: passing the edge filter, both endpoints visible.
     let edges: Vec<S::EdgeId> = match filter.edges(g, None)? {
-        Some(passing) => passing.into_iter().filter(endpoints_visible).collect(),
-        None => g.edges().filter(endpoints_visible).collect(),
+        Some(passing) => edges_between(g, passing, usize::MAX, endpoints_visible)?,
+        None => edges_between(g, g.edges()?, usize::MAX, endpoints_visible)?,
     };
     let vertices: Vec<S::VertexId> = if filter.hide_isolated() {
         let mut touched = HashSet::with_capacity(edges.len());
         for e in &edges {
-            if let Some((s, t)) = g.edge_endpoints(*e) {
+            if let Some((s, t)) = g.edge_endpoints(*e)? {
                 touched.insert(s);
                 touched.insert(t);
             }
         }
         match listed {
             Some(list) => list.into_iter().filter(|v| touched.contains(v)).collect(),
-            None => g.vertices().filter(|v| touched.contains(v)).collect(),
+            None => g.vertices()?.filter(|v| touched.contains(v)).collect(),
         }
     } else {
         match listed {
             Some(list) => list,
-            None => g.vertices().collect(),
+            None => g.vertices()?.collect(),
         }
     };
     let (matched_nodes, matched_edges) = (vertices.len(), edges.len());
     let drawn: Vec<S::VertexId> = vertices.into_iter().take(max_nodes).collect();
     let drawn_set: HashSet<S::VertexId> = drawn.iter().copied().collect();
-    let drawn_edges: Vec<S::EdgeId> = edges
-        .into_iter()
-        .filter(|e| {
-            g.edge_endpoints(*e)
-                .is_some_and(|(s, t)| drawn_set.contains(&s) && drawn_set.contains(&t))
-        })
-        .take(max_edges)
-        .collect();
-    let mut view = CompactGraph::build(g, &drawn, &drawn_edges);
+    let drawn_edges = edges_between(g, edges, max_edges, |s, t| {
+        drawn_set.contains(&s) && drawn_set.contains(&t)
+    })?;
+    let mut view = CompactGraph::build(g, &drawn, &drawn_edges)?;
     view.truncated = drawn.len() < matched_nodes || drawn_edges.len() < matched_edges;
-    view.total_nodes = g.vertex_count();
-    view.total_edges = g.edge_count();
+    view.total_nodes = g.vertex_count()?;
+    view.total_edges = g.edge_count()?;
     view.matched_nodes = Some(matched_nodes);
     view.matched_edges = Some(matched_edges);
     Ok(view)
@@ -854,7 +867,7 @@ mod tests {
     #[test]
     fn graph_view_respects_the_caps() {
         let graph = GraphSource::tinkerpop_modern();
-        let view = serde_json::to_value(graph_view(&*graph.read(), 3, 100)).unwrap();
+        let view = serde_json::to_value(graph_view(&*graph.read(), 3, 100).unwrap()).unwrap();
         assert_eq!(view["vertexIds"].as_array().unwrap().len(), 3);
         assert_eq!(view["truncated"], true);
         assert_eq!(view["totalNodes"], 6);
@@ -864,7 +877,7 @@ mod tests {
     #[test]
     fn graph_view_is_columnar_without_properties() {
         let graph = GraphSource::tinkerpop_modern();
-        let view = serde_json::to_value(graph_view(&*graph.read(), 100, 100)).unwrap();
+        let view = serde_json::to_value(graph_view(&*graph.read(), 100, 100).unwrap()).unwrap();
         let ids = view["vertexIds"].as_array().unwrap();
         assert_eq!(ids.len(), 6);
         assert_eq!(view["vertexName"].as_array().unwrap().len(), 6);
@@ -903,7 +916,7 @@ mod tests {
     #[test]
     fn graph_view_keeps_only_edges_between_drawn_vertices() {
         let graph = GraphSource::tinkerpop_modern();
-        let view = graph_view(&*graph.read(), 2, 100);
+        let view = graph_view(&*graph.read(), 2, 100).unwrap();
         let n = view.vertex_ids.len() as u32;
         assert!(
             view.edge_source
@@ -917,7 +930,7 @@ mod tests {
             .write()
             .add_vertex(None, Vec::new(), PropertyMap::default())
             .unwrap();
-        let view = serde_json::to_value(graph_view(&*graph.read(), 10, 10)).unwrap();
+        let view = serde_json::to_value(graph_view(&*graph.read(), 10, 10).unwrap()).unwrap();
         assert_eq!(view["vertexName"], json!([null]));
         assert_eq!(view["labels"], json!([""]));
     }
@@ -941,10 +954,13 @@ mod tests {
         let (tg, fw) = modern_pair();
         assert_eq!(schema_view(&tg).unwrap(), schema_view(&fw).unwrap());
         let drawn = |g: CompactGraph| serde_json::to_value(g).unwrap();
-        assert_eq!(drawn(graph_view(&tg, 4, 3)), drawn(graph_view(&fw, 4, 3)));
         assert_eq!(
-            drawn(graph_view(&tg, 100, 100)),
-            drawn(graph_view(&fw, 100, 100))
+            drawn(graph_view(&tg, 4, 3).unwrap()),
+            drawn(graph_view(&fw, 4, 3).unwrap())
+        );
+        assert_eq!(
+            drawn(graph_view(&tg, 100, 100).unwrap()),
+            drawn(graph_view(&fw, 100, 100).unwrap())
         );
         assert_eq!(statistics_view(&tg).unwrap(), statistics_view(&fw).unwrap());
         assert!(statistics_view(&fw).unwrap().is_object());

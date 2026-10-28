@@ -47,31 +47,47 @@ fn snapshot<S: GraphStorage>(storage: &S) -> Snapshot {
     };
     let mut vertices: Vec<_> = storage
         .vertices()
+        .unwrap()
         .map(|v| {
             (
-                storage.vertex_id(v).unwrap_or_default().to_string(),
+                storage
+                    .vertex_id(v)
+                    .unwrap()
+                    .unwrap_or_default()
+                    .to_string(),
                 storage
                     .vertex_labels(v)
+                    .unwrap()
                     .iter()
                     .map(|l| l.to_string())
                     .collect(),
-                sorted(storage.vertex_properties(v)),
+                sorted(storage.vertex_properties(v).unwrap()),
             )
         })
         .collect();
     vertices.sort_by(|a, b| a.0.cmp(&b.0));
     let mut edges: Vec<_> = storage
         .edges()
+        .unwrap()
         .map(|e| {
             let (from, to) = storage
                 .edge_endpoints(e)
+                .unwrap()
                 .unwrap_or_else(|| panic!("edge {e:?} has no endpoints"));
             (
-                storage.edge_id(e).unwrap_or_default().to_string(),
-                storage.edge_label(e).map(str::to_string),
-                storage.vertex_id(from).unwrap_or_default().to_string(),
-                storage.vertex_id(to).unwrap_or_default().to_string(),
-                sorted(storage.edge_properties(e)),
+                storage.edge_id(e).unwrap().unwrap_or_default().to_string(),
+                storage.edge_label(e).unwrap().map(str::to_string),
+                storage
+                    .vertex_id(from)
+                    .unwrap()
+                    .unwrap_or_default()
+                    .to_string(),
+                storage
+                    .vertex_id(to)
+                    .unwrap()
+                    .unwrap_or_default()
+                    .to_string(),
+                sorted(storage.edge_properties(e).unwrap()),
             )
         })
         .collect();
@@ -158,8 +174,8 @@ pub fn savepoint_rollback_keeps_the_outer_unit<S: GraphStorage>(storage: &mut S)
         .unwrap();
     assert_eq!(snapshot(storage), after_outer);
     storage.commit_unit(outer).expect("commit");
-    assert!(storage.get_vertex_by_id("kept").is_some());
-    assert!(storage.get_vertex_by_id("undone").is_none());
+    assert!(storage.get_vertex_by_id("kept").unwrap().is_some());
+    assert!(storage.get_vertex_by_id("undone").unwrap().is_none());
     assert_consistent(storage);
 }
 
@@ -177,7 +193,7 @@ pub fn unit_changes_never_claims_an_undone_change<S: GraphStorage>(storage: &mut
         !storage.unit_changes(outer).unwrap().any(),
         "a fresh unit has no changes"
     );
-    let _ = storage.vertex_count();
+    let _ = storage.vertex_count().unwrap();
     assert!(
         !storage.unit_changes(outer).unwrap().any(),
         "a read is not a change"
@@ -339,10 +355,10 @@ pub fn applied_change_set_reproduces_the_unit<S: GraphStorage>(storage: &mut S) 
         .and_then(|s| s.first().cloned())
         .expect("one change set");
     // Undo by hand through the trait, then re-apply.
-    if let Some(v) = storage.get_vertex_by_id("a") {
+    if let Some(v) = storage.get_vertex_by_id("a").unwrap() {
         storage.drop_vertex(v).expect("drop");
     }
-    assert_eq!(storage.vertex_count(), 0);
+    assert_eq!(storage.vertex_count().unwrap(), 0);
     storage.apply_change_set(&set).expect("apply");
     assert_eq!(snapshot(storage), recorded);
     assert_consistent(storage);
@@ -396,13 +412,21 @@ pub fn applied_change_set_raises_the_id_sequences<S: GraphStorage>(storage: &mut
     let link = edge(storage, None, Some("e"), first, second, props(&[]));
     storage.commit_unit(mark).expect("commit");
     for v in [first, second] {
-        let id = storage.vertex_id(v).unwrap_or_default().to_string();
+        let id = storage
+            .vertex_id(v)
+            .unwrap()
+            .unwrap_or_default()
+            .to_string();
         assert!(
             !used_vertices.contains(&id.as_str()),
             "auto vertex id {id} reuses an id of the applied change set's source"
         );
     }
-    let id = storage.edge_id(link).unwrap_or_default().to_string();
+    let id = storage
+        .edge_id(link)
+        .unwrap()
+        .unwrap_or_default()
+        .to_string();
     assert!(
         !used_edges.contains(&id.as_str()),
         "auto edge id {id} reuses an id of the applied change set's source"
@@ -561,7 +585,7 @@ pub fn edge_label_change_rolls_back_and_is_captured<S: GraphStorage>(storage: &m
         before,
         "a rollback restores the edge label"
     );
-    assert_eq!(storage.edges_by_label("likes").count(), 0);
+    assert_eq!(storage.edges_by_label("likes").unwrap().count(), 0);
     assert_consistent(storage);
     if !storage.capabilities().unwrap().change_capture {
         return;
@@ -576,7 +600,7 @@ pub fn edge_label_change_rolls_back_and_is_captured<S: GraphStorage>(storage: &m
         .register_commit_hook(Box::new(hook))
         .expect("change_capture: hooks are supported");
     let mark = storage.begin_unit().unwrap();
-    let e = storage.get_edge_by_id("ab").expect("edge ab");
+    let e = storage.get_edge_by_id("ab").unwrap().expect("edge ab");
     storage.set_edge_label(e, "likes".into()).expect("relabel");
     storage.commit_unit(mark).expect("commit");
     let sets = accepted.lock().map(|s| s.clone()).unwrap_or_default();
@@ -597,7 +621,7 @@ pub fn edge_label_change_rolls_back_and_is_captured<S: GraphStorage>(storage: &m
         other => panic!("expected one SetEdgeLabel, got {other:?}"),
     }
     let recorded = snapshot(storage);
-    let e = storage.get_edge_by_id("ab").expect("edge ab");
+    let e = storage.get_edge_by_id("ab").unwrap().expect("edge ab");
     storage.set_edge_label(e, "knows".into()).expect("back");
     storage.apply_change_set(&set).expect("apply");
     assert_eq!(snapshot(storage), recorded);
@@ -631,9 +655,17 @@ pub fn discard_unit_restores_state_keeps_sequences<S: GraphStorage>(storage: &mu
 
     let mark = storage.begin_unit().unwrap();
     let fresh = vertex(storage, None, &["x"], props(&[]));
-    let fresh_id = storage.vertex_id(fresh).unwrap_or_default().to_string();
+    let fresh_id = storage
+        .vertex_id(fresh)
+        .unwrap()
+        .unwrap_or_default()
+        .to_string();
     let link = edge(storage, None, Some("e"), fresh, a, props(&[]));
-    let link_id = storage.edge_id(link).unwrap_or_default().to_string();
+    let link_id = storage
+        .edge_id(link)
+        .unwrap()
+        .unwrap_or_default()
+        .to_string();
     storage
         .set_vertex_property(a, "name".into(), "ANN".into())
         .expect("set");
@@ -678,12 +710,12 @@ pub fn discard_unit_restores_state_keeps_sequences<S: GraphStorage>(storage: &mu
     let next_edge = edge(storage, None, Some("e"), next, a, props(&[]));
     storage.commit_unit(mark).expect("commit");
     assert_ne!(
-        storage.vertex_id(next).unwrap_or_default(),
+        storage.vertex_id(next).unwrap().unwrap_or_default(),
         fresh_id,
         "an auto vertex id handed out in a discarded unit is not handed out again"
     );
     assert_ne!(
-        storage.edge_id(next_edge).unwrap_or_default(),
+        storage.edge_id(next_edge).unwrap().unwrap_or_default(),
         link_id,
         "an auto edge id handed out in a discarded unit is not handed out again"
     );
@@ -754,7 +786,7 @@ pub fn transaction_with_metadata_reaches_hooks<S: GraphStorage>(storage: &mut S)
         metadata.attributes().get("failed").is_none(),
         "a failed nested transaction adds nothing"
     );
-    assert!(storage.get_vertex_by_id("c").is_none());
+    assert!(storage.get_vertex_by_id("c").unwrap().is_none());
     assert_consistent(storage);
 }
 
@@ -798,7 +830,7 @@ pub fn transactional_panic_rolls_back<S: GraphStorage>(storage: &mut S) {
             Ok::<_, GraphError>(())
         })
         .expect("a transaction after the panic");
-    assert!(storage.get_vertex_by_id("after").is_some());
+    assert!(storage.get_vertex_by_id("after").unwrap().is_some());
     assert_consistent(storage);
 }
 
@@ -923,10 +955,10 @@ pub fn change_set_builder_round_trip<S: GraphStorage>(storage: &mut S) {
         built, captured,
         "the constructors rebuild the captured change set"
     );
-    if let Some(v) = storage.get_vertex_by_id("a") {
+    if let Some(v) = storage.get_vertex_by_id("a").unwrap() {
         storage.drop_vertex(v).expect("drop");
     }
-    assert_eq!(storage.vertex_count(), 0);
+    assert_eq!(storage.vertex_count().unwrap(), 0);
     storage.apply_change_set(&built).expect("apply");
     assert_eq!(snapshot(storage), recorded);
     assert_consistent(storage);

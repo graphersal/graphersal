@@ -533,31 +533,49 @@ impl fmt::Display for Lookup {
 /// The vertices matching `map`: the id, label and every property entry must match, with the
 /// equality of `has(key, value)`. `T.id` uses the id index, else `T.label` the label index,
 /// else every vertex is scanned.
-pub(crate) fn find_vertices<S: GraphStorage>(storage: &S, map: &ParsedMap) -> Vec<S::VertexId> {
-    let matches = |node: &S::VertexId| {
-        map.label
-            .as_deref()
-            .is_none_or(|label| storage.vertex_has_label(*node, label))
-            && map
-                .entries
-                .iter()
-                .all(|entry| vertex_has(storage, *node, &entry.key, &entry.value))
+pub(crate) fn find_vertices<S: GraphStorage>(
+    storage: &S,
+    map: &ParsedMap,
+) -> Result<Vec<S::VertexId>, GraphError> {
+    let matches = |node: S::VertexId| -> Result<bool, GraphError> {
+        if let Some(label) = map.label.as_deref()
+            && !storage.vertex_has_label(node, label)?
+        {
+            return Ok(false);
+        }
+        for entry in &map.entries {
+            if !vertex_has(storage, node, &entry.key, &entry.value)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    let mut found = Vec::new();
+    let mut keep = |node: S::VertexId| -> Result<(), GraphError> {
+        if matches(node)? {
+            found.push(node);
+        }
+        Ok(())
     };
     match Lookup::of(map) {
-        Lookup::Id => storage
-            .get_vertex_by_id(map.id.as_deref().unwrap_or_default())
-            .into_iter()
-            .filter(matches)
-            .collect(),
-        Lookup::Label => storage
-            .vertices_by_label(map.label.as_deref().unwrap_or_default())
-            .filter(matches)
-            .collect(),
+        Lookup::Id => {
+            if let Some(node) = storage.get_vertex_by_id(map.id.as_deref().unwrap_or_default())? {
+                keep(node)?;
+            }
+        }
+        Lookup::Label => {
+            for node in storage.vertices_by_label(map.label.as_deref().unwrap_or_default())? {
+                keep(node)?;
+            }
+        }
         // `Lookup::of` never names an edge adjacency for a vertex search.
         Lookup::Scan | Lookup::OutEdges | Lookup::InEdges => {
-            storage.vertices().filter(matches).collect()
+            for node in storage.vertices()? {
+                keep(node)?;
+            }
         }
     }
+    Ok(found)
 }
 
 /// An edge endpoint after resolution: a stored vertex, or an id that names no vertex (which
@@ -577,7 +595,7 @@ pub(crate) fn find_edges<S: GraphStorage>(
     map: &ParsedMap,
     out_v: Option<&Endpoint<S::VertexId>>,
     in_v: Option<&Endpoint<S::VertexId>>,
-) -> Vec<S::EdgeId> {
+) -> Result<Vec<S::EdgeId>, GraphError> {
     let vertex = |endpoint: Option<&Endpoint<S::VertexId>>| match endpoint {
         Some(Endpoint::Vertex(node)) => Ok(Some(*node)),
         // An id naming no vertex has no edges.
@@ -585,40 +603,67 @@ pub(crate) fn find_edges<S: GraphStorage>(
         None => Ok(None),
     };
     let (Ok(out_v), Ok(in_v)) = (vertex(out_v), vertex(in_v)) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let matches = |edge: &S::EdgeId| {
-        let endpoints = storage.edge_endpoints(*edge);
-        map.id
-            .as_deref()
-            .is_none_or(|id| storage.edge_id(*edge) == Some(id))
-            && map
-                .label
-                .as_deref()
-                .is_none_or(|label| storage.edge_label(*edge) == Some(label))
-            && out_v.is_none_or(|node| endpoints.is_some_and(|(from, _)| from == node))
-            && in_v.is_none_or(|node| endpoints.is_some_and(|(_, to)| to == node))
-            && map
-                .entries
-                .iter()
-                .all(|entry| edge_has(storage, *edge, &entry.key, &entry.value))
+    let matches = |edge: S::EdgeId| -> Result<bool, GraphError> {
+        let endpoints = storage.edge_endpoints(edge)?;
+        if let Some(id) = map.id.as_deref()
+            && storage.edge_id(edge)? != Some(id)
+        {
+            return Ok(false);
+        }
+        if let Some(label) = map.label.as_deref()
+            && storage.edge_label(edge)? != Some(label)
+        {
+            return Ok(false);
+        }
+        if !(out_v.is_none_or(|node| endpoints.is_some_and(|(from, _)| from == node))
+            && in_v.is_none_or(|node| endpoints.is_some_and(|(_, to)| to == node)))
+        {
+            return Ok(false);
+        }
+        for entry in &map.entries {
+            if !edge_has(storage, edge, &entry.key, &entry.value)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    let mut found = Vec::new();
+    let mut keep = |edge: S::EdgeId| -> Result<(), GraphError> {
+        if matches(edge)? {
+            found.push(edge);
+        }
+        Ok(())
     };
     match (out_v, in_v, Lookup::of_edge(map)) {
-        (Some(node), _, _) => storage.out_edges(node).filter(matches).collect(),
-        (None, Some(node), _) => storage.in_edges(node).filter(matches).collect(),
-        (None, None, Lookup::Id) => storage
-            .get_edge_by_id(map.id.as_deref().unwrap_or_default())
-            .into_iter()
-            .filter(matches)
-            .collect(),
-        (None, None, Lookup::Label) => storage
-            .edges_by_label(map.label.as_deref().unwrap_or_default())
-            .filter(matches)
-            .collect(),
+        (Some(node), _, _) => {
+            for edge in storage.out_edges(node)? {
+                keep(edge)?;
+            }
+        }
+        (None, Some(node), _) => {
+            for edge in storage.in_edges(node)? {
+                keep(edge)?;
+            }
+        }
+        (None, None, Lookup::Id) => {
+            if let Some(edge) = storage.get_edge_by_id(map.id.as_deref().unwrap_or_default())? {
+                keep(edge)?;
+            }
+        }
+        (None, None, Lookup::Label) => {
+            for edge in storage.edges_by_label(map.label.as_deref().unwrap_or_default())? {
+                keep(edge)?;
+            }
+        }
         (None, None, Lookup::Scan | Lookup::OutEdges | Lookup::InEdges) => {
-            storage.edges().filter(matches).collect()
+            for edge in storage.edges()? {
+                keep(edge)?;
+            }
         }
     }
+    Ok(found)
 }
 
 /// Creates the edge `map` describes from `out_v` to `in_v`, in one storage call. Edge

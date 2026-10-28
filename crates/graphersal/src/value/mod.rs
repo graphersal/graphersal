@@ -1736,7 +1736,7 @@ impl<S: GraphStorage> TraverserValue<S> {
         let id = crate::graph::storage::stored_vertex_id(storage, *node_index)?;
         let labels = crate::graph::storage::stored_vertex_labels(storage, *node_index)?.to_vec();
         let properties = storage
-            .vertex_properties(*node_index)
+            .vertex_properties(*node_index)?
             .map(logical_element)
             .unwrap_or_default();
         Ok(ElementProperty::Vertex(Box::new(VertexValue::new(
@@ -1749,18 +1749,18 @@ impl<S: GraphStorage> TraverserValue<S> {
     #[inline(never)]
     fn materialize_edge(storage: &S, edge_index: &S::EdgeId) -> TraverserResult<ElementProperty> {
         let id = crate::graph::storage::stored_edge_id(storage, *edge_index)?;
-        let label = storage.edge_label(*edge_index).map(CompactString::new);
+        let label = storage.edge_label(*edge_index)?.map(CompactString::new);
         let (out_vertex, in_vertex) = storage
-            .edge_endpoints(*edge_index)
+            .edge_endpoints(*edge_index)?
             .ok_or_else(|| Box::new(crate::error::GraphError::edge_removed().into()))?;
         let endpoint = |vertex: S::VertexId| -> TraverserResult<VertexRef> {
             Ok(VertexRef::new(
                 crate::graph::storage::stored_vertex_id(storage, vertex)?,
-                storage.vertex_label(vertex).map(CompactString::new),
+                storage.vertex_label(vertex)?.map(CompactString::new),
             ))
         };
         let properties = storage
-            .edge_properties(*edge_index)
+            .edge_properties(*edge_index)?
             .map(logical_element)
             .unwrap_or_default();
         Ok(ElementProperty::Edge(Box::new(EdgeValue::new(
@@ -1799,7 +1799,7 @@ impl<S: GraphStorage> TraverserValue<S> {
             ))
         } else {
             // A handle to a property of a vertex removed since: the value is gone.
-            let Some(props) = storage.vertex_properties(*node_index) else {
+            let Some(props) = storage.vertex_properties(*node_index)? else {
                 return Err(Box::new(crate::error::GraphError::vertex_removed().into()));
             };
             let prop_value = props.get(property.as_str());
@@ -1836,10 +1836,10 @@ impl<S: GraphStorage> TraverserValue<S> {
                     .unwrap_or_default(),
             ))
         } else {
-            let props = storage.edge_properties(*edge_index);
+            let props = storage.edge_properties(*edge_index)?;
             // An edge may store no property map at all, so only a removed edge (not a
             // missing map) is an error here.
-            if props.is_none() && !storage.contains_edge(*edge_index) {
+            if props.is_none() && !storage.contains_edge(*edge_index)? {
                 return Err(Box::new(crate::error::GraphError::edge_removed().into()));
             }
             let prop_value = props.and_then(|map| map.get(property.as_str()));
@@ -1876,10 +1876,14 @@ impl<S: GraphStorage> TraverserValue<S> {
             | TraverserValue::EdgeProperty(_, _, kind)
                 if kind.is_value() =>
             {
-                crate::traversal::step::local_scope::stored_value(context, value).map_or_else(
-                    || "null".to_string(),
-                    |stored| TraverserValue::<S>::Computed(stored.clone(), None).kind_name(),
-                )
+                match crate::traversal::step::local_scope::stored_value(context, value) {
+                    Ok(stored) => stored.map_or_else(
+                        || "null".to_string(),
+                        |stored| TraverserValue::<S>::Computed(stored.clone(), None).kind_name(),
+                    ),
+                    // The storage cannot read the value: its error is the one to report.
+                    Err(error) => return error.into(),
+                }
             }
             other => other.kind_name(),
         };
@@ -1910,7 +1914,7 @@ impl<S: GraphStorage> TraverserValue<S> {
             By::Value => match traverser_value {
                 TraverserValue::VertexProperty(_, _, PropertyHandleKind::Element)
                 | TraverserValue::EdgeProperty(_, _, PropertyHandleKind::Element) => {
-                    crate::traversal::step::local_scope::stored_value(context, traverser_value)
+                    crate::traversal::step::local_scope::stored_value(context, traverser_value)?
                         .map(|stored| TraverserValue::Computed(stored.clone(), None))
                 }
                 TraverserValue::PathProperty(property) => {
@@ -1970,7 +1974,7 @@ impl<S: GraphStorage> TraverserValue<S> {
             By::Order(_) => None,
             By::Count => None,
             By::JsonPath(path) => {
-                TraverserValue::resolve_json_path(context, traverser_value, path.segments())
+                TraverserValue::resolve_json_path(context, traverser_value, path.segments())?
             }
             // A label list filters vertices; it projects nothing. Every step that resolves a
             // `by()` through here rejects it with `InvalidModulator` (via `ByModulatorCheck`)
@@ -1981,7 +1985,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                     reason: "a vertex-label list is not a projection".to_string(),
                 }));
             }
-            By::Column(column) => TraverserValue::column_of(context, traverser_value, *column),
+            By::Column(column) => TraverserValue::column_of(context, traverser_value, *column)?,
         })
     }
 
@@ -2072,7 +2076,7 @@ impl<S: GraphStorage> TraverserValue<S> {
         context: &TraverserContext<'_, S>,
         value: &TraverserValue<S>,
         column: crate::value::Column,
-    ) -> Option<TraverserValue<S>> {
+    ) -> Result<Option<TraverserValue<S>>, crate::error::GraphError> {
         use crate::value::Column;
         fn property_column<S: GraphStorage>(
             property: &ElementProperty,
@@ -2114,7 +2118,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                 | ElementProperty::Array(_) => None,
             }
         }
-        match value {
+        Ok(match value {
             TraverserValue::Entry(entry) => Some(match column {
                 Column::Keys => entry.0.clone(),
                 Column::Values => entry.1.clone(),
@@ -2135,8 +2139,10 @@ impl<S: GraphStorage> TraverserValue<S> {
             TraverserValue::Computed(property, _) => property_column(property, column),
             TraverserValue::PathProperty(prop) => property_column(&prop.1, column),
             TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-                crate::traversal::step::local_scope::stored_value(context, value)
-                    .and_then(|stored| property_column(stored, column))
+                return Ok(
+                    crate::traversal::step::local_scope::stored_value(context, value)?
+                        .and_then(|stored| property_column(stored, column)),
+                );
             }
             TraverserValue::Path(path) => match column {
                 Column::Keys => Some(Self::path_labels(path)),
@@ -2147,7 +2153,7 @@ impl<S: GraphStorage> TraverserValue<S> {
             | TraverserValue::Array(_)
             | TraverserValue::Schema(_)
             | TraverserValue::Graph(_) => None,
-        }
+        })
     }
 
     /// Resolves a JSONPath's segments against any stream value, dispatching on its shape the same
@@ -2161,6 +2167,26 @@ impl<S: GraphStorage> TraverserValue<S> {
         context: &TraverserContext<'_, S>,
         traverser_value: &TraverserValue<S>,
         segments: &[crate::value::json_path::JsonPathSegment],
+    ) -> Result<Option<TraverserValue<S>>, crate::error::GraphError> {
+        // The storage read happens here, once; the walk below reads only `stored`.
+        let stored = match traverser_value {
+            TraverserValue::Vertex(node_index)
+            | TraverserValue::VertexProperty(_, node_index, _) => {
+                context.storage.vertex_properties(*node_index)?
+            }
+            TraverserValue::Edge(edge_index) | TraverserValue::EdgeProperty(_, edge_index, _) => {
+                context.storage.edge_properties(*edge_index)?
+            }
+            _ => None,
+        };
+        Ok(Self::walk_json_path_in(traverser_value, stored, segments))
+    }
+
+    /// [`Self::resolve_json_path`] once the element's stored map (`stored`) is read.
+    fn walk_json_path_in(
+        traverser_value: &TraverserValue<S>,
+        stored: Option<&crate::value::PropertyMap>,
+        segments: &[crate::value::json_path::JsonPathSegment],
     ) -> Option<TraverserValue<S>> {
         use crate::value::json_path::{
             JsonPathSegment, descend_properties, descend_property, walk_json_path,
@@ -2168,26 +2194,12 @@ impl<S: GraphStorage> TraverserValue<S> {
         // Descends by reference into stored data and clones only the value the path ends on,
         // never the whole top-level property.
         match traverser_value {
-            TraverserValue::Vertex(node_index) => {
-                let props = context.storage.vertex_properties(*node_index)?;
-                descend_properties(props, segments).map(|leaf| leaf.clone().into())
+            TraverserValue::Vertex(_) | TraverserValue::Edge(_) => {
+                descend_properties(stored?, segments).map(|leaf| leaf.clone().into())
             }
-            TraverserValue::Edge(edge_index) => {
-                let props = context.storage.edge_properties(*edge_index)?;
-                descend_properties(props, segments).map(|leaf| leaf.clone().into())
-            }
-            TraverserValue::VertexProperty(prop_name, node_index, _) => {
-                let root = context
-                    .storage
-                    .vertex_properties(*node_index)?
-                    .get(prop_name.as_str())?;
-                descend_property(root, segments).map(|leaf| leaf.clone().into())
-            }
-            TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
-                let root = context
-                    .storage
-                    .edge_properties(*edge_index)?
-                    .get(prop_name.as_str())?;
+            TraverserValue::VertexProperty(prop_name, _, _)
+            | TraverserValue::EdgeProperty(prop_name, _, _) => {
+                let root = stored?.get(prop_name.as_str())?;
                 descend_property(root, segments).map(|leaf| leaf.clone().into())
             }
             TraverserValue::Computed(root, _) => {
@@ -2255,7 +2267,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                 Ok(None)
             }
             TraverserValue::VertexProperty(vertex_property, vertex_index, _) => {
-                let v = context.storage.vertex_properties(*vertex_index);
+                let v = context.storage.vertex_properties(*vertex_index)?;
                 let v = v.and_then(|v| v.get(vertex_property));
                 match v {
                     Some(v) => Ok(match v {
@@ -2287,11 +2299,11 @@ impl<S: GraphStorage> TraverserValue<S> {
                 }
             }
             TraverserValue::Vertex(vertex_index) => {
-                let v = context.storage.vertex_properties(*vertex_index);
+                let v = context.storage.vertex_properties(*vertex_index)?;
                 Ok(v.and_then(|v| v.get(prop)).map(ElementProperty::to_logical))
             }
             TraverserValue::Edge(edge_index) => {
-                let e = context.storage.edge_properties(*edge_index);
+                let e = context.storage.edge_properties(*edge_index)?;
                 Ok(e.and_then(|e| e.get(prop)).map(ElementProperty::to_logical))
             }
             TraverserValue::Record { keys, values } => {
@@ -2302,7 +2314,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                 }
             }
             TraverserValue::EdgeProperty(edge_property, edge_index, _) => {
-                let e = context.storage.edge_properties(*edge_index);
+                let e = context.storage.edge_properties(*edge_index)?;
                 let e = e.and_then(|e| e.get(edge_property));
                 match e {
                     Some(v) => Ok(match v {

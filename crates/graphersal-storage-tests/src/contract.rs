@@ -45,7 +45,7 @@ pub fn statistics_of<S: GraphStorage>(storage: &S) -> GraphStatistics {
         .statistics()
         .unwrap()
         .cloned()
-        .unwrap_or_else(|| GraphStatistics::from_storage(storage))
+        .unwrap_or_else(|| GraphStatistics::from_storage(storage).unwrap())
 }
 
 fn label_vec(labels: &[&str]) -> Vec<CompactString> {
@@ -87,12 +87,13 @@ pub fn edge<S: GraphStorage>(
 fn vertex_id_of<S: GraphStorage>(storage: &S, v: S::VertexId) -> String {
     storage
         .vertex_id(v)
+        .unwrap()
         .unwrap_or_else(|| panic!("vertex {v:?} has no id"))
         .to_string()
 }
 
 fn name_set<S: GraphStorage>(storage: &S, label: &str) -> HashSet<S::VertexId> {
-    storage.vertices_by_label(label).collect()
+    storage.vertices_by_label(label).unwrap().collect()
 }
 
 fn ints(values: &[i32]) -> ElementProperty {
@@ -110,15 +111,15 @@ fn path(text: &str) -> JsonPath {
 /// recomputation), every edge's endpoints exist and appear
 /// in the adjacency of both ends. Called after every mutation by the contract items.
 pub fn assert_consistent<S: GraphStorage>(storage: &S) {
-    let vertices: Vec<S::VertexId> = storage.vertices().collect();
-    let edges: Vec<S::EdgeId> = storage.edges().collect();
+    let vertices: Vec<S::VertexId> = storage.vertices().unwrap().collect();
+    let edges: Vec<S::EdgeId> = storage.edges().unwrap().collect();
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         vertices.len(),
         "vertex_count() != vertices().count()"
     );
     assert_eq!(
-        storage.edge_count(),
+        storage.edge_count().unwrap(),
         edges.len(),
         "edge_count() != edges().count()"
     );
@@ -132,11 +133,11 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
             "vertex id {id:?} is not unique"
         );
         assert_eq!(
-            storage.get_vertex_by_id(&id),
+            storage.get_vertex_by_id(&id).unwrap(),
             Some(v),
             "get_vertex_by_id({id:?}) != the handle"
         );
-        let labels = storage.vertex_labels(v);
+        let labels = storage.vertex_labels(v).unwrap();
         let distinct: HashSet<&CompactString> = labels.iter().collect();
         assert_eq!(
             distinct.len(),
@@ -144,17 +145,17 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
             "labels of {id:?} are not deduplicated: {labels:?}"
         );
         assert_eq!(
-            storage.vertex_label(v),
+            storage.vertex_label(v).unwrap(),
             labels.first().map(|l| l.as_str()),
             "primary label of {id:?}"
         );
         assert!(
-            storage.vertex_properties(v).is_some(),
+            storage.vertex_properties(v).unwrap().is_some(),
             "vertex_properties({id:?}) is None"
         );
         for label in labels {
             assert!(
-                storage.vertex_has_label(v, label),
+                storage.vertex_has_label(v, label).unwrap(),
                 "vertex_has_label({id:?}, {label})"
             );
             label_scan.entry(label.to_string()).or_default().insert(v);
@@ -163,12 +164,12 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
     // Primary-label counts: every labeled vertex exactly once, under its first label.
     let mut primary_scan: HashMap<String, usize> = HashMap::new();
     for &v in &vertices {
-        if let Some(label) = storage.vertex_label(v) {
+        if let Some(label) = storage.vertex_label(v).unwrap() {
             *primary_scan.entry(label.to_string()).or_default() += 1;
         }
     }
     // A storage that reports statistics must report exactly the recomputed ones.
-    let stats = GraphStatistics::from_storage(storage);
+    let stats = GraphStatistics::from_storage(storage).unwrap();
     if let Some(reported) = storage.statistics().unwrap() {
         assert_eq!(
             reported, &stats,
@@ -202,7 +203,7 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
             members.len(),
             "vertex_label_count({label})"
         );
-        let by_label: HashSet<S::VertexId> = storage.vertices_by_label(label).collect();
+        let by_label: HashSet<S::VertexId> = storage.vertices_by_label(label).unwrap().collect();
         assert_eq!(&by_label, members, "vertices_by_label({label}) != scan");
     }
 
@@ -212,34 +213,36 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
     for &e in &edges {
         let id = storage
             .edge_id(e)
+            .unwrap()
             .unwrap_or_else(|| panic!("edge {e:?} has no id"))
             .to_string();
         assert!(edge_ids.insert(id.clone()), "edge id {id:?} is not unique");
         assert_eq!(
-            storage.get_edge_by_id(&id),
+            storage.get_edge_by_id(&id).unwrap(),
             Some(e),
             "get_edge_by_id({id:?}) != the handle"
         );
         let (from, to) = storage
             .edge_endpoints(e)
+            .unwrap()
             .unwrap_or_else(|| panic!("edge {id:?} has no endpoints"));
         assert!(
-            storage.vertex_id(from).is_some() && storage.vertex_id(to).is_some(),
+            storage.vertex_id(from).unwrap().is_some() && storage.vertex_id(to).unwrap().is_some(),
             "edge {id:?} endpoint missing"
         );
         assert!(
-            storage.out_edges(from).any(|x| x == e),
+            storage.out_edges(from).unwrap().any(|x| x == e),
             "edge {id:?} missing from out_edges of its source"
         );
         assert!(
-            storage.in_edges(to).any(|x| x == e),
+            storage.in_edges(to).unwrap().any(|x| x == e),
             "edge {id:?} missing from in_edges of its target"
         );
         assert!(
-            storage.edge_properties(e).is_some(),
+            storage.edge_properties(e).unwrap().is_some(),
             "edge_properties({id:?}) is None"
         );
-        if let Some(label) = storage.edge_label(e) {
+        if let Some(label) = storage.edge_label(e).unwrap() {
             edge_label_scan
                 .entry(label.to_string())
                 .or_default()
@@ -247,17 +250,17 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
         }
     }
     for &v in &vertices {
-        for e in storage.out_edges(v) {
+        for e in storage.out_edges(v).unwrap() {
             out_total += 1;
             assert_eq!(
-                storage.edge_endpoints(e).map(|(from, _)| from),
+                storage.edge_endpoints(e).unwrap().map(|(from, _)| from),
                 Some(v),
                 "out_edges contains a foreign edge"
             );
         }
-        for e in storage.in_edges(v) {
+        for e in storage.in_edges(v).unwrap() {
             assert_eq!(
-                storage.edge_endpoints(e).map(|(_, to)| to),
+                storage.edge_endpoints(e).unwrap().map(|(_, to)| to),
                 Some(v),
                 "in_edges contains a foreign edge"
             );
@@ -280,7 +283,7 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
             members.len(),
             "edge_label_count({label})"
         );
-        let by_label: HashSet<S::EdgeId> = storage.edges_by_label(label).collect();
+        let by_label: HashSet<S::EdgeId> = storage.edges_by_label(label).unwrap().collect();
         assert_eq!(&by_label, members, "edges_by_label({label}) != scan");
     }
 }
@@ -293,11 +296,11 @@ pub fn assert_consistent<S: GraphStorage>(storage: &S) {
 pub fn explicit_vertex_ids_are_preserved<S: GraphStorage>(storage: &mut S) {
     let a = vertex(storage, Some("alpha"), &["n"], PropertyMap::default());
     let b = vertex(storage, Some("42"), &["n"], PropertyMap::default());
-    assert_eq!(storage.vertex_id(a), Some("alpha"));
-    assert_eq!(storage.vertex_id(b), Some("42"));
-    assert_eq!(storage.get_vertex_by_id("alpha"), Some(a));
-    assert_eq!(storage.get_vertex_by_id("42"), Some(b));
-    assert_eq!(storage.get_vertex_by_id("missing"), None);
+    assert_eq!(storage.vertex_id(a).unwrap(), Some("alpha"));
+    assert_eq!(storage.vertex_id(b).unwrap(), Some("42"));
+    assert_eq!(storage.get_vertex_by_id("alpha").unwrap(), Some(a));
+    assert_eq!(storage.get_vertex_by_id("42").unwrap(), Some(b));
+    assert_eq!(storage.get_vertex_by_id("missing").unwrap(), None);
     assert_consistent(storage);
 }
 
@@ -342,7 +345,7 @@ pub fn duplicate_vertex_id_is_rejected<S: GraphStorage>(storage: &mut S) {
         matches!(err, GraphError::VertexIdUniqueConstraint { .. }),
         "got {err:?}"
     );
-    assert_eq!(storage.vertex_count(), 1);
+    assert_eq!(storage.vertex_count().unwrap(), 1);
     assert_eq!(
         name_set(storage, "b").len(),
         0,
@@ -357,8 +360,8 @@ pub fn edge_ids_are_preserved_unique_and_bump_the_sequence<S: GraphStorage>(stor
     let a = vertex(storage, None, &[], PropertyMap::default());
     let b = vertex(storage, None, &[], PropertyMap::default());
     let e = edge(storage, Some("e1"), Some("l"), a, b, PropertyMap::default());
-    assert_eq!(storage.edge_id(e), Some("e1"));
-    assert_eq!(storage.get_edge_by_id("e1"), Some(e));
+    assert_eq!(storage.edge_id(e).unwrap(), Some("e1"));
+    assert_eq!(storage.get_edge_by_id("e1").unwrap(), Some(e));
     let err = storage
         .insert_edge(
             Some("e1".into()),
@@ -372,10 +375,14 @@ pub fn edge_ids_are_preserved_unique_and_bump_the_sequence<S: GraphStorage>(stor
         matches!(err, GraphError::EdgeIdUniqueConstraint { .. }),
         "got {err:?}"
     );
-    assert_eq!(storage.edge_count(), 1);
+    assert_eq!(storage.edge_count().unwrap(), 1);
     edge(storage, Some("20"), Some("l"), a, b, PropertyMap::default());
     let auto = edge(storage, None, Some("l"), a, b, PropertyMap::default());
-    let id = storage.edge_id(auto).expect("auto edge id").to_string();
+    let id = storage
+        .edge_id(auto)
+        .unwrap()
+        .expect("auto edge id")
+        .to_string();
     let numeric: u64 = id
         .parse()
         .unwrap_or_else(|_| panic!("auto edge id {id:?} is not numeric"));
@@ -392,17 +399,17 @@ pub fn lookups_after_drop_find_nothing<S: GraphStorage>(storage: &mut S) {
     let b = vertex(storage, Some("b"), &["p"], PropertyMap::default());
     let e = edge(storage, Some("e"), Some("l"), a, b, PropertyMap::default());
     storage.drop_edge(e).expect("drop_edge");
-    assert_eq!(storage.get_edge_by_id("e"), None);
-    assert_eq!(storage.edge_id(e), None);
-    assert!(storage.edge_endpoints(e).is_none());
-    assert!(storage.edge_properties(e).is_none());
+    assert_eq!(storage.get_edge_by_id("e").unwrap(), None);
+    assert_eq!(storage.edge_id(e).unwrap(), None);
+    assert!(storage.edge_endpoints(e).unwrap().is_none());
+    assert!(storage.edge_properties(e).unwrap().is_none());
     storage.drop_vertex(a).expect("drop_vertex");
-    assert_eq!(storage.get_vertex_by_id("a"), None);
-    assert_eq!(storage.vertex_id(a), None);
-    assert!(storage.vertex_properties(a).is_none());
-    assert!(storage.vertex_labels(a).is_empty());
-    assert_eq!(storage.vertex_label(a), None);
-    assert_eq!(storage.vertex_count(), 1);
+    assert_eq!(storage.get_vertex_by_id("a").unwrap(), None);
+    assert_eq!(storage.vertex_id(a).unwrap(), None);
+    assert!(storage.vertex_properties(a).unwrap().is_none());
+    assert!(storage.vertex_labels(a).unwrap().is_empty());
+    assert_eq!(storage.vertex_label(a).unwrap(), None);
+    assert_eq!(storage.vertex_count().unwrap(), 1);
     assert_consistent(storage);
 }
 
@@ -421,12 +428,15 @@ pub fn vertex_labels_are_an_ordered_set<S: GraphStorage>(storage: &mut S) {
     );
     let labels: Vec<&str> = storage
         .vertex_labels(v)
+        .unwrap()
         .iter()
         .map(|l| l.as_str())
         .collect();
     assert_eq!(labels, ["b", "a", "c"]);
-    assert_eq!(storage.vertex_label(v), Some("b"));
-    assert!(storage.vertex_has_label(v, "c") && !storage.vertex_has_label(v, "z"));
+    assert_eq!(storage.vertex_label(v).unwrap(), Some("b"));
+    assert!(
+        storage.vertex_has_label(v, "c").unwrap() && !storage.vertex_has_label(v, "z").unwrap()
+    );
     for label in ["a", "b", "c"] {
         assert!(
             name_set(storage, label).contains(&v),
@@ -449,8 +459,8 @@ pub fn vertex_labels_are_an_ordered_set<S: GraphStorage>(storage: &mut S) {
 /// A vertex without labels has an empty label set and no primary label, and is in no label count.
 pub fn unlabeled_vertex_has_no_labels<S: GraphStorage>(storage: &mut S) {
     let v = vertex(storage, None, &[], PropertyMap::default());
-    assert!(storage.vertex_labels(v).is_empty());
-    assert_eq!(storage.vertex_label(v), None);
+    assert!(storage.vertex_labels(v).unwrap().is_empty());
+    assert_eq!(storage.vertex_label(v).unwrap(), None);
     assert!(statistics_of(storage).vertex_label_counts().is_empty());
     assert_consistent(storage);
 }
@@ -466,6 +476,7 @@ pub fn add_and_remove_vertex_label<S: GraphStorage>(storage: &mut S) {
     );
     let labels: Vec<&str> = storage
         .vertex_labels(v)
+        .unwrap()
         .iter()
         .map(|l| l.as_str())
         .collect();
@@ -474,14 +485,14 @@ pub fn add_and_remove_vertex_label<S: GraphStorage>(storage: &mut S) {
     assert!(storage.remove_vertex_label(v, "a").expect("remove"));
     assert!(!storage.remove_vertex_label(v, "a").expect("remove again"));
     assert_eq!(
-        storage.vertex_label(v),
+        storage.vertex_label(v).unwrap(),
         Some("b"),
         "the next label becomes primary"
     );
     assert!(name_set(storage, "a").is_empty());
     assert_consistent(storage);
     assert!(storage.remove_vertex_label(v, "b").expect("remove last"));
-    assert!(storage.vertex_labels(v).is_empty());
+    assert!(storage.vertex_labels(v).unwrap().is_empty());
     assert_consistent(storage);
 }
 
@@ -495,7 +506,7 @@ pub fn label_with_the_reserved_delimiter_is_rejected<S: GraphStorage>(storage: &
         matches!(err, GraphError::InvalidLabel { .. }),
         "got {err:?}"
     );
-    assert_eq!(storage.vertex_count(), 0);
+    assert_eq!(storage.vertex_count().unwrap(), 0);
     let v = vertex(storage, None, &["ok"], PropertyMap::default());
     let err = storage
         .add_vertex_label(v, "x::y".into())
@@ -504,7 +515,7 @@ pub fn label_with_the_reserved_delimiter_is_rejected<S: GraphStorage>(storage: &
         matches!(err, GraphError::InvalidLabel { .. }),
         "got {err:?}"
     );
-    assert_eq!(storage.vertex_labels(v).len(), 1);
+    assert_eq!(storage.vertex_labels(v).unwrap().len(), 1);
     assert_consistent(storage);
 }
 
@@ -529,12 +540,16 @@ pub fn labels_index_matches_scans_after_every_mutation<S: GraphStorage>(storage:
     assert_consistent(storage);
     storage.drop_vertex(b).expect("drop vertex");
     assert_consistent(storage);
-    assert_eq!(storage.edge_count(), 0, "dropping b must take e2 with it");
+    assert_eq!(
+        storage.edge_count().unwrap(),
+        0,
+        "dropping b must take e2 with it"
+    );
     let _ = e2;
     storage.drop_vertex(a).expect("drop vertex");
     storage.drop_vertex(c).expect("drop vertex");
     assert_consistent(storage);
-    assert_eq!(storage.vertex_count(), 0);
+    assert_eq!(storage.vertex_count().unwrap(), 0);
     let stats = statistics_of(storage);
     assert!(stats.vertex_label_counts().is_empty() && stats.edge_label_counts().is_empty());
 }
@@ -557,12 +572,15 @@ pub fn edge_endpoints_and_single_label<S: GraphStorage>(storage: &mut S) {
         props(&[("w", 1.into())]),
     );
     let plain = edge(storage, None, None, b, a, PropertyMap::default());
-    assert_eq!(storage.edge_endpoints(labeled), Some((a, b)));
-    assert_eq!(storage.edge_endpoints(plain), Some((b, a)));
-    assert_eq!(storage.edge_label(labeled), Some("knows"));
-    assert_eq!(storage.edge_label(plain), None);
+    assert_eq!(storage.edge_endpoints(labeled).unwrap(), Some((a, b)));
+    assert_eq!(storage.edge_endpoints(plain).unwrap(), Some((b, a)));
+    assert_eq!(storage.edge_label(labeled).unwrap(), Some("knows"));
+    assert_eq!(storage.edge_label(plain).unwrap(), None);
     assert_eq!(
-        storage.edge_properties(labeled).and_then(|p| p.get("w")),
+        storage
+            .edge_properties(labeled)
+            .unwrap()
+            .and_then(|p| p.get("w")),
         Some(&ElementProperty::from(1))
     );
     assert_consistent(storage);
@@ -593,23 +611,26 @@ pub fn set_edge_label_changes_label_index_and_counts<S: GraphStorage>(storage: &
             .expect("same label"),
         "the same label again is a no-op"
     );
-    assert_eq!(storage.edge_label(labeled), Some("likes"));
+    assert_eq!(storage.edge_label(labeled).unwrap(), Some("likes"));
     assert_eq!(
-        storage.edge_properties(labeled).and_then(|p| p.get("w")),
+        storage
+            .edge_properties(labeled)
+            .unwrap()
+            .and_then(|p| p.get("w")),
         Some(&ElementProperty::from(1)),
         "a label change keeps the properties"
     );
-    assert_eq!(storage.edge_endpoints(labeled), Some((a, b)));
+    assert_eq!(storage.edge_endpoints(labeled).unwrap(), Some((a, b)));
     assert!(
         storage
             .set_edge_label(plain, "likes".into())
             .expect("label")
     );
-    assert_eq!(storage.edge_label(plain), Some("likes"));
-    let mut by_label: Vec<S::EdgeId> = storage.edges_by_label("likes").collect();
-    by_label.sort_by_key(|e| storage.edge_id(*e).map(str::to_string));
+    assert_eq!(storage.edge_label(plain).unwrap(), Some("likes"));
+    let mut by_label: Vec<S::EdgeId> = storage.edges_by_label("likes").unwrap().collect();
+    by_label.sort_by_key(|e| storage.edge_id(*e).unwrap().map(str::to_string));
     assert_eq!(by_label, vec![labeled, plain]);
-    assert_eq!(storage.edges_by_label("knows").count(), 0);
+    assert_eq!(storage.edges_by_label("knows").unwrap().count(), 0);
     let stats = statistics_of(storage);
     assert_eq!(stats.edge_label_count("likes"), 2);
     assert_eq!(stats.edge_label_count("knows"), 0);
@@ -630,13 +651,13 @@ pub fn adjacency_matches_endpoints<S: GraphStorage>(storage: &mut S) {
     let e1 = edge(storage, None, Some("l"), a, b, PropertyMap::default());
     let e2 = edge(storage, None, Some("l"), a, b, PropertyMap::default());
     let loop_edge = edge(storage, None, Some("self"), a, a, PropertyMap::default());
-    let out_a: HashSet<S::EdgeId> = storage.out_edges(a).collect();
-    let in_a: HashSet<S::EdgeId> = storage.in_edges(a).collect();
-    let in_b: HashSet<S::EdgeId> = storage.in_edges(b).collect();
+    let out_a: HashSet<S::EdgeId> = storage.out_edges(a).unwrap().collect();
+    let in_a: HashSet<S::EdgeId> = storage.in_edges(a).unwrap().collect();
+    let in_b: HashSet<S::EdgeId> = storage.in_edges(b).unwrap().collect();
     assert_eq!(out_a, HashSet::from([e1, e2, loop_edge]));
     assert_eq!(in_a, HashSet::from([loop_edge]));
     assert_eq!(in_b, HashSet::from([e1, e2]));
-    assert_eq!(storage.out_edges(b).count(), 0);
+    assert_eq!(storage.out_edges(b).unwrap().count(), 0);
     assert_consistent(storage);
 }
 
@@ -658,7 +679,7 @@ pub fn edge_to_a_dropped_vertex_is_an_error_not_a_panic<S: GraphStorage>(storage
         Ok(Ok(())) => panic!("add_edge to a dropped vertex succeeded"),
         Ok(Err(_)) => {}
     }
-    assert_eq!(storage.edge_count(), 0);
+    assert_eq!(storage.edge_count().unwrap(), 0);
     assert_consistent(storage);
 }
 
@@ -706,35 +727,35 @@ pub fn stale_handle_never_aliases<S: GraphStorage>(storage: &mut S) {
         "a new vertex got the stale handle"
     );
     assert!(
-        !storage.contains_vertex(stale_vertex),
+        !storage.contains_vertex(stale_vertex).unwrap(),
         "the stale vertex handle resolves"
     );
-    assert!(storage.contains_vertex(fresh_vertex));
+    assert!(storage.contains_vertex(fresh_vertex).unwrap());
     assert_eq!(
-        storage.vertex_id(stale_vertex),
+        storage.vertex_id(stale_vertex).unwrap(),
         None,
         "stale handle reads another id"
     );
-    assert_eq!(storage.vertex_label(stale_vertex), None);
-    assert!(storage.vertex_labels(stale_vertex).is_empty());
-    assert!(storage.vertex_properties(stale_vertex).is_none());
-    assert_eq!(storage.out_edges(stale_vertex).count(), 0);
-    assert_eq!(storage.in_edges(stale_vertex).count(), 0);
+    assert_eq!(storage.vertex_label(stale_vertex).unwrap(), None);
+    assert!(storage.vertex_labels(stale_vertex).unwrap().is_empty());
+    assert!(storage.vertex_properties(stale_vertex).unwrap().is_none());
+    assert_eq!(storage.out_edges(stale_vertex).unwrap().count(), 0);
+    assert_eq!(storage.in_edges(stale_vertex).unwrap().count(), 0);
 
     assert_ne!(stale_edge, fresh_edge, "a new edge got the stale handle");
     assert!(
-        !storage.contains_edge(stale_edge),
+        !storage.contains_edge(stale_edge).unwrap(),
         "the stale edge handle resolves"
     );
-    assert!(storage.contains_edge(fresh_edge));
+    assert!(storage.contains_edge(fresh_edge).unwrap());
     assert_eq!(
-        storage.edge_id(stale_edge),
+        storage.edge_id(stale_edge).unwrap(),
         None,
         "stale handle reads another id"
     );
-    assert_eq!(storage.edge_label(stale_edge), None);
-    assert!(storage.edge_properties(stale_edge).is_none());
-    assert_eq!(storage.edge_endpoints(stale_edge), None);
+    assert_eq!(storage.edge_label(stale_edge).unwrap(), None);
+    assert!(storage.edge_properties(stale_edge).unwrap().is_none());
+    assert_eq!(storage.edge_endpoints(stale_edge).unwrap(), None);
 
     // Writes through the stale handles fail and leave the new elements alone.
     assert!(matches!(
@@ -764,20 +785,24 @@ pub fn stale_handle_never_aliases<S: GraphStorage>(storage: &mut S) {
     assert_eq!(
         storage
             .vertex_properties(fresh_vertex)
+            .unwrap()
             .and_then(|p| p.get("name")),
         Some(&ElementProperty::from("new"))
     );
     assert_eq!(
-        storage.vertex_labels(fresh_vertex),
+        storage.vertex_labels(fresh_vertex).unwrap(),
         &[CompactString::from("new")]
     );
     assert_eq!(
-        storage.edge_properties(fresh_edge).and_then(|p| p.get("w")),
+        storage
+            .edge_properties(fresh_edge)
+            .unwrap()
+            .and_then(|p| p.get("w")),
         Some(&ElementProperty::from(2))
     );
-    assert_eq!(storage.edge_label(fresh_edge), Some("new"));
-    assert_eq!(storage.vertex_count(), 2);
-    assert_eq!(storage.edge_count(), 1);
+    assert_eq!(storage.edge_label(fresh_edge).unwrap(), Some("new"));
+    assert_eq!(storage.vertex_count().unwrap(), 2);
+    assert_eq!(storage.edge_count().unwrap(), 1);
     assert_consistent(storage);
 }
 
@@ -825,12 +850,15 @@ pub fn every_property_kind_round_trips<S: GraphStorage>(storage: &mut S) {
     let e = edge(storage, None, Some("l"), v, w, initial.clone());
     for (key, value) in sample_values() {
         assert_eq!(
-            storage.vertex_properties(v).and_then(|p| p.get(key)),
+            storage
+                .vertex_properties(v)
+                .unwrap()
+                .and_then(|p| p.get(key)),
             Some(&value),
             "vertex {key} via add_vertex"
         );
         assert_eq!(
-            storage.edge_properties(e).and_then(|p| p.get(key)),
+            storage.edge_properties(e).unwrap().and_then(|p| p.get(key)),
             Some(&value),
             "edge {key} via add_edge"
         );
@@ -838,7 +866,10 @@ pub fn every_property_kind_round_trips<S: GraphStorage>(storage: &mut S) {
             .set_vertex_property(w, key.into(), value.clone())
             .expect("set_vertex_property");
         assert_eq!(
-            storage.vertex_properties(w).and_then(|p| p.get(key)),
+            storage
+                .vertex_properties(w)
+                .unwrap()
+                .and_then(|p| p.get(key)),
             Some(&value),
             "vertex {key} via set"
         );
@@ -849,7 +880,7 @@ pub fn every_property_kind_round_trips<S: GraphStorage>(storage: &mut S) {
             .set_edge_property(f, key.into(), value.clone())
             .expect("set_edge_property");
         assert_eq!(
-            storage.edge_properties(f).and_then(|p| p.get(key)),
+            storage.edge_properties(f).unwrap().and_then(|p| p.get(key)),
             Some(&value),
             "edge {key} via set"
         );
@@ -860,7 +891,7 @@ pub fn every_property_kind_round_trips<S: GraphStorage>(storage: &mut S) {
 /// A property set to null is present with the value null; a property never set is absent.
 pub fn null_is_stored_and_absent_is_not<S: GraphStorage>(storage: &mut S) {
     let v = vertex(storage, None, &[], props(&[("n", ElementProperty::Null)]));
-    let props_of_v = storage.vertex_properties(v).expect("properties");
+    let props_of_v = storage.vertex_properties(v).unwrap().expect("properties");
     assert_eq!(props_of_v.get("n"), Some(&ElementProperty::Null));
     assert!(props_of_v.get("absent").is_none());
     assert!(!props_of_v.contains_key("absent"));
@@ -879,19 +910,35 @@ pub fn property_overwrite_and_removal<S: GraphStorage>(storage: &mut S) {
     storage
         .set_edge_property(e, "k".into(), "two".into())
         .expect("overwrite");
-    assert_eq!(storage.vertex_properties(a).map(|p| p.len()), Some(1));
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("k")),
+        storage.vertex_properties(a).unwrap().map(|p| p.len()),
+        Some(1)
+    );
+    assert_eq!(
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("k")),
         Some(&"two".into())
     );
     assert_eq!(
-        storage.edge_properties(e).and_then(|p| p.get("k")),
+        storage.edge_properties(e).unwrap().and_then(|p| p.get("k")),
         Some(&"two".into())
     );
     storage.drop_vertex_property("k", a).expect("drop");
     storage.drop_edge_property("k", e).expect("drop");
-    assert!(storage.vertex_properties(a).is_some_and(|p| p.is_empty()));
-    assert!(storage.edge_properties(e).is_some_and(|p| p.is_empty()));
+    assert!(
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .is_some_and(|p| p.is_empty())
+    );
+    assert!(
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .is_some_and(|p| p.is_empty())
+    );
     storage
         .drop_vertex_property("k", a)
         .expect("dropping an absent property is a no-op");
@@ -982,7 +1029,10 @@ pub fn jpath_writes_create_append_and_fault<S: GraphStorage>(storage: &mut S) {
         .expect("creates meta.k");
     let meta = props(&[("k", 5.into())]);
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("meta")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("meta")),
         Some(&ElementProperty::Object(Box::new(meta)))
     );
     storage
@@ -995,18 +1045,24 @@ pub fn jpath_writes_create_append_and_fault<S: GraphStorage>(storage: &mut S) {
         .set_vertex_property_path(a, &path("tags[1]"), 2.into())
         .expect("[len] appends");
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("tags")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("tags")),
         Some(&ints(&[1, 2]))
     );
     storage
         .set_vertex_property_path(a, &path("tags[0]"), 9.into())
         .expect("overwrites an element");
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("tags")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("tags")),
         Some(&ints(&[9, 2]))
     );
 
-    let before = storage.vertex_properties(a).cloned();
+    let before = storage.vertex_properties(a).unwrap().cloned();
     let err = storage
         .set_vertex_property_path(a, &path("name.x"), 1.into())
         .expect_err("key on a string");
@@ -1047,7 +1103,7 @@ pub fn jpath_writes_create_append_and_fault<S: GraphStorage>(storage: &mut S) {
         "got {err:?}"
     );
     assert_eq!(
-        storage.vertex_properties(a).cloned(),
+        storage.vertex_properties(a).unwrap().cloned(),
         before,
         "a failed path write must not change the value"
     );
@@ -1058,6 +1114,7 @@ pub fn jpath_writes_create_append_and_fault<S: GraphStorage>(storage: &mut S) {
     assert!(
         storage
             .edge_properties(e)
+            .unwrap()
             .is_some_and(|p| p.contains_key("meta"))
     );
     let err = storage
@@ -1099,21 +1156,30 @@ pub fn jpath_removals_shift_and_ignore_missing<S: GraphStorage>(storage: &mut S)
         .remove_vertex_property_path(a, &path("tags[0]"))
         .expect("removes with shift");
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("tags")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("tags")),
         Some(&ints(&[2, 3]))
     );
     storage
         .remove_vertex_property_path(a, &path("tags[-1]"))
         .expect("negative index counts from the end");
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("tags")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("tags")),
         Some(&ints(&[2]))
     );
     storage
         .remove_vertex_property_path(a, &path("meta.k"))
         .expect("removes the key");
     assert_eq!(
-        storage.vertex_properties(a).and_then(|p| p.get("meta")),
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .and_then(|p| p.get("meta")),
         Some(&ElementProperty::Object(Box::default())),
         "the emptied parent stays"
     );
@@ -1123,10 +1189,11 @@ pub fn jpath_removals_shift_and_ignore_missing<S: GraphStorage>(storage: &mut S)
     assert!(
         storage
             .vertex_properties(a)
+            .unwrap()
             .is_some_and(|p| !p.contains_key("plain"))
     );
 
-    let before = storage.vertex_properties(a).cloned();
+    let before = storage.vertex_properties(a).unwrap().cloned();
     for missing in ["nothing", "nothing.x", "tags[9]", "meta.absent", "tags.k"] {
         storage
             .remove_vertex_property_path(a, &path(missing))
@@ -1135,7 +1202,7 @@ pub fn jpath_removals_shift_and_ignore_missing<S: GraphStorage>(storage: &mut S)
             });
     }
     assert_eq!(
-        storage.vertex_properties(a).cloned(),
+        storage.vertex_properties(a).unwrap().cloned(),
         before,
         "removals of missing paths change nothing"
     );
@@ -1144,13 +1211,21 @@ pub fn jpath_removals_shift_and_ignore_missing<S: GraphStorage>(storage: &mut S)
         .remove_edge_property_path(e, &path("tags[0]"))
         .expect("edge removal");
     assert_eq!(
-        storage.edge_properties(e).and_then(|p| p.get("tags")),
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .and_then(|p| p.get("tags")),
         Some(&ints(&[5]))
     );
     storage
         .remove_edge_property_path(e, &path("tags"))
         .expect("edge one segment");
-    assert!(storage.edge_properties(e).is_some_and(|p| p.is_empty()));
+    assert!(
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .is_some_and(|p| p.is_empty())
+    );
     assert_consistent(storage);
 }
 
@@ -1219,16 +1294,21 @@ pub fn graph_elements_are_rejected_as_property_values<S: GraphStorage>(storage: 
         );
     }
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         2,
         "a rejected insert_vertex left a vertex behind"
     );
     assert_eq!(
-        storage.edge_count(),
+        storage.edge_count().unwrap(),
         1,
         "a rejected insert_edge left an edge behind"
     );
-    assert!(storage.vertex_properties(v).is_some_and(|p| p.is_empty()));
+    assert!(
+        storage
+            .vertex_properties(v)
+            .unwrap()
+            .is_some_and(|p| p.is_empty())
+    );
     assert_consistent(storage);
 }
 
@@ -1275,19 +1355,19 @@ pub fn drop_vertex_cascades_its_edges<S: GraphStorage>(storage: &mut S) {
         PropertyMap::default(),
     );
     storage.drop_vertex(hub).expect("drop_vertex");
-    assert_eq!(storage.vertex_count(), 2);
-    assert_eq!(storage.edge_count(), 1);
+    assert_eq!(storage.vertex_count().unwrap(), 2);
+    assert_eq!(storage.edge_count().unwrap(), 1);
     for gone in ["out", "in", "loop"] {
         assert_eq!(
-            storage.get_edge_by_id(gone),
+            storage.get_edge_by_id(gone).unwrap(),
             None,
             "edge {gone} survived its endpoint"
         );
     }
-    assert_eq!(storage.get_edge_by_id("keep"), Some(keep));
-    assert_eq!(storage.out_edges(x).count(), 1);
-    assert_eq!(storage.in_edges(x).count(), 0);
-    assert_eq!(storage.in_edges(y).count(), 1);
+    assert_eq!(storage.get_edge_by_id("keep").unwrap(), Some(keep));
+    assert_eq!(storage.out_edges(x).unwrap().count(), 1);
+    assert_eq!(storage.in_edges(x).unwrap().count(), 0);
+    assert_eq!(storage.in_edges(y).unwrap().count(), 1);
     assert_eq!(statistics_of(storage).edge_label_counts().len(), 1);
     assert_eq!(statistics_of(storage).vertex_label_count("h"), 0);
     assert_consistent(storage);
@@ -1301,15 +1381,15 @@ pub fn drop_edge_updates_adjacency_and_counts<S: GraphStorage>(storage: &mut S) 
     let e1 = edge(storage, Some("e1"), Some("l"), a, b, PropertyMap::default());
     let e2 = edge(storage, Some("e2"), Some("l"), a, b, PropertyMap::default());
     storage.drop_edge(e1).expect("drop_edge");
-    assert_eq!(storage.edge_count(), 1);
-    assert_eq!(storage.out_edges(a).collect::<Vec<_>>(), vec![e2]);
-    assert_eq!(storage.in_edges(b).collect::<Vec<_>>(), vec![e2]);
+    assert_eq!(storage.edge_count().unwrap(), 1);
+    assert_eq!(storage.out_edges(a).unwrap().collect::<Vec<_>>(), vec![e2]);
+    assert_eq!(storage.in_edges(b).unwrap().collect::<Vec<_>>(), vec![e2]);
     assert_eq!(statistics_of(storage).edge_label_count("l"), 1);
     assert_consistent(storage);
     storage.drop_edge(e2).expect("drop_edge");
     assert!(statistics_of(storage).edge_label_counts().is_empty());
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         2,
         "dropping edges must keep the vertices"
     );
@@ -1335,23 +1415,23 @@ pub fn slot_reuse_does_not_resurrect_dropped_ids<S: GraphStorage>(storage: &mut 
         PropertyMap::default(),
     );
     assert_eq!(
-        storage.get_vertex_by_id("b"),
+        storage.get_vertex_by_id("b").unwrap(),
         None,
         "the dropped vertex id resolves"
     );
     assert_eq!(
-        storage.get_edge_by_id("e1"),
+        storage.get_edge_by_id("e1").unwrap(),
         None,
         "the cascaded edge id resolves to another edge"
     );
-    assert_eq!(storage.get_edge_by_id("fresh"), Some(fresh));
+    assert_eq!(storage.get_edge_by_id("fresh").unwrap(), Some(fresh));
     assert_eq!(
-        storage.edges_by_label("l").count(),
+        storage.edges_by_label("l").unwrap().count(),
         1,
         "only e2 still has the label l"
     );
     assert_consistent(storage);
-    let e2 = storage.get_edge_by_id("e2").expect("e2 survives");
+    let e2 = storage.get_edge_by_id("e2").unwrap().expect("e2 survives");
     storage.drop_edge(e2).expect("drop_edge");
     edge(
         storage,
@@ -1362,7 +1442,7 @@ pub fn slot_reuse_does_not_resurrect_dropped_ids<S: GraphStorage>(storage: &mut 
         PropertyMap::default(),
     );
     assert_eq!(
-        storage.get_edge_by_id("e2"),
+        storage.get_edge_by_id("e2").unwrap(),
         None,
         "the dropped edge id resolves to the new edge"
     );
@@ -1422,10 +1502,10 @@ pub fn schema_application_failure_leaves_graph_and_schema_unchanged<S: GraphStor
         storage.get_schema().unwrap().is_none(),
         "a failed set_schema stored the schema"
     );
-    assert_eq!(storage.vertex_count(), 1);
+    assert_eq!(storage.vertex_count().unwrap(), 1);
     vertex(storage, Some("q"), &["Person"], PropertyMap::default());
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         2,
         "the rejected schema must not be enforced afterwards"
     );
@@ -1483,12 +1563,15 @@ pub fn schema_modes_enforce_declared_properties<S: GraphStorage>(storage: &mut S
         "removing a required property"
     );
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         1,
         "rejected writes must leave nothing behind"
     );
     assert_eq!(
-        storage.vertex_properties(ok).and_then(|p| p.get("name")),
+        storage
+            .vertex_properties(ok)
+            .unwrap()
+            .and_then(|p| p.get("name")),
         Some(&"ann".into())
     );
     assert_consistent(storage);
@@ -1497,7 +1580,7 @@ pub fn schema_modes_enforce_declared_properties<S: GraphStorage>(storage: &mut S
         .set_schema(GraphSchema::new().with_mode(SchemaMode::None))
         .expect("mode None applies without scanning");
     vertex(storage, None, &["Undeclared"], PropertyMap::default());
-    assert_eq!(storage.vertex_count(), 2);
+    assert_eq!(storage.vertex_count().unwrap(), 2);
     assert_consistent(storage);
 }
 
@@ -1525,6 +1608,7 @@ pub fn add_applies_schema_defaults_insert_does_not<S: GraphStorage>(storage: &mu
     let level = |storage: &S, v: S::VertexId| {
         storage
             .vertex_properties(v)
+            .unwrap()
             .and_then(|p| p.get("level").cloned())
     };
 
@@ -1556,7 +1640,10 @@ pub fn add_applies_schema_defaults_insert_does_not<S: GraphStorage>(storage: &mu
         .insert_vertex(None, label_vec(&["Person"]), props(&[("level", 7.into())]))
         .expect("insert_vertex with the required property");
     assert_eq!(
-        storage.vertex_properties(inserted).map(|p| p.len()),
+        storage
+            .vertex_properties(inserted)
+            .unwrap()
+            .map(|p| p.len()),
         Some(1),
         "insert_vertex stores exactly the given properties"
     );
@@ -1573,6 +1660,7 @@ pub fn add_applies_schema_defaults_insert_does_not<S: GraphStorage>(storage: &mu
     assert_eq!(
         storage
             .edge_properties(edge)
+            .unwrap()
             .and_then(|p| p.get("weight").cloned()),
         Some(0.5.into()),
         "add_edge stores the edge default"
@@ -1587,12 +1675,12 @@ pub fn add_applies_schema_defaults_insert_does_not<S: GraphStorage>(storage: &mu
         )
         .expect("insert_edge");
     assert_eq!(
-        storage.edge_properties(raw_edge).map(|p| p.len()),
+        storage.edge_properties(raw_edge).unwrap().map(|p| p.len()),
         Some(0),
         "insert_edge stores exactly the given properties"
     );
     assert_eq!(
-        storage.vertex_count(),
+        storage.vertex_count().unwrap(),
         3,
         "the rejected insert left nothing"
     );
@@ -1612,7 +1700,10 @@ pub fn read_only_rejects_writes<S: GraphStorage>(
     vertex: S::VertexId,
     edge: S::EdgeId,
 ) {
-    let (vertices, edges) = (storage.vertex_count(), storage.edge_count());
+    let (vertices, edges) = (
+        storage.vertex_count().unwrap(),
+        storage.edge_count().unwrap(),
+    );
     assert!(
         storage
             .insert_vertex(None, vec![], PropertyMap::default())
@@ -1652,7 +1743,10 @@ pub fn read_only_rejects_writes<S: GraphStorage>(
         "a rejected catalog write changed the catalog"
     );
     assert_eq!(
-        (storage.vertex_count(), storage.edge_count()),
+        (
+            storage.vertex_count().unwrap(),
+            storage.edge_count().unwrap()
+        ),
         (vertices, edges),
         "a rejected write changed the storage"
     );
@@ -1846,6 +1940,6 @@ pub fn mutation_outside_unit_records_nothing<S: GraphStorage>(storage: &mut S) {
         seq,
         "a mutation outside a unit is not a commit"
     );
-    assert_eq!(storage.vertex_count(), 1);
+    assert_eq!(storage.vertex_count().unwrap(), 1);
     assert_consistent(storage);
 }

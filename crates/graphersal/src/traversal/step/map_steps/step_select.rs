@@ -92,20 +92,20 @@ impl<'g, S: GraphStorage + 'g> StepSelect<'g, S> {
     pub(super) fn resolve_lazy(
         context: &TraverserContext<'_, S>,
         value: &TraverserValue<S>,
-    ) -> Option<TraverserValue<S>> {
-        match value {
+    ) -> Result<Option<TraverserValue<S>>, GraphError> {
+        Ok(match value {
             TraverserValue::VertexProperty(prop_name, node_index, _) => context
                 .storage
-                .vertex_properties(*node_index)
+                .vertex_properties(*node_index)?
                 .and_then(|p| p.get(prop_name.as_str()).map(ElementProperty::to_logical))
                 .map(TraverserValue::from),
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => context
                 .storage
-                .edge_properties(*edge_index)
+                .edge_properties(*edge_index)?
                 .and_then(|p| p.get(prop_name.as_str()).map(ElementProperty::to_logical))
                 .map(TraverserValue::from),
             _ => None,
-        }
+        })
     }
 
     /// Reads `key` from the incoming traverser's value when it is map-shaped - the vanilla Gremlin
@@ -152,7 +152,7 @@ impl<'g, S: GraphStorage + 'g> StepSelect<'g, S> {
             Pop::First | Pop::All | Pop::Mixed => {
                 context
                     .paths
-                    .labelled(context.storage, source.path, key, pop)
+                    .labelled(context.storage, source.path, key, pop)?
             }
         })
     }
@@ -464,7 +464,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSelect<'g, S> {
                 )));
             }
         };
-        let resolved = Self::resolve_lazy(context, &source.value);
+        let resolved = Self::resolve_lazy(context, &source.value)?;
         let map = resolved.as_ref().unwrap_or(&source.value);
         let by_list = self.by.as_deref().unwrap_or_default();
 

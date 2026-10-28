@@ -287,27 +287,30 @@ impl SchemaInferer {
         schema
     }
 
-    /// Infers the schema of every vertex and edge of `storage`.
-    pub fn infer_from_storage<S: GraphStorage>(storage: &S) -> GraphSchema {
+    /// Infers the schema of every vertex and edge of `storage`; `Err` when the storage cannot
+    /// read its elements.
+    pub fn infer_from_storage<S: GraphStorage>(
+        storage: &S,
+    ) -> Result<GraphSchema, crate::error::GraphError> {
         let mut inferer = SchemaInferer::new();
         let empty = PropertyMap::default();
-        for vertex in storage.vertices() {
+        for vertex in storage.vertices()? {
             inferer.observe_vertex(
-                storage.vertex_labels(vertex),
-                storage.vertex_properties(vertex).unwrap_or(&empty),
+                storage.vertex_labels(vertex)?,
+                storage.vertex_properties(vertex)?.unwrap_or(&empty),
             );
         }
-        for edge in storage.edges() {
-            let Some((from, to)) = storage.edge_endpoints(edge) else {
+        for edge in storage.edges()? {
+            let Some((from, to)) = storage.edge_endpoints(edge)? else {
                 continue;
             };
             inferer.observe_edge(
-                storage.edge_label(edge),
-                storage.vertex_labels(from),
-                storage.vertex_labels(to),
-                storage.edge_properties(edge).unwrap_or(&empty),
+                storage.edge_label(edge)?,
+                storage.vertex_labels(from)?,
+                storage.vertex_labels(to)?,
+                storage.edge_properties(edge)?.unwrap_or(&empty),
             );
         }
-        inferer.finish()
+        Ok(inferer.finish())
     }
 }

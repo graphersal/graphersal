@@ -47,23 +47,28 @@ type EdgeSnapshot = BTreeMap<String, (Option<String>, String, String, PropertyMa
 fn snapshot(graph: &Graph) -> (VertexSnapshot, EdgeSnapshot) {
     let g = graph.read();
     let mut vertices = BTreeMap::new();
-    for v in g.vertices() {
-        let id = g.vertex_id(v).expect("id").to_string();
-        let labels = g.vertex_labels(v).iter().map(|l| l.to_string()).collect();
-        let props = g.vertex_properties(v).cloned().unwrap_or_default();
+    for v in g.vertices().unwrap() {
+        let id = g.vertex_id(v).unwrap().expect("id").to_string();
+        let labels = g
+            .vertex_labels(v)
+            .unwrap()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let props = g.vertex_properties(v).unwrap().cloned().unwrap_or_default();
         vertices.insert(id, (labels, props));
     }
     let mut edges = BTreeMap::new();
-    for e in g.edges() {
-        let id = g.edge_id(e).expect("edge id").to_string();
-        let (from, to) = g.edge_endpoints(e).expect("endpoints");
+    for e in g.edges().unwrap() {
+        let id = g.edge_id(e).unwrap().expect("edge id").to_string();
+        let (from, to) = g.edge_endpoints(e).unwrap().expect("endpoints");
         edges.insert(
             id,
             (
-                g.edge_label(e).map(str::to_string),
-                g.vertex_id(from).expect("from").to_string(),
-                g.vertex_id(to).expect("to").to_string(),
-                g.edge_properties(e).cloned().unwrap_or_default(),
+                g.edge_label(e).unwrap().map(str::to_string),
+                g.vertex_id(from).unwrap().expect("from").to_string(),
+                g.vertex_id(to).unwrap().expect("to").to_string(),
+                g.edge_properties(e).unwrap().cloned().unwrap_or_default(),
             ),
         );
     }
@@ -72,8 +77,8 @@ fn snapshot(graph: &Graph) -> (VertexSnapshot, EdgeSnapshot) {
 
 fn vertex_props(graph: &Graph, id: &str) -> PropertyMap {
     let g = graph.read();
-    let v = g.get_vertex_by_id(id).expect("vertex");
-    g.vertex_properties(v).cloned().unwrap_or_default()
+    let v = g.get_vertex_by_id(id).unwrap().expect("vertex");
+    g.vertex_properties(v).unwrap().cloned().unwrap_or_default()
 }
 
 fn note(report: &ImportReport, pred: impl Fn(&ImportNoteKind) -> bool) -> Option<usize> {

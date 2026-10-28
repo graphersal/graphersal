@@ -109,11 +109,13 @@ fn source() -> TraversalGraph {
 fn ids_of(graph: &TraversalGraph) -> (Vec<String>, Vec<String>) {
     let mut vertices: Vec<String> = graph
         .vertices()
-        .map(|v| graph.vertex_id(v).unwrap().to_string())
+        .unwrap()
+        .map(|v| graph.vertex_id(v).unwrap().unwrap().to_string())
         .collect();
     let mut edges: Vec<String> = graph
         .edges()
-        .map(|e| graph.edge_id(e).unwrap().to_string())
+        .unwrap()
+        .map(|e| graph.edge_id(e).unwrap().unwrap().to_string())
         .collect();
     vertices.sort();
     edges.sort();
@@ -146,31 +148,39 @@ mod rust_api {
             )
         );
 
-        let a = sub.get_vertex_by_id("a").unwrap();
-        let src_a = src.get_vertex_by_id("a").unwrap();
+        let a = sub.get_vertex_by_id("a").unwrap().unwrap();
+        let src_a = src.get_vertex_by_id("a").unwrap().unwrap();
         assert_eq!(
-            sub.vertex_labels(a),
+            sub.vertex_labels(a).unwrap(),
             &[s("Person"), s("Admin")],
             "the whole label set, in order"
         );
         assert_eq!(
-            sub.vertex_properties(a),
-            src.vertex_properties(src_a),
+            sub.vertex_properties(a).unwrap(),
+            src.vertex_properties(src_a).unwrap(),
             "nested object/array props"
         );
-        let profile = sub.vertex_properties(a).unwrap().get("profile").unwrap();
+        let profile = sub
+            .vertex_properties(a)
+            .unwrap()
+            .unwrap()
+            .get("profile")
+            .unwrap();
         assert!(matches!(profile, ElementProperty::Object(_)));
 
-        let b = sub.get_vertex_by_id("b").unwrap();
-        assert_eq!(sub.vertex_labels(b), &[s("Person")]);
+        let b = sub.get_vertex_by_id("b").unwrap().unwrap();
+        assert_eq!(sub.vertex_labels(b).unwrap(), &[s("Person")]);
 
-        let e1 = sub.get_edge_by_id("e1").unwrap();
-        let src_e1 = src.get_edge_by_id("e1").unwrap();
-        assert_eq!(sub.edge_label(e1), Some("knows"));
-        assert_eq!(sub.edge_properties(e1), src.edge_properties(src_e1));
-        let (from, to) = sub.edge_endpoints(e1).unwrap();
+        let e1 = sub.get_edge_by_id("e1").unwrap().unwrap();
+        let src_e1 = src.get_edge_by_id("e1").unwrap().unwrap();
+        assert_eq!(sub.edge_label(e1).unwrap(), Some("knows"));
         assert_eq!(
-            (sub.vertex_id(from), sub.vertex_id(to)),
+            sub.edge_properties(e1).unwrap(),
+            src.edge_properties(src_e1).unwrap()
+        );
+        let (from, to) = sub.edge_endpoints(e1).unwrap().unwrap();
+        assert_eq!(
+            (sub.vertex_id(from).unwrap(), sub.vertex_id(to).unwrap()),
             (Some("a"), Some("b")),
             "direction kept"
         );
@@ -181,8 +191,8 @@ mod rust_api {
         let src = source();
         let sub = src.traversal().e("e2").to_graph().unwrap();
         let sub = sub.read();
-        let c = sub.get_vertex_by_id("c").unwrap();
-        assert!(sub.vertex_labels(c).is_empty());
+        let c = sub.get_vertex_by_id("c").unwrap().unwrap();
+        assert!(sub.vertex_labels(c).unwrap().is_empty());
     }
 
     #[test]
@@ -205,7 +215,8 @@ mod rust_api {
             )
         );
         assert_eq!(
-            sub.vertex_properties(sub.get_vertex_by_id("d").unwrap())
+            sub.vertex_properties(sub.get_vertex_by_id("d").unwrap().unwrap())
+                .unwrap()
                 .unwrap()
                 .get("name"),
             Some(&text("Berlin"))
@@ -224,8 +235,9 @@ mod rust_api {
         let (vertex_ids, edge_ids) = ids_of(&sub);
         let source_edge_ids: Vec<String> = {
             let mut ids: Vec<String> = src
-                .out_edges(src.get_vertex_by_id("1").unwrap())
-                .map(|e| src.edge_id(e).unwrap().to_string())
+                .out_edges(src.get_vertex_by_id("1").unwrap().unwrap())
+                .unwrap()
+                .map(|e| src.edge_id(e).unwrap().unwrap().to_string())
                 .collect();
             ids.sort();
             ids
@@ -236,7 +248,7 @@ mod rust_api {
         let fresh = sub
             .add_vertex(None, vec![], PropertyMap::default())
             .unwrap();
-        let fresh_id = sub.vertex_id(fresh).unwrap().to_string();
+        let fresh_id = sub.vertex_id(fresh).unwrap().unwrap().to_string();
         assert!(
             !vertex_ids.contains(&fresh_id),
             "fresh id {fresh_id} collides"
@@ -244,7 +256,7 @@ mod rust_api {
         let edge_fresh = sub
             .add_edge(None, Some(s("x")), fresh, fresh, PropertyMap::default())
             .unwrap();
-        assert!(!edge_ids.contains(&sub.edge_id(edge_fresh).unwrap().to_string()));
+        assert!(!edge_ids.contains(&sub.edge_id(edge_fresh).unwrap().unwrap().to_string()));
     }
 
     #[test]
@@ -271,7 +283,7 @@ mod rust_api {
         let src = source();
         let sub = src.traversal().e("e1").to_graph().unwrap();
         assert_eq!(sub.read().vertex_count(), 2);
-        assert!(sub.read().get_vertex_by_id("c").is_none());
+        assert!(sub.read().get_vertex_by_id("c").unwrap().is_none());
     }
 
     #[test]
@@ -354,9 +366,9 @@ mod rust_api {
             sub.traversal_mut().v("b").drop().to_list().unwrap();
         }
         assert_eq!(sub.read().vertex_count(), 1);
-        let a = src.get_vertex_by_id("a").unwrap();
+        let a = src.get_vertex_by_id("a").unwrap().unwrap();
         assert_eq!(
-            src.vertex_properties(a).unwrap().get("name"),
+            src.vertex_properties(a).unwrap().unwrap().get("name"),
             Some(&text("alice"))
         );
         assert_eq!((src.vertex_count(), src.edge_count()), (4, 4));
@@ -369,9 +381,9 @@ mod rust_api {
             .to_list()
             .unwrap();
         let sub2 = sub2.read();
-        let a2 = sub2.get_vertex_by_id("a").unwrap();
+        let a2 = sub2.get_vertex_by_id("a").unwrap().unwrap();
         assert_eq!(
-            sub2.vertex_properties(a2).unwrap().get("name"),
+            sub2.vertex_properties(a2).unwrap().unwrap().get("name"),
             Some(&text("alice"))
         );
     }
@@ -702,9 +714,9 @@ mod rust_api {
         }
         let target = target.read();
         assert_eq!((target.vertex_count(), target.edge_count()), (2, 1));
-        let a = target.get_vertex_by_id("a").unwrap();
+        let a = target.get_vertex_by_id("a").unwrap().unwrap();
         assert_eq!(
-            target.vertex_properties(a).unwrap().get("name"),
+            target.vertex_properties(a).unwrap().unwrap().get("name"),
             Some(&text("pre-existing")),
             "reused as is"
         );
@@ -787,9 +799,11 @@ mod rust_api {
         let some = some.read();
         assert_eq!(some.edge_count(), 1000);
         // Every edge of the copy has both endpoints in the copy.
-        for edge in some.edges() {
-            let (from, to) = some.edge_endpoints(edge).unwrap();
-            assert!(some.vertex_id(from).is_some() && some.vertex_id(to).is_some());
+        for edge in some.edges().unwrap() {
+            let (from, to) = some.edge_endpoints(edge).unwrap().unwrap();
+            assert!(
+                some.vertex_id(from).unwrap().is_some() && some.vertex_id(to).unwrap().is_some()
+            );
         }
     }
 }

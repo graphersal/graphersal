@@ -188,12 +188,18 @@ impl GraphFilter {
         if matches!(self.vertices, Side::All) {
             return Ok(None);
         }
-        let ids = candidates.map(|c| {
-            c.iter()
-                .filter_map(|v| g.vertex_id(*v))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        });
+        let ids = match candidates {
+            None => None,
+            Some(c) => {
+                let mut ids = Vec::with_capacity(c.len());
+                for v in c {
+                    if let Some(id) = g.vertex_id(*v)? {
+                        ids.push(id.to_string());
+                    }
+                }
+                Some(ids)
+            }
+        };
         let passing =
             |label: &str, conditions: &[Condition]| -> Result<Vec<S::VertexId>, SessionError> {
                 if ids.as_ref().is_some_and(Vec::is_empty) {
@@ -205,21 +211,26 @@ impl GraphFilter {
                     Some(ids) => start.v(ids.clone()),
                 };
                 let traversal = with_conditions(start.has_label(label), conditions);
-                Ok(
-                    element_ids(traversal.id().to_list(), label, ElementKind::Vertex)?
-                        .iter()
-                        .filter_map(|id| g.get_vertex_by_id(id))
-                        .collect(),
-                )
+                let mut found = Vec::new();
+                for id in element_ids(traversal.id().to_list(), label, ElementKind::Vertex)? {
+                    if let Some(v) = g.get_vertex_by_id(&id)? {
+                        found.push(v);
+                    }
+                }
+                Ok(found)
             };
-        let label_index = |label: &str| -> Vec<S::VertexId> {
+        let label_index = |label: &str| -> Result<Vec<S::VertexId>, GraphError> {
             match candidates {
-                None => g.vertices_by_label(label).collect(),
-                Some(c) => c
-                    .iter()
-                    .copied()
-                    .filter(|v| g.vertex_has_label(*v, label))
-                    .collect(),
+                None => Ok(g.vertices_by_label(label)?.collect()),
+                Some(c) => {
+                    let mut found = Vec::new();
+                    for v in c {
+                        if g.vertex_has_label(*v, label)? {
+                            found.push(*v);
+                        }
+                    }
+                    Ok(found)
+                }
             }
         };
         evaluate(
@@ -228,7 +239,7 @@ impl GraphFilter {
             || g.vertices(),
             label_index,
             passing,
-            |v, keep| g.vertex_labels(v).iter().all(|l| keep(l.as_str())),
+            |v, keep| Ok(g.vertex_labels(v)?.iter().all(|l| keep(l.as_str()))),
         )
     }
 
@@ -243,12 +254,18 @@ impl GraphFilter {
         if matches!(self.edges, Side::All) {
             return Ok(None);
         }
-        let ids = candidates.map(|c| {
-            c.iter()
-                .filter_map(|e| g.edge_id(*e))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        });
+        let ids = match candidates {
+            None => None,
+            Some(c) => {
+                let mut ids = Vec::with_capacity(c.len());
+                for e in c {
+                    if let Some(id) = g.edge_id(*e)? {
+                        ids.push(id.to_string());
+                    }
+                }
+                Some(ids)
+            }
+        };
         let passing =
             |label: &str, conditions: &[Condition]| -> Result<Vec<S::EdgeId>, SessionError> {
                 if ids.as_ref().is_some_and(Vec::is_empty) {
@@ -260,21 +277,26 @@ impl GraphFilter {
                     Some(ids) => start.e(ids.clone()),
                 };
                 let traversal = with_conditions(start.has_label(label), conditions);
-                Ok(
-                    element_ids(traversal.id().to_list(), label, ElementKind::Edge)?
-                        .iter()
-                        .filter_map(|id| g.get_edge_by_id(id))
-                        .collect(),
-                )
+                let mut found = Vec::new();
+                for id in element_ids(traversal.id().to_list(), label, ElementKind::Edge)? {
+                    if let Some(e) = g.get_edge_by_id(&id)? {
+                        found.push(e);
+                    }
+                }
+                Ok(found)
             };
-        let label_index = |label: &str| -> Vec<S::EdgeId> {
+        let label_index = |label: &str| -> Result<Vec<S::EdgeId>, GraphError> {
             match candidates {
-                None => g.edges_by_label(label).collect(),
-                Some(c) => c
-                    .iter()
-                    .copied()
-                    .filter(|e| g.edge_label(*e) == Some(label))
-                    .collect(),
+                None => Ok(g.edges_by_label(label)?.collect()),
+                Some(c) => {
+                    let mut found = Vec::new();
+                    for e in c {
+                        if g.edge_label(*e)? == Some(label) {
+                            found.push(*e);
+                        }
+                    }
+                    Ok(found)
+                }
             }
         };
         evaluate(
@@ -283,7 +305,7 @@ impl GraphFilter {
             || g.edges(),
             label_index,
             passing,
-            |e, keep| keep(g.edge_label(e).unwrap_or("")),
+            |e, keep| Ok(keep(g.edge_label(e)?.unwrap_or(""))),
         )
     }
 }
@@ -294,10 +316,10 @@ impl GraphFilter {
 fn evaluate<Id, I>(
     side: &Side,
     candidates: Option<&[Id]>,
-    all: impl FnOnce() -> I,
-    label_index: impl Fn(&str) -> Vec<Id>,
+    all: impl FnOnce() -> Result<I, GraphError>,
+    label_index: impl Fn(&str) -> Result<Vec<Id>, GraphError>,
     passing: impl Fn(&str, &[Condition]) -> Result<Vec<Id>, SessionError>,
-    labels_ok: impl Fn(Id, &dyn Fn(&str) -> bool) -> bool,
+    labels_ok: impl Fn(Id, &dyn Fn(&str) -> bool) -> Result<bool, GraphError>,
 ) -> Result<Option<Vec<Id>>, SessionError>
 where
     Id: Copy + Eq + Hash,
@@ -310,7 +332,7 @@ where
             let mut out = Vec::new();
             for (label, conditions) in labels {
                 let found = if conditions.is_empty() {
-                    label_index(label)
+                    label_index(label)?
                 } else {
                     passing(label, conditions)?
                 };
@@ -341,10 +363,24 @@ where
                     !hidden.contains(label) && sets.get(label).is_none_or(|set| set.contains(x))
                 })
             };
-            Ok(Some(match candidates {
-                None => all().filter(visible).collect(),
-                Some(c) => c.iter().copied().filter(visible).collect(),
-            }))
+            let mut out = Vec::new();
+            match candidates {
+                None => {
+                    for x in all()? {
+                        if visible(&x)? {
+                            out.push(x);
+                        }
+                    }
+                }
+                Some(c) => {
+                    for x in c {
+                        if visible(x)? {
+                            out.push(*x);
+                        }
+                    }
+                }
+            }
+            Ok(Some(out))
         }
     }
 }

@@ -98,10 +98,13 @@ fn add_person<S: PersistentStorage + Default>(store: &Store<S>, name: &str) {
 fn names<S: GraphStorage>(graph: &S) -> Vec<String> {
     let mut names: Vec<String> = graph
         .vertices()
-        .filter_map(|v| match graph.vertex_properties(v)?.get("name")? {
-            ElementProperty::String(s) => Some(s.to_string()),
-            _ => None,
-        })
+        .unwrap()
+        .filter_map(
+            |v| match graph.vertex_properties(v).unwrap()?.get("name")? {
+                ElementProperty::String(s) => Some(s.to_string()),
+                _ => None,
+            },
+        )
         .collect();
     names.sort();
     names

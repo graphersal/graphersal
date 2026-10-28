@@ -443,8 +443,16 @@ mod persist {
         let expect = |lock: &TraversalGraph| {
             assert_eq!(lock.vertex_count(), 1 + 2 * values.len() + 1);
             for (index, value) in values.iter().enumerate() {
-                let v = lock.get_vertex_by_id(format!("v{index}").as_str()).unwrap();
-                let got = lock.vertex_properties(v).unwrap().get("at").unwrap();
+                let v = lock
+                    .get_vertex_by_id(format!("v{index}").as_str())
+                    .unwrap()
+                    .unwrap();
+                let got = lock
+                    .vertex_properties(v)
+                    .unwrap()
+                    .unwrap()
+                    .get("at")
+                    .unwrap();
                 let got = got.as_temporal().unwrap();
                 assert_eq!(
                     format!("{}({got})", got.kind()),

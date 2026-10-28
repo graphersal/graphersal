@@ -1126,7 +1126,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 if *kind == crate::value::PropertyHandleKind::Label {
                     context
                         .storage
-                        .vertex_label(*vertex_index)
+                        .vertex_label(*vertex_index)?
                         .map(|l| Scalar::Str(Cow::Borrowed(l)))
                 } else if *kind == crate::value::PropertyHandleKind::Id {
                     let id =
@@ -1137,7 +1137,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 } else {
                     match context
                         .storage
-                        .vertex_properties(*vertex_index)
+                        .vertex_properties(*vertex_index)?
                         .and_then(|p| p.get(prop.as_str()))
                     {
                         Some(property) => Scalar::of(property),
@@ -1149,7 +1149,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 if *kind == crate::value::PropertyHandleKind::Label {
                     context
                         .storage
-                        .edge_label(*edge_index)
+                        .edge_label(*edge_index)?
                         .map(|l| Scalar::Str(Cow::Borrowed(l)))
                 } else if *kind == crate::value::PropertyHandleKind::Id {
                     let id = crate::graph::storage::stored_edge_id(&*context.storage, *edge_index)?;
@@ -1159,7 +1159,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 } else {
                     match context
                         .storage
-                        .edge_properties(*edge_index)
+                        .edge_properties(*edge_index)?
                         .and_then(|p| p.get(prop.as_str()))
                     {
                         Some(property) => Scalar::of(property),
@@ -1226,7 +1226,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 }
                 let observed = context
                     .storage
-                    .vertex_properties(*vertex_index)
+                    .vertex_properties(*vertex_index)?
                     .and_then(|p| p.get(prop.as_str()))
                     .map_or(Some(ValueType::Null), type_of);
                 Ok(observed.is_some_and(|observed| target.matches(&observed)))
@@ -1245,7 +1245,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 }
                 let observed = context
                     .storage
-                    .edge_properties(*edge_index)
+                    .edge_properties(*edge_index)?
                     .and_then(|p| p.get(prop.as_str()))
                     .map_or(Some(ValueType::Null), type_of);
                 Ok(observed.is_some_and(|observed| target.matches(&observed)))

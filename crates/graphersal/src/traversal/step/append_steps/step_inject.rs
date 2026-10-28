@@ -79,7 +79,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepAppend<'g, S> for StepInject {
             match r {
                 // A vertex or an edge value is injected as the stored element of its id.
                 ElementProperty::Vertex(vertex) => {
-                    if let Some(vertex_idx) = context.storage.get_vertex_by_id(vertex.id()) {
+                    if let Some(vertex_idx) = context.storage.get_vertex_by_id(vertex.id())? {
                         res.push(Traverser::start(
                             context,
                             TraverserValue::Vertex(vertex_idx),
@@ -88,7 +88,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepAppend<'g, S> for StepInject {
                 }
 
                 ElementProperty::Edge(edge) => {
-                    if let Some(edge_idx) = context.storage.get_edge_by_id(edge.id()) {
+                    if let Some(edge_idx) = context.storage.get_edge_by_id(edge.id())? {
                         res.push(Traverser::start(context, TraverserValue::Edge(edge_idx)));
                     }
                 }

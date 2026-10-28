@@ -60,15 +60,18 @@ where
     let b = storage
         .add_vertex(Some(s("b")), vec![], PropertyMap::default())
         .unwrap();
-    assert_eq!(storage.vertex_count(), 2);
-    assert!(storage.contains_vertex(a) && storage.contains_vertex(b));
-    assert_eq!(storage.get_vertex_by_id("a"), Some(a));
-    assert_eq!(storage.vertex_id(b), Some("b"));
-    assert_eq!(storage.vertex_label(a), Some("person"));
-    assert_eq!(storage.vertex_label(b), None);
-    assert_eq!(storage.vertices().count(), 2);
+    assert_eq!(storage.vertex_count().unwrap(), 2);
+    assert!(storage.contains_vertex(a).unwrap() && storage.contains_vertex(b).unwrap());
+    assert_eq!(storage.get_vertex_by_id("a").unwrap(), Some(a));
+    assert_eq!(storage.vertex_id(b).unwrap(), Some("b"));
+    assert_eq!(storage.vertex_label(a).unwrap(), Some("person"));
+    assert_eq!(storage.vertex_label(b).unwrap(), None);
+    assert_eq!(storage.vertices().unwrap().count(), 2);
     assert_eq!(
-        storage.vertices_by_label("person").collect::<Vec<_>>(),
+        storage
+            .vertices_by_label("person")
+            .unwrap()
+            .collect::<Vec<_>>(),
         vec![a]
     );
     assert_eq!(
@@ -85,13 +88,16 @@ where
         !storage.add_vertex_label(a, s("employee")).unwrap(),
         "already there"
     );
-    assert_eq!(storage.vertex_labels(a), &[s("person"), s("employee")]);
+    assert_eq!(
+        storage.vertex_labels(a).unwrap(),
+        &[s("person"), s("employee")]
+    );
     assert!(storage.remove_vertex_label(a, "employee").unwrap());
     assert!(
         !storage.remove_vertex_label(a, "employee").unwrap(),
         "already gone"
     );
-    assert_eq!(storage.vertex_labels(a), &[s("person")]);
+    assert_eq!(storage.vertex_labels(a).unwrap(), &[s("person")]);
 
     // edges
     let e = storage
@@ -103,17 +109,20 @@ where
             props(&[("w", 1.into())]),
         )
         .unwrap();
-    assert_eq!(storage.edge_count(), 1);
-    assert!(storage.contains_edge(e));
-    assert_eq!(storage.get_edge_by_id("e"), Some(e));
-    assert_eq!(storage.edge_id(e), Some("e"));
-    assert_eq!(storage.edge_label(e), Some("knows"));
-    assert_eq!(storage.edge_endpoints(e), Some((a, b)));
-    assert_eq!(storage.out_edges(a).collect::<Vec<_>>(), vec![e]);
-    assert_eq!(storage.in_edges(b).collect::<Vec<_>>(), vec![e]);
-    assert_eq!(storage.in_edges(a).count(), 0);
-    assert_eq!(storage.edges().count(), 1);
-    assert_eq!(storage.edges_by_label("knows").collect::<Vec<_>>(), vec![e]);
+    assert_eq!(storage.edge_count().unwrap(), 1);
+    assert!(storage.contains_edge(e).unwrap());
+    assert_eq!(storage.get_edge_by_id("e").unwrap(), Some(e));
+    assert_eq!(storage.edge_id(e).unwrap(), Some("e"));
+    assert_eq!(storage.edge_label(e).unwrap(), Some("knows"));
+    assert_eq!(storage.edge_endpoints(e).unwrap(), Some((a, b)));
+    assert_eq!(storage.out_edges(a).unwrap().collect::<Vec<_>>(), vec![e]);
+    assert_eq!(storage.in_edges(b).unwrap().collect::<Vec<_>>(), vec![e]);
+    assert_eq!(storage.in_edges(a).unwrap().count(), 0);
+    assert_eq!(storage.edges().unwrap().count(), 1);
+    assert_eq!(
+        storage.edges_by_label("knows").unwrap().collect::<Vec<_>>(),
+        vec![e]
+    );
     assert_eq!(
         storage
             .statistics()
@@ -134,7 +143,7 @@ where
         .remove_vertex_property_path(a, &jpath("meta.x"))
         .unwrap();
     assert_eq!(
-        storage.vertex_properties(a).unwrap().get("meta"),
+        storage.vertex_properties(a).unwrap().unwrap().get("meta"),
         Some(&obj(&[("y", 2.into())]))
     );
     storage.set_edge_property(e, s("info"), obj(&[])).unwrap();
@@ -142,25 +151,46 @@ where
         .set_edge_property_path(e, &jpath("info.k"), "v".into())
         .unwrap();
     assert_eq!(
-        storage.edge_properties(e).unwrap().get("info"),
+        storage.edge_properties(e).unwrap().unwrap().get("info"),
         Some(&obj(&[("k", "v".into())]))
     );
     storage
         .remove_edge_property_path(e, &jpath("info.k"))
         .unwrap();
     assert_eq!(
-        storage.edge_properties(e).unwrap().get("info"),
+        storage.edge_properties(e).unwrap().unwrap().get("info"),
         Some(&obj(&[]))
     );
     // a one-segment path removes the whole property
     storage
         .remove_edge_property_path(e, &jpath("info"))
         .unwrap();
-    assert!(storage.edge_properties(e).unwrap().get("info").is_none());
+    assert!(
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .unwrap()
+            .get("info")
+            .is_none()
+    );
     storage.drop_vertex_property("name", a).unwrap();
-    assert!(storage.vertex_properties(a).unwrap().get("name").is_none());
+    assert!(
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .unwrap()
+            .get("name")
+            .is_none()
+    );
     storage.drop_edge_property("w", e).unwrap();
-    assert!(storage.edge_properties(e).unwrap().get("w").is_none());
+    assert!(
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .unwrap()
+            .get("w")
+            .is_none()
+    );
 
     // schema and diagnostics
     assert!(storage.get_schema().unwrap().is_none());
@@ -196,11 +226,11 @@ where
 
     // removal
     storage.drop_edge(e).unwrap();
-    assert!(!storage.contains_edge(e));
-    assert_eq!(storage.edge_count(), 0);
+    assert!(!storage.contains_edge(e).unwrap());
+    assert_eq!(storage.edge_count().unwrap(), 0);
     storage.drop_vertex(b).unwrap();
-    assert!(!storage.contains_vertex(b));
-    assert_eq!(storage.vertex_count(), 1);
+    assert!(!storage.contains_vertex(b).unwrap());
+    assert_eq!(storage.vertex_count().unwrap(), 1);
 }
 
 #[test]
@@ -229,9 +259,9 @@ fn rejects_every_write<S>(storage: &mut S, reason: &str)
 where
     S: GraphStorage<VertexId = VertexHandle, EdgeId = EdgeHandle>,
 {
-    let a = storage.get_vertex_by_id("1").expect("marko");
-    let b = storage.get_vertex_by_id("2").expect("vadas");
-    let e = storage.get_edge_by_id("0").expect("an edge");
+    let a = storage.get_vertex_by_id("1").unwrap().expect("marko");
+    let b = storage.get_vertex_by_id("2").unwrap().expect("vadas");
+    let e = storage.get_edge_by_id("0").unwrap().expect("an edge");
     let check = |result: Result<(), GraphError>, what: &str| match result {
         Err(GraphError::InvalidElementState { reason: got, .. }) => {
             assert!(got.contains(reason), "{what}: {got}")
@@ -278,11 +308,23 @@ where
     check(storage.drop_vertex(a), "drop_vertex");
     check(storage.set_schema(GraphSchema::default()), "set_schema");
 
-    assert_eq!(storage.vertex_count(), 6);
-    assert_eq!(storage.edge_count(), 6);
-    assert_eq!(storage.vertex_labels(a), &[s("person")]);
-    assert!(storage.vertex_properties(a).unwrap().contains_key("name"));
-    assert!(storage.edge_properties(e).unwrap().contains_key("weight"));
+    assert_eq!(storage.vertex_count().unwrap(), 6);
+    assert_eq!(storage.edge_count().unwrap(), 6);
+    assert_eq!(storage.vertex_labels(a).unwrap(), &[s("person")]);
+    assert!(
+        storage
+            .vertex_properties(a)
+            .unwrap()
+            .unwrap()
+            .contains_key("name")
+    );
+    assert!(
+        storage
+            .edge_properties(e)
+            .unwrap()
+            .unwrap()
+            .contains_key("weight")
+    );
 }
 
 #[test]
@@ -291,8 +333,8 @@ fn a_read_only_reference_rejects_every_write() {
     let mut view: &TraversalGraph = &graph;
     rejects_every_write(&mut view, "immutable graph reference");
     // reads are forwarded
-    let marko = view.get_vertex_by_id("1").unwrap();
-    assert!(view.contains_vertex(marko));
+    let marko = view.get_vertex_by_id("1").unwrap().unwrap();
+    assert!(view.contains_vertex(marko).unwrap());
     assert_eq!(
         view.statistics()
             .unwrap()
@@ -321,7 +363,7 @@ fn a_shared_arc_rejects_every_write_and_a_sole_one_accepts_it() {
     let mut shared = Arc::new(TraversalGraph::tinkerpop_modern());
     let other_owner = shared.clone();
     rejects_every_write(&mut shared, "shared Arc<TraversalGraph>");
-    let a = shared.get_vertex_by_id("1").unwrap();
+    let a = shared.get_vertex_by_id("1").unwrap().unwrap();
     let path_write = shared.set_vertex_property_path(a, &jpath("meta.x"), 1.into());
     assert!(matches!(
         path_write,
@@ -332,7 +374,7 @@ fn a_shared_arc_rejects_every_write_and_a_sole_one_accepts_it() {
             .remove_vertex_property_path(a, &jpath("meta.x"))
             .is_err()
     );
-    let e = shared.get_edge_by_id("0").unwrap();
+    let e = shared.get_edge_by_id("0").unwrap().unwrap();
     assert!(
         shared
             .set_edge_property_path(e, &jpath("meta.x"), 1.into())
@@ -353,7 +395,7 @@ fn a_shared_arc_rejects_every_write_and_a_sole_one_accepts_it() {
     assert!(shared.capabilities().unwrap().writable);
     shared.set_vertex_property(a, s("k"), 1.into()).unwrap();
     assert_eq!(
-        shared.vertex_properties(a).unwrap().get("k"),
+        shared.vertex_properties(a).unwrap().unwrap().get("k"),
         Some(&1.into())
     );
 }
@@ -410,8 +452,8 @@ fn recorded_change_sets() -> Vec<ChangeSet> {
 }
 
 fn assert_replayed<S: GraphStorage>(storage: &S) {
-    assert_eq!(storage.vertex_count(), 2);
-    assert_eq!(storage.edge_count(), 1);
+    assert_eq!(storage.vertex_count().unwrap(), 2);
+    assert_eq!(storage.edge_count().unwrap(), 1);
     assert_eq!(
         storage
             .statistics()
@@ -458,5 +500,5 @@ fn commit_hooks_register_through_box_and_mut_ref_and_see_traversal_commits() {
     boxed
         .rollback_unit(mark, &RollbackReason::failed(&"test"))
         .unwrap();
-    assert_eq!(boxed.vertex_count(), 1);
+    assert_eq!(boxed.vertex_count().unwrap(), 1);
 }

@@ -68,7 +68,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
     ) -> TraverserResult<()> {
         match source.value {
             TraverserValue::Vertex(node_index) => {
-                if let Some(node) = context.storage.vertex_properties(node_index) {
+                if let Some(node) = context.storage.vertex_properties(node_index)? {
                     emit_matching_property_refs(
                         node,
                         &self.args,
@@ -89,7 +89,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
             }
 
             TraverserValue::Edge(edge_index) => {
-                match context.storage.edge_properties(edge_index) {
+                match context.storage.edge_properties(edge_index)? {
                     Some(edge) => {
                         emit_matching_property_refs(
                             edge,
@@ -108,7 +108,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
                         );
                     }
                     // A removed edge has no properties (stale handle): nothing to emit.
-                    None if !context.storage.contains_edge(edge_index) => {}
+                    None if !context.storage.contains_edge(edge_index)? => {}
                     None => {
                         return Err(Box::new(TraverserError::Value(
                             ValueError::PropertyNotFound {
@@ -142,7 +142,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop = context
                     .storage
-                    .vertex_properties(node_index)
+                    .vertex_properties(node_index)?
                     .and_then(|p| p.get(prop_name.as_str()).map(ElementProperty::to_logical));
                 resolve_nested_property_values(
                     prop,
@@ -157,7 +157,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
             TraverserValue::EdgeProperty(prop_name, edge_index, _) => {
                 let prop = context
                     .storage
-                    .edge_properties(edge_index)
+                    .edge_properties(edge_index)?
                     .and_then(|p| p.get(prop_name.as_str()).map(ElementProperty::to_logical));
                 resolve_nested_property_values(
                     prop,

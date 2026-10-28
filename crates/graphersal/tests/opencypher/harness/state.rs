@@ -57,10 +57,11 @@ pub fn snapshot<S: GraphStorage>(graph: &S) -> Snapshot {
         labels: BTreeSet::new(),
         properties: HashMap::new(),
     };
-    for v in graph.vertices() {
-        let id = id_or_handle(graph.vertex_id(v), &v);
-        snap.labels.extend(graph.vertex_labels(v).iter().cloned());
-        if let Some(map) = graph.vertex_properties(v) {
+    for v in graph.vertices().unwrap() {
+        let id = id_or_handle(graph.vertex_id(v).unwrap(), &v);
+        snap.labels
+            .extend(graph.vertex_labels(v).unwrap().iter().cloned());
+        if let Some(map) = graph.vertex_properties(v).unwrap() {
             for (key, value) in map.iter() {
                 snap.properties
                     .insert((Element::Node(id.clone()), key.clone()), value.clone());
@@ -68,9 +69,9 @@ pub fn snapshot<S: GraphStorage>(graph: &S) -> Snapshot {
         }
         snap.nodes.insert(id);
     }
-    for e in graph.edges() {
-        let id = id_or_handle(graph.edge_id(e), &e);
-        if let Some(map) = graph.edge_properties(e) {
+    for e in graph.edges().unwrap() {
+        let id = id_or_handle(graph.edge_id(e).unwrap(), &e);
+        if let Some(map) = graph.edge_properties(e).unwrap() {
             for (key, value) in map.iter() {
                 snap.properties.insert(
                     (Element::Relationship(id.clone()), key.clone()),
@@ -236,7 +237,7 @@ mod tests {
             &mut graph,
             "CREATE (:A {num: 0})-[:T {w: 1}]->(:B {num: 1})",
         );
-        let handles_before: Vec<_> = graph.vertices().collect();
+        let handles_before: Vec<_> = graph.vertices().unwrap().collect();
         let before = snapshot(&graph);
         // Fails after the delete (W28: a returned property of a deleted node), so the unit
         // rolls back and the undo log re-inserts the elements, possibly under new handles.
@@ -244,7 +245,7 @@ mod tests {
             .gql("MATCH (n:A) DETACH DELETE n RETURN n.num")
             .iterate();
         assert!(failed.is_err(), "the query must fail and roll back");
-        let handles_after: Vec<_> = graph.vertices().collect();
+        let handles_after: Vec<_> = graph.vertices().unwrap().collect();
         let after = snapshot(&graph);
         assert!(
             diff(&before, &after).is_empty(),

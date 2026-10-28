@@ -398,15 +398,15 @@ mod tests {
         .unwrap();
         live.transaction(|g| {
             let e = g
-                .get_edge_by_id("e2")
+                .get_edge_by_id("e2")?
                 .ok_or(GraphError::unsupported("e2"))?;
             g.set_edge_label(e, "loves".into())?;
             let a = g
-                .get_vertex_by_id("a")
+                .get_vertex_by_id("a")?
                 .ok_or(GraphError::unsupported("a"))?;
             g.drop_vertex_property("name", a)?;
             let c = g
-                .get_vertex_by_id("c")
+                .get_vertex_by_id("c")?
                 .ok_or(GraphError::unsupported("c"))?;
             g.remove_vertex_label(c, "robot")?;
             g.drop_vertex(a)?;
@@ -430,28 +430,33 @@ mod tests {
     fn state<S: PersistentStorage>(storage: &S) -> State {
         let mut vertices: Vec<String> = storage
             .vertices()
+            .unwrap()
             .map(|v| {
                 format!(
                     "{:?} {:?} {:?}",
-                    storage.vertex_id(v),
-                    storage.vertex_labels(v),
-                    storage.vertex_properties(v)
+                    storage.vertex_id(v).unwrap(),
+                    storage.vertex_labels(v).unwrap(),
+                    storage.vertex_properties(v).unwrap()
                 )
             })
             .collect();
         vertices.sort();
         let mut edges: Vec<String> = storage
             .edges()
+            .unwrap()
             .map(|e| {
-                let ends = storage
-                    .edge_endpoints(e)
-                    .map(|(from, to)| (storage.vertex_id(from), storage.vertex_id(to)));
+                let ends = storage.edge_endpoints(e).unwrap().map(|(from, to)| {
+                    (
+                        storage.vertex_id(from).unwrap(),
+                        storage.vertex_id(to).unwrap(),
+                    )
+                });
                 format!(
                     "{:?} {:?} {:?} {:?}",
-                    storage.edge_id(e),
-                    storage.edge_label(e),
+                    storage.edge_id(e).unwrap(),
+                    storage.edge_label(e).unwrap(),
                     ends,
-                    storage.edge_properties(e)
+                    storage.edge_properties(e).unwrap()
                 )
             })
             .collect();

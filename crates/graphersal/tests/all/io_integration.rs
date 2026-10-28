@@ -184,52 +184,67 @@ fn test_generic_custom_storage_io_roundtrip() {
         type VertexId = VertexHandle;
         type EdgeId = EdgeHandle;
 
-        fn vertex_count(&self) -> usize {
-            self.inner.vertex_count()
+        fn vertex_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::vertex_count(&self.inner)
         }
-        fn edge_count(&self) -> usize {
-            self.inner.edge_count()
+        fn edge_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::edge_count(&self.inner)
         }
-        fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+        fn vertices(&self) -> Result<impl Iterator<Item = VertexHandle> + '_, GraphError> {
             GraphStorage::vertices(&self.inner)
         }
-        fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn edges(&self) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::edges(&self.inner)
         }
-        fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+        fn get_vertex_by_id(&self, id: &str) -> Result<Option<VertexHandle>, GraphError> {
             self.inner.get_vertex_by_id(id)
         }
-        fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+        fn get_edge_by_id(&self, id: &str) -> Result<Option<EdgeHandle>, GraphError> {
             self.inner.get_edge_by_id(id)
         }
-        fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn out_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::out_edges(&self.inner, node)
         }
-        fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+        fn in_edges(
+            &self,
+            node: VertexHandle,
+        ) -> Result<impl Iterator<Item = EdgeHandle> + '_, GraphError> {
             GraphStorage::in_edges(&self.inner, node)
         }
-        fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_id(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.inner.vertex_id(node)
         }
-        fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_id(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             self.inner.edge_id(edge)
         }
-        fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+        fn vertex_label(&self, node: VertexHandle) -> Result<Option<&str>, GraphError> {
             self.inner.vertex_label(node)
         }
-        fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+        fn edge_label(&self, edge: EdgeHandle) -> Result<Option<&str>, GraphError> {
             self.inner.edge_label(edge)
         }
-        fn vertex_labels(&self, node: VertexHandle) -> &[compact_str::CompactString] {
+        fn vertex_labels(
+            &self,
+            node: VertexHandle,
+        ) -> Result<&[compact_str::CompactString], GraphError> {
             self.inner.vertex_labels(node)
         }
-        fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+        fn vertex_properties(
+            &self,
+            node: VertexHandle,
+        ) -> Result<Option<&PropertyMap>, GraphError> {
             self.inner.vertex_properties(node)
         }
-        fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+        fn edge_properties(&self, edge: EdgeHandle) -> Result<Option<&PropertyMap>, GraphError> {
             self.inner.edge_properties(edge)
         }
-        fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+        fn edge_endpoints(
+            &self,
+            edge: EdgeHandle,
+        ) -> Result<Option<(VertexHandle, VertexHandle)>, GraphError> {
             self.inner.edge_endpoints(edge)
         }
 
@@ -343,10 +358,13 @@ fn test_generic_custom_storage_io_roundtrip() {
         .import_reader(&mut imported_ml_storage, xml_reader)
         .expect("Import XML failed");
 
-    assert_eq!(imported_ml_storage.vertex_count(), 2);
-    assert_eq!(imported_ml_storage.edge_count(), 1);
-    let ml_v1 = imported_ml_storage.get_vertex_by_id("10").unwrap();
-    assert_eq!(imported_ml_storage.vertex_label(ml_v1), Some("custom_node"));
+    assert_eq!(imported_ml_storage.vertex_count().unwrap(), 2);
+    assert_eq!(imported_ml_storage.edge_count().unwrap(), 1);
+    let ml_v1 = imported_ml_storage.get_vertex_by_id("10").unwrap().unwrap();
+    assert_eq!(
+        imported_ml_storage.vertex_label(ml_v1).unwrap(),
+        Some("custom_node")
+    );
 }
 
 /// Imports `xml` into an empty graph through the stream entry point.

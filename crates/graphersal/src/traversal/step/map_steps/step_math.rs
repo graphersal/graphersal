@@ -126,7 +126,7 @@ impl<'g, S: GraphStorage + 'g> StepMath<'g, S> {
                     },
                 }
             } else {
-                match scope_value(context, source, name) {
+                match scope_value(context, source, name)? {
                     Some(scoped) => match by {
                         None => Slot::Owned(scoped),
                         Some(by) => {
@@ -186,11 +186,12 @@ impl<'g, S: GraphStorage + 'g> StepMath<'g, S> {
             };
             let mut cursor = start;
             for (depth, seg) in var.path.iter().enumerate() {
-                cursor = match cursor.step(storage, seg) {
+                cursor = match cursor.step(storage, seg).map_err(Failure::storage)? {
                     Some(next) => next,
                     None => {
                         let path = render_path(name, var.path.get(..=depth).unwrap_or(&var.path));
-                        let message = format!("{path} leads to no value: {}", cursor.explain(storage, seg));
+                        let why = cursor.explain(storage, seg).map_err(Failure::storage)?;
+                        let message = format!("{path} leads to no value: {why}");
                         return Err(Failure::Traverser(self.var_error(
                             name,
                             var,
@@ -204,6 +205,7 @@ impl<'g, S: GraphStorage + 'g> StepMath<'g, S> {
             cursor.number(storage).map_err(|leaf| {
                 let path = render_path(name, &var.path);
                 let (kind, message) = match leaf {
+                    Leaf::Storage(err) => return Failure::storage(err),
                     Leaf::Null => (
                         MathErrorKind::Null { path: path.clone() },
                         format!("the variable {path} for math() must resolve to a number, but it is null"),
@@ -231,6 +233,13 @@ impl<'g, S: GraphStorage + 'g> StepMath<'g, S> {
 enum Failure {
     Eval(MathEvalError),
     Traverser(BoxedTraverserError),
+}
+
+impl Failure {
+    /// A storage read error while resolving a variable: the query fails with it.
+    fn storage(err: GraphError) -> Self {
+        Failure::Traverser(Box::new(err.into()))
+    }
 }
 
 impl From<MathEvalError> for Failure {
@@ -263,21 +272,21 @@ fn scope_value<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     source: &Traverser<S>,
     name: &str,
-) -> Option<TraverserValue<S>> {
+) -> Result<Option<TraverserValue<S>>, GraphError> {
     let storage: &S = context.storage;
     let key = PathSeg::Key(name.into());
     let from_map = match &source.value {
         TraverserValue::Object(_)
         | TraverserValue::Record { .. }
         | TraverserValue::Computed(ElementProperty::Object(_) | ElementProperty::Map(_), _) => {
-            Cursor::Value(&source.value).step(storage, &key)
+            Cursor::Value(&source.value).step(storage, &key)?
         }
         // A `values(key)` reference to a map-valued property is a map too.
         TraverserValue::VertexProperty(..) | TraverserValue::EdgeProperty(..) => {
-            match Cursor::Value(&source.value).resolve(storage) {
+            match Cursor::Value(&source.value).resolve(storage)? {
                 Some(Cursor::Property(
                     map @ (ElementProperty::Object(_) | ElementProperty::Map(_)),
-                )) => Cursor::Property(map).step(storage, &key),
+                )) => Cursor::Property(map).step(storage, &key)?,
                 _ => None,
             }
         }
@@ -292,12 +301,12 @@ fn scope_value<S: GraphStorage>(
         | TraverserValue::Graph(_) => None,
     };
     if let Some(found) = from_map {
-        return Some(found.to_owned_value());
+        return Ok(Some(found.to_owned_value()));
     }
     if let Some(value) = context.side_effect.get(name) {
-        return Some(value.to_traverser_value());
+        return Ok(Some(value.to_traverser_value()));
     }
-    context.paths.by_label(source.path, name)
+    Ok(context.paths.by_label(source.path, name))
 }
 
 /// A borrowed position inside a variable's value, for nested access without materializing it.
@@ -318,6 +327,8 @@ impl<S: GraphStorage> Copy for Cursor<'_, S> {}
 enum Leaf {
     Null,
     Other(&'static str),
+    /// The storage could not read the property.
+    Storage(GraphError),
 }
 
 /// Normalizes a list index (a negative index counts from the end).
@@ -338,26 +349,44 @@ fn list_index(index: i64, len: usize) -> Option<usize> {
 impl<'a, S: GraphStorage> Cursor<'a, S> {
     /// Reads a lazy property reference from storage; every other position is itself.
     /// `None` for a reference to a missing property.
-    fn resolve(self, storage: &'a S) -> Option<Cursor<'a, S>> {
-        match self {
+    fn resolve(self, storage: &'a S) -> Result<Option<Cursor<'a, S>>, GraphError> {
+        Ok(match self {
             Cursor::Value(TraverserValue::VertexProperty(name, id, _)) => storage
                 .vertex_properties(*id)?
-                .get(name.as_str())
+                .and_then(|properties| properties.get(name.as_str()))
                 .map(Cursor::Property),
             Cursor::Value(TraverserValue::EdgeProperty(name, id, _)) => storage
                 .edge_properties(*id)?
-                .get(name.as_str())
+                .and_then(|properties| properties.get(name.as_str()))
                 .map(Cursor::Property),
             Cursor::Value(TraverserValue::Computed(property, _)) => {
                 Some(Cursor::Property(property))
             }
             other => Some(other),
-        }
+        })
     }
 
     /// One nested-access step; `None` when it leads to no value.
-    fn step(self, storage: &'a S, seg: &PathSeg) -> Option<Cursor<'a, S>> {
-        match (self.resolve(storage)?, seg) {
+    fn step(self, storage: &'a S, seg: &PathSeg) -> Result<Option<Cursor<'a, S>>, GraphError> {
+        let Some(at) = self.resolve(storage)? else {
+            return Ok(None);
+        };
+        Ok(match (at, seg) {
+            (Cursor::Value(TraverserValue::Vertex(id)), PathSeg::Key(key)) => storage
+                .vertex_properties(*id)?
+                .and_then(|properties| properties.get(key.as_str()))
+                .map(Cursor::Property),
+            (Cursor::Value(TraverserValue::Edge(id)), PathSeg::Key(key)) => storage
+                .edge_properties(*id)?
+                .and_then(|properties| properties.get(key.as_str()))
+                .map(Cursor::Property),
+            (at, seg) => at.step_in_value(seg),
+        })
+    }
+
+    /// [`step`](Self::step) on a resolved position that is not an element.
+    fn step_in_value(self, seg: &PathSeg) -> Option<Cursor<'a, S>> {
+        match (self, seg) {
             (Cursor::Value(TraverserValue::Object(map)), PathSeg::Key(key)) => {
                 let lookup = TraverserValue::Computed(ElementProperty::String(key.clone()), None);
                 map.get(&lookup).map(Cursor::Value)
@@ -369,14 +398,6 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
             (Cursor::Value(TraverserValue::Array(items)), PathSeg::Index(index)) => items
                 .get(list_index(*index, items.len())?)
                 .map(Cursor::Value),
-            (Cursor::Value(TraverserValue::Vertex(id)), PathSeg::Key(key)) => storage
-                .vertex_properties(*id)?
-                .get(key.as_str())
-                .map(Cursor::Property),
-            (Cursor::Value(TraverserValue::Edge(id)), PathSeg::Key(key)) => storage
-                .edge_properties(*id)?
-                .get(key.as_str())
-                .map(Cursor::Property),
             (
                 Cursor::Property(
                     value @ (ElementProperty::Object(_)
@@ -398,9 +419,9 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
 
     /// Why [`step`](Self::step) found nothing: the available keys, the list length, or the
     /// kind of value that has neither.
-    fn explain(self, storage: &'a S, seg: &PathSeg) -> String {
-        let Some(at) = self.resolve(storage) else {
-            return "the property it reads does not exist".to_string();
+    fn explain(self, storage: &'a S, seg: &PathSeg) -> Result<String, GraphError> {
+        let Some(at) = self.resolve(storage)? else {
+            return Ok("the property it reads does not exist".to_string());
         };
         let keys: Option<Vec<String>> = match at {
             Cursor::Value(TraverserValue::Object(map)) => Some(
@@ -418,12 +439,12 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
             }
             Cursor::Value(TraverserValue::Vertex(id)) => Some(
                 storage
-                    .vertex_properties(*id)
+                    .vertex_properties(*id)?
                     .map_or_else(Vec::new, |p| p.keys().map(|k| k.to_string()).collect()),
             ),
             Cursor::Value(TraverserValue::Edge(id)) => Some(
                 storage
-                    .edge_properties(*id)
+                    .edge_properties(*id)?
                     .map_or_else(Vec::new, |p| p.keys().map(|k| k.to_string()).collect()),
             ),
             Cursor::Property(
@@ -440,7 +461,7 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
             Cursor::Property(ElementProperty::Array(items)) => Some(items.len()),
             _ => None,
         };
-        match (seg, keys, len) {
+        Ok(match (seg, keys, len) {
             (PathSeg::Key(key), Some(keys), _) => {
                 format!(
                     "no key '{key}'; the available keys are: {}",
@@ -454,12 +475,12 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
             (PathSeg::Index(index), _, None) => {
                 format!("a {} has no index {index}", at.type_name())
             }
-        }
+        })
     }
 
     /// The number at this position.
     fn number(self, storage: &'a S) -> Result<f64, Leaf> {
-        match self.resolve(storage) {
+        match self.resolve(storage).map_err(Leaf::Storage)? {
             None | Some(Cursor::Property(ElementProperty::Null)) => Err(Leaf::Null),
             Some(Cursor::Property(ElementProperty::Number(n))) => {
                 // Exact for every `f64`; an `i64` converts like Java's `Number.doubleValue()`.

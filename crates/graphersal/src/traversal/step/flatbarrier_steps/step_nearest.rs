@@ -131,7 +131,7 @@ impl MetricCache {
         value: &TraverserValue<S>,
     ) -> TraverserResult<VectorMetric> {
         let labels: &[CompactString] = match value {
-            TraverserValue::Vertex(node) => storage.vertex_labels(*node),
+            TraverserValue::Vertex(node) => storage.vertex_labels(*node)?,
             _ => &[],
         };
         let metric = match value {

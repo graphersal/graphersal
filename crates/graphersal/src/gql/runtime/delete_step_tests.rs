@@ -206,15 +206,20 @@ fn is_removed(error: &TraverserError) -> bool {
 }
 
 fn counts(graph: &TraversalGraph) -> (usize, usize) {
-    (graph.vertices().count(), graph.edges().count())
+    (
+        graph.vertices().unwrap().count(),
+        graph.edges().unwrap().count(),
+    )
 }
 
 fn names_left(graph: &TraversalGraph) -> Vec<String> {
     let mut out: Vec<String> = graph
         .vertices()
+        .unwrap()
         .filter_map(|v| {
             graph
                 .vertex_properties(v)
+                .unwrap()
                 .and_then(|p| p.get("name"))
                 .and_then(ElementProperty::as_string)
                 .map(str::to_string)
@@ -227,22 +232,22 @@ fn names_left(graph: &TraversalGraph) -> Vec<String> {
 /// A canonical dump of the whole graph.
 fn dump(graph: &TraversalGraph) -> String {
     let mut out = Vec::new();
-    for v in graph.vertices() {
+    for v in graph.vertices().unwrap() {
         out.push(format!(
             "v {:?} {:?}",
-            graph.vertex_labels(v),
-            graph.vertex_properties(v)
+            graph.vertex_labels(v).unwrap(),
+            graph.vertex_properties(v).unwrap()
         ));
     }
-    for e in graph.edges() {
+    for e in graph.edges().unwrap() {
         out.push(format!(
             "e {:?} {:?} {:?}",
-            graph.edge_label(e),
-            graph.edge_endpoints(e).map(|(s, t)| (
-                graph.vertex_id(s).map(str::to_string),
-                graph.vertex_id(t).map(str::to_string)
+            graph.edge_label(e).unwrap(),
+            graph.edge_endpoints(e).unwrap().map(|(s, t)| (
+                graph.vertex_id(s).unwrap().map(str::to_string),
+                graph.vertex_id(t).unwrap().map(str::to_string)
             )),
-            graph.edge_properties(e)
+            graph.edge_properties(e).unwrap()
         ));
     }
     out.sort();
@@ -442,9 +447,11 @@ fn a_row_of_bulk_n_is_deleted_once_and_keeps_its_bulk() {
     let mut graph = TraversalGraph::tinkerpop_modern();
     let marko = graph
         .vertices()
+        .unwrap()
         .find(|v| {
             graph
                 .vertex_properties(*v)
+                .unwrap()
                 .and_then(|p| p.get("name"))
                 .and_then(ElementProperty::as_string)
                 == Some("marko")

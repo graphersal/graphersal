@@ -81,7 +81,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasLabel {
                 // OR, so single-label behavior is unchanged; under multi-label it correctly
                 // matches a vertex on any one of the labels it carries. Without candidates
                 // (`has_label()`) a vertex passes iff its label set is not empty.
-                let vertex_labels = context.storage.vertex_labels(*node_index);
+                let vertex_labels = context.storage.vertex_labels(*node_index)?;
                 match &self.labels {
                     Some(labels) => Ok(labels
                         .iter()
@@ -91,7 +91,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasLabel {
             }
 
             TraverserValue::Edge(edge_index) => {
-                let edge_label = context.storage.edge_label(*edge_index);
+                let edge_label = context.storage.edge_label(*edge_index)?;
                 match edge_label {
                     Some(edge_label) => match &self.labels {
                         Some(labels) => Ok(labels.iter().any(|s| s == edge_label)),

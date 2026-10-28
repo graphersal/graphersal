@@ -64,11 +64,15 @@ fn assert_reconciles(graph: &TraversalGraph, report: &MemoryReport) {
 /// slots and heap, read through the public API.
 fn expected(graph: &TraversalGraph, label: &str, key: &str) -> (u64, u64, u64) {
     let mut out = (0, 0, 0);
-    for v in graph.vertices() {
-        if graph.vertex_label(v) != Some(label) {
+    for v in graph.vertices().unwrap() {
+        if graph.vertex_label(v).unwrap() != Some(label) {
             continue;
         }
-        if let Some(value) = graph.vertex_properties(v).and_then(|map| map.get(key)) {
+        if let Some(value) = graph
+            .vertex_properties(v)
+            .unwrap()
+            .and_then(|map| map.get(key))
+        {
             out.0 += 1;
             out.1 += 32;
             out.2 += value.estimated_heap_bytes();
@@ -425,7 +429,7 @@ fn every_property_index_is_reported_separately() {
 fn removed_elements_leave_tombstoned_slots() {
     let mut graph = TraversalGraph::tinkerpop_modern();
     for id in ["2", "3"] {
-        let v = graph.get_vertex_by_id(id).unwrap();
+        let v = graph.get_vertex_by_id(id).unwrap().unwrap();
         graph.drop_vertex(v).unwrap();
     }
     let report = full(&graph);
@@ -456,7 +460,7 @@ fn dropped_keys_leave_map_overhead_that_reconciles() {
             )
             .unwrap();
     }
-    let handles: Vec<_> = graph.vertices().collect();
+    let handles: Vec<_> = graph.vertices().unwrap().collect();
     for v in handles {
         graph.drop_vertex_property("b", v).unwrap();
     }

@@ -272,17 +272,10 @@ pub trait SessionGraph: AnyGraph {
     fn register_hook(&self, hook: Box<dyn CommitHook>) -> Result<(), GraphError>;
 }
 
-/// A read of `graph` for a [`SessionGraph`] method: `answer` on the read view, or the refusal
-/// when the current thread may not have one ([`Graph::read_checked`]: it holds the graph's unit
-/// and a write view of it is alive, as in a commit hook of that unit); never a panic.
-fn reading<S: GraphStorage, T>(
-    graph: &Graph<S>,
-    answer: impl FnOnce(&S) -> T,
-) -> Result<T, GraphError> {
-    Ok(answer(&*graph.read_checked()?))
-}
-
-/// [`reading`] for an answer that can fail itself.
+/// A read of `graph` for a [`SessionGraph`] method: `answer` on the read view (whose own storage
+/// error it returns), or the refusal when the current thread may not have one
+/// ([`Graph::read_checked`]: it holds the graph's unit and a write view of it is alive, as in a
+/// commit hook of that unit); never a panic.
 fn reading_with<S: GraphStorage, T, E: From<GraphError>>(
     graph: &Graph<S>,
     answer: impl FnOnce(&S) -> Result<T, E>,
@@ -320,11 +313,11 @@ where
     S: GraphStorage + Default + Send + Sync + 'static,
 {
     fn vertex_count(&self) -> Result<usize, GraphError> {
-        reading(self, |g| g.vertex_count())
+        reading_with(self, |g| g.vertex_count())
     }
 
     fn edge_count(&self) -> Result<usize, GraphError> {
-        reading(self, |g| g.edge_count())
+        reading_with(self, |g| g.edge_count())
     }
 
     fn inferred_schema(&self) -> Result<GraphSchema, GraphError> {
@@ -340,7 +333,7 @@ where
     }
 
     fn graph_view(&self, max_nodes: usize, max_edges: usize) -> Result<CompactGraph, GraphError> {
-        reading(self, |g| crate::views::graph_view(g, max_nodes, max_edges))
+        reading_with(self, |g| crate::views::graph_view(g, max_nodes, max_edges))
     }
 
     fn graph_view_request(
@@ -355,7 +348,7 @@ where
     }
 
     fn add_degrees(&self, view: &mut CompactGraph) -> Result<(), GraphError> {
-        reading(self, |g| view.add_degrees(g))
+        reading_with(self, |g| view.add_degrees(g))
     }
 
     fn statistics_view(&self) -> Result<Value, GraphError> {
@@ -371,7 +364,7 @@ where
     }
 
     fn element(&self, kind: ElementKind, id: &str) -> Result<Option<InspectedElement>, GraphError> {
-        reading(self, |g| crate::display::element_of(g, kind, id))
+        reading_with(self, |g| crate::display::element_of(g, kind, id))
     }
 
     fn subgraph(
@@ -379,7 +372,7 @@ where
         results: &[ElementProperty],
         max_elements: usize,
     ) -> Result<Option<CompactGraph>, GraphError> {
-        reading(self, |g| {
+        reading_with(self, |g| {
             crate::display::collect_subgraph(g, results, max_elements)
         })
     }
@@ -407,7 +400,7 @@ where
     }
 
     fn element_view(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError> {
-        reading(self, |g| crate::edit::element_view(g, kind, id))
+        reading_with(self, |g| crate::edit::element_view(g, kind, id))
     }
 
     fn update_element(
@@ -438,11 +431,11 @@ where
     }
 
     fn drawn(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError> {
-        reading(self, |g| crate::create::drawn_in(g, kind, id))
+        reading_with(self, |g| crate::create::drawn_in(g, kind, id))
     }
 
     fn incident_edges(&self, kind: ElementKind, id: &str) -> Result<Option<usize>, GraphError> {
-        reading(self, |g| crate::create::incident_edges(g, kind, id))
+        reading_with(self, |g| crate::create::incident_edges(g, kind, id))
     }
 
     fn delete_element(
@@ -829,30 +822,32 @@ fn copy_plain<S: GraphStorage + Default>(src: &TraversalGraph) -> Result<S, Grap
     for definition in GraphStorage::definitions(src)? {
         dst.set_definition(definition.clone())?;
     }
-    for v in GraphStorage::vertices(src) {
-        let id = GraphStorage::vertex_id(src, v).unwrap_or_default();
+    for v in GraphStorage::vertices(src)? {
+        let id = GraphStorage::vertex_id(src, v)?.unwrap_or_default();
         dst.insert_vertex(
             Some(id.into()),
-            GraphStorage::vertex_labels(src, v).to_vec(),
-            logical(GraphStorage::vertex_properties(src, v)),
+            GraphStorage::vertex_labels(src, v)?.to_vec(),
+            logical(GraphStorage::vertex_properties(src, v)?),
         )?;
     }
-    for e in GraphStorage::edges(src) {
-        let Some((from, to)) = GraphStorage::edge_endpoints(src, e) else {
+    for e in GraphStorage::edges(src)? {
+        let Some((from, to)) = GraphStorage::edge_endpoints(src, e)? else {
             continue;
         };
-        let endpoint = |v| {
-            GraphStorage::vertex_id(src, v)
-                .and_then(|id| dst.get_vertex_by_id(id))
-                .ok_or_else(|| GraphError::unsupported("an edge whose endpoint was not copied"))
+        let endpoint = |v| -> Result<_, GraphError> {
+            let found = match GraphStorage::vertex_id(src, v)? {
+                Some(id) => dst.get_vertex_by_id(id)?,
+                None => None,
+            };
+            found.ok_or_else(|| GraphError::unsupported("an edge whose endpoint was not copied"))
         };
         let (from, to) = (endpoint(from)?, endpoint(to)?);
         dst.insert_edge(
-            GraphStorage::edge_id(src, e).map(Into::into),
-            GraphStorage::edge_label(src, e).map(Into::into),
+            GraphStorage::edge_id(src, e)?.map(Into::into),
+            GraphStorage::edge_label(src, e)?.map(Into::into),
             from,
             to,
-            logical(GraphStorage::edge_properties(src, e)),
+            logical(GraphStorage::edge_properties(src, e)?),
         )?;
     }
     let (vertices, edges) = PersistentStorage::id_sequences(src);
@@ -871,23 +866,23 @@ fn copy_loaded<S: PersistentStorage + Default>(src: &TraversalGraph) -> Result<S
     for definition in GraphStorage::definitions(src)? {
         dst.load_definition(definition.clone())?;
     }
-    for v in GraphStorage::vertices(src) {
+    for v in GraphStorage::vertices(src)? {
         dst.load_vertex(
-            GraphStorage::vertex_id(src, v).unwrap_or_default().into(),
-            GraphStorage::vertex_labels(src, v).to_vec(),
-            logical(GraphStorage::vertex_properties(src, v)),
+            GraphStorage::vertex_id(src, v)?.unwrap_or_default().into(),
+            GraphStorage::vertex_labels(src, v)?.to_vec(),
+            logical(GraphStorage::vertex_properties(src, v)?),
         )?;
     }
-    for e in GraphStorage::edges(src) {
-        let Some((from, to)) = GraphStorage::edge_endpoints(src, e) else {
+    for e in GraphStorage::edges(src)? {
+        let Some((from, to)) = GraphStorage::edge_endpoints(src, e)? else {
             continue;
         };
         dst.load_edge(
-            GraphStorage::edge_id(src, e).unwrap_or_default().into(),
-            GraphStorage::edge_label(src, e).map(Into::into),
-            GraphStorage::vertex_id(src, from).unwrap_or_default(),
-            GraphStorage::vertex_id(src, to).unwrap_or_default(),
-            logical(GraphStorage::edge_properties(src, e)),
+            GraphStorage::edge_id(src, e)?.unwrap_or_default().into(),
+            GraphStorage::edge_label(src, e)?.map(Into::into),
+            GraphStorage::vertex_id(src, from)?.unwrap_or_default(),
+            GraphStorage::vertex_id(src, to)?.unwrap_or_default(),
+            logical(GraphStorage::edge_properties(src, e)?),
         )?;
     }
     dst.finish_load()?;

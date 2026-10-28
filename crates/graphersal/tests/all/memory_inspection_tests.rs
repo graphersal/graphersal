@@ -75,55 +75,70 @@ fn t1_memory_usage_via_generic_storage_trait() {
         type VertexId = <TraversalGraph as GraphStorage>::VertexId;
         type EdgeId = <TraversalGraph as GraphStorage>::EdgeId;
 
-        fn vertex_count(&self) -> usize {
-            self.0.vertex_count()
+        fn vertex_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::vertex_count(&self.0)
         }
-        fn edge_count(&self) -> usize {
-            self.0.edge_count()
+        fn edge_count(&self) -> Result<usize, GraphError> {
+            GraphStorage::edge_count(&self.0)
         }
-        fn vertices(&self) -> impl Iterator<Item = Self::VertexId> + '_ {
+        fn vertices(&self) -> Result<impl Iterator<Item = Self::VertexId> + '_, GraphError> {
             GraphStorage::vertices(self.0)
         }
-        fn edges(&self) -> impl Iterator<Item = Self::EdgeId> + '_ {
+        fn edges(&self) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
             GraphStorage::edges(self.0)
         }
-        fn get_vertex_by_id(&self, id: &str) -> Option<Self::VertexId> {
+        fn get_vertex_by_id(&self, id: &str) -> Result<Option<Self::VertexId>, GraphError> {
             self.0.get_vertex_by_id(id)
         }
-        fn get_edge_by_id(&self, id: &str) -> Option<Self::EdgeId> {
+        fn get_edge_by_id(&self, id: &str) -> Result<Option<Self::EdgeId>, GraphError> {
             self.0.get_edge_by_id(id)
         }
-        fn out_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+        fn out_edges(
+            &self,
+            node: Self::VertexId,
+        ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
             GraphStorage::out_edges(self.0, node)
         }
-        fn in_edges(&self, node: Self::VertexId) -> impl Iterator<Item = Self::EdgeId> + '_ {
+        fn in_edges(
+            &self,
+            node: Self::VertexId,
+        ) -> Result<impl Iterator<Item = Self::EdgeId> + '_, GraphError> {
             GraphStorage::in_edges(self.0, node)
         }
-        fn vertex_id(&self, node: Self::VertexId) -> Option<&str> {
+        fn vertex_id(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
             self.0.vertex_id(node)
         }
-        fn edge_id(&self, edge: Self::EdgeId) -> Option<&str> {
+        fn edge_id(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
             self.0.edge_id(edge)
         }
-        fn vertex_label(&self, node: Self::VertexId) -> Option<&str> {
+        fn vertex_label(&self, node: Self::VertexId) -> Result<Option<&str>, GraphError> {
             self.0.vertex_label(node)
         }
-        fn edge_label(&self, edge: Self::EdgeId) -> Option<&str> {
+        fn edge_label(&self, edge: Self::EdgeId) -> Result<Option<&str>, GraphError> {
             self.0.edge_label(edge)
         }
-        fn vertex_labels(&self, node: Self::VertexId) -> &[compact_str::CompactString] {
+        fn vertex_labels(
+            &self,
+            node: Self::VertexId,
+        ) -> Result<&[compact_str::CompactString], GraphError> {
             self.0.vertex_labels(node)
         }
         fn vertex_properties(
             &self,
             node: Self::VertexId,
-        ) -> Option<&graphersal::prelude::PropertyMap> {
+        ) -> Result<Option<&graphersal::prelude::PropertyMap>, GraphError> {
             self.0.vertex_properties(node)
         }
-        fn edge_properties(&self, edge: Self::EdgeId) -> Option<&graphersal::prelude::PropertyMap> {
+        fn edge_properties(
+            &self,
+            edge: Self::EdgeId,
+        ) -> Result<Option<&graphersal::prelude::PropertyMap>, GraphError> {
             self.0.edge_properties(edge)
         }
-        fn edge_endpoints(&self, edge: Self::EdgeId) -> Option<(Self::VertexId, Self::VertexId)> {
+        fn edge_endpoints(
+            &self,
+            edge: Self::EdgeId,
+        ) -> Result<Option<(Self::VertexId, Self::VertexId)>, GraphError> {
             self.0.edge_endpoints(edge)
         }
         fn insert_vertex(

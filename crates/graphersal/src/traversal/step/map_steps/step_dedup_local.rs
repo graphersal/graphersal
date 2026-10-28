@@ -144,14 +144,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 fn list_items<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: TraverserValue<S>,
-) -> Result<Vec<TraverserValue<S>>, TraverserValue<S>> {
-    match value {
+) -> Result<Result<Vec<TraverserValue<S>>, TraverserValue<S>>, crate::error::GraphError> {
+    Ok(match value {
         TraverserValue::Array(items) => Ok(items),
         TraverserValue::Computed(ElementProperty::Array(items), _) => {
             Ok(items.into_iter().map(TraverserValue::from).collect())
         }
         TraverserValue::VertexProperty(_, _, _) | TraverserValue::EdgeProperty(_, _, _) => {
-            match stored_value(context, &value) {
+            match stored_value(context, &value)? {
                 Some(ElementProperty::Array(items)) => {
                     Ok(items.iter().cloned().map(TraverserValue::from).collect())
                 }
@@ -168,7 +168,7 @@ fn list_items<S: GraphStorage>(
         | TraverserValue::Entry(_)
         | TraverserValue::Schema(_)
         | TraverserValue::Graph(_) => Err(value),
-    }
+    })
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepDedupLocal {
@@ -181,7 +181,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepDedupLocal {
         let path = source.path;
         let bulk = source.bulk;
         let sack = source.sack;
-        let items = match list_items(context, source.value) {
+        let items = match list_items(context, source.value)? {
             Ok(items) => items,
             // Not a list: passes through unchanged.
             Err(value) => return Ok(Traverser::with_parts(value, path, bulk, sack)),

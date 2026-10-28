@@ -1254,7 +1254,7 @@ mod element_properties {
     }
 
     fn handles(graph: &TraversalGraph) -> Vec<VertexHandle> {
-        GraphStorage::vertices(graph).collect()
+        GraphStorage::vertices(graph).unwrap().collect()
     }
 
     /// Adds a new key to every vertex (a fresh graph per sample).
@@ -1337,7 +1337,12 @@ mod element_properties {
         bencher.bench_local(|| {
             handles
                 .iter()
-                .filter_map(|&v| graph.vertex_properties(v).and_then(|p| p.get(&key)))
+                .filter_map(|&v| {
+                    graph
+                        .vertex_properties(v)
+                        .unwrap()
+                        .and_then(|p| p.get(&key))
+                })
                 .count()
         });
     }
@@ -1480,32 +1485,34 @@ mod imports {
     /// The source graph as one change set of free-standing maps.
     fn change_set(graph: &TraversalGraph) -> ChangeSet {
         let mut builder = ChangeSet::builder(1, 1);
-        for v in GraphStorage::vertices(graph) {
+        for v in GraphStorage::vertices(graph).unwrap() {
             let props: PropertyMap = graph
                 .vertex_properties(v)
+                .unwrap()
                 .unwrap()
                 .iter()
                 .map(|(k, val)| (k.as_str(), val.clone()))
                 .collect();
             builder.push(Mutation::add_vertex(
-                graph.vertex_id(v).unwrap(),
+                graph.vertex_id(v).unwrap().unwrap(),
                 ["person"],
                 props,
             ));
         }
-        for e in GraphStorage::edges(graph) {
+        for e in GraphStorage::edges(graph).unwrap() {
             let props: PropertyMap = graph
                 .edge_properties(e)
+                .unwrap()
                 .unwrap()
                 .iter()
                 .map(|(k, val)| (k.as_str(), val.clone()))
                 .collect();
-            let (from, to) = graph.edge_endpoints(e).unwrap();
+            let (from, to) = graph.edge_endpoints(e).unwrap().unwrap();
             builder.push(Mutation::add_edge(
-                graph.edge_id(e).unwrap(),
+                graph.edge_id(e).unwrap().unwrap(),
                 Some("knows"),
-                graph.vertex_id(from).unwrap(),
-                graph.vertex_id(to).unwrap(),
+                graph.vertex_id(from).unwrap().unwrap(),
+                graph.vertex_id(to).unwrap().unwrap(),
                 props,
             ));
         }

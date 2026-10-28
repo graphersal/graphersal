@@ -66,7 +66,7 @@ pub(crate) fn held_value<'a, S: GraphStorage>(
             Cow::Owned(value.into_node_property(context.storage)?)
         }
         TraverserValue::VertexProperty(..) | TraverserValue::EdgeProperty(..) => {
-            match stored_value(context, value) {
+            match stored_value(context, value)? {
                 Some(stored) => Cow::Borrowed(stored),
                 None => Cow::Owned(ElementProperty::Null),
             }

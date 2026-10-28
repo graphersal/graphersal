@@ -167,9 +167,10 @@ fn source() -> Graph {
 }
 
 fn vertex_values<S: GraphStorage>(graph: &S, id: &str) -> Vec<String> {
-    let v = graph.get_vertex_by_id(id).expect("vertex");
+    let v = graph.get_vertex_by_id(id).unwrap().expect("vertex");
     graph
         .vertex_properties(v)
+        .unwrap()
         .unwrap()
         .iter()
         .map(|(key, value)| format!("{key} = {}", exact(value)))
@@ -177,9 +178,10 @@ fn vertex_values<S: GraphStorage>(graph: &S, id: &str) -> Vec<String> {
 }
 
 fn edge_values<S: GraphStorage>(graph: &S) -> Vec<String> {
-    let e = graph.get_edge_by_id("e").expect("edge");
+    let e = graph.get_edge_by_id("e").unwrap().expect("edge");
     let mut values: Vec<String> = graph
         .edge_properties(e)
+        .unwrap()
         .unwrap()
         .iter()
         .map(|(key, value)| format!("{key} = {}", exact(value)))
@@ -324,8 +326,13 @@ fn one_value(value: &str) -> (Option<String>, ImportReport) {
     let report = GraphSONImport::new()
         .import_reader(&mut graph, line.as_bytes())
         .unwrap();
-    let v = graph.get_vertex_by_id("v").unwrap();
-    let got = graph.vertex_properties(v).unwrap().get("p").map(exact);
+    let v = graph.get_vertex_by_id("v").unwrap().unwrap();
+    let got = graph
+        .vertex_properties(v)
+        .unwrap()
+        .unwrap()
+        .get("p")
+        .map(exact);
     (got, report)
 }
 

@@ -1314,16 +1314,23 @@ fn brute_force_ids(
     let mut next = 0usize;
     let mut copy = |tree: &mut TraversalGraph, original| {
         next += 1;
-        let id = format!("{}#{next}", graph.vertex_id(original).unwrap_or_default());
-        let labels = graph.vertex_labels(original).to_vec();
+        let id = format!(
+            "{}#{next}",
+            graph.vertex_id(original).unwrap().unwrap_or_default()
+        );
+        let labels = graph.vertex_labels(original).unwrap().to_vec();
         let properties = graph
             .vertex_properties(original)
+            .unwrap()
             .cloned()
             .unwrap_or_default();
         tree.add_vertex(Some(id.into()), labels, properties)
             .unwrap()
     };
-    let original_start = graph.get_vertex_by_id(start).expect("start vertex");
+    let original_start = graph
+        .get_vertex_by_id(start)
+        .unwrap()
+        .expect("start vertex");
     let tree_start = copy(&mut tree, original_start);
     let mut frontier = vec![(original_start, tree_start)];
     for _ in 0..max_depth {
@@ -1331,7 +1338,8 @@ fn brute_force_ids(
         for (original, copied) in frontier {
             let children: Vec<_> = graph
                 .out_edges(original)
-                .filter_map(|edge| graph.edge_endpoints(edge).map(|(_, child)| child))
+                .unwrap()
+                .filter_map(|edge| graph.edge_endpoints(edge).unwrap().map(|(_, child)| child))
                 .collect();
             for child in children {
                 let child_copy = copy(&mut tree, child);
@@ -1348,7 +1356,11 @@ fn brute_force_ids(
         }
         frontier = deeper;
     }
-    let start_copy = tree.vertex_id(tree_start).unwrap_or_default().to_string();
+    let start_copy = tree
+        .vertex_id(tree_start)
+        .unwrap()
+        .unwrap_or_default()
+        .to_string();
     let walk = tree.traversal().v(start_copy.as_str()).glob_path(pattern);
     let walk = if by_label {
         walk.by(By::Label)

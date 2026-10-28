@@ -53,7 +53,7 @@ fn history(store: &Store) {
             .graph()
             .write()
             .transaction(|g| {
-                let v = g.get_vertex_by_id(&format!("v{i:04}")).unwrap();
+                let v = g.get_vertex_by_id(&format!("v{i:04}")).unwrap().unwrap();
                 g.set_vertex_property(v, "touched".into(), ElementProperty::Boolean(true))
             })
             .unwrap();

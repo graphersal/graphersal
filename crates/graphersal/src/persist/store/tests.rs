@@ -29,10 +29,13 @@ fn add_person(store: &Store, name: &str) -> Result<(), String> {
 pub(super) fn names_of(graph: &TraversalGraph) -> Vec<String> {
     let mut names: Vec<String> = graph
         .vertices()
-        .filter_map(|v| match graph.vertex_properties(v)?.get("name")? {
-            crate::value::ElementProperty::String(s) => Some(s.to_string()),
-            _ => None,
-        })
+        .unwrap()
+        .filter_map(
+            |v| match graph.vertex_properties(v).unwrap()?.get("name")? {
+                crate::value::ElementProperty::String(s) => Some(s.to_string()),
+                _ => None,
+            },
+        )
         .collect();
     names.sort();
     names

@@ -59,7 +59,7 @@ fn some_vertex(graph: &TraversalGraph, rng: &mut Rng) -> Option<crate::graph::Ve
     if count == 0 {
         return None;
     }
-    graph.vertices().nth(rng.below(count))
+    graph.vertices().unwrap().nth(rng.below(count))
 }
 
 fn some_edge(graph: &TraversalGraph, rng: &mut Rng) -> Option<crate::graph::EdgeHandle> {
@@ -67,7 +67,7 @@ fn some_edge(graph: &TraversalGraph, rng: &mut Rng) -> Option<crate::graph::Edge
     if count == 0 {
         return None;
     }
-    graph.edges().nth(rng.below(count))
+    graph.edges().unwrap().nth(rng.below(count))
 }
 
 /// One random change in a unit of its own (a change that fails, a schema violation for
@@ -496,10 +496,10 @@ fn untouched_segments_are_reused_by_reference() {
             .graph()
             .write()
             .transaction(|g| {
-                for v in g.vertices().collect::<Vec<_>>() {
+                for v in g.vertices().unwrap().collect::<Vec<_>>() {
                     g.set_vertex_property(v, "touch".into(), ElementProperty::Number(i.into()))?;
                 }
-                for e in g.edges().collect::<Vec<_>>() {
+                for e in g.edges().unwrap().collect::<Vec<_>>() {
                     g.set_edge_property(e, "touch".into(), ElementProperty::Number(i.into()))?;
                 }
                 Ok::<(), crate::error::GraphError>(())
@@ -672,7 +672,7 @@ fn touch(graph: &mut TraversalGraph, ids: &[String], value: i64) {
     graph
         .transaction(|g| {
             for id in ids {
-                if let Some(v) = g.get_vertex_by_id(id) {
+                if let Some(v) = g.get_vertex_by_id(id).unwrap() {
                     g.set_vertex_property(
                         v,
                         "touched".into(),
@@ -715,7 +715,7 @@ fn drop_ids(graph: &mut TraversalGraph, ids: &[String]) {
     graph
         .transaction(|g| {
             for id in ids {
-                if let Some(v) = g.get_vertex_by_id(id) {
+                if let Some(v) = g.get_vertex_by_id(id).unwrap() {
                     g.drop_vertex(v)?;
                 }
             }
@@ -768,7 +768,8 @@ fn the_delta_anywhere_in_the_id_space_merges_exactly() {
             let (first, last) = &s[1];
             let ids: Vec<String> = g
                 .vertices()
-                .filter_map(|v| g.vertex_id(v).map(str::to_string))
+                .unwrap()
+                .filter_map(|v| g.vertex_id(v).unwrap().map(str::to_string))
                 .filter(|id| id >= first && id <= last)
                 .collect();
             drop_ids(g, &ids)
@@ -776,14 +777,15 @@ fn the_delta_anywhere_in_the_id_space_merges_exactly() {
         ("emptied and refilled", |g, _, _| {
             let ids: Vec<String> = g
                 .vertices()
-                .filter_map(|v| g.vertex_id(v).map(str::to_string))
+                .unwrap()
+                .filter_map(|v| g.vertex_id(v).unwrap().map(str::to_string))
                 .collect();
             drop_ids(g, &ids);
             add_ids(g, &["refill-1".into(), "refill-2".into()]);
         }),
         ("a value larger than a chunk", |g, s, _| {
             g.transaction(|g| {
-                let v = g.get_vertex_by_id(&s[0].0).unwrap();
+                let v = g.get_vertex_by_id(&s[0].0).unwrap().unwrap();
                 g.set_vertex_property(
                     v,
                     "big".into(),

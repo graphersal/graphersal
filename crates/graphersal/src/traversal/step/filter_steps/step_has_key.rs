@@ -63,7 +63,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasKey {
     ) -> TraverserResult<bool> {
         match &source.value {
             TraverserValue::Vertex(node_index) => {
-                let vertex = context.storage.vertex_properties(*node_index);
+                let vertex = context.storage.vertex_properties(*node_index)?;
                 match vertex {
                     Some(vertex) => match &self.key_list {
                         Some(key_list) => {
@@ -82,7 +82,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasKey {
 
             TraverserValue::Edge(edge_index) => match &self.key_list {
                 Some(key_list) => {
-                    let edge = context.storage.edge_properties(*edge_index);
+                    let edge = context.storage.edge_properties(*edge_index)?;
                     match edge {
                         Some(edge) => {
                             for key in key_list {
