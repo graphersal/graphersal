@@ -319,8 +319,8 @@ USAGE:
     graphersal [OPTIONS]                 # interactive REPL (/help lists its commands)
     graphersal [OPTIONS] <SCRIPT>        # evaluate SCRIPT, print the result, exit
     graphersal [OPTIONS] --in            # evaluate the script read from stdin, print the result, exit
-    graphersal --graph <SOURCE> --server [--port N] [--ui-dir DIR] [--mcp [--mcp-read-only]
-               [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
+    graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR]
+               [--mcp [--mcp-read-only] [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
                [--mcp-max-chars N]]
                [--ai FILE]
                                          # DEV server: the playground UI over HTTP (unstable),
@@ -403,8 +403,9 @@ OPTIONS:
         --server           DEV MODE, UNSTABLE, LOCAL ONLY: serve the graph of --graph and the
                            playground UI on http://127.0.0.1:<port>/ (the same UI as the
                            browser playground, with this process as its engine instead of
-                           WebAssembly). Binds the loopback only (127.0.0.1, and [::1] when
-                           available), no authentication. With a Store
+                           WebAssembly). Binds the loopback (127.0.0.1, and [::1] when
+                           available; inside a container 0.0.0.0, see --host), no
+                           authentication. With a Store
                            directory (--graph <dir>) every commit is persisted and the UI
                            shows the store (checkpoints, marks, snapshot downloads); otherwise
                            the graph lives in memory and "Save to file" writes it back to a
@@ -418,6 +419,15 @@ OPTIONS:
                            the level (default warn). Stop it with Ctrl+C.
         --port <N>         Port of --server; default 8080. 0 picks a free port (the address
                            is printed on stdout).
+        --host <ADDR>      Address --server listens on: an IP address or a host name, e.g.
+                           0.0.0.0 (every IPv4 interface), :: (every IPv6 interface),
+                           192.168.1.5, localhost. Default 127.0.0.1 (this machine only), but
+                           0.0.0.0 inside a container (/.dockerenv or /run/.containerenv
+                           exists), so docker run -p 8080:8080 ... works without flags. A
+                           non-loopback address makes the server reachable from the network
+                           WITHOUT authentication (a warning on stderr says so); requests
+                           must then name the server by an IP address, localhost, a name
+                           without a dot, or the --host name.
         --ui-dir <DIR>     A directory whose files --server serves instead of the playground
                            UI embedded in the binary (a file missing there comes from the
                            embedded copy); default ./playground when it exists.
@@ -522,6 +532,7 @@ EXAMPLES:
     graphersal --graph large --no-limit -e 'g.v()' > all_vertices.txt
     graphersal --graph large --memory-limit auto -e 'g.v().out().out().fold()'
     graphersal --graph ./mygraph.json --server --port 8080      # then open http://localhost:8080/
+    graphersal --graph ./mygraph.json --server --host 0.0.0.0  # reachable from the network (no auth!)
     graphersal store create data/ --from modern && graphersal --graph data/ --server
     graphersal --args-file args-dev-server.json --port 9000     # the file, with the port replaced
     graphersal embed-model download minishlab/potion-base-8M
@@ -954,6 +965,9 @@ pub struct Cli {
     pub memory_headroom: Option<u64>,
     /// `--port`: the port of the dev server ([`Mode::Server`]); `0` picks a free one.
     pub port: u16,
+    /// `--host`: the address the dev server binds (an IP address or a host name); `None` is
+    /// the loopback, or `0.0.0.0` inside a container.
+    pub host: Option<String>,
     /// `--ui-dir`: a directory whose files the dev server serves over the embedded playground
     /// UI; `None` is [`DEFAULT_UI_DIR`] when it exists, else the embedded UI alone.
     pub ui_dir: Option<String>,
@@ -1049,6 +1063,7 @@ impl Default for Cli {
             memory_limit: None,
             memory_headroom: None,
             port: DEFAULT_PORT,
+            host: None,
             ui_dir: None,
             create_store: false,
             on_damage: None,
@@ -1162,6 +1177,7 @@ impl Cli {
                         )
                     })?;
                 }
+                "--host" => cli.host = Some(value(&mut args)?),
                 "--ui-dir" => cli.ui_dir = Some(value(&mut args)?),
                 "--mcp" => cli.mcp = true,
                 "--mcp-read-only" => cli.mcp_read_only = true,
@@ -1348,6 +1364,12 @@ impl Cli {
                 ));
             }
             cli.mode = Mode::Server;
+        } else if cli.host.is_some() {
+            return Err(
+                "--host needs --server: it is the address the dev server listens on \
+                 (graphersal --graph <src> --server --host 0.0.0.0)"
+                    .to_string(),
+            );
         } else if cli.mcp {
             return Err(
                 "--mcp needs --server: the MCP endpoint is part of the dev server \

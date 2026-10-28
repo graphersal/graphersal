@@ -2,8 +2,10 @@
 
 > **DEV mode, unstable, local only, temporary. Not for production.** The dev server is a way to try Graphersal "as a
 > small server" and watch how it behaves. Its HTTP API is internal to the playground and changes
-> without notice; it has no authentication and serves only the loopback (`127.0.0.1`, and `[::1]`
-> when the system has IPv6). Do not expose it.
+> without notice; it has no authentication and by default serves only the loopback (`127.0.0.1`,
+> and `[::1]` when the system has IPv6; inside a container `0.0.0.0`, see
+> [Listening address and Docker](#listening-address-and-docker)). Do not expose it to a network
+> you do not trust.
 
 `graphersal --server` serves the [Web Playground](../users_guide/web_playground.md) UI over
 HTTP, with the CLI process itself as the engine instead of the WebAssembly worker. It is the same single-page app:
@@ -29,6 +31,8 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
   [On a Store](#on-a-store)).
 - `--port` (default `8080`; `0` picks a free one). The address is the only line on stdout; the
   "dev mode, unstable, local only" banner goes to stderr.
+- `--host <ADDR>` (default `127.0.0.1`, inside a container `0.0.0.0`): the address to listen on,
+  see [Listening address and Docker](#listening-address-and-docker).
 - The playground UI is **embedded in the binary** (its static files: `index.html`, `css/`, `js/`,
   `assets/`, `reset/`), so `graphersal` serves it on its own, from any working directory.
   `--ui-dir <DIR>` names a directory whose files win over the embedded copy (for working on the
@@ -221,15 +225,62 @@ graphersal --graph data/ --server --mcp --embedder potion=minishlab/potion-base-
 - Without a Store directory nothing is saved automatically, and nothing survives a restart of the
   server. On a Store directory every commit is persisted (below).
 
+## Listening address and Docker
+
+Without `--host` the server binds the loopback, `127.0.0.1` and, when the system has IPv6, `[::1]`
+on the same port (the `listening` row on stderr then names both addresses; if that bind fails the
+server stays on IPv4, silently). Only programs on the same machine reach it.
+
+Inside a container the loopback is useless: a published port (`docker run -p 8080:8080`) arrives
+on the container's network interface. So when the server finds `/.dockerenv` (Docker) or
+`/run/.containerenv` (Podman), its default is `0.0.0.0`, every interface of the container, and
+`docker run -p` works without flags:
+
+```bash
+# an image that has the graphersal binary; the Store lives in a volume
+docker run --rm -p 8080:8080 -v "$PWD/data:/data" my-graphersal-image \
+  graphersal --graph /data --create-store --server --port 8080
+# the same with the address spelled out (it also works where the container is not detected)
+docker run --rm -p 8080:8080 my-graphersal-image \
+  graphersal --graph modern --server --port 8080 --host 0.0.0.0
+# then open http://localhost:8080/ on the host
+```
+
+`docker run -p 127.0.0.1:8080:8080 ...` publishes the port on the host's loopback only, which
+keeps the server private to the host machine.
+
+`--host <ADDR>` names the address explicitly, on any machine: an IP address (`0.0.0.0` every
+IPv4 interface, `::` every IPv6 interface, `192.168.1.5` one interface, `127.0.0.1` the loopback,
+which also overrides the container default) or a host name that resolves on the machine
+(`localhost` is the loopback default). An address that is not valid or does not resolve is an
+invocation error (exit code `2`). For a wildcard address the URL on stdout is
+`http://127.0.0.1:<port>/` (`http://[::1]:<port>/` for `::`), the one a browser on the same
+machine opens, and the `listening` row adds `(all interfaces: 0.0.0.0:<port>)`; otherwise it is
+the address or name given.
+
+> **Warning.** On any address other than a loopback one the server is **reachable from the
+> network and has no authentication**: whoever reaches the port can read and change the graph,
+> write Store checkpoints and backups, and, with `--ai`, spend the AI provider key. The banner
+> says so, and a one-line warning on stderr names the address. Publish the port only to networks
+> you trust, and use `--mcp-token` for the MCP endpoint.
+
 ## Safety
 
-The server is a local development tool: it binds the loopback only, `127.0.0.1` and, when the
-system has IPv6, `[::1]` on the same port (the `listening` row on stderr then names both
-addresses; if that bind fails the server stays on IPv4, silently;
-the URL on stdout is always `http://127.0.0.1:<port>/`). There is no option to bind elsewhere. It
-has no authentication, and refuses requests whose `Host` (`127.0.0.1`, `localhost` or `[::1]` with
-the server's port) is not the server itself or
-whose `Origin` is another site; every write needs `Content-Type: application/json`, which a page of
+The server is a local development tool: it binds the loopback unless `--host` or a container
+says otherwise ([above](#listening-address-and-docker)). It has no authentication, and checks
+the `Host` and `Origin` headers of every request against DNS rebinding and cross-site requests:
+
+- On the loopback, `Host` must name the server itself (`127.0.0.1`, `localhost` or `[::1]`, or the
+  `--host` name, with the server's port), and an `Origin` must be one of them.
+- On any other address the port of `Host` is not checked (a container's port mapping changes it)
+  and its name must be an IP address, `localhost` (or a `*.localhost` name), a name without a dot
+  (a machine name, a Docker Compose service name such as `http://graphersal:8080`), or the
+  `--host` name. Any other fully qualified name is refused (`403`): a DNS rebinding attack sends
+  the attacker's domain. To open the server by a domain name, start it with `--host <that name>`.
+  An `Origin` must be the request's own origin (`http://` followed by its `Host`), so a page of
+  another site is refused even when it names an IP address.
+
+Beyond the headers, every write needs `Content-Type: application/json`, which a page of
 another site cannot send without a CORS preflight that the server never answers. Scripts cannot
 read or write files (as in the playground: file access is denied), so a file is written only by
 the explicit Save to file. Request bodies are limited to 16 MiB; a malformed request gets a 4xx
@@ -571,9 +622,11 @@ notification is answered `202 Accepted`), `GET /mcp` is `405`, `DELETE /mcp` end
 restart of the server) is `404`, so the client initializes again. A request whose
 `MCP-Protocol-Version` header names another revision is `400`, which tells a client that also
 speaks newer, stateless revisions to fall back to `initialize`. The `Host`/`Origin` checks of the
-[Safety](#safety) section apply (another site's `Origin` is `403`), and the server still binds
-the loopback only: `--mcp-token` protects against other local users and programs, not against the
-network.
+[Safety](#safety) section apply (another site's `Origin` is `403`). On the loopback
+`--mcp-token` protects against other local users and programs; on a network address
+([`--host`, or a container](#listening-address-and-docker)) it is the only thing that keeps other
+machines from the MCP tools. The printed MCP URL uses the host of the stdout URL (`127.0.0.1` for a
+wildcard address); a client on another machine uses the server's address instead.
 
 ## AI Chat
 

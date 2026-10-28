@@ -4,8 +4,10 @@
 native engine in this process instead of WebAssembly, and the same process can open the graph to
 AI agents.
 
-> **DEV mode.** The server is for local work: it listens on the loopback interface only, has no
-> user accounts, and its HTTP API changes without notice.
+> **DEV mode.** The server is for local work: it listens on the loopback interface (inside a
+> container on every interface, or where `--host` says), has no user accounts, and its HTTP API
+> changes without notice. See
+> [Listening address and Docker](../persistence/dev_server.md#listening-address-and-docker).
 
 ## The playground over your own graph
 

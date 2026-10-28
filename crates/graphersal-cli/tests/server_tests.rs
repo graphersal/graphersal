@@ -1002,6 +1002,141 @@ fn a_missing_ui_dir_is_a_usage_error_with_a_hint() {
     assert!(stderr.contains("--ui-dir"), "{stderr}");
 }
 
+#[test]
+fn an_invalid_host_is_a_usage_error() {
+    for host in ["nonsense..", "", "1.2.3.4:80", "http://localhost"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args([
+                "--graph", "empty", "--server", "--port", "0", "--host", host,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{host:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Invalid --host value"),
+            "{host:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{host:?}");
+    }
+}
+
+/// Starts the server with `args` (which name the host and the port) and returns it with the
+/// stdout address line and the stderr lines up to the banner's `listening:` row.
+fn start_on_host(args: &[&str]) -> (DevServer, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--graph", "empty", "--server"])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("graphersal starts");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut text = String::new();
+    let mut lines = BufReader::new(stderr).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        text.push_str(&line);
+        text.push('\n');
+        if line.trim_start().starts_with("listening:") {
+            break;
+        }
+    }
+    // Keep reading: a closed pipe would fail the server's later stderr lines.
+    std::thread::spawn(move || lines.for_each(drop));
+    let stdout = child.stdout.take().expect("stdout");
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let port = line
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no address on stdout: {line:?}"));
+    (DevServer { child, port }, line, text)
+}
+
+#[test]
+fn an_explicit_loopback_host_serves_without_a_network_notice() {
+    let (server, line, stderr) = start_on_host(&["--host", "127.0.0.1", "--port", "0"]);
+    let port = server.port;
+    assert_eq!(
+        line.trim(),
+        format!("Graphersal dev server: http://127.0.0.1:{port}/")
+    );
+    assert!(!stderr.contains("reachable from the network"), "{stderr}");
+    assert!(stderr.contains("Loopback only."), "{stderr}");
+    assert_eq!(get(port, "/api/info").status, 200);
+    // The loopback keeps the strict Host check: another name or port is refused.
+    for host in [
+        format!("Host: 192.168.1.5:{port}"),
+        "Host: 127.0.0.1:1".to_string(),
+        format!("Host: graphersal:{port}"),
+    ] {
+        let answer = request(port, "GET", "/api/info", None, &[host.as_str()]);
+        assert_eq!(answer.status, 403, "{host}: {}", answer.body);
+    }
+}
+
+#[test]
+fn a_wildcard_host_warns_and_accepts_network_names() {
+    let (server, line, stderr) = start_on_host(&["--host", "0.0.0.0", "--port", "0"]);
+    let port = server.port;
+    // The stdout line is a URL a browser on this machine opens.
+    assert_eq!(
+        line.trim(),
+        format!("Graphersal dev server: http://127.0.0.1:{port}/")
+    );
+    let notice = stderr
+        .lines()
+        .find(|l| l.starts_with("warning: the dev server listens on"))
+        .unwrap_or_else(|| panic!("no network notice: {stderr}"));
+    assert!(notice.contains(&format!("0.0.0.0:{port}")), "{notice}");
+    assert!(notice.contains("reachable from the network"), "{notice}");
+    assert!(notice.contains("NO authentication"), "{notice}");
+    assert!(
+        stderr.contains(" REACHABLE FROM THE NETWORK, see the warning below."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("(all interfaces: 0.0.0.0:"), "{stderr}");
+    // Addresses, localhost and single-label names on any port (a port mapping) are served.
+    for host in [
+        format!("Host: 127.0.0.1:{port}"),
+        "Host: localhost:9000".to_string(),
+        "Host: 192.168.1.5:8080".to_string(),
+        "Host: graphersal:8080".to_string(),
+    ] {
+        let answer = request(port, "GET", "/api/info", None, &[host.as_str()]);
+        assert_eq!(answer.status, 200, "{host}: {}", answer.body);
+    }
+    // A fully qualified name (DNS rebinding) and a foreign Origin are refused.
+    let answer = request(port, "GET", "/api/info", None, &["Host: evil.example:8080"]);
+    assert_eq!(answer.status, 403, "{}", answer.body);
+    let answer = request(
+        port,
+        "GET",
+        "/api/info",
+        None,
+        &["Host: 192.168.1.5:8080", "Origin: http://192.168.1.9:8080"],
+    );
+    assert_eq!(answer.status, 403, "{}", answer.body);
+    // The page's own origin passes: a write from the UI opened by IP address.
+    let answer = request(
+        port,
+        "POST",
+        "/api/execute",
+        Some(r#"{"script": "1 + 1"}"#),
+        &[
+            "Host: 192.168.1.5:8080",
+            "Origin: http://192.168.1.5:8080",
+            "Content-Type: application/json",
+        ],
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(answer.json()["ok"], true, "{}", answer.body);
+}
+
 /// Starts the server in the directory `cwd` and returns it with the value of its `UI:` banner
 /// row.
 fn start_in(cwd: &std::path::Path, args: &[&str]) -> (DevServer, String) {

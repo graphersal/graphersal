@@ -145,13 +145,15 @@ goes away. `graphersal --help` lists every option.
 
 ## The dev server
 
-DEV mode, unstable, local only (127.0.0.1, no authentication). It serves the playground UI with
+DEV mode, unstable, local only (127.0.0.1 unless `--host` or a container says otherwise, no
+authentication). It serves the playground UI with
 this process as the engine. Details: [Dev Server and MCP](../persistence/dev_server.md).
 
 ```bash
 graphersal --graph modern --server                       # http://127.0.0.1:8080/
 graphersal --graph ./mygraph.json --server --port 9000   # any --graph source; "Save to file" writes it back
 graphersal --graph large --server --port 0               # 0 picks a free port (the address is printed on stdout)
+graphersal --graph modern --server --host 0.0.0.0        # every interface: reachable from the network, NO authentication
 graphersal --graph data/ --server                        # a Store: every commit is durable, the Store menu appears
 graphersal --graph new/ --create-store --server          # create the store when it does not exist
 graphersal --graph g.graphml --schema schema.json --server   # a graph file loaded against its schema

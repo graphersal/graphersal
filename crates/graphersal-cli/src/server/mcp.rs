@@ -13,7 +13,8 @@
 //! too. A request whose `MCP-Protocol-Version` header names a revision this server does not
 //! speak (a stateless, newer client) is `400` with a plain JSON-RPC error, which tells a dual-era
 //! client to fall back to `initialize`. The `Host`/`Origin` checks of the HTTP API apply (a
-//! foreign `Origin` is `403`), the sockets bind the loopback only, and `--mcp-token <secret>`
+//! foreign `Origin` is `403`), the sockets bind the loopback unless `--host` or a container
+//! says otherwise (`super::bind`), and `--mcp-token <secret>`
 //! requires `Authorization: Bearer <secret>` (`401` otherwise).
 //!
 //! Hand-written JSON-RPC over `tiny_http` rather than the `rmcp` SDK: `rmcp` needs the tokio
@@ -150,8 +151,8 @@ impl Mcp {
 
     /// The start banner's MCP rows: where the endpoint is, and the command that connects Claude
     /// Code to it.
-    pub(super) fn banner(&self, port: u16) -> (String, String) {
-        let url = format!("http://127.0.0.1:{port}/mcp");
+    pub(super) fn banner(&self, host: &str, port: u16) -> (String, String) {
+        let url = format!("http://{host}:{port}/mcp");
         let header = match &self.token {
             Some(_) => " --header \"Authorization: Bearer <your --mcp-token>\"",
             None => "",

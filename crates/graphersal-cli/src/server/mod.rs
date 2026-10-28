@@ -2,7 +2,7 @@
 //!
 //! It serves the playground UI (embedded in the binary, a file of `--ui-dir` or `./playground`
 //! winning over the embedded copy: [`ui`]) and an HTTP API on
-//! `127.0.0.1:<port>`; the UI detects the server through `GET /api/info` and sends every engine
+//! `127.0.0.1:<port>` (`--host` binds another address: [`bind`]); the UI detects the server through `GET /api/info` and sends every engine
 //! call here instead of to its WebAssembly worker (`playground/js/engine/http-engine.js`). The
 //! API is the playground's engine boundary over HTTP: every endpoint calls one method of the
 //! shared [`graphersal_session::Session`], so the answers are the structures the WebAssembly
@@ -14,10 +14,11 @@
 //! wait for the session thread, so Stop works while a query runs: it cancels the session's
 //! [`CancelToken`], the query stops at its next check and its unit rolls back.
 //!
-//! Safety for a local endpoint without authentication: the sockets bind the loopback only
-//! (127.0.0.1, and `[::1]` on the same port when the system has IPv6); a
-//! request whose `Host` is not this server (DNS rebinding) or whose `Origin` is another site is
-//! refused (403); a write needs `Content-Type: application/json`, which a cross-site page cannot
+//! Safety for a local endpoint without authentication: the sockets bind the loopback
+//! (127.0.0.1, and `[::1]` on the same port when the system has IPv6) unless `--host` names
+//! another address or the process runs in a container (then `0.0.0.0`, with a warning on
+//! stderr: [`bind`]); a request whose `Host` is not this server (DNS rebinding) or whose
+//! `Origin` is another site is refused (403; the rules of a network bind are in [`bind`]); a write needs `Content-Type: application/json`, which a cross-site page cannot
 //! send without a CORS preflight that this server never answers; scripts cannot touch files
 //! (the playground's authorizer); bodies are limited to [`MAX_BODY_BYTES`]; a static path
 //! cannot leave the UI directory (canonicalized and checked).
@@ -58,6 +59,7 @@ use crate::cli::{Cli, DEFAULT_UI_DIR, EXIT_OK, EXIT_USAGE_ERROR, GraphSpec, Scri
 
 #[cfg(feature = "ai")]
 mod ai;
+mod bind;
 mod layout;
 mod mcp;
 mod start_banner;
@@ -105,6 +107,8 @@ struct Context {
     /// The `--schema` file the graph was loaded with, when one was given.
     schema_source: Option<PathBuf>,
     port: u16,
+    /// Where the server listens, and which `Host`/`Origin` headers it answers.
+    bind: bind::BindPlan,
     /// The session presets, as `GET /api/info` reports them.
     presets: Value,
     /// The Store of a `--graph <dir>`: checkpoints, marks, snapshot downloads, views, forks,
@@ -248,6 +252,14 @@ impl HttpError {
 
 /// Runs the dev server until the process is stopped; returns the exit code of a failed start.
 pub fn run(cli: &Cli) -> i32 {
+    // --host (or the container default): an address that does not resolve is a usage error.
+    let plan = match bind::BindPlan::new(cli.host.as_deref(), bind::in_container()) {
+        Ok(plan) => plan,
+        Err(message) => {
+            errln!("Error: {message}");
+            return EXIT_USAGE_ERROR;
+        }
+    };
     // --ai: the file is read and checked before anything starts (a bad file is a usage error).
     #[cfg(feature = "ai")]
     let ai = match &cli.ai {
@@ -344,13 +356,18 @@ pub fn run(cli: &Cli) -> i32 {
     if let Some(store) = &store {
         crate::signals::close_store_on_signal(store.clone(), Some(cancel.clone()), EXIT_OK);
     }
-    let server = match Server::http(("127.0.0.1", cli.port)) {
+    let server = match Server::http((plan.ip, cli.port)) {
         Ok(server) => server,
         Err(err) => {
             errln!(
-                "Error: cannot listen on 127.0.0.1:{}: {err}\nHelp: choose another port with \
-                 --port <N> (0 picks a free one).",
-                cli.port
+                "Error: cannot listen on {}: {err}\nHelp: choose another port with \
+                 --port <N> (0 picks a free one){}.",
+                plan.address(cli.port),
+                if cli.host.is_some() {
+                    " or another address with --host <ADDR>"
+                } else {
+                    ""
+                }
             );
             return EXIT_USAGE_ERROR;
         }
@@ -362,15 +379,29 @@ pub fn run(cli: &Cli) -> i32 {
         .unwrap_or(cli.port);
     // The same port on the IPv6 loopback, when the system has one (a browser may resolve
     // `localhost` to `::1` first); without it the server stays on IPv4 only, silently.
-    let server_v6 = Server::http(("::1", port)).ok();
+    let server_v6 = plan
+        .also_v6_loopback
+        .then(|| Server::http(("::1", port)).ok())
+        .flatten();
+    let banner = if store.is_some() {
+        STORE_BANNER
+    } else {
+        BANNER
+    };
     errln!(
         "{}",
-        if store.is_some() {
-            STORE_BANNER
-        } else {
-            BANNER
+        match plan.exposure {
+            bind::Exposure::Loopback => banner.to_string(),
+            bind::Exposure::Network => banner.replacen(
+                " No authentication. Loopback only. ",
+                " REACHABLE FROM THE NETWORK, see the warning below.\n No authentication. ",
+                1
+            ),
         }
     );
+    if let Some(notice) = plan.network_notice(port) {
+        errln!("{notice}");
+    }
     let replayed = store
         .as_ref()
         .map(|store| store.open_report().commits_replayed);
@@ -450,7 +481,7 @@ pub fn run(cli: &Cli) -> i32 {
     server_section.row("limits", presets_summary(&presets_json));
     server_section.unwrapped("UI", ui.banner());
     if let Some(mcp) = &mcp {
-        let (endpoint, connect) = mcp.banner(port);
+        let (endpoint, connect) = mcp.banner(&plan.url_host(), port);
         server_section.row("MCP", endpoint);
         server_section.unwrapped("connect", connect);
     }
@@ -462,8 +493,14 @@ pub fn run(cli: &Cli) -> i32 {
         "listening",
         if server_v6.is_some() {
             format!("http://127.0.0.1:{port}/ and http://[::1]:{port}/ (IPv6 loopback)")
+        } else if plan.is_wildcard() {
+            format!(
+                "{} (all interfaces: {})",
+                plan.url(port),
+                plan.address(port)
+            )
         } else {
-            format!("http://127.0.0.1:{port}/")
+            plan.url(port)
         },
     );
     errln!(
@@ -472,7 +509,7 @@ pub fn run(cli: &Cli) -> i32 {
     );
     // The address is the only line on stdout (tests and scripts read it).
     // `outln!` flushes; a closed stdout loses the line and the server keeps serving.
-    outln!("Graphersal dev server: http://127.0.0.1:{port}/");
+    outln!("Graphersal dev server: {}", plan.url(port));
 
     let context = Arc::new(Context {
         jobs: Mutex::new(jobs),
@@ -482,6 +519,7 @@ pub fn run(cli: &Cli) -> i32 {
         source,
         schema_source,
         port,
+        bind: plan,
         presets: presets_json,
         store,
         view: Mutex::new(None),
@@ -791,10 +829,7 @@ impl Context {
 
     /// The hosts a request to this server may name (`Host`, and the origin of `Origin`).
     fn is_own_host(&self, host: &str) -> bool {
-        let port = self.port.to_string();
-        ["127.0.0.1", "localhost", "[::1]"]
-            .iter()
-            .any(|name| host.eq_ignore_ascii_case(&format!("{name}:{port}")))
+        self.bind.is_own_host(host, self.port)
     }
 }
 
@@ -844,26 +879,30 @@ type Answer = Response<std::io::Cursor<Vec<u8>>>;
 
 fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpError> {
     // DNS rebinding and cross-site requests: only this server's own address is served.
-    match header(request, "Host") {
-        Some(host) if context.is_own_host(host) => {}
+    let host = match header(request, "Host") {
+        Some(host) if context.is_own_host(host) => host,
         _ => {
             return Err(HttpError(
                 403,
-                "unknown Host: use http://127.0.0.1:<port>/".into(),
+                match context.bind.exposure {
+                    bind::Exposure::Loopback => {
+                        format!("unknown Host: use {}", context.bind.url(context.port))
+                    }
+                    bind::Exposure::Network => "unknown Host: open this server by its IP \
+                        address, localhost or a name without a dot, or start it with \
+                        --host <that name>"
+                        .to_string(),
+                },
             ));
         }
-    }
-    if let Some(origin) = header(request, "Origin") {
-        let host = origin
-            .strip_prefix("http://")
-            .unwrap_or("")
-            .trim_end_matches('/');
-        if !context.is_own_host(host) {
-            return Err(HttpError(
-                403,
-                format!("cross-origin request from {origin} refused"),
-            ));
-        }
+    };
+    if let Some(origin) = header(request, "Origin")
+        && !context.bind.is_own_origin(origin, host, context.port)
+    {
+        return Err(HttpError(
+            403,
+            format!("cross-origin request from {origin} refused"),
+        ));
     }
     let url = request.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));

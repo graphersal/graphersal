@@ -352,6 +352,18 @@ fn unknown_option_is_a_usage_error() {
 }
 
 #[test]
+fn host_needs_server() {
+    let res = run(&["--host", "0.0.0.0", "-e", "1"], "");
+    assert_eq!(res.code, 2);
+    assert!(
+        res.stderr.contains("--host needs --server"),
+        "{}",
+        res.stderr
+    );
+    assert!(res.stdout.is_empty(), "{}", res.stdout);
+}
+
+#[test]
 fn a_bad_ai_file_stops_the_server_before_it_starts() {
     // The --ai file is checked first, before the UI directory and the graph.
     let res = run(&["--ai", "ai.json"], "");
