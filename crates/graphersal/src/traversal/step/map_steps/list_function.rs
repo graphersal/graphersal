@@ -270,8 +270,21 @@ pub(crate) fn input_error(
 }
 
 /// The kind of a value, for a diagnostic: `null`, the logical type of a computed or stored value,
-/// otherwise the stream kind (`vertex`, `path`, ...).
+/// otherwise the stream kind (`vertex`, `path`, ...). A value the storage cannot read is
+/// [`UNREADABLE_DETAIL`](crate::error::UNREADABLE_DETAIL): the step's own error is the one to
+/// report, only without the kind.
 pub(crate) fn kind_name<S: GraphStorage>(
+    context: &TraverserContext<'_, S>,
+    value: &TraverserValue<S>,
+) -> String {
+    read_kind_name(context, value).unwrap_or_else(|error| {
+        crate::error::unreadable_detail("the kind of a value", &error);
+        crate::error::UNREADABLE_DETAIL.to_string()
+    })
+}
+
+/// [`kind_name`], `Err` when the storage cannot read the value.
+fn read_kind_name<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     value: &TraverserValue<S>,
 ) -> Result<String, crate::error::GraphError> {
@@ -449,7 +462,7 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                 step,
                 "argument",
                 expected,
-                kind_name(context, &TraverserValue::Computed(value.clone(), None))?,
+                kind_name(context, &TraverserValue::Computed(value.clone(), None)),
             )),
             Operand::Traversal(traversal) => {
                 let Some(first) = traversal.first(context, source)? else {
@@ -466,7 +479,7 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                         step,
                         "traversal argument",
                         expected,
-                        kind_name(context, &first.value)?,
+                        kind_name(context, &first.value),
                     ));
                 }
                 if incoming == Kind::Map {
@@ -582,7 +595,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepListFunction<'g, S> {
                 step,
                 "incoming value",
                 expected,
-                kind_name(context, &source.value)?,
+                kind_name(context, &source.value),
             ));
         }
         // The child traversal runs on the whole incoming traverser before its value is taken

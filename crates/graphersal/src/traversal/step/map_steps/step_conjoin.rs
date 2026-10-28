@@ -114,7 +114,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConjoin {
                 "conjoin",
                 "incoming value",
                 "list",
-                kind_name(context, &source.value)?,
+                kind_name(context, &source.value),
             ));
         }
         let Traverser {

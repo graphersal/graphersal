@@ -114,7 +114,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepToLower {
             )),
             None => Err(Box::new(TraverserError::cast_exception_str(
                 &["string"],
-                Traverser::observed_type_name(context, &value)?,
+                Traverser::observed_type_name(context, &value),
             ))),
         }
     }

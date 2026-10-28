@@ -1881,8 +1881,12 @@ impl<S: GraphStorage> TraverserValue<S> {
                         || "null".to_string(),
                         |stored| TraverserValue::<S>::Computed(stored.clone(), None).kind_name(),
                     ),
-                    // The storage cannot read the value: its error is the one to report.
-                    Err(error) => return error.into(),
+                    // The storage cannot read the value: the cast error is still the one to
+                    // report, only without the value's type.
+                    Err(error) => {
+                        crate::error::unreadable_detail("the type of a value", &error);
+                        crate::error::UNREADABLE_DETAIL.to_string()
+                    }
                 }
             }
             other => other.kind_name(),

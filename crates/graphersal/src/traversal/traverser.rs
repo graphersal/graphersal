@@ -159,11 +159,24 @@ impl<S: GraphStorage> Traverser<S> {
     ///
     /// Reads the stored value's type in place, without materializing it: a property that is
     /// absent is `null`, a stored value reports its [`ValueType`](crate::graph::ValueType) name
-    /// (`uuid`, `int64`, ...), and a non-property stream value reports its stream kind.
+    /// (`uuid`, `int64`, ...), and a non-property stream value reports its stream kind. A value
+    /// the storage cannot read reports [`UNREADABLE_DETAIL`](crate::error::UNREADABLE_DETAIL):
+    /// the string step's own error is the one to report, only without the type.
     pub(crate) fn observed_type_name(
         context: &TraverserContext<'_, S>,
         traverser_value: &TraverserValue<S>,
-    ) -> TraverserResult<String> {
+    ) -> String {
+        Self::read_observed_type_name(context, traverser_value).unwrap_or_else(|error| {
+            crate::error::unreadable_detail("the type of a value", &error);
+            crate::error::UNREADABLE_DETAIL.to_string()
+        })
+    }
+
+    /// [`Self::observed_type_name`], `Err` when the storage cannot read the value.
+    fn read_observed_type_name(
+        context: &TraverserContext<'_, S>,
+        traverser_value: &TraverserValue<S>,
+    ) -> Result<String, crate::error::GraphError> {
         let stored = match traverser_value {
             TraverserValue::Computed(value, _) => Some(value),
             TraverserValue::VertexProperty(prop, vertex_index, kind) => {

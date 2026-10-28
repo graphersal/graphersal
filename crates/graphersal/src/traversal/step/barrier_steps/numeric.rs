@@ -82,25 +82,35 @@ pub(crate) enum ValueSource<S: GraphStorage> {
 }
 
 impl<S: GraphStorage> ValueSource<S> {
-    /// Materializes the provenance for a diagnostic message. `Err` when the storage cannot read
-    /// the element's id or label: the caller reports that error instead of its own.
-    pub(crate) fn origin(
-        &self,
-        context: &TraverserContext<'_, S>,
-    ) -> Result<Option<ValueOrigin>, crate::error::GraphError> {
-        Ok(match self {
+    /// Materializes the provenance for a diagnostic message. An id or label the storage cannot
+    /// read is left out (`None`, as for an element without one): the caller's error is the one
+    /// to report, only without that detail, never the storage's error.
+    pub(crate) fn origin(&self, context: &TraverserContext<'_, S>) -> Option<ValueOrigin> {
+        match self {
             ValueSource::Anonymous => None,
             ValueSource::Vertex(node, property) => Some(ValueOrigin::vertex(
-                context.storage.vertex_id(*node)?.map(|id| id.to_string()),
-                context.storage.vertex_label(*node)?.map(|l| l.to_string()),
+                detail(context.storage.vertex_id(*node), "the id of a vertex"),
+                detail(context.storage.vertex_label(*node), "the label of a vertex"),
                 property.as_ref().map(|p| p.to_string()),
             )),
             ValueSource::Edge(edge, property) => Some(ValueOrigin::edge(
-                context.storage.edge_id(*edge)?.map(|id| id.to_string()),
-                context.storage.edge_label(*edge)?.map(|l| l.to_string()),
+                detail(context.storage.edge_id(*edge), "the id of an edge"),
+                detail(context.storage.edge_label(*edge), "the label of an edge"),
                 property.as_ref().map(|p| p.to_string()),
             )),
-        })
+        }
+    }
+}
+
+/// One detail of a diagnostic read from the storage: `None` when the element has none or the
+/// storage cannot read it (logged, [`crate::error::unreadable_detail`]).
+fn detail(read: Result<Option<&str>, crate::error::GraphError>, what: &str) -> Option<String> {
+    match read {
+        Ok(text) => text.map(str::to_string),
+        Err(error) => {
+            crate::error::unreadable_detail(what, &error);
+            None
+        }
     }
 }
 
@@ -126,7 +136,7 @@ pub(crate) fn number_of<S: GraphStorage>(
             &["number"],
             crate::graph::schema::value_type_name(other),
             Some(preview(other)),
-            source.origin(context)?,
+            source.origin(context),
         ))),
     }
 }
@@ -458,10 +468,7 @@ fn incomparable<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     source: &ValueSource<S>,
 ) -> crate::error::BoxedTraverserError {
-    let origin = match source.origin(context) {
-        Ok(origin) => origin,
-        Err(error) => return error.into(),
-    };
+    let origin = source.origin(context);
     Box::new(TraverserError::Value(ValueError::IncomparableValues {
         step,
         expected: expected.join(" or "),

@@ -759,3 +759,134 @@ fn a_boxed_storage_is_attributed_to_its_graph() {
     }
     assert!(boxed.is_poisoned());
 }
+
+// A storage read that fails while the engine builds the diagnostic of another error: the
+// original error is reported, only without the detail that could not be read.
+
+/// Runs `query` once to count its property reads, then again with every read after the first
+/// `count - 1` failing (the last read, the diagnostic's), and returns both errors' texts.
+fn with_the_last_read_failing(
+    storage: &Failing,
+    query: impl Fn(&Failing) -> Result<(), Box<TraverserError>>,
+) -> (String, String) {
+    let faults = storage.faults();
+    faults.fail_element_reads_after(None);
+    let healthy = chain(&*query(storage).unwrap_err());
+    let reads = faults
+        .element_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads > 0, "the query reads properties");
+    faults.fail_element_reads_after(Some(reads - 1));
+    let faulty = chain(&*query(storage).unwrap_err());
+    faults.fail_element_reads_after(None);
+    (healthy, faulty)
+}
+
+#[test]
+fn ids_and_labels_unreadable_for_a_value_origin_keep_the_original_error() {
+    // The value origin of a cast error (`as_number`), a numeric step's (`sum`) and an
+    // incomparable value (`max`) names the element by its id and label: a storage that cannot
+    // read them leaves them out, the original error stays.
+    type Query = dyn Fn(&Failing) -> Result<(), Box<TraverserError>>;
+    let cast: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v("1")
+            .values("name")
+            .as_number(GType::LONG)
+            .iterate()
+    };
+    let sum: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v("1")
+            .values("name")
+            .sum()
+            .iterate()
+    };
+    let max: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v(None)
+            .values(vec!["age", "name"])
+            .max()
+            .iterate()
+    };
+    let storage = modern();
+    let faults = storage.faults();
+    for query in [cast, sum, max] {
+        let healthy = query(&storage).unwrap_err();
+        let healthy_origin = origin_of(&healthy);
+        assert!(
+            healthy_origin
+                .as_ref()
+                .is_some_and(|origin| origin.element_id.is_some() && origin.element_label.is_some()),
+            "{healthy_origin:?}"
+        );
+        Faults::set(&faults.element_identity, true);
+        let faulty = query(&storage).unwrap_err();
+        Faults::set(&faults.element_identity, false);
+        assert_eq!(
+            chain(&*faulty),
+            chain(&*healthy),
+            "the original error is reported"
+        );
+        let origin = origin_of(&faulty).expect("the origin is still there");
+        assert_eq!(origin.element_id, None, "the id could not be read");
+        assert_eq!(origin.element_label, None, "the label could not be read");
+        assert_eq!(origin.element_type, "vertex");
+        assert_eq!(origin.property.as_deref(), Some("name"));
+    }
+}
+
+/// The value origin of a cast or incomparable-value error.
+fn origin_of(err: &TraverserError) -> Option<ValueOrigin> {
+    match err.root_cause() {
+        TraverserError::Value(ValueError::CastException { origin, .. })
+        | TraverserError::Value(ValueError::IncomparableValues { origin, .. }) => {
+            origin.as_deref().cloned()
+        }
+        other => panic!("expected a cast or incomparable-value error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_value_unreadable_for_a_type_name_keeps_the_original_error() {
+    // A string step (`to_upper`), a list function (`conjoin`) and the `T.value` token name the
+    // type of the value they refused; the last property read of each query is that diagnostic's
+    // read, so failing it leaves the type out of the original error.
+    type Query = dyn Fn(&Failing) -> Result<(), Box<TraverserError>>;
+    let string_step: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v("1")
+            .values("age")
+            .to_upper()
+            .iterate()
+    };
+    let list_function: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v("1")
+            .values("age")
+            .conjoin("-")
+            .iterate()
+    };
+    let t_token: &Query = &|s| {
+        GraphTraversalSource::new(s)
+            .v("1")
+            .values("age")
+            .order()
+            .by(By::Value)
+            .iterate()
+    };
+    let storage = modern();
+    for query in [string_step, list_function, t_token] {
+        let (healthy, faulty) = with_the_last_read_failing(&storage, query);
+        assert!(healthy.contains("int64"), "{healthy}");
+        assert!(
+            !faulty.contains("unavailable"),
+            "not the storage's error: {faulty}"
+        );
+        assert_eq!(
+            faulty,
+            healthy.replace("int64", "unknown"),
+            "the original error without the type"
+        );
+    }
+}

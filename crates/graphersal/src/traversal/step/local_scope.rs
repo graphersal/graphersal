@@ -504,7 +504,7 @@ fn local_string_item<S: GraphStorage>(
                     step,
                     STRING_ACCEPTS,
                     index,
-                    Traverser::observed_type_name(context, value)?,
+                    Traverser::observed_type_name(context, value),
                 ))),
             }
         }

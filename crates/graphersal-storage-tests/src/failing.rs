@@ -7,15 +7,16 @@
 //! lookups, opening a unit, rolling a unit back or discarding it (the wrapped graph IS rolled
 //! back, then the failure is reported, like a backend whose undo half failed; behind a `Graph`
 //! that poisons the graph), the execution policy, the schema,
-//! the element scans, the property reads of single elements, the adjacency of a vertex and the
-//! unit clock.
+//! the element scans, the property reads of single elements (also only those after the first
+//! `n`, [`Faults::fail_element_reads_after`], counted in [`Faults::element_reads`]), the ids and
+//! labels of single elements, the adjacency of a vertex and the unit clock.
 //! The switches are shared ([`Failing::faults`]), so a test can turn a fault on while the storage
 //! sits inside a `Graph`. The [`failing`](self) contract functions use it.
 //!
 //! This file uses only `graphersal`'s public facade, like [`forwarding`](crate::forwarding).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::forwarding::{ForwardEdgeId, ForwardVertexId, Forwarding};
 use graphersal::ElementProperty;
@@ -56,12 +57,44 @@ pub struct Faults {
     pub adjacency: AtomicBool,
     /// `unit_started_at` (read when an element is created).
     pub unit_started_at: AtomicBool,
+    /// The ids and labels of single elements: `vertex_id`, `edge_id`, `vertex_label`,
+    /// `edge_label`.
+    pub element_identity: AtomicBool,
+    /// How many property reads of single elements (`vertex_properties`, `edge_properties`) the
+    /// storage answered or refused so far; a test may reset it.
+    pub element_reads: AtomicUsize,
+    /// 0: off; `n + 1`: the property reads of single elements after the first `n` fail
+    /// ([`Faults::fail_element_reads_after`]).
+    element_read_limit: AtomicUsize,
 }
 
 impl Faults {
     /// Turns `switch` on (`true`) or off.
     pub fn set(switch: &AtomicBool, on: bool) {
         switch.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes the property reads of single elements fail after the first `n` ones from now on
+    /// (`None`: never), counting from 0 again ([`Faults::element_reads`] is reset). A test runs
+    /// a query once to count its reads, then fails exactly its last ones.
+    pub fn fail_element_reads_after(&self, n: Option<usize>) {
+        self.element_reads.store(0, Ordering::SeqCst);
+        let limit = n.map_or(0, |n| n.saturating_add(1));
+        self.element_read_limit.store(limit, Ordering::SeqCst);
+    }
+
+    /// Counts one property read of a single element and fails it while `element_read` is on or
+    /// the reads allowed by [`Faults::fail_element_reads_after`] are used up.
+    fn element_read(&self, operation: &'static str) -> Result<(), GraphError> {
+        let before = self.element_reads.fetch_add(1, Ordering::SeqCst);
+        let limit = self.element_read_limit.load(Ordering::SeqCst);
+        if limit != 0 && before >= limit - 1 {
+            return Err(GraphError::storage_failed(
+                operation,
+                "the backend is unavailable",
+            ));
+        }
+        self.check(&self.element_read, operation)
     }
 
     /// The backend error of `operation` while `switch` is on.
@@ -165,18 +198,26 @@ impl GraphStorage for Failing {
     }
 
     fn vertex_id(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
+        self.faults
+            .check(&self.faults.element_identity, "read the id of a vertex")?;
         GraphStorage::vertex_id(&self.inner, node)
     }
 
     fn edge_id(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
+        self.faults
+            .check(&self.faults.element_identity, "read the id of an edge")?;
         GraphStorage::edge_id(&self.inner, edge)
     }
 
     fn vertex_label(&self, node: ForwardVertexId) -> Result<Option<&str>, GraphError> {
+        self.faults
+            .check(&self.faults.element_identity, "read the label of a vertex")?;
         GraphStorage::vertex_label(&self.inner, node)
     }
 
     fn edge_label(&self, edge: ForwardEdgeId) -> Result<Option<&str>, GraphError> {
+        self.faults
+            .check(&self.faults.element_identity, "read the label of an edge")?;
         GraphStorage::edge_label(&self.inner, edge)
     }
 
@@ -186,13 +227,12 @@ impl GraphStorage for Failing {
 
     fn vertex_properties(&self, node: ForwardVertexId) -> Result<Option<&PropertyMap>, GraphError> {
         self.faults
-            .check(&self.faults.element_read, "read the properties of a vertex")?;
+            .element_read("read the properties of a vertex")?;
         GraphStorage::vertex_properties(&self.inner, node)
     }
 
     fn edge_properties(&self, edge: ForwardEdgeId) -> Result<Option<&PropertyMap>, GraphError> {
-        self.faults
-            .check(&self.faults.element_read, "read the properties of an edge")?;
+        self.faults.element_read("read the properties of an edge")?;
         GraphStorage::edge_properties(&self.inner, edge)
     }
 

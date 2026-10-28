@@ -1035,6 +1035,19 @@ const UUID_CANONICAL_HINT: &str = "\nA UUID is written in canonical form: 8-4-4-
 /// keys its advice on it.
 pub(crate) const SELECT_COLUMN_EXPECTED: &str = "map or entry";
 
+/// The type a diagnostic names for a value the storage could not read while the engine built
+/// the message of another error (the value's type, its element's id or label are details of
+/// that error): the original error is reported without the detail, never replaced by the
+/// storage's error (`observed_type_name`, `kind_name`, `ValueSource::origin`).
+pub(crate) const UNREADABLE_DETAIL: &str = "unknown";
+
+/// Logs a storage error that left out a detail of another error's diagnostic
+/// ([`UNREADABLE_DETAIL`]).
+#[cold]
+pub(crate) fn unreadable_detail(what: &str, error: &GraphError) {
+    tracing::debug!("the diagnostic of an error left out {what}: the storage failed: {error}");
+}
+
 /// Expected kinds of the cast error of the `T.key`/`T.value` tokens (`by(T.value)`, ...): a
 /// property element or a map entry.
 pub(crate) const T_TOKEN_EXPECTED: &[&str] = &[

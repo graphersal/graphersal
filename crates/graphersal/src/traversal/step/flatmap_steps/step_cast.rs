@@ -659,12 +659,12 @@ fn enrich<S: GraphStorage>(
     match err {
         TraverserError::Value(ValueError::CastException {
             expected, actual, ..
-        }) => match origin.origin(context) {
-            Ok(origin) => {
-                TraverserError::cast_exception_target(expected, actual, value.map(preview), origin)
-            }
-            Err(error) => error.into(),
-        },
+        }) => TraverserError::cast_exception_target(
+            expected,
+            actual,
+            value.map(preview),
+            origin.origin(context),
+        ),
         other => other,
     }
 }
