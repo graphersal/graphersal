@@ -101,7 +101,14 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `try_read`/`try_write` answer `None`) and `Graph::read()`/`write()` panic. No unpoison: drop the
   graph and reopen the storage. `TraversalGraph` and the Store cannot get there (their rollback
   cannot fail). Upgrade step for a host storage: return `Err` from `rollback_unit` only when the
-  storage really is in an unknown state.
+  storage really is in an unknown state. The poison is isolated per graph: the failing storage is
+  named by the new `GraphStorage::storage_identity()` (default: its address; a wrapper over a
+  storage held elsewhere forwards it, as the shipped wrapper impls do), so a failure never
+  poisons another graph on the same thread, and a bare storage poisons nothing.
+- Behaviour: a storage read that fails while the engine builds the diagnostic of another error
+  (the value origin of cast, numeric and incomparable-value errors, the type a string step, a
+  list function or `T.value` names) no longer replaces that error with the storage's: the
+  original error is reported without the unreadable detail.
 - `GraphStorage`, the element reads too: `vertex_count`/`edge_count` -> `Result<usize, _>`,
   `vertices`/`edges`/`out_edges`/`in_edges` -> `Result<impl Iterator, _>` (one `Result` per
   call, never per item), `vertices_by_label`/`edges_by_label` -> `Result<Box<dyn Iterator>, _>`
@@ -129,8 +136,9 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`,
   `GraphError::StorageFailed` (`GraphError::storage_failed`), `GraphError::RollbackFailed`
   (`GraphError::rollback_failed`), `GraphError::Poisoned` (`GraphError::poisoned`),
-  `Graph::is_poisoned`, `Graph::poison_cause`, `graphersal-storage-tests`' `failing::Failing`
-  (with the `discard_unit` fault).
+  `Graph::is_poisoned`, `Graph::poison_cause`, `GraphStorage::storage_identity` (with a
+  default), `graphersal-storage-tests`' `failing::Failing` (with the `discard_unit`,
+  `element_identity` and `fail_element_reads_after` faults).
 
 `graphersal-session` (internal, listed for the CLI and the wasm crate):
 

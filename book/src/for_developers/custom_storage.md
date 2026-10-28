@@ -93,7 +93,16 @@ of a storage without change capture, and for a rollback during a panic's unwindi
 way back in place: the host drops the graph and reopens the storage; `Graph::is_poisoned()` and
 `Graph::poison_cause()` tell what happened, and `Graph::into_inner()` still hands the storage out
 to close or salvage it. A bare storage (a `&mut S` with `Transactional`) has no graph to poison:
-the caller only gets the error. `TraversalGraph` never fails an element
+the caller only gets the error. The poison hits exactly the graph whose storage failed, never
+another graph of the process (also with write views of several graphs open on one thread): the
+engine names the failing storage by `GraphStorage::storage_identity()`, the address of the
+storage by default. A storage that owns its state keeps the default; a wrapper that forwards to a
+storage it borrows or owns elsewhere returns that storage's identity (as the shipped `&G`,
+`&mut G`, `Box<G>` and `Arc<TraversalGraph>` impls do). `Graph::try_read()` and
+`Graph::try_write()` answer `None` on a poisoned graph, the same as on a busy one;
+`Graph::is_poisoned()` and `Graph::try_write_checked()` tell the two apart. When a read fails
+while the engine only builds the message of another error (the element a refused value came
+from, the type of a refused value), that error is still the one reported, without the detail. `TraversalGraph` never fails an element
 read and its methods are inlined, so the `Result` costs nothing on the hot paths (measured with
 the Divan bench before the change). The conformance suite has a storage that fails each of these
 groups on purpose (`graphersal-storage-tests`, `failing`: element scans, property reads,

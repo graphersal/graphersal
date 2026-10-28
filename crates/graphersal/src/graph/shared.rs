@@ -751,8 +751,27 @@ impl<S: GraphStorage> Graph<S> {
     /// deadlock), and on the thread that holds a unit of this graph while a
     /// [`write`](Self::write) view of it is alive there. On the thread that holds a unit it
     /// returns a view of the unit's lock otherwise, as [`Self::read`] does. A successful
-    /// `try_read` counts no wait. A poisoned graph ([`Self::is_poisoned`]) answers `None` too;
-    /// [`Self::read_checked`] tells it apart ([`GraphError::Poisoned`]).
+    /// `try_read` counts no wait.
+    ///
+    /// **A poisoned graph ([`Self::is_poisoned`]) answers `None` as well**, exactly like a busy
+    /// one, and it stays `None` for good: a caller that retries on `None` must tell the two
+    /// apart, or it retries forever. [`Self::is_poisoned`] does so without blocking (one atomic
+    /// load); [`Self::read_checked`] returns [`GraphError::Poisoned`] (or
+    /// [`GraphError::GraphViewHeld`] for a view this thread may not have) but waits while the
+    /// graph is busy.
+    ///
+    /// ```rust
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    /// let answer = match graph.try_read() {
+    ///     Some(view) => format!("{} vertices", view.vertex_count().unwrap()),
+    ///     // `None`: busy (retry later) or poisoned (never again).
+    ///     None if graph.is_poisoned() => "poisoned: reopen the storage".to_string(),
+    ///     None => "busy: try again later".to_string(),
+    /// };
+    /// assert_eq!(answer, "6 vertices");
+    /// ```
     pub fn try_read(&self) -> Option<GraphRead<'_, S>> {
         if self.holds_unit() {
             self.poison.check().ok()?;
@@ -856,8 +875,25 @@ impl<S: GraphStorage> Graph<S> {
     /// opens, as at the unit's first [`write`](Self::write)), `None` while other threads read or
     /// the thread holds another view of the graph.
     ///
-    /// `None` means "busy", "not allowed on this thread" and "poisoned" alike;
-    /// [`Self::try_write_checked`] tells them apart.
+    /// **`None` means "busy", "not allowed on this thread" and "poisoned" alike**, and on a
+    /// poisoned graph ([`Self::is_poisoned`]) it stays `None` for good: a caller that retries on
+    /// `None` must tell them apart. [`Self::try_write_checked`] does, without blocking:
+    /// `Ok(None)` busy, [`GraphError::GraphViewHeld`] not allowed on this thread,
+    /// [`GraphError::Poisoned`] poisoned.
+    ///
+    /// ```rust
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    /// let answer = match graph.try_write_checked() {
+    ///     Ok(Some(_guard)) => "written",
+    ///     Ok(None) => "busy: try again later",
+    ///     Err(GraphError::GraphViewHeld { .. }) => "drop this thread's other view first",
+    ///     Err(GraphError::Poisoned { .. }) => "poisoned: reopen the storage",
+    ///     Err(_) => "refused",
+    /// };
+    /// assert_eq!(answer, "written");
+    /// ```
     pub fn try_write(&self) -> Option<GraphWrite<'_, S>> {
         self.try_write_checked().ok().flatten()
     }
