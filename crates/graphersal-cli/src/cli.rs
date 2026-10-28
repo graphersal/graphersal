@@ -466,7 +466,8 @@ OPTIONS:
                            0.0.0.0 (every IPv4 interface), :: (every IPv6 interface),
                            192.168.1.5, localhost. Default 127.0.0.1 (this machine only), but
                            0.0.0.0 inside a container (/.dockerenv or /run/.containerenv
-                           exists), so docker run -p 8080:8080 ... works without flags. A
+                           exists, or KUBERNETES_SERVICE_HOST is set), so docker run -p
+                           8080:8080 ... works without flags. A
                            non-loopback address makes the server reachable from the network
                            WITHOUT authentication (a warning on stderr says so); requests
                            must then name the server by an IP address, localhost, a name

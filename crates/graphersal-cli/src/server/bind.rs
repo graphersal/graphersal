@@ -2,8 +2,8 @@
 //! answers.
 //!
 //! Without `--host` the server binds the loopback (`127.0.0.1`, plus `[::1]` on the same port
-//! when the system has IPv6), except inside a container ([`in_container`]: `/.dockerenv` or
-//! Podman's `/run/.containerenv`), where it binds `0.0.0.0` so `docker run -p 8080:8080 ...`
+//! when the system has IPv6), except inside a container ([`in_container`]: `/.dockerenv`,
+//! Podman's `/run/.containerenv`, or a Kubernetes pod's `KUBERNETES_SERVICE_HOST`), where it binds `0.0.0.0` so `docker run -p 8080:8080 ...`
 //! works without flags. `--host ADDR` binds the address given (an IP address or a host name,
 //! resolved once; `localhost` is the loopback default).
 //!
@@ -31,7 +31,13 @@ pub(super) fn in_container() -> bool {
     container_detected(
         Path::new("/.dockerenv").exists(),
         Path::new("/run/.containerenv").exists(),
-    )
+    ) || kubernetes_detected(std::env::var_os("KUBERNETES_SERVICE_HOST").as_deref())
+}
+
+/// A Kubernetes pod (containerd, CRI-O create neither container file): the kubelet sets
+/// `KUBERNETES_SERVICE_HOST` in every container of a pod.
+fn kubernetes_detected(service_host: Option<&std::ffi::OsStr>) -> bool {
+    service_host.is_some_and(|host| !host.is_empty())
 }
 
 /// The container decision from the two probes (kept apart from the file system for tests).
@@ -263,6 +269,13 @@ fn host_name(host: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kubernetes_pod_counts_as_a_container() {
+        assert!(!kubernetes_detected(None));
+        assert!(!kubernetes_detected(Some(std::ffi::OsStr::new(""))));
+        assert!(kubernetes_detected(Some(std::ffi::OsStr::new("10.96.0.1"))));
+    }
 
     #[test]
     fn the_container_probes_decide_the_default_host() {

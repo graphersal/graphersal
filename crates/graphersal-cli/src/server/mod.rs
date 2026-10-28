@@ -10,8 +10,8 @@
 //!
 //! Threads: one session thread (64 MiB stack, like the CLI's script thread) owns the
 //! [`Session`] and runs the jobs one after the other; every HTTP request gets a thread of its
-//! own that sends a job and waits for its answer. `POST /api/cancel` and `GET /api/info` never
-//! wait for the session thread, so Stop works while a query runs: it cancels the session's
+//! own that sends a job and waits for its answer. `POST /api/cancel`, `GET /api/info` and the
+//! health probes `GET /healthz` / `/readyz` ([`health`]) never wait for the session thread, so Stop works while a query runs: it cancels the session's
 //! [`CancelToken`], the query stops at its next check and its unit rolls back.
 //!
 //! Safety for a local endpoint without authentication: the sockets bind the loopback
