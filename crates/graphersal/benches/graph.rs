@@ -1571,3 +1571,391 @@ mod imports {
             .bench_local_values(|graph| graph.replay(&changes).unwrap());
     }
 }
+
+/// Mutations through queries and through the `Graph<S>` lock: bulk `add_v` / `add_e` /
+/// `property` / `drop` / `merge_v` traversals, many small write queries (per-query unit and lock
+/// overhead), Rhai scripts with many write statements (one unit per statement and one unit for
+/// the whole script) and GQL writes. Every case rebuilds its input graph outside the timed part.
+mod mutations {
+    use std::sync::Arc;
+
+    use graphersal::prelude::*;
+
+    /// Vertices of the input graph.
+    const N: usize = 10_000;
+
+    /// `n` vertices `v0..v<n>` labelled `item` (keys `name`, `n`, `k`), a chain of `next` edges
+    /// `v<i> -> v<i+1>`, and a vertex `hub` labelled `hub`.
+    fn graph(n: usize) -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = format!("v{i}");
+            let props = PropertyMap::from([
+                ("name", ElementProperty::from(id.as_str())),
+                ("n", ElementProperty::from(i as i64)),
+                ("k", ElementProperty::from(i as i64 % 7)),
+            ]);
+            handles.push(
+                graph
+                    .insert_vertex(Some(id.as_str().into()), vec!["item".into()], props)
+                    .unwrap(),
+            );
+        }
+        for pair in handles.windows(2) {
+            graph
+                .insert_edge(
+                    None,
+                    Some("next".into()),
+                    pair[0],
+                    pair[1],
+                    PropertyMap::default(),
+                )
+                .unwrap();
+        }
+        graph
+            .insert_vertex(
+                Some("hub".into()),
+                vec!["hub".into()],
+                PropertyMap::default(),
+            )
+            .unwrap();
+        graph
+    }
+
+    fn seeds(n: usize) -> Vec<ElementProperty> {
+        (0..n as i64).map(ElementProperty::from).collect()
+    }
+
+    /// One traversal creating `n` vertices with three properties each:
+    /// `inject(0..n).add_v("new").property(..)x3`.
+    #[divan::bench(args = [1_000, 10_000], sample_count = 20)]
+    fn add_v_bulk(bencher: divan::Bencher, n: usize) {
+        bencher
+            .with_inputs(|| (graph(N), seeds(n)))
+            .bench_local_values(|(mut graph, seeds)| {
+                graph
+                    .traversal_mut()
+                    .inject(seeds)
+                    .add_v("new")
+                    .property("name", "x")
+                    .property("score", 1.5)
+                    .property("flag", true)
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// The same 10k-vertex `add_v` traversal through `Graph<TraversalGraph>::write()`.
+    #[divan::bench(sample_count = 20)]
+    fn add_v_bulk_shared(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| (Graph::new(graph(N)), seeds(N)))
+            .bench_local_values(|(graph, seeds)| {
+                graph
+                    .write()
+                    .traversal_mut()
+                    .inject(seeds)
+                    .add_v("new")
+                    .property("name", "x")
+                    .property("score", 1.5)
+                    .property("flag", true)
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// One traversal adding an edge with a property from every `item` to the vertex `hub`.
+    #[divan::bench(sample_count = 20)]
+    fn add_e_to_hub(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("item")
+                    .add_e("link")
+                    .to("hub")
+                    .property("w", 1)
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// One traversal adding an edge between every pair of `next` neighbours (distinct vertex
+    /// pairs): `v().has_label("item").as_("a").out("next").add_e("pair").from("a")`.
+    #[divan::bench(sample_count = 20)]
+    fn add_e_pairs(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("item")
+                    .as_("a")
+                    .out("next")
+                    .add_e("pair")
+                    .from("a")
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// `property()` overwrite of an existing key and a new key on every `item`.
+    #[divan::bench(sample_count = 20)]
+    fn property_update_all(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("item")
+                    .property("k", 99)
+                    .property("touched", true)
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// `drop()` of half the `item` vertices (with their `next` edges).
+    #[divan::bench(sample_count = 20)]
+    fn drop_half(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("item")
+                    .has_p("n", P::Lt(N as i64 / 2))
+                    .drop()
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// `merge_v` upsert of 2000 maps by `T.id` (`v9000..v10999`): half existing, half new.
+    #[divan::bench(sample_count = 20)]
+    fn merge_v_upsert(bencher: divan::Bencher) {
+        let maps = || -> Vec<ElementProperty> {
+            (N - 1_000..N + 1_000)
+                .map(|i| {
+                    let mut map = PropertyMap::default();
+                    map.insert("T.id", format!("v{i}").as_str().into());
+                    map.insert("T.label", "item".into());
+                    ElementProperty::Object(Box::new(map))
+                })
+                .collect()
+        };
+        bencher
+            .with_inputs(|| (graph(N), maps()))
+            .bench_local_values(|(mut graph, maps)| {
+                graph
+                    .traversal_mut()
+                    .inject(maps)
+                    .merge_v_by(__::identity())
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// 1000 single-vertex `add_v` traversals one after another on a plain `TraversalGraph`.
+    #[divan::bench(sample_count = 20)]
+    fn small_add_v_queries(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                for i in 0..1_000i64 {
+                    graph
+                        .traversal_mut()
+                        .add_v("new")
+                        .property("n", i)
+                        .iterate()
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// The same 1000 queries through `Graph<TraversalGraph>`, one `write()` guard per query.
+    #[divan::bench(sample_count = 20)]
+    fn small_add_v_queries_shared(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| Graph::new(graph(N)))
+            .bench_local_values(|graph| {
+                for i in 0..1_000i64 {
+                    graph
+                        .write()
+                        .traversal_mut()
+                        .add_v("new")
+                        .property("n", i)
+                        .iterate()
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// 1000 small `property()` updates by id through `Graph<TraversalGraph>`.
+    #[divan::bench(sample_count = 20)]
+    fn small_property_queries_shared(bencher: divan::Bencher) {
+        let ids: Vec<String> = (0..1_000).map(|i| format!("v{}", i * 7)).collect();
+        bencher
+            .with_inputs(|| Graph::new(graph(N)))
+            .bench_local_values(|graph| {
+                for id in &ids {
+                    graph
+                        .write()
+                        .traversal_mut()
+                        .v(id.as_str())
+                        .property("touched", true)
+                        .iterate()
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// A Rhai script of 1000 write statements (`add_v` + `property`).
+    const SCRIPT: &str = r#"for i in 0..1000 { g.add_v("new").property("n", i).iterate(); }"#;
+
+    /// [`SCRIPT`] through `script::eval_value_with_limits` (one unit per statement); the engine is
+    /// built per call, as for every `eval_*` entry.
+    #[divan::bench(sample_count = 20)]
+    fn script_statements(bencher: divan::Bencher) {
+        use graphersal::auth::AllowAll;
+        use graphersal::script::{ScriptLimits, eval_value_with_limits};
+        let limits = ScriptLimits::default();
+        bencher
+            .with_inputs(|| Arc::new(Graph::new(graph(N))))
+            .bench_local_values(|graph| {
+                let _ = eval_value_with_limits(
+                    graph.clone(),
+                    SCRIPT,
+                    Default::default(),
+                    &limits,
+                    Arc::new(AllowAll),
+                )
+                .unwrap();
+                graph
+            });
+    }
+
+    /// [`SCRIPT`] through `script::eval_value_atomic` (the whole script one unit).
+    #[divan::bench(sample_count = 20)]
+    fn script_atomic(bencher: divan::Bencher) {
+        use graphersal::auth::AllowAll;
+        use graphersal::script::{ScriptLimits, eval_value_atomic};
+        let limits = ScriptLimits::default();
+        bencher
+            .with_inputs(|| Arc::new(Graph::new(graph(N))))
+            .bench_local_values(|graph| {
+                let _ = eval_value_atomic(
+                    graph.clone(),
+                    SCRIPT,
+                    Default::default(),
+                    &limits,
+                    Arc::new(AllowAll),
+                )
+                .unwrap();
+                graph
+            });
+    }
+
+    /// A trivial script through `eval_value_with_limits`: the fixed cost (engine build, scope)
+    /// the two script cases above include.
+    #[divan::bench(sample_count = 20)]
+    fn script_empty(bencher: divan::Bencher) {
+        use graphersal::auth::AllowAll;
+        use graphersal::script::{ScriptLimits, eval_value_with_limits};
+        let limits = ScriptLimits::default();
+        let graph = Arc::new(Graph::new(graph(N)));
+        bencher.bench_local(|| {
+            eval_value_with_limits(
+                graph.clone(),
+                "1",
+                Default::default(),
+                &limits,
+                Arc::new(AllowAll),
+            )
+            .unwrap()
+        });
+    }
+
+    /// GQL `UNWIND .. INSERT` of 10k vertices.
+    #[cfg(feature = "gql")]
+    #[divan::bench(sample_count = 20)]
+    fn gql_insert(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .gql("UNWIND range(1, 10000) AS i INSERT (:new {n: i, name: 'x'})")
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// GQL `MATCH .. SET` on every `item`.
+    #[cfg(feature = "gql")]
+    #[divan::bench(sample_count = 20)]
+    fn gql_set(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .gql("MATCH (x:item) SET x.k = 99, x.touched = true")
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// GQL `MATCH .. DETACH DELETE` of half the `item` vertices.
+    #[cfg(feature = "gql")]
+    #[divan::bench(sample_count = 20)]
+    fn gql_delete(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| graph(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .gql("MATCH (x:item) WHERE x.n < 5000 DETACH DELETE x")
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
+    /// 1000 small GQL `INSERT` queries through `Graph<TraversalGraph>`, one `write()` per query.
+    #[cfg(feature = "gql")]
+    #[divan::bench(sample_count = 20)]
+    fn gql_small_inserts_shared(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| Graph::new(graph(N)))
+            .bench_local_values(|graph| {
+                for i in 0..1_000i64 {
+                    graph
+                        .write()
+                        .traversal_mut()
+                        .gql_with("INSERT (:new {n: $i})", [("i", i)])
+                        .iterate()
+                        .unwrap();
+                }
+                graph
+            });
+    }
+}
