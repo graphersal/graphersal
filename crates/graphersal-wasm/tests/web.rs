@@ -36,7 +36,7 @@ fn creates_a_graph_and_runs_a_query() {
 
 #[wasm_bindgen_test]
 fn the_statistics_report_the_wasm_memory() {
-    let stats = json(&modern().statistics());
+    let stats = json(&modern().statistics().unwrap());
     let memory = &stats["process"]["memory"];
     assert!(
         memory["wasmMemoryBytes"].as_u64().unwrap() >= 65536,
@@ -103,7 +103,10 @@ fn graphml_save_and_load_with_the_schema_first_keeps_schema_and_types() {
     session.load_sample("modern").unwrap();
     {
         let graph = session.graph().clone();
-        let mut schema = graph.inferred_schema().with_mode(SchemaMode::Closed);
+        let mut schema = graph
+            .inferred_schema()
+            .unwrap()
+            .with_mode(SchemaMode::Closed);
         schema
             .vertices
             .get_mut("person")
@@ -136,13 +139,13 @@ fn graphml_save_and_load_with_the_schema_first_keeps_schema_and_types() {
     assert_eq!(info["vertexCount"], 6);
     assert_eq!(info["edgeCount"], 6);
     assert_eq!(info["schemaMode"], "closed");
-    let schema = json(&p.schema());
+    let schema = json(&p.schema().unwrap());
     assert_eq!(schema["mode"], "closed");
     assert_eq!(schema["source"], "stored");
-    let stored = json(&p.get_schema());
+    let stored = json(&p.get_schema().unwrap());
     assert_eq!(stored["mode"], "closed");
     assert!(
-        json(&p.diff_schema(&p.get_schema()).unwrap())["changes"]
+        json(&p.diff_schema(&p.get_schema().unwrap()).unwrap())["changes"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -173,7 +176,7 @@ fn graphml_save_and_load_with_the_schema_first_keeps_schema_and_types() {
             .unwrap(),
     );
     assert_eq!(info["schemaMode"], serde_json::Value::Null, "{info}");
-    assert_eq!(p.get_schema(), "null");
+    assert_eq!(p.get_schema().unwrap(), "null");
     // A bad schema file fails the load and keeps the current graph.
     assert!(
         p.load_graphml(
@@ -183,7 +186,7 @@ fn graphml_save_and_load_with_the_schema_first_keeps_schema_and_types() {
         )
         .is_err()
     );
-    assert_eq!(json(&p.info())["name"], "saved.graphml");
+    assert_eq!(json(&p.info().unwrap())["name"], "saved.graphml");
 }
 
 #[wasm_bindgen_test]
@@ -291,7 +294,7 @@ fn file_access_and_import_are_denied_without_panicking() {
 #[wasm_bindgen_test]
 fn graph_view_is_columnar_and_element_fetches_the_properties() {
     let p = modern();
-    let view = json(&p.graph_view(100, 100));
+    let view = json(&p.graph_view(100, 100).unwrap());
     assert_eq!(view["vertexIds"].as_array().unwrap().len(), 6);
     assert_eq!(view["edgeTarget"].as_array().unwrap().len(), 6);
     assert!(view.get("nodes").is_none());
@@ -372,7 +375,7 @@ fn graph_filter_with_hidden_labels_and_neighbourhood_counts() {
 #[wasm_bindgen_test]
 fn the_force_layout_runs_in_slices_and_answers_positions() {
     let mut p = modern();
-    let view = json(&p.graph_view(100, 100));
+    let view = json(&p.graph_view(100, 100).unwrap());
     let column = |key: &str| -> Vec<u32> {
         view[key]
             .as_array()
@@ -503,7 +506,7 @@ fn saved_queries_are_managed_and_run_in_the_browser() {
             .unwrap(),
     );
     assert_eq!(refused["errors"][0]["field"], "name");
-    let list = json(&p.list_queries(Some("demo".into())));
+    let list = json(&p.list_queries(Some("demo".into())).unwrap());
     assert_eq!(list[0]["status"], "ok");
     let text = json(&p.query_call_text("people", r#"{"limit": 3}"#).unwrap());
     assert_eq!(text, "g.query(\"people\", #{limit: 3})");
@@ -513,12 +516,12 @@ fn saved_queries_are_managed_and_run_in_the_browser() {
         3,
         "{r}"
     );
-    let file = p.save_catalog();
+    let file = p.save_catalog().unwrap();
     let mut other = modern();
     let loaded = json(&other.load_catalog(&file, false).unwrap());
     assert_eq!(loaded["graph"]["savedQueries"], 1);
     assert_eq!(json(&p.drop_query("people").unwrap())["dropped"], true);
-    assert_eq!(json(&p.info())["savedQueries"], 0);
+    assert_eq!(json(&p.info().unwrap())["savedQueries"], 0);
 }
 
 /// Compression rules in the browser build: define (a refused rule names its field), list with
@@ -538,7 +541,7 @@ fn compression_rules_in_the_browser() {
             .unwrap(),
     );
     assert_eq!(refused["errors"][0]["field"], "path");
-    assert_eq!(json(&p.list_compressions())[0]["name"], "names");
+    assert_eq!(json(&p.list_compressions().unwrap())[0]["name"], "names");
     let r = json(
         &p.execute(
             r#"g.v().has_label("person").values("name").to_list()"#,
@@ -549,10 +552,10 @@ fn compression_rules_in_the_browser() {
     assert_eq!(r["ok"], true, "{r}");
     assert!(r.to_string().contains("marko"), "{r}");
     assert_eq!(json(&p.recompress("names").unwrap())["name"], "names");
-    let file = p.save_catalog();
+    let file = p.save_catalog().unwrap();
     assert!(file.contains("\"compression\""), "{file}");
     assert_eq!(json(&p.drop_compression("names").unwrap())["dropped"], true);
-    assert_eq!(json(&p.info())["compressionRules"], 0);
+    assert_eq!(json(&p.info().unwrap())["compressionRules"], 0);
 }
 
 /// Runs one GQL query through the browser session: it either answers (with `rows` rows) or is
