@@ -1088,7 +1088,7 @@ mod tests {
     /// The catalogue of a session on the modern graph.
     fn catalogue() -> Catalogue {
         let cli = Cli::parse(Vec::<String>::new()).unwrap();
-        let opened = cli.graph.open(false, None, None).unwrap();
+        let opened = cli.graph.open(false, None, None, false).unwrap();
         let budget = cli.budget();
         let engine = budget.engine(&cli.script_limits());
         let scope = budget.scope(opened.graph.clone(), &cli.render_options());

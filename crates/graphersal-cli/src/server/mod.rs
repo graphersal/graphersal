@@ -568,10 +568,7 @@ pub fn run(cli: &Cli) -> i32 {
         "\n{}\n",
         start_banner::render(&[store_section, graph_section, models_section, server_section])
     );
-    // The address is the only line on stdout (tests and scripts read it).
-    // `outln!` flushes; a closed stdout loses the line and the server keeps serving.
-    outln!("Graphersal dev server: {}", plan.url(port));
-
+    let url = plan.url(port);
     let context = Arc::new(Context {
         jobs: Mutex::new(jobs),
         cancel,
@@ -596,6 +593,10 @@ pub fn run(cli: &Cli) -> i32 {
     start_job_ticker(&context);
     // From here on the requests reach the API (before: health endpoints and 503 answers).
     let _ = serving.context.set(context);
+    // The address is the only line on stdout (tests and scripts read it), printed once the
+    // API serves. `outln!` flushes (so `docker logs` shows it at once); a closed stdout loses
+    // the line and the server keeps serving.
+    outln!("Graphersal dev server: {url}");
     match accepting {
         Some(accepting) => {
             let _ = accepting.join();

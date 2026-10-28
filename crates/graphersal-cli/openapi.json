@@ -69,7 +69,7 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`. Answered without the session.",
+        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused). Answered without the session.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {
@@ -3669,6 +3669,78 @@
           },
           "404": {
             "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Liveness probe",
+        "description": "`{\"status\": \"ok\"}` while the process answers HTTP, also while the graph loads, a query runs or the server stops. Takes no lock and never waits for the session; exempt from the Host/Origin checks (it reveals nothing). `HEAD` answers the same without a body. For Kubernetes `livenessProbe` and Docker `HEALTHCHECK` (`graphersal health`).",
+        "operationId": "getHealthz",
+        "responses": {
+          "200": {
+            "description": "The process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Readiness probe",
+        "description": "200 `{\"status\": \"ready\"}` when the graph is loaded and the server serves queries; 503 `{\"status\": \"loading\"}` while the graph or Store loads (every other endpoint answers 503 then), 503 `{\"status\": \"stopping\"}` after SIGINT/SIGTERM. Takes no lock and never waits for the session; exempt from the Host/Origin checks. `HEAD` answers the same without a body. For Kubernetes `readinessProbe` (`graphersal health --ready`).",
+        "operationId": "getReadyz",
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ready"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Loading or stopping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "loading",
+                        "stopping"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

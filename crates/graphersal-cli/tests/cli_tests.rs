@@ -5014,3 +5014,158 @@ fn mcp_instructions_need_mcp_and_a_readable_file() {
     assert_eq!(res.code, 2);
     assert!(res.stderr.contains("cannot read"), "{}", res.stderr);
 }
+
+/// `graphersal health`: nothing listening is exit 1 with the reason on stderr and nothing on
+/// stdout; an invalid invocation is exit 2; `--help` prints the usage. (A server that answers:
+/// `server_tests.rs`.)
+#[test]
+fn the_health_probe_fails_without_a_server_and_checks_its_arguments() {
+    // A port nobody listens on: bound once, then released.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let res = run(&["health", "--port", &port, "--timeout", "1500"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(res.stdout.is_empty(), "{}", res.stdout);
+    assert!(res.stderr.starts_with("unhealthy: "), "{}", res.stderr);
+    for args in [
+        &["health", "--port", "0"][..],
+        &["health", "--port", "x"],
+        &["health", "--timeout", "0"],
+        &["health", "--nope"],
+        &["health", "--host"],
+    ] {
+        let res = run(args, "");
+        assert_eq!(res.code, 2, "{args:?}: {}", res.stderr);
+        assert!(
+            res.stderr.contains("graphersal health --help"),
+            "{}",
+            res.stderr
+        );
+    }
+    let res = run(&["health", "--help"], "");
+    assert_eq!(res.code, 0);
+    assert!(res.stdout.contains("--ready"), "{}", res.stdout);
+    assert!(run(&["--help"], "").stdout.contains("graphersal health"));
+}
+
+/// `--read-only`: every write is refused (and rolled back), reads work; it cannot create a
+/// store.
+#[test]
+fn read_only_refuses_writes_of_a_one_shot_script() {
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "--read-only",
+            "-e",
+            r#"g.add_v("x").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("the graph is served read-only"),
+        "{}",
+        res.stderr
+    );
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "--read-only",
+            "-e",
+            "g.v().count().next()",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), "6");
+    let dir = temp_path("ro_create");
+    let res = run(
+        &[
+            "--graph",
+            dir.to_str().unwrap(),
+            "--create-store",
+            "--read-only",
+            "-e",
+            "1",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(res.stderr.contains("--read-only and --create-store"));
+    assert!(!dir.exists());
+}
+
+/// A single-file store the process may not write (file 0444 in a 0555 directory): `--read-only`
+/// reads it, a plain `--graph` falls back to read-only with a note, and neither changes a byte
+/// or creates a file next to it.
+#[cfg(unix)]
+#[test]
+fn a_write_protected_single_file_store_is_read_without_writing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_path("ro_store");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("db.gstore");
+    let file_arg = file.to_str().unwrap().to_string();
+    let res = run(
+        &[
+            "--graph",
+            &file_arg,
+            "--create-store",
+            "-e",
+            r#"g.add_v("person").property("name", "ann").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let bytes = std::fs::read(&file).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // As root (a container) permissions do not protect the file: nothing to test then.
+    if std::fs::write(dir.join("probe"), "").is_ok() {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let read = r#"g.v().values("name").next()"#;
+    let flagged = run(&["--graph", &file_arg, "--read-only", "-e", read], "");
+    let fallback = run(&["--graph", &file_arg, "-e", read], "");
+    let write = run(
+        &[
+            "--graph",
+            &file_arg,
+            "--read-only",
+            "-e",
+            r#"g.add_v("x").iterate()"#,
+        ],
+        "",
+    );
+    let names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let after = std::fs::read(&file).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(flagged.code, 0, "{}", flagged.stderr);
+    assert_eq!(flagged.stdout.trim(), "ann");
+    assert_eq!(fallback.code, 0, "{}", fallback.stderr);
+    assert_eq!(fallback.stdout.trim(), "ann");
+    assert!(
+        fallback.stderr.contains("cannot be opened for writing")
+            && fallback.stderr.contains("READ-ONLY"),
+        "{}",
+        fallback.stderr
+    );
+    assert_eq!(write.code, 1, "{}", write.stderr);
+    assert!(write.stderr.contains("read-only"), "{}", write.stderr);
+    assert_eq!(names, vec![std::ffi::OsString::from("db.gstore")]);
+    assert!(after == bytes, "the store file changed");
+}

@@ -6315,3 +6315,272 @@ fn the_openapi_description_matches_the_router() {
     }
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// Sends a request and does not wait for the answer (a query that runs until it is cancelled
+/// or the process stops).
+fn send_only(port: u16, script: &str) -> TcpStream {
+    let body = serde_json::json!({ "script": script }).to_string();
+    let mut stream = connect(port).unwrap();
+    let head = format!(
+        "POST /api/execute HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    stream
+}
+
+/// Waits up to `seconds` for `child` to exit.
+fn exit_within(child: &mut Child, seconds: u64) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    loop {
+        if let Some(exit) = child.try_wait().unwrap() {
+            return exit;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server did not stop within {seconds} s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `/healthz` and `/readyz`: 200 with a tiny JSON body under any `Host` (a Kubernetes probe
+/// names the pod IP) in loopback and network mode, `HEAD` without a body, other methods 405;
+/// both answer while a query holds the session (they never wait for it).
+#[test]
+fn health_endpoints_answer_any_host_and_while_a_query_runs() {
+    let ui = ui_dir("health");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    for host in [
+        format!("Host: 127.0.0.1:{port}"),
+        "Host: 10.1.2.3:8080".to_string(),
+        "Host: evil.example.com".to_string(),
+    ] {
+        let live = request(port, "GET", "/healthz", None, &[host.as_str()]);
+        assert_eq!(live.status, 200, "{host}: {}", live.body);
+        assert_eq!(live.json(), serde_json::json!({"status": "ok"}));
+        assert!(
+            live.headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{}",
+            live.headers
+        );
+        let ready = request(port, "GET", "/readyz?x=1", None, &[host.as_str()]);
+        assert_eq!(ready.status, 200, "{host}: {}", ready.body);
+        assert_eq!(ready.json(), serde_json::json!({"status": "ready"}));
+    }
+    // The API itself keeps its Host check.
+    let refused = request(port, "GET", "/api/info", None, &["Host: 10.1.2.3:8080"]);
+    assert_eq!(refused.status, 403);
+    for path in ["/healthz", "/readyz"] {
+        let head = request(port, "HEAD", path, None, &[]);
+        assert_eq!(head.status, 200);
+        assert!(head.body.is_empty(), "{}", head.body);
+        assert_eq!(request(port, "POST", path, Some("{}"), &[JSON]).status, 405);
+    }
+    // A query that runs until it is cancelled holds the session thread.
+    let _running = send_only(port, "let n = 0; loop { n += 1; }");
+    std::thread::sleep(Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    assert_eq!(get(port, "/healthz").status, 200);
+    assert_eq!(get(port, "/readyz").status, 200);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(post(port, "/api/cancel", "").json()["cancelled"], true);
+
+    // Network mode: any name, too.
+    let (network, _, _) = start_on_host(&["--host", "0.0.0.0", "--port", "0"]);
+    for host in ["Host: 10.1.2.3:8080", "Host: db.internal.example.com:8080"] {
+        assert_eq!(
+            request(network.port, "GET", "/healthz", None, &[host]).status,
+            200
+        );
+        assert_eq!(
+            request(network.port, "GET", "/readyz", None, &[host]).status,
+            200
+        );
+    }
+}
+
+/// `graphersal health` against a running server: exit 0 for `/healthz` and `/readyz`, nothing
+/// on stdout.
+#[test]
+fn the_health_probe_passes_against_a_running_server() {
+    let ui = ui_dir("health-probe");
+    let server = start(&["--graph", "empty", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port.to_string();
+    for extra in [&[][..], &["--ready"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(["health", "--port", &port])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+}
+
+/// The listener binds before the graph loads: while a large graph builds, `/healthz` answers
+/// 200, `/readyz` 503 `loading` and the API 503, then `/readyz` turns 200. (Whether a probe
+/// lands inside the load depends on the machine's speed: every answer must be one of these.)
+#[test]
+fn probes_answer_while_the_graph_loads() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let ui = ui_dir("health-early");
+    let child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "--graph",
+            "large",
+            "--ui-dir",
+            ui.to_str().unwrap(),
+            "--server",
+        ])
+        .args(["--port", &port.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("graphersal starts");
+    let _server = DevServer { child, port };
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "never ready");
+        let ready = get(port, "/readyz");
+        assert_eq!(get(port, "/healthz").status, 200);
+        if ready.status == 200 {
+            assert_eq!(ready.json()["status"], "ready");
+            break;
+        }
+        assert_eq!(ready.status, 503, "{}", ready.body);
+        assert_eq!(ready.json()["status"], "loading");
+        let api = get(port, "/api/info");
+        assert!(api.status == 503 || api.status == 200, "{}", api.body);
+        if api.status == 503 {
+            assert!(api.body.contains("still loading"), "{}", api.body);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(get(port, "/api/info").status, 200);
+}
+
+/// SIGTERM (`docker stop`) stops a server without a Store promptly, also while a query runs:
+/// the query is cancelled and the process exits with 0.
+#[cfg(unix)]
+#[test]
+fn sigterm_stops_an_in_memory_server_promptly() {
+    let ui = ui_dir("sigterm-memory");
+    let mut server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let _running = send_only(server.port, "let n = 0; loop { n += 1; }");
+    std::thread::sleep(Duration::from_millis(300));
+    let status = Command::new("kill")
+        .args(["-TERM", &server.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exit = exit_within(&mut server.child, 5);
+    assert_eq!(exit.code(), Some(0), "{exit:?}");
+}
+
+/// SIGTERM on a server of a Store closes the store cleanly (like Ctrl+C).
+#[cfg(unix)]
+#[test]
+fn sigterm_closes_the_store_of_a_server_cleanly() {
+    let ui = ui_dir("sigterm-store");
+    let data = ui.parent().unwrap().join("data-sigterm");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let mut server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--create-store",
+    ]);
+    let r = execute(server.port, r#"g.add_v("person").to_list()"#);
+    assert_eq!(r["ok"], true, "{r}");
+    let status = Command::new("kill")
+        .args(["-TERM", &server.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exit = exit_within(&mut server.child, 30);
+    assert_eq!(exit.code(), Some(0), "{exit:?}");
+    let info = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["store", "info", &data_arg])
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&info.stdout);
+    assert!(info.contains("closed cleanly"), "{info}");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// `--read-only` on a server of a Store: every write through the API is refused (queries,
+/// schema, saved queries, "Save to file"), reads work, `/api/info` says `readOnly`, MCP is
+/// read-only too, and the store's files are not touched.
+#[test]
+fn a_read_only_server_refuses_every_write_and_writes_nothing() {
+    let ui = ui_dir("read-only");
+    let data = ui.parent().unwrap().join("ro.gstore");
+    let _ = std::fs::remove_file(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let made = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--graph", &data_arg, "--create-store", "-e"])
+        .arg(r#"g.add_v("person").property("name", "ann").iterate()"#)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let bytes = std::fs::read(&data).unwrap();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--read-only",
+        "--mcp",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    let info = get(port, "/api/info").json();
+    assert_eq!(info["readOnly"], true, "{info}");
+    assert_eq!(info["store"], Value::Null, "{info}");
+    assert_eq!(info["mcp"]["readOnly"], true, "{info}");
+    let read = execute(port, r#"g.v().values("name").to_list()"#);
+    assert_eq!(read["ok"], true, "{read}");
+    let write = execute(port, r#"g.add_v("person").iterate()"#);
+    assert_eq!(write["ok"], false, "{write}");
+    assert!(
+        write["execution"]["error"]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("the graph is served read-only"),
+        "{write}"
+    );
+    let schema = post(port, "/api/schema/set?mode=open", r#"{"mode": "open"}"#);
+    assert_eq!(schema.status, 422, "{}", schema.body);
+    assert!(schema.body.contains("read-only"), "{}", schema.body);
+    let saved = post(
+        port,
+        "/api/queries/define",
+        r#"{"name": "x", "folder": "kb", "body": "fn x() { g.v().count().next() }"}"#,
+    );
+    assert!(saved.body.contains("read-only"), "{}", saved.body);
+    assert_eq!(post(port, "/api/save", "{}").status, 409);
+    assert_eq!(get(port, "/api/graph").json()["vertexCount"], 1);
+    drop(server);
+    assert!(std::fs::read(&data).unwrap() == bytes, "the store changed");
+    let _ = std::fs::remove_file(&data);
+}
