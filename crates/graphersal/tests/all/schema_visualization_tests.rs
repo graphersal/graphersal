@@ -224,6 +224,7 @@ fn test_label_description_has_its_own_row() {
     );
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_schema_to_table_empty_sections() {
     let s = schema(r#"{"vertices": {"person": {}}}"#);

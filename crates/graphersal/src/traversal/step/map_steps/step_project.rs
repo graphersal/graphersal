@@ -202,6 +202,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepProject<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_first() {
         test_dual!(

@@ -103,6 +103,7 @@ fn uuid_key_stays_a_uuid() {
     assert_eq!(map.get_str("550e8400-e29b-41d4-a716-446655440000"), None);
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn json_output_is_tagged_only_for_typed_keys() {
     let typed =
@@ -177,6 +178,7 @@ fn order_local_over_mixed_key_kinds_does_not_panic() {
     assert_eq!(keys.len(), 6);
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn display_renders_keys_through_display_text() {
     let table =

@@ -58,6 +58,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepIdentity {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_identity() {
         test_dual!(
@@ -71,6 +72,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_identity_values() {
         test_dual!(
@@ -84,6 +86,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_identity() {
         test_dual!(

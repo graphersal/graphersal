@@ -266,6 +266,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOut {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(
@@ -279,6 +280,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn label() {
         test_dual!(
@@ -292,6 +294,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn labels() {
         test_dual!(

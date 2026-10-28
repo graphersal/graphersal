@@ -1,8 +1,10 @@
 //! `has_label()` without arguments (a Graphersal extension): keeps the elements that have a label;
 //! `not(__.has_label())` selects the unlabeled vertices and edges.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::eval_value;
 use graphersal::prelude::*;
 
@@ -38,12 +40,14 @@ fn mixed_graph() -> Graph {
     Graph::new(inner)
 }
 
+#[cfg(feature = "script")]
 fn text(graph: &Arc<Graph>, script: &str) -> String {
     eval_value(graph.clone(), script)
         .unwrap_or_else(|err| panic!("{script}: {err}"))
         .to_string()
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_selects_labeled_and_unlabeled_elements_in_both_spellings() {
     let graph = Arc::new(mixed_graph());
@@ -72,6 +76,7 @@ fn dsl_selects_labeled_and_unlabeled_elements_in_both_spellings() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn vertex_properties_always_have_a_label() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -118,6 +123,7 @@ fn rust_api_has_label_none() {
 
 /// The optimizer must not fold `has_label()` into the source step as an empty label list (which
 /// would keep nothing), nor into an edge step; the profile shows the step as `has_label()`.
+#[cfg(feature = "script")]
 #[test]
 fn profile_shows_has_label_and_nothing_is_folded() {
     let graph = Arc::new(mixed_graph());
@@ -153,6 +159,7 @@ fn profile_shows_has_label_and_nothing_is_folded() {
 }
 
 /// The freeze recipe of the closed-schema help: label every unlabeled element, then freeze.
+#[cfg(feature = "script")]
 #[test]
 fn freeze_recipe_end_to_end() {
     let graph = Arc::new(mixed_graph());
@@ -179,6 +186,7 @@ fn count(list: Vec<ElementProperty>) -> i64 {
 /// A value converts to a step argument, never to "no argument": Rust
 /// `has_label(ElementProperty::Null)` keeps nothing on vertices and edges (like the DSL's
 /// `has_label(null)`), while `has_label(None::<()>)` keeps the labelled ones.
+#[cfg(feature = "script")]
 #[test]
 fn rust_api_has_label_null_keeps_nothing() {
     let graph = mixed_graph();

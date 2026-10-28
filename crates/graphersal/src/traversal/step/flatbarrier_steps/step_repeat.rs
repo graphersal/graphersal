@@ -930,6 +930,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn repeat_times_dual() {
         test_dual!(

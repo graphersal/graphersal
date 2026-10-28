@@ -202,6 +202,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepPath<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     fn names(value: &ElementProperty) -> Vec<String> {
         match value {
             ElementProperty::Array(items) => items
@@ -212,6 +213,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn out_out_by_name() {
         test_dual!(
@@ -229,6 +231,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn by_missing_key_drops_the_traverser() {
         test_dual!(

@@ -93,6 +93,7 @@ mod tests {
 
     /// `g.V().hasLabel("person").properties("name", "age").value()`: the
     /// correct multiset of values across all four `person` vertices.
+    #[cfg(feature = "script")]
     #[test]
     fn person_values() {
         test_dual!(
@@ -113,6 +114,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn edge_value() {
         test_dual!(
@@ -135,6 +137,7 @@ mod tests {
     /// `StepHasValueP`); this test is kept as-is to keep covering the `.value().is(P...)` path in
     /// its own right, and the no-workaround form now has its own test,
     /// `step_has_value::tests::roadmap_bothe_properties_dedup_haskey_hasvalue_predicate`.
+    #[cfg(feature = "script")]
     #[test]
     fn full_chain_bothe_properties_dedup_haskey_value() {
         test_dual!(

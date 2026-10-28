@@ -78,6 +78,7 @@ mod tests {
     /// all-null) numeric stream emits nothing at all, not `0` and not an error (confirmed via
     /// `graphersal`: `g.V().hasLabel("nope").values("age").sum()` produces no rows). A fused
     /// `count()` must then read `0`, matching `.to_list().len()`.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_emits_nothing() {
         test_dual!(
@@ -91,6 +92,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_count_is_zero() {
         test_dual!(
@@ -104,6 +106,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age() {
         test_dual!(
@@ -117,6 +120,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -130,6 +134,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -143,6 +148,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn inject_float() {
         test_dual!(

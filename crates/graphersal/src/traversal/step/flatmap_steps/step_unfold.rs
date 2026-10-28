@@ -226,6 +226,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepUnfold {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn vertex() {
         test_dual!(
@@ -239,6 +240,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_wrong() {
         test_dual!(
@@ -252,6 +254,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -265,6 +268,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -278,6 +282,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn id() {
         test_dual!(
@@ -314,6 +319,7 @@ mod tests {
     /// `unfold()` must flatten it into one traverser per collected vertex, exactly like TinkerPop
     /// (confirmed via `graphersal`: before this fix, `g.V().aggregate("x").cap("x").unfold().count()`
     /// returned `1`, the whole bucket as one scalar, instead of `6`).
+    #[cfg(feature = "script")]
     #[test]
     fn cap_of_aggregate_unfolds_into_one_traverser_per_element() {
         test_dual!(
@@ -329,6 +335,7 @@ mod tests {
 
     /// Same bucket shape as `aggregate()` (both share `push_side_effect`), so `store("x")` needs
     /// the same fix.
+    #[cfg(feature = "script")]
     #[test]
     fn cap_of_store_unfolds_into_one_traverser_per_element() {
         test_dual!(
@@ -348,6 +355,7 @@ mod tests {
     /// the tree. `g.V().out()` from the modern graph has 3 distinct source vertices with an
     /// outgoing edge (`marko`, `josh`, `peter`), so the tree has 3 root branches (confirmed via
     /// `graphersal` against the same query).
+    #[cfg(feature = "script")]
     #[test]
     fn cap_of_tree_unfolds_into_one_entry_per_root() {
         test_dual!(
@@ -365,6 +373,7 @@ mod tests {
     /// `Computed` wrapper), so `unfold()`'s pre-existing `Object` arm already flattens it into one
     /// `Entry` per key — no change needed for this shape, asserted here to lock it in alongside
     /// the `Array`/`tree` fixes above.
+    #[cfg(feature = "script")]
     #[test]
     fn cap_of_two_keys_unfolds_into_one_entry_per_key() {
         test_dual!(

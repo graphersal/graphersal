@@ -1,11 +1,14 @@
 //! Integration tests for TinkerPop's three-argument `has(label, key, value)` /
 //! `has(label, key, P)`, in the Rust API (`has_labeled`/`has_labeled_p`) and the Rhai DSL.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::{eval, eval_value};
 use graphersal::prelude::*;
 
+#[cfg(feature = "script")]
 fn strings(script: &str) -> Vec<String> {
     let mut out: Vec<String> = eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .unwrap()
@@ -18,6 +21,7 @@ fn strings(script: &str) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "script")]
 fn int(script: &str) -> i64 {
     eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .unwrap()
@@ -91,6 +95,7 @@ fn rust_label_is_pushed_into_the_source() {
     assert!(!profile.contains("has_label("), "{profile}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_value_and_predicate_forms() {
     assert_eq!(
@@ -111,6 +116,7 @@ fn dsl_value_and_predicate_forms() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_edges() {
     assert_eq!(
@@ -123,6 +129,7 @@ fn dsl_on_edges() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_existing_forms_unchanged() {
     assert_eq!(int(r#"g.V().has("name", "marko").count().next()"#), 1);
@@ -130,6 +137,7 @@ fn dsl_existing_forms_unchanged() {
     assert_eq!(int(r#"g.V().has("age").count().next()"#), 4);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_label_is_pushed_into_the_source() {
     let profile = eval(

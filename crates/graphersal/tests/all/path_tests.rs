@@ -1,6 +1,7 @@
 //! Integration tests for path tracking: `path()`, `simple_path()`/`cyclic_path()`, label steps
 //! and the path requirement analysis that decides what each step records.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;

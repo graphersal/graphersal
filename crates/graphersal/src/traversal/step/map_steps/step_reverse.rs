@@ -111,7 +111,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepReverse {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

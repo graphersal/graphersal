@@ -122,6 +122,7 @@ fn events(events: &Events) -> Vec<String> {
     std::mem::take(&mut *events.lock().unwrap())
 }
 
+#[cfg(feature = "io")]
 fn names(graph: &TraversalGraph) -> Vec<ElementProperty> {
     let mut out = graph
         .traversal()

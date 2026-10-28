@@ -241,6 +241,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(

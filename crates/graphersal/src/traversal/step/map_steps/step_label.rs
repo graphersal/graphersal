@@ -112,6 +112,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLabel {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple() {
         test_dual!(
@@ -134,6 +135,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_simple() {
         test_dual!(

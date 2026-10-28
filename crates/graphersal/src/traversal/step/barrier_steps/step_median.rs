@@ -105,6 +105,7 @@ mod tests {
     /// emits nothing at all, not an error. `median()` is not itself a TinkerPop step, but it
     /// shares `numeric.rs`'s accumulator and is kept consistent with its siblings' seedless
     /// empty-input behavior.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_emits_nothing() {
         test_dual!(
@@ -118,6 +119,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -131,6 +133,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -144,6 +147,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -157,6 +161,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(

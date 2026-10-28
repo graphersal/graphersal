@@ -1,3 +1,4 @@
+#[cfg(feature = "display")]
 use graphersal::exec::RenderOptions;
 use graphersal::prelude::*;
 
@@ -48,6 +49,7 @@ fn test_edge_to_table_default() {
     assert!(table.contains("created"));
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_column_inclusion() {
     let tg = TraversalGraph::tinkerpop_modern();
@@ -67,6 +69,7 @@ fn test_column_inclusion() {
     assert!(!md.contains("label"));
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_column_exclusion() {
     let tg = TraversalGraph::tinkerpop_modern();
@@ -97,6 +100,7 @@ fn test_column_exclusion() {
     assert_eq!(md, md_minus);
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_missing_property_handling() {
     let tg = TraversalGraph::tinkerpop_modern();
@@ -115,6 +119,7 @@ fn test_missing_property_handling() {
     assert!(md.contains("-"));
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_row_numbers_option() {
     let tg = TraversalGraph::tinkerpop_modern();
@@ -136,6 +141,7 @@ fn test_row_numbers_option() {
     assert!(md.contains("marko"));
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_truncate_and_max_width() {
     let graph = GraphSource::empty();
@@ -198,6 +204,7 @@ fn test_record_object_table() {
     assert!(md.contains("marko"));
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn test_scalar_table() {
     let tg = TraversalGraph::tinkerpop_modern();

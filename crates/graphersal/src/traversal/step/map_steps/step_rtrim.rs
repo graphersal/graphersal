@@ -124,6 +124,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepRTrim {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple() {
         test_dual!(
@@ -137,6 +138,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -150,6 +152,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -163,6 +166,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple_none() {
         test_dual!(

@@ -133,6 +133,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasLabel {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_args_single() {
         test_dual!(
@@ -146,6 +147,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -159,6 +161,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -172,6 +175,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_args_array_1() {
         test_dual!(
@@ -185,6 +189,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_args_array_2() {
         test_dual!(
@@ -198,6 +203,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_args_single() {
         test_dual!(
@@ -211,6 +217,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_args_array() {
         test_dual!(

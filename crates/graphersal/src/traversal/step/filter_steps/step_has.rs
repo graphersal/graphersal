@@ -300,6 +300,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -313,6 +314,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_bool() {
         let graph = GraphSource::tinkerpop_modern();
@@ -335,6 +337,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where() {
         test_dual!(
@@ -348,6 +351,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where_inner() {
         test_dual!(
@@ -361,6 +365,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_number() {
         test_dual!(
@@ -377,6 +382,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(
@@ -402,8 +408,10 @@ mod tests {
         assert!(result.to_string().contains("has("));
     }
 
+    #[cfg(feature = "script")]
     use crate::traversal::test_utils::nested_doc_graph;
 
+    #[cfg(feature = "script")]
     #[test]
     fn nested_key_of_an_object_valued_property_is_compared() {
         // The nested `a` (1) is compared, not d1's top-level `a` (100).
@@ -445,6 +453,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn scalar_property_values_are_cast_errors() {
         test_dual_err!(
@@ -473,6 +482,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn maps_compare_the_value_under_the_key() {
         test_dual!(
@@ -513,6 +523,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn non_element_inputs_are_cast_errors() {
         test_dual_err!(

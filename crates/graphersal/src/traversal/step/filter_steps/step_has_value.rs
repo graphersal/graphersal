@@ -815,6 +815,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasValueAny {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -828,6 +829,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_bool() {
         let graph = GraphSource::tinkerpop_modern();
@@ -850,6 +852,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -863,6 +866,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -876,6 +880,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_str() {
         test_dual!(
@@ -889,6 +894,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_obj() {
         test_dual!(
@@ -902,6 +908,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_obj_wrong() {
         test_dual!(
@@ -915,6 +922,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_wrong() {
         test_dual!(
@@ -928,6 +936,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(
@@ -952,6 +961,7 @@ mod tests {
 
     // -- D1: `hasValue(v1, v2, ...)`, the multi-value OR overload --------------------------
 
+    #[cfg(feature = "script")]
     #[test]
     fn multi_value_any() {
         test_dual!(
@@ -965,6 +975,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn multi_value_any_none_match() {
         test_dual!(
@@ -977,6 +988,7 @@ mod tests {
 
     // -- D1: `hasValue(P<V>)`, the predicate overload ---------------------------------------
 
+    #[cfg(feature = "script")]
     #[test]
     fn predicate_number() {
         test_dual!(
@@ -991,6 +1003,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn predicate_string() {
         test_dual!(
@@ -1004,6 +1017,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn predicate_boolean() {
         let graph = GraphSource::tinkerpop_modern();
@@ -1026,6 +1040,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn predicate_where_inner() {
         test_dual!(
@@ -1054,6 +1069,7 @@ mod tests {
     /// misleading "expected object, got float64"-shaped `CastException` instead of comparing.
     /// Same expectation as `v` above (marko's `age` is the only `29`), but reached through
     /// `properties()` so the traverser is actually `VertexProperty`, not `Vertex`.
+    #[cfg(feature = "script")]
     #[test]
     fn scalar_property_bug_fix() {
         test_dual!(
@@ -1068,6 +1084,7 @@ mod tests {
     }
 
     /// Same bug, on an `EdgeProperty` traverser and a predicate instead of a literal.
+    #[cfg(feature = "script")]
     #[test]
     fn scalar_edge_property_predicate_bug_fix() {
         test_dual!(
@@ -1087,6 +1104,7 @@ mod tests {
     /// on top of that, forcing the `.value().is(P.lt(0.3))` workaround documented in
     /// `step_value.rs`'s `full_chain_bothe_properties_dedup_haskey_value` test. This is the exact
     /// literal query, with no workaround.
+    #[cfg(feature = "script")]
     #[test]
     fn roadmap_bothe_properties_dedup_haskey_hasvalue_predicate() {
         test_dual!(
@@ -1112,8 +1130,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     use crate::traversal::test_utils::nested_doc_graph;
 
+    #[cfg(feature = "script")]
     #[test]
     fn object_valued_properties_match_any_nested_value() {
         test_dual!(
@@ -1167,6 +1187,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn maps_and_path_properties_match_by_their_values() {
         test_dual!(
@@ -1228,6 +1249,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn null_and_list_values_never_match() {
         let graph = GraphSource::tinkerpop_modern();
@@ -1247,6 +1269,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn non_element_inputs_are_cast_errors() {
         for (rhai, ty) in [

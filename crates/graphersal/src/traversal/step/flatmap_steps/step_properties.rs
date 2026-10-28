@@ -163,6 +163,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepProperties {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_all() {
         test_dual!(
@@ -177,6 +178,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_named() {
         test_dual!(
@@ -193,6 +195,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_simple() {
         test_dual!(

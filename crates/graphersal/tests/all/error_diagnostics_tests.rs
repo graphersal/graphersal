@@ -1,9 +1,11 @@
 //! Integration tests for traversal diagnostics: step paths, physical plan rendering and the
 //! provenance of the value that caused a failure.
 
+#[cfg(feature = "script")]
 use graphersal::auth::{AccessPolicy, Authorizer};
 use graphersal::changes::{ChangeSet, CommitHook, HookError};
 use graphersal::exec::ExecutionPolicy;
+#[cfg(feature = "script")]
 use graphersal::exec::Spelling;
 use graphersal::prelude::PropertyMap;
 use graphersal::prelude::*;
@@ -2864,6 +2866,7 @@ fn invalid_local_range_help_names_the_scope_local_form() {
 /// `by(Column.keys)` / `by(Column.values)` on a step other than `order()` fails with
 /// `InvalidModulator`, and the help names the supported `order().by(Column.values, Order.desc)`
 /// and `order(Scope.local)` forms plus `select(Column)`.
+#[cfg(feature = "script")]
 #[test]
 fn by_column_outside_order_names_the_order_forms() {
     let graph = GraphSource::tinkerpop_modern();
@@ -4203,6 +4206,7 @@ fn side_effect_key_helps_name_the_reducer_declaration() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn reserved_parameter_help_lists_token_classes() {
     use std::collections::HashMap;
@@ -4365,6 +4369,7 @@ fn remove_property_jpath_help_and_path_property_drop_help() {
 
 /// Nested schema errors (Task 10 of the jpath work) name the full canonical path and their help
 /// reads that location with `jpath(..)`, never with a literal key.
+#[cfg(feature = "serde")]
 #[cfg(feature = "script")]
 #[test]
 fn nested_schema_error_help_names_the_path_and_reads_it_with_jpath() {
@@ -6730,6 +6735,7 @@ fn vector_search_errors_carry_their_help() {
     assert!(report.contains("quantize(\"bit\")"), "{report}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn property_index_type_errors_carry_their_help() {
     use crate::script_host::eval_value;
@@ -6781,6 +6787,7 @@ fn property_index_type_errors_carry_their_help() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn property_index_transform_errors_carry_their_help() {
     use crate::script_host::eval_value;
@@ -10643,6 +10650,7 @@ mod gql {
         }
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn gql_insert_reference_errors_name_the_gremlin_steps_for_a_bound_node() {
         for (query, start) in [
@@ -11059,6 +11067,7 @@ mod gql {
     /// A label item on a variable the binder knows is an edge (42002): the Gremlin fix reads
     /// the edge from the failing query's own clauses (or a plain MATCH inside a CALL body), and
     /// runs.
+    #[cfg(feature = "script")]
     #[test]
     fn gql_edge_label_item_names_set_label_on_the_failing_query() {
         for (query, fix) in [
@@ -12046,6 +12055,7 @@ mod gql {
              params: #{min: \"integer\"}}); g.gql(\"CALL people.adults(30) YIELD name RETURN name \
              ORDER BY name\")";
 
+        #[cfg(feature = "script")]
         #[test]
         fn a_call_of_an_unknown_saved_query_points_at_its_name() {
             let (err, report) = failure("MATCH (n) CALL people.minors(18) YIELD name RETURN name");

@@ -109,6 +109,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepFlatMap<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn every_result() {
         test_dual!(
@@ -123,6 +124,7 @@ mod tests {
     }
 
     /// The child's steps are hidden from `path()`.
+    #[cfg(feature = "script")]
     #[test]
     fn hides_the_child_path() {
         test_dual!(
@@ -139,6 +141,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn reads_the_incoming_path() {
         test_dual!(
@@ -149,6 +152,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn keeps_bulk() {
         test_dual!(

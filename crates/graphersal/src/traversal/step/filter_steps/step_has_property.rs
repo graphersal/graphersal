@@ -241,6 +241,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasProperty {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_has_age() {
         test_dual!(
@@ -255,6 +256,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_missing_key() {
         test_dual!(
@@ -268,6 +270,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_has_weight() {
         test_dual!(
@@ -281,6 +284,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -294,6 +298,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -316,8 +321,10 @@ mod tests {
         assert!(result.to_string().contains("has(\"age\")"));
     }
 
+    #[cfg(feature = "script")]
     use crate::traversal::test_utils::nested_doc_graph;
 
+    #[cfg(feature = "script")]
     #[test]
     fn nested_key_existence_inside_object_valued_properties() {
         test_dual!(
@@ -355,6 +362,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn edges_and_maps_are_kept_by_key_existence() {
         test_dual!(
@@ -388,6 +396,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn non_element_inputs_are_cast_errors() {
         test_dual_err!(

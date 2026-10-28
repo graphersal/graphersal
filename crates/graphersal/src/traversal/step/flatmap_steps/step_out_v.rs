@@ -143,6 +143,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOutV {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(
@@ -156,6 +157,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple_edge_property() {
         test_dual!(
@@ -169,6 +171,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple__() {
         test_dual!(
@@ -182,6 +185,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple_where() {
         test_dual!(

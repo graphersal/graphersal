@@ -2,6 +2,7 @@
 //! `dedup()` in a per-traverser child of the body (`where`, `local`) starts fresh for every
 //! traverser. Both orders agree and merging the frontier stays invisible.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;
@@ -77,11 +78,13 @@ fn sorted_text(values: &[ElementProperty]) -> Vec<String> {
     text
 }
 
+#[cfg(feature = "script")]
 fn count_of(values: &[ElementProperty]) -> i64 {
     values.first().and_then(|v| v.as_i64()).expect("a count")
 }
 
 /// Evaluates a Rhai traversal and returns the materialized results.
+#[cfg(feature = "script")]
 fn rhai_on(graph: Arc<Graph>, script: &str) -> Vec<ElementProperty> {
     let engine = crate::script_host::engine();
     let mut scope = crate::script_host::graph_scope(graph.clone());
@@ -94,6 +97,7 @@ fn rhai_on(graph: Arc<Graph>, script: &str) -> Vec<ElementProperty> {
         .expect("script runs")
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn the_three_tinkerpop_scenarios() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -138,6 +142,7 @@ fn the_three_tinkerpop_scenarios() {
     assert_eq!(count_of(&rust), 0);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn a_visited_set_over_the_whole_loop() {
     let graph = small();
@@ -160,6 +165,7 @@ fn a_visited_set_over_the_whole_loop() {
     assert_eq!(sorted_text(&res), vec!["a", "b", "c"]);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn per_traverser_children_start_fresh() {
     // a -> t, b -> t: `where` and `local` children see one traverser at a time.
@@ -197,6 +203,7 @@ fn separate_dedup_steps_have_separate_sets() {
     assert_eq!(sorted_text(&res), vec!["c"]);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dedup_by_a_projection_in_a_body() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());

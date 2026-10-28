@@ -1017,7 +1017,10 @@ mod graphml {
 
 mod schema {
     use super::*;
-    use graphersal::schema::{PropertySchema, SchemaChangeKind, SchemaFormat};
+    use graphersal::schema::SchemaChangeKind;
+    #[cfg(feature = "display")]
+    use graphersal::schema::{PropertySchema, SchemaFormat};
+    #[cfg(feature = "display")]
     use graphersal::temporal::TemporalKind;
 
     fn vertex_schema(mode: &str, properties: &str) -> String {
@@ -1051,6 +1054,7 @@ mod schema {
         })
     }
 
+    #[cfg(feature = "display")]
     #[test]
     fn every_temporal_format_parses_prints_and_names_its_type() {
         let properties = r#"{

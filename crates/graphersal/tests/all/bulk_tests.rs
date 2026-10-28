@@ -17,6 +17,7 @@ type Source<'b> = GraphTraversalSource<'b, &'b TraversalGraph>;
 ///
 /// The order may differ (merge points emit duplicates together), so the comparison does not
 /// sort by `Debug` text: every merged result is matched against an equal unmerged one.
+#[cfg(feature = "script")]
 fn assert_bulk_invisible<F>(query: F)
 where
     F: for<'b> Fn(Source<'b>) -> Source<'b>,
@@ -25,6 +26,7 @@ where
 }
 
 /// [`assert_bulk_invisible`] on `graph`. Returns the merged result for further assertions.
+#[cfg(feature = "script")]
 fn assert_bulk_invisible_on<F>(graph: &Graph, query: F) -> Vec<ElementProperty>
 where
     F: for<'b> Fn(Source<'b>) -> Source<'b>,
@@ -100,6 +102,7 @@ pub(crate) fn dense() -> Graph {
     Graph::new(dense_graph())
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn merge_switch_does_not_change_results() {
     assert_bulk_invisible(|g| g.v(None).out(None).out(None));
@@ -176,6 +179,7 @@ fn rhai_with_accepts_and_rejects_bulk_options() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn count_is_bulk_weighted_after_a_barrier() {
     for graph in [modern(), dense()] {
@@ -201,6 +205,7 @@ fn count_is_bulk_weighted_after_a_barrier() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn reducers_are_bulk_correct() {
     for graph in [modern(), dense()] {
@@ -390,6 +395,7 @@ fn the_expansion_limit_also_guards_the_terminal_list() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn range_family_counts_units_not_traversers() {
     for graph in [modern(), dense()] {
@@ -434,6 +440,7 @@ fn range_family_counts_units_not_traversers() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn order_and_maps_carry_the_bulk() {
     for graph in [modern(), dense()] {
@@ -597,6 +604,7 @@ fn barrier_with_size_validates_and_is_named_in_the_profile() {
     assert!(numbers[2] < numbers[1], "{row}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn nested_barrier_in_a_child_traversal_is_bulk_invisible() {
     for graph in [modern(), dense()] {
@@ -741,6 +749,7 @@ mod dsl {
 /// Equality of two results that ignores the order of array items at any depth (merge points emit
 /// duplicates together, so value lists inside a `group()` may list them in another order) and of
 /// object entries.
+#[cfg(feature = "script")]
 fn same_unordered(a: &ElementProperty, b: &ElementProperty) -> bool {
     match (a, b) {
         (ElementProperty::Array(x), ElementProperty::Array(y)) => {
@@ -767,6 +776,7 @@ fn same_unordered(a: &ElementProperty, b: &ElementProperty) -> bool {
     }
 }
 
+#[cfg(feature = "script")]
 fn assert_same_deep(unmerged: &[ElementProperty], merged: &[ElementProperty]) {
     assert_eq!(unmerged.len(), merged.len(), "result sizes differ");
     let mut rest: Vec<&ElementProperty> = unmerged.iter().collect();
@@ -779,6 +789,7 @@ fn assert_same_deep(unmerged: &[ElementProperty], merged: &[ElementProperty]) {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn group_count_counts_units_not_traversers() {
     let merged = assert_bulk_invisible_on(&modern(), |g| {
@@ -801,6 +812,7 @@ fn group_count_counts_units_not_traversers() {
     });
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn local_gives_one_result_per_logical_traverser() {
     let merged = assert_bulk_invisible_on(&modern(), |g| {
@@ -848,6 +860,7 @@ fn side_effect_callback_runs_once_per_traverser_with_its_bulk() {
     assert!(calls < 30, "a merged traverser is seen once: {calls} calls");
 }
 
+#[cfg(feature = "script")]
 mod step3_dsl {
     use super::*;
     use std::sync::Arc;
@@ -1066,6 +1079,7 @@ mod step3_dsl {
 mod repeat_merge {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn repeat_queries_are_bulk_invisible_on_modern_and_dense() {
         for graph in [modern(), dense()] {
@@ -1160,6 +1174,7 @@ mod repeat_merge {
             assert_eq!(count, Some(2_505_037_961_767_380));
         }
 
+        #[cfg(feature = "script")]
         #[test]
         fn merged_equals_unmerged_for_times_two() {
             let graph = grateful();
@@ -1179,6 +1194,7 @@ mod repeat_merge {
             assert_eq!(run(false), Some(327_370));
         }
 
+        #[cfg(feature = "script")]
         #[test]
         fn rhai_form_of_the_grateful_count() {
             let graph = std::sync::Arc::new(grateful());
@@ -1236,6 +1252,7 @@ mod lazy_barrier {
         assert!(!text.contains("Bulk"), "{text}");
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn results_are_equal_with_and_without_the_rule() {
         fn run<F>(graph: &Graph, query: F)
@@ -1319,6 +1336,7 @@ mod lazy_barrier {
         assert!(text.contains("Bulk"), "{text}");
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn rhai_toggles_the_rule_through_with() {
         use std::sync::Arc;
@@ -1399,6 +1417,7 @@ mod adaptive_skip {
     }
 
     /// `n` sources that all point at one hub, which points at one sink.
+    #[cfg(feature = "script")]
     fn star(n: usize) -> Graph {
         let mut tg = TraversalGraph::new();
         let hub = tg
@@ -1432,6 +1451,7 @@ mod adaptive_skip {
     }
 
     /// `n` sources that all point at one hub without out-edges.
+    #[cfg(feature = "script")]
     fn dead_end(n: usize) -> Graph {
         let mut tg = TraversalGraph::new();
         let hub = tg
@@ -1456,6 +1476,7 @@ mod adaptive_skip {
     }
 
     /// The `lazy_barrier()` row of a profile: (in, out).
+    #[cfg(feature = "script")]
     fn barrier_in_out(graph: &Graph) -> (u64, u64) {
         let lock = graph.read();
         let metrics = lock
@@ -1475,6 +1496,7 @@ mod adaptive_skip {
         (row.count_in(), row.counts().traverser_count())
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn duplicates_the_next_step_does_not_expand_are_not_merged() {
         // 6000 traversers on one hub merge into one, but the hub has no out-edges: the following
@@ -1485,6 +1507,7 @@ mod adaptive_skip {
         assert_bulk_invisible_on(&dead_end(5000), |g| g.v(None).out(None).out(None).count());
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn adaptive_skipping_is_bulk_invisible() {
         for graph in [sparse(5000), star(5000)] {

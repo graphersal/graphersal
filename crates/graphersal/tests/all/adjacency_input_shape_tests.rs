@@ -4,10 +4,12 @@
 //! counting path (`.count()`), in both DSL spellings and in the Rust API. Never a panic, never a
 //! silent empty result.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;
 
+#[cfg(feature = "script")]
 thread_local! {
     // Building the engine registers every step; the matrix below runs hundreds of read-only
     // queries, so each test thread builds it (and the graph) once.
@@ -16,6 +18,7 @@ thread_local! {
 }
 
 /// Runs `script` against the modern graph; `Err` is the rendered error report.
+#[cfg(feature = "script")]
 fn run(script: &str) -> Result<rhai::Dynamic, String> {
     ENGINE.with(|engine| {
         let mut scope = MODERN.with(|g| crate::script_host::graph_scope(g.clone()));
@@ -25,6 +28,7 @@ fn run(script: &str) -> Result<rhai::Dynamic, String> {
     })
 }
 
+#[cfg(feature = "script")]
 fn int(script: &str) -> i64 {
     run(script)
         .unwrap_or_else(|e| panic!("{script}: {e}"))
@@ -32,6 +36,7 @@ fn int(script: &str) -> i64 {
         .unwrap_or_else(|t| panic!("{script}: not an int but {t}"))
 }
 
+#[cfg(feature = "script")]
 fn names(script: &str) -> Vec<String> {
     let mut out: Vec<String> = run(script)
         .unwrap_or_else(|e| panic!("{script}: {e}"))
@@ -44,6 +49,7 @@ fn names(script: &str) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "script")]
 fn assert_cast_error(script: &str, got: &str) {
     match run(script) {
         Ok(value) => panic!("{script}: expected a cast error, got {value:?}"),
@@ -55,6 +61,7 @@ fn assert_cast_error(script: &str, got: &str) {
 }
 
 /// Producers of every stream shape, with the type name the cast error reports.
+#[cfg(feature = "script")]
 const SHAPES: &[(&str, &str)] = &[
     (r#"g.V("1")"#, "vertex"),
     (r#"g.V("1").properties("name")"#, "vertexProperty"),
@@ -74,6 +81,7 @@ const SHAPES: &[(&str, &str)] = &[
 
 /// Vertex-expanding steps in both spellings: they accept a vertex and a vertex property (the
 /// property's owner).
+#[cfg(feature = "script")]
 const VERTEX_STEPS: &[(&str, &str)] = &[
     ("out()", "out()"),
     ("in()", "in_()"),
@@ -84,12 +92,14 @@ const VERTEX_STEPS: &[(&str, &str)] = &[
 ];
 
 /// Edge-reading steps in both spellings: they accept an edge and an edge property.
+#[cfg(feature = "script")]
 const EDGE_STEPS: &[(&str, &str)] = &[
     ("outV()", "out_v()"),
     ("inV()", "in_v()"),
     ("bothV()", "both_v()"),
 ];
 
+#[cfg(feature = "script")]
 #[test]
 fn vertex_steps_reject_every_non_vertex_shape_in_both_paths() {
     for (producer, got) in SHAPES {
@@ -105,6 +115,7 @@ fn vertex_steps_reject_every_non_vertex_shape_in_both_paths() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn edge_steps_reject_every_non_edge_shape_in_both_paths() {
     for (producer, got) in SHAPES {
@@ -120,6 +131,7 @@ fn edge_steps_reject_every_non_edge_shape_in_both_paths() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn a_vertex_property_expands_from_its_owner_vertex() {
     // marko: out 3 (lop, vadas, josh), in 0, both 3
@@ -145,6 +157,7 @@ fn a_vertex_property_expands_from_its_owner_vertex() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn an_edge_property_reads_its_owner_edge_endpoints() {
     let p = r#"g.V("1").outE("knows").has("weight", 0.5).properties("weight")"#;
@@ -168,6 +181,7 @@ fn an_edge_property_reads_its_owner_edge_endpoints() {
     assert_eq!(int(&format!("{p}.other_v().count().next()")), 1);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn other_v_without_an_earlier_vertex_explains_the_fix() {
     for script in [
@@ -180,6 +194,7 @@ fn other_v_without_an_earlier_vertex_explains_the_fix() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn label_filters_apply_in_the_counting_path() {
     // vertex 4 (josh): out created -> lop, ripple; in knows <- marko
@@ -194,6 +209,7 @@ fn label_filters_apply_in_the_counting_path() {
     assert_eq!(int(r#"g.v("4").in_e("knows").count().next()"#), 1);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn counting_multiplies_by_bulk() {
     // g.V().V("1") yields six marko traversers; barrier() merges them into one with bulk 6; every counting step

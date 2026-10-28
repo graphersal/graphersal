@@ -323,6 +323,7 @@ fn select_column_needs_no_path_and_profiles_under_its_name() {
 
 /// `select(Column)` over the other map shapes: an object-valued vertex/edge property read
 /// through `values(key)`, an injected map and a path's labels; a scalar is a cast error.
+#[cfg(feature = "script")]
 mod other_shapes {
     use super::*;
     use crate::script_host::eval_value;

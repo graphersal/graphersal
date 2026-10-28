@@ -127,6 +127,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepRange {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn first_three() {
         test_dual!(
@@ -140,6 +141,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn skip_two_take_three() {
         test_dual!(
@@ -153,6 +155,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn unbounded_high_from_low() {
         // tinkerpop_modern has 6 vertices; range(2, -1) should return every vertex from index 2
@@ -168,6 +171,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn zero_and_unbounded_is_a_no_op() {
         test_dual!(
@@ -181,6 +185,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn high_exceeds_stream_length() {
         test_dual!(
@@ -194,6 +199,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn compare_elements() {
         test_dual!(
@@ -234,6 +240,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn order_by_then_range_paginates() {
         // Pagination: order().by("name") gives a stable order, range(2, 4) takes page 2 of

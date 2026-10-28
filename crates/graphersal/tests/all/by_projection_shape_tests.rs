@@ -3,6 +3,7 @@
 //! properties, materialized maps (`elementMap()`, `valueMap()`, `project()`, an injected map),
 //! lists and paths. A shape without the key is an unproductive `by()` (the `project()` key is
 //! left out), never an error.
+#![cfg(feature = "script")]
 
 use std::sync::Arc;
 

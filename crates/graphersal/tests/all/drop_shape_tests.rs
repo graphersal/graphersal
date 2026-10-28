@@ -1,15 +1,19 @@
 //! `drop()` over every stream shape: elements and property handles are removed, anything else
 //! fails with a cast error and removes nothing (the failing traversal is rolled back).
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::eval_value;
 use graphersal::prelude::*;
 
+#[cfg(feature = "script")]
 fn modern() -> Arc<Graph> {
     Arc::new(GraphSource::tinkerpop_modern())
 }
 
+#[cfg(feature = "script")]
 fn int(graph: &Arc<Graph>, script: &str) -> i64 {
     eval_value(graph.clone(), script)
         .unwrap_or_else(|e| panic!("{script}: {e}"))
@@ -17,6 +21,7 @@ fn int(graph: &Arc<Graph>, script: &str) -> i64 {
         .unwrap_or_else(|t| panic!("{script}: not an int but {t}"))
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn edge_properties_are_dropped_in_both_spellings() {
     let g = modern();
@@ -54,6 +59,7 @@ fn rust_api_drops_edge_properties_and_edges() {
     assert_eq!(graph.edge_count(), 5);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn non_removable_values_are_cast_errors_and_nothing_is_removed() {
     for (script, got) in [
@@ -88,6 +94,7 @@ fn non_removable_values_are_cast_errors_and_nothing_is_removed() {
 
 /// A path, a list, a map and a computed value are reported by their real kind, never as the
 /// internal `computed`.
+#[cfg(feature = "script")]
 #[test]
 fn non_removable_containers_are_named_by_kind() {
     for (script, got) in [

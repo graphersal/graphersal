@@ -7,7 +7,7 @@
 //! path values); on the (acyclic) modern graph queries are paired with hand-written
 //! `repeat(__.out()..)` twins. Reaching a limit is an error naming the pattern, never a cut
 //! result, and the plan records labels only, never a full path.
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "gql", feature = "script"))]
 
 use std::sync::Arc;
 

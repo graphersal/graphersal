@@ -380,7 +380,7 @@ token_p_api!(
     "`hasKey(P)`: keeps a property (or a map) whose key satisfies the predicate, e.g. `properties().has_key_p(P::Neq(\"name\"))`."
 );
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

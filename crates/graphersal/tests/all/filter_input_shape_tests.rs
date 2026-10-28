@@ -2,6 +2,7 @@
 //! three forms) over every stream shape, in both DSL spellings: each shape is either filtered or
 //! fails with a typed cast error naming what it got. Never a panic, never a silent drop of a
 //! shape the filter cannot read.
+#![cfg(feature = "script")]
 
 use std::sync::Arc;
 

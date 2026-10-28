@@ -68,6 +68,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConstant {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string_simple() {
         test_dual!(
@@ -81,6 +82,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -94,6 +96,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -107,6 +110,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string_double() {
         test_dual!(
@@ -124,6 +128,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string_array() {
         test_dual!(
@@ -137,6 +142,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_integer_simple() {
         test_dual!(
@@ -150,6 +156,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_integer_double() {
         test_dual!(
@@ -167,6 +174,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_float_simple() {
         test_dual!(
@@ -180,6 +188,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_float_double() {
         test_dual!(

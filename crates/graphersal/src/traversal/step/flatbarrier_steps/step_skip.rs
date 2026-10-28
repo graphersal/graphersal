@@ -71,6 +71,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepSkip {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_one() {
         test_dual!(
@@ -84,6 +85,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_six() {
         test_dual!(
@@ -97,6 +99,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_zero() {
         test_dual!(
@@ -110,6 +113,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_four() {
         test_dual!(

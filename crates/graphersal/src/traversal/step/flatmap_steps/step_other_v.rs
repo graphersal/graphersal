@@ -229,6 +229,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOtherV {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn returns_the_neighbor_not_the_origin() {
         test_dual!(
@@ -246,6 +247,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn survives_a_chain_of_hops() {
         test_dual!(

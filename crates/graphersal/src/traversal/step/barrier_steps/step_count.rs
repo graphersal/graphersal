@@ -41,6 +41,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepCount<'g, S> for StepCount {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count() {
         test_dual!(
@@ -54,6 +55,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where_count() {
         test_dual!(
@@ -67,6 +69,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_count() {
         test_dual!(

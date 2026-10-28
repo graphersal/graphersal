@@ -119,6 +119,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepMap<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn maps_to_the_first_result() {
         test_dual!(
@@ -137,6 +138,7 @@ mod tests {
     }
 
     /// A traverser the child maps to nothing is dropped; `null` is a result like any other.
+    #[cfg(feature = "script")]
     #[test]
     fn no_result_drops_null_is_kept() {
         test_dual!(
@@ -154,6 +156,7 @@ mod tests {
     }
 
     /// The child reads the incoming path; its own steps are not path positions.
+    #[cfg(feature = "script")]
     #[test]
     fn reads_the_path_and_adds_one_position() {
         test_dual!(
@@ -174,6 +177,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn keeps_bulk() {
         test_dual!(

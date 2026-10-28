@@ -2,6 +2,7 @@
 //! DSL `g.define_job` / `g.jobs()` / `g.drop_job`, the definer's rights checked and stored as
 //! the job's effects, and the definition surviving every store path; a newer version's job is
 //! kept byte for byte and never run.
+#![cfg(all(feature = "persist", feature = "script"))]
 
 use std::sync::Arc;
 

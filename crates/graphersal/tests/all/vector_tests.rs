@@ -447,6 +447,7 @@ mod dsl {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn element_maps_and_json_show_the_values() {
         let graph = docs();

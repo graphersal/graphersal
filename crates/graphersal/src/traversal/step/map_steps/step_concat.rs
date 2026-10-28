@@ -340,6 +340,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepConcat<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn appends_constants() {
         test_dual!(
@@ -350,6 +351,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn no_argument_keeps_the_string() {
         test_dual!(
@@ -360,6 +362,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn null_is_skipped_and_all_null_is_null() {
         test_dual!(
@@ -382,6 +385,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_traversal_argument_is_its_first_result_on_the_incoming_traverser() {
         test_dual!(
@@ -402,6 +406,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn several_traversals_in_order() {
         test_dual!(
@@ -419,6 +424,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn rejects_non_strings() {
         test_dual_err!(

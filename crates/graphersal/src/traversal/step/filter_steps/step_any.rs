@@ -131,6 +131,7 @@ pub(crate) fn list_items<S: GraphStorage>(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple() {
         test_dual!(
@@ -144,6 +145,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple_gte() {
         test_dual!(
@@ -157,6 +159,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple_wrong() {
         test_dual!(
@@ -170,6 +173,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_simple() {
         test_dual!(
@@ -200,6 +204,7 @@ mod tests {
     }
 
     /// A non-list value never passes `any()` (TinkerPop), not even a matching scalar or `null`.
+    #[cfg(feature = "script")]
     #[test]
     fn scalar_and_null_are_filtered_out() {
         test_dual!(

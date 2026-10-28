@@ -1,5 +1,6 @@
 //! Integration tests for the `Cardinality`, `Direction` and `Merge` token classes in the Rhai DSL
 //! (dot form `Class.member` and static-module form `Class::member`).
+#![cfg(feature = "script")]
 
 use std::sync::Arc;
 

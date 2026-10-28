@@ -1,4 +1,4 @@
-#![cfg(feature = "script")]
+#![cfg(all(feature = "script", feature = "serde"))]
 //! Rhai surface of the `JsonPath` property-key type: the `jpath("...")` constructor.
 
 use crate::script_host::{eval_value, rhai};

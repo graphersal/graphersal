@@ -307,6 +307,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffect<'g, S> for StepAggregate<'g, 
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(
@@ -326,6 +327,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn by_name() {
         test_dual!(
@@ -348,6 +350,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn passthrough_does_not_filter() {
         test_dual!(
@@ -386,6 +389,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_within_side_effect_matches() {
         // marko's own aggregated "friends" (vadas, josh) must each test positive for
@@ -407,6 +411,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_without_side_effect_excludes() {
         // The motivating combinator, `not(within(key))`, exercised on a case with a real
@@ -431,6 +436,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn roadmap_acceptance_query_literal() {
         // The motivating example, verbatim: g.V(1).out("knows").aggregate("friends")

@@ -5,6 +5,7 @@
 //! Expected values are what TinkerPop returns on the modern graph (`g.V(1)` is `g.v("1")` here);
 //! `math()` always yields a double.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::error::MathErrorKind;
@@ -16,6 +17,7 @@ fn d(value: f64) -> ElementProperty {
 }
 
 /// Runs a DSL script on the modern graph and renders the result.
+#[cfg(feature = "script")]
 fn modern(script: &str) -> String {
     let value = crate::script_host::eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .unwrap_or_else(|e| panic!("`{script}` failed: {e}"));
@@ -23,6 +25,7 @@ fn modern(script: &str) -> String {
 }
 
 /// Runs a DSL script on the modern graph, expecting an error, and returns its text.
+#[cfg(feature = "script")]
 fn modern_err(script: &str) -> String {
     match crate::script_host::eval_value(Arc::new(GraphSource::tinkerpop_modern()), script) {
         Ok(value) => panic!("`{script}` should fail, got {value:?}"),
@@ -80,6 +83,7 @@ fn graph_with_object_property() -> Graph {
     graph
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn current_value_without_by() {
     let graph = GraphSource::tinkerpop_modern();
@@ -102,6 +106,7 @@ fn current_value_without_by() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn current_value_with_by() {
     let graph = GraphSource::tinkerpop_modern();
@@ -120,6 +125,7 @@ fn current_value_with_by() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn results_are_always_doubles() {
     let graph = GraphSource::tinkerpop_modern();
@@ -146,6 +152,7 @@ fn results_are_always_doubles() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn step_labels() {
     let graph = GraphSource::tinkerpop_modern();
@@ -171,6 +178,7 @@ fn step_labels() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn keys_of_the_current_map() {
     let graph = GraphSource::tinkerpop_modern();
@@ -193,6 +201,7 @@ fn keys_of_the_current_map() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn side_effects() {
     let graph = GraphSource::tinkerpop_modern();
@@ -235,6 +244,7 @@ fn the_by_ring_follows_first_appearance() {
     assert_same_items(res, vec![d(32.0), d(33.0), d(35.0), d(38.0)]);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn constants_and_their_scope_override() {
     assert_eq!(
@@ -252,6 +262,7 @@ fn constants_and_their_scope_override() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn nested_access_on_value_map_element_map_and_project() {
     assert_eq!(
@@ -276,6 +287,7 @@ fn nested_access_on_value_map_element_map_and_project() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn nested_access_after_the_by_projection() {
     assert_eq!(
@@ -288,6 +300,7 @@ fn nested_access_after_the_by_projection() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn nested_access_on_inject_maps_and_lists() {
     assert_eq!(
@@ -405,6 +418,7 @@ fn nested_access_errors() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn variable_errors() {
     let graph = GraphSource::tinkerpop_modern();
@@ -515,6 +529,7 @@ fn parse_errors_fail_before_execution() {
     assert_eq!(math_kind(&err), MathErrorKind::Syntax, "{err}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn empty_stream() {
     let graph = GraphSource::tinkerpop_modern();
@@ -553,6 +568,7 @@ fn profile_shows_the_equation_and_its_by_modulators() {
 }
 
 /// Asserts a Rust result and the DSL results (both spellings) of the same query.
+#[cfg(feature = "script")]
 fn dual(
     rust: Result<Vec<ElementProperty>, Box<TraverserError>>,
     expected: Vec<ElementProperty>,
@@ -565,6 +581,7 @@ fn dual(
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn rust_api_and_both_dsl_spellings_agree() {
     let graph = GraphSource::tinkerpop_modern();

@@ -113,6 +113,7 @@ mod tests {
         assert_eq!(result.as_i64(), Some(1));
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_str() {
         test_dual!(
@@ -126,6 +127,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_str_wrong() {
         test_dual!(
@@ -139,6 +141,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_eq() {
         test_dual!(
@@ -152,6 +155,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_neq() {
         test_dual!(
@@ -165,6 +169,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_neq_wrong() {
         test_dual!(
@@ -178,6 +183,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label() {
         test_dual!(
@@ -197,6 +203,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string_within() {
         test_dual!(
@@ -214,6 +221,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_number_within() {
         test_dual!(
@@ -231,6 +239,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string_without() {
         test_dual!(
@@ -248,6 +257,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_number_within() {
         test_dual!(
@@ -265,6 +275,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age_inside() {
         test_dual!(
@@ -278,6 +289,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age_inside_wrong() {
         test_dual!(
@@ -291,6 +303,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age_outside() {
         test_dual!(
@@ -304,6 +317,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age_outside_wrong() {
         test_dual!(
@@ -317,6 +331,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_age_between() {
         test_dual!(
@@ -330,6 +345,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_starting_with() {
         test_dual!(
@@ -343,6 +359,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_not_starting_with() {
         test_dual!(
@@ -356,6 +373,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_ending_with() {
         test_dual!(
@@ -369,6 +387,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_not_ending_with() {
         test_dual!(
@@ -382,6 +401,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_containing() {
         test_dual!(
@@ -395,6 +415,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_not_containing() {
         test_dual!(
@@ -408,6 +429,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn is_bool_false() {
         let graph = GraphSource::tinkerpop_modern();
@@ -430,6 +452,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn is_bool_true() {
         let graph = GraphSource::tinkerpop_modern();
@@ -453,6 +476,7 @@ mod tests {
     }
 
     /// Text predicates read the lazy `id()`/`label()` handles of edges and vertices as strings.
+    #[cfg(feature = "script")]
     #[test]
     fn text_predicates_over_edge_and_vertex_ids_and_labels() {
         test_dual!(
@@ -506,6 +530,7 @@ mod tests {
     /// TinkerPop's `TextP` only matches a `String`: a list, a map, a path, a vertex or an edge
     /// is not one, so the predicate is `false` (its negation `true`), exactly like a number,
     /// never an error.
+    #[cfg(feature = "script")]
     #[test]
     fn text_predicates_on_non_strings_filter_instead_of_failing() {
         test_dual!(

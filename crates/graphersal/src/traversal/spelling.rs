@@ -199,6 +199,7 @@ pub(crate) fn respell_keeping(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn respell_renames_calls_outside_strings_only() {
         assert_eq!(

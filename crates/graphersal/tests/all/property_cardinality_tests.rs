@@ -1,8 +1,10 @@
 //! Integration tests for `property(Cardinality, key, value)`, `property(map)` and
 //! `property(Cardinality, map)`, in the Rust API and in the Rhai DSL.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::eval_value;
 use graphersal::prelude::*;
 
@@ -37,6 +39,7 @@ fn root_cause_display(err: &TraverserError) -> String {
 }
 
 /// Runs `script` against a fresh modern graph and returns the value of its last statement.
+#[cfg(feature = "script")]
 fn script_int(script: &str) -> i64 {
     eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .unwrap()
@@ -44,6 +47,7 @@ fn script_int(script: &str) -> i64 {
         .unwrap()
 }
 
+#[cfg(feature = "script")]
 fn script_err(script: &str) -> String {
     eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .expect_err("script must fail")
@@ -287,6 +291,7 @@ fn profile_names_the_cardinality() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn rhai_cardinality_forms() {
     assert_eq!(
@@ -307,6 +312,7 @@ fn rhai_cardinality_forms() {
     assert!(err.contains("Cardinality.list is not supported"), "{err}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn rhai_map_forms() {
     assert_eq!(

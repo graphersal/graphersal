@@ -317,6 +317,7 @@ mod tests {
         assert_eq!(parse_pattern(""), Vec::<Segment>::new());
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn reads_properties_and_filters_missing_ones() {
         test_dual!(
@@ -335,6 +336,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_stored_null_property_is_written_as_null() {
         let graph = || {
@@ -366,6 +368,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn falls_back_to_a_path_label() {
         test_dual!(
@@ -382,6 +385,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn the_by_ring_fills_underscores() {
         test_dual!(
@@ -400,6 +404,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn reads_map_keys() {
         test_dual!(
@@ -416,6 +421,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn underscore_without_by_is_the_value() {
         test_dual!(

@@ -339,6 +339,7 @@ mod tests {
     }
 
     /// The token form and the name form select the same values, in both DSL spellings.
+    #[cfg(feature = "script")]
     #[test]
     fn type_of_takes_tokens_and_names_alike() {
         crate::test_dual!(

@@ -170,6 +170,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasKey {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_wrong() {
         test_dual!(
@@ -183,6 +184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_wrong_multiple() {
         test_dual!(
@@ -196,6 +198,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -209,6 +212,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where() {
         test_dual!(
@@ -222,6 +226,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where_inner() {
         test_dual!(
@@ -235,6 +240,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_multiple() {
         test_dual!(
@@ -248,6 +254,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_wrong() {
         test_dual!(
@@ -261,6 +268,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_wrong_multiple() {
         test_dual!(
@@ -274,6 +282,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(
@@ -287,6 +296,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_multiple() {
         test_dual!(
@@ -300,6 +310,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_wrong() {
         test_dual!(
@@ -313,6 +324,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_wrong_multiple() {
         test_dual!(
@@ -326,6 +338,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj() {
         test_dual!(
@@ -339,6 +352,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_multiple() {
         test_dual!(
@@ -352,6 +366,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_non_string_key_skipped_not_panic() {
         test_dual!(
@@ -365,6 +380,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_unexpected_key_kind_skipped_not_panic() {
         test_dual!(
@@ -382,6 +398,7 @@ mod tests {
     /// the property/value/key/valueMap spec), not wrapped in an `Object`/`Record` — filters by
     /// the property's own key. Regression for the previously-missing `VertexProperty`/
     /// `EdgeProperty` match arm.
+    #[cfg(feature = "script")]
     #[test]
     fn vertex_property_own_key() {
         test_dual!(
@@ -398,6 +415,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn edge_property_own_key_no_match() {
         test_dual!(

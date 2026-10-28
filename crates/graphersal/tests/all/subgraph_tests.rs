@@ -843,6 +843,7 @@ mod dsl {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn the_example_of_the_task_prints_the_vertices() {
         let json = run(
@@ -974,6 +975,7 @@ mod dsl {
         assert_eq!(result.unwrap().as_int().unwrap(), 2);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn the_listing_of_a_graph_value_shows_vertices_and_edges() {
         let listed = run(r#"g.e(0).subgraph("sg").cap("sg").to_json().to_string()"#)
@@ -1042,6 +1044,7 @@ mod dsl {
     }
 
     /// A single list-valued traverser is a list of ONE element for `to_list()` and `to_json()`.
+    #[cfg(feature = "serde")]
     #[test]
     fn single_list_valued_results_agree_between_terminals() {
         for source in [

@@ -318,6 +318,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepSample<'g, S>
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn keeps_n_members_of_the_stream() {
         test_dual!(
@@ -334,6 +335,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_short_stream_passes_unchanged() {
         test_dual!(
@@ -367,6 +369,7 @@ mod tests {
     }
 
     /// A zero weight is never drawn; a missing weight drops the traverser.
+    #[cfg(feature = "script")]
     #[test]
     fn weights_decide() {
         test_dual!(
@@ -394,6 +397,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn rejects_a_second_by_and_a_bad_weight() {
         test_dual_err!(
@@ -411,6 +415,7 @@ mod tests {
     }
 
     /// Merged traversers are sampled unit by unit: the sample never exceeds `n` in bulk.
+    #[cfg(feature = "script")]
     #[test]
     fn respects_bulk() {
         test_dual!(
@@ -421,6 +426,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn inside_repeat_and_local() {
         test_dual!(

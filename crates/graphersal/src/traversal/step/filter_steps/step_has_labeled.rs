@@ -101,7 +101,7 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

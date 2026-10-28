@@ -128,6 +128,7 @@ mod tests {
     /// this point in the pipeline — here, `aggregate("x")` fills the bucket from all 6 vertices
     /// before `hasLabel("nope")` filters everything out, so `cap("x")` must still see the whole
     /// bucket (confirmed via `graphersal`: before this task's fix, this returned nothing).
+    #[cfg(feature = "script")]
     #[test]
     fn cap_ignores_the_upstream_stream_size() {
         test_dual!(
@@ -147,6 +148,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn string() {
         test_dual!(
@@ -163,6 +165,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -176,6 +179,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -189,6 +193,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn number() {
         test_dual!(
@@ -205,6 +210,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn array() {
         test_dual!(

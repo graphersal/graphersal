@@ -2,7 +2,9 @@
 //! sample schema file `tests/data/sample_ecommerce_schema.json`: the file loads (the library
 //! reads strings, the caller reads the file) and is enforced.
 use graphersal::prelude::*;
-use graphersal::schema::{EdgeConnection, META_SCHEMA_JSON, SCHEMA_FORMAT_URL, SchemaPattern};
+#[cfg(feature = "serde")]
+use graphersal::schema::SCHEMA_FORMAT_URL;
+use graphersal::schema::{EdgeConnection, META_SCHEMA_JSON, SchemaPattern};
 use std::path::PathBuf;
 
 fn sample_schema_text() -> String {

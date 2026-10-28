@@ -101,6 +101,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepLocal<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn limits_per_vertex_not_per_stream() {
         // marko (id 1) has 3 out-edges (knows x2, created x1); vadas/josh/peter have out-edges
@@ -141,6 +142,7 @@ mod tests {
         assert_ne!(local_count, bare_count);
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn per_vertex_property_extraction() {
         test_dual!(
@@ -156,6 +158,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn empty_result_when_child_filters_everything_out() {
         // vadas (id 2) has no out-edges, so `local(outE().limit(1))` yields nothing for it.

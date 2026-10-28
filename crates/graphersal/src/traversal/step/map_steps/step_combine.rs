@@ -19,6 +19,7 @@ list_function_builders!(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn appends_a_constant_and_keeps_duplicates() {
         test_dual!(
@@ -31,6 +32,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_traversal_argument_is_its_first_result() {
         test_dual!(
@@ -50,6 +52,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_path_is_a_list() {
         test_dual!(
@@ -60,6 +63,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn vertices_stay_vertices() {
         test_dual!(
@@ -76,6 +80,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn rejects_null_and_non_lists() {
         test_dual_err!(

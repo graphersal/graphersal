@@ -7,9 +7,11 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use graphersal::catalog::{Definition, DefinitionKind, QueryDefinition};
+#[cfg(feature = "serde")]
+use graphersal::changes::EdgeState;
 use graphersal::changes::{
-    ChangeSet, CommitHook, CommitMetadata, EdgeState, ElementRef, HookError, Mutation,
-    RollbackReason, VertexState,
+    ChangeSet, CommitHook, CommitMetadata, ElementRef, HookError, Mutation, RollbackReason,
+    VertexState,
 };
 use graphersal::error::{DiagnosticError, GraphError};
 use graphersal::persist::{Durability, Journal};

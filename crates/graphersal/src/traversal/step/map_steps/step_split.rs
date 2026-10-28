@@ -266,6 +266,7 @@ mod tests {
         assert_eq!(strings(split_text("", Some(""))), [""]);
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn global_split_keeps_null() {
         test_dual!(
@@ -279,6 +280,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn null_separator_splits_on_whitespace() {
         test_dual!(
@@ -289,6 +291,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn local_split_maps_each_element() {
         test_dual!(
@@ -318,6 +321,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn rejects_non_strings() {
         test_dual_err!(

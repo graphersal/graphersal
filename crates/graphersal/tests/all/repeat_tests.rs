@@ -5,6 +5,7 @@
 //! Expected results are those of TinkerPop 3.7 on the modern graph, compared as multisets unless
 //! a test pins the documented order.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;

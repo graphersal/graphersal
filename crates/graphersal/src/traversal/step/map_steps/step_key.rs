@@ -91,6 +91,7 @@ mod tests {
     /// `g.V().properties().key()`: the correct multiset of vertex property
     /// key names across all six `tinkerpop_modern` vertices — four `person`s (`name`, `age`
     /// each) and two `software`s (`name`, `lang` each): six `name`s, four `age`s, two `lang`s.
+    #[cfg(feature = "script")]
     #[test]
     fn v_all_keys() {
         test_dual!(

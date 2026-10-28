@@ -6,6 +6,7 @@
 //! This engine's modern graph numbers its edges from `0`, so TinkerPop's edge `7` (marko knows
 //! vadas, `weight` 0.5) is edge `"0"` here.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;

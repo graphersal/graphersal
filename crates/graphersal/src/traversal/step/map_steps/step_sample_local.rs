@@ -78,6 +78,7 @@ mod tests {
     use super::*;
     use crate::value::Scope;
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_scalar_passes_through() {
         test_dual!(
@@ -88,6 +89,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn samples_a_list() {
         test_dual!(
@@ -102,6 +104,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_short_list_and_a_map() {
         test_dual!(

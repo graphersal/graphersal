@@ -233,6 +233,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_has_not_age() {
         test_dual!(
@@ -247,6 +248,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_has_not_wrong_key() {
         test_dual!(
@@ -260,6 +262,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_has_not_weight() {
         test_dual!(
@@ -273,6 +276,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -295,10 +299,12 @@ mod tests {
         assert!(result.to_string().contains("has_not(\"age\")"));
     }
 
+    #[cfg(feature = "script")]
     fn obj_a1() -> ElementProperty {
         ElementProperty::from_entries(vec![(ElementProperty::from("a"), ElementProperty::from(1))])
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn nested_vertex_property_key_is_checked_inside_an_object_value() {
         // d1.meta = {a, b}, d2.meta = {b}: only d2's meta lacks the nested key `a`.
@@ -316,6 +322,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn nested_edge_property_key_is_checked_inside_an_object_value() {
         test_dual!(
@@ -338,6 +345,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_scalar_property_value_has_no_nested_keys_and_is_a_cast_error() {
         test_dual_err!(
@@ -360,6 +368,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn maps_keep_or_drop_by_their_keys() {
         // valueMap() (a record) and project() / inject() (objects) are filtered by their keys.
@@ -392,6 +401,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn non_element_inputs_are_cast_errors() {
         test_dual_err!(

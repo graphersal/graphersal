@@ -1,3 +1,5 @@
+#![cfg(feature = "io")]
+
 use graphersal::GraphSource;
 use graphersal::prelude::*;
 

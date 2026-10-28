@@ -550,6 +550,7 @@ mod tests {
     /// `GroupCountStep`, seed: an empty map): an empty input stream still reduces to `{}`, not
     /// nothing (confirmed via `graphersal`: `g.V().hasLabel("nope").group()` → `#{}`). A fused
     /// `count()` must then read `1`.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_group_reduces_to_an_empty_map() {
         test_dual!(
@@ -569,6 +570,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_group_count_is_one() {
         test_dual!(
@@ -582,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_group_count_step_reduces_to_an_empty_map() {
         test_dual!(
@@ -606,6 +609,7 @@ mod tests {
     /// the barrier's own empty seed (`[]`) — TinkerPop keeps the key; dropping it was the bug.
     /// `software` vertices have no `age`, so `values("age")` produces nothing for them and
     /// `fold()` (fixed by this task) seeds `[]` for that key instead of the key vanishing.
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_by_values_fold_keeps_the_unproductive_key_as_an_empty_list() {
         test_dual!(
@@ -629,6 +633,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_label_id() {
         test_dual!(
@@ -666,6 +671,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_label_where_id_fold() {
         test_dual!(
@@ -703,6 +709,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_count() {
         test_dual!(
@@ -724,6 +731,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_age_count() {
         test_dual!(
@@ -744,6 +752,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_last_count() {
         test_dual!(
@@ -760,6 +769,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_where_count() {
         test_dual!(
@@ -781,6 +791,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_group_count_by_label() {
         test_dual!(
@@ -802,6 +813,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_default_value() {
         test_dual!(
@@ -825,6 +837,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_label_by_property() {
         test_dual!(
@@ -857,6 +870,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_by_name_by_id() {
         test_dual!(
@@ -880,6 +894,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_group_count_default() {
         test_dual!(
@@ -906,6 +921,7 @@ mod tests {
 
     /// Equal property values read from different vertices form one group: the key is the value,
     /// not the per-vertex property handle (`lop` and `ripple` both have `lang: "java"`).
+    #[cfg(feature = "script")]
     #[test]
     fn v_group_count_merges_equal_values_from_different_vertices() {
         test_dual!(

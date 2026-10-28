@@ -1,13 +1,16 @@
 //! Bounded rendering: `RenderOptions::max_rows` / `max_items` limit what a visualizer renders,
 //! never the data, and report every cut in `RenderedOutput::truncation`, never in the text.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(all(feature = "script", feature = "display"))]
 use crate::script_host::rhai::Dynamic;
 use graphersal::exec::RenderOptions;
 use graphersal::prelude::*;
 
 /// Rows of a rounded `tabled` table: every line that starts with a cell border, minus the header.
+#[cfg(feature = "display")]
 fn table_rows(table: &str) -> usize {
     table
         .lines()
@@ -20,6 +23,7 @@ fn rows(n: usize) -> RenderOptions {
     RenderOptions::new().with_max_rows(n)
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn max_rows_on_a_large_graph_renders_exactly_max_rows() {
     let graph = GraphSource::large_110k();
@@ -40,6 +44,7 @@ fn max_rows_on_a_large_graph_renders_exactly_max_rows() {
     );
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn exactly_max_rows_results_are_not_truncated() {
     let graph = TraversalGraph::tinkerpop_modern();
@@ -62,6 +67,7 @@ fn exactly_max_rows_results_are_not_truncated() {
     assert_eq!(truncation.rows_shown, 5);
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn a_mutating_traversal_updates_every_element_and_only_the_output_is_cut() {
     let mut graph = TraversalGraph::tinkerpop_modern();
@@ -84,6 +90,8 @@ fn a_mutating_traversal_updates_every_element_and_only_the_output_is_cut() {
     assert_eq!(updated.and_then(|c| c.as_i64()), Some(6));
 }
 
+#[cfg(feature = "display")]
+#[cfg(feature = "script")]
 #[test]
 fn a_nested_mutation_in_a_script_updates_every_element() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -100,6 +108,8 @@ fn a_nested_mutation_in_a_script_updates_every_element() {
     assert_eq!(count.as_int().unwrap(), 6);
 }
 
+#[cfg(feature = "display")]
+#[cfg(feature = "script")]
 #[test]
 fn max_items_cuts_nested_collections_at_every_depth() {
     let graph = TraversalGraph::tinkerpop_modern();
@@ -139,6 +149,7 @@ fn max_items_cuts_nested_collections_at_every_depth() {
     assert!(rendered.truncation.expect("cut").items_cut);
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn max_items_cuts_a_huge_single_group_row() {
     let graph = GraphSource::large_110k();
@@ -161,6 +172,7 @@ fn max_items_cuts_a_huge_single_group_row() {
     assert!(truncation.items_cut && !truncation.more_rows);
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn bounded_json_parses_and_has_max_rows_elements_without_markers() {
     let graph = TraversalGraph::tinkerpop_modern();
@@ -198,6 +210,7 @@ fn bounded_json_parses_and_has_max_rows_elements_without_markers() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn a_schema_and_a_profile_are_not_bounded() {
     let graph = TraversalGraph::tinkerpop_modern();
@@ -225,6 +238,8 @@ fn a_schema_and_a_profile_are_not_bounded() {
     assert_eq!(rendered.truncation, None);
 }
 
+#[cfg(feature = "display")]
+#[cfg(feature = "serde")]
 #[test]
 fn unlimited_output_is_identical_to_the_unbounded_visualizers() {
     let graph = TraversalGraph::tinkerpop_modern();

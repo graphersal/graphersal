@@ -6,6 +6,7 @@
 use graphersal::prelude::PropertyMap;
 use graphersal::prelude::*;
 
+#[cfg(feature = "script")]
 use crate::script_host::eval_value;
 
 fn person(
@@ -54,6 +55,7 @@ fn a_new_key_order_is_a_new_shape_and_shrink_releases_unused_ones() {
     assert!(graph.memory_usage().unwrap().unwrap().shape_bytes < two);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn the_rhai_memory_map_reports_shape_bytes() {
     let graph = std::sync::Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));

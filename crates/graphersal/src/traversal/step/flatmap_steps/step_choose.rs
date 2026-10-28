@@ -792,6 +792,7 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn choose_if_then_else() {
         test_dual!(
@@ -815,6 +816,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn choose_switch_with_default() {
         test_dual!(
@@ -839,6 +841,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn choose_switch_no_match_passes_traverser_through() {
         // Step 3c changed the meaning of this test (it used to assert a drop): with no matching
@@ -861,6 +864,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn choose_first_match_wins() {
         // Two options with the same token: choose() takes only the first (at-most-one, unlike

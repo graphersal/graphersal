@@ -128,6 +128,7 @@ mod tests {
     /// an empty input stream still folds to `[]`, not nothing (confirmed via `graphersal`:
     /// `g.V().hasLabel("nope").fold()` → `[]`). A fused `count()` must then read `1`, matching
     /// `.to_list().len()`.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_folds_to_an_empty_list() {
         test_dual!(
@@ -149,6 +150,7 @@ mod tests {
 
     /// The fused `count()` on an empty-seeded `fold()` must equal `.to_list().len()` (`1`), not
     /// `0` — the same consistency the count-pushdown rules keep for `group()`/`tree()`.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_fold_count_is_one() {
         test_dual!(
@@ -162,6 +164,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -175,6 +178,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_id() {
         test_dual!(
@@ -200,6 +204,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(
@@ -213,6 +218,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_values() {
         test_dual!(

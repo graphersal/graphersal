@@ -240,6 +240,7 @@ fn rebuild_record<S: GraphStorage>(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn list_by_age() {
         test_dual!(
@@ -256,6 +257,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn scalar_passes_through() {
         test_dual!(

@@ -216,6 +216,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepDedupLocal {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn list_first_occurrence_wins() {
         test_dual!(
@@ -250,6 +251,7 @@ mod tests {
     }
 
     /// The modern graph with marko's `tags = [1, 2, 1, 3, 2]`.
+    #[cfg(feature = "script")]
     fn tagged() -> Graph {
         let graph = GraphSource::tinkerpop_modern();
         graph
@@ -262,6 +264,7 @@ mod tests {
         graph
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_stored_list_property_is_deduplicated() {
         test_dual!(
@@ -285,6 +288,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_non_list_passes_through_unchanged() {
         // TinkerPop's DedupLocalStep only touches collections
@@ -316,6 +320,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn global_dedup_by_labels_keys_by_the_labelled_objects() {
         test_dual!(

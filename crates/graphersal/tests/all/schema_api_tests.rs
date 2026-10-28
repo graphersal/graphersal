@@ -6,11 +6,13 @@
 use std::sync::Arc;
 
 use graphersal::auth::AccessPolicy;
-use graphersal::changes::{ChangeSet, Mutation};
+#[cfg(feature = "serde")]
+use graphersal::changes::ChangeSet;
+use graphersal::changes::Mutation;
 use graphersal::prelude::*;
-use graphersal::schema::{
-    JsonType, PropertySchema, SCHEMA_FORMAT_URL, SchemaChangeKind, SchemaDiff, SchemaPatch,
-};
+#[cfg(feature = "serde")]
+use graphersal::schema::SCHEMA_FORMAT_URL;
+use graphersal::schema::{JsonType, PropertySchema, SchemaChangeKind, SchemaDiff, SchemaPatch};
 use graphersal::storage::UnitChanges;
 
 use crate::schema_support::{props, schema};

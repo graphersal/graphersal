@@ -8,6 +8,7 @@
 //! queries that call each other (effects, dialect, the catalog check at save time).
 #![cfg(feature = "gql")]
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::catalog::{

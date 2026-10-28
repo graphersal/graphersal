@@ -164,6 +164,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffect<'g, S> for StepStore<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(
@@ -183,6 +184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn by_name() {
         test_dual!(
@@ -205,6 +207,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn passthrough_does_not_filter() {
         test_dual!(
@@ -245,6 +248,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_within_side_effect_matches() {
         test_dual!(

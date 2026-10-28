@@ -101,6 +101,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepCoalesce<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple() {
         test_dual!(
@@ -118,6 +119,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple_1() {
         test_dual!(

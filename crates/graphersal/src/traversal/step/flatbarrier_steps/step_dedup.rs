@@ -428,6 +428,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepDedup<'g, S> 
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -461,6 +462,7 @@ mod tests {
     /// paths converging on the same vertex (`union(both(), both())` from `marko`, each branch
     /// reaching `vadas`/`josh`/`lop`) must key by vertex identity and keep exactly one survivor
     /// per distinct vertex, unaffected by the switch away from full property materialization.
+    #[cfg(feature = "script")]
     #[test]
     fn identity_keyed_dedup_on_converging_vertex_paths() {
         test_dual!(
@@ -489,6 +491,7 @@ mod tests {
     /// D1 regression: the same convergence, but on an `Edge` stream (`bothE()` from two branches
     /// landing on the same edges), must key by edge identity rather than materializing each
     /// edge's properties.
+    #[cfg(feature = "script")]
     #[test]
     fn identity_keyed_dedup_on_converging_edge_paths() {
         test_dual!(
@@ -509,6 +512,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn labels() {
         test_dual!(

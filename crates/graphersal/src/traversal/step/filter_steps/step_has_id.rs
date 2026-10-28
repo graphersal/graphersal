@@ -101,6 +101,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasId {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -114,6 +115,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where() {
         test_dual!(
@@ -127,6 +129,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_where_inner() {
         test_dual!(
@@ -140,6 +143,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_wrong() {
         test_dual!(
@@ -153,6 +157,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_multiply() {
         test_dual!(
@@ -166,6 +171,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_multiply_2() {
         test_dual!(
@@ -179,6 +185,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(
@@ -192,6 +199,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_where() {
         test_dual!(
@@ -205,6 +213,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_where_inner() {
         test_dual!(
@@ -218,6 +227,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_wrong() {
         test_dual!(
@@ -231,6 +241,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_multiply() {
         test_dual!(
@@ -244,6 +255,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_multiply_2() {
         test_dual!(

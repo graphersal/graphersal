@@ -1,17 +1,21 @@
 //! Integration tests for `mergeE()` with `option(Merge.onCreate|onMatch|outV|inV, ..)`, in the
 //! Rust API and in the Rhai DSL (both spellings).
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::{eval_value, rhai::Dynamic};
 use graphersal::prelude::*;
 
 /// An empty graph for the DSL.
+#[cfg(feature = "script")]
 fn empty() -> Arc<Graph> {
     Arc::new(Graph::new(TraversalGraph::new()))
 }
 
 /// Two persons: marko (id "1") and vadas (id "2"), no edges.
+#[cfg(feature = "script")]
 fn two() -> Arc<Graph> {
     let graph = empty();
     let _ = eval_value(
@@ -23,6 +27,7 @@ fn two() -> Arc<Graph> {
 }
 
 /// [`two`] plus two `knows` edges from marko to vadas, the first with `created: "Y"`.
+#[cfg(feature = "script")]
 fn two_knows() -> Arc<Graph> {
     let graph = two();
     let _ = eval_value(
@@ -34,6 +39,7 @@ fn two_knows() -> Arc<Graph> {
 }
 
 /// The script once with `mergeE` and once with `merge_e`, each on a fresh graph from `graph`.
+#[cfg(feature = "script")]
 fn both(graph: fn() -> Arc<Graph>, script: &str, check: impl Fn(&Arc<Graph>, Dynamic)) {
     for spelling in [script.to_string(), script.replace("mergeE", "merge_e")] {
         let g = graph();
@@ -44,6 +50,7 @@ fn both(graph: fn() -> Arc<Graph>, script: &str, check: impl Fn(&Arc<Graph>, Dyn
 }
 
 /// The error of `script`, in both spellings (they must agree).
+#[cfg(feature = "script")]
 fn both_err(graph: fn() -> Arc<Graph>, script: &str) -> String {
     let mut messages = Vec::new();
     for spelling in [script.to_string(), script.replace("mergeE", "merge_e")] {
@@ -60,10 +67,12 @@ fn both_err(graph: fn() -> Arc<Graph>, script: &str) -> String {
     messages.remove(0)
 }
 
+#[cfg(feature = "script")]
 fn int(graph: &Arc<Graph>, script: &str) -> i64 {
     eval_value(graph.clone(), script).unwrap().as_int().unwrap()
 }
 
+#[cfg(feature = "script")]
 fn len(value: Dynamic) -> usize {
     value.into_array().unwrap().len()
 }
@@ -306,6 +315,7 @@ fn rust_schema_enforcement_applies_to_created_edges() {
 
 // ---- DSL ------------------------------------------------------------------------------------
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_creates_then_matches_the_same_edge() {
     both(
@@ -321,6 +331,7 @@ fn dsl_creates_then_matches_the_same_edge() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_out_v_in_v_options() {
     // select() options, map options, and the Merge::outV spelling all find the same edge.
@@ -351,6 +362,7 @@ fn dsl_out_v_in_v_options() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_one_self_loop_per_vertex() {
     let script = r#"g.V().as("v").mergeE(#{"T.label": "self", "Direction.OUT": Merge.outV, "Direction.IN": Merge.inV}).option(Merge.outV, __.select("v")).option(Merge.inV, __.select("v")).toList()"#;
@@ -373,6 +385,7 @@ fn dsl_one_self_loop_per_vertex() {
     });
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_merge_v_then_merge_e() {
     let script = r#"g.mergeV(#{"name": "marko", "T.label": "person"}).as("outV").mergeV(#{"name": "vadas", "T.label": "person"}).as("inV").mergeE(#{"Direction.OUT": Merge.outV, "Direction.IN": Merge.inV, "T.label": "knows"}).option(Merge.outV, __.select("outV")).option(Merge.inV, __.select("inV")).toList()"#;
@@ -392,6 +405,7 @@ fn dsl_merge_v_then_merge_e() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_create_sets_the_edge_id() {
     both(
@@ -412,6 +426,7 @@ fn dsl_on_create_sets_the_edge_id() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_mid_traversal_matches_every_edge() {
     // The incoming vertex is no implicit endpoint: the one marko traverser matches both knows
@@ -433,6 +448,7 @@ fn dsl_mid_traversal_matches_every_edge() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_match_traversal_receives_the_matched_edge() {
     both(
@@ -445,6 +461,7 @@ fn dsl_on_match_traversal_receives_the_matched_edge() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_errors() {
     for script in [r#"g.mergeE(#{}).toList()"#, r#"g.mergeE(()).toList()"#] {
@@ -531,6 +548,7 @@ fn dsl_errors() {
     assert_eq!(int(&two(), "g.E().count().next()"), 0);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_override_is_eager_for_constants_and_lazy_for_traversals() {
     // Both maps constant: fails although an edge matches.
@@ -559,6 +577,7 @@ fn dsl_override_is_eager_for_constants_and_lazy_for_traversals() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_invalid_constant_map_fails_before_execution() {
     // No traverser reaches the step, the problem is still reported.
@@ -580,6 +599,7 @@ fn dsl_invalid_constant_map_fails_before_execution() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_merge_e_without_argument_merges_injected_maps() {
     both(
@@ -592,6 +612,7 @@ fn dsl_merge_e_without_argument_merges_injected_maps() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_profile_shows_the_lookup() {
     let g = two_knows();
@@ -632,6 +653,7 @@ fn dsl_profile_shows_the_lookup() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_select_in_options_records_the_labels() {
     let profile = eval_value(
@@ -648,6 +670,7 @@ fn dsl_select_in_options_records_the_labels() {
     assert!(profile.contains(r#"\> select("x")"#), "{profile}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_count_still_mutates() {
     both(

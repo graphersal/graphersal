@@ -5,7 +5,7 @@
 //! edges, a self-loop) the rows are compared with every trail a brute-force walk enumerates.
 //! Reaching `repeat.max_loops` or `traversal.max_traversers` is an error, never a cut result
 //! (design D14), and the plan records labels only, never a full path.
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "gql", feature = "script"))]
 
 use std::sync::Arc;
 

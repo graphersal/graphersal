@@ -128,7 +128,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLoops {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

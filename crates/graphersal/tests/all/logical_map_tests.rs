@@ -110,6 +110,7 @@ fn get_str_reads_string_keys_only() {
     assert_eq!(map.get(&int(29)), Some(&int(1)));
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn lowers_to_a_graphson_map() {
     let json = graphersal::ElementProperty::from_entries([(int(29), int(1)), (text("a"), int(2))]);
@@ -156,6 +157,7 @@ fn renders_with_typed_keys_in_a_table_and_the_console_form() {
     );
 }
 
+#[cfg(feature = "display")]
 #[test]
 fn a_string_and_a_number_with_the_same_text_stay_separate_columns() {
     let map = ElementProperty::from_entries([(int(29), int(1)), (text("29"), int(2))]);

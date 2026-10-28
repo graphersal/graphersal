@@ -500,12 +500,14 @@ mod tests {
     use super::*;
 
     /// A one-element list holding `value`, the shape `valueMap()` gives every property.
+    #[cfg(feature = "script")]
     fn list(value: impl Into<ElementProperty>) -> ElementProperty {
         ElementProperty::Array(vec![value.into()])
     }
 
     /// `g.V("1").valueMap("name", "age")`: the correct key -> value-list dict, with `id`/`label`
     /// excluded and each value wrapped in a one-element list (TinkerPop's cardinality shape).
+    #[cfg(feature = "script")]
     #[test]
     fn person_value_map_excludes_id_label_list_wrapped() {
         test_dual!(
@@ -530,6 +532,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn value_map_no_args_returns_all_properties() {
         test_dual!(
@@ -552,6 +555,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn edge_value_map() {
         test_dual!(
@@ -575,6 +579,7 @@ mod tests {
 
     /// `valueMap().by(__.unfold())` (TinkerPop 3.4+): the `by()` traversal runs on each value
     /// list, so `unfold()` yields the plain values.
+    #[cfg(feature = "script")]
     #[test]
     fn by_unfold_unwraps_values() {
         test_dual!(

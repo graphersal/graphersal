@@ -1,11 +1,14 @@
 //! Integration tests for TinkerPop 3.8's `to(Direction, labels)`, `toE(Direction, labels)` and
 //! `toV(Direction)`, in the Rust API (`to_direction`/`to_e`/`to_v`) and both DSL spellings.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::eval_value;
 use graphersal::prelude::*;
 
+#[cfg(feature = "script")]
 fn sorted(script: &str) -> Vec<String> {
     let mut out: Vec<String> = eval_value(Arc::new(GraphSource::tinkerpop_modern()), script)
         .unwrap()
@@ -64,6 +67,7 @@ fn rust_equals_the_direction_specific_steps() {
     assert_eq!(anon.len(), 2);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_to() {
     assert_eq!(
@@ -88,6 +92,7 @@ fn dsl_to() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_to_e_both_spellings() {
     for step in ["toE", "to_e"] {
@@ -112,6 +117,7 @@ fn dsl_to_e_both_spellings() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_to_v_both_spellings() {
     let out = sorted(r#"g.E().outV().values("name").toList()"#);
@@ -136,6 +142,7 @@ fn dsl_to_v_both_spellings() {
     }
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_to_still_modulates_add_e() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -153,6 +160,7 @@ fn dsl_to_still_modulates_add_e() {
     assert_eq!(names[0].to_string(), "vadas");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_to_with_a_non_direction_first_argument_is_a_missing_overload() {
     let err = eval_value(

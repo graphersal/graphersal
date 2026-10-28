@@ -5,7 +5,9 @@
 //! the same behavior through `UUID.fromString(..)` and its other spellings.
 
 use graphersal::prelude::*;
-use graphersal::schema::{PropertySchema, ValueType, type_of};
+#[cfg(feature = "serde")]
+use graphersal::schema::PropertySchema;
+use graphersal::schema::{ValueType, type_of};
 
 const UID_1: &str = "550e8400-e29b-41d4-a716-446655440000";
 const UID_2: &str = "00000000-0000-0000-0000-00000000000a";

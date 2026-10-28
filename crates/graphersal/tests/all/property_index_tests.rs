@@ -1930,6 +1930,7 @@ mod index_types {
         store.close().unwrap();
     }
 
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
     fn run_on(graph: &Arc<Graph>, script: &str) {
         ok(graph, script);
     }

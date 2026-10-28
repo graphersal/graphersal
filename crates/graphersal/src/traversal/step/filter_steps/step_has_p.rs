@@ -393,6 +393,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -406,6 +407,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -419,6 +421,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -432,6 +435,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_1() {
         test_dual!(
@@ -445,6 +449,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_select() {
         test_dual!(
@@ -459,6 +464,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_within() {
         test_dual!(
@@ -490,11 +496,13 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     use crate::traversal::test_utils::nested_doc_graph;
 
     /// `has(key, P)` on an object-valued property tests the NESTED value, as the literal form
     /// `has(key, value)` does, never the element's top-level property of that name: d1 has
     /// `meta.a = 1` and a top-level `a = 100`.
+    #[cfg(feature = "script")]
     #[test]
     fn nested_key_of_an_object_valued_vertex_property_is_tested() {
         test_dual!(
@@ -527,6 +535,7 @@ mod tests {
     }
 
     /// Edge counterpart of the test above: the edge has `info.w = 2` and a top-level `w = 200`.
+    #[cfg(feature = "script")]
     #[test]
     fn nested_key_of_an_object_valued_edge_property_is_tested() {
         test_dual!(
@@ -555,6 +564,7 @@ mod tests {
 
     /// A predicate that compares (`gt`, `within`, a text predicate) sees the nested value too, on
     /// the property element.
+    #[cfg(feature = "script")]
     #[test]
     fn nested_key_with_comparing_and_text_predicates() {
         test_dual!(
@@ -574,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_missing_nested_key_filters_out_and_a_scalar_value_is_a_cast_error() {
         test_dual!(
@@ -608,6 +619,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn edges_and_maps_are_tested_by_key() {
         test_dual!(
@@ -663,6 +675,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn non_element_inputs_are_cast_errors() {
         test_dual_err!(

@@ -87,6 +87,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepCoin {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn zero() {
         test_dual!(
@@ -100,6 +101,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -113,6 +115,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -126,6 +129,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn one() {
         test_dual!(
@@ -161,6 +165,7 @@ mod tests {
         assert!((1..20).any(|seed| run(seed) != first));
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn integer_probability_in_the_dsl() {
         test_dual!(

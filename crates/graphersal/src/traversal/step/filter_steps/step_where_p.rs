@@ -294,6 +294,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_name() {
         test_dual!(
@@ -307,6 +308,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -320,6 +322,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -333,6 +336,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_str() {
         test_dual!(
@@ -346,6 +350,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_str_wrong() {
         test_dual!(
@@ -359,6 +364,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_eq() {
         test_dual!(
@@ -372,6 +378,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_neq() {
         test_dual!(
@@ -385,6 +392,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_count_neq_wrong() {
         test_dual!(

@@ -126,6 +126,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepAppend<'g, S> for StepInject {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn string() {
         test_dual!(
@@ -141,6 +142,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -157,6 +159,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(
@@ -173,6 +176,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn i64() {
         test_dual!(
@@ -188,6 +192,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn f64() {
         test_dual!(
@@ -203,6 +208,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn two_string() {
         test_dual!(
@@ -219,6 +225,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string() {
         test_dual!(

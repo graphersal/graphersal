@@ -1879,6 +1879,7 @@ fn step_table_covers_gql() {
 /// A case's files stay in its own temporary directory: a relative name is written there, a path
 /// that leaves it is denied with a located diagnostic (so the denial is no finding), and nothing
 /// reaches the working directory.
+#[cfg(feature = "io")]
 #[test]
 fn case_files_stay_in_the_temporary_directory() {
     let watchdog = Duration::from_secs(60);

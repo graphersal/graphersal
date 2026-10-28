@@ -1443,9 +1443,10 @@ mod script_atomic {
     use std::sync::Arc;
 
     use crate::script_host::rhai::Dynamic;
-    use crate::script_host::{
-        ScriptGraphTraversalSource, ScriptLimits, eval_value, eval_value_atomic, render_value,
-    };
+    #[cfg(feature = "display")]
+    use crate::script_host::{ScriptGraphTraversalSource, render_value};
+    use crate::script_host::{ScriptLimits, eval_value, eval_value_atomic};
+    #[cfg(feature = "display")]
     use graphersal::exec::RenderOptions;
     use graphersal::prelude::*;
 
@@ -1546,6 +1547,7 @@ mod script_atomic {
         assert_eq!(graph.read().vertex_count(), 6);
     }
 
+    #[cfg(feature = "display")]
     #[test]
     fn a_returned_traversal_runs_against_the_real_graph_after_the_commit() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());

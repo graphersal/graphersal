@@ -218,6 +218,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepLength {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_string() {
         test_dual!(
@@ -231,6 +232,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -244,6 +246,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -266,6 +269,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_label() {
         test_dual!(
@@ -279,6 +283,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_label() {
         test_dual!(

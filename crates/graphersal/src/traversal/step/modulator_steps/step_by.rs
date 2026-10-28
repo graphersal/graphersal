@@ -254,6 +254,7 @@ mod tests {
     }
 
     /// `T.value` reads a property element, a jpath property and a map entry.
+    #[cfg(feature = "script")]
     #[test]
     fn t_value_reads_property_elements_and_entries() {
         test_dual!(
@@ -292,6 +293,7 @@ mod tests {
 
     /// `T.value` of a value that is not a property element or an entry is a cast error, as in
     /// TinkerPop: a vertex, a computed number and a lazily read `values()` result alike.
+    #[cfg(feature = "script")]
     #[test]
     fn t_value_of_a_plain_value_is_an_error() {
         test_dual_err!(
@@ -345,6 +347,7 @@ mod tests {
 
     /// `group()` without a `by()` keys by the incoming value itself ([`By::Identity`]), which
     /// is not the strict `T.value`.
+    #[cfg(feature = "script")]
     #[test]
     fn group_without_by_keys_by_the_value_itself() {
         test_dual!(

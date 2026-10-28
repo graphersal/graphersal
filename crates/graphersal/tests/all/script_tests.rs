@@ -198,6 +198,7 @@ mod tests {
 
     /// Rule 3: `remove_property(jpath(..))` / `remove_property(..)` mutate through the DSL, with a
     /// terminal and as a bare (rendered) traversal; a missing path is a no-op, not an error.
+    #[cfg(feature = "serde")]
     #[test]
     fn test_script_eval_remove_property_jpath_mutations() {
         let graph = Arc::new(GraphSource::empty());
@@ -2105,6 +2106,7 @@ mod tests {
         assert!(res.is_ok(), "set_visualizer failed: {:?}", res.err());
     }
 
+    #[cfg(feature = "display")]
     #[test]
     fn test_script_eval_table_visualization() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -3578,6 +3580,7 @@ mod tests {
 mod uuid_values {
     use crate::script_host::{eval_value, eval_with_params, rhai::Dynamic};
     use graphersal::prelude::*;
+    #[cfg(feature = "serde")]
     use graphersal::schema::PropertySchema;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -4704,6 +4707,7 @@ mod typed_list_tests {
     }
 }
 
+#[cfg(feature = "script")]
 mod reserved_param_names {
     use std::collections::HashMap;
     use std::sync::Arc;

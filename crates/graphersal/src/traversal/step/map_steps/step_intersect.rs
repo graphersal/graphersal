@@ -15,7 +15,7 @@ list_function_builders!(
      assert_eq!(common, ElementProperty::from(vec![27]));"
 );
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

@@ -1,9 +1,12 @@
 //! Integration tests for `property(T.id, v)` / `property(T.label, v)` folded into the preceding
 //! `addV()`/`addE()`, and for `addE()`'s self-loop default.
 
+#[cfg(feature = "script")]
 use std::collections::HashMap;
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::{eval_value, eval_value_with_params};
 use graphersal::prelude::*;
 
@@ -11,10 +14,12 @@ fn one() -> Option<ElementProperty> {
     Some(ElementProperty::from(1))
 }
 
+#[cfg(feature = "script")]
 fn empty() -> Arc<Graph> {
     Arc::new(Graph::new(TraversalGraph::new()))
 }
 
+#[cfg(feature = "script")]
 fn script_int(graph: &Arc<Graph>, script: &str) -> i64 {
     eval_value(graph.clone(), script).unwrap().as_int().unwrap()
 }
@@ -249,6 +254,7 @@ fn add_e_as_a_start_step_still_needs_endpoints() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn rhai_token_forms() {
     let graph = empty();
@@ -287,6 +293,7 @@ fn rhai_token_forms() {
     assert!(err.is_err());
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn rhai_token_forms_with_parameters() {
     let graph = empty();

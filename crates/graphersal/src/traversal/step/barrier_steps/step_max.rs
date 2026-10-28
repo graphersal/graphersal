@@ -72,6 +72,7 @@ mod tests {
     /// TinkerPop 3.7's `max()` is a seedless reducing barrier (`MaxGlobalStep`): an empty (or
     /// all-null) numeric stream emits nothing at all, not an error (confirmed via `graphersal`:
     /// `g.V().hasLabel("nope").values("age").max()` produces no rows).
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_emits_nothing() {
         test_dual!(
@@ -85,6 +86,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v() {
         test_dual!(
@@ -98,6 +100,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -111,6 +114,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(
@@ -124,6 +128,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e() {
         test_dual!(

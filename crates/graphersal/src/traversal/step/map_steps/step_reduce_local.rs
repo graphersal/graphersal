@@ -339,6 +339,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepReduceLocal {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn sum_fold() {
         test_dual!(
@@ -352,6 +353,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn sum_empty_list_emits_nothing() {
         test_dual!(
@@ -365,6 +367,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn min_max_fold() {
         test_dual!(
@@ -387,6 +390,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn mean_scalar_is_double() {
         test_dual!(
@@ -416,6 +420,7 @@ mod tests {
     }
 
     /// The modern graph with marko's `tags = [4, 2, 6]` and edge 0's `ws = [0.5, 1.5]`.
+    #[cfg(feature = "script")]
     fn listed() -> Graph {
         let graph = GraphSource::tinkerpop_modern();
         {
@@ -434,6 +439,7 @@ mod tests {
         graph
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn stored_list_properties_reduce_in_place() {
         for (kind, expected) in [
@@ -476,6 +482,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_scalar_reduces_to_itself_and_a_child_traversal_reduces_its_list() {
         test_dual!(
@@ -514,6 +521,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn an_empty_list_drops_the_traverser_and_a_path_with_an_element_fails() {
         test_dual!(

@@ -149,10 +149,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepIndex {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     fn pair(item: ElementProperty, position: i64) -> ElementProperty {
         ElementProperty::Array(vec![item, position.into()])
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn indexes_a_list() {
         test_dual!(
@@ -177,6 +179,7 @@ mod tests {
     }
 
     /// A non-collection is a one-element collection.
+    #[cfg(feature = "script")]
     #[test]
     fn indexes_a_scalar_and_an_element() {
         test_dual!(
@@ -193,6 +196,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn indexes_map_entries() {
         test_dual!(

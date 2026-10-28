@@ -374,6 +374,7 @@ fn runs_count_under_their_normalized_plan() {
     assert_eq!((mcp.2.count, mcp.2.failed), (1, 1));
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn a_saved_query_call_counts_under_its_name() {
     use std::sync::Arc;
@@ -404,6 +405,7 @@ fn a_saved_query_call_counts_under_its_name() {
 // ---------------------------------------------------------------------------------------------
 
 /// `(element, label, key, access, executions, items)` of every property series, sorted.
+#[cfg(feature = "script")]
 fn property_uses(store: &Store) -> Vec<(String, String, String, String, u64, u64)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -430,17 +432,20 @@ fn property_uses(store: &Store) -> Vec<(String, String, String, String, u64, u64
     out
 }
 
+#[cfg(feature = "script")]
 fn run_script(store: &Store, script: &str) {
     let _ = crate::script_host::eval_value(store.graph().clone(), script)
         .unwrap_or_else(|err| panic!("{script}: {err}"));
 }
 
+#[cfg(feature = "script")]
 fn uses_of(store: &Store, script: &str) -> Vec<(String, String, String, String, u64, u64)> {
     store.workload_stats().clear(None);
     run_script(store, script);
     property_uses(store)
 }
 
+#[cfg(feature = "script")]
 fn row(
     e: &str,
     l: &str,
@@ -452,6 +457,7 @@ fn row(
     (e.into(), l.into(), k.into(), a.into(), n, items)
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn filters_and_reads_count_per_label_and_key() {
     let dir = MemDir::named("memory:props");
@@ -493,6 +499,7 @@ fn filters_and_reads_count_per_label_and_key() {
     assert_eq!(uses, [row("*", "*", "lang", "filter_scan", 1, 0)]);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn an_index_served_filter_and_writes_count_as_such() {
     let dir = MemDir::named("memory:props-index");
@@ -531,6 +538,7 @@ fn an_index_served_filter_and_writes_count_as_such() {
 
 /// Every step that takes a property key declares how it uses it (a new key-taking step needs a
 /// `property_access` and a line here).
+#[cfg(feature = "script")]
 #[test]
 fn every_key_taking_step_declares_its_property_access() {
     let dir = MemDir::named("memory:props-coverage");
@@ -696,6 +704,7 @@ fn a_report_with_history_gives_the_buckets_of_the_tier() {
 
 /// A saved query called inside a whole-script unit (the playground runs every script as one)
 /// counts as `saved:<name>` too: the unit's private graph has no statistics of its own.
+#[cfg(feature = "script")]
 #[test]
 fn a_saved_query_call_inside_a_whole_script_unit_counts() {
     let dir = MemDir::named("memory:saved-in-unit");
@@ -722,6 +731,7 @@ fn a_saved_query_call_inside_a_whole_script_unit_counts() {
 /// The workload statistics' memory shows as `workload_bytes` in `g.memory_usage()` (beside the
 /// graph's own data: never part of `total_bytes`) and grows with the series; a graph without
 /// statistics reports 0.
+#[cfg(feature = "script")]
 #[test]
 fn the_statistics_memory_is_shown_beside_the_graph() {
     let dir = MemDir::named("memory:workload-memory");

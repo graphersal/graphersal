@@ -93,6 +93,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepOptional<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn is_false() {
         test_dual!(
@@ -106,6 +107,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn is_true() {
         test_dual!(

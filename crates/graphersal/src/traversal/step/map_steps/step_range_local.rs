@@ -297,10 +297,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepRangeLocal {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     fn names(values: &[&str]) -> ElementProperty {
         ElementProperty::Array(values.iter().map(|v| ElementProperty::from(*v)).collect())
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn limit_list_stays_list() {
         test_dual!(
@@ -314,6 +316,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn skip_list() {
         test_dual!(
@@ -327,6 +330,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn tail_list() {
         test_dual!(
@@ -340,6 +344,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn range_list_out_of_bounds_is_empty() {
         test_dual!(
@@ -353,6 +358,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn range_scalar_passes_through() {
         test_dual!(
@@ -400,6 +406,7 @@ mod tests {
         assert!(result.to_string().contains("limit(Scope.local, 2)"));
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn global_scope_with_a_negative_count() {
         // limit(-1) is TinkerPop's "no limit"
@@ -432,6 +439,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn anonymous_scoped_forms_in_child_traversals() {
         test_dual!(
@@ -511,6 +519,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_path_is_not_sliced_yet() {
         for (mode, rhai) in [

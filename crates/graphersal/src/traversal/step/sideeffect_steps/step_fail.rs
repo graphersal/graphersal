@@ -126,6 +126,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffect<'g, S> for StepFail {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn fails_with_the_default_message() {
         test_dual_err!(
@@ -136,6 +137,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn fails_with_the_message() {
         test_dual_err!(
@@ -147,6 +149,7 @@ mod tests {
     }
 
     /// Only a traverser that reaches the step fails the traversal.
+    #[cfg(feature = "script")]
     #[test]
     fn only_when_reached() {
         test_dual!(

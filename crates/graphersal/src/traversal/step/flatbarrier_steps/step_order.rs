@@ -155,6 +155,7 @@ mod tests {
 
     /// No `.by()`: natural ascending order over the traversers' own materialized value
     /// (`compare_element_property`'s defined order — numeric here, `age` values 27/29/32/35).
+    #[cfg(feature = "script")]
     #[test]
     fn no_by_natural_order() {
         test_dual!(
@@ -174,6 +175,7 @@ mod tests {
     /// A single `.by("age")` call, no second call at all: implicit ascending, one clause, one
     /// `push_modulator_by` invocation. Regression check that a genuinely single `.by(key)` call
     /// (not followed by a merging `.by(Order)`) still works after the `Option` -> `Vec` change.
+    #[cfg(feature = "script")]
     #[test]
     fn by_key_only_implicit_ascending() {
         test_dual!(
@@ -191,6 +193,7 @@ mod tests {
     }
 
     /// `.by("age", Order.asc)` — explicit ascending, property-keyed.
+    #[cfg(feature = "script")]
     #[test]
     fn by_age_asc() {
         test_dual!(
@@ -209,6 +212,7 @@ mod tests {
 
     /// `.by("age", Order.desc)` — explicit descending, property-keyed. Matches part 2's
     /// acceptance query.
+    #[cfg(feature = "script")]
     #[test]
     fn by_age_desc() {
         test_dual!(
@@ -227,6 +231,7 @@ mod tests {
 
     /// `.by(__.outE().count(), Order.desc)` — nested-traversal sort key, descending. `marko`
     /// (id "1") has 3 outgoing edges, `josh` (id "4") has 2, everyone else has 0.
+    #[cfg(feature = "script")]
     #[test]
     fn by_traversal_out_e_count_desc() {
         test_dual!(
@@ -257,6 +262,7 @@ mod tests {
     /// 4 (josh), 5 (ripple), 6 (peter); filtering to `person` gives input order
     /// marko, vadas, josh, peter (ids 1, 2, 4, 6) — `order()` on the constant `"person"` label
     /// must reproduce that exact order, not merely "some" ordering.
+    #[cfg(feature = "script")]
     #[test]
     fn stable_sort_preserves_input_order_on_equal_keys() {
         test_dual!(
@@ -275,6 +281,7 @@ mod tests {
 
     /// A bare `.by(Order.desc)` sorts by the traverser's own current value, direction only —
     /// no property/traversal key.
+    #[cfg(feature = "script")]
     #[test]
     fn by_order_only_desc() {
         test_dual!(
@@ -301,6 +308,7 @@ mod tests {
     /// (`vadas, ripple, peter, marko, lop, josh`) — a different, distinguishable order from the
     /// grouped-then-tiebroken one this test asserts, which is what actually proves accumulation
     /// rather than merely re-checking a single-key sort.
+    #[cfg(feature = "script")]
     #[test]
     fn second_unrelated_by_call_accumulates_as_tiebreaker() {
         test_dual!(
@@ -330,6 +338,7 @@ mod tests {
     /// produces real ties (4 `person` vertices, 2 `software` vertices) that the second key
     /// breaks. Same shape as the accumulation test above but phrased as the spec's dedicated
     /// "two-key sort with a provable tiebreak" case, using ascending order throughout.
+    #[cfg(feature = "script")]
     #[test]
     fn two_key_sort_label_then_name_tiebreak() {
         test_dual!(
@@ -351,6 +360,7 @@ mod tests {
     /// `marko` has 3 outgoing edges, `josh` has 2, `vadas` and `peter` both have 0 — a real tie
     /// on the traversal key that the `name` tiebreaker must break (alphabetically: peter before
     /// vadas).
+    #[cfg(feature = "script")]
     #[test]
     fn two_key_traversal_then_property_tiebreak() {
         test_dual!(
@@ -380,6 +390,7 @@ mod tests {
     /// ties within each label group: `vadas`/`peter` both have 0 outgoing edges among persons,
     /// both `software` vertices have 0 outgoing edges) -> `name` ascending, which finally breaks
     /// every remaining tie.
+    #[cfg(feature = "script")]
     #[test]
     fn three_key_chain_label_outedges_name() {
         test_dual!(

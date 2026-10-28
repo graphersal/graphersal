@@ -76,6 +76,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepCountLocal {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn fold() {
         test_dual!(
@@ -89,6 +90,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn map() {
         test_dual!(
@@ -102,6 +104,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn scalar() {
         test_dual!(
@@ -118,6 +121,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn global_is_count() {
         test_dual!(

@@ -324,6 +324,7 @@ fn resolve_nested_property_values<S: GraphStorage>(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_simple() {
         test_dual!(
@@ -337,6 +338,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_simple() {
         test_dual!(
@@ -353,6 +355,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_double() {
         test_dual!(
@@ -369,6 +372,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_double() {
         test_dual!(
@@ -387,6 +391,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn obj_none() {
         test_dual!(
@@ -405,6 +410,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_simple() {
         test_dual!(
@@ -418,6 +424,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_all() {
         test_dual!(
@@ -431,6 +438,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn e_empty() {
         test_dual!(
@@ -444,6 +452,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t() {
         test_dual!(
@@ -457,6 +466,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_t_inner() {
         test_dual!(

@@ -127,7 +127,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepSimplePath<'g, S> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

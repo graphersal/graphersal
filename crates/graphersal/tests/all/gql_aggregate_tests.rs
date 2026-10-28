@@ -8,6 +8,7 @@
 //! hand-computed rows.
 #![cfg(feature = "gql")]
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;
@@ -381,6 +382,7 @@ fn empty_input_without_keys_gives_one_row_with_keys_none() {
 
 /// `r -a-> m0, m1, m2 -b-> t -c-> u1 (x 1), u2 (x 2.5), u3 (no x)`: the three paths through
 /// the `m`s merge at `t` (one traverser of bulk 3) before the last hop.
+#[cfg(feature = "script")]
 fn bulk_fixture() -> Arc<Graph> {
     let graph = Arc::new(Graph::new(TraversalGraph::new()));
     let _ = crate::script_host::eval_value(
@@ -399,6 +401,7 @@ fn bulk_fixture() -> Arc<Graph> {
     graph
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn merged_rows_aggregate_like_unmerged_ones() {
     let graph = bulk_fixture();
@@ -592,6 +595,7 @@ fn aggregation_after_with_and_followed_by_match() {
 
 // ----- twins and the large sample -----
 
+#[cfg(feature = "script")]
 mod differential {
     use super::*;
 
@@ -876,6 +880,7 @@ fn percentiles_on_the_modern_graph() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn percentiles_aggregate_merged_rows_like_unmerged_ones() {
     let graph = bulk_fixture();

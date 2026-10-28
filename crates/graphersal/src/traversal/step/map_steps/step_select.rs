@@ -606,6 +606,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSelect<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_first() {
         test_dual!(
@@ -641,6 +642,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_second() {
         test_dual!(
@@ -654,6 +656,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn b_second() {
         test_dual!(
@@ -667,6 +670,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn b_by_name_by_label() {
         test_dual!(
@@ -697,6 +701,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn multiply() {
         test_dual!(
@@ -846,6 +851,7 @@ mod tests {
     /// the *filtered* traversers (2), not the whole incoming stream (6). Confirmed with
     /// `graphersal -e '...select("a").count().profile()'`: `select("a")` reports `In: 6, Out: 2`
     /// and `count()` reports `In: 1, Out: 1` with a final count of `2`, not `6`.
+    #[cfg(feature = "script")]
     #[test]
     fn select_before_count_is_not_skipped_by_the_count_fusion_optimization() {
         test_dual!(
@@ -867,6 +873,7 @@ mod tests {
     /// `g.V().union(__.as("a").out("knows"), __.out("created")).select("a")`: real TinkerPop
     /// returns `[v[1], v[1]]` — the right branch's four `out("created")` traversers never set
     /// "a" and are filtered, not erroring, even though "a" is declared (by the left branch).
+    #[cfg(feature = "script")]
     #[test]
     fn union_declared_label_absent_on_one_branch_filters_not_errors() {
         test_dual!(
@@ -895,6 +902,7 @@ mod tests {
     /// `optional()` unchanged, without "a", and is filtered by `select("a")`. Asserted as a set:
     /// this engine's own `out()` adjacency order differs from TinkerGraph's (documented,
     /// pre-existing deviation), so marko's two "knows" edges are visited in the other order.
+    #[cfg(feature = "script")]
     #[test]
     fn optional_declared_label_absent_when_child_unproductive_filters() {
         test_dual!(
@@ -925,6 +933,7 @@ mod tests {
     /// design spec task 4, out of scope here); `has_label("person")` partitions the modern graph
     /// identically (exactly the persons have "age") and was verified with `graphersal` to reproduce
     /// the exact same reference result, in the same order.
+    #[cfg(feature = "script")]
     #[test]
     fn choose_declared_label_absent_on_the_untaken_branch_filters() {
         test_dual!(
@@ -1001,6 +1010,7 @@ mod tests {
     /// TinkerPop: `select("a","a").by("name").by(T.label)` -> `{a: "person"}`, the *second*
     /// `by()`'s value (the traversal ring still runs both positions; the later write wins, like
     /// `LinkedHashMap.put` on an existing key).
+    #[cfg(feature = "script")]
     #[test]
     fn select_duplicate_key_collapses_to_one_entry_last_by_wins() {
         test_dual!(

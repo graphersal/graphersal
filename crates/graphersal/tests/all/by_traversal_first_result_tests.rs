@@ -18,6 +18,7 @@
 //! (`g.V(1)` is `g.v("1")` here). A multi-result child is built with `union()` so that its first
 //! result does not depend on adjacency order, which differs between this engine and TinkerGraph.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::Order;

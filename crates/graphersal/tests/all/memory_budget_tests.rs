@@ -235,6 +235,7 @@ fn element_bytes(graph: &TraversalGraph) -> u64 {
 }
 
 /// GraphML text with `n` vertices labelled `tmp`, ids `<prefix><i>`.
+#[cfg(feature = "io")]
 fn graphml_vertices(prefix: &str, n: usize) -> String {
     let mut text = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -252,6 +253,7 @@ fn graphml_vertices(prefix: &str, n: usize) -> String {
 }
 
 /// GraphSON (line form) with `n` vertices labelled `tmp`, ids `<prefix><i>`.
+#[cfg(feature = "io")]
 fn graphson_vertices(prefix: &str, n: usize) -> String {
     (0..n)
         .map(|i| format!("{{\"id\":\"{prefix}{i}\",\"label\":\"tmp\"}}\n"))

@@ -218,6 +218,8 @@ enum Mode {
     /// Cancels the token, then reports through `ctx.check()`.
     CancelSelf,
     /// A new value every call (not deterministic).
+    // Only the `persist` test constructs it; gating it would also gate the `call` counter.
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     Random,
 }
 

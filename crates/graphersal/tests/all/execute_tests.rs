@@ -696,6 +696,7 @@ fn session_renders_results_then_the_profile_table() {
 
 /// `ScriptExecution::render_results`: the results alone (no profile table), in the requested
 /// fallback format and within the display limits; a failed run is its diagnostic.
+#[cfg(feature = "serde")]
 #[test]
 fn render_results_shows_the_results_without_the_profile() {
     let exec = eval_value(

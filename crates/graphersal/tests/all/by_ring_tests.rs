@@ -9,6 +9,7 @@
 //! (`g.V(1)` is `g.v("1")` here). Stream order is compared as a multiset, since the adjacency
 //! order of this engine's modern graph differs from TinkerGraph's.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
 use graphersal::prelude::*;

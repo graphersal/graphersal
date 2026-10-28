@@ -163,6 +163,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepBothV {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn simple() {
         test_dual!(
@@ -176,6 +177,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn every_edge_contributes_two_endpoints() {
         test_dual!(

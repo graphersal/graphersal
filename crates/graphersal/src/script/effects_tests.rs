@@ -4,9 +4,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::effects::{self, BodyEffects, CLASSES, StepClass};
+use super::effects::{self, BodyEffects};
+#[cfg(all(feature = "serde", feature = "io", feature = "persist"))]
+use super::effects::{CLASSES, StepClass};
 use crate::graph::{AccessRequest, AccessRequestBuf, Action, Authorizer, Denied, Resource};
-use crate::script::{ScriptLimits, engine, eval_value_with_limits, registered_step_names};
+#[cfg(all(feature = "serde", feature = "io", feature = "persist"))]
+use crate::script::registered_step_names;
+use crate::script::{ScriptLimits, engine, eval_value_with_limits};
 
 /// An authorizer that allows everything and records every write it is asked about.
 #[derive(Default)]
@@ -60,6 +64,8 @@ fn texts(requests: &[AccessRequestBuf]) -> Vec<String> {
     texts
 }
 
+// The classified names include steps that only `serde`, `io` and `persist` register.
+#[cfg(all(feature = "serde", feature = "io", feature = "persist"))]
 #[test]
 fn every_classified_name_is_registered() {
     let registered = registered_step_names();

@@ -1,17 +1,21 @@
 //! Integration tests for `mergeV()` with `option(Merge.onCreate|onMatch, ..)`, in the Rust API
 //! and in the Rhai DSL (both spellings), plus `inject(map)`.
 
+#[cfg(feature = "script")]
 use std::sync::Arc;
 
+#[cfg(feature = "script")]
 use crate::script_host::{eval_value, rhai::Dynamic};
 use graphersal::prelude::*;
 
 /// An empty graph for the DSL.
+#[cfg(feature = "script")]
 fn empty() -> Arc<Graph> {
     Arc::new(Graph::new(TraversalGraph::new()))
 }
 
 /// The graph of most MergeVertex scenarios: one person marko (29).
+#[cfg(feature = "script")]
 fn marko() -> Arc<Graph> {
     let graph = empty();
     let _ = eval_value(
@@ -23,6 +27,7 @@ fn marko() -> Arc<Graph> {
 }
 
 /// The script once with `mergeV` and once with `merge_v`, each on a fresh graph from `graph`.
+#[cfg(feature = "script")]
 fn both(graph: fn() -> Arc<Graph>, script: &str, check: impl Fn(&Arc<Graph>, Dynamic)) {
     for spelling in [script.to_string(), script.replace("mergeV", "merge_v")] {
         let g = graph();
@@ -33,6 +38,7 @@ fn both(graph: fn() -> Arc<Graph>, script: &str, check: impl Fn(&Arc<Graph>, Dyn
 }
 
 /// The error of `script`, in both spellings (they must agree).
+#[cfg(feature = "script")]
 fn both_err(graph: fn() -> Arc<Graph>, script: &str) -> String {
     let mut messages = Vec::new();
     for spelling in [script.to_string(), script.replace("mergeV", "merge_v")] {
@@ -49,10 +55,12 @@ fn both_err(graph: fn() -> Arc<Graph>, script: &str) -> String {
     messages.remove(0)
 }
 
+#[cfg(feature = "script")]
 fn int(graph: &Arc<Graph>, script: &str) -> i64 {
     eval_value(graph.clone(), script).unwrap().as_int().unwrap()
 }
 
+#[cfg(feature = "script")]
 fn len(value: Dynamic) -> usize {
     value.into_array().unwrap().len()
 }
@@ -311,6 +319,7 @@ fn rust_schema_enforcement_applies_to_created_vertices() {
 
 // ---- DSL ------------------------------------------------------------------------------------
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_creates_then_matches_the_same_vertex() {
     both(
@@ -328,6 +337,7 @@ fn dsl_creates_then_matches_the_same_vertex() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_match_sets_properties() {
     both(
@@ -346,6 +356,7 @@ fn dsl_on_match_sets_properties() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_create_with_inherited_keys() {
     both(
@@ -376,6 +387,7 @@ fn dsl_on_create_with_inherited_keys() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_empty_and_null_maps_match_everything() {
     both(marko, "g.mergeV(#{}).toList()", |g, value| {
@@ -404,6 +416,7 @@ fn dsl_empty_and_null_maps_match_everything() {
     });
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_mid_traversal_runs_per_traverser() {
     both(
@@ -431,6 +444,7 @@ fn dsl_mid_traversal_runs_per_traverser() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_merge_v_without_argument_merges_injected_maps() {
     both(
@@ -448,6 +462,7 @@ fn dsl_merge_v_without_argument_merges_injected_maps() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_traversal_argument_and_options_see_side_effects() {
     both(
@@ -478,6 +493,7 @@ fn dsl_traversal_argument_and_options_see_side_effects() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_on_match_traversal_receives_the_matched_vertex() {
     let two = || {
@@ -507,6 +523,7 @@ fn dsl_on_match_traversal_receives_the_matched_vertex() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_cardinality_values() {
     both(
@@ -534,6 +551,7 @@ fn dsl_cardinality_values() {
     assert!(err.contains("Cardinality.set is not supported"), "{err}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_errors() {
     let err = both_err(
@@ -585,6 +603,7 @@ fn dsl_errors() {
     assert!(err.contains("merge_v() traversal produced no map"), "{err}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_dynamic_override_fails_only_on_create() {
     let err = both_err(
@@ -608,6 +627,7 @@ fn dsl_dynamic_override_fails_only_on_create() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_invalid_constant_map_fails_before_execution() {
     // No traverser reaches the step, the problem is still reported.
@@ -639,6 +659,7 @@ fn dsl_invalid_constant_map_fails_before_execution() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_option_without_merge_step() {
     let err = eval_value(
@@ -649,6 +670,7 @@ fn dsl_option_without_merge_step() {
     assert!(err.to_string().contains("merge_v()/merge_e()"), "{err}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_profile_shows_the_lookup() {
     let g = marko();
@@ -679,6 +701,7 @@ fn dsl_profile_shows_the_lookup() {
     assert!(profile.contains("[lookup: dynamic]"), "{profile}");
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_count_still_mutates() {
     both(
@@ -691,6 +714,7 @@ fn dsl_count_still_mutates() {
     );
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn inject_map_is_one_value() {
     let g = empty();
@@ -705,6 +729,7 @@ fn inject_map_is_one_value() {
     assert_eq!(values, vec![object(&[("a", 1.into())])]);
 }
 
+#[cfg(feature = "script")]
 #[test]
 fn dsl_project_record_is_a_merge_map() {
     both(

@@ -71,6 +71,7 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn branch_fans_out_on_multiple_matches() {
         // The key test proving branch() differs from choose(): both options key on "person" and
@@ -98,6 +99,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn branch_pick_any_runs_additionally() {
         // Pick.any's branch runs for every traverser, in addition to whichever explicit option
@@ -126,6 +128,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn branch_no_match_drops_traverser() {
         test_dual!(

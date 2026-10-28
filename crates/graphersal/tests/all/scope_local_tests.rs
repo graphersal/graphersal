@@ -60,6 +60,7 @@ fn collections_graph() -> Graph {
     graph
 }
 
+#[cfg(feature = "script")]
 const COLLECTIONS_SETUP: &str = r#"g.addV("data").property("list", [1, 2, 3, 4, 5]).next();
 g.addV("data").property("map", #{"a": 1, "b": 2, "c": 3}).next();
 "#;
@@ -1753,6 +1754,7 @@ fn strings_graph() -> Graph {
     graph
 }
 
+#[cfg(feature = "script")]
 const STRINGS_SETUP: &str = r#"g.addV("data").property("words", [" Hello ", (), "wOrLd"]).property("mixed", ["a", 1]).property("nums", [1, ()]).next();
 "#;
 

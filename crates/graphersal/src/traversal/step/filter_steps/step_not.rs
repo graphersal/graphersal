@@ -119,6 +119,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepNot<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn label() {
         test_dual!(
@@ -135,6 +136,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_() {
         test_dual!(
@@ -151,6 +153,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn where_inner() {
         test_dual!(

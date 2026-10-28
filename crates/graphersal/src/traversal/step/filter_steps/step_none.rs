@@ -105,6 +105,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn keeps_a_list_without_a_match() {
         test_dual!(
@@ -118,6 +119,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn drops_a_list_with_a_match() {
         test_dual!(
@@ -132,6 +134,7 @@ mod tests {
     }
 
     /// An empty list passes (no element matches), and `null` elements compare like values.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_list_passes_and_null_elements_compare() {
         test_dual!(
@@ -149,6 +152,7 @@ mod tests {
     }
 
     /// A non-list value never passes `none()` (TinkerPop), not even a non-matching scalar.
+    #[cfg(feature = "script")]
     #[test]
     fn scalars_are_filtered_out() {
         test_dual!(
@@ -162,6 +166,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn in_a_child_traversal() {
         test_dual!(

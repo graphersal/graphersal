@@ -2,6 +2,7 @@
 //! the catalog's jobs into scheduler jobs; a query job calls its saved query as one unit carrying
 //! `{job: <name>}`, under the effects stored with it; checkpoint and backup jobs work on the
 //! store; disabled, dropped and changed jobs follow the catalog through `sync_user_jobs`.
+#![cfg(all(feature = "persist", feature = "script"))]
 
 use std::sync::{Arc, Mutex};
 

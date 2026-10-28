@@ -336,6 +336,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn test_element_map_vertex() {
         test_dual!(
@@ -382,10 +383,12 @@ mod tests {
         assert!(result.to_string().contains("element_map(\"name\")"));
     }
 
+    #[cfg(feature = "script")]
     fn entry<'a>(map: &'a ElementProperty, key: &str) -> Option<&'a ElementProperty> {
         map.as_object().and_then(|m| m.get(key))
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn an_edge_map_keeps_id_label_and_the_selected_keys() {
         test_dual!(
@@ -416,6 +419,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_map_is_reselected_keeping_id_and_label() {
         // an element map narrowed again keeps id and label and the selected keys
@@ -479,6 +483,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn a_property_value_is_a_cast_error() {
         test_dual_err!(

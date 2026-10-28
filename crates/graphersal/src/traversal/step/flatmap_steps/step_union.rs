@@ -166,6 +166,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepUnion<'g, S> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_union_out_knows_and_created() {
         test_dual!(
@@ -183,6 +184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_union_identity_and_out() {
         test_dual!(
@@ -200,6 +202,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn v_union_empty() {
         test_dual!(

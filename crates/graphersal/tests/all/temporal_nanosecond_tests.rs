@@ -4,10 +4,11 @@
 //! Rhai and GQL forms, the property index, and a Store that keeps a value with a part below the
 //! microsecond (file format version 3; stage 1 refused it under version 2).
 
+#[cfg(feature = "serde")]
 use graphersal::prelude::*;
-use graphersal::temporal::{
-    DT, Date, DateTime, Duration, LocalDateTime, Temporal, TemporalKind, Time,
-};
+#[cfg(feature = "serde")]
+use graphersal::temporal::DT;
+use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, Temporal, TemporalKind, Time};
 
 fn ldt(text: &str) -> LocalDateTime {
     text.parse().unwrap_or_else(|e| panic!("{text}: {e}"))

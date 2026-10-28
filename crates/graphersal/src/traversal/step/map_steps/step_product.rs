@@ -16,7 +16,7 @@ list_function_builders!(
      assert_eq!(pairs.as_array().map(|a| a.len()), Some(8));"
 );
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 

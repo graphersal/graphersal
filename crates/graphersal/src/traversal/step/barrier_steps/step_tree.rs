@@ -430,6 +430,7 @@ mod tests {
     /// Walks into the single child of a one-key tree node, without hardcoding the (Debug-format,
     /// vertex-keyed) key text — keeps the assertion robust to how a default (no `.by()`) key
     /// renders.
+    #[cfg(feature = "script")]
     fn only_child(value: &ElementProperty) -> &ElementProperty {
         match value {
             ElementProperty::Object(map) => {
@@ -445,6 +446,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "script")]
     fn object_len(value: &ElementProperty) -> usize {
         match value {
             ElementProperty::Object(map) => map.len(),
@@ -456,6 +458,7 @@ mod tests {
     /// TinkerPop 3.7's `tree()` is a seeded reducing barrier (`TreeStep`, seed: an empty `Tree`):
     /// an empty input stream still reduces to `{}`, not nothing (confirmed via `graphersal`:
     /// `g.V().hasLabel("nope").tree()` → `#{}`). A fused `count()` must then read `1`.
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_reduces_to_an_empty_tree() {
         test_dual!(
@@ -472,6 +475,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script")]
     #[test]
     fn empty_input_tree_count_is_one() {
         test_dual!(
@@ -489,6 +493,7 @@ mod tests {
     /// `tinkerpop_modern`, marko(1)'s two-hop `out()` walk only survives via josh(4) (vadas(2) and
     /// lop(3) both dead-end after one hop), landing on ripple(5) and lop(3) — so the tree is
     /// marko -> josh -> {lop, ripple}.
+    #[cfg(feature = "script")]
     #[test]
     fn roadmap_repeat_times_two() {
         test_dual!(
@@ -513,6 +518,7 @@ mod tests {
     /// is reached from two different `out("created")` traversers (josh->lop and josh->ripple).
     /// A broken merge (each traverser writing a fresh top-level "josh" entry instead of sharing
     /// one) would leave `josh`'s subtree with only one child (whichever write ran last), not two.
+    #[cfg(feature = "script")]
     #[test]
     fn branching_paths_merge_not_duplicate() {
         test_dual!(
@@ -542,6 +548,7 @@ mod tests {
 
     /// `tree().by(...)` reshapes what gets stored at each level — here, vertex names instead of
     /// whole vertices, making the keys directly assertable.
+    #[cfg(feature = "script")]
     #[test]
     fn tree_by_name() {
         test_dual!(
@@ -612,6 +619,7 @@ mod tests {
 
     /// `tree("key")` is a side effect (see [`StepTreeSideEffect`]): `cap("key")` reads the tree,
     /// and the stream before `cap` is the unchanged input traversers.
+    #[cfg(feature = "script")]
     #[test]
     fn tree_key_reaches_cap() {
         test_dual!(
@@ -635,6 +643,7 @@ mod tests {
     }
 
     /// The keyed form passes its input through, and a keyed tree and the reducing barrier agree.
+    #[cfg(feature = "script")]
     #[test]
     fn keyed_tree_passes_traversers_through() {
         test_dual!(

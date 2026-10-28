@@ -373,7 +373,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffect<'g, S> for StepGroupSideEffec
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod tests {
     use super::*;
 
