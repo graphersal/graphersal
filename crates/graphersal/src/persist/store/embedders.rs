@@ -69,6 +69,23 @@ impl<S: PersistentStorage> Store<S> {
     }
 }
 
+impl Store {
+    /// [`Store::stored_embedders`] of the store in `dir` without opening it (no lock, nothing
+    /// written), for a graph loaded with [`Store::open_read_only`]: `schema` is that graph's
+    /// schema. Fails like [`Store::stored_embedders`] when the model directory or a manifest
+    /// cannot be read, and when `dir` is not a store this version reads.
+    pub fn stored_embedders_dir(
+        dir: impl super::IntoStoreDir,
+        schema: Option<&GraphSchema>,
+        registered: &Embedders,
+    ) -> Result<StoredEmbedders, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        super::files::refuse_other_version(&dir)?;
+        let location = dir.display();
+        load(&dir, schema, registered, &location)
+    }
+}
+
 /// [`Store::stored_embedders`] for the store at `dir` with the schema `schema`.
 pub(crate) fn load(
     dir: &DirPath,

@@ -843,6 +843,65 @@ mod auto_load {
         );
     }
 
+    /// A single-file store the process may not write (file 0444 in a 0555 directory, as a
+    /// container's read-only file or mount): `Store::open_read_only` loads it and
+    /// `Store::stored_embedders_dir` registers its models, and neither changes a byte nor
+    /// creates a file (no lock, no temporary file beside it).
+    #[cfg(unix)]
+    #[test]
+    fn a_write_protected_single_file_store_loads_read_only_with_its_models() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = Temp::new("readonly");
+        let dir = model_dir(&temp, "acme/tiny");
+        let identity = Model2Vec::model_identity(&dir).unwrap();
+        let folder = temp.join("ro");
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("db.gstore");
+        let store = Store::create(&path, options()).unwrap();
+        store.add_model(new_model(&dir, "acme/tiny")).unwrap();
+        set_schema(&store, &identity);
+        add_person(&store, "ann");
+        store.close().unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let recovered = Store::open_read_only(&path, RecoveryTarget::Latest).unwrap();
+            assert_eq!(recovered.graph.vertex_count(), 1);
+            let schema = recovered.graph.get_schema().unwrap();
+            let found =
+                Store::stored_embedders_dir(&path, schema.as_ref(), &Embedders::default()).unwrap();
+            assert!(found.notes.is_empty(), "{:?}", found.notes);
+            assert_eq!(
+                found.loaded,
+                vec![("acme/tiny".to_string(), identity.clone())]
+            );
+            assert_eq!(
+                found
+                    .embedders
+                    .by_model(&identity)
+                    .unwrap()
+                    .info()
+                    .dimension,
+                3
+            );
+        });
+        let names: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(names, vec![std::ffi::OsString::from("db.gstore")]);
+        assert!(fs::read(&path).unwrap() == bytes, "the store file changed");
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
+
     #[test]
     fn a_model_neither_registered_nor_stored_is_a_note_with_the_command() {
         let temp = Temp::new("missing");

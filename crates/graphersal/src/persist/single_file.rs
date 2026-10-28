@@ -1784,11 +1784,19 @@ impl Open {
     }
 }
 
-/// Opens the container file read-write, or read-only where writing is not allowed.
+/// Opens the container file read-write, or read-only where writing is not allowed (no write
+/// permission, or a read-only file system such as a container's `:ro` mount).
 fn open_file(path: &Path) -> io::Result<File> {
     match OpenOptions::new().read(true).write(true).open(path) {
         Ok(file) => Ok(file),
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => File::open(path),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            File::open(path)
+        }
         Err(err) => Err(err),
     }
 }
