@@ -13,7 +13,7 @@ from them in the same traversal ([Embeddings and Vector Search](https://graphers
 
 ```toml
 [dependencies]
-graphersal = { version = "0.2", features = ["script", "io", "display"] }
+graphersal = { version = "0.4", features = ["script", "io", "display"] }
 ```
 
 ```rust
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   = one graph) with point-in-time views, fork, rollback, verified backups and repair; the format is
   a [public specification](https://graphersal.dev/persistence/format.html).
 - Your own storage: the whole engine is generic over the `GraphStorage` trait (EXPERIMENTAL in
-  0.2.x), with the conformance suite `graphersal-storage-tests`.
+  0.4.x), with the conformance suite `graphersal-storage-tests`.
 
 ## Features
 

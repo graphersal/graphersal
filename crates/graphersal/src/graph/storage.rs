@@ -136,7 +136,7 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// no capabilities, hooks refused), so a host storage gets the view the read terminals use
 /// without writing it.
 ///
-/// **EXPERIMENTAL in 0.2.x:** methods and associated types may change in any 0.2.x release
+/// **EXPERIMENTAL in 0.4.x:** methods and associated types may change in any 0.4.x release
 /// (`book/src/users_guide/transactions.md`: a layered storage and borrow-free read methods
 /// are still to come). The crate `graphersal-storage-tests` (published, EXPERIMENTAL like this
 /// trait) holds the conformance suite an implementation should pass:

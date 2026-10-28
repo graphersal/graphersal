@@ -1,7 +1,7 @@
 # Directory Backends
 
 The Store is written against a directory abstraction, the `persist::StoreDir` trait
-(**EXPERIMENTAL in 0.2.x**, like `GraphStorage`: it may still change; its rustdoc is the
+(**EXPERIMENTAL in 0.4.x**, like `GraphStorage`: it may still change; its rustdoc is the
 implementer's guide). The byte format is the same on every backend.
 
 | Backend | Where the files live | Targets | Use it for |

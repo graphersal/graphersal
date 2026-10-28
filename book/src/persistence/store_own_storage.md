@@ -6,7 +6,7 @@ in-memory storage (a type implementing `GraphStorage`) can keep it in a Store to
 `Store<S>` for any `S` that implements `PersistentStorage`.
 
 > **EXPERIMENTAL.** `PersistentStorage`, like `GraphStorage` and `StoreDir`, may change in any
-> 0.2.x release.
+> 0.4.x release.
 
 The overview of everything a host storage implements and where it plugs in (the DSL, the
 session, the Store) is [Custom Storages](../for_developers/custom_storage.md).

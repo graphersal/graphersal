@@ -56,7 +56,8 @@ graphersal --graph people.json --server --mcp          # open http://127.0.0.1:8
 claude mcp add --transport http graphersal http://127.0.0.1:8080/mcp
 ```
 
-`--server` serves the playground UI (embedded in the binary) on the loopback interface and runs
+`--server` serves the playground UI (embedded in the binary) on the loopback interface (inside a
+container on every interface, or where `--host` says) and runs
 its queries in this process: tables, the graph drawing, schema, profile, Stop, and "Save to file"
 back to the `--graph` file. `--args-file FILE` (or `@FILE`) reads flags from a JSON file. `--mcp` adds a Model Context Protocol endpoint on the same graph, so an
 AI agent works next to you in the browser (`--mcp-read-only`, `--mcp-token <secret>`, `--mcp-instructions FILE`); the page

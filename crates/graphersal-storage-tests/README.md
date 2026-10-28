@@ -4,7 +4,7 @@ Conformance tests for implementations of the [`graphersal`](https://crates.io/cr
 `GraphStorage` trait.
 
 > **EXPERIMENTAL.** Like the `GraphStorage` trait itself, this suite may change in any minor
-> release before 1.0 (also in a 0.2.x release): items may be added, renamed or tightened when the
+> release before 1.0 (also in a 0.4.x release): items may be added, renamed or tightened when the
 > trait changes. Pin the exact version, the same as `graphersal`'s.
 
 ## Usage
@@ -13,7 +13,7 @@ In the crate that implements `GraphStorage`:
 
 ```toml
 [dev-dependencies]
-graphersal-storage-tests = "=0.2.0"
+graphersal-storage-tests = "=0.4.0"
 ```
 
 ```rust

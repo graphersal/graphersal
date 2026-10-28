@@ -169,7 +169,7 @@ and [Dev Server, MCP and AI Chat](https://graphersal.dev/getting_started/server_
 
 ```toml
 [dependencies]
-graphersal = { version = "0.3", features = ["script", "io", "display", "gql"] }
+graphersal = { version = "0.4", features = ["script", "io", "display", "gql"] }
 ```
 
 ```rust
@@ -221,7 +221,7 @@ See the [Python Quick Start](https://graphersal.dev/library/python.html).
 
 ## How mature is it
 
-Graphersal 0.3 is an early release line, built with the care of a database:
+Graphersal 0.4 is an early release line, built with the care of a database:
 
 - **TinkerPop conformance.** Apache TinkerPop's own Gherkin test suite (3.8.2) runs on every test
   run. More than 97 % of the scenarios in scope pass, and no implemented step gives a wrong result.
@@ -239,7 +239,7 @@ Graphersal 0.3 is an early release line, built with the care of a database:
 - **A public storage format.** Snapshots, the write-ahead log and the Store are described byte by
   byte in the [format specification](https://graphersal.dev/persistence/format.html); every
   decoder treats its input as hostile.
-- **Clear stability labels.** Within 0.3.x the public API of `graphersal` (outside the items
+- **Clear stability labels.** Within 0.4.x the public API of `graphersal` (outside the items
   marked experimental), the DSL and the schema format change only additively. GQL, the storage
   traits (`GraphStorage`, `PersistentStorage`, `StoreDir`) and the AI Chat are experimental, and the
   dev server's HTTP API is internal.

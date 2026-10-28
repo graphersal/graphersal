@@ -21,9 +21,9 @@ unlabeled vertices, unlabeled edges, the schema, the catalog of definitions (sav
 and the graph's position (commit sequence number, commit time, auto-id sequences).
 
 ```toml
-graphersal = { version = "0.2", features = ["persist"] }        # LZ4 chunks, the Store, journals
-graphersal = { version = "0.2", features = ["persist-zstd"] }   # also zstd chunks (pure Rust)
-graphersal = { version = "0.2", features = ["persist-zip"] }    # also ZIP backups of a Store
+graphersal = { version = "0.4", features = ["persist"] }        # LZ4 chunks, the Store, journals
+graphersal = { version = "0.4", features = ["persist-zstd"] }   # also zstd chunks (pure Rust)
+graphersal = { version = "0.4", features = ["persist-zip"] }    # also ZIP backups of a Store
 ```
 
 Where it runs:

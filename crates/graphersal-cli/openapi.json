@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Graphersal dev server HTTP API (EXPERIMENTAL)",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "summary": "The HTTP API of `graphersal --server`: EXPERIMENTAL, may change in any release.",
     "description": "**EXPERIMENTAL.** The HTTP API of the Graphersal development server (`graphersal --server`), the playground's engine boundary over HTTP. It may change in any release, minor or patch; pin the exact Graphersal version and read this file from the same version (the server answers it at `GET /openapi.json`, with its own version in `info.version`). The server binds the loopback interface only and has no authentication besides the optional MCP token: it is a local development tool, not a production server.\n\nConventions: answers are JSON; an error is `{\"error\": \"...\"}` with a 4xx status (422 when the engine refuses). Form-like operations (`*/define`, `*/create`, `element/*`) answer 200 with `{ok: false, errors: [{field, message, help?}]}` for refused input. A page sends `X-Graphersal-Client: <id>` with every request so the change feed can name who committed. Request bodies are JSON (`Content-Type: application/json`). The schemas below are deliberately loose (objects with the documented keys); the authoritative descriptions of every answer are the Graphersal book's pages linked from `externalDocs`.",
     "license": {

@@ -39,8 +39,10 @@ In scope, among others:
   change sets, snapshots (`.gsnap`), the Store's files and backups. A crash, an unbounded
   allocation or silently wrong data from a crafted file is in scope; damage that is detected and
   reported as damage is the intended behaviour.
-- **The dev server** (`graphersal --server`) listens on the loopback interface only and refuses
-  requests whose `Host` or `Origin` is not its own. A way for a web page or another host to reach
+- **The dev server** (`graphersal --server`) listens on the loopback interface (inside a container
+  on every interface, or where `--host` says) and refuses requests whose `Host` or `Origin` is not
+  its own (on a network address it accepts IP literals, `localhost`, dotless names and the
+  `--host` name and refuses other host names, against DNS rebinding). A way for a web page or another host to reach
   it, to bypass `--mcp-read-only` or `--mcp-token`, or to make it reveal the AI Chat API key is in
   scope.
 - **The playground** must not send a user's graph or queries anywhere (apart from the AI Chat of

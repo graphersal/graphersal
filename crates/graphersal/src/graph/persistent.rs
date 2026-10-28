@@ -16,7 +16,7 @@ use crate::value::PropertyMap;
 /// replayed. The snapshot functions and the Store (`graphersal::persist`) need it; a storage
 /// without it can still be queried through the DSL and the session, but not stored.
 ///
-/// **EXPERIMENTAL in 0.2.x**, like [`GraphStorage`]: methods may change in any 0.2.x release.
+/// **EXPERIMENTAL in 0.4.x**, like [`GraphStorage`]: methods may change in any 0.4.x release.
 /// Guides: the book pages `persistence/store_own_storage.md` (a `Store<S>`) and
 /// `for_developers/custom_storage.md` (every front end).
 ///

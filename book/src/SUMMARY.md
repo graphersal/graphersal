@@ -380,6 +380,7 @@
 
 - [Releases and Versioning](for_developers/release_plan.md)
 - [Version Control and Contributions](for_developers/version_control.md)
+- [Release Notes 0.4.0](release_notes/release_notes_0.4.0.md)
 - [Release Notes 0.3.0](release_notes/release_notes_0.3.0.md)
 - [Release Notes 0.2.3](release_notes/release_notes_0.2.3.md)
 - [Release Notes 0.2.2](release_notes/release_notes_0.2.2.md)

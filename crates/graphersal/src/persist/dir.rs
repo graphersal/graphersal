@@ -1,5 +1,5 @@
 //! The directory a [`Store`](super::Store) keeps its files in, as a trait (**EXPERIMENTAL in
-//! 0.2.x**, like `GraphStorage`): [`StoreDir`], with [`FsDir`] (a directory of the file system,
+//! 0.4.x**, like `GraphStorage`): [`StoreDir`], with [`FsDir`] (a directory of the file system,
 //! native only) and [`MemDir`] (in memory, every target including wasm32).
 //!
 //! # Implementer's guide
@@ -128,7 +128,7 @@ pub trait StoreFile: Write + Send + Sync {
     fn set_len(&mut self, len: u64) -> io::Result<()>;
 }
 
-/// The directory a Store keeps its files in. **EXPERIMENTAL in 0.2.x**; see the module
+/// The directory a Store keeps its files in. **EXPERIMENTAL in 0.4.x**; see the module
 /// documentation for names, atomicity and locks.
 pub trait StoreDir: Send + Sync + std::fmt::Debug {
     /// Where the directory is, for diagnostics (a path, `memory:main`).

@@ -3,7 +3,7 @@
 //! For implementers of their own storage backend (a server keeping its graph elsewhere, a test
 //! double, a wrapper adding behaviour). `use graphersal::storage::*;` together with
 //! `use graphersal::prelude::*;` is all an implementation needs. The trait is EXPERIMENTAL in
-//! 0.2.x; its trait-level documentation is the implementer's guide, and the crate
+//! 0.4.x; its trait-level documentation is the implementer's guide, and the crate
 //! `graphersal-storage-tests` is its conformance suite. A shared graph is a [`Graph<S>`](Graph);
 //! the front ends hold it as the sealed, object-safe [`AnyGraph`] (see [`IntoAnyGraph`]).
 //!
