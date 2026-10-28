@@ -764,6 +764,7 @@ pub fn run(options: Cli) -> Result<()> {
         options.create_store,
         options.on_damage,
         options.schema.as_ref(),
+        options.read_only,
     ) {
         Ok(opened) => opened,
         Err(err) => {

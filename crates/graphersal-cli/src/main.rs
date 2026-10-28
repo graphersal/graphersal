@@ -11,6 +11,7 @@ mod args_file;
 mod cli;
 #[cfg(feature = "model2vec")]
 mod embed_model;
+mod health;
 mod log;
 mod repl;
 #[cfg(feature = "dev-server")]
@@ -67,6 +68,9 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("store") {
         log::install();
         exit(out::exit_code(store_cmd::run(&args[1..])));
+    }
+    if args.first().map(String::as_str) == Some("health") {
+        exit(health::run(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("embed-model") {
         #[cfg(feature = "model2vec")]

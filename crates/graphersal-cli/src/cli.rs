@@ -196,8 +196,41 @@ fn register_stored_models(
     path: &str,
     store: &graphersal::persist::Store,
 ) -> Result<(), graphersal::persist::PersistError> {
-    let found = store.stored_embedders(&embedders())?;
-    let stored = store.models()?;
+    register_found_models(path, store.stored_embedders(&embedders())?, store.models()?);
+    Ok(())
+}
+
+/// [`register_stored_models`] of a Store loaded read-only (`--read-only`): the models are read
+/// from `path` without opening the store, under the schema of `graph`.
+#[cfg(feature = "model2vec")]
+fn register_stored_models_read_only(path: &str, graph: &Graph) -> Result<(), String> {
+    use graphersal::persist::Store;
+    use graphersal::prelude::GraphStorage;
+    let format =
+        |err: graphersal::persist::PersistError| graphersal::error::format_diagnostic(&err);
+    let schema = graph
+        .read_checked()
+        .and_then(|graph| graph.get_schema())
+        .map_err(|err| graphersal::error::format_diagnostic(&err))?;
+    let found = Store::stored_embedders_dir(path, schema.as_ref(), &embedders()).map_err(format)?;
+    register_found_models(path, found, Store::models_dir(path).map_err(format)?);
+    Ok(())
+}
+
+/// Without the `model2vec` feature no stored model can be loaded (a read-only open names none).
+#[cfg(not(feature = "model2vec"))]
+fn register_stored_models_read_only(_path: &str, _graph: &Graph) -> Result<(), String> {
+    Ok(())
+}
+
+/// Registers what [`graphersal::persist::Store::stored_embedders`] found in the store at
+/// `path` (`stored`: the models it keeps) and lists them for the start banner.
+#[cfg(feature = "model2vec")]
+fn register_found_models(
+    path: &str,
+    found: graphersal::persist::StoredEmbedders,
+    stored: Vec<graphersal::persist::StoredModel>,
+) {
     for (name, identity) in &found.loaded {
         let model = stored
             .iter()
@@ -254,7 +287,6 @@ fn register_stored_models(
     if !found.loaded.is_empty() {
         set_embedders(found.embedders);
     }
-    Ok(())
 }
 
 /// Without the `model2vec` feature no stored model can be loaded: the schema's models are
@@ -328,6 +360,9 @@ USAGE:
     graphersal store <COMMAND> <DIR> ... # manage a Store (graphersal store help)
     graphersal embed-model <COMMAND> ... # download and list embedding models
                                          # (graphersal embed-model help)
+    graphersal health [--ready] [--host ADDR] [--port N]
+                                         # probe a running --server: exit 0 when /healthz
+                                         # (/readyz) answers 200 (graphersal health --help)
 
 OPTIONS:
     -g, --graph <SOURCE>   Graph to run against: "modern" (TinkerPop Modern, the default),
@@ -352,6 +387,14 @@ OPTIONS:
         --create-store     With --graph <dir>: create the store there when it does not exist
                            yet (the directory must be missing or empty; a path ending in
                            .gstore becomes a single-file store).
+        --read-only        Serve the --graph read-only: every write (queries, schema, saved
+                           queries, indexes, "Save to file") is refused. A Store is loaded
+                           without its lock and nothing in it is written (no recovery cut, no
+                           checkpoint, no workload statistics), so a read-only file system, a
+                           :ro container mount or a file without write permission works; its
+                           Store panel and history are not offered. A Store that cannot be
+                           opened for writing (no permission, read-only file system) falls back
+                           to this mode with a note.
         --on-damage <P>    With --create-store: the damage policy of the new store, fixed for
                            its life: "maintenance" (the default: damage found on disk while it
                            is open makes it read-only) or "continue" (it keeps committing and
@@ -679,12 +722,93 @@ impl Opened {
         }
     }
 
-    /// Closes the Store cleanly on SIGINT/SIGTERM (exits with `exit_code` afterwards).
+    /// Closes the Store cleanly on SIGINT/SIGTERM (exits with `exit_code` afterwards). Without
+    /// a Store a signal ends the process by its default action, except as PID 1 (a container's
+    /// first process ignores SIGTERM without a handler): there it exits with
+    /// [`crate::signals::EXIT_INTERRUPTED`].
     pub fn close_on_signal(&self, cancel: Option<graphersal::exec::CancelToken>, exit_code: i32) {
-        if let Some(store) = &self.store {
-            crate::signals::close_store_on_signal(store.clone(), cancel, exit_code);
+        match &self.store {
+            Some(store) => crate::signals::close_store_on_signal(store.clone(), cancel, exit_code),
+            None => crate::signals::exit_on_signal_as_pid1(),
         }
     }
+}
+
+/// Why [`GraphSpec::open`] could not open a Store read-write.
+enum StoreOpenError {
+    /// The store may not be written by this process (no permission, a read-only file
+    /// system): the I/O error's text. `--graph` falls back to a read-only open.
+    NotWritable(String),
+    /// Any other failure.
+    Other(StartError),
+}
+
+impl From<StartError> for StoreOpenError {
+    fn from(err: StartError) -> Self {
+        StoreOpenError::Other(err)
+    }
+}
+
+impl From<String> for StoreOpenError {
+    fn from(message: String) -> Self {
+        StoreOpenError::Other(message.into())
+    }
+}
+
+/// Loads the Store at `path` read-only (`--read-only`, or a store this process may not write):
+/// the latest state, without its lock and without writing anything into it
+/// ([`graphersal::persist::Store::open_read_only`]; an interrupted last write is ignored, not
+/// cut), with its embedding models registered and every write refused ([`refuse_writes`]).
+fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
+    use graphersal::persist::{RecoveryTarget, Store};
+    let format = |err: graphersal::persist::PersistError| {
+        StartError::failed(graphersal::error::format_diagnostic(&err))
+    };
+    if !Store::is_store(path).map_err(format)? {
+        return Err(StartError::failed(format!(
+            "Error: '{path}' is not a Graphersal store (no GRAPH file)\nHelp: --read-only opens \
+             an existing store; create one with `graphersal store create {path}` first."
+        )));
+    }
+    let recovered = Store::open_read_only(path, RecoveryTarget::Latest).map_err(format)?;
+    let graph = Graph::new(recovered.graph);
+    register_stored_models_read_only(path, &graph).map_err(StartError::failed)?;
+    refuse_writes(&graph)?;
+    Ok(Opened {
+        graph: Arc::new(graph),
+        store: None,
+    })
+}
+
+/// The commit hook of `--read-only`: vetoes every unit that changes something (data, schema,
+/// catalog), so every front end (queries, the dev server's API, MCP, the REPL) refuses writes
+/// with one diagnostic.
+struct ReadOnlyGraph;
+
+impl graphersal::changes::CommitHook for ReadOnlyGraph {
+    fn name(&self) -> &str {
+        "read-only"
+    }
+
+    fn before_commit(
+        &mut self,
+        _: &graphersal::changes::ChangeSet,
+    ) -> Result<(), graphersal::changes::HookError> {
+        Err(Box::new(graphersal::changes::HookRefusal::new(
+            "the graph is served read-only: writes are refused",
+            "Run reading queries only; to change the data, start graphersal without \
+             --read-only on a copy the process may write.",
+        )))
+    }
+}
+
+/// Makes `graph` refuse every write ([`ReadOnlyGraph`]).
+fn refuse_writes(graph: &Graph) -> Result<(), StartError> {
+    use graphersal::prelude::GraphStorage;
+    graph
+        .write_checked()
+        .and_then(|mut graph| graph.register_commit_hook(Box::new(ReadOnlyGraph)))
+        .map_err(|err| StartError::failed(graphersal::error::format_diagnostic(&err)))
 }
 
 impl GraphSpec {
@@ -817,16 +941,48 @@ impl GraphSpec {
         create: bool,
         on_damage: Option<graphersal::persist::DamagePolicy>,
         schema: Option<&SchemaSource>,
+        read_only: bool,
     ) -> Result<Opened, StartError> {
         let GraphSpec::Store(path) = self else {
+            let graph = self.load_with_schema(schema)?;
+            if read_only {
+                refuse_writes(&graph)?;
+            }
             return Ok(Opened {
-                graph: Arc::new(self.load_with_schema(schema)?),
+                graph: Arc::new(graph),
                 store: None,
             });
         };
         if schema.is_some() {
             return Err(StartError::usage(schema_refused(path, "a Store")));
         }
+        if read_only {
+            return open_store_read_only(path);
+        }
+        match self.open_store(path, create, on_damage) {
+            // A store this process may not write (no permission, a read-only file system such
+            // as a `:ro` container mount) is served read-only instead of not at all.
+            Err(StoreOpenError::NotWritable(message)) if !create => {
+                errln!(
+                    "note: the store {path} cannot be opened for writing ({message}): serving \
+                     it READ-ONLY, writes are refused. Help: pass --read-only to say so, or \
+                     make the store writable for this user."
+                );
+                open_store_read_only(path)
+            }
+            Err(StoreOpenError::NotWritable(message)) => Err(StartError::failed(message)),
+            Err(StoreOpenError::Other(err)) => Err(err),
+            Ok(opened) => Ok(opened),
+        }
+    }
+
+    /// [`Self::open`] of a Store read-write.
+    fn open_store(
+        &self,
+        path: &str,
+        create: bool,
+        on_damage: Option<graphersal::persist::DamagePolicy>,
+    ) -> Result<Opened, StoreOpenError> {
         use graphersal::persist::{Store, StoreOptions};
         // A store that cannot be opened (in use, damaged, an older format, ...) is a failed
         // operation (exit 1), not an invalid invocation.
@@ -849,7 +1005,19 @@ impl GraphSpec {
                     store
                 }
                 _ => {
-                    let store = Store::open(path, StoreOptions::new()).map_err(format)?;
+                    let store =
+                        Store::open(path, StoreOptions::new()).map_err(|err| match &err {
+                            graphersal::persist::PersistError::Io { source, .. }
+                                if matches!(
+                                    source.kind(),
+                                    io::ErrorKind::PermissionDenied
+                                        | io::ErrorKind::ReadOnlyFilesystem
+                                ) =>
+                            {
+                                StoreOpenError::NotWritable(source.to_string())
+                            }
+                            _ => StoreOpenError::Other(format(err)),
+                        })?;
                     if let Some(wanted) = on_damage
                         && store.damage_policy().map_err(format)? != wanted
                     {
@@ -869,7 +1037,7 @@ impl GraphSpec {
             }
         } else if create {
             if let Some(refusal) = crate::store_cmd::create_refusal(path) {
-                return Err(StartError::failed(refusal));
+                return Err(StartError::failed(refusal).into());
             }
             let policy = on_damage.unwrap_or_default();
             let store = Store::create(path, StoreOptions::new().with_damage_policy(policy))
@@ -975,7 +1143,10 @@ pub struct Cli {
     pub create_store: bool,
     /// `--on-damage`: the damage policy of a store `--create-store` creates.
     pub on_damage: Option<graphersal::persist::DamagePolicy>,
-    /// `--mcp`: the dev server also serves the MCP endpoint `POST /mcp`.
+    /// `--read-only`: the graph refuses every write; a Store is loaded without its lock and
+    /// nothing in it is written (`GraphSpec::open`).
+    pub read_only: bool,
+    /// `--mcp`:the dev server also serves the MCP endpoint `POST /mcp`.
     pub mcp: bool,
     /// `--mcp-read-only`: the MCP endpoint offers no writing tool and refuses writing queries.
     pub mcp_read_only: bool,
@@ -1066,6 +1237,7 @@ impl Default for Cli {
             host: None,
             ui_dir: None,
             create_store: false,
+            read_only: false,
             on_damage: None,
             mcp: false,
             mcp_read_only: false,
@@ -1161,6 +1333,7 @@ impl Cli {
                     })?);
                 }
                 "--create-store" => cli.create_store = true,
+                "--read-only" => cli.read_only = true,
                 "--on-damage" => {
                     let raw = value(&mut args)?;
                     cli.on_damage = Some(
@@ -1306,6 +1479,13 @@ impl Cli {
             return Err(
                 "--on-damage is a creation parameter: use it with --create-store (or `graphersal \
                  store create <dir> --on-damage <policy>`)"
+                    .to_string(),
+            );
+        }
+        if cli.read_only && cli.create_store {
+            return Err(
+                "--read-only and --create-store exclude each other: a read-only open writes \
+                 nothing, so it cannot create the store"
                     .to_string(),
             );
         }
@@ -1767,10 +1947,12 @@ pub fn run_eval(cli: &Cli) -> i32 {
         return EXIT_OK;
     }
 
-    let opened = match cli
-        .graph
-        .open(cli.create_store, cli.on_damage, cli.schema.as_ref())
-    {
+    let opened = match cli.graph.open(
+        cli.create_store,
+        cli.on_damage,
+        cli.schema.as_ref(),
+        cli.read_only,
+    ) {
         Ok(opened) => opened,
         Err(err) => {
             errln!("{}", err.message);

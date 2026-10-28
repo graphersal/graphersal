@@ -46,7 +46,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use graphersal::persist::Store;
 use graphersal::{GraphSource, exec::CancelToken};
@@ -93,6 +93,15 @@ const STORE_BANNER: &str = "\
  The HTTP API is internal to the playground and changes without notice.
 ==============================================================================";
 
+/// The stderr banner of a read-only server (`--read-only`, or a Store it may not write).
+const READ_ONLY_BANNER: &str = "\
+==============================================================================
+ graphersal DEV SERVER - dev mode, unstable, local only, NOT for production
+ No authentication. Loopback only. The graph is served READ-ONLY: every
+ write is refused and nothing is written to its file or store.
+ The HTTP API is internal to the playground and changes without notice.
+==============================================================================";
+
 type Job = Box<dyn FnOnce(&mut Session) + Send>;
 
 /// What every request handler shares.
@@ -111,6 +120,9 @@ struct Context {
     bind: bind::BindPlan,
     /// The session presets, as `GET /api/info` reports them.
     presets: Value,
+    /// `--read-only` (or a Store opened read-only): the graph refuses every write and
+    /// "Save to file" is refused.
+    read_only: bool,
     /// The Store of a `--graph <dir>`: checkpoints, marks, snapshot downloads, views, forks,
     /// rollbacks, the attic ([`store`]).
     store: Option<Arc<Store>>,
@@ -307,57 +319,15 @@ pub fn run(cli: &Cli) -> i32 {
         },
         None => None,
     };
-    // The load time printed at start: Store open (snapshot load + WAL replay), file import
-    // (with --schema) or sample build, up to the session holding the graph.
-    let load_started = std::time::Instant::now();
-    // A Store directory is opened here (its lock held for the life of the server); the open
-    // registers the embedding models the store keeps and its schema names, so the presets
-    // are built after it.
-    // The models the open loads (and the ones the schema names that nobody provides) are
-    // listed in the start banner's own section, not as `note:` lines before it.
-    crate::cli::defer_model_notes();
-    let store = match &cli.graph {
-        GraphSpec::Store(_) => match cli.graph.open(cli.create_store, cli.on_damage, None) {
-            Ok(opened) => opened.store,
-            Err(err) => {
-                errln!("{}", err.message);
-                return err.code;
-            }
-        },
-        _ => None,
-    };
-    let presets = session_presets(cli);
-    let presets_json = presets.to_value();
-    // With --schema the graph is loaded here, like the one-shot runner does (schema first,
-    // then the data as one unit), so a violation stops the start with exit code 1.
-    let preloaded = match &cli.schema {
-        Some(schema) if store.is_none() => match cli.graph.load_with_schema(Some(schema)) {
-            Ok(graph) => Some((Arc::new(graph), graph_title(&cli.graph))),
-            Err(err) => {
-                errln!("{}", err.message);
-                return err.code;
-            }
-        },
-        _ => None,
-    };
-    let shared = store
-        .as_ref()
-        .map(|store| (store.clone(), store.location()));
-    let (jobs, cancel, commit_seq, statistics) =
-        match start_session(&cli.graph, source.as_deref(), presets, shared, preloaded) {
-            Ok(started) => started,
-            Err(message) => {
-                errln!("{message}");
-                return EXIT_USAGE_ERROR;
-            }
-        };
-    let load_time = load_started.elapsed();
-    // Ctrl+C / SIGTERM: the running query is cancelled and the store closed cleanly.
-    if let Some(store) = &store {
-        crate::signals::close_store_on_signal(store.clone(), Some(cancel.clone()), EXIT_OK);
-    }
+    // SIGINT/SIGTERM always end the server (as PID 1 of a container a process without a
+    // handler ignores SIGTERM): the running query is cancelled, `/readyz` answers 503, and a
+    // Store (added once it is open) is closed cleanly before the exit.
+    let stop = Arc::new(crate::signals::Stop::default());
+    stop.install(EXIT_OK, "Stopping: the dev server exits.");
+    // The listeners bind before the graph loads, so the health endpoints answer during a long
+    // Store open (`/healthz` 200, `/readyz` 503) and a taken port fails the start at once.
     let server = match Server::http((plan.ip, cli.port)) {
-        Ok(server) => server,
+        Ok(server) => Arc::new(server),
         Err(err) => {
             errln!(
                 "Error: cannot listen on {}: {err}\nHelp: choose another port with \
@@ -383,8 +353,87 @@ pub fn run(cli: &Cli) -> i32 {
         .also_v6_loopback
         .then(|| Server::http(("::1", port)).ok())
         .flatten();
+    let serving = Arc::new(Serving {
+        context: OnceLock::new(),
+        stop: stop.clone(),
+    });
+    let has_v6 = server_v6.is_some();
+    if let Some(server_v6) = server_v6 {
+        let serving = serving.clone();
+        let spawned = std::thread::Builder::new()
+            .name("graphersal-accept-v6".to_string())
+            .spawn(move || accept(&server_v6, &serving));
+        if let Err(err) = spawned {
+            errln!("warning: cannot start the IPv6 accept thread: {err}");
+        }
+    }
+    let accepting = {
+        let serving = serving.clone();
+        let server = server.clone();
+        std::thread::Builder::new()
+            .name("graphersal-accept".to_string())
+            .spawn(move || accept(&server, &serving))
+            .ok()
+    };
+    // The load time printed at start: Store open (snapshot load + WAL replay), file import
+    // (with --schema) or sample build, up to the session holding the graph.
+    let load_started = std::time::Instant::now();
+    // A Store directory is opened here (its lock held for the life of the server); the open
+    // registers the embedding models the store keeps and its schema names, so the presets
+    // are built after it.
+    // The models the open loads (and the ones the schema names that nobody provides) are
+    // listed in the start banner's own section, not as `note:` lines before it.
+    crate::cli::defer_model_notes();
+    // With --schema the graph is loaded here, like the one-shot runner does (schema first,
+    // then the data as one unit), so a violation stops the start with exit code 1; with
+    // --read-only too (the graph gets the hook that refuses writes), and a Store opened
+    // read-only (--read-only, or a store this process may not write) is a loaded graph
+    // without a Store.
+    let opens = matches!(cli.graph, GraphSpec::Store(_)) || cli.schema.is_some() || cli.read_only;
+    let (store, preloaded) = if opens {
+        match cli.graph.open(
+            cli.create_store,
+            cli.on_damage,
+            cli.schema.as_ref(),
+            cli.read_only,
+        ) {
+            Ok(opened) => match opened.store {
+                Some(store) => (Some(store), None),
+                None => (None, Some((opened.graph, graph_title(&cli.graph)))),
+            },
+            Err(err) => {
+                errln!("{}", err.message);
+                return err.code;
+            }
+        }
+    } else {
+        (None, None)
+    };
+    // The whole server refuses writes: --read-only, or a Store opened read-only.
+    let read_only = cli.read_only || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none());
+    let presets = session_presets(cli);
+    let presets_json = presets.to_value();
+    let shared = store
+        .as_ref()
+        .map(|store| (store.clone(), store.location()));
+    let (jobs, cancel, commit_seq, statistics) =
+        match start_session(&cli.graph, source.as_deref(), presets, shared, preloaded) {
+            Ok(started) => started,
+            Err(message) => {
+                errln!("{message}");
+                return EXIT_USAGE_ERROR;
+            }
+        };
+    let load_time = load_started.elapsed();
+    // Ctrl+C / SIGTERM: the running query is cancelled and the store closed cleanly.
+    if let Some(store) = &store {
+        stop.set_store(store.clone());
+    }
+    stop.set_cancel(cancel.clone());
     let banner = if store.is_some() {
         STORE_BANNER
+    } else if read_only {
+        READ_ONLY_BANNER
     } else {
         BANNER
     };
@@ -442,6 +491,17 @@ pub fn run(cli: &Cli) -> i32 {
         graph_section.row("source", graph_title(&cli.graph));
         graph_section.row("loaded", loaded);
     }
+    if read_only {
+        graph_section.row(
+            "access",
+            if matches!(cli.graph, GraphSpec::Store(_)) {
+                "READ-ONLY: every write is refused; the store was loaded without its lock and \
+                 nothing in it is written (no Store panel, no history)"
+            } else {
+                "READ-ONLY: every write is refused"
+            },
+        );
+    }
     graph_section.rows(start_stats::rows(
         &statistics,
         graphersal::alloc_tracking::global_live_bytes(),
@@ -470,7 +530,8 @@ pub fn run(cli: &Cli) -> i32 {
     }
     let mcp = cli.mcp.then(|| {
         mcp::Mcp::new(
-            cli.mcp_read_only,
+            // A read-only graph offers the agent no writing tool either.
+            cli.mcp_read_only || read_only,
             cli.mcp_token.clone(),
             cli.mcp_query_tools,
         )
@@ -491,7 +552,7 @@ pub fn run(cli: &Cli) -> i32 {
     }
     server_section.row(
         "listening",
-        if server_v6.is_some() {
+        if has_v6 {
             format!("http://127.0.0.1:{port}/ and http://[::1]:{port}/ (IPv6 loopback)")
         } else if plan.is_wildcard() {
             format!(
@@ -521,6 +582,7 @@ pub fn run(cli: &Cli) -> i32 {
         port,
         bind: plan,
         presets: presets_json,
+        read_only,
         store,
         view: Mutex::new(None),
         feed: Arc::new(Mutex::new(Feed {
@@ -531,17 +593,16 @@ pub fn run(cli: &Cli) -> i32 {
         #[cfg(feature = "ai")]
         ai,
     });
-    if let Some(server_v6) = server_v6 {
-        let context = context.clone();
-        let spawned = std::thread::Builder::new()
-            .name("graphersal-accept-v6".to_string())
-            .spawn(move || accept(&server_v6, &context));
-        if let Err(err) = spawned {
-            errln!("warning: cannot start the IPv6 accept thread: {err}");
-        }
-    }
     start_job_ticker(&context);
-    accept(&server, &context);
+    // From here on the requests reach the API (before: health endpoints and 503 answers).
+    let _ = serving.context.set(context);
+    match accepting {
+        Some(accepting) => {
+            let _ = accepting.join();
+        }
+        // No accept thread could be started: accept here (no early answers then).
+        None => accept(&server, &serving),
+    }
     EXIT_OK
 }
 
@@ -574,14 +635,21 @@ fn start_job_ticker(context: &Arc<Context>) {
     }
 }
 
+/// What the accept loops share: the API's [`Context`] once the graph is loaded, and the
+/// signal state (readiness turns 503 at the first SIGINT/SIGTERM).
+struct Serving {
+    context: OnceLock<Arc<Context>>,
+    stop: Arc<crate::signals::Stop>,
+}
+
 /// Accepts the requests of `server`, each on a thread of its own; every listener (IPv4 and
 /// IPv6 loopback) feeds the same handler and session queue.
-fn accept(server: &Server, context: &Arc<Context>) {
+fn accept(server: &Server, serving: &Arc<Serving>) {
     for request in server.incoming_requests() {
-        let context = context.clone();
+        let serving = serving.clone();
         let spawned = std::thread::Builder::new()
             .name("graphersal-http".to_string())
-            .spawn(move || handle(&context, request));
+            .spawn(move || handle(&serving, request));
         if let Err(err) = spawned {
             errln!("warning: cannot start a request thread: {err}");
         }
@@ -850,7 +918,7 @@ fn header<'a>(request: &'a Request, name: &'static str) -> Option<&'a str> {
 /// up to this size still gets its `413`).
 const MAX_DECLARED_BODY_BYTES: usize = 4 * MAX_BODY_BYTES;
 
-fn handle(context: &Arc<Context>, mut request: Request) {
+fn handle(serving: &Serving, mut request: Request) {
     if request
         .body_length()
         .is_some_and(|len| len > MAX_DECLARED_BODY_BYTES)
@@ -860,6 +928,26 @@ fn handle(context: &Arc<Context>, mut request: Request) {
             request.body_length().unwrap_or_default()
         );
         std::mem::forget(request);
+        return;
+    }
+    // The probes: no Host/Origin check, no lock, no session (see `health`).
+    if let Some(response) = health(serving, &request) {
+        let _ = request.respond(response);
+        return;
+    }
+    let Some(context) = serving.context.get() else {
+        let _ = request.respond(json_response(
+            503,
+            &json!({ "error": "the server is still loading its graph; GET /readyz answers \
+                200 when it serves queries" }),
+        ));
+        return;
+    };
+    if serving.stop.stopping() {
+        let _ = request.respond(json_response(
+            503,
+            &json!({ "error": "the server is stopping" }),
+        ));
         return;
     }
     let client = if request.url().split('?').next() == Some("/mcp") {
@@ -876,6 +964,39 @@ fn handle(context: &Arc<Context>, mut request: Request) {
 }
 
 type Answer = Response<std::io::Cursor<Vec<u8>>>;
+
+/// `GET`/`HEAD /healthz` (liveness: 200 while the process answers HTTP) and `/readyz`
+/// (readiness: 200 when the graph is loaded and no stop signal arrived, else 503), or `None`
+/// for every other path. Answered before the Host/Origin checks, so a Kubernetes probe
+/// (`Host: <pod IP>:<port>`) and a Docker `HEALTHCHECK` work in every bind mode: they read
+/// nothing of the graph, take no lock and never wait for the session thread (a long query
+/// cannot fail liveness), and have no side effect.
+fn health(serving: &Serving, request: &Request) -> Option<Answer> {
+    let path = request.url().split('?').next().unwrap_or_default();
+    if path != "/healthz" && path != "/readyz" {
+        return None;
+    }
+    let method = request.method();
+    if !matches!(method, Method::Get | Method::Head) {
+        return Some(json_response(
+            405,
+            &json!({ "error": format!("method {method} is not allowed on {path}") }),
+        ));
+    }
+    // Probes come every few seconds: never above trace.
+    tracing::trace!(target: "graphersal::server", "{method} {path}");
+    if path == "/healthz" {
+        return Some(json_response(200, &json!({ "status": "ok" })));
+    }
+    let (status, state) = if serving.stop.stopping() {
+        (503, "stopping")
+    } else if serving.context.get().is_none() {
+        (503, "loading")
+    } else {
+        (200, "ready")
+    };
+    Some(json_response(status, &json!({ "status": state })))
+}
 
 fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpError> {
     // DNS rebinding and cross-site requests: only this server's own address is served.
@@ -1273,6 +1394,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             value(saved)
         }
         (Method::Post, "save") => {
+            if context.read_only {
+                return Err(HttpError(
+                    409,
+                    "the graph is served read-only: nothing is saved".into(),
+                ));
+            }
             let Some(path) = context.source.clone() else {
                 return Err(HttpError(
                     409,
@@ -1398,6 +1525,8 @@ fn info(context: &Context) -> Value {
         "view": store::current_view(context),
         // The limits every query runs under (from the command line).
         "presets": context.presets,
+        // --read-only (or a Store this process may not write): every write is refused.
+        "readOnly": context.read_only,
         // The MCP endpoint (`--mcp`): `{readOnly, endpoint, client}`, or null.
         "mcp": mcp::status(context),
         // The AI Chat (`--ai`): `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}`
