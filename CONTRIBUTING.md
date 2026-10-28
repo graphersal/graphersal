@@ -106,9 +106,16 @@ review the diff) in the same change. See `crates/graphersal/tests/tinkerpop/READ
 ## Code rules (summary)
 
 - No `unwrap`/`expect`/`panic!` in step or script paths; map failures to a `TraverserError`.
-- A change to a Rust step also updates its Rhai binding, in both spellings.
+- A change to a Rust step also updates its Rhai binding. Names are snake_case. Only TinkerPop's own steps and
+  functions are registered in both spellings (snake_case and camelCase), for compatibility with Apache TinkerPop
+  Gremlin; GQL follows the ISO GQL spelling that the openCypher TCK checks. Graphersal's own extensions are
+  snake_case only.
 - Steps are lazy: no per-item allocation, materialize only at terminals.
 - Public API stays small; public enums and result structs are `#[non_exhaustive]` unless closed by definition.
+- A public method that touches shared state (the graph's lock, the storage, a Store, files, network, embedders)
+  returns `Result` with the crate's `#[non_exhaustive]` error type (`GraphError`, `PersistError`, `TraverserError`),
+  even when it cannot fail today, so a new error never breaks callers. Never answer an empty or default value
+  (plus a log line) instead of an error. Pure getters on finished values return plain values.
 - Every public item has a `///` comment; new public features get integration tests in `crates/graphersal/tests/all/`
   (one test binary; add a module, never a new top-level test file).
 - Library code logs through `tracing`, never `println!`.
@@ -133,6 +140,3 @@ I have read the CLA Document and I hereby sign the CLA
 and the check turns green for this and every later pull request (comment `recheck` to run it again). If you
 contribute on behalf of your employer, make sure you are allowed to accept the agreement for it (section 1 of
 [CLA.md](CLA.md)). A pull request is merged only when every author of its commits has signed.
-
-Contributions to a future Graphersal server, which will live in its own repository, may follow a different
-process; that repository will say so.
