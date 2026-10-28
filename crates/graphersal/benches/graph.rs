@@ -1019,8 +1019,10 @@ fn repeat_out_times_count_grateful(bencher: divan::Bencher, n: u32) {
     });
 }
 
-/// Same with `bulk.merge` off: the cost without merging (3 iterations only, 8 would not finish).
-#[divan::bench(args = [3])]
+/// Same with `bulk.merge` off: the cost without merging. Two iterations only: 8 would not finish,
+/// and 3 already peaked at 3.5 GB per run (5+ GB under divan's default sampling, killed by the
+/// 5 GB watchdog); 2 keeps the unmerged frontier (every path its own traverser) well under 1 GB.
+#[divan::bench(args = [2])]
 fn repeat_out_times_count_grateful_unmerged(bencher: divan::Bencher, n: u32) {
     let graph = grateful();
     let lock = graph.read();
