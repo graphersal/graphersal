@@ -102,8 +102,10 @@ never answers a failure with an empty or default value. The upgrade step for eac
   graph and reopen the storage. `TraversalGraph` and the Store cannot get there (their rollback
   cannot fail). Upgrade step for a host storage: return `Err` from `rollback_unit` only when the
   storage really is in an unknown state. The poison is isolated per graph: the failing storage is
-  named by the new `GraphStorage::storage_identity()` (default: its address; a wrapper over a
-  storage held elsewhere forwards it, as the shipped wrapper impls do), so a failure never
+  named by the new `GraphStorage::storage_identity() -> StorageIdentity` (opaque; default
+  `StorageIdentity::of(self)`; a wrapper over a storage held elsewhere forwards it, as the shipped
+  wrapper impls do; the pinned clock of a held unit is now found the same way, also for
+  `Graph<Box<TraversalGraph>>` and wrapper storages), so a failure never
   poisons another graph on the same thread, and a bare storage poisons nothing.
 - Behaviour: a storage read that fails while the engine builds the diagnostic of another error
   (the value origin of cast, numeric and incomparable-value errors, the type a string step, a
@@ -137,7 +139,7 @@ never answers a failure with an empty or default value. The upgrade step for eac
   `GraphError::StorageFailed` (`GraphError::storage_failed`), `GraphError::RollbackFailed`
   (`GraphError::rollback_failed`), `GraphError::Poisoned` (`GraphError::poisoned`),
   `Graph::is_poisoned`, `Graph::poison_cause`, `GraphStorage::storage_identity` (with a
-  default), `graphersal-storage-tests`' `failing::Failing` (with the `discard_unit`,
+  default) and `storage::StorageIdentity`, `graphersal-storage-tests`' `failing::Failing` (with the `discard_unit`,
   `element_identity` and `fail_element_reads_after` faults).
 
 `graphersal-session` (internal, listed for the CLI and the wasm crate):

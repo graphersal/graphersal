@@ -93,7 +93,7 @@ pub use property_index::PropertyIndexType;
 pub use schema::*;
 pub use shared::{Graph, GraphRead, GraphWrite};
 pub use statistics::GraphStatistics;
-pub use storage::{GraphStorage, UnitChanges, UnitMark};
+pub use storage::{GraphStorage, StorageIdentity, UnitChanges, UnitMark};
 pub use transaction::Transactional;
 
 /// Vertex weight stored in the topology: `(id, label set, properties, generation)`.

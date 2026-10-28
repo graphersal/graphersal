@@ -11,7 +11,8 @@ use web_time::Instant;
 use crate::error::GraphError;
 use crate::graph::workload::{SeriesKey, SeriesKind, WorkloadLevel, WorkloadStats};
 use crate::graph::{
-    ChangeSet, CommitMetadata, GraphStorage, RollbackReason, TraversalGraph, UnitChanges, UnitMark,
+    ChangeSet, CommitMetadata, GraphStorage, RollbackReason, StorageIdentity, TraversalGraph,
+    UnitChanges, UnitMark,
 };
 
 /// A shareable, lock-protected graph: a [`GraphStorage`] `S` behind a read-write lock.
@@ -172,7 +173,7 @@ struct OpenWatch {
 #[derive(Clone, Copy)]
 struct WatchedStorage {
     /// [`GraphStorage::storage_identity`] of the graph's storage.
-    identity: usize,
+    identity: StorageIdentity,
     /// The address of the `S` inside the graph's lock.
     start: usize,
     /// `size_of::<S>()`.
@@ -184,7 +185,7 @@ impl WatchedStorage {
     /// that holds the lock).
     fn of<S: GraphStorage>(graph: &Graph<S>, storage: &S) -> Self {
         Self {
-            identity: storage.storage_identity() as usize,
+            identity: storage.storage_identity(),
             start: graph.lock.data_ptr() as usize,
             len: std::mem::size_of::<S>(),
         }
@@ -194,8 +195,8 @@ impl WatchedStorage {
     /// or an address inside the graph's `S` (a storage nested inline in the graph's storage,
     /// such as the graph a wrapper storage forwards to, rolling back on its own). The `S` of two
     /// live graphs never overlap, so at most one graph matches.
-    fn contains(&self, identity: usize) -> bool {
-        identity == self.identity || identity.wrapping_sub(self.start) < self.len
+    fn contains(&self, identity: StorageIdentity) -> bool {
+        identity == self.identity || identity.address().wrapping_sub(self.start) < self.len
     }
 }
 
@@ -277,8 +278,7 @@ impl Drop for RollbackWatch {
 /// ends. Without such a watch (a bare storage, or a graph with no write view open on this
 /// thread) nothing happens; the watches of other graphs are never touched.
 #[cold]
-pub(crate) fn note_failed_rollback(storage: *const (), cause: &dyn fmt::Display) {
-    let identity = storage as usize;
+pub(crate) fn note_failed_rollback(identity: StorageIdentity, cause: &dyn fmt::Display) {
     let _ = ROLLBACK_WATCHES.try_with(|watches| {
         if let Ok(mut watches) = watches.try_borrow_mut()
             && let Some(open) = watches
@@ -342,40 +342,47 @@ struct HeldUnit {
 const NO_OWNER: u64 = 0;
 
 thread_local! {
-    /// The times pinned for the units this thread holds ([`Graph::begin_unit`]), by the address
-    /// of the graph's storage: until the storage's own unit opens (the unit's first write), a
-    /// storage that knows this table ([`TraversalGraph`]'s `unit_started_at`) reports the pinned
-    /// time through the owner's read views. Only the owning thread sees an entry; a thread may
-    /// hold units of several graphs at once.
-    static HELD_UNIT_CLOCKS: std::cell::RefCell<Vec<(usize, i128)>> =
+    /// The times pinned for the units this thread holds ([`Graph::begin_unit`]), by the graph's
+    /// storage ([`WatchedStorage`], matched like a [`RollbackWatch`]): until the storage's own
+    /// unit opens (the unit's first write), a storage that knows this table
+    /// ([`TraversalGraph`]'s `unit_started_at`) reports the pinned time through the owner's read
+    /// views, also from inside a wrapper storage (`Box<TraversalGraph>`, a storage holding a
+    /// `TraversalGraph` inline). Only the owning thread sees an entry; a thread may hold units of
+    /// several graphs at once.
+    static HELD_UNIT_CLOCKS: std::cell::RefCell<Vec<(WatchedStorage, i128)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The time pinned for the unit the current thread holds on the storage at `storage` (`None`:
-/// no such unit, or its storage has no unit clock).
-pub(crate) fn held_unit_clock(storage: *const ()) -> Option<i128> {
-    let address = storage as usize;
+/// The time pinned for the unit the current thread holds on the storage with identity
+/// `storage` (`None`: no such unit, or its storage has no unit clock).
+pub(crate) fn held_unit_clock(storage: StorageIdentity) -> Option<i128> {
     HELD_UNIT_CLOCKS
         .try_with(|clocks| {
             clocks
                 .borrow()
                 .iter()
-                .find(|(at, _)| *at == address)
+                .rev()
+                .find(|(held, _)| held.contains(storage))
                 .map(|(_, started_at)| *started_at)
         })
         .ok()
         .flatten()
 }
 
-/// Records (`Some`) or removes (`None`) the pinned time of the unit this thread holds on the
-/// storage at `address`.
-fn set_held_unit_clock(address: usize, started_at: Option<i128>) {
+/// Records the time pinned for the unit this thread holds on `storage`.
+fn pin_held_unit_clock(storage: WatchedStorage, started_at: i128) {
     let _ = HELD_UNIT_CLOCKS.try_with(|clocks| {
         let mut clocks = clocks.borrow_mut();
-        clocks.retain(|(at, _)| *at != address);
-        if let Some(started_at) = started_at {
-            clocks.push((address, started_at));
-        }
+        clocks.retain(|(held, _)| held.start != storage.start);
+        clocks.push((storage, started_at));
+    });
+}
+
+/// Removes the pinned time of the unit this thread held on the graph whose `S` starts at
+/// `start` (the graph's lock data pointer).
+fn unpin_held_unit_clock(start: usize) {
+    let _ = HELD_UNIT_CLOCKS.try_with(|clocks| {
+        clocks.borrow_mut().retain(|(held, _)| held.start != start);
     });
 }
 
@@ -468,7 +475,7 @@ impl<S: GraphStorage> Drop for FinishClose<'_, S> {
         *held = HeldUnit::default();
         drop(held);
         if pinned {
-            set_held_unit_clock(graph.lock.data_ptr() as usize, None);
+            unpin_held_unit_clock(graph.lock.data_ptr() as usize);
         }
         graph.unit.thread.store(NO_OWNER, Ordering::Release);
         if let Some(since) = since
@@ -1035,8 +1042,8 @@ impl<S: GraphStorage> Graph<S> {
             ..HeldUnit::default()
         };
         self.unit.thread.store(token, Ordering::Release);
-        if started_at.is_some() {
-            set_held_unit_clock(self.lock.data_ptr() as usize, started_at);
+        if let Some(started_at) = started_at {
+            pin_held_unit_clock(WatchedStorage::of(self, base), started_at);
         }
         Ok(UnitMark::new(0))
     }

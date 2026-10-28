@@ -95,8 +95,8 @@ way back in place: the host drops the graph and reopens the storage; `Graph::is_
 to close or salvage it. A bare storage (a `&mut S` with `Transactional`) has no graph to poison:
 the caller only gets the error. The poison hits exactly the graph whose storage failed, never
 another graph of the process (also with write views of several graphs open on one thread): the
-engine names the failing storage by `GraphStorage::storage_identity()`, the address of the
-storage by default. A storage that owns its state keeps the default; a wrapper that forwards to a
+engine names the failing storage by `GraphStorage::storage_identity()` (an opaque
+`StorageIdentity`, by default `StorageIdentity::of(self)`). A storage that owns its state keeps the default; a wrapper that forwards to a
 storage it borrows or owns elsewhere returns that storage's identity (as the shipped `&G`,
 `&mut G`, `Box<G>` and `Arc<TraversalGraph>` impls do). `Graph::try_read()` and
 `Graph::try_write()` answer `None` on a poisoned graph, the same as on a busy one;

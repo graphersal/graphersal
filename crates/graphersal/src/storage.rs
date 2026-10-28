@@ -218,8 +218,8 @@ pub use crate::graph::{
     AnyGraph, ChangeSet, ChangeSetBuilder, CommitHook, CommitHooks, CommitMetadata, Definition,
     DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy, Graph, GraphNodeType,
     GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError, IntoAnyGraph, IsolationLevel,
-    JournalSlot, Mark, MemoryStats, Mutation, RollbackReason, StorageCapabilities, Transactional,
-    TraversalGraph, UnitChanges, UnitMark, VertexHandle, VertexState,
+    JournalSlot, Mark, MemoryStats, Mutation, RollbackReason, StorageCapabilities, StorageIdentity,
+    Transactional, TraversalGraph, UnitChanges, UnitMark, VertexHandle, VertexState,
 };
 pub use crate::value::{ElementProperty, JsonPath, JsonPathSegment, PropertyMap};
 pub use compact_str::CompactString;

@@ -947,3 +947,65 @@ mod script {
         graph.commit_unit(mark).unwrap();
     }
 }
+
+/// The pinned unit clock of a held unit on a graph whose storage wraps a `TraversalGraph`
+/// (boxed, or inline in a foreign storage): the owner's read view reports it before the first
+/// write, the elements the unit creates store it, other threads see none (the same checks as
+/// `the_unit_clock_is_one_value_before_and_after_the_first_write`).
+fn assert_the_unit_clock_is_pinned<S>(graph: Arc<Graph<S>>)
+where
+    S: GraphStorage + Send + Sync + 'static,
+{
+    let schema = GraphSchema::from_json(
+        r#"{"mode": "open", "vertices": {"event": {"schema": {"type": "object",
+            "properties": {"at": {"type": "string", "format": "date-time",
+                                  "defaultFunction": "now"}}}}}}"#,
+    )
+    .unwrap();
+    GraphTraversalSource::new(&mut *graph.write())
+        .set_schema(schema)
+        .unwrap();
+    let mark = graph.begin_unit().unwrap();
+    let before = graph
+        .read()
+        .unit_started_at()
+        .unwrap()
+        .expect("pinned at the begin");
+    let other = Arc::clone(&graph);
+    assert_eq!(
+        on_thread(move || other.read().unit_started_at().unwrap())
+            .recv_timeout(PROGRESS)
+            .unwrap(),
+        None
+    );
+    std::thread::sleep(Duration::from_millis(5));
+    GraphTraversalSource::new(&mut *graph.write())
+        .add_v("event")
+        .iterate()
+        .unwrap();
+    assert_eq!(graph.read().unit_started_at().unwrap(), Some(before));
+    let stored = GraphTraversalSource::new(&*graph.read())
+        .v(None)
+        .has_label("event")
+        .values("at")
+        .next()
+        .unwrap();
+    let expected = graphersal::temporal::DateTime::from_nanos(before, 0).unwrap();
+    assert_eq!(stored, Some(ElementProperty::Temporal(expected.into())));
+    graph.commit_unit(mark).unwrap();
+    assert_eq!(graph.read().unit_started_at().unwrap(), None);
+}
+
+#[test]
+fn the_unit_clock_is_pinned_for_a_boxed_storage() {
+    assert_the_unit_clock_is_pinned(Arc::new(Graph::new(Box::new(
+        TraversalGraph::tinkerpop_modern(),
+    ))));
+}
+
+#[test]
+fn the_unit_clock_is_pinned_for_a_forwarding_storage() {
+    assert_the_unit_clock_is_pinned(Arc::new(Graph::new(crate::forwarding::Forwarding::new(
+        TraversalGraph::tinkerpop_modern(),
+    ))));
+}

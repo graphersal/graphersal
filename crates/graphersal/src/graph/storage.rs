@@ -1301,21 +1301,21 @@ pub trait GraphStorage: Send + Sync {
         Ok(0)
     }
 
-    /// The address that identifies this storage's state, for telling which
-    /// [`Graph`](crate::graph::Graph) a failed rollback belongs to: a failed
-    /// [`Self::rollback_unit`] or [`Self::discard_unit`] the engine runs poisons exactly the
-    /// graph whose storage has this identity (or lies inside its memory), never another one, and
-    /// nothing when no graph holds the storage. Read once per write view and when a rollback
-    /// fails, never per element.
+    /// Which storage this is, for telling which [`Graph`](crate::graph::Graph) holds it: a
+    /// failed [`Self::rollback_unit`] or [`Self::discard_unit`] the engine runs poisons exactly
+    /// the graph whose storage has this identity (or lies inside its memory), never another one,
+    /// and nothing when no graph holds the storage; a held unit's pinned clock
+    /// ([`Self::unit_started_at`] of [`TraversalGraph`] before the unit's first write) is found
+    /// the same way. Read once per write view or unit and when a rollback fails, never per
+    /// element.
     ///
-    /// Default: the address of `self`, which is right for every storage that owns its state.
-    /// A wrapper that forwards to a storage it borrows or owns elsewhere (as the shipped
+    /// Default: [`StorageIdentity::of`]`(self)`, which is right for every storage that owns its
+    /// state. A wrapper that forwards to a storage it borrows or owns elsewhere (as the shipped
     /// `&G`, `&mut G`, `Box<G>` and `Arc<TraversalGraph>` impls do) returns the identity of that
     /// storage, so a temporary wrapper over a graph's storage is attributed to that graph. Never
-    /// return any other address: an address inside another graph's storage would poison that
-    /// graph.
-    fn storage_identity(&self) -> *const () {
-        (self as *const Self).cast::<()>()
+    /// return any other identity: one inside another graph's storage would poison that graph.
+    fn storage_identity(&self) -> StorageIdentity {
+        StorageIdentity::of(self)
     }
 
     /// The start of the outermost open unit, in nanoseconds since the Unix epoch (UTC, the unit
@@ -1425,6 +1425,32 @@ pub(crate) const CHANGE_SET_OPERATION: &str = "change set apply";
 /// The [`RollbackReason`] message of a unit that a panic unwound through ([`close_on_unwind`]).
 pub(crate) const UNWOUND: &str =
     "a panic unwound through the unit (an engine bug); its changes were rolled back";
+
+/// Which storage a value is, for telling which [`Graph`](crate::graph::Graph) holds it
+/// ([`GraphStorage::storage_identity`]): opaque, compared only for equality (the address it
+/// stands for is not public). Two live storages never have the same identity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StorageIdentity(usize);
+
+impl StorageIdentity {
+    /// The identity of `storage` (its address): what [`GraphStorage::storage_identity`] returns
+    /// by default, and what a forwarding wrapper returns for the storage it forwards to.
+    pub fn of<T: ?Sized>(storage: &T) -> Self {
+        Self((storage as *const T).cast::<()>() as usize)
+    }
+
+    /// The address it stands for, for the engine's containment check (`graph::shared`).
+    pub(crate) fn address(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for StorageIdentity {
+    /// Opaque: the address is not shown.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StorageIdentity(..)")
+    }
+}
 
 /// Rolls back the unit `mark` that `cause` made fail and returns the error to report: `cause`
 /// itself, or, when the rollback fails too, [`GraphError::RollbackFailed`] naming both (the
@@ -2771,7 +2797,7 @@ impl GraphStorage for TraversalGraph {
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
         Ok(self
             .undo_unit_started_at()
-            .or_else(|| crate::graph::shared::held_unit_clock((self as *const Self).cast::<()>())))
+            .or_else(|| crate::graph::shared::held_unit_clock(StorageIdentity::of(self))))
     }
 
     /// `max` of each sequence and the given value; nothing is recorded (sequences are never
@@ -3202,7 +3228,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
-    fn storage_identity(&self) -> *const () {
+    fn storage_identity(&self) -> StorageIdentity {
         (**self).storage_identity()
     }
 
@@ -3665,7 +3691,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
-    fn storage_identity(&self) -> *const () {
+    fn storage_identity(&self) -> StorageIdentity {
         (**self).storage_identity()
     }
 
@@ -4142,7 +4168,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     }
 
     #[inline]
-    fn storage_identity(&self) -> *const () {
+    fn storage_identity(&self) -> StorageIdentity {
         (**self).storage_identity()
     }
 
@@ -4799,7 +4825,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     #[inline]
-    fn storage_identity(&self) -> *const () {
+    fn storage_identity(&self) -> StorageIdentity {
         GraphStorage::storage_identity(self.as_ref())
     }
 
