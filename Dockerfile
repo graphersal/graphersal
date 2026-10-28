@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 #
-# The `graphersal` command line as a container image: a static musl binary (the same build as
-# the Linux release binaries of .github/workflows/binaries.yml: crate graphersal-cli, default
+# The `graphersal` command line as a container image: a static musl binary (the build of the
+# Linux release binaries of .github/workflows/binaries.yml: crate graphersal-cli, default
 # features incl. the dev server, MCP, the AI Chat and Model2Vec embedding models, profile
-# `dist`) on distroless/static, running as a non-root user.
+# `dist`, thin LTO unless --build-arg LTO=fat) on distroless/static, as a non-root user.
 #
 #   docker build -t graphersal .
 #   docker run --rm -p 8080:8080 -v "$PWD/graph.gstore:/data/graph.gstore:ro" graphersal
@@ -23,6 +23,11 @@ FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS build
 # ring (TLS for the AI Chat and model downloads, SHA-256) compiles C code.
 RUN apk add --no-cache musl-dev
 WORKDIR /src
+# The release binaries link with fat LTO, which needs more than the 8 GB of a default Docker
+# Desktop VM; thin LTO builds in less memory and runs within a few percent of it.
+# `--build-arg LTO=fat` gives the release build exactly.
+ARG LTO=thin
+ENV CARGO_PROFILE_DIST_LTO=${LTO}
 COPY . .
 # The registry, git checkouts and the target directory live in BuildKit cache mounts: a source
 # change rebuilds only the workspace crates, never the dependencies, and no build artefact

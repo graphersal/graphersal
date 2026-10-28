@@ -216,7 +216,10 @@ docker build -t graphersal .
 docker build --build-arg RUST_VERSION=1.91 -t graphersal .     # another toolchain
 ```
 
-The build stage is `rust:<RUST_VERSION>-alpine` (musl, a static binary; profile `dist`: fat LTO,
-symbols stripped); dependencies and the target directory live in BuildKit cache mounts, so a
-source change rebuilds only the workspace crates. The base image tags in the `Dockerfile` are
+The build stage is `rust:<RUST_VERSION>-alpine` (musl, a static binary; profile `dist`, symbols
+stripped). It links with thin LTO by default: the fat LTO of the release binaries needs more
+memory than the 8 GB of a default Docker Desktop VM (the linker is killed);
+`--build-arg LTO=fat` builds exactly the release binary where the builder has the memory.
+Dependencies and the target directory live in BuildKit cache mounts, so a source change
+rebuilds only the workspace crates. The base image tags in the `Dockerfile` are
 examples: bump them when you build. `docker builder prune` removes the build cache.

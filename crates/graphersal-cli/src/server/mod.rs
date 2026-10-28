@@ -449,7 +449,14 @@ pub fn run(cli: &Cli) -> i32 {
         }
     );
     if let Some(notice) = plan.network_notice(port) {
-        errln!("{notice}");
+        if read_only {
+            errln!(
+                "{}",
+                notice.replacen("read and change the graph", "read the graph", 1)
+            );
+        } else {
+            errln!("{notice}");
+        }
     }
     let replayed = store
         .as_ref()

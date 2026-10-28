@@ -44,6 +44,7 @@ impl Stop {
     }
 
     /// Whether a signal arrived: the process is stopping.
+    #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
     pub fn stopping(&self) -> bool {
         self.signals.load(Ordering::SeqCst) > 0
     }
