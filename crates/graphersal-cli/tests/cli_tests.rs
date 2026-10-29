@@ -728,6 +728,44 @@ fn profile_reports_net_retained_and_alloc_count() {
     assert_ne!(allocs, "-", "line: {group_row}");
 }
 
+/// A filter nested in a child traversal (`not(__.has_label(..))` inside `filter(..)`, run once
+/// per traverser by the short-circuiting `exists_in_level`) reports its own allocator delta per
+/// call. It used to be measured against a zeroed snapshot, so every call added the thread's whole
+/// allocation counter: `has_label()` showed trillions of allocations and terabytes on a large
+/// graph. `has_label()` allocates nothing, so its figures stay small.
+#[test]
+fn nested_filter_steps_report_their_own_allocations() {
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "-e",
+            "g.e().filter(__.out_v().not(__.has_label(\"software\"))).count()\
+             .profile(ProfileType::Memory)",
+        ],
+        "",
+    );
+
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    for step in ["not(", "has_label("] {
+        let row = res
+            .stdout
+            .lines()
+            .find(|l| l.contains("\\>") && l.contains(step))
+            .unwrap_or_else(|| panic!("no nested {step}..) row in stdout: {}", res.stdout));
+        let fields: Vec<&str> = row.split_whitespace().collect();
+        // ... Mem Retained Allocs %Dur
+        let allocs: u64 = fields[fields.len() - 2]
+            .parse()
+            .expect("Allocs is a number");
+        assert!(allocs < 100, "line: {row}");
+        assert!(
+            parse_bytes_figure(fields[fields.len() - 4]) < 64.0 * 1024.0,
+            "line: {row}"
+        );
+    }
+}
+
 /// Parses a `format_bytes`-style figure (`"208B"`, `"26.00KB"`, `"26.00MB"`, optionally `~`-
 /// prefixed) into a byte count. Panics on anything else, since a test fixture producing a
 /// differently-shaped figure is itself a bug worth surfacing loudly.

@@ -797,9 +797,10 @@ impl GraphSource {
 
 /// Allocator counters snapshotted immediately before a step runs, when `.profile()` is active
 /// (D1/D2 of the richer-memory-diagnostics spec). Bundled into one `Copy` value so the call sites
-/// that need a "before" snapshot (`execute_optimized_steps`'s main loop, `Map`, and `FlatMap` in
-/// `exists_in_level`) read all three thread-locals at the one point each already reads
-/// `thread_allocated_bytes()`, rather than adding new call sites.
+/// that need a "before" snapshot (`execute_optimized_steps`'s main loop and every profiled arm of
+/// `exists_in_level`) read all three thread-locals at one point. A step must never be measured
+/// against `AllocSnapshot::default()`: the delta would be the thread's whole counter, added up
+/// once per call of a nested step.
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(not(feature = "alloc-tracking"), allow(dead_code))]
 struct AllocSnapshot {
@@ -4502,6 +4503,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         .profile
                         .enter_step(child, position, || profile_step(current_step, mode));
                 }
+                let alloc_before = AllocSnapshot::capture(profile_memory);
                 let start = Instant::now();
                 let matches = step.process(context, source).with_step_frame(
                     || step.get_name(),
@@ -4514,12 +4516,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 if is_profile {
                     let duration = start.elapsed();
                     let count_out = if matches { 1 } else { 0 };
-                    let memory = Self::step_memory_metrics(
-                        current_step,
-                        &[],
-                        AllocSnapshot::default(),
-                        profile_memory,
-                    );
+                    let memory =
+                        Self::step_memory_metrics(current_step, &[], alloc_before, profile_memory);
                     context.profile.exit_step(duration, 1, count_out, 0, memory);
                 }
                 if matches {
@@ -4665,6 +4663,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         .profile
                         .enter_step(child, position, || profile_step(current_step, mode));
                 }
+                let alloc_before = AllocSnapshot::capture(profile_memory);
                 let start = Instant::now();
                 let mut s = source.clone();
                 step.process(context, &mut s).with_step_frame(
@@ -4677,12 +4676,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 )?;
                 if is_profile {
                     let duration = start.elapsed();
-                    let memory = Self::step_memory_metrics(
-                        current_step,
-                        &[],
-                        AllocSnapshot::default(),
-                        profile_memory,
-                    );
+                    let memory =
+                        Self::step_memory_metrics(current_step, &[], alloc_before, profile_memory);
                     context.profile.exit_step(duration, 1, 1, 0, memory);
                 }
                 Self::exists_in_level(
@@ -4704,6 +4699,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         .profile
                         .enter_step(child, position, || profile_step(current_step, mode));
                 }
+                let alloc_before = AllocSnapshot::capture(profile_memory);
                 let start = Instant::now();
                 step.declare_side_effect(&mut context.side_effect);
                 step.process(context, source).with_step_frame(
@@ -4724,12 +4720,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 )?;
                 if is_profile {
                     let duration = start.elapsed();
-                    let memory = Self::step_memory_metrics(
-                        current_step,
-                        &[],
-                        AllocSnapshot::default(),
-                        profile_memory,
-                    );
+                    let memory =
+                        Self::step_memory_metrics(current_step, &[], alloc_before, profile_memory);
                     context.profile.exit_step(duration, 1, 1, 0, memory);
                 }
                 Self::exists_in_level(
