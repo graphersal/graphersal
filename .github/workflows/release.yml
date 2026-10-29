@@ -1,9 +1,9 @@
 name: Release
 
-# Publishes the Python package `graphersal` to PyPI: the five-platform wheels and the sdist built
+# Publishes the Python package `graphersal` to PyPI: the four-platform wheels and the sdist built
 # by python.yml (which also runs the binding's tests), uploaded through PyPI Trusted Publishing
 # (OIDC: no token in this repository; PyPI trusts this file, `release.yml`, in the environment
-# `pypi`). Builds the five-platform `graphersal` CLI archives through binaries.yml (smoke-tested,
+# `pypi`). Builds the four-platform `graphersal` CLI archives through binaries.yml (smoke-tested,
 # SHA256SUMS, build provenance attestations) and creates a DRAFT GitHub Release for the tag with
 # them attached; its text is the version's release notes of the book
 # (`book/src/release_notes/release_notes_<version>.md`, links made absolute on graphersal.dev by
@@ -63,10 +63,10 @@ jobs:
           pattern: python-dist-*
           path: dist
           merge-multiple: true
-      - name: Six files (five wheels and the sdist)
+      - name: Five files (four wheels and the sdist)
         run: |
           ls -l dist
-          test "$(find dist -type f | wc -l)" -eq 6
+          test "$(find dist -type f | wc -l)" -eq 4
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
@@ -94,12 +94,12 @@ jobs:
           pattern: binaries-*
           path: dist
           merge-multiple: true
-      - name: Five archives and SHA256SUMS
+      - name: Four archives and SHA256SUMS
         run: |
           set -euo pipefail
           cd dist
           ls -l
-          test "$(find . -maxdepth 1 \( -name 'graphersal-v*-*.tar.gz' -o -name 'graphersal-v*-*.zip' \) | wc -l)" -eq 5
+          test "$(find . -maxdepth 1 \( -name 'graphersal-v*-*.tar.gz' -o -name 'graphersal-v*-*.zip' \) | wc -l)" -eq 4
           sha256sum -c SHA256SUMS
       - name: Create the draft release
         env:

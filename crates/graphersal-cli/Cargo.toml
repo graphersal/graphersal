@@ -34,10 +34,6 @@ bin-dir = "graphersal-v{ version }-linux-aarch64/{ bin }{ binary-ext }"
 pkg-url = "{ repo }/releases/download/v{ version }/graphersal-v{ version }-macos-arm64.tar.gz"
 bin-dir = "graphersal-v{ version }-macos-arm64/{ bin }{ binary-ext }"
 
-[package.metadata.binstall.overrides.x86_64-apple-darwin]
-pkg-url = "{ repo }/releases/download/v{ version }/graphersal-v{ version }-macos-x86_64.tar.gz"
-bin-dir = "graphersal-v{ version }-macos-x86_64/{ bin }{ binary-ext }"
-
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-url = "{ repo }/releases/download/v{ version }/graphersal-v{ version }-windows-x86_64.zip"
 bin-dir = "graphersal-v{ version }-windows-x86_64/{ bin }{ binary-ext }"

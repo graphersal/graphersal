@@ -26,7 +26,7 @@ NOTES_DIR = "release_notes"
 BINARIES = (
     "## Prebuilt binaries\n\n"
     "The `graphersal` command line tool is attached to this release for Linux (x86_64, aarch64), "
-    "macOS (arm64, x86_64) and Windows (x86_64), with a `SHA256SUMS` file and build provenance "
+    "macOS (Apple silicon) and Windows (x86_64), with a `SHA256SUMS` file and build provenance "
     "attestations (`gh attestation verify <archive> --repo graphersal/graphersal`); "
     "`cargo binstall graphersal-cli` installs it too. The Linux binaries are static musl builds, "
     "which run on every distribution but use musl's slower memory allocator: build from source "

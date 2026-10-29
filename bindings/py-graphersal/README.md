@@ -27,7 +27,7 @@ the context for your language model in one call. The guide, with a sentence-tran
 pip install graphersal
 ```
 
-Wheels exist for Linux (x86_64, aarch64), macOS (x86_64, Apple silicon) and Windows (x86_64). One
+Wheels exist for Linux (x86_64, aarch64), macOS (Apple silicon) and Windows (x86_64). One
 wheel per platform covers Python 3.10 and every newer version (the stable ABI, `abi3`). On another
 platform pip builds the package from source, which needs a Rust toolchain (1.88 or newer).
 

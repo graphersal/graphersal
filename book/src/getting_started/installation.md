@@ -15,8 +15,11 @@ archive per platform:
 | Linux x86_64 (any distribution, also Alpine and WSL2) | `graphersal-v<version>-linux-x86_64.tar.gz` |
 | Linux aarch64 (ARM64) | `graphersal-v<version>-linux-aarch64.tar.gz` |
 | macOS on Apple silicon | `graphersal-v<version>-macos-arm64.tar.gz` |
-| macOS on Intel | `graphersal-v<version>-macos-x86_64.tar.gz` |
 | Windows x86_64 | `graphersal-v<version>-windows-x86_64.zip` |
+
+There is no prebuilt binary for macOS on Intel after 0.4.0 (its runner made every release
+much slower): build it from source with Cargo (below), or open an issue if you need one. The
+Python package installs there from the sdist, which needs a Rust toolchain.
 
 Each archive holds one directory of its own name with the `graphersal` binary (`graphersal.exe`
 on Windows), the licence files, the third-party licences and `README.md`. The Linux binaries are statically linked, so they run on every distribution; see

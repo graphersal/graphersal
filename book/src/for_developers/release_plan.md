@@ -13,7 +13,7 @@ Python package and the web playground are released with the same number:
 | `graphersal` | crates.io | the library: engine, Rhai DSL, I/O, persistence (feature flags) |
 | `graphersal-session` | crates.io | the playground session logic, published because the CLI depends on it; internal, no stability guarantees |
 | `graphersal-cli` | crates.io | the `graphersal` binary: REPL, one-shot runner, `graphersal store`, the dev server |
-| `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for five platforms, with `SHA256SUMS` and build provenance attestations |
+| `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for four platforms, with `SHA256SUMS` and build provenance attestations |
 | `graphersal-storage-tests` | crates.io | the `GraphStorage` conformance suite, EXPERIMENTAL like the trait (pin the exact version) |
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
@@ -60,7 +60,7 @@ Before a version is tagged:
   each runs in every `cargo test`);
 - a benchmark run on a quiet machine shows no unexplained regression against the previous release;
 - a dry run of the CLI binaries (`gh workflow run "CLI binaries" --ref <release branch>`, see Publishing) is
-  green on all five platforms;
+  green on all four platforms;
 - `cargo publish --dry-run` succeeds for every published crate, `graphersal` first, then the crates that depend on it;
 - the version's release notes (`book/src/release_notes/`, for 0.2.0
   [Release Notes 0.2.0](../release_notes/release_notes_0.2.0.md)) describe what changed; they are the project's
@@ -112,12 +112,12 @@ machine and are compared with the previous release, not per change.
      with `LICENSE-APACHE`, `NOTICE`, `README.md` and `THIRD-PARTY-LICENSES.html` (cargo-about, `about.toml`).
      A final job writes `SHA256SUMS` and creates the GitHub build provenance attestations. The job
      `github-release` then creates a **draft** GitHub Release for the tag, titled "Graphersal <version>",
-     with the five archives and `SHA256SUMS` attached; its text is the version's release notes
+     with the four archives and `SHA256SUMS` attached; its text is the version's release notes
      (`book/src/release_notes/release_notes_<version>.md`) with the book links made absolute on
      graphersal.dev, the soft line breaks joined and a section about the prebuilt binaries added
      (`.github/scripts/release_notes.py <version>` prints the same text locally).
-4. Check the draft on the repository's Releases page: five archives (`linux-x86_64`, `linux-aarch64`,
-   `macos-arm64`, `macos-x86_64`, `windows-x86_64`) plus `SHA256SUMS`; download one archive and check it
+4. Check the draft on the repository's Releases page: four archives (`linux-x86_64`, `linux-aarch64`,
+   `macos-arm64`, `windows-x86_64`) plus `SHA256SUMS`; download one archive and check it
    (`sha256sum -c SHA256SUMS --ignore-missing`, `gh attestation verify <archive> --repo graphersal/graphersal`,
    unpack it and run `graphersal --version`); read the release text, its links included. Then publish the
    draft ("Publish release", or `gh release edit v0.2.0 --draft=false`). Only a published release is visible

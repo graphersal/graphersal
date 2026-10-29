@@ -3,7 +3,7 @@ name: Python wheels
 # Builds abi3 wheels (one wheel per platform covers Python 3.10+) and the sdist, and runs the
 # binding's tests. Manual only (a project decision: Actions minutes are limited):
 # `gh workflow run "Python wheels"` runs the binding's tests (Python 3.10 and 3.13); with
-# `-f wheels=true` it also builds the five-platform wheels (two of them on macOS, whose minutes
+# `-f wheels=true` it also builds the four-platform wheels (one of them on macOS, whose minutes
 # count x10 on a private repository), checks that each installs and imports where it can run,
 # and builds the sdist. release.yml calls it (`workflow_call`) and publishes the artifacts
 # `python-dist-*`.
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       wheels:
-        description: "Also build the wheels for the five platforms and the sdist"
+        description: "Also build the wheels for the four platforms and the sdist"
         type: boolean
         default: false
   workflow_call:
@@ -39,7 +39,6 @@ jobs:
           # `smoke`: the runner can run the wheel (not the cross-built linux-aarch64 one).
           - { name: linux-x86_64, os: ubuntu-latest, target: x86_64, manylinux: auto, smoke: true }
           - { name: linux-aarch64, os: ubuntu-latest, target: aarch64, manylinux: auto, smoke: false }
-          - { name: macos-x86_64, os: macos-15-intel, target: x86_64, manylinux: auto, smoke: true }
           - { name: macos-arm64, os: macos-latest, target: aarch64, manylinux: auto, smoke: true }
           - { name: windows-x86_64, os: windows-latest, target: x64, manylinux: auto, smoke: true }
     steps:
