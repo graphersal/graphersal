@@ -179,13 +179,57 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
              feature (real embedding models); only the built-in hash-ngram/1 is available"
         ));
     }
+    let mut registry = builder.build();
     if let Some(name) = &cli.default_embedder {
-        builder = builder
-            .default_name(name)
-            .map_err(|err| format!("--default-embedder {name}: {}", registry_error(err)))?;
+        registry = match (registry.to_builder().default_name(name), &cli.graph) {
+            (Ok(builder), _) => builder.build(),
+            // A model the Store keeps is registered only when the store is opened: the
+            // default is chosen then ([`apply_deferred_default`]).
+            (Err(_), GraphSpec::Store(_)) => {
+                if let Ok(mut deferred) = DEFERRED_DEFAULT.lock() {
+                    *deferred = Some(name.clone());
+                }
+                registry
+            }
+            (Err(err), _) => {
+                return Err(format!(
+                    "--default-embedder {name}: {}",
+                    registry_error(err)
+                ));
+            }
+        };
     }
-    set_embedders(Arc::new(builder.build()));
+    set_embedders(Arc::new(registry));
     Ok(())
+}
+
+/// The `--default-embedder` name that no `--embedder` registers: a model the opened Store
+/// keeps, chosen by [`apply_deferred_default`] once the store's models are registered.
+static DEFERRED_DEFAULT: Mutex<Option<String>> = Mutex::new(None);
+
+/// Makes the deferred `--default-embedder` ([`DEFERRED_DEFAULT`]) the default of the registry
+/// now that the opened Store's models are in it; a name neither registers is the error
+/// ([`EXIT_USAGE_ERROR`], as at start).
+fn apply_deferred_default(path: &str) -> Result<(), StartError> {
+    let Some(name) = DEFERRED_DEFAULT.lock().ok().and_then(|mut d| d.take()) else {
+        return Ok(());
+    };
+    let registry = embedders();
+    match registry.to_builder().default_name(&name) {
+        Ok(builder) => {
+            set_embedders(Arc::new(builder.build()));
+            Ok(())
+        }
+        Err(err) => {
+            let names: Vec<String> = registry.infos().map(|info| info.name.to_string()).collect();
+            Err(StartError::usage(format!(
+                "--default-embedder {name}: {err}: neither an --embedder nor a model the store \
+                 {path} keeps is registered under that name (registered: {})\nHelp: {}",
+                names.join(", "),
+                err.help()
+            )))
+        }
+    }
 }
 
 /// Registers the embedding models the opened `store` keeps and its schema names (format spec
@@ -958,9 +1002,23 @@ impl GraphSpec {
         if schema.is_some() {
             return Err(StartError::usage(schema_refused(path, "a Store")));
         }
-        if read_only {
-            return open_store_read_only(path);
-        }
+        let opened = if read_only {
+            open_store_read_only(path)
+        } else {
+            self.open_store_writable(path, create, on_damage)
+        }?;
+        apply_deferred_default(path)?;
+        Ok(opened)
+    }
+
+    /// [`Self::open`] of a Store read-write, falling back to read-only when this process may
+    /// not write it.
+    fn open_store_writable(
+        &self,
+        path: &str,
+        create: bool,
+        on_damage: Option<graphersal::persist::DamagePolicy>,
+    ) -> Result<Opened, StartError> {
         match self.open_store(path, create, on_damage) {
             // A store this process may not write (no permission, a read-only file system such
             // as a `:ro` container mount) is served read-only instead of not at all.

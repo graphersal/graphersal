@@ -4911,6 +4911,95 @@ mod embed_models {
     }
 
     #[test]
+    fn a_model_the_store_keeps_can_be_the_default_embedder() {
+        let base = fresh_dir("m2v_stored_default");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+
+        // The name the store registers its model under is a valid default, read-write and
+        // read-only: the default is chosen once the store's models are registered.
+        let schema = r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{text: #{type: "string"}}}}}})"#;
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--default-embedder",
+                "acme/tiny",
+                "-e",
+                schema,
+                "-e",
+                r#"g.add_v("doc").property("text", "graph vector").iterate()"#,
+                "-e",
+                r#"g.embed_property(#{label: "doc", from: "text", to: "emb"})"#,
+                "-e",
+                r#"g.get_schema().vertices.doc.schema.properties.emb.embedder"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stdout.contains("model2vec/acme/tiny@"),
+            "{}",
+            res.stdout
+        );
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--read-only",
+                "--default-embedder",
+                "acme/tiny",
+                "-e",
+                "1",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+
+        // A name neither an --embedder nor the store registers is still an invalid invocation,
+        // naming what is registered.
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--default-embedder",
+                "potion",
+                "-e",
+                "1",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 2, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("--default-embedder potion"),
+            "{}",
+            res.stderr
+        );
+        assert!(
+            res.stderr.contains("registered: hash-ngram/1, acme/tiny"),
+            "{}",
+            res.stderr
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn an_imported_model_the_schema_names_is_loaded_when_the_store_opens() {
         let base = fresh_dir("m2v_autoload");
         let model = base.join("model");

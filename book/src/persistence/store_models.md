@@ -33,7 +33,9 @@ on an open store, `Store::add_model_dir` on a closed one.
 When a store is opened (`graphersal --graph data/`, the dev server, Python `Store.open`), every
 model the store keeps is registered as an embedder (under its repository name,
 `minishlab/potion-base-8M`; a model **the schema names** under the identity the schema records),
-so text queries and `embed_property()` work without `--embedder`:
+so text queries and `embed_property()` work without `--embedder`. Such a name is also a valid
+`--default-embedder` (`--default-embedder minishlab/potion-base-8M`); a short name of your own
+(`potion`) exists only with `--embedder potion=...`:
 
 ```bash
 graphersal --graph data/ -e 'g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "minishlab/potion-base-8M"})'
