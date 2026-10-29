@@ -82,6 +82,10 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// Reusable buffer for `simple_path()`/`cyclic_path()`, so the check does not allocate per
     /// traverser.
     pub(crate) scratch_path: Vec<(u64, PathRef)>,
+    /// Spare output buffers of the `FlatMap` steps of short-circuiting child runs
+    /// (`exists_in_level`), one taken per nesting depth, so a child run per traverser
+    /// (`filter(__.out())`, `where(..)`, `not(..)`) does not allocate per traverser.
+    pub(crate) exists_scratch: Vec<Vec<crate::Traverser<S>>>,
     /// Reusable DFS stack and visited sets of `glob_path()`, so its walk does not allocate per
     /// visited vertex or per incoming traverser.
     pub(crate) glob_path:
@@ -179,6 +183,24 @@ impl<S: GraphStorage> std::fmt::Debug for LoopFrame<S> {
 }
 
 impl<'a, S: GraphStorage> TraverserContext<'a, S> {
+    /// The largest buffer [`Self::give_back_exists_scratch`] keeps: one that grew on a
+    /// supernode's fan-out is freed rather than held for the rest of the execution.
+    const EXISTS_SCRATCH_KEEP: usize = 4096;
+
+    /// An empty output buffer for one `FlatMap` step of a short-circuiting child run, with the
+    /// capacity an earlier run left in it.
+    pub(crate) fn take_exists_scratch(&mut self) -> Vec<crate::Traverser<S>> {
+        self.exists_scratch.pop().unwrap_or_default()
+    }
+
+    /// Returns a buffer of [`Self::take_exists_scratch`] for the next child run.
+    pub(crate) fn give_back_exists_scratch(&mut self, mut scratch: Vec<crate::Traverser<S>>) {
+        if scratch.capacity() <= Self::EXISTS_SCRATCH_KEEP {
+            scratch.clear();
+            self.exists_scratch.push(scratch);
+        }
+    }
+
     /// Runs `run` with `loop_persist` set to `persist`, restoring the previous value afterwards
     /// (also when `run` fails). A per-traverser child traversal passes `false`: its stateful
     /// steps start from scratch for every start traverser, like TinkerPop's reset children.
@@ -207,6 +229,7 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             initial_sack: crate::value::SackRef::NONE,
             path_mode: PathMode::None,
             scratch_path: Vec::new(),
+            exists_scratch: Vec::new(),
             glob_path: Default::default(),
             options: ExecutionOptions::default(),
             deadline: None,

@@ -4318,7 +4318,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         level: Option<&LevelPlan<'g, S>>,
         path_modes: &[PathMode],
     ) -> TraverserResult<bool> {
-        let mut scratch: Vec<Traverser<S>> = Vec::new();
         Self::exists_in_level(
             steps,
             steps,
@@ -4328,7 +4327,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             0,
             level,
             path_modes,
-            &mut scratch,
             None,
         )
     }
@@ -4348,7 +4346,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         level: Option<&LevelPlan<'g, S>>,
         path_modes: &[PathMode],
     ) -> TraverserResult<Option<Traverser<S>>> {
-        let mut scratch: Vec<Traverser<S>> = Vec::new();
         let mut first = None;
         Self::exists_in_level(
             steps,
@@ -4359,7 +4356,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             0,
             level,
             path_modes,
-            &mut scratch,
             Some(&mut first),
         )?;
         Ok(first)
@@ -4399,11 +4395,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// child index of the level (`None` at the top level) and `position` the position of
     /// `steps[0]` in it: together the id of the step being evaluated.
     ///
-    /// `scratch` is a reusable buffer for `GraphStep::FlatMap`'s `process()` calls along this
-    /// recursion's call tree. It is threaded through every recursive call rather than allocated
-    /// fresh per `FlatMap` step visited, so its backing allocation is reused across the several
-    /// steps a `where`/`not` sub-traversal can contain, instead of one small `Vec` per step.
-    ///
     /// `first`, when given, receives the traverser that made the level productive (see
     /// [`Self::execute_optimized_steps_first`]); an existence check passes `None` and clones
     /// nothing.
@@ -4417,7 +4408,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         position: usize,
         level: Option<&LevelPlan<'g, S>>,
         path_modes: &[PathMode],
-        scratch: &mut Vec<Traverser<S>>,
         mut first: Option<&mut Option<Traverser<S>>>,
     ) -> TraverserResult<bool> {
         if steps.is_empty() {
@@ -4491,7 +4481,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 position,
                 level,
                 path_modes,
-                scratch,
                 first,
             );
         }
@@ -4530,7 +4519,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         position + 1,
                         level,
                         path_modes,
-                        scratch,
                         first,
                     )
                 } else {
@@ -4584,7 +4572,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     position + 1,
                     level,
                     path_modes,
-                    scratch,
                     first,
                 )
             }
@@ -4596,14 +4583,10 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 }
                 let alloc_before = AllocSnapshot::capture(profile_memory);
                 let start = Instant::now();
-                // Take this recursion's shared scratch buffer for the duration of this call:
-                // `process()` writes into it, and this arm iterates its produced items and
-                // recurses per item. The buffer must not stay borrowed from `scratch` while a
-                // recursive call (elsewhere in this same call tree) might also want to use
-                // `scratch` for its own `process()` call — so it is fully taken out here (`buf`),
-                // and only given back to `*scratch` once every item has been visited (see below).
-                let mut buf = std::mem::take(scratch);
-                buf.clear();
+                // A buffer of the execution's pool, owned by this call while it iterates the
+                // produced items and recurses per item (a nested `FlatMap` takes its own), so a
+                // child run per traverser reuses buffers instead of allocating one per call.
+                let mut buf = context.take_exists_scratch();
                 step.process(context, source.clone(), &mut buf)
                     .with_step_frame(
                         || step.get_name(),
@@ -4644,17 +4627,15 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         position + 1,
                         level,
                         path_modes,
-                        scratch,
                         first.as_deref_mut(),
                     )? {
                         found = true;
                         break;
                     }
                 }
-                // `buf` is empty here (the drain above removes every item, visited or not) but
-                // keeps whatever capacity it grew to, so give it back for the next `FlatMap` step
-                // this recursion's call tree visits.
-                *scratch = buf;
+                // Empty here (the drain removes every item, visited or not), with the capacity it
+                // grew to: back to the pool for the next `FlatMap` step of the execution.
+                context.give_back_exists_scratch(buf);
                 Ok(found)
             }
             GraphStep::As(_, step) => {
@@ -4689,7 +4670,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     position + 1,
                     level,
                     path_modes,
-                    scratch,
                     first,
                 )
             }
@@ -4733,7 +4713,6 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     position + 1,
                     level,
                     path_modes,
-                    scratch,
                     first,
                 )
             }

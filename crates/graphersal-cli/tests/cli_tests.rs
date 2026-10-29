@@ -766,6 +766,35 @@ fn nested_filter_steps_report_their_own_allocations() {
     }
 }
 
+/// An expansion step of a short-circuiting child run (`out_v()` in `filter(__.out_v()...)`, run
+/// once per traverser) takes its output buffer from the execution's pool, so it allocates once
+/// for the whole run, not once per traverser (it used to make one allocation per edge).
+#[test]
+fn nested_expansion_step_reuses_its_buffer_across_traversers() {
+    let res = run(
+        &[
+            "--graph",
+            "large",
+            "-e",
+            "g.e().filter(__.out_v().not(__.has_label(\"software\"))).count()\
+             .profile(ProfileType::Memory)",
+        ],
+        "",
+    );
+
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    let row = res
+        .stdout
+        .lines()
+        .find(|l| l.contains("\\>") && l.contains("out_v()"))
+        .unwrap_or_else(|| panic!("no nested out_v() row in stdout: {}", res.stdout));
+    let fields: Vec<&str> = row.split_whitespace().collect();
+    let calls: u64 = fields[2].parse().expect("Call is a number");
+    let allocs: u64 = fields[fields.len() - 2].parse().expect("Allocs is a number");
+    assert!(calls > 100_000, "line: {row}");
+    assert!(allocs < 100, "line: {row}");
+}
+
 /// Parses a `format_bytes`-style figure (`"208B"`, `"26.00KB"`, `"26.00MB"`, optionally `~`-
 /// prefixed) into a byte count. Panics on anything else, since a test fixture producing a
 /// differently-shaped figure is itself a bug worth surfacing loudly.
