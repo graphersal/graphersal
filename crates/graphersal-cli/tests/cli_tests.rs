@@ -790,7 +790,9 @@ fn nested_expansion_step_reuses_its_buffer_across_traversers() {
         .unwrap_or_else(|| panic!("no nested out_v() row in stdout: {}", res.stdout));
     let fields: Vec<&str> = row.split_whitespace().collect();
     let calls: u64 = fields[2].parse().expect("Call is a number");
-    let allocs: u64 = fields[fields.len() - 2].parse().expect("Allocs is a number");
+    let allocs: u64 = fields[fields.len() - 2]
+        .parse()
+        .expect("Allocs is a number");
     assert!(calls > 100_000, "line: {row}");
     assert!(allocs < 100, "line: {row}");
 }
