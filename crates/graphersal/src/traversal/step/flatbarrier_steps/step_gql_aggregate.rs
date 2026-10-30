@@ -203,20 +203,23 @@ impl<'g, S: GraphStorage + 'g> StepGqlAggregate<'g, S> {
         groups: &IndexMap<Vec<GroupKey<GqlElement<S>>>, Group<S>, FnvBuildHasher>,
     ) -> TraverserResult<()> {
         let each = std::mem::size_of::<TraverserValue<S>>() as u64;
-        let max = context.options.max_materialized_bytes;
+        let max = context.memory.limit();
         let mut bytes: u64 = 0;
         for group in groups.values() {
             for accumulator in &group.accumulators {
                 bytes = bytes.saturating_add(accumulator.collected().saturating_mul(each));
             }
             if bytes > max {
-                return Err(bulk::materialized_bytes_error(max, bytes));
+                // Over the limit on its own: no need to size the rest.
+                break;
             }
         }
-        match &context.options.memory {
-            Some(budget) if bytes > 0 => budget.check(bytes),
-            _ => Ok(()),
+        if bytes == 0 {
+            return Ok(());
         }
+        context.check_memory(bytes)?;
+        context.memory.charge(bytes);
+        Ok(())
     }
 }
 

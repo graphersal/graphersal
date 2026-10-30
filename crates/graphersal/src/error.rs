@@ -6018,7 +6018,7 @@ const MEMORY_CEILING_SETTING: &str = "The ceiling is ONE setting of the whole pr
      physical memory, 3.5 GiB in the browser). The host raises it or turns it off: the \
      graphersal command line takes --memory-limit <bytes|auto|none> (and --memory-headroom), the \
      Python binding graphersal.set_memory_limit(...), a Rust host \
-     graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
+     exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
      off). A query cannot set it.";
 
 /// What the memory ceiling compared in this process: the live heap when a tracking allocator
@@ -6035,6 +6035,16 @@ fn memory_measure(unit: bool) -> &'static str {
         "The figure is estimated (no tracking allocator in this process): the graph's footprint \
          (see g.memory_usage()) plus what the traversal holds and adds; the real process can \
          hold more."
+    }
+}
+
+/// What the per-execution limit `traversal.max_materialized_bytes` measured: the live heap of the
+/// query's thread (tracked) or the engine's count of what the run holds (estimated).
+fn query_memory_measure() -> &'static str {
+    if crate::traversal::memory_budget::tracked_live_bytes().is_some() {
+        "tracked: the live heap this query's thread holds, without what it added to the graph"
+    } else {
+        "estimated: the engine's count of its buffers and values"
     }
 }
 
@@ -6177,12 +6187,12 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
                 .unwrap_or_default()
         ),
         "traversal.max_materialized_bytes" => format!(
-            "A step had to materialize a value or buffer larger than \
-             'traversal.max_materialized_bytes' allows{}{}, by the engine's size estimate. \
-             Steps that expand merged traversers into single items (fold(), aggregate(), \
-             store(), group() value lists, a terminal list) do this, and so does a repeat() \
-             whose body doubles its value on every iteration (repeat(__.path()), \
-             repeat(__.group())). Prefer a step that works on the multiplicity directly: count() \
+            "The traversal held more memory at once than 'traversal.max_materialized_bytes' \
+             allows{}{} ({}). Memory a step frees is given back, so only what is held at the \
+             same time counts. Steps that expand merged traversers into single items (fold(), \
+             aggregate(), store(), group() value lists, a terminal list) hold the most, and so \
+             does a repeat() whose body multiplies its traversers or doubles its value on every \
+             iteration (repeat(__.path()), repeat(__.group())). Prefer a step that works on the multiplicity directly: count() \
              instead of fold(), for example g.v().repeat(__.both()).times(8).count(); \
              group_count() to see how often each result occurs, for example \
              g.v().repeat(__.both()).times(8).group_count(); dedup() or limit(n) before the \
@@ -6196,8 +6206,9 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
              administrative option: a script whose host restricts it needs Update on that Option.",
             max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
             observed
-                .map(|observed| format!("; this one needed at least {observed} bytes"))
+                .map(|observed| format!("; it reached {observed} bytes"))
                 .unwrap_or_default(),
+            query_memory_measure(),
         ),
         "memory.limit" => format!(
             "The traversal would take the memory in use over the process memory ceiling \
@@ -6332,7 +6343,7 @@ fn invalid_option_help(key: &str) -> String {
              example g.v().out().fold() instead of g.with(\"memory.limit\", 4294967296).v().out().fold(), \
              and set it on the host: the graphersal command line --memory-limit 4294967296, \
              Python graphersal.set_memory_limit(4294967296), Rust \
-             graphersal::exec::set_memory_limit(MemoryLimit::Bytes(4294967296)). Limit one \
+             exec::set_memory_limit(MemoryLimit::Bytes(4294967296)). Limit one \
              query with 'traversal.max_materialized_bytes' instead, for example \
              g.with(\"traversal.max_materialized_bytes\", 268435456).v().out().fold()."
             .to_string(),
@@ -6341,7 +6352,7 @@ fn invalid_option_help(key: &str) -> String {
              limit, a non-negative integer number of bytes the host sets once: the graphersal \
              command line --memory-headroom 268435456, Python \
              graphersal.set_memory_limit(\"auto\", headroom=268435456), Rust \
-             graphersal::exec::set_memory_headroom(Some(268435456)). The default is a tenth of \
+             exec::set_memory_headroom(Some(268435456)). The default is a tenth of \
              the cgroup limit, at least 67108864 (64 MiB) and at most half of the limit."
             .to_string(),
         "traversal.max_string_bytes" => "Set 'traversal.max_string_bytes' to a positive integer \
@@ -8580,8 +8591,9 @@ fn gql_traverser_limit_help(
 fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> String {
     let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
     format!(
-        "The gql() query built a value larger than 'traversal.max_materialized_bytes' \
-         allows{}{}, by the engine's size estimate. A function whose result can be larger than \
+        "The gql() query held more memory at once than 'traversal.max_materialized_bytes' \
+         allows{}{} ({}). Memory a step frees is given back, so only what is held at the same \
+         time counts. A function whose result can be larger than \
          its arguments (range(), split(), replace(), || and CAST(x AS STRING) of a list or map) and \
          the list of collect_list() are checked before they are built, as is the list of a \
          pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out \
@@ -8601,8 +8613,9 @@ fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> Strin
          administrative option: a script whose host restricts it needs Update on that Option.",
         max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
         observed
-            .map(|observed| format!("; this one needed at least {observed} bytes"))
+            .map(|observed| format!("; it reached {observed} bytes"))
             .unwrap_or_default(),
+        query_memory_measure(),
     )
 }
 

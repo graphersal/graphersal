@@ -245,3 +245,87 @@ fn a_store_open_over_the_process_ceiling_names_the_minimum_needed() {
     assert_eq!(store.graph().read().vertex_count(), 2000);
     store.close().unwrap();
 }
+
+/// The per-query limit `traversal.max_materialized_bytes` counts the LIVE bytes the query holds
+/// at once (tracked: the live heap of its thread since it started; estimated: the engine's
+/// count), never a sum of allocations: a chain of twenty `fold().unfold()` holds no more at
+/// once than one (within allocator noise), and runs under a limit far below the sum of its
+/// lists. What a writing query adds to the GRAPH does not count against it.
+#[test]
+fn the_per_query_limit_counts_live_bytes_when_tracked() {
+    const LIMIT: &str = "traversal.max_materialized_bytes";
+    let _guard = exclusive();
+    let mut graph = TraversalGraph::new();
+    for _ in 0..5000 {
+        graph.traversal_mut().add_v("x").iterate().unwrap();
+    }
+    let peak = |graph: &TraversalGraph, folds: usize| {
+        let mut traversal = graph.traversal().with(LIMIT, 1i64 << 40).v(None);
+        for _ in 0..folds {
+            traversal = traversal.fold().unfold();
+        }
+        let metrics = traversal.count().profile().unwrap();
+        let memory = metrics.memory().unwrap();
+        let expected = if tracked() {
+            graphersal::profile::MemorySource::Tracked
+        } else {
+            graphersal::profile::MemorySource::Estimated
+        };
+        assert_eq!(memory.source(), expected);
+        memory.peak_bytes()
+    };
+    let one = peak(&graph, 1);
+    let twenty = peak(&graph, 20);
+    assert!(
+        one >= 5000 * 80,
+        "the stream of 5000 traversers is held: {one}"
+    );
+    assert!(twenty <= one + one / 2, "{twenty} vs {one}");
+    // Twenty lists of 5000 values (at least 32 bytes each) sum to 3.2 MB; the chain runs under
+    // twice what one fold holds.
+    let limit = one * 2;
+    assert!(20 * 5000 * 32 > limit);
+    let mut traversal = graph.traversal().with(LIMIT, limit as i64).v(None);
+    for _ in 0..20 {
+        traversal = traversal.fold().unfold();
+    }
+    assert_eq!(traversal.count().to_list().unwrap().len(), 1);
+    // Below what one fold holds, the query fails on the per-query limit.
+    let err = graph
+        .traversal()
+        .with(LIMIT, (one / 4) as i64)
+        .v(None)
+        .fold()
+        .unfold()
+        .count()
+        .to_list()
+        .unwrap_err();
+    assert!(
+        matches!(root(&err), TraverserError::ResourceLimitExceeded { limit, .. } if limit == LIMIT),
+        "{err}"
+    );
+    // A query that adds 20 000 vertices one at a time: its own memory is far below what the
+    // graph gained.
+    let before = graph.memory_usage().unwrap().unwrap().total_bytes();
+    let metrics = graph
+        .traversal_mut()
+        .with(LIMIT, 1i64 << 40)
+        .inject(vec![1i64])
+        .repeat(__::add_v("y"))
+        .times(20_000)
+        .count()
+        .profile()
+        .unwrap();
+    let grown = graph
+        .memory_usage()
+        .unwrap()
+        .unwrap()
+        .total_bytes()
+        .saturating_sub(before);
+    let peak = metrics.memory().unwrap().peak_bytes();
+    assert!(grown > 1_000_000, "{grown}");
+    assert!(
+        peak < grown / 2,
+        "the graph's growth is not the query's: {peak} vs {grown}"
+    );
+}

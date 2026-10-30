@@ -297,6 +297,13 @@ are the optional `memory` section of every step's [`Metrics`](profiling_and_exec
 `Retained`/`Allocs` value of `-` means that figure simply isn't tracked for this run
 (`source: "estimated"`, which has no allocator-level figures to show).
 
+The whole query's figure is separate: the peak of the live bytes the query held at once, against
+its per-query limit `traversal.max_materialized_bytes`, on every profile as
+`TraversalMetrics::memory()` (key `query_memory`) and, with `ProfileType::Memory`, as the line
+`Peak memory: .. of .. (traversal.max_materialized_bytes, tracked|estimated)` under the table
+(see [Profiling and execute()](profiling_and_execute.md)). It is not the sum of the `Mem` column:
+`Mem` counts what each step allocated, the peak what the query held at the same time.
+
 ### No `memory` section vs. `Estimated` vs. `Tracked`
 
 - **No `memory` section** (a bare `.profile()`, no `ProfileType` argument): memory profiling wasn't

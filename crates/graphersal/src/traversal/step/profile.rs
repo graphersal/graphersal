@@ -324,6 +324,7 @@ impl ProfileContext {
             duration,
             metrics,
             optimizer_rules_applied: self.applied_optimizer_rules,
+            memory: None,
         }
     }
 }

@@ -621,6 +621,24 @@ def test_set_limits_sets_the_per_query_memory_limit():
     assert graphersal.Graph.tinkerpop_modern().execute(fold) > 0
 
 
+def test_per_query_limit_is_cumulative():
+    # The per-query limit counts what a query holds AT ONCE (live bytes, tracked here): twenty
+    # lists built and dropped one after the other fit under twice what one of them holds.
+    graph = graphersal.Graph.tinkerpop_modern()
+    numbers = "let xs = []; for i in 0..2000 { xs.push(i); } g.inject(xs).unfold()"
+    one = graph.execute(numbers + ".fold().unfold().count().profile().to_map()")["query_memory"]
+    assert one["source"] == "tracked"
+    assert one["limit"] == "traversal.max_materialized_bytes"
+    assert 0 < one["peak_bytes"] <= one["limit_bytes"]
+    chain = numbers + ".fold().unfold()" * 20 + ".count().next()"
+    graph.set_limits(max_materialized_bytes=one["peak_bytes"] * 2)
+    assert graph.execute(chain) == 2000
+    graph.set_limits(max_materialized_bytes=one["peak_bytes"] // 4)
+    with pytest.raises(graphersal.GraphersalError) as excinfo:
+        graph.execute(chain)
+    assert "traversal.max_materialized_bytes" in str(excinfo.value)
+
+
 def test_limits_reports_what_set_limits_set():
     graph = graphersal.Graph.tinkerpop_modern()
     defaults = graph.limits()

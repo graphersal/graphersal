@@ -22,6 +22,42 @@ pub struct TraversalMetrics {
     pub(crate) duration: Duration,
     pub(crate) metrics: Vec<Metrics>,
     pub(crate) optimizer_rules_applied: Vec<String>,
+    pub(crate) memory: Option<QueryMemory>,
+}
+
+/// The memory of the whole run against its per-execution limit
+/// `traversal.max_materialized_bytes`: the PEAK of the live bytes the run held at once (memory a
+/// step frees is given back), sampled at the engine's checks (every step boundary, bulk
+/// expansion, `repeat()` traverser and sized value), so a short spike between two checks can be
+/// missed. Never the process ceiling `memory.limit`. Present on every profile of a run that
+/// started (not with a bare `.profile()` text table: the line `Peak memory: ..` shows only with
+/// `ProfileType::Memory`). `#[non_exhaustive]` and built only by the library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QueryMemory {
+    pub(crate) peak_bytes: u64,
+    pub(crate) limit_bytes: u64,
+    pub(crate) source: MemorySource,
+}
+
+impl QueryMemory {
+    /// The highest live figure seen at a check: tracked, the heap the run's thread held beyond
+    /// its start (graph growth from writes excluded); estimated, the engine's count of the
+    /// buffers and values the run held. After a failure on the limit, the figure of the failing
+    /// check.
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    /// The per-execution limit `traversal.max_materialized_bytes` the run was checked against.
+    pub fn limit_bytes(&self) -> u64 {
+        self.limit_bytes
+    }
+
+    /// Whether the figure is the tracking allocator's or the engine's estimate.
+    pub fn source(&self) -> MemorySource {
+        self.source
+    }
 }
 
 /// The figures of one step of the optimized plan.
@@ -138,6 +174,12 @@ impl TraversalMetrics {
         &self.optimizer_rules_applied
     }
 
+    /// The run's memory against its per-execution limit ([`QueryMemory`]); `None` when the run
+    /// failed before it started (an invalid option, a plan check).
+    pub fn memory(&self) -> Option<QueryMemory> {
+        self.memory
+    }
+
     /// The step with the given id (`"3"`, `"3.1.0"`), at any nesting depth.
     pub fn find(&self, id: &str) -> Option<&Metrics> {
         fn find_in<'a>(list: &'a [Metrics], id: &str) -> Option<&'a Metrics> {
@@ -154,7 +196,8 @@ impl TraversalMetrics {
 
     /// The metrics as a plain value tree with snake_case keys, the shape of the Rhai map
     /// (`to_map()`) and of [`Self::to_json`]: `{duration_ns, metrics: [..],
-    /// optimizer_rules_applied: [..]}`, each step `{id, name, duration_ns, percent_duration,
+    /// optimizer_rules_applied: [..], query_memory?: {peak_bytes, limit_bytes, limit, source}}` (the
+    /// run's [`QueryMemory`], `limit` = `"traversal.max_materialized_bytes"`), each step `{id, name, duration_ns, percent_duration,
     /// path_recording?, counts: {traverser_count, element_count}, calls, count_in, timing?, loops?, memory?,
     /// nested: [..]}`. Durations are integer nanoseconds; an optional section is absent unless
     /// present in the data.
@@ -174,6 +217,22 @@ impl TraversalMetrics {
                     .collect(),
             ),
         );
+        if let Some(memory) = &self.memory {
+            let mut section = PropertyMap::default();
+            section.insert("peak_bytes", int(memory.peak_bytes));
+            section.insert("limit_bytes", int(memory.limit_bytes));
+            section.insert(
+                "limit",
+                ElementProperty::String(CompactString::new(
+                    crate::traversal::context::MAX_MATERIALIZED_BYTES,
+                )),
+            );
+            section.insert(
+                "source",
+                ElementProperty::String(CompactString::new(memory.source.as_str())),
+            );
+            map.insert("query_memory", ElementProperty::Object(Box::new(section)));
+        }
         ElementProperty::Object(Box::new(map))
     }
 
@@ -419,6 +478,28 @@ fn format_bytes(bytes: u64, source: MemorySource) -> String {
         format!("{bytes}B")
     };
     format!("{prefix}{formatted}")
+}
+
+/// Formats `bytes` in binary units with at most one decimal (`512 B`, `1.2 MiB`, `1 GiB`),
+/// prefixed with `~` for an estimate.
+fn format_binary_bytes(bytes: u64, source: MemorySource) -> String {
+    let prefix = match source {
+        MemorySource::Estimated => "~",
+        MemorySource::Tracked => "",
+    };
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{prefix}{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let text = format!("{value:.1}");
+    let text = text.strip_suffix(".0").unwrap_or(&text);
+    format!("{prefix}{text} {}", UNITS[unit])
 }
 
 /// Formats a signed byte delta (`bytes_retained`) with an explicit `-` for a net-freeing delta.
@@ -772,6 +853,18 @@ impl std::fmt::Display for TraversalMetrics {
             ));
         }
         buf.push_str(&separator);
+
+        // The run's peak against the per-execution limit: only when memory was profiled, so
+        // the plain table stays as it is.
+        if show_mem && let Some(memory) = &self.memory {
+            buf.push_str(&format!(
+                "Peak memory: {} of {} ({}, {})\n",
+                format_binary_bytes(memory.peak_bytes, memory.source),
+                format_binary_bytes(memory.limit_bytes, MemorySource::Tracked),
+                crate::traversal::context::MAX_MATERIALIZED_BYTES,
+                memory.source.as_str()
+            ));
+        }
 
         // The optimizer rules that fired, omitted entirely (not `(none)`) when none did.
         if !self.optimizer_rules_applied.is_empty() {

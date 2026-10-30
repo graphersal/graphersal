@@ -79,7 +79,7 @@ grouped duplicates, so it is not implemented. `barrier(0)` fails with
 | `bulk.merge` | `true` | `false` turns every merge point into a pass-through. The result is the same, only slower on dense graphs. Use it to diagnose or to compare. |
 | `bulk.one` | `false` | `true` (`g.withBulk(false)`) makes a merge keep bulk 1 (duplicates collapse and are emitted once), stops sacked traversers from merging, and switches the automatic merge points off. A strict boolean. See [Sack and Operators](sack_and_operators.md#withbulkfalse). |
 | `bulk.max_expansion` | `10 000 000` | The most values a step may produce when it expands a merged traverser into single items. Larger expansions fail with `BulkExpansionLimit`. |
-| `traversal.max_materialized_bytes` | `1 GiB` (256 MiB on wasm32) | The largest estimated size of one expansion (and of a value a `repeat()` body builds up). Larger ones fail with `ResourceLimitExceeded` before anything is allocated. See [Resource Limits](resource_limits.md#memory-materialized-bytes-and-expansions). |
+| `traversal.max_materialized_bytes` | `1 GiB` (256 MiB on wasm32) | The memory the query holds at once (live bytes), an expansion included: one that would take it over the limit fails with `ResourceLimitExceeded` before anything is allocated. See [Resource Limits](resource_limits.md#memory-materialized-bytes-and-expansions). |
 
 ```rhai,graph=modern
 g.with("bulk.merge", false).V().both().both().count().next()                 // same 30, no merging

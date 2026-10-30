@@ -15,6 +15,11 @@
 //! | `percentDur`    | `percent_duration`         |
 //! | nested metrics  | `nested`                   |
 //!
+//! The whole run's memory is [`TraversalMetrics::memory`] ([`QueryMemory`]): the peak of the
+//! live bytes the run held at once against its per-execution limit
+//! `traversal.max_materialized_bytes`, on every profile (`query_memory` key in the map and the JSON);
+//! the text table shows it as one line under `TOTAL:` only with `ProfileType::Memory`.
+//!
 //! # Extensibility rule
 //!
 //! These types are pure data that callers may store, compare and serialize, so they may only
@@ -31,6 +36,6 @@
 //! [`TraversalMetrics::to_json`].
 
 pub use crate::traversal::{
-    LoopMetrics, MemoryMetrics, MemorySource, Metrics, ProfileType, StepCounts, TimingMetrics,
-    TraversalMetrics,
+    LoopMetrics, MemoryMetrics, MemorySource, Metrics, ProfileType, QueryMemory, StepCounts,
+    TimingMetrics, TraversalMetrics,
 };

@@ -99,22 +99,42 @@ struct RunOutcome<S: GraphStorage> {
 pub(crate) struct Expansion {
     limits: bulk::ExpansionLimits,
     deadline: Option<crate::traversal::context::Deadline>,
+    /// The run's memory (its peak and what it still holds), `None` when the run never started.
+    memory: Option<crate::traversal::run_memory::RunMemory>,
 }
 
 impl Expansion {
     /// No bound (a run that failed before its options were parsed has nothing to expand).
-    const UNBOUNDED: Self = Self {
-        limits: bulk::ExpansionLimits::UNBOUNDED,
-        deadline: None,
-    };
+    fn unbounded() -> Self {
+        Self {
+            limits: bulk::ExpansionLimits::UNBOUNDED,
+            deadline: None,
+            memory: None,
+        }
+    }
 
-    /// Expands `traversers` (see [`bulk::expand`]); `step` names the boundary in an error.
+    /// Expands `traversers` (see [`bulk::expand`]) under the run's memory; `step` names the
+    /// boundary in an error.
     pub(crate) fn expand<S: GraphStorage>(
         &mut self,
         traversers: Vec<Traverser<S>>,
         step: &str,
     ) -> TraverserResult<Vec<Traverser<S>>> {
-        bulk::expand(traversers, self.limits, &mut self.deadline, step)
+        match &self.memory {
+            Some(memory) => bulk::expand(traversers, self.limits, memory, &mut self.deadline, step),
+            None => bulk::expand(
+                traversers,
+                self.limits,
+                &crate::traversal::run_memory::RunMemory::new(u64::MAX, None),
+                &mut self.deadline,
+                step,
+            ),
+        }
+    }
+
+    /// The run's memory figures for the profile (`None`: the run never started).
+    fn query_memory(&self) -> Option<crate::traversal::QueryMemory> {
+        self.memory.as_ref().map(|memory| memory.query_memory())
     }
 }
 
@@ -2347,9 +2367,12 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     .result
                     .and_then(|traversers| expansion.expand(traversers, "execute"));
                 let duration = start.elapsed();
-                let profile = options
-                    .profile_types()
-                    .map(|_| outcome.profile.into_metrics(duration));
+                let query_memory = expansion.query_memory();
+                let profile = options.profile_types().map(|_| {
+                    let mut metrics = outcome.profile.into_metrics(duration);
+                    metrics.memory = query_memory;
+                    metrics
+                });
                 let materialized = expanded.and_then(|traversers| {
                     let mut items = Vec::with_capacity(traversers.len());
                     for traverser in traversers {
@@ -2632,7 +2655,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             RunOutcome {
                 result: Err(err),
                 profile: ProfileContext::new(),
-                expansion: Expansion::UNBOUNDED,
+                expansion: Expansion::unbounded(),
                 step_inputs: None,
             }
         };
@@ -2683,6 +2706,18 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             }
             started => started.and_then(Result::ok),
         };
+        // The run's memory: the per-execution limit and the started process ceiling, with the
+        // starting point of its measure (tracked: the thread's live heap and the element count).
+        let memory = match crate::traversal::run_memory::RunMemory::start(
+            &self.storage,
+            options.max_materialized_bytes,
+            options.memory,
+        ) {
+            Ok(memory) => memory,
+            Err(err) => {
+                return failed_before_run(Box::new(TraverserError::from(err)), &self.options);
+            }
+        };
         let path_analysis = options.path_analysis;
         let limits = bulk::ExpansionLimits::of(&options);
         let spelling = options.render_spelling;
@@ -2695,41 +2730,49 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             }
         };
         let count_inputs = crate::graph::workload::scope::attached().is_some();
-        let (result, mut profile, deadline, step_inputs) = crate::graph::storage::close_on_unwind(
-            self,
-            |this| {
-                let mut context = TraverserContext::with_options(
-                    &mut this.storage,
-                    this.strategy,
-                    this.side_effect.clone(),
-                    options,
-                );
-                if count_inputs {
-                    context.step_inputs = Some(Vec::new());
-                }
-                context.profile_type = this.profile_type;
-                context.create_context = this
-                    .create_time
-                    .map(crate::graph::schema::defaults::CreateContext::at);
-                let result = match &this.sack {
-                    Some(spec) => context.sacks.intern(spec.initial.clone()).map(|sack| {
-                        context.initial_sack = sack;
-                        context.sack_merge = spec.merge;
-                    }),
-                    None => Ok(()),
-                }
-                .and_then(|()| Self::execute_steps(&mut this.steps, &mut context, path_analysis));
-                #[cfg(test)]
-                crate::traversal::unwind_probe::after_steps();
-                (
-                    result,
-                    std::mem::take(&mut context.profile),
-                    context.deadline.take(),
-                    context.step_inputs.take(),
-                )
-            },
-            |this| crate::graph::storage::rollback_unwound(&mut this.storage, mark),
-        );
+        let (result, mut profile, deadline, step_inputs, memory) =
+            crate::graph::storage::close_on_unwind(
+                self,
+                |this| {
+                    let mut context = TraverserContext::with_options(
+                        &mut this.storage,
+                        this.strategy,
+                        this.side_effect.clone(),
+                        options,
+                    );
+                    context.memory = memory;
+                    if count_inputs {
+                        context.step_inputs = Some(Vec::new());
+                    }
+                    context.profile_type = this.profile_type;
+                    context.create_context = this
+                        .create_time
+                        .map(crate::graph::schema::defaults::CreateContext::at);
+                    let result = match &this.sack {
+                        Some(spec) => context.sacks.intern(spec.initial.clone()).map(|sack| {
+                            context.initial_sack = sack;
+                            context.sack_merge = spec.merge;
+                        }),
+                        None => Ok(()),
+                    }
+                    .and_then(|()| {
+                        Self::execute_steps(&mut this.steps, &mut context, path_analysis)
+                    });
+                    #[cfg(test)]
+                    crate::traversal::unwind_probe::after_steps();
+                    // The path records die with the context: the terminal's expansion no longer
+                    // counts them.
+                    context.memory.set_arena(0);
+                    (
+                        result,
+                        std::mem::take(&mut context.profile),
+                        context.deadline.take(),
+                        context.step_inputs.take(),
+                        context.memory.clone(),
+                    )
+                },
+                |this| crate::graph::storage::rollback_unwound(&mut this.storage, mark),
+            );
         // Steps render in snake_case; `render.spelling` respells the diagnostics once, here.
         profile.respell(spelling);
         let result = result.map_err(|mut err| {
@@ -2753,7 +2796,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         RunOutcome {
             result,
             profile,
-            expansion: Expansion { limits, deadline },
+            expansion: Expansion {
+                limits,
+                deadline,
+                memory: Some(memory),
+            },
             step_inputs,
         }
     }
@@ -2813,6 +2860,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 Ok(analysed) => analysed,
                 Err(err) => return Err(locate_plan_error(steps, level.as_ref(), err)),
             };
+        // What a plan that mutates adds to the graph is not the query's own memory.
+        context.memory.set_writes(effects.mutates);
         // A plan that mutates never merges: one logical traverser must stay one mutation.
         context.bulk_merge = context.options.bulk_merge && !effects.mutates;
         // A sack merge operator or `bulk.one` makes merging visible: only an explicit barrier
@@ -3523,9 +3572,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             // allocator cannot provide (the limit raised to "unlimited") is an error,
             // never an abort of the process.
             let product = incoming.len().saturating_mul(found.len());
+            let product_bytes =
+                (product as u64).saturating_mul(std::mem::size_of::<Traverser<S>>() as u64);
             context
                 .check_traverser_limit(product)
-                .and_then(|()| context.check_memory_budget(product))
+                .and_then(|()| context.check_memory(product_bytes))
                 .and_then(|()| crate::traversal::capacity::try_reserve_exact(source, product))
                 .with_step_frame(
                     || step.get_name(),
@@ -3576,7 +3627,26 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         Ok(count_out)
     }
 
+    /// Runs one level of a plan on `initial_source`. What the level charged to the run's
+    /// estimated memory (its step buffers and the values its steps built) is released when it
+    /// returns, whether it succeeded or failed: the caller charges what it keeps of the result at
+    /// its own boundary.
     pub(crate) fn execute_optimized_steps(
+        steps: &[GraphStep<'g, S>],
+        initial_source: Vec<Traverser<S>>,
+        context: &mut TraverserContext<'_, S>,
+        at: LevelAt,
+        level: Option<&LevelPlan<'g, S>>,
+        path_modes: &[PathMode],
+    ) -> TraverserResult<Vec<Traverser<S>>> {
+        let mark = context.memory.mark();
+        let result = Self::execute_level(steps, initial_source, context, at, level, path_modes);
+        context.memory.restore(mark);
+        result
+    }
+
+    /// The step loop of [`Self::execute_optimized_steps`].
+    fn execute_level(
         steps: &[GraphStep<'g, S>],
         initial_source: Vec<Traverser<S>>,
         context: &mut TraverserContext<'_, S>,
@@ -3599,6 +3669,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         // The traversers a step folded into one count for the fused `count()` after it: that
         // step's real output, and the real input of the `count()` (see `note_collapsed`).
         let mut counted_in: Option<usize> = None;
+
+        // The level's charges to the run's estimated memory: its stream buffer (by capacity)
+        // and the values the steps since the last value-replacing step built.
+        let mut buffer_charge: u64 = 0;
+        let mut values_charge: u64 = 0;
 
         while let Some(current_step) = steps.get(physical) {
             let mode = path_mode_at(path_modes, physical);
@@ -3666,6 +3741,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             }
             let mut count_out = 0;
             let alloc_before = AllocSnapshot::capture(profile_memory);
+            let step_mark = context.memory.mark();
 
             match current_step {
                 GraphStep::Init(_, step) => {
@@ -4277,9 +4353,26 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             }
 
             if !matches!(current_step, GraphStep::Modulator(_, _)) {
+                // What the step charged: kept with the stream when it passes values through,
+                // for the rest of the run when a side effect holds them, else it replaces the
+                // values charged before. Then the new buffer replaces the old one.
+                let memory = &context.memory;
+                let added = memory.since(step_mark);
+                if !current_step.keeps_values() {
+                    memory.release(values_charge);
+                    values_charge = added;
+                } else if current_step.holds_values_for_the_run() {
+                    memory.retain(added);
+                } else {
+                    values_charge = values_charge.saturating_add(added);
+                }
+                memory.release(buffer_charge);
+                buffer_charge = (source.capacity() as u64)
+                    .saturating_mul(std::mem::size_of::<Traverser<S>>() as u64);
+                memory.charge(buffer_charge);
                 context
                     .check_traverser_limit(source.len())
-                    .and_then(|()| context.check_memory_budget(source.len()))
+                    .and_then(|()| context.check_memory_boundary())
                     .with_step_frame(
                         || current_step.get_name(),
                         step_at,
@@ -4331,7 +4424,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         level: Option<&LevelPlan<'g, S>>,
         path_modes: &[PathMode],
     ) -> TraverserResult<bool> {
-        Self::exists_in_level(
+        // A per-traverser check: what it charged is released when it answers.
+        let mark = context.memory.mark();
+        let result = Self::exists_in_level(
             steps,
             steps,
             source,
@@ -4341,7 +4436,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             level,
             path_modes,
             None,
-        )
+        );
+        context.memory.restore(mark);
+        result
     }
 
     /// The first traverser `steps` produce from `source`, or `None` when they produce nothing,
@@ -4360,7 +4457,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         path_modes: &[PathMode],
     ) -> TraverserResult<Option<Traverser<S>>> {
         let mut first = None;
-        Self::exists_in_level(
+        // A per-traverser child: what it charged is released when it answers.
+        let mark = context.memory.mark();
+        let result = Self::exists_in_level(
             steps,
             steps,
             source,
@@ -4370,7 +4469,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             level,
             path_modes,
             Some(&mut first),
-        )?;
+        );
+        context.memory.restore(mark);
+        result?;
         Ok(first)
     }
 

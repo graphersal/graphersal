@@ -1277,6 +1277,17 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         .map_err(|err| err.at("schema.json", schema_at))?;
 
     graph.load_schema(schema)?;
+    // The growth check's starting point is taken BEFORE the slots are reserved: the reserved
+    // capacity is part of the manifest's estimate that the elements count at their average
+    // below, so the empty graph's footprint must not hold it a second time.
+    let operation = load_operation(options);
+    let elements = fixed.vertex_count.saturating_add(fixed.edge_count);
+    let element_bytes = fixed.memory_bytes.checked_div(elements).unwrap_or(0);
+    let mut budget = crate::traversal::memory_budget::UnitBudget::start_with_element_bytes(
+        &*graph,
+        operation,
+        element_bytes,
+    )?;
     // Allocate the slots once when the counts agree with the manifest's own memory estimate (a
     // damaged manifest claiming billions of elements reserves nothing; the load then fails on
     // the count check below).
@@ -1293,14 +1304,6 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     // The growth check while the graph is built (the manifest's estimate passed above, but the
     // data may grow past it): every 4096 elements and at the end, an element estimated at the
     // manifest's average. All checks run on this thread (the decode threads never check).
-    let operation = load_operation(options);
-    let elements = fixed.vertex_count.saturating_add(fixed.edge_count);
-    let element_bytes = fixed.memory_bytes.checked_div(elements).unwrap_or(0);
-    let mut budget = crate::traversal::memory_budget::UnitBudget::start_with_element_bytes(
-        &*graph,
-        operation,
-        element_bytes,
-    )?;
     let mut loaded = 0u64;
     let mut last_vertex: Option<CompactString> = None;
     let mut last_edge: Option<CompactString> = None;

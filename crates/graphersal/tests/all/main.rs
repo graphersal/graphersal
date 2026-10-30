@@ -159,6 +159,7 @@ mod property_handle_tests;
 mod property_index_tests;
 mod property_order_tests;
 mod property_shape_tests;
+mod query_memory_tests;
 mod random_seed_tests;
 mod reducer_operator_tests;
 mod reducer_widening_tests;

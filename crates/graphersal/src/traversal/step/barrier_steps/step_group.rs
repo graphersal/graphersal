@@ -52,7 +52,12 @@ pub(crate) fn push_n<S: GraphStorage>(
     step: &str,
 ) -> TraverserResult<()> {
     if n > 1 {
-        bulk::ExpansionLimits::of(&context.options).check_copies(&value, n, step)?;
+        bulk::ExpansionLimits::of(&context.options).check_copies(
+            &context.memory,
+            &value,
+            n,
+            step,
+        )?;
     }
     bulk::push_copies(bucket, value, n, &mut context.deadline)
 }

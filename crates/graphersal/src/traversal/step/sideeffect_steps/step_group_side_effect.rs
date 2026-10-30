@@ -232,6 +232,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffect<'g, S> for StepGroupSideEffec
                     && source.bulk > 1
                 {
                     crate::traversal::bulk::ExpansionLimits::of(&context.options).check_copies(
+                        &context.memory,
                         value,
                         source.bulk,
                         step,
