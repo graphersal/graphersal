@@ -391,39 +391,6 @@ pub(crate) fn copy_blob(
     Ok(true)
 }
 
-/// Writes `bytes` that claim to be `blob` into the store at `to` (foreign input: ZIP restore,
-/// `.gsnap` import): checked by SHA-256, CRC-32C and length; a mismatch is refused.
-pub(crate) fn install_foreign(
-    to: &DirPath,
-    blob: &BlobRef,
-    reader: &mut dyn Read,
-) -> Result<(), BlobError> {
-    if blob.hash_algo() != BlobHashAlgo::Sha256 {
-        return Err(BlobError::Unsupported);
-    }
-    if check_blob(to, blob, true).is_ok() {
-        return Ok(());
-    }
-    let written = write_blob(to, reader, &mut |_| {}).map_err(|err| match err {
-        PersistError::Io { source, .. } => BlobError::Io(source),
-        other => BlobError::Io(std::io::Error::other(other.to_string())),
-    })?;
-    if &written.blob != blob {
-        if written.new {
-            let _ = blob_path(to, &written.blob).remove_file();
-        }
-        let fault = if written.blob.length() != blob.length() {
-            BlobFault::Length
-        } else if written.blob.crc32c() != blob.crc32c() {
-            BlobFault::Crc
-        } else {
-            BlobFault::Hash
-        };
-        return Err(BlobError::Fault(fault));
-    }
-    Ok(())
-}
-
 /// One file under `blobs/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlobFile {
@@ -952,6 +919,19 @@ pub(crate) fn referenced(
     ledger_stale: bool,
 ) -> Result<Referenced, PersistError> {
     referenced_from(root, chain, ledger_stale, 0)
+}
+
+/// The blobs the blob tables of every snapshot of the store and of its attic entries
+/// reference (no ledger, no WAL).
+pub(crate) fn referenced_by_tables(root: &DirPath) -> Result<Referenced, PersistError> {
+    let mut out = Referenced::default();
+    let snapshots: Vec<DirPath> = files::list_snapshots(root)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    add_tables(&mut out, &snapshots)?;
+    add_tables(&mut out, &super::rollback::attic_snapshot_dirs(root)?)?;
+    Ok(out)
 }
 
 /// [`referenced`] of the history from `kept_from` on: the snapshots at or after it, the frames

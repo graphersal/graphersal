@@ -652,15 +652,18 @@ fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport)
         });
     }
     let has_ledger = dir.join(blobs::LEDGER_FILE).exists();
-    if listing.blobs.is_empty() && !has_ledger {
-        return;
-    }
     if has_ledger && matches!(blobs::read_ledger(dir), Ok(None)) {
         report
             .notes
             .push("the blob ledger is damaged: the next open rebuilds it from the WAL".into());
     }
-    let referenced = match blobs::referenced(dir, chain, false) {
+    // Without blob files and ledger only the snapshots' blob tables are read (no WAL scan for
+    // a store that never held a blob).
+    let referenced = match if listing.blobs.is_empty() && !has_ledger {
+        blobs::referenced_by_tables(dir)
+    } else {
+        blobs::referenced(dir, chain, false)
+    } {
         Ok(referenced) => referenced,
         Err(err) => {
             report.notes.push(format!(
