@@ -125,6 +125,7 @@ macro_rules! conformance {
             discard_unit_restores_state_keeps_sequences
             transaction_with_metadata_reaches_hooks
             transactional_panic_rolls_back
+            commit_clock_is_shared_with_hooks
         ; ignored:
         }
     };
@@ -182,6 +183,7 @@ macro_rules! conformance_core {
             discard_unit_restores_state_keeps_sequences
             transaction_with_metadata_reaches_hooks
             transactional_panic_rolls_back
+            commit_clock_is_shared_with_hooks
         ; ignored:
         }
     };

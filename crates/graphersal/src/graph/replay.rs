@@ -194,6 +194,7 @@ impl crate::graph::TraversalGraph {
     fn raise_replayed_position(&mut self, changes: &ChangeSet) {
         self.undo.last_commit_seq = self.undo.last_commit_seq.max(changes.commit_seq());
         self.undo.last_committed_at = self.undo.last_committed_at.max(changes.committed_at());
+        self.undo.hooks.clock_ref().raise(changes.committed_at());
         self.node_sequence = self.node_sequence.max(changes.node_sequence());
         self.edge_sequence = self.edge_sequence.max(changes.edge_sequence());
     }

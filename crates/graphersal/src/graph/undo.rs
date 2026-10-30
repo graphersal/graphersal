@@ -72,8 +72,8 @@ pub(crate) struct UndoLog {
     /// The commit sequence number of the last unit that changed something (0: none yet).
     pub(crate) last_commit_seq: u64,
     /// The commit time of the last unit that changed something, in microseconds since the Unix
-    /// epoch (0: none yet). The next commit's time is never earlier (monotonic per graph); a
-    /// rollback does not touch it.
+    /// epoch (0: none yet). The next commit's time is never earlier (it comes from the
+    /// instance clock in `hooks`, raised to this first); a rollback does not touch it.
     pub(crate) last_committed_at: i64,
     /// `true` while a graph that is not published yet is being loaded
     /// ([`TraversalGraph::load_outside_units`]): a schema change is then not a unit of its own.
@@ -292,11 +292,13 @@ impl TraversalGraph {
     }
 
     /// `clock` raised to the log's monotonic floor: never earlier than the previous unit's
-    /// start or the last commit's time, so a later unit never stores an earlier `now`.
+    /// start, the last commit's time or the instance clock's floor (anything the instance
+    /// timed, a journal record included), so a later unit never stores an earlier `now`.
     fn unit_start_from(&self, clock: i128) -> i128 {
         clock
             .max(self.undo.last_started_at)
             .max(self.undo.last_committed_at as i128 * 1000)
+            .max(self.undo.hooks.clock_ref().floor() as i128 * 1000)
     }
 
     /// [`Self::begin_undo_unit`] whose outermost unit starts at `clock` (raised to the log's
@@ -359,7 +361,8 @@ impl TraversalGraph {
             self.rollback_undo_unit(mark, &RollbackReason::failed(&error));
             return Err(error);
         };
-        let committed_at = now_micros().max(self.undo.last_committed_at);
+        // The instance clock (shared with marks and the system journal), also without hooks.
+        let committed_at = self.undo.hooks.commit_time(self.undo.last_committed_at);
         if !self.undo.hooks.is_active() {
             self.finish_commit(commit_seq, committed_at);
             return Ok(());

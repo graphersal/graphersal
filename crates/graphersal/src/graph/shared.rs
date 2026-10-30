@@ -113,6 +113,10 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     unit: UnitOwner,
     /// Set for good when a rollback of one of the graph's units failed ([`Graph::is_poisoned`]).
     poison: Poison,
+    /// The instance clock: the storage's ([`GraphStorage::commit_clock`]), else one of the
+    /// graph's own (Q2.3: then it times only what the graph itself writes, such as journal
+    /// records; the storage's commits are its own business).
+    clock: crate::graph::CommitClock,
 }
 
 /// The poison of a [`Graph`]: set once a rollback of one of its units failed, never cleared.
@@ -578,6 +582,18 @@ fn lock_key(stats: &WorkloadStats, name: &str) -> Option<SeriesKey> {
     (!origin.technical).then(|| SeriesKey::new(SeriesKind::Lock(name.into()), origin.channel))
 }
 
+/// The storage's commit clock; `None` when it keeps none or cannot answer (logged: the graph
+/// then keeps a clock of its own, which only times what the graph writes itself).
+fn storage_clock<S: GraphStorage>(storage: &S) -> Option<crate::graph::CommitClock> {
+    match storage.commit_clock() {
+        Ok(clock) => clock,
+        Err(error) => {
+            tracing::warn!("the storage cannot hand out its commit clock: {error}");
+            None
+        }
+    }
+}
+
 /// The current time in microseconds since the Unix epoch.
 fn now_micros() -> i64 {
     web_time::SystemTime::now()
@@ -595,6 +611,7 @@ impl<S: GraphStorage> Graph<S> {
     /// (The typed snapshot functions in `graphersal::persist` take any persistent storage
     /// directly.)
     pub fn new(storage: S) -> Self {
+        let clock = storage_clock(&storage).unwrap_or_default();
         Graph {
             lock: parking_lot::RwLock::new(storage),
             #[cfg(feature = "persist")]
@@ -602,7 +619,15 @@ impl<S: GraphStorage> Graph<S> {
             workload: OnceLock::new(),
             unit: UnitOwner::default(),
             poison: Poison::default(),
+            clock,
         }
+    }
+
+    /// The instance clock (the storage's, else the graph's own): the system journal and a
+    /// Store time their records with it.
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn clock(&self) -> &crate::graph::CommitClock {
+        &self.clock
     }
 
     /// Counts the lock's wait and hold times in `stats` from now on (book page "Workload
@@ -1466,12 +1491,19 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
         ) -> Result<crate::persist::SnapshotInfo, crate::persist::PersistError> {
             crate::persist::write_snapshot(storage, writer, &crate::persist::WriteOptions::new())
         }
+        // A storage without a clock of its own: the graph's starts at its last commit time.
+        let clock = storage_clock(&storage).unwrap_or_else(|| {
+            let clock = crate::graph::CommitClock::new();
+            clock.raise(crate::graph::PersistentStorage::last_committed_at(&storage));
+            clock
+        });
         Graph {
             lock: parking_lot::RwLock::new(storage),
             snapshot_writer: Some(write::<S>),
             workload: OnceLock::new(),
             unit: UnitOwner::default(),
             poison: Poison::default(),
+            clock,
         }
     }
 }

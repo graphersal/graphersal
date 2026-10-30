@@ -197,6 +197,7 @@ impl PersistentStorage for TraversalGraph {
     fn raise_position(&mut self, commit_seq: u64, committed_at: i64) -> Result<(), GraphError> {
         self.undo.last_commit_seq = self.undo.last_commit_seq.max(commit_seq);
         self.undo.last_committed_at = self.undo.last_committed_at.max(committed_at);
+        self.undo.hooks.clock_ref().raise(committed_at);
         Ok(())
     }
 

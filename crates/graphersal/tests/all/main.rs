@@ -37,6 +37,7 @@ mod changeset_tests;
 mod child_step_rendering_tests;
 mod choose_forms_tests;
 mod column_select_tests;
+mod commit_clock_tests;
 mod commit_hook_tests;
 mod compressed_property_tests;
 mod compression_dedup_tests;

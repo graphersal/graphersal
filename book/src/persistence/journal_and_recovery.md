@@ -127,6 +127,18 @@ Names are unique within a journal (pass the names of earlier journals with
 mark inside an open transaction, is an error (`GraphError::MarkUnavailable`). In the DSL `g.mark`
 needs the `Update` permission on data. The Store keeps mark names unique along its whole history.
 
+### Commit times
+
+Commit, mark and checkpoint times come from one clock per instance (`CommitClock`, microseconds
+since the Unix epoch, UTC): every time is `max(system clock, the latest time the instance
+handed out)`, so a mark is never earlier than the commit it names and a commit never earlier than
+a record written before it. Equal times are allowed. The clock's floor is not stored: a recovery
+and a Store's open raise it again to the latest time the files hold (the last commit, every mark
+and checkpoint record read, the snapshot's creation time), and a rollback in place keeps it. When
+the system clock steps back by more than one second behind the floor (a resumed virtual machine, a
+manual change), times stay at the floor until the system clock catches up and Graphersal writes
+a warning; it is never an error.
+
 ## Recovery
 
 ```rust,ignore

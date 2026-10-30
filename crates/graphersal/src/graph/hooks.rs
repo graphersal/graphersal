@@ -2,6 +2,7 @@
 
 use crate::error::GraphError;
 use crate::graph::change::ChangeSet;
+use crate::graph::clock::CommitClock;
 
 /// The error a [`CommitHook::before_commit`] returns to veto a commit: any error type, boxed
 /// (`Err("disk full".into())` works too). It reaches the caller unchanged as the `source` of
@@ -283,7 +284,8 @@ impl std::fmt::Debug for JournalSlot {
 /// - [`Self::is_active`]: capture changes only while it is `true` (nothing is paid without
 ///   hooks).
 /// - At the outermost commit of a unit that changed something: first validate everything and
-///   **assign the commit sequence number** (and the commit time), build the [`ChangeSet`] with
+///   **assign the commit sequence number** (and the commit time, from [`Self::commit_time`]:
+///   the instance clock, shared with the marks and the system journal), build the [`ChangeSet`] with
 ///   [`ChangeSet::builder`], then call [`Self::before_commit`]. It runs `before_commit` of every
 ///   user hook in registration order and THEN the journal's, which writes the record: nothing
 ///   fallible may follow it, or the journal would hold a unit that did not happen. On `Ok`
@@ -324,6 +326,9 @@ impl std::fmt::Debug for JournalSlot {
 pub struct CommitHooks {
     hooks: Vec<Box<dyn CommitHook>>,
     journal: Option<Box<dyn JournalHook>>,
+    /// The instance clock commit and mark times come from ([`Self::commit_time`]); it stays
+    /// with the hooks, so a reload in place (which keeps them) keeps its floor.
+    clock: CommitClock,
 }
 
 impl std::fmt::Debug for CommitHooks {
@@ -336,9 +341,31 @@ impl std::fmt::Debug for CommitHooks {
 }
 
 impl CommitHooks {
-    /// No hooks, an empty journal slot.
+    /// No hooks, an empty journal slot, a new [`CommitClock`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The time of a commit (or mark) at this point: the clock's floor first raised to
+    /// `last_committed_at` (the storage's last commit time, microseconds since the Unix epoch),
+    /// then [`CommitClock::now`], so it is never earlier than the previous commit nor than
+    /// anything else the instance timed with the same clock. A storage that captures changes
+    /// times every commit with it (also when no hook is registered).
+    pub fn commit_time(&self, last_committed_at: i64) -> i64 {
+        self.clock.raise(last_committed_at);
+        self.clock.now()
+    }
+
+    /// The instance clock (a clone sharing its state); a storage hands it out through
+    /// [`GraphStorage::commit_clock`](crate::storage::GraphStorage::commit_clock).
+    pub fn clock(&self) -> CommitClock {
+        self.clock.clone()
+    }
+
+    /// The instance clock, borrowed (no clone).
+    #[inline]
+    pub(crate) fn clock_ref(&self) -> &CommitClock {
+        &self.clock
     }
 
     /// `true` while at least one hook (or the journal) is registered: change capture is on.
@@ -417,7 +444,8 @@ impl CommitHooks {
     }
 
     /// Has the journal record a mark named `name` pointing at `commit_seq` (the storage's last
-    /// commit), timed `max(now, last_committed_at)`. The storage refuses a mark while a unit is
+    /// commit), timed by the instance clock ([`Self::commit_time`]: never earlier than
+    /// `last_committed_at`). The storage refuses a mark while a unit is
     /// open before calling this. [`GraphError::MarkUnavailable`] for a name outside 1 to 255
     /// bytes or without a journal, [`GraphError::MarkRejected`] when the journal refuses it.
     pub fn mark(
@@ -436,7 +464,9 @@ impl CommitHooks {
                 reason: "no journal is registered on this graph",
             });
         };
-        let time = crate::graph::undo::now_micros().max(last_committed_at);
+        // `Self::commit_time` on the field (the journal is borrowed).
+        self.clock.raise(last_committed_at);
+        let time = self.clock.now();
         let mark = Mark::new(name, commit_seq, time);
         journal
             .record_mark(&mark)
