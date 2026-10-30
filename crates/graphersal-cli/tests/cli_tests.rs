@@ -1950,6 +1950,46 @@ fn memory_limit_fails_a_query_that_grows_past_it_and_rolls_back() {
     );
 }
 
+/// A store whose graph does not fit under `--memory-limit` refuses the open (exit 1, nothing
+/// opened, never maintenance mode); the help names the operation and the minimum to raise the
+/// ceiling to. The same store opens without the small ceiling.
+#[test]
+fn a_store_over_the_memory_limit_exits_1_naming_the_minimum() {
+    let root = temp_path("ceiling-store");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = root.join("store");
+    let d = dir.to_str().unwrap();
+    let fill = "for i in 0..2000 { g.add_v(\"person\").property(\"name\", `person ${i}`).iterate(); } \
+                g.v().count().next()";
+    let res = run(&["--graph", d, "--create-store", "-e", fill], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let res = run(
+        &[
+            "--graph",
+            d,
+            "--memory-limit",
+            "100000",
+            "-e",
+            "g.v().count().next()",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "stdout: {}", res.stdout);
+    assert!(
+        res.stderr.contains("store open") && res.stderr.contains("The graph does not fit"),
+        "{}",
+        res.stderr
+    );
+    assert!(res.stderr.contains("at least"), "{}", res.stderr);
+    assert!(res.stderr.contains("--memory-limit"), "{}", res.stderr);
+    assert!(!res.stderr.contains("maintenance"), "{}", res.stderr);
+    let res = run(&["--graph", d, "-e", "g.v().count().next()"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), "2000");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The process memory ceiling is on by default and `--memory-limit none` turns it off: the
 /// same small graph loaded under a tiny ceiling fails, under `none` it answers; `--help` names
 /// the three forms.

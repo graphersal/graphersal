@@ -79,8 +79,14 @@ Indexes and statistics are not stored: they are rebuilt during the load.
   from CRC-32C checksums on every header, chunk and section. Damage is a
   `PersistError::Corrupt` naming the section and the byte offset, never a panic or a silently
   wrong graph.
-- `ReadOptions::with_memory_limit(bytes)` refuses a snapshot whose recorded size estimate does
-  not fit, before anything is loaded (`PersistError::MemoryBudget`);
+- Every load is checked against the process memory ceiling (`memory.limit`, on by default): a
+  snapshot whose recorded size estimate does not fit is refused before anything is loaded
+  (`PersistError::MemoryBudget`, naming the operation and the minimum to raise the ceiling to),
+  and a graph that grows past the ceiling while it is read stops with
+  `PersistError::Graph(GraphError::ResourceLimitExceeded)` (see
+  [What the ceiling covers](../users_guide/resource_limits.md#what-the-ceiling-covers)).
+  `ReadOptions::with_memory_limit(bytes)` adds a stricter bound for one read (the lower of both
+  refuses);
   `with_max_value_depth(n)` bounds value nesting (default 128, like `traversal.max_value_depth`).
 - `persist::read_snapshot_info(r)` reads only the manifest: name, meta, identity, position,
   counts. It is how `graphersal store list` lists snapshots without loading them.

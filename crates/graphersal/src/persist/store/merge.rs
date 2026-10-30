@@ -72,6 +72,10 @@ use crate::graph::TraversalGraph;
 use crate::graph::change::Mutation;
 use crate::graph::memory::{loaded_edge_bytes, loaded_vertex_bytes};
 use crate::graph::schema::ElementKind;
+use crate::traversal::memory_budget::UnitBudget;
+
+/// What the memory checks of a checkpoint name (`GraphError::ResourceLimitExceeded`).
+pub(crate) const CHECKPOINT_OPERATION: &str = "checkpoint";
 
 /// The largest `schema.json` read (as for snapshot loads).
 const MAX_SCHEMA_BYTES: u64 = 256 << 20;
@@ -361,7 +365,11 @@ pub(super) fn merge_checkpoint(request: &MergeRequest<'_>) -> Result<Merged, Per
     let mut recovery = Recovery::new()
         .start_graph(delta)
         .verify_before_images()
-        .options(request.read.clone())
+        .options({
+            let mut read = request.read.clone();
+            read.operation = Some(CHECKPOINT_OPERATION);
+            read
+        })
         .chain(request.graph_file.chain())
         // To the end of the journals as read: they already stop at the durable end, and every
         // segment is read, also an empty one of a new lineage (a rollback without commits since
@@ -598,6 +606,7 @@ fn read_chunk(
             "chunk runs past the file",
         ));
     }
+    crate::traversal::memory_budget::ensure_room(CHECKPOINT_OPERATION, stored_len, 0)?;
     let stored = path.read_range(start, stored_len as usize).map_err(io)?;
     let chunk_crc = u32::from_le_bytes([head[13], head[14], head[15], head[16]]);
     if crc_append(crc(&head[..13]), &stored) != chunk_crc || chunk_crc != row.chunk.crc {
@@ -667,6 +676,9 @@ fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGrap
     *delta.schema.write() = super::super::snapshot::parse_stored_schema(&base.schema, 0, None)
         .map_err(|err| err.at(schema_location, 0))?;
     restore_definitions(&mut delta, &base.manifest, depth)?;
+    // The delta grows with what the WAL touched: checked against the memory ceiling every
+    // 4096 elements and at the end (a failure stops the merge before anything is written).
+    let mut budget = UnitBudget::start(&delta, CHECKPOINT_OPERATION)?;
 
     // Edges first: their endpoints join the vertices to load.
     let mut edges: Vec<EdgeRecord> = Vec::new();
@@ -708,6 +720,7 @@ fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGrap
             if vertices_wanted.contains(&record.id) {
                 check_labels(&record, &location, chunk.offset)?;
                 delta.insert_vertex_raw(record.id, record.labels, record.properties);
+                crate::traversal::memory_budget::tick(&mut budget, &delta)?;
             }
         }
     }
@@ -723,7 +736,9 @@ fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGrap
             ));
         };
         delta.insert_edge_raw(record.id, record.label, Some(record.properties), from, to);
+        crate::traversal::memory_budget::tick(&mut budget, &delta)?;
     }
+    crate::traversal::memory_budget::check(&budget, &delta)?;
     Ok(delta)
 }
 

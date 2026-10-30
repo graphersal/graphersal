@@ -581,15 +581,27 @@ impl GraphSource {
 
     /// Loads a graph from GraphML text read from `reader`, outside units like
     /// [`Self::from_graphml`].
+    ///
+    /// Under the process memory ceiling (`memory.limit`, on by default) the load checks it every
+    /// 4096 elements and at its end: a graph that does not fit stops the load with
+    /// [`IOError::Graph`] holding a `GraphError::ResourceLimitExceeded` (operation
+    /// `"GraphML load"`) and the half-built graph is dropped. Without a tracking allocator the
+    /// graph's size is estimated by the bytes of text read so far.
     #[cfg(feature = "io")]
     pub fn from_graphml_reader<R: std::io::BufRead>(reader: R) -> Result<Graph, IOError> {
+        use crate::traversal::memory_budget::{CountingReader, InputCounter, UnitBudget};
         let mut graph = TraversalGraph::new();
+        let counter = InputCounter::default();
+        let mut budget = UnitBudget::start(&graph, crate::io::graphml::GRAPHML_LOAD)?
+            .map(|budget| budget.with_input(counter.clone()));
+        let reader = CountingReader::new(reader, counter);
         graph.load_outside_units(|graph| {
             crate::io::GraphMLImport {}.import_outside_units(
                 graph,
                 quick_xml::Reader::from_reader(reader),
-                &mut None,
-            )
+                &mut budget,
+            )?;
+            crate::traversal::memory_budget::check(&budget, &*graph).map_err(IOError::Graph)
         })?;
         Ok(Graph::new(graph))
     }

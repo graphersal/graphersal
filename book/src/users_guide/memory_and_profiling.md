@@ -4,7 +4,10 @@ The structured result of `profile()` and the `execute()` terminal are described 
 [Profiling and execute()](profiling_and_execute.md); this page covers the memory figures.
 
 Graphersal has two related tools for answering "how much memory is this using": an on-demand
-snapshot of a graph's own footprint, and a per-step memory figure inside `.profile()`.
+snapshot of a graph's own footprint, and a per-step memory figure inside `.profile()`. What
+the process memory ceiling checks (queries, loads, store opens, checkpoints, ...) and how a host
+asks whether an allocation fits (`exec::check_memory_for`, `exec::memory_room`) is described in
+[What the ceiling covers](resource_limits.md#what-the-ceiling-covers).
 
 ## `graph.memory_usage()`
 

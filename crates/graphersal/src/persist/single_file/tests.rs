@@ -460,3 +460,27 @@ fn random_bytes_never_panic() {
         }
     }
 }
+
+/// A table that does not fit under the memory ceiling refuses the open with `OutOfMemory`
+/// (never read as a damaged table, never a fallback to an older one), and the same file opens
+/// without the lower ceiling.
+#[test]
+fn a_table_frame_claiming_more_than_the_ceiling_is_refused() {
+    let tmp = TempFile::new("table-ceiling");
+    let dir = unshared(&tmp.0);
+    populate(&dir);
+    dir.inner.mutate(|open| open.write_table()).unwrap();
+    let expected = image(&dir);
+    drop(dir);
+    let before = fs::read(&tmp.0).unwrap();
+    let err = crate::traversal::memory_limit::memory_limit_scope(8, || {
+        unshared(&tmp.0).entry_kind("GRAPH")
+    })
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::OutOfMemory, "{err}");
+    assert!(err.to_string().contains("store read"), "{err}");
+    assert_eq!(fs::read(&tmp.0).unwrap(), before, "nothing written");
+    let reopened = unshared(&tmp.0);
+    assert_eq!(image(&reopened), expected);
+    assert!(reopened.check().unwrap().is_ok());
+}

@@ -664,6 +664,9 @@ pub struct JournalReader<R: Read> {
     done: bool,
     /// A read-only load's lenient schema reading ([`decode_commit_in`]).
     newer: Option<NewerContent>,
+    /// What a refusal of the memory ceiling names (a record body read whole):
+    /// `"recovery"` unless the replay names another operation (`"store open"`, ...).
+    operation: &'static str,
     /// `(record start, frame commit_seq)` of the last commit record whose body this version
     /// could not decode ([`PersistError::UnsupportedContent`]; the reader can go on after it).
     unsupported_seq: Option<(u64, u64)>,
@@ -717,6 +720,7 @@ impl<R: Read> JournalReader<R> {
             version,
             done: false,
             newer: None,
+            operation: super::recover::RECOVERY_OPERATION,
             unsupported_seq: None,
         })
     }
@@ -725,6 +729,12 @@ impl<R: Read> JournalReader<R> {
     /// `newer` (a read-only load only, format spec 16).
     pub(crate) fn with_newer_schema(mut self, newer: Option<NewerContent>) -> Self {
         self.newer = newer;
+        self
+    }
+
+    /// The same reader naming `operation` when the memory ceiling refuses a record.
+    pub(crate) fn with_operation(mut self, operation: &'static str) -> Self {
+        self.operation = operation;
         self
     }
 
@@ -863,6 +873,9 @@ impl<R: Read> JournalReader<R> {
             }
         };
         let (length, commit_seq) = (header.length, header.commit_seq);
+        // The body is read whole (its header's checksum holds, so the length is the writer's):
+        // room for it is checked first.
+        crate::traversal::memory_budget::ensure_room(self.operation, u64::from(length), 0)?;
         let mut body = Vec::with_capacity((length as usize).min(1 << 20));
         (&mut self.source)
             .take(u64::from(length))

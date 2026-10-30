@@ -147,6 +147,10 @@ pub struct ReadOptions {
     /// this version cannot parse is loaded as no schema and noted here instead of failing the
     /// load. Never set where the loaded state may be written anywhere (a lossy view).
     pub(crate) newer_schema: Option<NewerContent>,
+    /// What a memory refusal names (`PersistError::MemoryBudget`, the growth checks of the load
+    /// and of the replay): `None` = `"snapshot load"` / `"recovery"`; the Store's open sets
+    /// `"store open"`, a merged checkpoint `"checkpoint"`.
+    pub(crate) operation: Option<&'static str>,
 }
 
 impl Default for ReadOptions {
@@ -155,6 +159,7 @@ impl Default for ReadOptions {
             memory_limit: None,
             max_value_depth: DEFAULT_MAX_VALUE_DEPTH,
             newer_schema: None,
+            operation: None,
         }
     }
 }
@@ -214,7 +219,9 @@ impl ReadOptions {
     }
 
     /// Refuses a snapshot whose header estimates more than `bytes` of memory for the loaded
-    /// graph ([`PersistError::MemoryBudget`]), before any element is read.
+    /// graph ([`PersistError::MemoryBudget`] naming this setting), before any element is read:
+    /// a bound of this read on top of the process memory ceiling `memory.limit`, which always
+    /// applies ([`crate::exec::memory_limit`]; the lower of both refuses).
     pub fn with_memory_limit(mut self, bytes: u64) -> Self {
         self.memory_limit = Some(bytes);
         self
@@ -362,7 +369,7 @@ pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
     writer: W,
     options: &WriteOptions,
 ) -> Result<(SnapshotInfo, EncodeStats), PersistError> {
-    let encoder = SnapshotEncoder::new(graph, options)?;
+    let encoder = SnapshotEncoder::new(graph, options, SNAPSHOT_WRITE)?;
     let mut plans = Vec::new();
     let vertices = encoder.plan_kind(KIND_VERTEX, &mut |plan| {
         plans.push(plan);
@@ -1195,6 +1202,45 @@ pub fn read_snapshot_into<S: PersistentStorage, R: Read>(
     Ok(graph)
 }
 
+/// What the memory check of a packed snapshot write names (the encoder's id index).
+pub(crate) const SNAPSHOT_WRITE: &str = "snapshot write";
+
+/// What the memory checks of a load with `options` name.
+pub(crate) fn load_operation(options: &ReadOptions) -> &'static str {
+    options.operation.unwrap_or("snapshot load")
+}
+
+/// Whether a graph the manifest estimates at `needed` bytes fits, BEFORE anything is read: the
+/// process memory ceiling (tracked: the live heap plus `needed`; estimated: `needed`) and a
+/// stricter [`ReadOptions::with_memory_limit`] (`needed` alone, as it always compared). When
+/// both refuse, the lower bound is named.
+pub(crate) fn check_fits(options: &ReadOptions, needed: u64) -> Result<(), PersistError> {
+    use super::error::{MEMORY_LIMIT_SETTING, READ_OPTIONS_SETTING};
+    let operation = load_operation(options);
+    let in_use = crate::traversal::memory_budget::tracked_live_bytes();
+    let ceiling = crate::traversal::memory_limit::effective_limit()
+        .filter(|limit| in_use.unwrap_or(0).saturating_add(needed) > *limit);
+    let read = options.memory_limit.filter(|limit| needed > *limit);
+    let refused = match (read, ceiling) {
+        (Some(read), Some(ceiling)) if ceiling < read => {
+            Some((ceiling, in_use, MEMORY_LIMIT_SETTING))
+        }
+        (Some(read), _) => Some((read, None, READ_OPTIONS_SETTING)),
+        (None, Some(ceiling)) => Some((ceiling, in_use, MEMORY_LIMIT_SETTING)),
+        (None, None) => None,
+    };
+    match refused {
+        Some((limit, in_use, setting)) => Err(PersistError::MemoryBudget {
+            needed,
+            limit,
+            operation,
+            in_use,
+            setting,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// [`read_snapshot_into`] into a borrowed empty storage (a reload in place keeps the instance
 /// and its hooks). On error the storage is half-loaded: clear or drop it.
 pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
@@ -1214,14 +1260,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     };
     let (manifest, _) = read_head(&mut source)?;
     let fixed = &manifest.fixed;
-    if let Some(limit) = options.memory_limit
-        && fixed.memory_bytes > limit
-    {
-        return Err(PersistError::MemoryBudget {
-            needed: fixed.memory_bytes,
-            limit,
-        });
-    }
+    check_fits(options, fixed.memory_bytes)?;
 
     let (schema_at, schema_bytes) =
         source.section(SECTION_SCHEMA, MAX_META_SECTION_BYTES, "schema.json")?;
@@ -1251,6 +1290,18 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     let max_depth = options.max_value_depth;
     restore_definitions(graph, &manifest, max_depth)?;
 
+    // The growth check while the graph is built (the manifest's estimate passed above, but the
+    // data may grow past it): every 4096 elements and at the end, an element estimated at the
+    // manifest's average. All checks run on this thread (the decode threads never check).
+    let operation = load_operation(options);
+    let elements = fixed.vertex_count.saturating_add(fixed.edge_count);
+    let element_bytes = fixed.memory_bytes.checked_div(elements).unwrap_or(0);
+    let mut budget = crate::traversal::memory_budget::UnitBudget::start_with_element_bytes(
+        &*graph,
+        operation,
+        element_bytes,
+    )?;
+    let mut loaded = 0u64;
     let mut last_vertex: Option<CompactString> = None;
     let mut last_edge: Option<CompactString> = None;
     let (mut vertex_properties, mut edge_properties) = (0u64, 0u64);
@@ -1266,9 +1317,21 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         } else {
             (SECTION_EDGE_SEGMENT, "edge segment")
         };
+        // The segment's bytes, then its decoded chunks, are held at once: room for both is
+        // checked before either is allocated (estimated: on top of what was loaded so far).
+        let resident = loaded.saturating_mul(element_bytes);
+        crate::traversal::memory_budget::ensure_room(operation, entry.byte_len, resident)?;
         let (_, bytes) = source.section(section, entry.byte_len, kind_name)?;
         let location = format!("{kind_name} {number} ({})", entry.path);
         let frame = check_segment(&manifest, number, &bytes, &location)?;
+        let decoded_bytes = frame.chunks.iter().fold(0u64, |sum, chunk| {
+            sum.saturating_add(chunk.uncompressed as u64)
+        });
+        crate::traversal::memory_budget::ensure_room(
+            operation,
+            entry.byte_len.saturating_add(decoded_bytes),
+            resident,
+        )?;
         let rows: Vec<&ChunkRow> = manifest
             .chunks
             .iter()
@@ -1288,6 +1351,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
                     &location,
                     chunk.offset,
                 )?;
+                let chunk_records = records.len();
                 for record in records {
                     for (i, label) in record.labels.iter().enumerate() {
                         if record.labels[..i].contains(label) {
@@ -1306,6 +1370,8 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
                             PersistError::corrupt(&location, chunk.offset, err.to_string())
                         })?;
                 }
+                loaded = loaded.saturating_add(chunk_records as u64);
+                crate::traversal::memory_budget::tick_n(&mut budget, &*graph, chunk_records)?;
             }
         } else {
             let decoded = decode_chunks(&frame.chunks, |chunk| {
@@ -1320,6 +1386,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
                     &location,
                     chunk.offset,
                 )?;
+                let chunk_records = records.len();
                 for record in records {
                     edge_properties += record.properties.len() as u64;
                     count += 1;
@@ -1345,6 +1412,8 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
                             }
                         })?;
                 }
+                loaded = loaded.saturating_add(chunk_records as u64);
+                crate::traversal::memory_budget::tick_n(&mut budget, &*graph, chunk_records)?;
             }
         }
         if count != entry.count
@@ -1380,6 +1449,7 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         ));
     }
     let _ = FIXED_BYTES;
+    crate::traversal::memory_budget::check(&budget, &*graph)?;
     // Derived state (a `TraversalGraph`'s compressed properties, D11: the file holds plain
     // values; the end of the load encodes the rule paths and builds the dictionaries).
     graph.finish_load()?;

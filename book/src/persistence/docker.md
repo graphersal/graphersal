@@ -150,6 +150,9 @@ not forward a foreign `Origin`. The process memory ceiling is on by default and 
 container's memory limit minus a headroom (`--memory-limit auto`, the default; `--memory-headroom`
 changes the headroom): a query that would exceed it fails and is rolled back instead of the pod
 being OOM-killed ([Resource Limits](../users_guide/resource_limits.md#the-process-memory-ceiling)).
+A store whose graph does not fit into the container refuses the OPEN instead (exit 1, nothing
+opened or changed, never maintenance mode); the error names the minimum `--memory-limit` (or
+container memory) it needs.
 
 ## Stopping
 

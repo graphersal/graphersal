@@ -586,6 +586,10 @@ impl GraphMLImport {
 /// The operation [`GraphError::ResourceLimitExceeded`] names for a GraphML import.
 pub(crate) const GRAPHML_IMPORT: &str = "GraphML import";
 
+/// The operation [`GraphError::ResourceLimitExceeded`] names for a GraphML load into a new
+/// graph ([`GraphSource::from_graphml_reader`](crate::GraphSource::from_graphml_reader)).
+pub(crate) const GRAPHML_LOAD: &str = "GraphML load";
+
 /// GraphML exporter and its output options. Build it with [`GraphMLExport::new`].
 ///
 /// The document carries the elements only, never the graph's schema: GraphML is an exchange
