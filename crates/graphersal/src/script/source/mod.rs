@@ -236,7 +236,7 @@ impl ScriptGraphTraversalSource {
         let file = self.require_file("import_graphml", crate::graph::Action::Read, &path)?;
         if let Some(ref g) = self.g {
             open_for_import(&file)
-                .and_then(|mut reader| g.import_graphml(&mut reader, Some(&self.access.presets)))
+                .and_then(|mut reader| g.import_graphml(&mut reader))
                 .map_err(|err| {
                     Box::new(rhai::EvalAltResult::ErrorRuntime(
                         rhai::Dynamic::from(crate::error::format_diagnostic(&err)),
@@ -268,7 +268,7 @@ impl ScriptGraphTraversalSource {
         let file = self.require_file("import_graphson", crate::graph::Action::Read, &path)?;
         if let Some(ref g) = self.g {
             let report = open_for_import(&file)
-                .and_then(|mut reader| g.import_graphson(&mut reader, Some(&self.access.presets)))
+                .and_then(|mut reader| g.import_graphson(&mut reader))
                 .map_err(|err| {
                     Box::new(rhai::EvalAltResult::ErrorRuntime(
                         rhai::Dynamic::from(crate::error::format_diagnostic(&err)),

@@ -225,9 +225,7 @@ fn graphson_and_graphml_round_trips() {
     assert_eq!(exported, direct);
 
     let target: Arc<dyn AnyGraph> = Arc::new(Graph::new(TraversalGraph::new()));
-    let report = target
-        .import_graphson(&mut exported.as_slice(), None)
-        .unwrap();
+    let report = target.import_graphson(&mut exported.as_slice()).unwrap();
     assert!(!report.has_skips());
     assert_eq!(target.statistics().unwrap(), any.statistics().unwrap());
 
@@ -240,7 +238,7 @@ fn graphson_and_graphml_round_trips() {
         .unwrap();
     assert_eq!(xml, direct);
     let target: Arc<dyn AnyGraph> = Arc::new(Graph::new(TraversalGraph::new()));
-    target.import_graphml(&mut xml.as_slice(), None).unwrap();
+    target.import_graphml(&mut xml.as_slice()).unwrap();
     assert_eq!(target.statistics().unwrap(), any.statistics().unwrap());
     assert_eq!(
         target.last_commit_seq().unwrap(),
