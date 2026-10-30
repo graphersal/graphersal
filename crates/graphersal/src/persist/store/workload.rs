@@ -115,7 +115,8 @@ impl<S: PersistentStorage> Store<S> {
     }
 
     /// The system jobs of this store, for the host's [`Scheduler`](crate::jobs::Scheduler):
-    /// `stats_flush` (every minute: [`Self::flush_workload_stats`]) and `compact` (off by
+    /// `stats_flush` (every minute: [`Self::flush_workload_stats`], and the batched records of
+    /// the system journal written) and `compact` (off by
     /// default, daily at 03:00: releases spare capacity, [`crate::storage::GraphStorage::shrink_to_fit`]
     /// under the write lock), each with the instance's settings applied
     /// ([`WorkloadStats::set_job_override`]: a schedule and a switch its user chose, kept in the
@@ -132,6 +133,8 @@ impl<S: PersistentStorage> Store<S> {
                 JobKind::System,
                 schedule,
                 move |_| {
+                    // The batched records of the system journal go to its files too.
+                    flush.shared.system_journal.sync();
                     flush
                         .flush_workload()
                         .map(|_| ())

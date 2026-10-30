@@ -1307,6 +1307,7 @@ pub(super) fn attic_fork(
         lineage,
         WriteOptions::new().with_parent(parent_id, branched_at),
         &options,
+        ("attic_fork", Some((old.store_id, branched_at))),
     )?;
     let models = super::models::carry_into_new(dir, new_dir, existed)?;
     let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {

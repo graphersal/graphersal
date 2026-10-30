@@ -82,5 +82,7 @@ it, so any storage type opens any store.
 | Read options (memory limit, value depth) | defaults | `with_read_options` |
 | Compaction policy and automatic compaction after prune | defaults, off | `with_compaction_policy`, `with_auto_compact` |
 | Workload statistics level (`off`, `memory`, `persisted`: the sidecar `WORKLOAD`) | `persisted` | `with_workload_level` |
+| System journal segment size (book page "System Journal") | 4 MiB | `with_journal_segment_bytes` |
+| Instance name in the system journal (kept in the instance file `INSTANCE`, never copied) | the host name (`HOSTNAME`, `COMPUTERNAME`), else `unknown` | `with_instance_name` |
 
 A new creation parameter is added to the first table (and to `store info`); see `CLAUDE.md`.

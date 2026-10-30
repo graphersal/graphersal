@@ -299,6 +299,11 @@ pub enum PersistError {
     /// apply, a sequence overflow, registering the journal).
     #[error(transparent)]
     Graph(#[from] GraphError),
+
+    /// The system journal could not answer (book page "System Journal"); the store itself is
+    /// not affected.
+    #[error(transparent)]
+    Journal(#[from] crate::graph::system_journal::JournalError),
 }
 
 /// Which copy a [`BackupDamage`] was found in.
@@ -795,6 +800,7 @@ impl PersistError {
                 StoreFailure::AutoCheckpointFailed,
                 err.to_string(),
             ),
+            PersistError::Journal(err) => PersistError::Journal(err.clone()),
         }
     }
 
@@ -1021,6 +1027,7 @@ impl DiagnosticError for PersistError {
                  created)."
             ),
             PersistError::Graph(err) => return err.help(),
+            PersistError::Journal(err) => err.help().to_string(),
         })
     }
 }

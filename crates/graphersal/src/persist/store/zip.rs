@@ -261,7 +261,7 @@ fn corrupt(offset: u64, reason: impl Into<String>) -> PersistError {
 }
 
 /// Whether `name` is a file a store backup may contain: `GRAPH`, `GRAPH.copy`, `marks`,
-/// `snapshots/<20 digits>/<file>`, `wal/<20 digits>.wal`.
+/// `snapshots/<20 digits>/<file>`, `wal/<20 digits>.wal`, `journal/<20 digits>.jnl`, models.
 fn allowed(name: &str) -> bool {
     let digits = |s: &str| s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit());
     let plain = |s: &str| {
@@ -278,6 +278,10 @@ fn allowed(name: &str) -> bool {
             .strip_suffix(&format!(".{WAL_EXTENSION}"))
             .is_some_and(digits),
         [dir, seq, file] if *dir == SNAPSHOTS_DIR => digits(seq) && plain(file),
+        // A segment of the system journal (format spec 4.7, 12.8): `journal/<20 digits>.jnl`.
+        [dir, file] if *dir == super::system_journal::JOURNAL_DIR => file
+            .strip_suffix(&format!(".{}", super::system_journal::JOURNAL_EXTENSION))
+            .is_some_and(digits),
         // A model (format spec 4.5, 12.8): `models/<id>/<file>`.
         [dir, id, file] if *dir == super::models::MODELS_DIR => {
             super::models::is_model_id(id)

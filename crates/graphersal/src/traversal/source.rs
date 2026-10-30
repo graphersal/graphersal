@@ -952,6 +952,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             private_graph: false,
             preset_options,
             required: Vec::new(),
+            journal: None,
         })
     }
 

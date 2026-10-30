@@ -40,6 +40,7 @@ mod merge;
 mod models;
 mod rollback;
 mod snapshot_dir;
+pub(crate) mod system_journal;
 mod upgrade;
 mod wal_files;
 mod workload;
@@ -59,6 +60,7 @@ use super::recover::{Recovered, RecoveryTarget};
 use super::segment::DEFAULT_CHUNK_BYTES;
 use super::snapshot::{ReadOptions, SnapshotInfo, WriteOptions};
 use crate::graph::hooks::Mark;
+use crate::graph::system_journal::{Event, catalogue};
 use crate::graph::{Graph, TraversalGraph};
 use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalGraphs};
 
@@ -139,6 +141,8 @@ pub struct StoreOptions {
     auto_compact: bool,
     damage_policy: DamagePolicy,
     workload_level: crate::graph::workload::WorkloadLevel,
+    journal_segment_bytes: u64,
+    instance_name: Option<String>,
     /// Injected WAL failures (crate tests only).
     faults: Option<Arc<Faults>>,
 }
@@ -159,6 +163,8 @@ impl Default for StoreOptions {
             auto_compact: false,
             damage_policy: DamagePolicy::Maintenance,
             workload_level: crate::graph::workload::WorkloadLevel::Persisted,
+            journal_segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
+            instance_name: None,
             faults: None,
         }
     }
@@ -178,6 +184,21 @@ impl StoreOptions {
     /// `GRAPH`; `off` keeps nothing, `memory` writes no file.
     pub fn with_workload_level(mut self, level: crate::graph::workload::WorkloadLevel) -> Self {
         self.workload_level = level;
+        self
+    }
+
+    /// The size after which a segment of the system journal closes (default 4 MiB; book page
+    /// "System Journal"). Per open.
+    pub fn with_journal_segment_bytes(mut self, bytes: u64) -> Self {
+        self.journal_segment_bytes = bytes.max(1);
+        self
+    }
+
+    /// The readable name of this instance in the system journal's records (default: the host
+    /// name). Kept in the instance file `INSTANCE`, which no copy of the store carries. Per
+    /// open.
+    pub fn with_instance_name(mut self, name: impl Into<String>) -> Self {
+        self.instance_name = Some(name.into());
         self
     }
 
@@ -436,6 +457,9 @@ struct Shared {
     /// The workload statistics (`workload.rs`): read from the sidecar at open, written by the
     /// system job `stats_flush` and at close.
     workload: Arc<crate::graph::workload::WorkloadStats>,
+    /// The system journal (`system_journal.rs`): written to `journal/` by a writable store,
+    /// read-only with an in-memory overlay otherwise.
+    system_journal: Arc<crate::graph::system_journal::SystemJournal>,
 }
 
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
@@ -553,7 +577,14 @@ impl Store {
             branched_at: 0,
             time: now(),
         }];
-        StoreCore::create_lineage(&dir, &graph, lineage, WriteOptions::new(), &options)?;
+        StoreCore::create_lineage(
+            &dir,
+            &graph,
+            lineage,
+            WriteOptions::new(),
+            &options,
+            ("create", None),
+        )?;
         Self::open_at(dir, options)
     }
 
@@ -1063,6 +1094,8 @@ impl<S: PersistentStorage + Default> Store<S> {
             })?;
         // The lock's wait and hold times go to the store's workload statistics.
         graph.attach_workload_stats(Arc::clone(&core.shared.workload));
+        // The store's system journal is the graph's (a graph made by the store has none yet).
+        graph.attach_system_journal(Arc::clone(&core.shared.system_journal));
         Ok(Store {
             core: Arc::new(core),
             graph,
@@ -1111,7 +1144,14 @@ impl<S: PersistentStorage + Default> Store<S> {
             branched_at: 0,
             time: now(),
         }];
-        StoreCore::create_lineage(&dir, &graph, lineage, WriteOptions::new(), &options)?;
+        StoreCore::create_lineage(
+            &dir,
+            &graph,
+            lineage,
+            WriteOptions::new(),
+            &options,
+            ("create", None),
+        )?;
         drop(graph);
         Self::from_core(StoreCore::open_at(
             dir,
@@ -1665,6 +1705,7 @@ impl StoreCore {
         options: StoreOptions,
         maker: &dyn GraphMaker,
     ) -> Result<StoreCore, PersistError> {
+        let started = web_time::Instant::now();
         maker.check()?;
         files::refuse_other_version(&dir)?;
         let graph_file = read_graph_file(&dir)?.file;
@@ -1699,6 +1740,7 @@ impl StoreCore {
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
+        let system_journal = open_system_journal(&dir, &options, &graph, false);
         let shared = Arc::new(Shared {
             chunk_bytes: graph_file.chunk_bytes,
             dir,
@@ -1715,7 +1757,9 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            system_journal,
         });
+        shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
             report,
@@ -1737,6 +1781,7 @@ impl StoreCore {
         prepare_new_dir(dir)?;
         let result = (|| {
             let (_, fixed) = snapshot_dir::import_packed(dir, packed)?;
+            system_journal::record_created(dir, "packed", None, options.instance_name.as_deref());
             write_graph_file(
                 dir,
                 &GraphFile {
@@ -1775,6 +1820,7 @@ impl StoreCore {
         lineage: Vec<LineageEntry>,
         write: WriteOptions,
         options: &StoreOptions,
+        created: (&str, Option<(u128, u64)>),
     ) -> Result<(), PersistError> {
         let existed = dir.exists();
         prepare_new_dir(dir)?;
@@ -1786,6 +1832,14 @@ impl StoreCore {
             let snapshot = NewSnapshotDir::begin(dir, graph.last_commit_seq()?)?;
             write_graph_snapshot(snapshot.tmp(), graph, &write)?;
             snapshot.finish()?;
+            // The journal's first record before GRAPH (best effort): a store whose GRAPH is
+            // written is complete.
+            system_journal::record_created(
+                dir,
+                created.0,
+                created.1,
+                options.instance_name.as_deref(),
+            );
             write_graph_file(
                 dir,
                 &GraphFile {
@@ -1819,6 +1873,7 @@ impl StoreCore {
         options: StoreOptions,
         maker: &dyn GraphMaker,
     ) -> Result<StoreCore, PersistError> {
+        let started = web_time::Instant::now();
         maker.check()?;
         // A newer (or older) format is refused before the lock and before any file is read
         // as this version's (format spec 15): never damage, never maintenance mode.
@@ -1910,7 +1965,7 @@ impl StoreCore {
         graph.clock().raise(loaded.clock_floor);
         if let Some(reason) = loaded.read_only.clone() {
             return Self::open_read_only_mode(
-                dir, lock, options, graph_file, report, graph, reason,
+                dir, lock, options, graph_file, report, graph, reason, started,
             );
         }
         let marks = sync_marks(&dir, &loaded, &options, &mut report)?;
@@ -1958,6 +2013,7 @@ impl StoreCore {
             write_graph_file(&dir, &file)?;
         }
         let workload_stats = workload::open_stats(&dir, options.workload_level, true);
+        let system_journal = open_system_journal(&dir, &options, &graph, true);
         let shared = Arc::new(Shared {
             chunk_bytes,
             dir,
@@ -1974,6 +2030,7 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            system_journal,
         });
         let thread = if shared.options.checkpoint_after_bytes > 0 {
             spawn_checkpoint_thread(&shared)
@@ -1988,6 +2045,7 @@ impl StoreCore {
         {
             shared.wal.wake();
         }
+        shared.journal_opened(&report, started, false);
         Ok(StoreCore {
             shared,
             report,
@@ -2007,6 +2065,7 @@ impl StoreCore {
         mut report: OpenReport,
         graph: Arc<dyn StoreGraph>,
         reason: String,
+        started: web_time::Instant,
     ) -> Result<StoreCore, PersistError> {
         graph.write().register_guard_hook(Box::new(ReadOnlyHook {
             path: dir.display(),
@@ -2017,6 +2076,12 @@ impl StoreCore {
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
+        let system_journal = open_system_journal(&dir, &options, &graph, false);
+        system_journal.emit(
+            &catalogue::STORE_READ_ONLY,
+            Event::new(format!("the store opens read-only: {reason}"))
+                .field("reason", reason.as_str()),
+        );
         let shared = Arc::new(Shared {
             chunk_bytes: graph_file.chunk_bytes,
             dir,
@@ -2033,7 +2098,9 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            system_journal,
         });
+        shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
             report,
@@ -2096,6 +2163,14 @@ impl StoreCore {
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
+        let system_journal = open_system_journal(&dir, &options, &graph, false);
+        system_journal.emit(
+            &catalogue::MAINTENANCE_MODE,
+            Event::new(format!(
+                "the store opened in maintenance mode (read-only): {trigger}"
+            ))
+            .field("trigger", trigger.to_string()),
+        );
         let shared = Arc::new(Shared {
             chunk_bytes: salvage.graph_file.chunk_bytes,
             dir,
@@ -2112,7 +2187,9 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            system_journal,
         });
+        shared.journal_opened(&report, web_time::Instant::now(), true);
         Ok(StoreCore {
             shared,
             report,
@@ -2129,7 +2206,19 @@ impl StoreCore {
     }
 
     pub fn repair_to(&self, new_dir: impl IntoStoreDir) -> Result<RepairReport, PersistError> {
-        Self::repair_at(&self.shared.dir, &DirPath::root(new_dir.into_store_dir()))
+        let report = Self::repair_at(&self.shared.dir, &DirPath::root(new_dir.into_store_dir()))?;
+        self.shared.system_journal.emit(
+            &catalogue::REPAIRED,
+            Event::new(format!(
+                "the salvaged state was written as a new store in {}",
+                report.location
+            ))
+            .commit(report.commit_seq)
+            .field("target", report.location.as_str())
+            .count("commit_seq", report.commit_seq)
+            .field("diverged", !report.diverged.is_empty()),
+        );
+        Ok(report)
     }
 
     fn repair_at(dir: &DirPath, new_dir: &DirPath) -> Result<RepairReport, PersistError> {
@@ -2174,6 +2263,8 @@ impl StoreCore {
                 .with_parent(parent_id, commit_seq)
                 .with_name("repaired"),
             &options,
+            // A new store: it does not carry the journal, its first record names the source.
+            ("repair", Some((salvage.graph_file.store_id, commit_seq))),
         )?;
         // The marks of a damaged store are a report only: a failure to list them is reported,
         // it does not fail the repair.
@@ -2456,6 +2547,7 @@ impl StoreCore {
             lineage,
             WriteOptions::new().with_parent(parent_id, branched_at),
             &options,
+            ("fork", Some((parent.store_id, branched_at))),
         )?;
         let models = models::carry_into_new(dir, new_dir, existed)?;
         let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
@@ -2481,7 +2573,10 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
+        let bytes =
+            maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
         let report = maintenance::prune(&self.shared.dir, up_to)?;
+        self.shared.journal_pruned(&report, bytes);
         if self.shared.options.auto_compact
             && compaction::advise(&self.shared.dir, self.shared.options.compaction, None)?
                 .recommended
@@ -2505,7 +2600,10 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
+        let bytes =
+            maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
         let prune = maintenance::prune(&self.shared.dir, up_to)?;
+        self.shared.journal_pruned(&prune, bytes);
         let compaction = self
             .shared
             .dir
@@ -2546,6 +2644,23 @@ impl StoreCore {
         if !report.is_ok() && self.tracks_damage() {
             self.shared.report_damage("verify", report.problems.clone());
         }
+        let level = if report.is_ok() && report.without_donor.is_empty() {
+            crate::graph::system_journal::Level::Info
+        } else {
+            crate::graph::system_journal::Level::Warn
+        };
+        self.shared.system_journal.emit(
+            &catalogue::VERIFIED,
+            Event::new(format!(
+                "the store was verified: {} problem(s), {} note(s)",
+                report.problems.len(),
+                report.notes.len()
+            ))
+            .level(level)
+            .count("problems", report.problems.len() as u64)
+            .count("warnings", report.without_donor.len() as u64)
+            .count("notes", report.notes.len() as u64),
+        );
         Ok(report)
     }
 
@@ -2584,13 +2699,11 @@ impl StoreCore {
         target_dir: impl IntoStoreDir,
         mode: BackupMode,
     ) -> Result<BackupReport, PersistError> {
-        let result = backup::backup_into(
-            &self.shared.dir,
-            self.durable_position(),
-            &DirPath::root(target_dir.into_store_dir()),
-            mode,
-        );
-        self.after_backup(result)
+        let target = DirPath::root(target_dir.into_store_dir());
+        let full = !files::has_entries(&target);
+        let result = backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode);
+        let mode = if full { "full" } else { "increment" };
+        self.after_backup(result, &target.display(), mode)
     }
 
     pub fn backup_from_memory(
@@ -2640,15 +2753,60 @@ impl StoreCore {
             from_memory::FROM_MEMORY_NAME,
         );
         let target = DirPath::root(target_dir.into_store_dir());
-        let graph = self.shared.graph.read();
-        graph.backup_from_memory(&self.shared.dir, &graph_file, &write, &target, mode)
+        let result = {
+            let graph = self.shared.graph.read();
+            graph.backup_from_memory(&self.shared.dir, &graph_file, &write, &target, mode)
+        };
+        self.journal_backup(&result, &target.display(), "memory");
+        result
+    }
+
+    /// Writes `store.backup_done` / `store.backup_failed`.
+    fn journal_backup(
+        &self,
+        result: &Result<BackupReport, PersistError>,
+        target: &str,
+        mode: &str,
+    ) {
+        match result {
+            Ok(report) => self.shared.system_journal.emit(
+                &catalogue::BACKUP_DONE,
+                Event::new(format!(
+                    "a {mode} backup to {target} holds commit {}",
+                    report.commit_seq
+                ))
+                .commit(report.commit_seq)
+                .field("target", target)
+                .field("mode", mode)
+                .count("commit_seq", report.commit_seq)
+                .count("bytes", report.bytes),
+            ),
+            Err(err) => {
+                let side = match err {
+                    PersistError::BackupDamaged(damage) => match damage.side {
+                        super::DamageSide::Store => "store",
+                        super::DamageSide::Backup => "backup",
+                    },
+                    _ => "none",
+                };
+                self.shared.system_journal.emit(
+                    &catalogue::BACKUP_FAILED,
+                    Event::new(format!("a backup to {target} failed: {err}"))
+                        .field("target", target)
+                        .field("side", side)
+                        .field("error", err.to_string()),
+                );
+            }
+        }
     }
 
     fn after_backup(
         &self,
         result: Result<BackupReport, PersistError>,
+        target: &str,
+        mode: &str,
     ) -> Result<BackupReport, PersistError> {
-        match result {
+        let result = match result {
             Err(PersistError::BackupDamaged(mut damage))
                 if damage.side == super::DamageSide::Store && self.tracks_damage() =>
             {
@@ -2657,7 +2815,9 @@ impl StoreCore {
                 Err(PersistError::BackupDamaged(damage))
             }
             other => other,
-        }
+        };
+        self.journal_backup(&result, target, mode);
+        result
     }
 
     #[cfg(feature = "persist-zip")]
@@ -2675,7 +2835,7 @@ impl StoreCore {
             &mut archive,
             models,
         );
-        self.after_backup(result)
+        self.after_backup(result, "a ZIP archive", "zip")
     }
 
     pub fn backup_marker(&self) -> Option<BackupMarker> {
@@ -2755,6 +2915,22 @@ impl StoreCore {
         let graph_id = self
             .reload_in_place(&mut *graph)
             .map_err(|err| self.stop_after_failed_reload("roll the store back", "rollback", err))?;
+        let mode_name = match mode {
+            RollbackMode::Move => "move",
+            RollbackMode::Delete => "delete",
+        };
+        let mut event = Event::new(format!(
+            "the store was rolled back from commit {current} to commit {target} ({mode_name})"
+        ))
+        .commit(target)
+        .count("target", target)
+        .field("mode", mode_name);
+        if let Some(attic) = &attic {
+            event = event.field("attic_entry", attic.as_str());
+        }
+        self.shared
+            .system_journal
+            .emit(&catalogue::ROLLED_BACK, event);
         Ok(RollbackReport {
             target,
             previous_commit_seq: current,
@@ -2807,6 +2983,10 @@ impl StoreCore {
         self.reload_in_place(&mut *graph).map_err(|err| {
             self.stop_after_failed_reload("restore the attic entry", "restore", err)
         })?;
+        self.shared.system_journal.emit(
+            &catalogue::ATTIC_RESTORED,
+            Event::new(format!("the attic entry {id} was restored")).field("entry", id),
+        );
         Ok(graph.last_commit_seq()?)
     }
 
@@ -2837,7 +3017,12 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
-        rollback::attic_remove(&self.shared.dir, id)
+        rollback::attic_remove(&self.shared.dir, id)?;
+        self.shared.system_journal.emit(
+            &catalogue::ATTIC_REMOVED,
+            Event::new(format!("the attic entry {id} was removed")).field("entry", id),
+        );
+        Ok(())
     }
 
     /// Stops the store after an in-place change failed while its files were changed (the
@@ -3033,6 +3218,20 @@ impl StoreCore {
             self.shared.wal.closed.store(true, Ordering::Release);
         }
         let last_commit = self.shared.graph.read().last_commit_seq()?;
+        let clean = result.is_ok()
+            && self.maintenance.is_none()
+            && self.backup.is_none()
+            && !self.writes_nothing()
+            && self.shared.wal.frozen().is_none();
+        self.shared.system_journal.emit(
+            &catalogue::STORE_CLOSED,
+            Event::new(format!("the store was closed at commit {last_commit}"))
+                .commit(last_commit)
+                .count("commit_seq", last_commit)
+                .field("clean", clean),
+        );
+        // The journal writes nothing more into the store's files (the lock goes next).
+        self.shared.system_journal.detach_writer();
         // A store frozen by damage found while it was open writes nothing more to its disk
         // (it opens as "not closed cleanly" next time, which is no damage).
         if result.is_ok()
@@ -3247,6 +3446,12 @@ impl Shared {
             // Neither the attic nor a model (format spec 4.5) is graph data the store writes.
             .filter(|p| p.path != "attic" && !p.path.starts_with("attic/"))
             .filter(|p| p.path != models::MODELS_DIR && !p.path.starts_with("models/"))
+            // Nor the system journal and the instance file (format spec 4.7).
+            .filter(|p| {
+                p.path != system_journal::JOURNAL_DIR
+                    && !p.path.starts_with("journal/")
+                    && p.path != system_journal::INSTANCE_FILE
+            })
             .collect();
         if problems.is_empty() {
             return;
@@ -3271,6 +3476,21 @@ impl Shared {
             }
         );
         let count = problems.len();
+        if policy == DamagePolicy::Maintenance {
+            // A frozen store writes nothing more to its files, the journal included: its
+            // records from now on stay in memory (and in the `tracing` mirror).
+            self.system_journal.drop_writer();
+        }
+        self.system_journal.emit(
+            &catalogue::DAMAGE_FOUND,
+            Event::new(format!(
+                "{found_by} found damage in the store ({count} problem(s), first: {}: {})",
+                problems[0].path, problems[0].reason
+            ))
+            .field("found_by", found_by)
+            .count("problems", count as u64)
+            .field("first_path", problems[0].path.as_str()),
+        );
         if let Ok(mut found) = self.found.lock() {
             found.push(FoundDamage {
                 found_by: found_by.to_string(),
@@ -3300,6 +3520,47 @@ impl Shared {
     /// last commit) and to append the Checkpoint record afterwards. Beyond the merge bound the
     /// loaded graph is encoded under its read lock.
     fn checkpoint(&self, name: Option<&str>, sync: bool) -> Result<CheckpointReport, PersistError> {
+        let started = web_time::Instant::now();
+        let result = self.checkpoint_inner(name, sync);
+        match &result {
+            Ok(report) => {
+                let seq = report.snapshot.commit_seq;
+                let base = self.dir.join(SNAPSHOTS_DIR).join(files::snapshot_name(seq));
+                let bytes = base
+                    .list()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|(name, _)| base.join(name).len().ok())
+                            .sum::<u64>()
+                    })
+                    .unwrap_or(0);
+                self.system_journal.emit(
+                    &catalogue::CHECKPOINT_DONE,
+                    Event::new(format!("a checkpoint wrote the snapshot at commit {seq}"))
+                        .commit(seq)
+                        .count("commit_seq", seq)
+                        .field("merged", report.merged)
+                        .count("bytes", bytes)
+                        .count("ms", started.elapsed().as_millis() as u64)
+                        .field("automatic", !sync),
+                );
+            }
+            Err(err) => self.system_journal.emit(
+                &catalogue::CHECKPOINT_FAILED,
+                Event::new(format!("a checkpoint failed: {err}"))
+                    .field("error", err.to_string())
+                    .field("automatic", !sync),
+            ),
+        }
+        result
+    }
+
+    fn checkpoint_inner(
+        &self,
+        name: Option<&str>,
+        sync: bool,
+    ) -> Result<CheckpointReport, PersistError> {
         let _guard = self.maintenance.lock().map_err(|_| {
             PersistError::store(
                 "write a checkpoint",
@@ -4056,7 +4317,8 @@ fn copy_tree(
                     graph_files.push(name);
                     continue;
                 }
-                "LOCK" | "BACKUP" => continue,
+                // Instance-local (format spec 4.7): never copied.
+                "LOCK" | "BACKUP" | system_journal::INSTANCE_FILE => continue,
                 _ if name.ends_with(".tmp") => continue,
                 _ => {}
             }
@@ -4069,6 +4331,80 @@ fn copy_tree(
         copied.1 += len;
     }
     files::sync_dir(&to.join(&relative))
+}
+
+/// The system journal of the store in `dir` (`writable`: written to its files; otherwise its
+/// stored records are readable and new ones stay in memory), on the graph's instance clock.
+fn open_system_journal(
+    dir: &DirPath,
+    options: &StoreOptions,
+    graph: &Arc<dyn StoreGraph>,
+    writable: bool,
+) -> Arc<crate::graph::system_journal::SystemJournal> {
+    system_journal::open_journal(system_journal::OpenJournal {
+        dir,
+        clock: graph.clock(),
+        writable,
+        instance_name: options.instance_name.as_deref(),
+        segment_bytes: options.journal_segment_bytes,
+    })
+}
+
+impl Shared {
+    /// Writes `store.prune_done`.
+    fn journal_pruned(&self, report: &PruneReport, bytes: u64) {
+        self.system_journal.emit(
+            &catalogue::PRUNE_DONE,
+            Event::new(format!(
+                "pruned: {} snapshot(s) and {} WAL segment(s) removed, history kept from commit {}",
+                report.snapshots_removed.len(),
+                report.segments_removed.len(),
+                report.kept_from
+            ))
+            .count("up_to", report.kept_from)
+            .count("snapshots_removed", report.snapshots_removed.len() as u64)
+            .count("segments_removed", report.segments_removed.len() as u64)
+            .count("bytes", bytes)
+            .count("marks_unreachable", report.marks_unreachable.len() as u64),
+        );
+    }
+
+    /// Writes `store.opened` (and `store.recovered` when the open repaired traces of a crash or
+    /// of an interrupted operation).
+    fn journal_opened(&self, report: &OpenReport, started: web_time::Instant, read_only: bool) {
+        let torn = report.torn_tail.map_or(0, |cut| cut.bytes);
+        if torn > 0
+            || report.intent_completed.is_some()
+            || report.tmp_removed > 0
+            || report.refused_cut.is_some()
+        {
+            self.system_journal.emit(
+                &catalogue::STORE_RECOVERED,
+                Event::new("the open repaired the traces of a crash or an interrupted operation")
+                    .count("torn_tail_cut_bytes", torn)
+                    .field(
+                        "intent_completed",
+                        report.intent_completed.clone().unwrap_or_default(),
+                    )
+                    .count("tmp_removed", report.tmp_removed as u64)
+                    .field("wal_cut", report.refused_cut.is_some()),
+            );
+        }
+        let load_ms = started.elapsed().as_millis() as u64;
+        self.system_journal.emit(
+            &catalogue::STORE_OPENED,
+            Event::new(format!(
+                "the store was opened at commit {}{}",
+                report.commit_seq,
+                if read_only { " (read-only)" } else { "" }
+            ))
+            .commit(report.commit_seq)
+            .count("commit_seq", report.commit_seq)
+            .count("replayed", report.commits_replayed)
+            .count("load_ms", load_ms)
+            .field("read_only", read_only),
+        );
+    }
 }
 
 /// Refuses a newer format version (an older one never decodes: `read_graph_file` refuses it
@@ -4148,6 +4484,15 @@ fn remove_tmp(dir: &DirPath) -> Result<usize, PersistError> {
     }
     removed += rollback::remove_interrupted(dir);
     removed += models::remove_tmp(dir);
+    // `journal/tmp-*` (format spec 4.7).
+    let journal = dir.join(system_journal::JOURNAL_DIR);
+    if let Ok(entries) = journal.list() {
+        for (name, _) in entries {
+            if name.starts_with(TMP_PREFIX) && remove_path(&journal.join(&name)).is_ok() {
+                removed += 1;
+            }
+        }
+    }
     if removed > 0 {
         files::sync_dir(&dir.join(SNAPSHOTS_DIR))?;
         files::sync_dir(dir)?;

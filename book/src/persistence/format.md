@@ -195,6 +195,10 @@ BACKUP                        an empty file; the backup pin (12.10)
 INTENT                        present only while a multi-file operation runs (11.1)
 marks                         the marks, derived from the WAL (10)
 WORKLOAD                      the workload statistics sidecar (4.4); optional, instance data
+INSTANCE                      the instance identity of the system journal (4.7); instance data
+journal/                      the system journal (4.7); optional
+    00000000000000000001.jnl  a journal segment; the name is the first seq it may hold
+    tmp-<32 hex digits>       never listed, removed on open
 models/                       the embedding models the store keeps (4.5); optional
     model2vec-0123456789ab/   one model; the name is its content address
         graphersal-embed-model.json   its manifest, written last
@@ -365,6 +369,79 @@ unchanged, 15):
 | a store directory or single-file store | opens, reads, writes, checkpoints, prunes, compacts and verifies it; ignores `models/` and keeps it; its backups and forks do not carry the models |
 | a ZIP backup | refuses the restore as written by a newer version (12.8, 16 rule 9; nothing is written); an archive without models restores |
 | a packed snapshot | loads it and ignores the models (8: ignorable files, checked by length and CRC); a store created from it keeps them as ignorable files of its first snapshot, dropped by its next checkpoint |
+
+### 4.7 The system journal
+
+The system journal (book page "System Journal") holds operational events of the instances that
+wrote the store: opens and closes, checkpoints, backups, prunes, damage, rollbacks, permission
+denials. Nothing reads it to decide anything: a missing, cut or damaged journal changes nothing
+of the store, is never damage (13) and never stops an operation; `verify` lists its problems as
+notes (12.9).
+
+**`INSTANCE`** (instance data like `WORKLOAD`: never copied by any copy path, regenerated when
+missing or unreadable):
+
+```text
+magic "GRSLINST" | version u32 = 1 | instance id 16 bytes (big-endian) | reserved 28 bytes, zero
+| CRC-32C u32 of bytes 0..56 | name (LEB128 length + UTF-8) | CRC-32C u32 of the name's bytes
+```
+
+The id is a random version-7 UUID, the name the configured instance name, else the host name.
+
+**Segments** `journal/<20 digits>.jnl`: the name is the first `seq` the segment may hold. A
+segment starts with a 64-byte header:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | magic `GRSLJRNL` |
+| 8 | 4 | file format version (15) |
+| 12 | 16 | the instance id that writes the segment (big-endian) |
+| 28 | 8 | the first `seq` it may hold (= the file name) |
+| 36 | 8 | created at, µs |
+| 44 | 16 | reserved, zero |
+| 60 | 4 | CRC-32C of bytes 0..60 |
+
+Then record frames (26 bytes + payload):
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | sync marker `u32 0x4A525347` (bytes `47 53 52 4A`; not the WAL's) |
+| 4 | 4 | payload length (at most 1 MiB; checked before allocating) |
+| 8 | 8 | `seq` |
+| 16 | 1 | level: 0 error, 1 warn, 2 notice, 3 info (a larger value is shown as `info`) |
+| 17 | 1 | reserved, 0 |
+| 18 | 4 | CRC-32C of bytes 0..18 |
+| 22 | 4 | CRC-32C of the payload |
+| 26 | n | payload (uncompressed) |
+
+```text
+payload = origin 16 (big-endian) | origin_seq u64 | time i64 (µs) | source | kind | message
+        | presence u8 (bit 0 op, bit 1 parent, bit 2 commit, bit 3 principal; other bits:
+          newer content, kept)
+        | [op u64] [parent u64] [commit u64] [principal]
+        | fields: a property map with inline keys (3)
+        | origin name                                  (strings: LEB128 length + UTF-8)
+```
+
+- A record's `seq` is local and never reused: the next writer continues after the last valid
+  record of the newest segment (after a damaged newest segment, after its name plus the frames
+  it holds). `(origin, origin_seq)` identifies a record across copies; records of another
+  origin keep theirs.
+- Torn tail and damage follow 9.6: a frame cut by a crash at the end of the newest segment is a
+  torn tail, cut by the next writer; a frame whose header CRC fails is skipped by resyncing on
+  the next sync marker with a valid header CRC, one whose body CRC fails by its length. Sealed
+  segments (every one but the newest) never change.
+- A new segment starts when the current one exceeds its size (default 4 MiB), when the instance
+  of the open differs from the newest segment's header (a restored copy, another machine), when
+  the newest segment has another file format version or damage, and after a failed write.
+- An unknown kind, level or presence bit is shown, never damage (16 rule 9); a field value of a
+  newer value tag makes only that record's fields unreadable (shown as `fields_unreadable`).
+- Writing: `error` records are written and synced at once; the others are written in batches
+  (before a checkpoint, by the instance's periodic flush, at close). A read-only open (a backup,
+  maintenance mode, 16 rule 3) and a store frozen by damage write nothing; their new records stay
+  in memory.
+- Copies: 12.6 to 12.8 and 12.11 carry the journal; a fork, an attic fork and a repair do not (a
+  new store: its first record `store.created` names the source); a packed snapshot (8) does not.
 
 ## 5. The `GRAPH` file
 
@@ -1289,7 +1366,8 @@ four) is a newer writer's file: the restore is refused as unsupported, never as 
 rule 9); any other name is damage. The reference writer reads the archive back after writing it (12.6): every
 entry's CRC-32 and every checksum of the store files in it, which arrive in an order a one-pass
 reader can check (`GRAPH`, `GRAPH.copy`, `marks`, then each snapshot's `manifest` before its
-other files, then the WAL segments).
+other files, then the WAL segments, then the segments of the system journal,
+`journal/<20 digits>.jnl`, 4.7: checked frame by frame, a problem is a warning).
 
 ### 12.9 Verification (scrub)
 
@@ -1303,7 +1381,9 @@ prune left). A segment file the newest snapshot shares with the previous one (a 
 donor rule, 12.3) is a **warning**, not damage: the range has no independent donor; the next
 checkpoint finds no twin for it and copies it. It is meant to be run regularly: it finds damage while donors
 still exist. Verification also checks every embedding model (4.5): its manifest, the
-set of files, every file's size and SHA-256; a model of a newer manifest format is a note.
+set of files, every file's size and SHA-256; a model of a newer manifest format is a note. It reads
+every segment of the system journal (4.7): a damaged record or segment is a note, never a
+problem.
 
 ### 12.10 Locks and pins
 
@@ -1732,7 +1812,9 @@ store format version 3 and file format version 3:
     `models/` is for a reader older than 4.5) is left alone: never listed as damage, never
     removed by a prune or a compaction, not copied by that reader's copies. A new side area
     therefore needs no new version when an older reader ignoring it cannot misread the store;
-    the copies it misses are listed with the area (4.5).
+    the copies it misses are listed with the area (4.5). `journal/` and `INSTANCE` (4.7) are
+    such areas for a reader older than 4.7 (it refuses a store whose journal segment has a
+    newer file format version through the header walk of 15, like any newer file).
 
 ## 17. Conformance notes
 
