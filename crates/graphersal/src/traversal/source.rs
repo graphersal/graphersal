@@ -2859,6 +2859,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 Ok(analysed) => analysed,
                 Err(err) => return Err(locate_plan_error(steps, level.as_ref(), err)),
             };
+        // What a plan that mutates adds to the graph is not the query's own memory.
+        context.memory.set_writes(effects.mutates);
         // A plan that mutates never merges: one logical traverser must stay one mutation.
         context.bulk_merge = context.options.bulk_merge && !effects.mutates;
         // A sack merge operator or `bulk.one` makes merging visible: only an explicit barrier

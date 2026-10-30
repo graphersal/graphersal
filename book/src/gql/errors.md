@@ -226,7 +226,9 @@ A function whose result can be larger than its arguments (`range()`, `split()`, 
 `traversal.max_materialized_bytes` and the memory budget, like `collect_list()`. A result that is
 too large fails with the ordinary limit error (`ResourceLimitExceeded`, no GQLSTATUS: the option
 and its lock are the engine's), never with a shortened value; inside `gql()` its help names the
-growing functions, a bound for them and the `g.with(..).gql(..)` that raises the limit:
+growing functions, a bound for them and the `g.with(..).gql(..)` that raises the limit. The
+limit counts everything the query holds at once (its rows in the making too), so the result is
+checked together with what is already held:
 
 ```rhai,graph=modern
 g.gql("MATCH (n:person) RETURN range(0, 9223372036854775807) AS r")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
@@ -235,7 +237,7 @@ g.with("traversal.max_materialized_bytes", 100).gql("MATCH (n:person) RETURN spl
 
 ```text
 Caused by: Resource limit 'traversal.max_materialized_bytes' exceeded (limit 1073741824, reached 18446744073709551615)
-Help: The gql() query built a value larger than 'traversal.max_materialized_bytes' allows (1073741824 bytes); ... A function whose result can be larger than its arguments (range(), split(), replace(), || and CAST(x AS STRING) of a list or map) and the list of collect_list() are checked before they are built, so the query stops instead of running out of memory; the result is never cut short. Build smaller values: bound range() and replace() by the data, as in g.gql("MATCH (p:person) RETURN range(1, p.age / 10) AS r"), ... or raise the limit for the query, g.with("traversal.max_materialized_bytes", 2147483648).gql(..), ...
+Help: The gql() query held more memory at once than 'traversal.max_materialized_bytes' allows (1073741824 bytes); it reached 18446744073709551615 bytes (estimated: the engine's count of its buffers and values). Memory a step frees is given back, so only what is held at the same time counts. A function whose result can be larger than its arguments (range(), split(), replace(), || and CAST(x AS STRING) of a list or map) and the list of collect_list() are checked before they are built, so the query stops instead of running out of memory; the result is never cut short. Build smaller values: bound range() and replace() by the data, as in g.gql("MATCH (p:person) RETURN range(1, p.age / 10) AS r"), ... or raise the limit for the query, g.with("traversal.max_materialized_bytes", 2147483648).gql(..), ...
 ```
 
 ## Subqueries

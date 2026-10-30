@@ -158,6 +158,20 @@ fn a_snapshot_over_the_ceiling_is_refused_before_any_element_is_read() {
     assert_eq!(loaded.vertex_count(), 200);
 }
 
+/// The estimated growth check of a load counts the graph once: the slots reserved up front are
+/// part of the manifest's estimate, not of the empty graph's footprint, so a ceiling a tenth
+/// above the estimate is enough (it needed about 1.4 times the estimate before).
+#[test]
+fn a_load_fits_under_a_ceiling_near_its_estimate() {
+    let (bytes, needed) = packed(&people(5000));
+    let loaded = memory_limit_scope(needed + needed / 10, || {
+        persist::read_snapshot(bytes.as_slice(), &ReadOptions::new())
+    })
+    .map_err(|err| err.to_string())
+    .unwrap();
+    assert_eq!(loaded.vertex_count(), 5000);
+}
+
 #[test]
 fn the_stricter_of_read_options_and_the_ceiling_bounds_a_load() {
     let (bytes, needed) = packed(&people(50));

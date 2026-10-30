@@ -15,7 +15,7 @@ all of them with two kinds of limit, both reported as one error,
 | | `script.max_value_depth` | 128 | nesting of arrays/maps in a value the script hands to the engine |
 | Traversal (`g.with()`) | `traversal.max_traversers` | 10 000 000 | traversers one step may leave alive |
 | | `traversal.max_value_depth` | 128 | nesting of arrays/maps/paths in a value the traversal builds or writes |
-| | `traversal.max_materialized_bytes` | 1 GiB (256 MiB on wasm32) | estimated size of one value or buffer a step materializes |
+| | `traversal.max_materialized_bytes` | 1 GiB (256 MiB on wasm32) | the memory one execution holds at once (live bytes: its buffers and values; freed memory is given back) |
 | | `traversal.max_string_bytes` | 16 MiB | the longest string a step builds (`replace()`, `concat()`, `format()`, ...) |
 | | `evaluationTimeout` | none | wall-clock budget, see [Query Limits](query_limits.md) |
 | | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) on an edge or a path pattern |
@@ -131,17 +131,39 @@ them), each a `54001` error before the run ([GQL Errors](../gql/errors.md#gqlsta
 Equal traversers are merged into one record with a multiplicity (bulk), so a query like
 `g.v().repeat(__.both()).times(17)` stays cheap while it only counts. A step that needs every
 value as its own item (`fold()`, `aggregate()`, `store()`, `group()` value lists, a terminal list)
-expands the bulk, and that is where memory is spent. Two limits bound it, both checked *before*
-anything is allocated:
+expands the bulk, and that is where memory is spent. Two limits bound it:
 
 - **`traversal.max_materialized_bytes`** (default 1 GiB natively, 256 MiB on `wasm32`): the
-  estimated size of one expansion, `size_of::<Traverser>()` plus the value's own heap estimate per
-  copy (the estimator of the `Mem` column of `.profile_with(ProfileType::Memory)` without
-  `alloc-tracking`). The same budget bounds a value a `repeat()` loop builds up again on every
-  iteration, checked once per traverser per iteration together with the depth: the value, its
-  sack, and the values the execution's path records keep (`repeat(__.path())` doubles its value
-  on every iteration and keeps each earlier one in the path records). Such a loop stops at most
-  one doubling past the budget. The size is an estimate, not a measurement.
+  memory ONE execution holds AT ONCE (changed in 0.5.0; before, it bounded the size of one value
+  or buffer). It counts **live bytes**: memory a step frees is given back, so only what is held at
+  the same time counts. A query that builds a list, drops it and builds the next
+  (`fold().unfold().fold().unfold()`) holds one list at a time; a query that keeps two lists (two
+  labelled folds, a `project()` of two folds) holds both. What is measured:
+  - **tracked** (a tracking allocator is installed, as in the `graphersal` command line, the
+    playground and the Python binding): the live heap of the query's thread minus what it held
+    when the query started. What the query adds to the GRAPH (a write) does not count here: in a
+    query that writes it is estimated at every step boundary (the elements added, at the graph's
+    average element size) and subtracted; the process ceiling below bounds the graph's growth;
+  - **estimated** (otherwise): the engine's count of what the query holds: the stream between
+    two steps (by capacity, 80 bytes per traverser), the values it sizes anyway (bulk expansions
+    and bucket copies, `fold()` lists, GQL lists and function results, `product()`, step-built
+    strings), the `repeat()` frontier with its values and sacks, and the values the path records
+    keep (`repeat(__.path())` doubles its value on every iteration and keeps each earlier one).
+    A value is charged when a step builds it and released when a later step replaces the stream
+    (a map, flat-map or barrier step; filters, labels and side effects pass it on) or when the
+    child traversal that built it returns; side-effect buckets are held to the end of the query.
+    The figures come from what the engine computes anyway, never from a walk over every element,
+    so the estimate is coarse: a value built inside a child traversal (`project().by(__.fold())`)
+    counts while the child runs, not afterwards, and most element properties read on the way are
+    not counted.
+
+  It is checked at every step boundary, before a bulk expansion, a bucket push of copies or a
+  sized value is built, and for every traverser of a new `repeat()` frontier WHILE the frontier is
+  built, so a loop that multiplies its traversers stops within the iteration that crosses the
+  limit. The error's `observed` figure (`reached N`) is what the query held plus what the failing
+  check was about to allocate. [Profiles](profiling_and_execute.md) report the PEAK of the
+  measure (`TraversalMetrics::memory()`); the peak is sampled at these checks, not exact, so a
+  short spike between two checks can be missed.
 - **`bulk.max_expansion`** (default 10 000 000 values): the number of values one expansion may
   produce, a second line behind the byte budget (`BulkExpansionLimit`).
 
@@ -158,8 +180,10 @@ There are exactly **two memory limits**, never mixed:
 
 - the **process memory ceiling** `memory.limit`: what the whole PROCESS may hold. One setting of
   the process, set by the host, on by default;
-- the **per-query limit** `traversal.max_materialized_bytes` (above): the estimated size of one
-  value or buffer a query materializes, an ordinary `g.with()` option.
+- the **per-query limit** `traversal.max_materialized_bytes` (above): the memory one query holds
+  at once (live bytes, the query's own working memory without what it adds to the graph), an
+  ordinary `g.with()` option. Profiles report its peak against this limit, never against the
+  process ceiling.
 
 The ceiling exists so that a query (or an import, or a write) which would exhaust the memory of
 the process fails with `ResourceLimitExceeded` and is rolled back, like every failing traversal,
@@ -197,7 +221,8 @@ exec::set_memory_headroom(Some(256 << 20)).unwrap();          // for a cgroup li
 `InvalidOption`, whose `help()` names the process setting (changed in 0.5.0; before, the budget
 was an opt-in option per execution). A scheduled job's `memory_limit` does not touch the
 ceiling: it is the per-query limit `traversal.max_materialized_bytes` of every traversal the
-job's run executes (the smaller of the two values; see
+job's run executes, with the same measure (live bytes held at once; the smaller of the two
+values; see
 [Scheduled jobs](../persistence/scheduled_jobs.md#limits-per-run)).
 
 What is compared with the ceiling (the error's `help()` says which one applied):
@@ -208,10 +233,11 @@ What is compared with the ceiling (the error's `help()` says which one applied):
   the extension's Rust heap only, not Python objects), the process's exact live heap bytes, plus
   what a check is about to allocate;
 - **estimated**: otherwise (a library host with the system allocator), the engine's estimate: the
-  graph's footprint (`g.memory_usage()`) when the traversal starts, plus the traversers alive
-  between two steps, the elements the traversal added (at the graph's average element size) and
-  what a check is about to allocate. Property values written to existing elements are not
-  counted, and loops that grow their values are undercounted, so the real process can hold
+  graph's footprint (`g.memory_usage()`) when the traversal starts, plus what the traversal holds
+  by the same count as the per-query limit (its buffers, the values it sizes, the `repeat()`
+  frontier, the path records), the elements the traversal added (at the graph's average element
+  size) and what a check is about to allocate. Property values written to existing elements are
+  not counted, and the count of what a query holds is coarse, so the real process can hold
   more. Because the ceiling is on by default, the start of a run never walks the graph while the
   graph is far from the ceiling: it takes the footprint of the last walk, adjusted by the
   elements added or removed since. The graph is walked (time proportional to its size, cached by

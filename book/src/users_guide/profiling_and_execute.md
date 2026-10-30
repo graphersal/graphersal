@@ -54,6 +54,29 @@ p.to_table()                        // the text table above
 `profile(ProfileType.Memory)` (also `ProfileType::Memory`, and `profile_with(..)`) adds a `memory`
 section to every step; see [Memory Inspection and Profiling](memory_and_profiling.md).
 
+Every profile also carries the **memory of the whole query** against its per-query limit
+`traversal.max_materialized_bytes`: the PEAK of the live bytes the query held at once (memory a
+step frees is given back; see [Resource Limits](resource_limits.md#memory-materialized-bytes-and-expansions)).
+In Rust it is `TraversalMetrics::memory()` (`QueryMemory`: `peak_bytes()`, `limit_bytes()`,
+`source()`, `tracked` or `estimated`; `None` only when the query failed before it started); in the
+map and the JSON it is the top-level key `query_memory`:
+
+```text
+p.query_memory  // #{peak_bytes: 2240, limit_bytes: 1073741824, limit: "traversal.max_materialized_bytes", source: "estimated"}
+```
+
+The peak is sampled where the engine checks the limit (every step boundary, bulk expansion,
+`repeat()` traverser and sized value), so a short spike between two checks can be missed. A
+failed `execute()` reports the figure of the check that failed. The text table shows it as one
+line under the `TOTAL:` rows only with `ProfileType::Memory` (a plain `.profile()` table is
+unchanged):
+
+```text
+Peak memory: ~2.2 KiB of 1 GiB (traversal.max_materialized_bytes, estimated)
+```
+
+It is never compared with the process ceiling `memory.limit`: the two limits are never mixed.
+
 A traversal that fails inside `profile()` is a **script error** with the full diagnostic, exactly
 like `to_list()`. Use `execute(#{profile: true})` to get the profile up to the failing step.
 

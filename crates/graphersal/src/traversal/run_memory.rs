@@ -7,8 +7,9 @@
 //! - **tracked** (a [`TrackingAllocator`](crate::alloc_tracking::TrackingAllocator) is installed
 //!   and the `alloc-tracking` feature is on): the live heap of the execution's thread minus its
 //!   value when the run started (one thread-local read per check), minus what the run added to
-//!   the graph (estimated, only when the check would fail otherwise: the graph's growth counts
-//!   against the process ceiling, not the per-execution limit);
+//!   the graph (a plan that writes: estimated at every step boundary from the element count, at
+//!   the graph's average element size; the graph's growth counts against the process ceiling,
+//!   not the per-execution limit);
 //! - **estimated** otherwise: the engine's own count of what the run holds (the per-level step
 //!   buffers by capacity, the values a step builds where the engine already sizes them: bulk
 //!   expansions, `fold()` lists, bucket copies, GQL lists, `product()`, step-built strings, the
@@ -50,13 +51,16 @@ pub(crate) struct RunMemory {
     /// The process ceiling, started on the graph (`None`: no ceiling).
     process: Option<MemoryBudget>,
     /// Estimated: what the run added to the graph, refreshed at step boundaries (the process
-    /// ceiling counts it). Tracked: the same estimate, refreshed only when the per-execution
-    /// check would fail, and subtracted from the thread's live heap.
+    /// ceiling counts it). Tracked: the same estimate, refreshed at the boundaries of a plan that
+    /// writes, and subtracted from the thread's live heap.
     grown: Cell<u64>,
     /// Vertices plus edges when the run started (tracked; for the graph growth).
     elements_at_start: u64,
     /// The estimated bytes of one element, taken once when the tracked check needs it.
     element_bytes: Cell<Option<u64>>,
+    /// Whether the plan writes to the graph (tracked: only then is the graph's growth
+    /// estimated, at every step boundary).
+    writes: Cell<bool>,
 }
 
 impl RunMemory {
@@ -77,6 +81,7 @@ impl RunMemory {
             grown: Cell::new(0),
             elements_at_start: 0,
             element_bytes: Cell::new(None),
+            writes: Cell::new(false),
         }
     }
 
@@ -92,6 +97,12 @@ impl RunMemory {
             memory.elements_at_start = element_count(storage)?;
         }
         Ok(memory)
+    }
+
+    /// Notes whether the plan writes to the graph (set once the plan is analysed).
+    #[inline]
+    pub(crate) fn set_writes(&self, writes: bool) {
+        self.writes.set(writes);
     }
 
     /// Whether the measure is the tracking allocator's (else the engine's estimate).
@@ -222,17 +233,15 @@ impl RunMemory {
     }
 
     /// The check at a step boundary on `storage`: refreshes the graph's growth where a measure
-    /// needs it (estimated with a process ceiling: every boundary; tracked: only when the
-    /// per-execution check would fail otherwise, so it never fails on what a write added to the
+    /// needs it (estimated with a process ceiling: every boundary; tracked: every boundary of a
+    /// plan that writes, so neither the check nor the peak counts what a write added to the
     /// graph), then [`Self::check`].
     pub(crate) fn check_boundary<S: GraphStorage + ?Sized>(
         &self,
         storage: &S,
     ) -> TraverserResult<()> {
         if self.tracked {
-            let delta = thread_live().saturating_sub(self.thread_start);
-            let raw = u64::try_from(delta).unwrap_or(0);
-            if raw > self.limit {
+            if self.writes.get() {
                 self.grown.set(self.tracked_growth(storage)?);
             }
         } else if let Some(budget) = &self.process {
@@ -241,8 +250,9 @@ impl RunMemory {
         self.check(0)
     }
 
-    /// Tracked: the bytes the run added to the graph, at the graph's average element size
-    /// (taken once per run from the storage's footprint hint, else its footprint).
+    /// Tracked: the bytes the run added to the graph and to its unit's undo record, at the
+    /// graph's average element size (taken once per run from the storage's footprint hint, else
+    /// its footprint) plus one undo entry per added element.
     fn tracked_growth<S: GraphStorage + ?Sized>(&self, storage: &S) -> Result<u64, GraphError> {
         let now = element_count(storage)?;
         let added = now.saturating_sub(self.elements_at_start);
@@ -256,7 +266,13 @@ impl RunMemory {
                     Some(hint) => hint,
                     None => storage.memory_footprint_bytes()?.unwrap_or(0),
                 };
-                let each = footprint.checked_div(now).unwrap_or(0);
+                // The element itself, at the graph's average, plus the unit's record of the
+                // write (an undo entry of `TraversalGraph`; for another storage an allowance for
+                // its own record of the unit).
+                let each = footprint
+                    .checked_div(now)
+                    .unwrap_or(0)
+                    .saturating_add(std::mem::size_of::<crate::graph::undo::UndoEntry>() as u64);
                 self.element_bytes.set(Some(each));
                 each
             }

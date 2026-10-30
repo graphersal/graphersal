@@ -65,10 +65,12 @@ pub const EVALUATION_TIMEOUT_MS: i64 = 10_000;
 pub const WALL_CLOCK_LIMIT: Duration = Duration::from_secs(30);
 
 /// Traversal options set on every traversal of a case (tighter than the defaults: the TCK
-/// graphs have at most a few dozen elements).
+/// graphs have at most a few dozen elements). The memory one query holds at once counts its
+/// buffers too (since 0.5.0): 256 MiB leaves room for a stream of a million rows (`UNWIND
+/// range(1000000, 2000000)`) under the 512 MiB ceiling below.
 pub const LIMITS: [(&str, i64); 5] = [
     ("traversal.max_traversers", 4_000_000),
-    ("traversal.max_materialized_bytes", 64 * 1024 * 1024),
+    ("traversal.max_materialized_bytes", 256 * 1024 * 1024),
     ("traversal.max_string_bytes", 1024 * 1024),
     ("bulk.max_expansion", 4_000_000),
     ("repeat.max_loops", 1_000),

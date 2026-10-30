@@ -35,9 +35,9 @@ optional). The engine cannot interrupt arbitrary code, so the limits reach the c
 traversal already makes: while the job runs, its remaining time caps each traversal's
 `evaluationTimeout` and its memory limit (bytes) caps each traversal's per-query limit
 [`traversal.max_materialized_bytes`](../users_guide/resource_limits.md) (a query's own stricter
-value stays). The memory limit is compared with what the traversal itself materializes, where
-that limit is checked (one value or buffer at a time today, not a running total of the whole
-run), never with the memory of the whole process: the
+value stays). The memory limit is compared with what the traversal itself holds at once (live
+bytes, the measure of the per-query limit: memory it frees is given back, what it adds to the
+graph does not count), never with the memory of the whole process: the
 [process memory ceiling](../users_guide/resource_limits.md#the-process-memory-ceiling) stays the
 same while a job runs, so a job with 256 MiB still runs in a process that holds 2 GiB. A breach fails the traversal as any timeout or memory limit does, its work is rolled
 back, and the run is recorded as failed with the reason. An action doing long work of its own
