@@ -125,20 +125,34 @@ pub(crate) struct KindTotals {
 
 impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     /// Sorts the graph's element ids (the only allocation that grows with the graph).
-    /// `Err` when the storage cannot read its elements.
+    /// `Err` when the storage cannot read its elements, or when the index and one chunk do not
+    /// fit under the process memory ceiling (`GraphError::ResourceLimitExceeded` naming
+    /// `operation`, checked before anything is allocated).
     pub(crate) fn new(
         graph: &'g S,
         options: &'g WriteOptions,
+        operation: &'static str,
     ) -> Result<Self, crate::error::GraphError> {
+        let (vertex_count, edge_count) = (graph.vertex_count()?, graph.edge_count()?);
+        let index_bytes = (vertex_count as u64)
+            .saturating_mul(size_of::<(&str, S::VertexId)>() as u64)
+            .saturating_add(
+                (edge_count as u64).saturating_mul(size_of::<(&str, S::EdgeId)>() as u64),
+            );
+        crate::traversal::memory_budget::ensure_room(
+            operation,
+            index_bytes.saturating_add(u64::from(options.chunk_bytes)),
+            0,
+        )?;
         // Sized up front: the index is allocated once, at its final size.
-        let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(graph.vertex_count()?);
+        let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(vertex_count);
         for vertex in graph.vertices()? {
             if let Some(id) = graph.vertex_id(vertex)? {
                 vertices.push((id, vertex));
             }
         }
         vertices.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(graph.edge_count()?);
+        let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(edge_count);
         for edge in graph.edges()? {
             if let Some(id) = graph.edge_id(edge)? {
                 edges.push((id, edge));

@@ -502,7 +502,7 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
     /// Combines the incoming list `left` with `right`.
     fn combine_lists(
         &self,
-        context: &TraverserContext<'_, S>,
+        context: &mut TraverserContext<'_, S>,
         left: Vec<TraverserValue<S>>,
         right: Right<'_, S>,
     ) -> TraverserResult<Vec<TraverserValue<S>>> {
@@ -513,10 +513,39 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                 return Ok(out);
             }
             ListFunction::Product => {
-                let mut out =
-                    crate::traversal::capacity::vec_capped(left.len().saturating_mul(right.len()));
+                let pairs = left.len().saturating_mul(right.len());
+                if pairs == 0 {
+                    return Ok(Vec::new());
+                }
+                // Checked before anything is allocated: every pair is one value holding a
+                // two-element array of copies of both items.
+                let slot = std::mem::size_of::<TraverserValue<S>>() as u64;
+                let each = |value: &TraverserValue<S>| {
+                    crate::traversal::step::profile::estimate_traverser_value_bytes(value)
+                };
+                let left_bytes = left
+                    .iter()
+                    .fold(0u64, |sum, value| sum.saturating_add(each(value)));
+                let mut right_bytes = 0u64;
+                for i in 0..right.len() {
+                    right_bytes = right_bytes.saturating_add(each(&right.item(i)));
+                }
+                let bytes = (pairs as u64)
+                    .saturating_mul(slot.saturating_mul(3))
+                    .saturating_add(left_bytes.saturating_mul(right.len() as u64))
+                    .saturating_add(right_bytes.saturating_mul(left.len() as u64));
+                let max = context.options.max_materialized_bytes;
+                if bytes > max {
+                    return Err(crate::traversal::bulk::materialized_bytes_error(max, bytes));
+                }
+                if let Some(budget) = &context.options.memory {
+                    budget.check(bytes)?;
+                }
+                let mut out = Vec::new();
+                crate::traversal::capacity::try_reserve_exact(&mut out, pairs)?;
                 for a in &left {
                     for i in 0..right.len() {
+                        context.tick()?;
                         out.push(TraverserValue::Array(vec![a.clone(), right.item(i)]));
                     }
                 }

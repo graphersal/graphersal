@@ -28,7 +28,7 @@ use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{TraverserError, TraverserResult};
+use crate::error::{GraphError, TraverserError, TraverserResult};
 
 /// The name of the process setting (the error's `limit`, `--memory-limit`, Python `set_memory_limit`).
 pub(crate) const MEMORY_LIMIT: &str = "memory.limit";
@@ -364,6 +364,98 @@ pub(crate) fn effective_limit() -> Option<u64> {
         Some(cap) => Some(limit.map_or(cap, |limit| limit.min(cap))),
         None => limit,
     }
+}
+
+/// Whether `bytes` more fit under the process memory ceiling now: for a host that is about to
+/// allocate memory proportional to data outside the engine's own checks (a model it loads, a
+/// buffer it fills). With a tracking allocator installed the process's live heap plus `bytes`
+/// is compared; otherwise only `bytes` (the rest of the process is not seen). No ceiling: `Ok`.
+///
+/// `Err`: [`GraphError::ResourceLimitExceeded`] naming `operation`, with `needed` = `bytes`
+/// and `observed` = what is in use plus `bytes` (the smallest ceiling that would have passed).
+///
+/// ```
+/// use graphersal::exec;
+/// use graphersal::prelude::GraphError;
+///
+/// // Far below any ceiling: fits.
+/// exec::check_memory_for("model load", 1024).unwrap();
+/// // More than any ceiling can hold (unless the host turned the ceiling off).
+/// if exec::memory_room().unwrap().limit().is_some() {
+///     let err = exec::check_memory_for("model load", u64::MAX).unwrap_err();
+///     assert!(matches!(
+///         err,
+///         GraphError::ResourceLimitExceeded { operation: "model load", needed: Some(u64::MAX), .. }
+///     ));
+/// }
+/// ```
+pub fn check_memory_for(operation: &'static str, bytes: u64) -> Result<(), GraphError> {
+    crate::traversal::memory_budget::ensure_room(operation, bytes, 0)
+}
+
+/// The figures behind [`check_memory_for`] ([`memory_room`]): the ceiling in effect on this
+/// thread, where it comes from, the live heap (tracked) and what is left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemoryRoom {
+    limit: Option<u64>,
+    source: MemoryLimitSource,
+    live_bytes: Option<u64>,
+    available: Option<u64>,
+}
+
+impl MemoryRoom {
+    /// The ceiling in bytes; `None`: no ceiling.
+    pub fn limit(&self) -> Option<u64> {
+        self.limit
+    }
+
+    /// Where the process ceiling comes from ([`memory_limit`]).
+    pub fn source(&self) -> MemoryLimitSource {
+        self.source
+    }
+
+    /// The process's live heap bytes when a tracking allocator counts them; `None` otherwise
+    /// (estimated mode: the engine does not see the whole process).
+    pub fn live_bytes(&self) -> Option<u64> {
+        self.live_bytes
+    }
+
+    /// What is left below the ceiling: the ceiling minus the live heap (tracked) or the whole
+    /// ceiling (estimated); `None` without a ceiling.
+    pub fn available(&self) -> Option<u64> {
+        self.available
+    }
+}
+
+/// The memory room now: the ceiling, its source, the live heap (tracked) and what is left
+/// ([`MemoryRoom`]). `Err` is reserved for a platform query that can fail; it does not fail
+/// today.
+///
+/// ```
+/// let room = graphersal::exec::memory_room().unwrap();
+/// if let (Some(limit), Some(available)) = (room.limit(), room.available()) {
+///     assert!(available <= limit);
+/// }
+/// ```
+pub fn memory_room() -> Result<MemoryRoom, GraphError> {
+    let settings = *settings();
+    let (_, source) = resolve(
+        settings.limit,
+        settings.headroom,
+        crate::traversal::memory_budget::cgroup_limit(),
+        physical_memory(),
+        cfg!(target_arch = "wasm32"),
+    );
+    let limit = effective_limit();
+    let live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
+    let available = limit.map(|limit| limit.saturating_sub(live_bytes.unwrap_or(0)));
+    Ok(MemoryRoom {
+        limit,
+        source,
+        live_bytes,
+        available,
+    })
 }
 
 /// The error of an invalid `memory.limit` value `text`.

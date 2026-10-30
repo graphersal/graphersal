@@ -444,6 +444,9 @@ fn ensure_declared<S: GraphStorage>(
     }
 }
 
+/// What the memory check of the id collection names.
+const EMBED_PROPERTY_OPERATION: &str = "embed_property";
+
 fn run<S: GraphStorage, A: Access<S>>(
     access: &mut A,
     job: &EmbedJob,
@@ -479,6 +482,23 @@ fn run<S: GraphStorage, A: Access<S>>(
         let keep = |properties: Option<&PropertyMap>| {
             !job.only_missing || !properties.is_some_and(|p| p.contains_key(&job.to))
         };
+        // The ids are collected at once: room for them is checked first (an id per element of
+        // the label, at the size of a `CompactString`; longer ids allocate more).
+        let count = match (
+            storage.statistics().map_err(TraverserError::from)?,
+            job.element,
+        ) {
+            (Some(stats), ElementKind::Vertex) => stats.vertex_label_count(&job.label),
+            (Some(stats), ElementKind::Edge) => stats.edge_label_count(&job.label),
+            (None, ElementKind::Vertex) => storage.vertex_count().map_err(TraverserError::from)?,
+            (None, ElementKind::Edge) => storage.edge_count().map_err(TraverserError::from)?,
+        };
+        crate::traversal::memory_budget::ensure_room(
+            EMBED_PROPERTY_OPERATION,
+            (count as u64).saturating_mul(std::mem::size_of::<CompactString>() as u64),
+            0,
+        )
+        .map_err(TraverserError::from)?;
         let mut ids: Vec<CompactString> = Vec::new();
         match job.element {
             ElementKind::Vertex => {

@@ -18,13 +18,17 @@
 //!   (a container), else 80 % of the physical memory, else 3.5 GiB on `wasm32`, else none.
 //!   With a tracking allocator installed (`alloc_tracking`) the process's live heap is compared,
 //!   otherwise an estimate (the graph's footprint plus what the query holds and adds).
+//!   Loads, store opens, recoveries, checkpoints, backup verifies and GraphSON/GraphML loads
+//!   check it BEFORE they allocate (a graph that does not fit refuses the open, naming the
+//!   minimum). A host that allocates data-proportional memory itself (a model it loads) asks
+//!   first with [`check_memory_for`]; [`memory_room`] reports the figures ([`MemoryRoom`]).
 //! - The **per-query limit** `traversal.max_materialized_bytes`: an execution option (lockable
 //!   through [`ExecutionPolicy`]) bounding what one query materializes.
 
 pub use crate::graph::ExecutionPolicy;
 pub use crate::traversal::memory_limit::{
-    MemoryLimit, MemoryLimitSource, ProcessMemoryLimit, memory_limit, memory_limit_scope,
-    set_memory_headroom, set_memory_limit,
+    MemoryLimit, MemoryLimitSource, MemoryRoom, ProcessMemoryLimit, check_memory_for, memory_limit,
+    memory_limit_scope, memory_room, set_memory_headroom, set_memory_limit,
 };
 pub use crate::traversal::{
     CancelToken, GlobPathOptions, RenderOptions, RenderedOutput, Spelling, Truncation,

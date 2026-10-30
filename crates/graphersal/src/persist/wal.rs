@@ -863,6 +863,13 @@ impl<R: Read> JournalReader<R> {
             }
         };
         let (length, commit_seq) = (header.length, header.commit_seq);
+        // The body is read whole (its header's checksum holds, so the length is the writer's):
+        // room for it is checked first.
+        crate::traversal::memory_budget::ensure_room(
+            super::recover::RECOVERY_OPERATION,
+            u64::from(length),
+            0,
+        )?;
         let mut body = Vec::with_capacity((length as usize).min(1 << 20));
         (&mut self.source)
             .take(u64::from(length))

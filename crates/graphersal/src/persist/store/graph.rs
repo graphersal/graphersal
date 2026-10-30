@@ -262,6 +262,13 @@ where
     /// catalog, lineage id, position and id sequences all arrive (maintenance mode is rare and
     /// read-only; the copy costs one more graph in memory while it runs).
     fn salvaged(&self, graph: TraversalGraph) -> Result<Arc<dyn StoreGraph>, PersistError> {
+        // The snapshot bytes and the second graph are held at once: about twice the graph.
+        let footprint = crate::graph::memory::footprint_bytes(&graph);
+        crate::traversal::memory_budget::ensure_room(
+            "maintenance copy",
+            footprint.saturating_mul(2),
+            0,
+        )?;
         let mut bytes = Vec::new();
         write_snapshot(
             &graph,

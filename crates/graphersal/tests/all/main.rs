@@ -123,6 +123,7 @@ mod logical_map_tests;
 mod math_tests;
 mod mem_store_tests;
 mod memory_budget_tests;
+mod memory_check_point_tests;
 mod memory_inspection_tests;
 mod memory_report_tests;
 mod merge_checkpoint_fuzz_tests;
