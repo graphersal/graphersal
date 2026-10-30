@@ -310,6 +310,7 @@ impl UnitBudget {
     /// `element_bytes` (at least the 128-byte floor) instead of the graph's average: a load into
     /// an empty graph has no average, but knows one (a snapshot's manifest estimate divided by
     /// its element count). Tracked mode ignores it.
+    #[cfg(any(feature = "persist", test))]
     pub(crate) fn start_with_element_bytes<S: GraphStorage + ?Sized>(
         storage: &S,
         operation: &'static str,
@@ -322,9 +323,10 @@ impl UnitBudget {
     }
 
     /// Estimates what the unit added by `input` instead of the element count (estimated mode
-    /// only): the bytes of text a load into a new graph has read so far ([`CountingReader`];
+    /// only): the bytes of text a load into a new graph has read so far (`CountingReader`;
     /// GraphSON or GraphML text is the same order of size as the graph it builds). The larger
     /// of both estimates counts.
+    #[cfg(any(feature = "io", test))]
     pub(crate) fn with_input(mut self, input: InputCounter) -> Self {
         self.input = Some(input);
         self
@@ -345,6 +347,7 @@ impl UnitBudget {
     /// Counts `n` handled elements at once (the mutations of one replayed commit, the records
     /// of one decoded chunk); checks the budget when the countdown runs out.
     #[inline]
+    #[cfg(any(feature = "persist", test))]
     pub(crate) fn tick_n<S: GraphStorage + ?Sized>(
         &mut self,
         storage: &S,
@@ -378,7 +381,7 @@ impl UnitBudget {
     }
 }
 
-/// The bytes a load has read from its input so far, shared between the [`CountingReader`] that
+/// The bytes a load has read from its input so far, shared between the `CountingReader` that
 /// counts them and the [`UnitBudget`] that compares them (estimated mode).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InputCounter(std::sync::Arc<std::sync::atomic::AtomicU64>);
@@ -389,6 +392,7 @@ impl InputCounter {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[cfg(any(feature = "io", test))]
     fn add(&self, bytes: usize) {
         self.0
             .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
@@ -397,11 +401,13 @@ impl InputCounter {
 
 /// A reader that counts the bytes consumed from `inner` into an [`InputCounter`] (one relaxed
 /// add per read or `consume`, never per element).
+#[cfg(any(feature = "io", test))]
 pub(crate) struct CountingReader<R> {
     inner: R,
     counter: InputCounter,
 }
 
+#[cfg(any(feature = "io", test))]
 impl<R> CountingReader<R> {
     /// Counts what is read from `inner` into `counter`.
     pub(crate) fn new(inner: R, counter: InputCounter) -> Self {
@@ -409,6 +415,7 @@ impl<R> CountingReader<R> {
     }
 }
 
+#[cfg(any(feature = "io", test))]
 impl<R: std::io::Read> std::io::Read for CountingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buf)?;
@@ -417,6 +424,7 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
     }
 }
 
+#[cfg(any(feature = "io", test))]
 impl<R: std::io::BufRead> std::io::BufRead for CountingReader<R> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         self.inner.fill_buf()
@@ -440,8 +448,9 @@ pub(crate) fn tick<S: GraphStorage + ?Sized>(
     }
 }
 
-/// [`UnitBudget::tick_n`] when there is a budget; nothing otherwise.
+/// `UnitBudget::tick_n` when there is a budget; nothing otherwise.
 #[inline]
+#[cfg(feature = "persist")]
 pub(crate) fn tick_n<S: GraphStorage + ?Sized>(
     budget: &mut Option<UnitBudget>,
     storage: &S,
@@ -520,7 +529,7 @@ pub(crate) fn room_error(
 /// [`ensure_room`] as an `io::Error` of kind `OutOfMemory` that carries the
 /// [`GraphError::ResourceLimitExceeded`] as its inner error (for the byte reads of a store
 /// directory, whose callers take `io::Result`).
-#[cfg(feature = "persist")]
+#[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
 pub(crate) fn ensure_room_io(operation: &'static str, needed: u64) -> std::io::Result<()> {
     ensure_room(operation, needed, 0)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::OutOfMemory, err))
