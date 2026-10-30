@@ -974,6 +974,14 @@ pub fn run(args: &[String]) -> i32 {
                         info.wal_segments,
                         info.wal_bytes
                     );
+                    if info.blobs.count > 0 {
+                        outln!(
+                            "blobs       {} ({}; {} unreferenced, removed by the next prune)",
+                            info.blobs.count,
+                            bytes_text(info.blobs.bytes),
+                            info.blobs.unreferenced
+                        );
+                    }
                     if !info.models.is_empty() || !info.schema_models.is_empty() {
                         outln!(
                             "models      {} ({}; every copy carries them)",
@@ -1286,6 +1294,13 @@ pub fn run(args: &[String]) -> i32 {
                         outln!(
                             "No longer reachable (their history was pruned): the mark(s) {}.",
                             report.marks_unreachable.join(", ")
+                        );
+                    }
+                    if report.blobs_removed > 0 {
+                        outln!(
+                            "Removed {} unreferenced blob(s) ({}).",
+                            report.blobs_removed,
+                            bytes_text(report.blob_bytes_removed)
                         );
                     }
                     EXIT_OK
@@ -1616,6 +1631,13 @@ pub fn run(args: &[String]) -> i32 {
                         outln!(
                             "No longer reachable (their history was pruned): the mark(s) {}.",
                             report.prune.marks_unreachable.join(", ")
+                        );
+                    }
+                    if report.prune.blobs_removed > 0 {
+                        outln!(
+                            "Removed {} unreferenced blob(s) ({}).",
+                            report.prune.blobs_removed,
+                            bytes_text(report.prune.blob_bytes_removed)
                         );
                     }
                     match report.compaction {

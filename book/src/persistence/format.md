@@ -1,7 +1,7 @@
-# Storage Format Specification (store version 3, file version 3)
+# Storage Format Specification (store version 3, file version 4)
 
 This page is the normative specification of Graphersal's storage format, store format version 3
-with file format version 3 (15): the packed snapshot (`.gsnap`), the write-ahead log
+with file format version 4 (15): the packed snapshot (`.gsnap`), the write-ahead log
 (journal), the Store directory and its files, and the single-file container (`.gstore`). It is
 written so that a third party can read (and write) these files without Graphersal's code: a
 backup tool, a converter, a change-data-capture connector that tails the WAL.
@@ -125,7 +125,8 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
 | 18 | `time` | `uvar nanos`: nanoseconds since midnight (file format version 3) |
 | 19 | `offsettime` | `uvar nanos`: nanoseconds since midnight (the local time of day), then `svar offset`: the UTC offset in seconds (file format version 3) |
 | 20 | `duration` | `svar months`, `svar days`, then the time part as `svar seconds` rounded down and `uvar nanos` of that second (`0..10^9`); each part with its own sign (the time part's sign is that of `seconds * 10^9 + nanos`) (file format version 3) |
-| 21..254 | reserved | invalid in versions 1 to 3 |
+| 21 | `blobref` | a reference to a blob of the store (4.6): `u8 hash_algo` (1 = SHA-256; 0 is invalid; 2..255 a newer writer's algorithm), `uvar hash_len` (1..=64; exactly 32 for SHA-256), the hash bytes, `u64 length` of the content (little-endian), `u32` CRC-32C of the content (little-endian) (file format version 4) |
+| 22..254 | reserved | invalid in versions 1 to 4 |
 | 255 | absent | only where a field explicitly allows it (the *before* value of a SetProperty mutation, 9.3) |
 
 - The order of object entries (and of property maps, 7.3) is the insertion order and MUST be
@@ -170,8 +171,13 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   violation are invalid (damage): every element kind of version 2 is defined here. A reader
   checks the payload length (`dimension` times the component size) against the remaining bytes
   before it allocates.
+- **Blob references** (tag 21): a `hash_algo` of 0, a `hash_len` outside 1..=64 and a SHA-256
+  hash that is not 32 bytes are invalid (damage). An algorithm 2..255 is a newer writer's: the
+  value is decoded and kept, its blob is copied by name (4.6) and never verified nor read
+  (unsupported content, 16 rule 9). In this version a `blobref` appears only in catalog
+  definition payloads (6.3); a writer MUST NOT store one as an element property value.
 - Tags 9 to 14 are **invalid in a file of format version 1**, tags 15 to 20 **in a file of
-  format version 1 or 2** (15): a reader MUST report such a value as damage, never decode it. A reader takes the version from the header of the file the
+  format version 1 or 2**, tag 21 **in a file of a format version before 4** (15): a reader MUST report such a value as damage, never decode it. A reader takes the version from the header of the file the
   value is in: a segment chunk from its segment's header (7.1, also when the chunk is read
   through the chunk index without framing the whole segment), a WAL record from its WAL
   segment's header (9.1), a definition from the manifest (6.1) or WAL segment it is stored in.
@@ -199,6 +205,10 @@ INSTANCE                      the instance identity of the system journal (4.7);
 journal/                      the system journal (4.7); optional
     00000000000000000001.jnl  a journal segment; the name is the first seq it may hold
     tmp-<32 hex digits>       never listed, removed on open
+ledger                        the blob ledger, derived from the WAL (10.1); optional
+blobs/                        the blobs the store keeps (4.6); optional
+    3f/3fa1...e9              one blob: its whole content; the name is the lowercase hex of its hash
+    tmp-<32 hex digits>       a blob being written (never listed, removed on open)
 models/                       the embedding models the store keeps (4.5); optional
     model2vec-0123456789ab/   one model; the name is its content address
         graphersal-embed-model.json   its manifest, written last
@@ -369,6 +379,40 @@ unchanged, 15):
 | a store directory or single-file store | opens, reads, writes, checkpoints, prunes, compacts and verifies it; ignores `models/` and keeps it; its backups and forks do not carry the models |
 | a ZIP backup | refuses the restore as written by a newer version (12.8, 16 rule 9; nothing is written); an archive without models restores |
 | a packed snapshot | loads it and ignores the models (8: ignorable files, checked by length and CRC); a store created from it keeps them as ignorable files of its first snapshot, dropped by its next checkpoint |
+
+### 4.6 Blobs
+
+A **blob** is an immutable file of the store, named by the hash of its content and referenced
+from values by a `blobref` (3, tag 21): `hash_algo`, the hash, the content's `length` and its
+CRC-32C. The hash is the blob's identity (computed when the content is written or arrives from
+outside, and by a verification); the CRC-32C checks every read; the length is checked, and used
+for memory decisions, before reading.
+
+```text
+blobs/
+    3f/3fa1...e9                  a SHA-256 blob: blobs/<first 2 hex digits>/<64 hex digits>
+    algo-<n>/3f/3fa1...           a blob of another algorithm n (2..255): its own directory
+    tmp-<32 hex digits>           a blob being written (never listed, removed on open)
+```
+
+- Names are lowercase hex; a blob file holds exactly the content, uncompressed. Anything else
+  under `blobs/` is invalid (a verification lists it).
+- **Writing.** The content is streamed into `blobs/tmp-<random>` while its SHA-256, CRC-32C and
+  length are computed (constant memory), the file is synced; when a blob of that hash exists and
+  its length and CRC-32C are intact the new file is dropped (deduplication), otherwise (none, or
+  a damaged one) the file is renamed to its name and both directories are synced. The commit
+  that references the blob comes AFTER. Several writers may write the same blob at once.
+- **Reading.** A missing file, a length other than the reference's and a CRC-32C mismatch are
+  failures of that blob only. A reader checks the length before it allocates.
+- **Referenced set.** A blob is kept exactly as long as some retained history references it
+  (12.4): the blob tables of the snapshots (6.2 item 5), the ledger (10.1) and the attic
+  entries' WAL. A blob no retained history references is removed by a prune, an attic removal
+  or a rollback `delete` (12.4, 12.5); a blob written and not yet referenced by a durable
+  commit is kept by the writer that wrote it until its commit.
+- **Damage.** A missing or damaged blob is NOT damage of the store (13): the damage policy does
+  not apply, the store keeps working, and only what needs the blob's bytes fails. Any copy of a
+  blob with the same hash is the same bytes.
+- The version walk (15) does not read `blobs/` (a blob may hold any bytes) nor `ledger`.
 
 ### 4.7 The system journal
 
@@ -583,6 +627,12 @@ In this order:
    `last id string` | `chunk CRC u32` (the value of 7.2), grouped by segment in table order.
    With it the id range of a damaged chunk is known even when the segment's own footer is
    damaged.
+5. **Blob table** (file format version 4; absent in a manifest of an older version, which
+   references no blob): `uvar` row count, then rows of a `blobref` payload (3, tag 21, without
+   the tag) | `refs uvar` (>= 1): every blob the snapshot's state references with the number of
+   references, rows strictly increasing by `(hash_algo, hash bytes)`. In this version only
+   catalog definitions (6.3) reference blobs. A merged checkpoint (12.3) writes the table of its
+   whole catalog, the same table a full encode writes. A packed export keeps it as it is.
 
 `schema.json` holds the stored schema as canonical compact JSON (an empty schema of mode `none`
 when the graph stores none); its length and CRC MUST match the manifest.
@@ -831,6 +881,14 @@ snapshot directory) and checks each model against its manifest (4.5); it treats 
 of a snapshot directory (one a reader without models imported) as a model file when it exports
 the snapshot again.
 
+**4**, a blob (4.6), written only into packed snapshots (8), after the snapshot's own rows:
+`path` is the blob's hash as lowercase hex (64 digits for SHA-256: a plain name), `first id`
+the algorithm's name (`sha256`), `last id` empty, `element count` 0; the byte length and CRC-32C
+are the blob's, and the manifest's blob table (6.2 item 5) names it. A reader that knows the
+kind checks the file's SHA-256, length and CRC-32C against the table (foreign input), puts it
+into `blobs/` of the store a packed snapshot is imported into and does not keep the row in the
+stored manifest; a reader without a store skips it like every ignorable file.
+
 ## 8. The packed snapshot
 
 A packed snapshot (`.gsnap`) is a whole snapshot in one stream:
@@ -1070,6 +1128,28 @@ at or after the oldest snapshot of the store (or backup) listed. The file is not
 prune (12.4): a backup copies it and may still reach older marks with older snapshots of its own.
 A mark that is not listed keeps its name taken; resolving it as a target fails.
 
+### 10.1 The `ledger` file
+
+A derived list of blob reference changes (4.6): append-only frames
+`length u32 | CRC-32C u32 of the payload | payload`,
+`payload = commit_seq u64 | graph_id 16 bytes (big-endian) | blobref (3, tag 21, without the
+tag) | delta svar`: one frame per (commit, blob) whose net delta is not 0, the delta counting
+every `blobref` in the commit's after images (+1) and before images (-1). Frames are appended
+and synced after the commit is durable in the WAL. The WAL is the source of truth:
+
+- A frame counts for a position when its `graph_id` and `commit_seq` lie on that position's
+  lineage chain (5.4): its lineage is on the chain and its commit at or before that lineage's
+  branch point. A rollback does not rewrite the file: frames of an abandoned lineage are
+  ignored by this rule.
+- A damaged file, and a missing one in a store that holds blobs, is rebuilt from all WAL
+  segments on open (a warning and a journal record `ledger.rebuilt`, never damage). After a
+  crash the frames of the replayed commits the file lacks are appended and frames of the
+  current lineage after the recovered end are dropped. A store that never referenced a blob
+  needs no `ledger`.
+- A prune rewrites it (atomically) without the frames at or before the oldest kept snapshot and
+  without the frames off the current chain (their history lives on in attic entries, whose
+  WAL is read for them); no `INTENT` is needed (the file is derived).
+
 ## 11. The `INTENT` and `ATTIC` files
 
 ### 11.1 `INTENT`
@@ -1235,6 +1315,15 @@ attic entry references any more (and the holder when it is left empty); a file n
 references is never referenced again (a checkpoint references only files of a listed snapshot),
 so this needs no `INTENT`.
 
+**Blobs (4.6).** The referenced set R of a store is the union of the blob tables (6.2 item 5) of
+every snapshot of the store and of its attic entries, the blobs of the ledger frames (10.1) on
+the current chain, the blobs every attic entry's own WAL references, and the blobs a running
+writer holds (written, its commit not yet durable). After its own removals a prune rewrites the
+ledger (10.1) and removes every blob file not in R (the orphans of interrupted writes too);
+an attic removal and a rollback `delete` do the same. A removal is idempotent and needs no
+`INTENT` (a blob not in R is never referenced again). When the referenced set cannot be read
+nothing is removed.
+
 ### 12.5 Fork, in-place rollback, attic
 
 - **Fork**: load the target (12.1) and write it as a new store: one snapshot (with the catalog,
@@ -1273,6 +1362,13 @@ no durable end, copies the last segment up to its last complete record (a torn t
 out; damage before it stops the backup), never past a recorded WAL cut.
 `LOCK`, `BACKUP` and the attic are not copied. During the copy the source's `BACKUP` pin is held
 shared.
+
+**Blobs (4.6).** A full backup copies the blobs its copied history references: the blob table of
+the copied snapshot (6.2 item 5) and the blobs the commits of the copied WAL reference, each
+checked by length and CRC-32C in the source and again in the copy (streamed). A blob missing or
+damaged in the source is not carried (a warning; the backup's catalog still references it):
+blob damage is never damage of the store. The `ledger` (10.1) is not copied: it is derived, and
+a backup's history is read from its WAL.
 
 **Verification.** A backup (full, increment, ZIP) reads every checksum of what it copies in the
 SOURCE before it writes anything, and again in the COPY after writing it:
@@ -1352,6 +1448,9 @@ root, a full backup; anything else is refused (a store that is not a backup is n
   rewritten from `graph_before`, `marks` rebuilt from the WAL, `INTENT` removed.
 - Nothing pins the source's WAL for a backup: a prune of the source can make the next increment
   impossible (a full backup is then needed).
+- **Blobs (4.6)**: after the increment, every blob the backup's history references that it lacks
+  is copied from the source (checked by length and CRC-32C on both sides); nothing is removed
+  (a prune of the backup, 12.4, collects).
 
 ### 12.8 ZIP backups
 
@@ -1366,8 +1465,14 @@ four) is a newer writer's file: the restore is refused as unsupported, never as 
 rule 9); any other name is damage. The reference writer reads the archive back after writing it (12.6): every
 entry's CRC-32 and every checksum of the store files in it, which arrive in an order a one-pass
 reader can check (`GRAPH`, `GRAPH.copy`, `marks`, then each snapshot's `manifest` before its
-other files, then the WAL segments, then the segments of the system journal,
-`journal/<20 digits>.jnl`, 4.7: checked frame by frame, a problem is a warning).
+other files, then the WAL segments, then the blobs, `blobs/<2 hex>/<hash>` (4.6: each read back
+with its length, CRC-32C and SHA-256), then the segments of the system journal,
+`journal/<20 digits>.jnl`, 4.7: checked frame by frame, a problem is a warning). Unpacking an
+archive checks every blob as foreign input: the SHA-256 of its content against its name, its
+length and CRC-32C against every reference its history holds; a mismatch refuses the restore
+as damage of the archive. A writer MAY leave the models and blobs out of an archive meant to be
+shared (the reference implementation's `BlobCopy::Exclude`): its catalog still references them,
+so the receiver has them missing.
 
 ### 12.9 Verification (scrub)
 
@@ -1383,7 +1488,11 @@ checkpoint finds no twin for it and copies it. It is meant to be run regularly: 
 still exist. Verification also checks every embedding model (4.5): its manifest, the
 set of files, every file's size and SHA-256; a model of a newer manifest format is a note. It reads
 every segment of the system journal (4.7): a damaged record or segment is a note, never a
-problem.
+problem. It reads every blob of the referenced set (12.4) whole: SHA-256, CRC-32C and length; a
+missing or damaged blob, and an entry under `blobs/` that is not a blob's name or `tmp-*`, is a
+problem with its path under `blobs/` (never damage of the store, 13); a blob file outside the
+referenced set is a note (an orphan the next prune removes); a blob of an unknown algorithm is a
+note, never verified.
 
 ### 12.10 Locks and pins
 
@@ -1415,6 +1524,10 @@ relation of 12.7, and its position at most `seq`) it is an increment under an `I
 than everything the backup holds, the commits between the backup's position and `seq` are not in
 it (no target between them). A later file-level increment of such a backup finds no segment of
 the source it continues and is refused: a full backup is needed.
+
+The blobs the graph's state references (the new snapshot's blob table) are copied from the
+store's `blobs/` leniently: the one exception to "reads nothing in the store's directory", since
+blobs live only there; one that is missing or damaged is listed as not carried.
 
 ## 13. Damage handling
 
@@ -1487,6 +1600,17 @@ Repair is explicit and never in place; it writes a new, verified store elsewhere
 - The result is a new lineage whose chain continues the damaged store's, with one snapshot named
   `repaired`. The report lists what was repaired, the lost commits, id ranges and elements, and
   the diverged elements. The damaged files are never changed.
+- The blobs the repaired state references are copied, each checked by length, CRC-32C and
+  SHA-256 (the source is damaged); a missing or damaged one is reported as not carried and does
+  not fail the repair. A fork and an attic fork (12.5) copy the blobs of their new snapshot's
+  table the same way (length and CRC-32C).
+
+**Blobs are not store damage.** A missing or damaged blob (4.6) never opens a store in
+maintenance mode, never freezes it under the damage policy and never makes a repair necessary:
+what needs its bytes fails (reading it, exporting it), everything else goes on. The writer
+reports it once per blob and failure in its operational journal (the reference implementation's
+`blob.damaged` record names the blob, the failure and a recommendation: any copy with the same
+hash, from a backup or another copy of the store, is the same bytes).
 
 ## 14. The single-file container
 
@@ -1629,7 +1753,7 @@ many small appends).
 - Every file starts with a magic and a format version. There are three version axes: the
   **store format version** in `GRAPH` (offset 8, 5.1), the **file format version** in the
   manifests, segments, WAL segments and packed snapshots, and the single-file **container
-  version** (14.1). This specification is store format version 3, file format version 3 and
+  version** (14.1). This specification is store format version 3, file format version 4 and
   container version 1.
 - Version history of the store format: 1, the first version; 2 (Graphersal 0.1.0) added the
   store identity `store_id` at `GRAPH` offset 100 (5.5), which version 1 left zero; 3
@@ -1653,7 +1777,11 @@ many small appends).
   version, below), never as damage, because it checks every file header first (it does so since
   0.1.1). That is why file format version 3 needs no new store format version, unlike version 2
   (whose readers, 0.1.0, took an unknown file version for damage). The container is still at
-  version 1.
+  version 1. File format version 4 (Graphersal 0.5.0) adds the blob reference value tag 21 (3),
+  the manifest's blob table (6.2 item 5) and the segments of the system journal (4.7); a
+  reader of version 4 reads versions 1 to 3 as they are, and an older reader refuses a version
+  4 file as newer (its header walk), never as damage: like version 3 it needs no new store
+  format version.
 - A writer writes only the current version.
 - A file with a newer version than the reader knows MUST be refused (unsupported version),
   never guessed at. A reader of file format version 3 MUST accept versions 1, 2 and 3 in every
@@ -1814,7 +1942,9 @@ store format version 3 and file format version 3:
     therefore needs no new version when an older reader ignoring it cannot misread the store;
     the copies it misses are listed with the area (4.5). `journal/` and `INSTANCE` (4.7) are
     such areas for a reader older than 4.7 (it refuses a store whose journal segment has a
-    newer file format version through the header walk of 15, like any newer file).
+    newer file format version through the header walk of 15, like any newer file). `blobs/`
+    and `ledger` (4.6, 10.1) are side areas too; a store referencing a blob holds files of file
+    format version 4, which an older reader refuses as newer.
 
 ## 17. Conformance notes
 

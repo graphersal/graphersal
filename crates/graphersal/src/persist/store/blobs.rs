@@ -170,6 +170,7 @@ fn copy_measured(
     Ok((len, check, hash.finish()))
 }
 
+#[cfg(feature = "persist-zip")]
 /// Checks a blob's bytes read from a stream (a ZIP entry read back) against its reference:
 /// length, CRC-32C and SHA-256. Returns the problems.
 pub(crate) fn check_stream(blob: &BlobRef, data: &mut dyn Read) -> Vec<String> {
@@ -452,6 +453,7 @@ pub(crate) fn list_blobs(root: &DirPath) -> std::io::Result<BlobListing> {
     Ok(out)
 }
 
+#[cfg(feature = "persist-zip")]
 /// Whether `prefix`/`hash` name a blob of algorithm `code` (lowercase hex, the prefix the
 /// hash's first two digits; SHA-256: 64 digits).
 pub(crate) fn is_blob_name(code: u8, prefix: &str, hash: &str) -> bool {
@@ -992,6 +994,7 @@ pub(crate) fn estimate_unreferenced(root: &DirPath, kept_from: u64) -> (u64, u64
         .fold((0, 0), |(count, bytes), b| (count + 1, bytes + b.len))
 }
 
+#[cfg(feature = "persist-zip")]
 /// Checks the blobs of a store that came from outside (a restored ZIP archive): every blob
 /// file's SHA-256 against its name, and the length and CRC-32C of every one the history
 /// references against its reference (format spec 12.8: a foreign blob is hostile input).
@@ -1329,4 +1332,163 @@ fn note_hash() {
 #[doc(hidden)]
 pub fn blob_hash_count() -> u64 {
     HASHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::definition::{DefinitionFlags, DefinitionKind};
+    use crate::persist::codec::{BLOB_FORMAT_VERSION, InlineKeys, put_value, read_value};
+    use crate::persist::{MemDir, Store, StoreOptions};
+    use crate::value::{ElementProperty, PropertyMap};
+
+    fn blob(n: u8) -> BlobRef {
+        BlobRef::new(BlobHashAlgo::Sha256, &[n; 32], u64::from(n) * 100, u32::from(n)).unwrap()
+    }
+
+    fn host(name: &str, blobs: &[BlobRef]) -> Definition {
+        let mut payload = PropertyMap::default();
+        payload.insert(
+            "b",
+            ElementProperty::Array(
+                blobs
+                    .iter()
+                    .map(|b| ElementProperty::Blob(Box::new(b.clone())))
+                    .collect(),
+            ),
+        );
+        Definition::opaque(
+            DefinitionKind::host(200).unwrap(),
+            DefinitionFlags::NONE,
+            name,
+            crate::persist::encode_payload(&payload).unwrap(),
+        )
+    }
+
+    #[test]
+    fn tag_21_round_trips_and_is_damage_before_version_4() {
+        for value in [
+            ElementProperty::Blob(Box::new(blob(7))),
+            ElementProperty::Blob(Box::new(
+                BlobRef::new(BlobHashAlgo::Unknown(9), &[1, 2, 3], 5, 6).unwrap(),
+            )),
+        ] {
+            let mut out = Vec::new();
+            put_value(&mut out, &value, &mut InlineKeys).unwrap();
+            assert_eq!(out[0], 21);
+            let mut reader = Reader::new(&out);
+            assert_eq!(read_value(&mut reader, &InlineKeys, 8).unwrap(), value);
+            let mut old = Reader::new(&out).with_version(BLOB_FORMAT_VERSION - 1);
+            assert!(read_value(&mut old, &InlineKeys, 8).is_err());
+        }
+        // Invalid payloads: algorithm 0, an empty or too long hash, a SHA-256 of 31 bytes.
+        for bad in [
+            vec![21u8, 0, 1, 0],
+            vec![21u8, 1, 0],
+            vec![21u8, 2, 65],
+            [vec![21u8, 1, 31], vec![0; 31], vec![0; 12]].concat(),
+        ] {
+            let mut reader = Reader::new(&bad);
+            assert!(read_value(&mut reader, &InlineKeys, 8).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn ledger_frames_round_trip_and_damage_is_detected() {
+        let frames = vec![
+            LedgerFrame {
+                commit_seq: 3,
+                graph_id: 9,
+                blob: blob(1),
+                delta: 1,
+            },
+            LedgerFrame {
+                commit_seq: 5,
+                graph_id: 9,
+                blob: blob(1),
+                delta: -1,
+            },
+        ];
+        let bytes = ledger_bytes(&frames);
+        assert_eq!(decode_ledger(&bytes), Some(frames.clone()));
+        for at in 0..bytes.len() {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 0x10;
+            assert_ne!(decode_ledger(&flipped), Some(frames.clone()), "byte {at}");
+        }
+        assert_eq!(decode_ledger(&bytes[..bytes.len() - 1]), None);
+        assert!(frames[0].on_chain(&[(9, u64::MAX)]));
+        assert!(!frames[1].on_chain(&[(9, 4)]));
+        assert!(!frames[0].on_chain(&[(8, u64::MAX)]));
+    }
+
+    #[test]
+    fn the_blob_table_counts_references_and_round_trips_in_order() {
+        let defs = [host("a", &[blob(2), blob(1)]), host("b", &[blob(2)])];
+        let table = blob_table(defs.iter());
+        assert_eq!(table, vec![(blob(1), 1), (blob(2), 2)]);
+        let mut out = Vec::new();
+        put_table(&mut out, &table);
+        assert_eq!(read_table(&mut Reader::new(&out)).unwrap(), table);
+        // Out of order or a zero count: damage.
+        let mut swapped = Vec::new();
+        put_table(&mut swapped, &[(blob(2), 1), (blob(1), 1)]);
+        assert!(read_table(&mut Reader::new(&swapped)).is_err());
+        let mut zero = Vec::new();
+        put_table(&mut zero, &[(blob(1), 0)]);
+        assert!(read_table(&mut Reader::new(&zero)).is_err());
+    }
+
+    #[test]
+    fn commit_deltas_are_net_per_blob() {
+        let kind = DefinitionKind::host(200).unwrap();
+        let mut builder = ChangeSet::builder(4, 0);
+        builder.push(Mutation::set_definition(
+            kind,
+            "m",
+            Some(host("m", &[blob(1), blob(2)])),
+            Some(host("m", &[blob(2), blob(3), blob(3)])),
+        ));
+        let changes = builder.build().unwrap();
+        assert_eq!(commit_deltas(&changes), vec![(blob(1), -1), (blob(3), 2)]);
+    }
+
+    /// The merged checkpoint computes the blob table from its whole catalog: the same table a
+    /// full encode of the live graph writes.
+    #[test]
+    fn a_merged_table_equals_the_full_encode_table() {
+        let tables = |merge_bytes: u64| {
+            let dir = MemDir::new();
+            let store = Store::create(
+                &dir,
+                StoreOptions::new()
+                    .with_checkpoint_after_bytes(0)
+                    .with_checkpoint_merge_bytes(merge_bytes),
+            )
+            .unwrap();
+            let set = |d: Definition| {
+                crate::graph::GraphStorage::set_definition(&mut *store.graph().write(), d)
+                    .unwrap();
+            };
+            set(host("a", &[blob(1), blob(2)]));
+            store.checkpoint(None).unwrap();
+            set(host("b", &[blob(2), blob(3)]));
+            set(host("a", &[blob(4)]));
+            let info = store.checkpoint(None).unwrap();
+            let root = DirPath::root(std::sync::Arc::new(dir));
+            let (_, newest) = files::list_snapshots(&root).unwrap().pop().unwrap();
+            assert_eq!(
+                newest.file_name(),
+                files::snapshot_name(info.commit_seq)
+            );
+            super::super::snapshot_dir::read_manifest(&newest)
+                .unwrap()
+                .1
+                .blobs
+        };
+        let merged = tables(u64::MAX);
+        let encoded = tables(0);
+        assert_eq!(merged, vec![(blob(2), 1), (blob(3), 1), (blob(4), 1)]);
+        assert_eq!(merged, encoded);
+    }
 }
