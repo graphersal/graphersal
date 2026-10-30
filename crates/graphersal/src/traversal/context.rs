@@ -952,7 +952,7 @@ fn reject_process_setting(
             key: key.to_string(),
             reason: format!(
                 "'{key}' is a setting of the whole process, not of one execution: the host sets \
-                 it once (graphersal::exec::set_memory_limit / set_memory_headroom, the \
+                 it once (a Rust host exec::set_memory_limit / set_memory_headroom, the \
                  command line's --memory-limit / --memory-headroom, Python's \
                  graphersal.set_memory_limit)"
             ),

@@ -6018,7 +6018,7 @@ const MEMORY_CEILING_SETTING: &str = "The ceiling is ONE setting of the whole pr
      physical memory, 3.5 GiB in the browser). The host raises it or turns it off: the \
      graphersal command line takes --memory-limit <bytes|auto|none> (and --memory-headroom), the \
      Python binding graphersal.set_memory_limit(...), a Rust host \
-     graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
+     exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
      off). A query cannot set it.";
 
 /// What the memory ceiling compared in this process: the live heap when a tracking allocator
@@ -6343,7 +6343,7 @@ fn invalid_option_help(key: &str) -> String {
              example g.v().out().fold() instead of g.with(\"memory.limit\", 4294967296).v().out().fold(), \
              and set it on the host: the graphersal command line --memory-limit 4294967296, \
              Python graphersal.set_memory_limit(4294967296), Rust \
-             graphersal::exec::set_memory_limit(MemoryLimit::Bytes(4294967296)). Limit one \
+             exec::set_memory_limit(MemoryLimit::Bytes(4294967296)). Limit one \
              query with 'traversal.max_materialized_bytes' instead, for example \
              g.with(\"traversal.max_materialized_bytes\", 268435456).v().out().fold()."
             .to_string(),
@@ -6352,7 +6352,7 @@ fn invalid_option_help(key: &str) -> String {
              limit, a non-negative integer number of bytes the host sets once: the graphersal \
              command line --memory-headroom 268435456, Python \
              graphersal.set_memory_limit(\"auto\", headroom=268435456), Rust \
-             graphersal::exec::set_memory_headroom(Some(268435456)). The default is a tenth of \
+             exec::set_memory_headroom(Some(268435456)). The default is a tenth of \
              the cgroup limit, at least 67108864 (64 MiB) and at most half of the limit."
             .to_string(),
         "traversal.max_string_bytes" => "Set 'traversal.max_string_bytes' to a positive integer \

@@ -559,7 +559,16 @@ fn bucket_copies_of_a_merged_traverser_are_bounded_by_the_byte_budget() {
 
 #[test]
 fn a_loop_that_doubles_its_value_stops_at_the_byte_budget() {
-    for body in ["__.path()", "__.group()"] {
+    // Where each loop stops is deterministic: `path()` at its own boundary in the body (the
+    // path records it keeps count at every check), `group()` at the loop's per-traverser check
+    // of the new frontier (its doubled map is sized there).
+    for (body, stops_at) in [
+        ("__.path()", "Step #1.0.0 'path()' execution failed"),
+        (
+            "__.group()",
+            "Step #1 'repeat(__.group()).times(60)' execution failed",
+        ),
+    ] {
         let text = query_error(&format!(
             r#"g.with("traversal.max_materialized_bytes", 100000).inject(1).repeat({body}).times(60).count().next()"#
         ));
@@ -567,12 +576,7 @@ fn a_loop_that_doubles_its_value_stops_at_the_byte_budget() {
             text.contains("traversal.max_materialized_bytes"),
             "{body}: {text}"
         );
-        // Stopped inside the loop: at its own per-traverser check or at a step boundary of its
-        // body (the path records count at every check).
-        assert!(
-            text.contains("Step #1 'repeat(") || text.contains("Step #1.0.0 "),
-            "{body}: {text}"
-        );
+        assert!(text.contains(stops_at), "{body}: {text}");
     }
     // A bounded loop within the budget runs.
     let ok = eval_value(

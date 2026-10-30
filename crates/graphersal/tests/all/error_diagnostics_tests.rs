@@ -5833,11 +5833,13 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         "ONE setting of the whole process, on by default",
         "--memory-limit <bytes|auto|none>",
         "graphersal.set_memory_limit(...)",
-        "graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))",
+        "a Rust host exec::set_memory_limit(MemoryLimit::Bytes(n))",
         "'memory.headroom'",
     ] {
         assert!(help.contains(needle), "{needle} missing in: {help}");
     }
+    // Seen from a script: no Rust crate path (the fuzz campaign's type-leak check).
+    assert!(!help.contains("graphersal::"), "{help}");
     let err = lock
         .traversal()
         .with("memory.limit", "plenty")
@@ -5864,9 +5866,57 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         .expect_err("not an execution option");
     let help = err.help().expect("help");
     assert!(
-        help.contains("graphersal::exec::set_memory_headroom(Some(268435456))"),
+        help.contains("Rust exec::set_memory_headroom(Some(268435456))"),
         "{help}"
     );
+    assert!(!help.contains("graphersal::"), "{help}");
+}
+
+/// The memory-ceiling diagnostics a script sees name the host settings without a Rust crate
+/// path (the robustness campaign's type-leak finding, seed 23030953: `g.inject(1)
+/// .repeat(__.path())` stopped by `memory.limit`), and keep naming every front end.
+#[test]
+fn memory_ceiling_diagnostics_name_no_rust_crate_path() {
+    let graph = GraphSource::tinkerpop_modern();
+    let lock = graph.read();
+    let err = graphersal::exec::memory_limit_scope(64 * 1024 * 1024, || {
+        lock.traversal()
+            .with("evaluationTimeout", 600_000)
+            .inject(vec![1])
+            .repeat(__::path())
+            .to_list()
+    })
+    .expect_err("the loop grows past the ceiling");
+    assert!(
+        err.root_cause()
+            .to_string()
+            .contains("'memory.limit' exceeded"),
+        "{err}"
+    );
+    let help = err.help().expect("help");
+    for needle in [
+        "--memory-limit <bytes|auto|none>",
+        "graphersal.set_memory_limit(...)",
+        "a Rust host exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it off)",
+    ] {
+        assert!(help.contains(needle), "{needle} missing in: {help}");
+    }
+    assert!(!help.contains("graphersal::"), "{help}");
+    // Set as an execution option: the refusal's reason names the host setting the same way.
+    let err = lock
+        .traversal()
+        .with("memory.limit", 1 << 30)
+        .v(None)
+        .to_list()
+        .expect_err("not an execution option");
+    let text = format!("{err}\n{}", err.help().unwrap_or_default());
+    assert!(
+        text.contains(
+            "the host sets it once (a Rust host exec::set_memory_limit / set_memory_headroom"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("graphersal::"), "{text}");
 }
 
 /// `traversal.max_string_bytes`: the help names the amplifying steps, the script-side

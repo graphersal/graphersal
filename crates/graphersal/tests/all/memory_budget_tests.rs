@@ -161,9 +161,10 @@ fn the_ceiling_is_not_an_execution_option() {
     let help = err.help().unwrap();
     assert!(help.contains("--memory-limit 4294967296"), "{help}");
     assert!(
-        help.contains("graphersal::exec::set_memory_limit(MemoryLimit::Bytes(4294967296))"),
+        help.contains("Rust exec::set_memory_limit(MemoryLimit::Bytes(4294967296))"),
         "{help}"
     );
+    assert!(!help.contains("graphersal::"), "{help}");
     let policy = ExecutionPolicy::permissive().with_locked("memory.limit");
     let graph = TraversalGraph::tinkerpop_modern().with_execution_policy(policy);
     assert_eq!(
