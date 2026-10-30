@@ -307,7 +307,7 @@ A query may set the semantic options freely; setting an administrative one is an
 
 | Option | Request |
 |---|---|
-| `evaluationTimeout`, `repeat.max_loops`, `bulk.max_expansion`, `traversal.max_traversers`, `traversal.max_value_depth`, `traversal.max_materialized_bytes`, `traversal.max_string_bytes`, `memory.limit`, `memory.headroom` (resource ceilings) | `Update` on `Option(key)` |
+| `evaluationTimeout`, `repeat.max_loops`, `bulk.max_expansion`, `traversal.max_traversers`, `traversal.max_value_depth`, `traversal.max_materialized_bytes`, `traversal.max_string_bytes` (resource ceilings); `memory.limit`, `memory.headroom` (the process memory ceiling: always refused as options, this check comes first) | `Update` on `Option(key)` |
 | `optimizer.disabled`, `optimizer.enabled`, `path.analysis`, `bulk.merge` (engine switches) | `Update` on `Option(key)` |
 | `repeat.order`, `bulk.one` (`withBulk(false)`), `random.seed`, `render.spelling`, the display options (`render.max_rows`, ...), unknown keys (ignored by the engine) | none |
 

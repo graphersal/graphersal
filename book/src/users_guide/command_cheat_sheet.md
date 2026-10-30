@@ -129,8 +129,8 @@ Limits (scripts run without limits by default; see [Resource Limits](resource_li
 
 ```bash
 graphersal --graph large --timeout 50 -e 'g.v().out().out().out().out().count().next()'  # 50 ms per traversal and script
-graphersal --memory-limit auto -e 'g.v().count().next()'         # memory budget: the cgroup limit minus a headroom
-graphersal --memory-limit 2000000000 -e 'g.v().count().next()'  # an explicit budget in bytes
+graphersal --memory-limit 2000000000 -e 'g.v().count().next()'  # process memory ceiling in bytes (default auto: cgroup limit minus headroom, else 80 % of RAM)
+graphersal --memory-limit none -e 'g.v().count().next()'        # no process memory ceiling
 graphersal --safe-limits -e 'g.v().count().next()'               # the library's SAFE script limits
 graphersal --max-operations 1000 -e 'let n = 0; loop { n += 1; }' # stops with "Resource limit 'script.max_operations'"
 graphersal --max-traversers 1000000 --max-value-depth 64 -e 'g.v().count().next()'  # also --max-string-size, --max-array-size, --max-map-size

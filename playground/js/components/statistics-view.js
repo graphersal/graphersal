@@ -83,7 +83,7 @@ export const StatisticsView = {
       <section v-if="model.limits.length" class="stats-section">
         <h4>Limits of a query</h4>
         <p v-if="model.noPresets" class="muted">{{ server
-          ? 'The dev server applies no presets (start it with --timeout, --memory-limit, --max-* to bound queries); the engine defaults apply.'
+          ? 'The dev server applies no presets (start it with --timeout, --max-* to bound queries); the engine defaults and the process memory ceiling (--memory-limit) apply.'
           : 'The playground applies no presets; the engine defaults apply. A query can change them with g.with(..).' }}</p>
         <table class="data-table">
           <thead><tr><th>Option</th><th>Value</th><th>Source</th></tr></thead>

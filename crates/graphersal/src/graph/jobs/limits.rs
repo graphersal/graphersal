@@ -3,8 +3,8 @@
 //!
 //! The engine cannot stop arbitrary code from outside (no thread of its own, none in wasm32), so
 //! the limits reach the checks that already run inside every execution: while a job runs, its
-//! remaining time caps each traversal's `evaluationTimeout` and its memory limit caps
-//! `memory.limit` (a query's own stricter value stays). A breach is the engine's ordinary
+//! remaining time caps each traversal's `evaluationTimeout` and its memory limit lowers
+//! the process memory ceiling `memory.limit` for the run. A breach is the engine's ordinary
 //! `Timeout` / `ResourceLimitExceeded`; the work is rolled back and the run recorded as failed.
 
 use std::cell::RefCell;
@@ -29,7 +29,7 @@ use web_time::Instant;
 pub struct JobLimits {
     /// The longest a run may take.
     pub timeout: Option<Duration>,
-    /// The most memory a run may use, in bytes (the traversals' `memory.limit`).
+    /// The most memory a run may use, in bytes (lowers the process memory ceiling for the run).
     pub memory_limit: Option<u64>,
 }
 

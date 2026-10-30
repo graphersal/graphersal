@@ -92,7 +92,8 @@ impl RunOptions {
 /// Host presets of a [`Session`]: the resource limits every run of it gets. The default (what
 /// [`Session::new`] uses, and the playground) is no limit at all: no Rhai resource limits, no
 /// preset traversal option, no script budget. The dev server of `graphersal-cli` fills them from
-/// its `--timeout`, `--memory-limit`, `--max-*` ... flags.
+/// its `--timeout`, `--max-*` ... flags. The process memory ceiling (`memory.limit`) is not a
+/// preset: it is one setting of the whole process (`graphersal::exec::set_memory_limit`).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionPresets {
@@ -100,7 +101,8 @@ pub struct SessionPresets {
     pub limits: ScriptLimits,
     /// Traversal options preset on every traversal source of a run (`g`, `_g`, `__` and the
     /// sources a script creates): `evaluationTimeout`, `traversal.max_traversers`,
-    /// `memory.limit`, ... A query overrides one with `g.with(..)` unless the host locks it.
+    /// ... A query overrides one with `g.with(..)` unless the host locks it. `memory.limit` and
+    /// `memory.headroom` are refused here (they are the process memory ceiling).
     pub options: Vec<(String, ElementProperty)>,
     /// Budget of a whole run in milliseconds: the Rhai code between the traversals (a `loop
     /// {}`) is stopped once the run is older than this. `None`: no budget.
@@ -134,7 +136,7 @@ impl SessionPresets {
         self
     }
 
-    /// Adds a preset traversal option (`evaluationTimeout`, `memory.limit`, ...).
+    /// Adds a preset traversal option (`evaluationTimeout`, `traversal.max_traversers`, ...).
     pub fn with_option(mut self, key: impl Into<String>, value: ElementProperty) -> Self {
         self.options.push((key.into(), value));
         self

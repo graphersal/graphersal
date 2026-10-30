@@ -95,8 +95,8 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
                --embedder; also stored in data
 
   ── Server ────────────────────────────────────────────────────────────────────
-    limits:    none (start with --timeout, --memory-limit, --safe-limits,
-               --max-* to bound queries)
+    limits:    none (start with --timeout, --safe-limits, --max-* to bound
+               queries; the process memory ceiling applies, --memory-limit)
     UI:        embedded
     MCP:       http://127.0.0.1:9010/mcp
     connect:   claude mcp add --transport http graphersal http://127.0.0.1:9010/mcp
@@ -166,7 +166,7 @@ page explains each limit).
 | Option | What every query gets |
 |---|---|
 | `--timeout <MS>` | `evaluationTimeout` on every traversal, and the budget of a query as a whole (a `loop {}` between traversals stops too, with "Script exceeded evaluationTimeout of N ms") |
-| `--memory-limit <BYTES\|auto>`, `--memory-headroom <BYTES>` | `memory.limit` / `memory.headroom`: a query that would take the server's live heap over the budget fails with "Resource limit 'memory.limit'" and rolls back, instead of the process being killed |
+| `--memory-limit <BYTES\|auto\|none>`, `--memory-headroom <BYTES>` | the process memory ceiling (`memory.limit`, on by default: the cgroup limit minus the headroom, else 80 % of RAM): a query, import or write that would take the server's live heap over it fails with "Resource limit 'memory.limit'" and rolls back, instead of the process being killed. One setting for the whole server process, not a session preset |
 | `--max-traversers <N>` | `traversal.max_traversers` |
 | `--max-string-size <N>` | the script's string limit and `traversal.max_string_bytes` |
 | `--max-value-depth <N>` | the script's value depth and `traversal.max_value_depth` |
@@ -182,7 +182,7 @@ server runs like the playground: no script limits, the engine's traversal defaul
 budget; Stop is the way to end a runaway query.
 
 ```bash
-graphersal --graph large --server --timeout 5000 --memory-limit auto
+graphersal --graph large --server --timeout 5000 --memory-limit 4000000000
 ```
 
 ## Embedding models

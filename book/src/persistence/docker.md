@@ -146,8 +146,10 @@ address, `localhost`, a name without a dot (a Service name such as `graphersal`)
 Ingress host is refused with 403 (DNS-rebinding protection, see
 [Listening address and Docker](dev_server.md#listening-address-and-docker)). A reverse proxy in
 front of it sets `Host` to an accepted name (nginx: `proxy_set_header Host localhost;`) and must
-not forward a foreign `Origin`. `--memory-limit auto` bounds every query by the container's
-memory limit ([Resource Limits](../users_guide/resource_limits.md)).
+not forward a foreign `Origin`. The process memory ceiling is on by default and follows the
+container's memory limit minus a headroom (`--memory-limit auto`, the default; `--memory-headroom`
+changes the headroom): a query that would exceed it fails and is rolled back instead of the pod
+being OOM-killed ([Resource Limits](../users_guide/resource_limits.md#the-process-memory-ceiling)).
 
 ## Stopping
 
