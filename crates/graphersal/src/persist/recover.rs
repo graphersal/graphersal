@@ -88,6 +88,12 @@ pub struct RecoveryReport {
     /// `true` when the journals were read to their end; `false` when the target stopped the
     /// recovery earlier (a past state: attach a journal to it only as a new branch).
     pub reached_end: bool,
+    /// The latest time in what was read (microseconds since the Unix epoch): the snapshot's last
+    /// commit and every commit, mark and checkpoint record read, also those a target skipped
+    /// past. The recovered storage's instance clock
+    /// ([`GraphStorage::commit_clock`](crate::graph::GraphStorage::commit_clock)) is raised to
+    /// it, so a later commit or mark is never earlier than anything the files hold.
+    pub clock_floor: i64,
 }
 
 /// A recovered graph and its report.
@@ -315,6 +321,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
             marks: Vec::new(),
             torn_tail: None,
             reached_end: true,
+            clock_floor: snapshot_time,
         };
         // The growth check of the replay: a WAL can grow the graph past the ceiling during an
         // open (every 4096 replayed mutations and at the end).
@@ -378,6 +385,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 match record {
                     JournalRecord::Commit(changes) => {
                         let seq = changes.commit_seq();
+                        report.clock_floor = report.clock_floor.max(changes.committed_at());
                         if seq <= snapshot_seq {
                             continue;
                         }
@@ -439,6 +447,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                         let hit =
                             matches!(&target, RecoveryTarget::Mark(name) if name == mark.name());
                         let mark_seq = mark.commit_seq();
+                        report.clock_floor = report.clock_floor.max(mark.time());
                         report.marks.push(mark);
                         if hit {
                             if mark_seq < snapshot_seq {
@@ -463,7 +472,9 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                             break;
                         }
                     }
-                    JournalRecord::Checkpoint { .. } => {}
+                    JournalRecord::Checkpoint { time, .. } => {
+                        report.clock_floor = report.clock_floor.max(time);
+                    }
                 }
             }
             if let Some(torn) = reader.torn_tail() {
@@ -495,6 +506,11 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
         // release the spare capacity, as the end of a load does.
         if report.commits_replayed > 0 {
             graph.shrink_to_fit()?;
+        }
+        // The instance clock never goes behind a time the files hold (system journal design,
+        // "Time"): marks and checkpoints included, which the commit position does not cover.
+        if let Some(clock) = graph.commit_clock()? {
+            clock.raise(report.clock_floor);
         }
         Ok(report)
     }

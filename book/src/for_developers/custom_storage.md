@@ -58,7 +58,10 @@ a parameter means `Graph<TraversalGraph>`.
    storage derives what a unit changed from its own bookkeeping. It embeds a `CommitHooks`
    (`graphersal::storage`) and calls it at its commit point, so the order of the hooks (user
    hooks in registration order, then the journal) is implemented once; the rustdoc of
-   `CommitHooks` says when to call each event.
+   `CommitHooks` says when to call each event. Time commits with `CommitHooks::commit_time`
+   (the instance clock, shared with marks and the system journal) and return
+   `Some(hooks.clock())` from `GraphStorage::commit_clock`; a storage that keeps the default
+   (`None`) times its commits itself, and a `Graph` over it keeps a clock of its own.
 5. **`PersistentStorage`** (optional, feature `persist`; needed for snapshots and the Store): the
    lineage id, the commit position, a load sink outside units, `clear`, the journal slot and
    replay. See [Your Own Storage](../persistence/store_own_storage.md).

@@ -577,6 +577,10 @@ impl GraphStorage for Failing {
         GraphStorage::register_commit_hook(&mut self.inner, hook)
     }
 
+    fn commit_clock(&self) -> Result<Option<graphersal::storage::CommitClock>, GraphError> {
+        GraphStorage::commit_clock(&self.inner)
+    }
+
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(&self.inner)
     }

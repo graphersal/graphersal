@@ -70,7 +70,10 @@ file records them; a reader MUST NOT assume a default where the file states the 
   invalid.
 - **`opt_string`** is `uvar 0` for "none", else `uvar (length + 1)` followed by the UTF-8 bytes.
 - **Time** is an `i64` of microseconds since the Unix epoch, UTC. Commit times of one lineage are
-  monotonic: a commit's time is `max(now, time of the previous commit)`.
+  monotonic: a commit's time is `max(now, time of the previous commit)`. Commit, mark and
+  checkpoint times and system-journal times of one instance share one monotonic clock:
+  `max(now, the latest time the instance wrote)`; after a restart the floor is the latest time in
+  the WAL and the journal (the floor itself is not stored).
 - **UUID** values and every `graph_id` are 16 bytes in RFC 9562 network order (big-endian), so
   that byte order equals the order of the canonical text.
 - **Element ids** are strings. "Sorted by id" means the bytewise order of the UTF-8 encoding.
@@ -900,7 +903,8 @@ a property is a SetProperty of the top-level key.
 `mark = commit_seq u64 | time i64 | name string`.
 
 A mark names the position right after commit `commit_seq` (recovering to it replays up to and
-including that commit). Its time is `max(now, time of the last commit)`. Mark names are unique
+including that commit). Its time comes from the instance clock (section 2, "Time"): never earlier
+than the last commit, nor than any other time the instance wrote. Mark names are unique
 along a store's whole history (across lineages); a duplicate MUST be refused when it is set.
 
 ### 9.5 Checkpoint payload
