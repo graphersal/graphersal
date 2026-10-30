@@ -474,19 +474,26 @@ OPTIONS:
         --max-traversers <N>   Default traversal.max_traversers: traversers one step may leave
                            alive (the library default is 10M; this tool defaults to unlimited).
                            For the four --max-* script limits and this one, 0 means unlimited.
+        --max-materialized-bytes <N>
+                           Default traversal.max_materialized_bytes: the per-query memory
+                           limit, the estimated size of one value or buffer a query
+                           materializes (the library default, 1 GiB, applies without it; 0
+                           means unlimited). A query's own g.with(...) overrides it.
         --max-value-depth <N>  Deepest nesting of arrays and maps in one value, for script
                            values (script.max_value_depth) and engine-built values
                            (traversal.max_value_depth); default 128, 0 means the default.
                            Never unlimited: deeper values would overflow the native stack.
-        --memory-limit <BYTES|auto>
-                           Memory budget of every traversal (memory.limit): a traversal that
-                           would take the process's live heap over BYTES fails with a
-                           "Resource limit 'memory.limit'" diagnostic and rolls back, instead of
-                           the process being killed for lack of memory. "auto" is the cgroup
-                           memory limit (Linux containers) minus the headroom, or no budget
-                           without one. No flag or 0: no budget (the default).
+        --memory-limit <BYTES|auto|none>
+                           The process memory ceiling (memory.limit), ON by default: a query,
+                           import or write that would take this process's live heap over it
+                           fails with a "Resource limit 'memory.limit'" diagnostic and rolls
+                           back, instead of the process being killed for lack of memory.
+                           "auto" (the default) is the cgroup memory limit (Linux containers)
+                           minus the headroom, else 80 % of the physical memory; "none" (or 0)
+                           turns it off. One setting for the whole process, every graph and
+                           (with --server) every session.
         --memory-headroom <BYTES>
-                           What --memory-limit auto keeps free below the cgroup limit
+                           What --memory-limit auto keeps free below a cgroup limit
                            (memory.headroom); default a tenth of the limit, at least 64 MiB.
         --server           DEV MODE, UNSTABLE, LOCAL ONLY: serve the graph of --graph and the
                            playground UI on http://127.0.0.1:<port>/ (the same UI as the
@@ -499,7 +506,8 @@ OPTIONS:
                            the graph lives in memory and "Save to file" writes it back to a
                            --graph file on request. The limit options
                            above (--timeout, --memory-limit, --memory-headroom, --safe-limits,
-                           --max-operations, --max-traversers, ...) apply to every query it
+                           --max-operations, --max-traversers, --max-materialized-bytes, ...)
+                           apply to every query it
                            runs; the display options (--format, --max-rows, --max-items,
                            --no-limit, --spelling) are refused (the UI sets them per query).
                            Store warnings (a failed automatic checkpoint, damage found) go
@@ -619,7 +627,7 @@ EXAMPLES:
     graphersal -e 'g.memory_usage()'
     graphersal --max-operations 1000000 -e 'let n = 0; loop { n += 1; }'
     graphersal --graph large --no-limit -e 'g.v()' > all_vertices.txt
-    graphersal --graph large --memory-limit auto -e 'g.v().out().out().fold()'
+    graphersal --graph large --memory-limit 2000000000 -e 'g.v().out().out().fold()'
     graphersal --graph ./mygraph.json --server --port 8080      # then open http://localhost:8080/
     graphersal --graph ./mygraph.json --server --host 0.0.0.0  # reachable from the network (no auth!)
     graphersal store create data/ --from modern && graphersal --graph data/ --server
@@ -1182,14 +1190,18 @@ pub struct Cli {
     pub max_map_size: Option<usize>,
     /// `--max-traversers`: the `traversal.max_traversers` default of the session.
     pub max_traversers: Option<u64>,
+    /// `--max-materialized-bytes`: the `traversal.max_materialized_bytes` default of the
+    /// session; `0` means unlimited.
+    pub max_materialized_bytes: Option<u64>,
     /// `--max-value-depth`: `ScriptLimits::max_value_depth` and the `traversal.max_value_depth`
     /// default of the session; `0` means the default.
     pub max_value_depth: Option<usize>,
     /// `--spelling`: the spelling of step names in diagnostics (`render.spelling`).
     pub spelling: Spelling,
-    /// `--memory-limit`: the `memory.limit` preset of the session; `None` (or `0`) is no budget.
+    /// `--memory-limit`: the process memory ceiling ([`Cli::apply_memory_limit`]); `None`: not
+    /// given, the library default (`auto`) stays.
     pub memory_limit: Option<MemoryLimit>,
-    /// `--memory-headroom`: the `memory.headroom` preset of the session.
+    /// `--memory-headroom`: the headroom of `auto` below a cgroup limit.
     pub memory_headroom: Option<u64>,
     /// `--port`: the port of the dev server ([`Mode::Server`]); `0` picks a free one.
     pub port: u16,
@@ -1234,39 +1246,21 @@ pub const DEFAULT_PORT: u16 = 8080;
 #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
 pub const DEFAULT_UI_DIR: &str = "playground";
 
-/// A `--memory-limit` value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryLimit {
-    /// An explicit budget in bytes.
-    Bytes(u64),
-    /// The cgroup memory limit minus the headroom (`"auto"`).
-    Auto,
-}
+/// A `--memory-limit` value: the library's process memory ceiling setting.
+pub use graphersal::exec::MemoryLimit;
 
-impl MemoryLimit {
-    /// Parses a `--memory-limit` value: `auto`, or a byte count (`0` is no budget: `None`).
-    pub fn parse(raw: &str) -> Result<Option<Self>, String> {
-        let trimmed = raw.trim();
-        if trimmed.eq_ignore_ascii_case("auto") {
-            return Ok(Some(Self::Auto));
-        }
-        match trimmed.parse::<u64>() {
-            Ok(0) => Ok(None),
-            Ok(bytes) => Ok(Some(Self::Bytes(bytes))),
-            Err(_) => Err(format!(
-                "Invalid --memory-limit value: {raw}. Expected a number of bytes or \"auto\" \
-                 (0 means no budget)"
-            )),
-        }
+/// Parses a `--memory-limit` value: a byte count, `auto` or `none` (`0` is `none`, like the
+/// `--max-*` flags).
+pub fn parse_memory_limit(raw: &str) -> Result<MemoryLimit, String> {
+    if raw.trim() == "0" {
+        return Ok(MemoryLimit::Unlimited);
     }
-
-    /// The `memory.limit` option value.
-    pub fn to_property(self) -> ElementProperty {
-        match self {
-            Self::Bytes(bytes) => ElementProperty::from(i64::try_from(bytes).unwrap_or(i64::MAX)),
-            Self::Auto => ElementProperty::from("auto"),
-        }
-    }
+    raw.parse::<MemoryLimit>().map_err(|_| {
+        format!(
+            "Invalid --memory-limit value: {raw}. Expected a number of bytes, \"auto\" or \
+             \"none\" (0 means none)"
+        )
+    })
 }
 
 impl Default for Cli {
@@ -1289,6 +1283,7 @@ impl Default for Cli {
             max_array_size: None,
             max_map_size: None,
             max_traversers: None,
+            max_materialized_bytes: None,
             max_value_depth: None,
             spelling: Spelling::default(),
             memory_limit: None,
@@ -1504,11 +1499,17 @@ impl Cli {
                 "--max-traversers" => {
                     cli.max_traversers = Some(parse_count("--max-traversers", &value(&mut args)?)?)
                 }
+                "--max-materialized-bytes" => {
+                    cli.max_materialized_bytes =
+                        Some(parse_count("--max-materialized-bytes", &value(&mut args)?)?)
+                }
                 "--max-value-depth" => {
                     cli.max_value_depth =
                         Some(parse_count("--max-value-depth", &value(&mut args)?)?)
                 }
-                "--memory-limit" => cli.memory_limit = MemoryLimit::parse(&value(&mut args)?)?,
+                "--memory-limit" => {
+                    cli.memory_limit = Some(parse_memory_limit(&value(&mut args)?)?)
+                }
                 "--memory-headroom" => {
                     let raw = value(&mut args)?;
                     cli.memory_headroom = Some(raw.trim().parse::<u64>().map_err(|_| {
@@ -1756,14 +1757,28 @@ impl Cli {
         limits
     }
 
-    /// The traversal budget of the session: `--timeout`, `--max-traversers` and
-    /// `--max-value-depth`.
+    /// The traversal budget of the session: `--timeout`, `--max-traversers`,
+    /// `--max-materialized-bytes` and `--max-value-depth`.
     pub fn budget(&self) -> ScriptBudget {
         ScriptBudget::new(self.timeout_ms)
             .with_max_traversers(self.traversal_max_traversers())
+            .with_max_materialized_bytes(self.traversal_max_materialized_bytes())
             .with_max_value_depth(self.max_value_depth)
             .with_max_string_bytes(self.traversal_max_string_bytes())
-            .with_memory_limit(self.memory_limit, self.memory_headroom)
+    }
+
+    /// Sets the process memory ceiling from `--memory-limit` and `--memory-headroom` (a flag
+    /// not given keeps the library default). Called once, before any graph is opened: the
+    /// ceiling is one setting of the whole process (every graph, every dev-server session).
+    pub fn apply_memory_limit(&self) -> Result<(), String> {
+        if let Some(limit) = self.memory_limit {
+            graphersal::exec::set_memory_limit(limit).map_err(|err| err.to_string())?;
+        }
+        if self.memory_headroom.is_some() {
+            graphersal::exec::set_memory_headroom(self.memory_headroom)
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
     }
 
     /// The `traversal.max_string_bytes` default of the session, following the script's string
@@ -1775,6 +1790,16 @@ impl Cli {
             Some(n) => Some(i64::try_from(n).unwrap_or(i64::MAX)),
             None if self.safe_limits => None,
             None => Some(i64::MAX),
+        }
+    }
+
+    /// The `traversal.max_materialized_bytes` default of the session from
+    /// `--max-materialized-bytes` (`0` is unlimited); `None` (not given) keeps the engine
+    /// default.
+    pub fn traversal_max_materialized_bytes(&self) -> Option<i64> {
+        match self.max_materialized_bytes? {
+            0 => Some(i64::MAX),
+            n => Some(i64::try_from(n).unwrap_or(i64::MAX)),
         }
     }
 
@@ -1828,10 +1853,9 @@ pub struct ScriptBudget {
     limit: Option<Duration>,
     started: Arc<Mutex<Option<Instant>>>,
     max_traversers: Option<i64>,
+    max_materialized_bytes: Option<i64>,
     max_value_depth: Option<i64>,
     max_string_bytes: Option<i64>,
-    memory_limit: Option<MemoryLimit>,
-    memory_headroom: Option<u64>,
 }
 
 impl ScriptBudget {
@@ -1841,24 +1865,22 @@ impl ScriptBudget {
             limit: limit_ms.map(Duration::from_millis),
             started: Arc::new(Mutex::new(None)),
             max_traversers: None,
+            max_materialized_bytes: None,
             max_value_depth: None,
             max_string_bytes: None,
-            memory_limit: None,
-            memory_headroom: None,
         }
-    }
-
-    /// Sets the session presets of `memory.limit` and `memory.headroom` (`None`: not set, so no
-    /// budget and the default headroom).
-    pub fn with_memory_limit(mut self, limit: Option<MemoryLimit>, headroom: Option<u64>) -> Self {
-        self.memory_limit = limit;
-        self.memory_headroom = headroom;
-        self
     }
 
     /// Sets the session default of `traversal.max_traversers` (`None` keeps the engine default).
     pub fn with_max_traversers(mut self, max: Option<i64>) -> Self {
         self.max_traversers = max;
+        self
+    }
+
+    /// Sets the session default of `traversal.max_materialized_bytes` (`None` keeps the engine
+    /// default).
+    pub fn with_max_materialized_bytes(mut self, max: Option<i64>) -> Self {
+        self.max_materialized_bytes = max;
         self
     }
 
@@ -1891,20 +1913,17 @@ impl ScriptBudget {
         if let Some(max) = self.max_traversers {
             options.push(("traversal.max_traversers", ElementProperty::from(max)));
         }
+        if let Some(max) = self.max_materialized_bytes {
+            options.push((
+                "traversal.max_materialized_bytes",
+                ElementProperty::from(max),
+            ));
+        }
         if let Some(max) = self.max_value_depth {
             options.push(("traversal.max_value_depth", ElementProperty::from(max)));
         }
         if let Some(max) = self.max_string_bytes {
             options.push(("traversal.max_string_bytes", ElementProperty::from(max)));
-        }
-        if let Some(limit) = self.memory_limit {
-            options.push(("memory.limit", limit.to_property()));
-        }
-        if let Some(headroom) = self.memory_headroom {
-            options.push((
-                "memory.headroom",
-                ElementProperty::from(i64::try_from(headroom).unwrap_or(i64::MAX)),
-            ));
         }
         options
     }

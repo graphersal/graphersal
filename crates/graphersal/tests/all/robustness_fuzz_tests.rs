@@ -1151,10 +1151,10 @@ fn run_inner_with(script: &str, kind: GraphKind, timeout_ms: i64, memory_limit: 
         GraphKind::Empty => GraphSource::empty(),
     });
     let limits = ScriptLimits::default();
-    let presets = [
-        ("evaluationTimeout", ElementProperty::from(timeout_ms)),
-        ("memory.limit", ElementProperty::from(memory_limit)),
-    ];
+    // The host's memory ceiling of the case: the process ceiling lowered for this thread (the
+    // process-wide setting is never changed in this shared test binary).
+    let memory_limit = u64::try_from(memory_limit).unwrap_or(1);
+    let presets = [("evaluationTimeout", ElementProperty::from(timeout_ms))];
     let engine = graphersal::script::engine_with_options(&limits, authorizer.clone(), &presets);
     let mut scope = graphersal::script::graph_scope_with_options(graph, &presets, authorizer);
     scope.push("nan", f64::NAN);
@@ -1165,7 +1165,9 @@ fn run_inner_with(script: &str, kind: GraphKind, timeout_ms: i64, memory_limit: 
     scope.push("big_string", "x".repeat(100_000));
     let big: graphersal::script::rhai::Array = (0..10_000_i64).map(Dynamic::from).collect();
     scope.push("big_list", big);
-    match engine.eval_with_scope::<Dynamic>(&mut scope, script) {
+    match graphersal::exec::memory_limit_scope(memory_limit, || {
+        engine.eval_with_scope::<Dynamic>(&mut scope, script)
+    }) {
         Ok(value) => match graphersal::script::try_render_value(
             value,
             VisualizeFormat::Auto,

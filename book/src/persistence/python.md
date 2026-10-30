@@ -12,8 +12,8 @@ import graphersal
 
 graph = graphersal.Graph.tinkerpop_modern()
 graph.save("g.gsnap")                                     # {"commit_seq", "vertex_count", "edge_count"}; name= optional
-graph = graphersal.Graph.load("g.gsnap")                  # no schema re-validation, checksummed
-graph = graphersal.Graph.load("g.gsnap", memory_limit="auto")   # refuse a snapshot that does not fit
+graph = graphersal.Graph.load("g.gsnap")                  # no schema re-validation, checksummed; a snapshot over
+                                                          # the process memory ceiling (graphersal.set_memory_limit) is refused
 
 graph.start_journal("g.wal")                              # durability="every_commit" (default) | "os" | seconds
 graph.execute('g.addV("person").property("name", "ann").next()')

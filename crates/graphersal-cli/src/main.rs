@@ -91,6 +91,12 @@ fn run() -> Result<()> {
             exit(cli::EXIT_USAGE_ERROR);
         }
     };
+    // The process memory ceiling (--memory-limit, --memory-headroom), before any graph is
+    // opened or model loaded: one setting for the whole process.
+    if let Err(err) = options.apply_memory_limit() {
+        errln!("{err}");
+        exit(cli::EXIT_USAGE_ERROR);
+    }
     // The embedding models of --embedder are loaded once, before any graph or script: every
     // mode (one-shot, REPL, --server and its MCP tools) calls the same registry.
     if !matches!(options.mode, Mode::Help | Mode::Version)

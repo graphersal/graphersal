@@ -33,8 +33,13 @@ A job never overlaps itself: due jobs run one after another. A time missed while
 A job may limit each of its runs: a **timeout** and a **memory limit** (`JobLimits`, both
 optional). The engine cannot interrupt arbitrary code, so the limits reach the checks every
 traversal already makes: while the job runs, its remaining time caps each traversal's
-`evaluationTimeout` and its memory limit caps `memory.limit` (a query's own stricter value
-stays). A breach fails the traversal as any timeout or memory limit does, its work is rolled
+`evaluationTimeout` and its memory limit (bytes) caps each traversal's per-query limit
+[`traversal.max_materialized_bytes`](../users_guide/resource_limits.md) (a query's own stricter
+value stays). The memory limit is compared with what the traversal itself materializes, where
+that limit is checked (one value or buffer at a time today, not a running total of the whole
+run), never with the memory of the whole process: the
+[process memory ceiling](../users_guide/resource_limits.md#the-process-memory-ceiling) stays the
+same while a job runs, so a job with 256 MiB still runs in a process that holds 2 GiB. A breach fails the traversal as any timeout or memory limit does, its work is rolled
 back, and the run is recorded as failed with the reason. An action doing long work of its own
 checks `limits.timeout` itself; if it finishes past its timeout anyway, the run is recorded as
 over time.

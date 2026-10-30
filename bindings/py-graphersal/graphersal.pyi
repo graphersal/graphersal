@@ -5,7 +5,7 @@ traversal engine). Shipped in the wheel by maturin together with a `py.typed` ma
 import datetime
 import os
 import uuid
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, Union
 
 __all__ = [
     "Graph",
@@ -23,6 +23,8 @@ __all__ = [
     "CommitRejectedError",
     "EmbedPropertyError",
     "ReturnedClosureError",
+    "set_memory_limit",
+    "memory_limit",
 ]
 
 #: A value a script parameter may take (a ``Vertex``/``Edge`` by its id and label). The date and
@@ -278,6 +280,22 @@ _Action = Literal["read", "create", "update", "delete", "execute", "custom", "*"
 #: The name of a resource kind of an ``AccessPolicy`` rule (``"*"``: every one).
 _Resource = Literal["data", "schema", "file", "option", "definition", "custom", "embedder", "*"]
 
+def set_memory_limit(
+    limit: Union[int, Literal["auto", "none"]], *, headroom: Optional[int] = None
+) -> None:
+    """Sets the PROCESS memory ceiling (``memory.limit``): one setting for every graph of this
+    Python process, on by default. ``limit``: a positive number of bytes, ``"auto"`` (the
+    default: the cgroup memory limit minus ``headroom`` bytes, default a tenth of the limit, at
+    least 64 MiB; else 80 % of the physical memory) or ``"none"`` (no ceiling). A query, import
+    or write that would take the process's live Rust heap over it raises ``GraphersalError`` and
+    is rolled back. Python objects are not counted: leave room for them. A bad value raises
+    ``ValueError``/``TypeError``."""
+
+def memory_limit() -> Dict[str, Any]:
+    """The process memory ceiling in effect: ``{"bytes": int | None, "source": "configured" |
+    "cgroup" | "physical" | "wasm" | "none" | "unknown", "setting": "auto" | "none" | "<bytes>",
+    "headroom": int | None}``."""
+
 class GraphersalError(Exception):
     """Raised for any script/engine error: parse errors, traversal failures, GraphSON/GraphML import
     errors. Subclasses name the failures a caller handles on purpose."""
@@ -358,8 +376,6 @@ class Graph:
     def __init__(
         self,
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> None:
@@ -370,19 +386,11 @@ class Graph:
         names the one used when a call names none (default ``"hash-ngram/1"``). A duplicate or
         reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
 
-        ``memory_limit``: the memory budget of every traversal on this graph, in bytes, or
-        ``"auto"`` (the cgroup memory limit of the process minus ``memory_headroom`` bytes;
-        no budget without a cgroup limit). A traversal that would exceed it raises
-        ``GraphersalError`` and is rolled back. ``None`` (the default): no budget.
-
-        The budget is compared with the exact live Rust heap of the extension (it installs a
-        tracking allocator), which does not count Python objects: with ``"auto"`` choose a
-        ``memory_headroom`` that also covers the Python side of the process."""
+        The process memory ceiling is not a keyword of a graph: it is one setting of the whole
+        process, ``set_memory_limit``."""
     @staticmethod
     def tinkerpop_modern(
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -394,8 +402,6 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -411,8 +417,6 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -441,14 +445,13 @@ class Graph:
     def load(
         path: str,
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
         """Reads a packed snapshot written by ``save`` (no schema validation; damage raises
-        ``GraphersalError``). A numeric ``memory_limit`` also refuses a snapshot whose size
-        estimate does not fit; the keywords are those of ``Graph()``."""
+        ``GraphersalError``). A snapshot whose size estimate exceeds the process memory ceiling
+        (``set_memory_limit``) is refused before any element is read; the keywords are those of
+        ``Graph()``."""
     def start_journal(
         self, path: str, *, durability: Union[Literal["every_commit", "os"], float, None] = None
     ) -> None:
@@ -479,11 +482,20 @@ class Graph:
         max_array_size: Optional[int] = None,
         max_map_size: Optional[int] = None,
         max_value_depth: Optional[int] = None,
+        max_materialized_bytes: Optional[int] = None,
         unlimited: bool = False,
     ) -> None:
         """Changes the resource limits of the scripts this graph runs (``0`` = unlimited;
         ``max_value_depth``, the deepest nesting of lists and maps in one value, is never
-        unlimited: ``0`` means its default, 128)."""
+        unlimited: ``0`` means its default, 128). ``max_materialized_bytes`` is the default of
+        the per-query memory limit ``traversal.max_materialized_bytes`` of every traversal these
+        scripts run (``None``: the library default, 1 GiB); a query's own ``g.with(..)``
+        overrides it."""
+
+    def limits(self) -> Dict[str, Optional[int]]:
+        """The limits ``set_limits`` set, under its keyword names (``0`` = unlimited;
+        ``max_materialized_bytes`` is ``None`` while the library default applies)."""
+        ...
     def get_schema(self, *, policy: Optional[AccessPolicy] = None) -> Optional[dict[str, Any]]:
         """The stored schema (the schema format as a ``dict``), or ``None`` without one. Never
         inferred."""

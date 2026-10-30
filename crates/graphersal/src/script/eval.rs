@@ -3,6 +3,97 @@
 
 use super::*;
 
+thread_local! {
+    /// The host presets of [`with_traversal_presets`] for the `eval_*` entries on this thread.
+    static PRESETS: std::cell::RefCell<Vec<(CompactString, ElementProperty)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `run` with `options` as host presets of every script that [`eval_value_with_limits`],
+/// [`eval_value_atomic`] and [`eval_value_dry_run`] evaluate on this thread meanwhile: they are
+/// put on every traversal source of the script (`g`, `_g`, `__`, `GraphSource::*`) as
+/// [`engine_with_options`] does for a host that builds its own engine, so a query's own
+/// `g.with(..)` overrides them (unless a policy locks the key). Restored afterwards, also on a
+/// panic; nested calls replace the outer presets.
+///
+/// For language bindings whose per-graph defaults (for example `traversal.max_materialized_bytes`)
+/// must reach scripts run through the `eval_*` entries.
+///
+/// ```rust
+/// # use std::sync::Arc;
+/// # use graphersal::prelude::*;
+/// # use graphersal::script::{ScriptLimits, eval_value_with_limits, with_traversal_presets};
+/// # use graphersal::auth::AllowAll;
+/// let graph = Arc::new(GraphSource::tinkerpop_modern());
+/// let presets = [("traversal.max_traversers", ElementProperty::from(3_i64))];
+/// let failed = with_traversal_presets(&presets, || {
+///     eval_value_with_limits(
+///         graph.clone(),
+///         "g.v().to_list()",
+///         Default::default(),
+///         &ScriptLimits::default(),
+///         Arc::new(AllowAll),
+///     )
+/// });
+/// assert!(failed.unwrap_err().to_string().contains("traversal.max_traversers"));
+/// ```
+pub fn with_traversal_presets<R>(
+    options: &[(&str, ElementProperty)],
+    run: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<Vec<(CompactString, ElementProperty)>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                let _ = PRESETS.try_with(|presets| {
+                    if let Ok(mut presets) = presets.try_borrow_mut() {
+                        *presets = previous;
+                    }
+                });
+            }
+        }
+    }
+    let next: Vec<(CompactString, ElementProperty)> = options
+        .iter()
+        .map(|(key, value)| (CompactString::new(key), value.clone()))
+        .collect();
+    let previous = PRESETS
+        .try_with(|presets| {
+            presets
+                .try_borrow_mut()
+                .ok()
+                .map(|mut presets| std::mem::replace(&mut *presets, next))
+        })
+        .ok()
+        .flatten();
+    let _restore = Restore(previous);
+    run()
+}
+
+/// The presets of [`with_traversal_presets`] in force on this thread.
+fn scoped_presets() -> Vec<(CompactString, ElementProperty)> {
+    PRESETS
+        .try_with(|presets| presets.try_borrow().map(|p| p.clone()).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// The engine and scope of an `eval_*` entry: `limits`, `authorizer` and the thread's presets
+/// ([`with_traversal_presets`]).
+fn engine_and_scope<'a>(
+    graph: impl IntoAnyGraph,
+    limits: &ScriptLimits,
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+) -> (rhai::Engine, Scope<'a>) {
+    let presets = scoped_presets();
+    let options: Vec<(&str, ElementProperty)> = presets
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect();
+    let engine = engine_with_options(limits, authorizer.clone(), &options);
+    let scope = graph_scope_with_options(graph, &options, authorizer);
+    (engine, scope)
+}
+
 /// Builds the scope a script runs in: the traversal source `g` over `g`, the anonymous
 /// traversal spawn `__` and the DSL globals (`P`, `TextP`, `GType`, `V`, `By`, `CastPolicy`,
 /// `ProfileType`, `Order`, `Column` and its bare tokens `keys` / `values`).
@@ -296,8 +387,7 @@ pub fn eval_value_with_limits(
     limits: &ScriptLimits,
     authorizer: Arc<dyn crate::graph::Authorizer>,
 ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
-    let engine = engine_with_limits(limits, authorizer.clone());
-    let mut scope = graph_scope_with_options(graph, &[], authorizer);
+    let (engine, mut scope) = engine_and_scope(graph, limits, authorizer);
     push_named_params(&mut scope, params, limits.effective_max_value_depth())?;
     engine
         .eval_with_scope::<Dynamic>(&mut scope, script)
@@ -497,8 +587,7 @@ fn eval_in_unit(
     limits: &ScriptLimits,
     authorizer: Arc<dyn crate::graph::Authorizer>,
 ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
-    let engine = engine_with_limits(limits, authorizer.clone());
-    let mut scope = graph_scope_with_options(graph.clone(), &[], authorizer);
+    let (engine, mut scope) = engine_and_scope(graph.clone(), limits, authorizer);
     let max_depth = limits.effective_max_value_depth();
     let evaluated = push_named_params(&mut scope, params, max_depth).and_then(|()| {
         engine

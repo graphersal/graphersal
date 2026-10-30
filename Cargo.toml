@@ -114,6 +114,13 @@ fd-lock = "4"
 # The free disk space of a single-file store's file system (`statvfs`, Unix), for the
 # compaction advice. Already in the tree through fd-lock (the same version and features).
 rustix = { version = "1", features = ["fs"] }
+# The physical memory of the machine for the default process memory ceiling
+# (`graphersal::exec::memory_limit`, 80 % of it when no cgroup limit applies): `sysctlbyname`
+# ("hw.memsize") on macOS and `GlobalMemoryStatusEx` on Windows (Linux reads /proc/meminfo with
+# std). Direct, target-gated dependencies of `graphersal`; both already in the tree (libc through
+# rustix/getrandom, windows-sys through fd-lock/rustyline), no new crate in the lock file.
+libc = { version = "0.2", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 # zstd chunks (codec 2, `persist-zstd` feature): the pure-Rust zstd encoder and decoder (no C
 # library), builds for wasm32.
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }

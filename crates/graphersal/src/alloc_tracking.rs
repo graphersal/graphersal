@@ -21,7 +21,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Net (live) heap bytes of the whole process, across all threads: what the memory budget
+/// Net (live) heap bytes of the whole process, across all threads: what the process memory ceiling
 /// (`memory.limit`) compares against when a [`TrackingAllocator`] is installed. A relaxed atomic,
 /// updated on every allocation, deallocation and resizing `realloc` next to the thread-local
 /// counters; it reads `0` when no [`TrackingAllocator`] is installed.
@@ -64,7 +64,7 @@ thread_local! {
 /// **The always-on cost this trades in:** once installed, *every* allocation anywhere in the
 /// process — profiled query or not, `graphersal` or unrelated code in the same binary — pays one
 /// `thread_local` read-modify-write per `alloc()`/`realloc()` call, plus one relaxed atomic add on
-/// the process-wide live-bytes counter ([`global_live_bytes`], read by the memory budget
+/// the process-wide live-bytes counter ([`global_live_bytes`], read by the process memory ceiling
 /// `memory.limit`). The thread-local part has no cross-thread synchronization cost; the atomic
 /// shares one cache line between threads that allocate concurrently. It is not literally zero;
 /// see this crate's benchmarks for a measured percentage.
@@ -165,7 +165,7 @@ pub fn thread_live_bytes() -> i64 {
 
 /// The whole process's current net (live) heap bytes, across all threads: allocated minus freed
 /// since start, as counted by an installed [`TrackingAllocator`] (one relaxed atomic, so a read
-/// costs a plain load). Reads `0` when no [`TrackingAllocator`] is installed. The memory budget
+/// costs a plain load). Reads `0` when no [`TrackingAllocator`] is installed. The memory ceiling
 /// (`memory.limit`) compares this figure with its limit when it is above `0`, and falls back to
 /// the engine's estimate otherwise.
 pub fn global_live_bytes() -> u64 {

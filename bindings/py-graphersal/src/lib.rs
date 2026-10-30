@@ -42,11 +42,43 @@ pub use store::Store;
 pub use temporal::Interval;
 pub use vector::PyVector;
 
+/// ``graphersal.set_memory_limit(limit, *, headroom=None)``: sets the PROCESS memory ceiling
+/// (``memory.limit``): ONE setting for every graph of this Python process, on by default.
+/// ``limit`` is a positive number of bytes, ``"auto"`` (the default: the cgroup memory limit
+/// minus ``headroom`` bytes, default a tenth of the limit, at least 64 MiB; else 80 % of the
+/// physical memory) or ``"none"`` (no ceiling). A query, import or write that would take the
+/// process's live Rust heap over it raises ``GraphersalError`` and is rolled back. Python
+/// objects are not counted: leave room for them.
+#[pyfunction]
+#[pyo3(signature = (limit, *, headroom=None))]
+fn set_memory_limit(limit: &Bound<'_, PyAny>, headroom: Option<u64>) -> PyResult<()> {
+    let limit = graph::memory_limit_value(Some(limit))?;
+    graph::set_process_memory_limit(limit, headroom)
+}
+
+/// ``graphersal.memory_limit()``: the process memory ceiling in effect as a dict: ``bytes``
+/// (``None``: no ceiling), ``source`` (``"configured"``, ``"cgroup"``, ``"physical"``,
+/// ``"wasm"``, ``"none"`` or ``"unknown"``), ``setting`` (``"auto"``, ``"none"`` or the bytes
+/// as text) and ``headroom`` (``None``: the default).
+#[pyfunction]
+fn memory_limit(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let limit = ::graphersal::exec::memory_limit()
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("bytes", limit.bytes())?;
+    dict.set_item("source", limit.source().as_str())?;
+    dict.set_item("setting", limit.setting().to_string())?;
+    dict.set_item("headroom", limit.headroom())?;
+    Ok(dict.into_any().unbind())
+}
+
 /// Python bindings of the Graphersal in-memory graph traversal engine: run Gremlin scripts against
 /// a `Graph` and get native Python values back. See `Graph`, `AccessPolicy` and `GraphersalError`.
 #[pymodule]
 fn graphersal(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Graph>()?;
+    m.add_function(wrap_pyfunction!(set_memory_limit, m)?)?;
+    m.add_function(wrap_pyfunction!(memory_limit, m)?)?;
     m.add_class::<AccessPolicy>()?;
     m.add_class::<DryRunResult>()?;
     m.add_class::<Store>()?;

@@ -1950,6 +1950,53 @@ fn memory_limit_fails_a_query_that_grows_past_it_and_rolls_back() {
     );
 }
 
+/// The process memory ceiling is on by default and `--memory-limit none` turns it off: the
+/// same small graph loaded under a tiny ceiling fails, under `none` it answers; `--help` names
+/// the three forms.
+#[test]
+fn memory_limit_none_turns_the_process_ceiling_off() {
+    let script = ["-e", "g.v().count().next()"];
+    let mut tiny = vec!["--memory-limit", "1000"];
+    tiny.extend(script);
+    let res = run(&tiny, "");
+    assert_eq!(res.code, 1, "stdout: {}", res.stdout);
+    assert!(
+        res.stderr
+            .contains("Resource limit 'memory.limit' exceeded (limit 1000"),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        res.stderr.contains("The figure is tracked"),
+        "{}",
+        res.stderr
+    );
+    for value in ["none", "NONE", "0"] {
+        let mut args = vec!["--memory-limit", value];
+        args.extend(script);
+        let res = run(&args, "");
+        assert_eq!(res.code, 0, "{value}: {}", res.stderr);
+        assert_eq!(res.stdout.trim(), "6");
+    }
+    // Not an option of a query.
+    let res = run(
+        &["-e", "g.with(\"memory.limit\", 1000).v().count().next()"],
+        "",
+    );
+    assert_eq!(res.code, 1);
+    assert!(
+        res.stderr.contains("setting of the whole process"),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["--help"], "");
+    assert!(
+        res.stdout.contains("--memory-limit <BYTES|auto|none>"),
+        "{}",
+        res.stdout
+    );
+}
+
 #[test]
 fn spelling_flag_respells_profile_and_errors() {
     let res = run(
@@ -5390,4 +5437,58 @@ fn a_write_protected_single_file_store_is_read_without_writing() {
     assert!(write.stderr.contains("read-only"), "{}", write.stderr);
     assert_eq!(names, vec![std::ffi::OsString::from("db.gstore")]);
     assert!(after == bytes, "the store file changed");
+}
+
+#[test]
+fn max_materialized_bytes_sets_the_per_query_memory_limit() {
+    let fold = "g.v().both().both().both().fold().next().len()";
+    let res = run(&["--max-materialized-bytes", "1024", "-e", fold], "");
+    assert_eq!(res.code, 1);
+    assert!(
+        res.stderr
+            .contains("Resource limit 'traversal.max_materialized_bytes' exceeded (limit 1024"),
+        "{}",
+        res.stderr
+    );
+    // A query's own g.with(..) overrides the default.
+    let own = format!(
+        r#"g.with("traversal.max_materialized_bytes", 1 << 30).{}"#,
+        &fold[2..]
+    );
+    let res = run(&["--max-materialized-bytes", "1024", "-e", &own], "");
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    // 0 means unlimited, like --max-traversers.
+    let res = run(&["--max-materialized-bytes", "0", "-e", fold], "");
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    // Not a count: refused as an invalid invocation.
+    let res = run(&["--max-materialized-bytes", "lots", "-e", fold], "");
+    assert_eq!(res.code, 2, "stderr: {}", res.stderr);
+    assert!(
+        res.stderr.contains("--max-materialized-bytes"),
+        "{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn an_args_file_sets_max_materialized_bytes() {
+    let dir = temp_path("argsfile-materialized");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.json");
+    std::fs::write(&file, r#"{"max-materialized-bytes": 1024}"#).unwrap();
+    let res = run(
+        &[
+            "--args-file",
+            file.to_str().unwrap(),
+            "-e",
+            "g.v().both().both().both().fold().next().len()",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "stdout: {}", res.stdout);
+    assert!(
+        res.stderr.contains("traversal.max_materialized_bytes"),
+        "{}",
+        res.stderr
+    );
 }

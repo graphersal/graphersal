@@ -1022,6 +1022,17 @@ pub trait GraphStorage: Send + Sync {
         Ok(self.memory_usage()?.map(|stats| stats.total_bytes()))
     }
 
+    /// A cheap, possibly stale estimate of [`Self::memory_footprint_bytes`] that never walks the
+    /// graph, or `None` when the storage has none (the default). The process memory ceiling is
+    /// on by default, so every run in the estimated mode (no tracking allocator) takes a starting
+    /// footprint: it takes this hint while the hint is below half of the ceiling, and the exact
+    /// figure only above (or without a hint). `TraversalGraph` answers the total of its last
+    /// walk adjusted by the elements added or removed since, at the average element size of that
+    /// walk (`None` before its first walk). `Err`: a backend error; a run fails with it.
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        Ok(None)
+    }
+
     /// The host-set ceiling this storage instance's queries execute under: which `g.with()`
     /// options are locked, and their defaults when a query's own options don't set them. Default:
     /// [`crate::graph::ExecutionPolicy::permissive`] — nothing locked, no defaults overridden,
@@ -1372,11 +1383,11 @@ pub trait GraphStorage: Send + Sync {
     /// [`ChangeSet`] without mutations reaches the hooks and a journal, so the raise survives a
     /// reopen).
     ///
-    /// Under a memory budget (a `memory.limit` default of the storage's
-    /// [`execution_policy`](Self::execution_policy)) the apply checks it every
-    /// 4096 mutations and at its end; a change set that grows the memory in use over it is
-    /// rolled back and fails with [`GraphError::ResourceLimitExceeded`] (operation
-    /// `"change set apply"`). Without a budget nothing is checked.
+    /// Under the process memory ceiling (`memory.limit`, [`crate::exec::memory_limit`], on by
+    /// default) the apply checks it every 4096 mutations and at its end; a change set that
+    /// grows the memory in use over it is rolled back and fails with
+    /// [`GraphError::ResourceLimitExceeded`] (operation `"change set apply"`). Without a
+    /// ceiling (`none`) nothing is checked.
     ///
     /// To rebuild a graph nobody sees yet (recovery from a snapshot plus the write-ahead log),
     /// use [`TraversalGraph::replay`] instead: it runs outside units and fires no hooks.
@@ -1393,7 +1404,7 @@ pub(crate) fn apply_change_set_with<S: GraphStorage + ?Sized>(
     copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
 ) -> Result<(), GraphError> {
     let mut budget =
-        crate::traversal::memory_budget::UnitBudget::start(&*storage, None, CHANGE_SET_OPERATION)?;
+        crate::traversal::memory_budget::UnitBudget::start(&*storage, CHANGE_SET_OPERATION)?;
     let mark = storage.begin_unit()?;
     let applied = close_on_unwind(
         storage,
@@ -2700,7 +2711,7 @@ impl GraphStorage for TraversalGraph {
 
     #[inline]
     fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
-        Ok(Some(crate::graph::memory::compute(self)))
+        Ok(Some(crate::graph::memory::walk(self)))
     }
 
     fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
@@ -2710,6 +2721,10 @@ impl GraphStorage for TraversalGraph {
     #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         Ok(Some(crate::graph::memory::footprint_bytes(self)))
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        Ok(crate::graph::memory::footprint_hint(self))
     }
 
     #[inline]
@@ -3203,6 +3218,10 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).memory_footprint_bytes()
     }
 
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        (**self).memory_footprint_hint()
+    }
+
     #[inline]
     fn execution_policy(&self) -> Result<crate::graph::ExecutionPolicy, GraphError> {
         (**self).execution_policy()
@@ -3620,6 +3639,10 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        (**self).memory_footprint_hint()
     }
 
     #[inline]
@@ -4097,6 +4120,10 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        (**self).memory_footprint_hint()
     }
 
     #[inline]
@@ -4716,6 +4743,10 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         self.as_ref().memory_footprint_bytes()
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        self.as_ref().memory_footprint_hint()
     }
 
     #[inline]

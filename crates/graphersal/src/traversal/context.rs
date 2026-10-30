@@ -9,9 +9,8 @@ use web_time::Instant;
 use crate::TraverserValue;
 use crate::error::{TraverserError, TraverserResult};
 use crate::graph::{ExecutionPolicy, GraphStorage};
-use crate::traversal::memory_budget::{
-    MEMORY_HEADROOM, MEMORY_LIMIT, MEMORY_LIMIT_AUTO, MemoryBudget,
-};
+use crate::traversal::memory_budget::MemoryBudget;
+use crate::traversal::memory_limit::{MEMORY_HEADROOM, MEMORY_LIMIT};
 use crate::traversal::optimizer::path_analysis::PathMode;
 use crate::traversal::side_effect::SideEffectValue;
 use crate::traversal::step::ProfileContext;
@@ -334,8 +333,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     }
 
     /// Fails with [`TraverserError::ResourceLimitExceeded`] (`memory.limit`) when the run is over
-    /// its memory budget at a step boundary with `alive` traversers between the steps. Without a
-    /// budget (the default) one branch.
+    /// the process memory ceiling at a step boundary with `alive` traversers between the steps.
+    /// Without a ceiling (`none`) one branch.
     #[inline]
     pub(crate) fn check_memory_budget(&self, alive: usize) -> TraverserResult<()> {
         match &self.options.memory {
@@ -374,8 +373,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     /// value, the sack and the values the execution's path records hold
     /// ([`PathArena::value_bytes`]) against `traversal.max_materialized_bytes`, so a body that
     /// doubles its value (`repeat(__.path())`, `repeat(__.group())`) stops at the byte budget,
-    /// at most one doubling past it. The same estimate counts against the memory budget
-    /// (`memory.limit`) when one is set. A scalar or element handle costs a `match`; a container
+    /// at most one doubling past it. The same estimate counts against the process memory ceiling
+    /// (`memory.limit`) when there is one. A scalar or element handle costs a `match`; a container
     /// is walked once, as the depth check already does.
     #[inline]
     pub(crate) fn check_loop_traverser(
@@ -576,8 +575,8 @@ pub(crate) const MAX_VALUE_DEPTH: &str = "traversal.max_value_depth";
 /// this target when neither the host nor the query sets them, as `(option key, value)`:
 /// `traversal.max_traversers`, `traversal.max_materialized_bytes` (smaller on `wasm32`),
 /// `traversal.max_string_bytes`, `traversal.max_value_depth`, `bulk.max_expansion` and
-/// `repeat.max_loops`. `evaluationTimeout` and `memory.limit` have no default (unbounded) and
-/// are not listed. For displays such as the playground's statistics panel; the book page
+/// `repeat.max_loops`. `evaluationTimeout` has no default (unbounded) and is not listed; the
+/// process memory ceiling `memory.limit` is not an execution option ([`crate::exec::memory_limit`]). For displays such as the playground's statistics panel; the book page
 /// "Resource Limits" has the table.
 ///
 /// ```
@@ -639,7 +638,8 @@ pub(crate) const PATH_ANALYSIS: &str = "path.analysis";
 pub(crate) const RENDER_SPELLING: &str = "render.spelling";
 
 /// Every `g.with()` key this crate recognises, in the order [`ExecutionOptions::parse`] resolves
-/// them. A host's [`ExecutionPolicy`] can lock or default any of these; used by
+/// them. Not `memory.limit`/`memory.headroom`: they are the process memory ceiling, refused as
+/// options (`reject_process_setting`), though still administrative ([`ADMIN_OPTION_KEYS`]). A host's [`ExecutionPolicy`] can lock or default any of these; used by
 /// [`ExecutionPolicy`]-aware code (and tests) that needs to iterate every known key rather than
 /// name them one by one. Keep in sync with the book's canonical options reference page.
 // Only exercised by this module's own tests today (iterating every key to assert the generic
@@ -663,8 +663,6 @@ pub(crate) const KNOWN_OPTION_KEYS: &[&str] = &[
     MAX_VALUE_DEPTH,
     MAX_MATERIALIZED_BYTES,
     MAX_STRING_BYTES,
-    MEMORY_LIMIT,
-    MEMORY_HEADROOM,
 ];
 
 /// The administrative `g.with()` keys: the resource ceilings and the engine switches. A
@@ -760,9 +758,11 @@ pub(crate) struct ExecutionOptions {
     pub(crate) max_materialized_bytes: u64,
     /// `traversal.max_string_bytes`: the longest string a step may build.
     pub(crate) max_string_bytes: u64,
-    /// `memory.limit` (with `memory.headroom` for `"auto"`): the memory budget of the run, `None`
-    /// without one (the default). Parsed with no starting point; the run takes it
-    /// ([`MemoryBudget::start`]) before the first step.
+    /// The process memory ceiling `memory.limit` the run is checked against
+    /// ([`crate::traversal::memory_limit::effective_limit`]), `None`
+    /// without one. Not an execution option: read from the process setting when the options are
+    /// parsed, with no starting point; the run takes it ([`MemoryBudget::start`]) before the
+    /// first step.
     pub(crate) memory: Option<MemoryBudget>,
 }
 
@@ -784,7 +784,8 @@ impl Default for ExecutionOptions {
             max_value_depth: crate::value::depth::DEFAULT_MAX_VALUE_DEPTH,
             max_materialized_bytes: DEFAULT_MAX_MATERIALIZED_BYTES,
             max_string_bytes: DEFAULT_MAX_STRING_BYTES,
-            memory: None,
+            // The process memory ceiling in effect (on by default), as `parse` reads it.
+            memory: crate::traversal::memory_limit::effective_limit().map(MemoryBudget::new),
         }
     }
 }
@@ -875,8 +876,12 @@ impl ExecutionOptions {
         if let Some(value) = resolve_option(MAX_STRING_BYTES, options, policy)? {
             parsed.max_string_bytes = parse_positive_count(MAX_STRING_BYTES, value, "bytes")?;
         }
-        parsed.memory = resolve_memory_limit(options, policy)?.map(MemoryBudget::new);
-        // A scheduled job's limits cap the run's own (the stricter value stays).
+        reject_process_setting(MEMORY_LIMIT, options, policy)?;
+        reject_process_setting(MEMORY_HEADROOM, options, policy)?;
+        // The process memory ceiling (process-wide; a job does not change it).
+        parsed.memory = crate::traversal::memory_limit::effective_limit().map(MemoryBudget::new);
+        // A scheduled job's limits cap the run's own (the stricter value stays): its remaining
+        // time caps `evaluationTimeout`, its memory limit `traversal.max_materialized_bytes`.
         if let Some(job) = crate::graph::jobs::limits::current() {
             if let Some(remaining) = job.remaining() {
                 parsed.evaluation_timeout = Some(
@@ -885,9 +890,8 @@ impl ExecutionOptions {
                         .map_or(remaining, |own| own.min(remaining)),
                 );
             }
-            if let Some(limit) = job.memory_limit {
-                let limit = parsed.memory.map_or(limit, |own| own.limit.min(limit));
-                parsed.memory = Some(MemoryBudget::new(limit));
+            if let Some(bytes) = job.memory_limit {
+                parsed.max_materialized_bytes = parsed.max_materialized_bytes.min(bytes.max(1));
             }
         }
         if let Some(name) = parsed
@@ -907,22 +911,28 @@ impl ExecutionOptions {
     }
 }
 
-/// The memory budget in bytes that `memory.limit` (with `memory.headroom` for `"auto"`)
-/// resolves to under `options` and `policy`, by the precedence of [`resolve_option`]; `None`:
-/// no budget. Shared by [`ExecutionOptions::parse`] and the units that are not traversals
-/// ([`crate::traversal::memory_budget::UnitBudget`]).
-pub(crate) fn resolve_memory_limit(
+/// Fails with [`TraverserError::InvalidOption`] when `key` (`memory.limit` or
+/// `memory.headroom`) is set as an execution option: by the query, by a host preset or as a
+/// default of `policy`. Both are ONE process-wide setting since 0.5.0
+/// ([`crate::exec::set_memory_limit`], [`crate::exec::set_memory_headroom`]); a lock alone is
+/// harmless and ignored.
+fn reject_process_setting(
+    key: &'static str,
     options: &HashMap<CompactString, ElementProperty>,
     policy: &ExecutionPolicy,
-) -> TraverserResult<Option<u64>> {
-    let headroom = match resolve_option(MEMORY_HEADROOM, options, policy)? {
-        Some(value) => Some(parse_headroom(value)?),
-        None => None,
-    };
-    match resolve_option(MEMORY_LIMIT, options, policy)? {
-        Some(value) => parse_memory_limit(value, headroom),
-        None => Ok(None),
+) -> TraverserResult<()> {
+    if options.contains_key(key) || policy.default_for(key).is_some() {
+        return Err(Box::new(TraverserError::InvalidOption {
+            key: key.to_string(),
+            reason: format!(
+                "'{key}' is a setting of the whole process, not of one execution: the host sets \
+                 it once (graphersal::exec::set_memory_limit / set_memory_headroom, the \
+                 command line's --memory-limit / --memory-headroom, Python's \
+                 graphersal.set_memory_limit)"
+            ),
+        }));
     }
+    Ok(())
 }
 
 /// The single generic "is this key locked / what wins" check every key in
@@ -1121,35 +1131,6 @@ fn parse_random_seed(value: &ElementProperty) -> TraverserResult<u64> {
             ),
         })),
     }
-}
-
-/// Reads `memory.limit`: a positive integer number of bytes, or `"auto"` (any letter case), which
-/// is the process's cgroup memory limit minus `headroom` (`None`: the default headroom), or no
-/// budget when the process has no cgroup limit (and always on `wasm32`).
-fn parse_memory_limit(
-    value: &ElementProperty,
-    headroom: Option<u64>,
-) -> TraverserResult<Option<u64>> {
-    if let Some(text) = value.as_str() {
-        if text.eq_ignore_ascii_case(MEMORY_LIMIT_AUTO) {
-            return Ok(crate::traversal::memory_budget::resolve_auto(headroom));
-        }
-        return Err(Box::new(TraverserError::InvalidOption {
-            key: MEMORY_LIMIT.to_string(),
-            reason: format!(
-                "expected a positive integer number of bytes or \"auto\", got \"{text}\""
-            ),
-        }));
-    }
-    parse_positive_count(MEMORY_LIMIT, value, "bytes").map(Some)
-}
-
-/// Reads `memory.headroom`: a non-negative integer number of bytes.
-fn parse_headroom(value: &ElementProperty) -> TraverserResult<u64> {
-    if matches!(value, ElementProperty::Number(number) if number.as_i64() == Some(0)) {
-        return Ok(0);
-    }
-    parse_positive_count(MEMORY_HEADROOM, value, "bytes")
 }
 
 /// Reads `bulk.max_expansion`: an integer from 1.

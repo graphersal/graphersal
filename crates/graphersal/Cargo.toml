@@ -76,6 +76,12 @@ safetensors = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, optional = true }
 
+# The physical memory of the machine: the default process memory ceiling (`exec::memory_limit`).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [features]
 default = []
 # GraphSON 3.0 (dependency-free, `value/physical.rs` JSON reader) and GraphML (`quick-xml`).

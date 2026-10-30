@@ -366,25 +366,57 @@ def test_memory_budget_fails_an_oversized_traversal_and_rolls_back():
     # The extension installs the tracking allocator, so the budget compares the live Rust heap of
     # the extension (a few MiB here). 32 MiB leaves room for the modern graph, not for 200 new
     # vertices with a 256 KiB string each (50 MiB).
-    graph = graphersal.Graph.tinkerpop_modern(memory_limit=32 << 20)
-    assert graph.execute("g.v().count().next()") == 6
-    with pytest.raises(graphersal.GraphersalError) as excinfo:
-        graph.execute(
-            'let s = "x"; for i in 0..18 { s += s; } '
-            "let xs = []; for i in 0..200 { xs.push(i); } "
-            'g.inject(xs).unfold().addV("tmp").property("text", s).toList()'
-        )
-    assert "memory.limit" in str(excinfo.value)
-    assert "--memory-limit" in (excinfo.value.help or "")
-    assert graph.execute("g.v().count().next()") == 6
-    # "auto" without a cgroup limit is no budget; with one, this small query fits.
-    auto = graphersal.Graph(memory_limit="auto", memory_headroom=0)
-    assert auto.execute("g.v().count().next()") == 0
-    for bad, error in [("lots", ValueError), (0, ValueError), (1.5, TypeError)]:
-        with pytest.raises(error):
-            graphersal.Graph(memory_limit=bad)
-    with pytest.raises(ValueError):
-        graphersal.Graph(memory_headroom=10)
+    # The ceiling is one setting of the process (no constructor keyword).
+    graph = graphersal.Graph.tinkerpop_modern()
+    try:
+        graphersal.set_memory_limit(32 << 20)
+        assert graph.execute("g.v().count().next()") == 6
+        with pytest.raises(graphersal.GraphersalError) as excinfo:
+            graph.execute(
+                'let s = "x"; for i in 0..18 { s += s; } '
+                "let xs = []; for i in 0..200 { xs.push(i); } "
+                'g.inject(xs).unfold().addV("tmp").property("text", s).toList()'
+            )
+        assert "memory.limit" in str(excinfo.value)
+        assert "--memory-limit" in (excinfo.value.help or "")
+        assert graph.execute("g.v().count().next()") == 6
+        # "auto" without a cgroup limit is the physical-memory default; this small query fits.
+        graphersal.set_memory_limit("auto", headroom=0)
+        assert graphersal.Graph().execute("g.v().count().next()") == 0
+    finally:
+        graphersal.set_memory_limit("auto")
+    for keyword in ["memory_limit", "memory_headroom"]:
+        with pytest.raises(TypeError):
+            graphersal.Graph(**{keyword: 1 << 30})
+
+
+def test_the_process_memory_ceiling_is_on_by_default_and_can_be_turned_off():
+    try:
+        limit = graphersal.memory_limit()
+        assert set(limit) == {"bytes", "source", "setting", "headroom"}
+        assert limit["source"] in {"cgroup", "physical", "configured"}
+        graphersal.set_memory_limit(1000)
+        assert graphersal.memory_limit()["bytes"] == 1000
+        assert graphersal.memory_limit()["source"] == "configured"
+        graph = graphersal.Graph.tinkerpop_modern()
+        with pytest.raises(graphersal.GraphersalError) as excinfo:
+            graph.execute("g.v().count().next()")
+        assert "memory.limit" in str(excinfo.value)
+        assert "The figure is tracked" in (excinfo.value.help or "")
+        graphersal.set_memory_limit("none")
+        assert graphersal.memory_limit()["source"] == "none"
+        assert graph.execute("g.v().count().next()") == 6
+        graphersal.set_memory_limit(1 << 40)
+        assert graphersal.memory_limit()["bytes"] == 1 << 40
+        for bad, error in [("lots", ValueError), (0, ValueError), (1.5, TypeError)]:
+            with pytest.raises(error):
+                graphersal.set_memory_limit(bad)
+        # Not an option of a query.
+        with pytest.raises(graphersal.GraphersalError):
+            graph.execute('g.with("memory.limit", 1000).v().count().next()')
+    finally:
+        graphersal.set_memory_limit("auto")
+    assert graphersal.memory_limit()["setting"] == "auto"
 
 
 def test_memory_profile_reports_tracked_bytes():
@@ -559,3 +591,54 @@ def test_a_dedup_rule_shares_repeated_values_and_the_estimate_matches():
     ]
     with pytest.raises(graphersal.GraphersalError):
         graph.define_compression("bad", "symbol", "doc", codec="dedup", dictionary=True)
+
+
+def test_set_limits_sets_the_per_query_memory_limit():
+    graph = graphersal.Graph.tinkerpop_modern()
+    fold = "g.v().both().both().both().fold().next().len()"
+    assert graph.execute(fold) > 0
+    graph.set_limits(max_materialized_bytes=1024)
+    with pytest.raises(graphersal.GraphersalError) as excinfo:
+        graph.execute(fold)
+    assert "traversal.max_materialized_bytes" in str(excinfo.value)
+    # It reaches atomic runs, dry runs and sources the script creates.
+    with pytest.raises(graphersal.GraphersalError):
+        graph.execute(fold, atomic=True)
+    with pytest.raises(graphersal.GraphersalError):
+        graph.dry_run(fold)
+    with pytest.raises(graphersal.GraphersalError):
+        graph.execute("GraphSource::tinkerpop_modern().v().both().both().both().fold().next()")
+    # A query's own value overrides the default.
+    own = 'g.with("traversal.max_materialized_bytes", 1 << 30).v().both().both().both().fold().next().len()'
+    assert graph.execute(own) > 0
+    # 0 means unlimited; a later set_limits without it restores the library default.
+    graph.set_limits(max_materialized_bytes=0)
+    assert graph.execute(fold) > 0
+    graph.set_limits(max_materialized_bytes=1024)
+    graph.set_limits()
+    assert graph.execute(fold) > 0
+    # Another graph is not affected.
+    assert graphersal.Graph.tinkerpop_modern().execute(fold) > 0
+
+
+def test_limits_reports_what_set_limits_set():
+    graph = graphersal.Graph.tinkerpop_modern()
+    defaults = graph.limits()
+    assert defaults["max_materialized_bytes"] is None
+    assert defaults["max_operations"] == 10_000_000
+    assert set(defaults) == {
+        "max_operations",
+        "max_string_size",
+        "max_array_size",
+        "max_map_size",
+        "max_value_depth",
+        "max_materialized_bytes",
+    }
+    graph.set_limits(max_operations=5, max_materialized_bytes=4096)
+    assert graph.limits()["max_operations"] == 5
+    assert graph.limits()["max_materialized_bytes"] == 4096
+    graph.set_limits(unlimited=True, max_materialized_bytes=0)
+    limits = graph.limits()
+    assert limits["max_operations"] == 0
+    assert limits["max_materialized_bytes"] == 0
+    assert limits["max_value_depth"] == 128

@@ -23,12 +23,14 @@
 //! (the playground's authorizer); bodies are limited to [`MAX_BODY_BYTES`]; a static path
 //! cannot leave the UI directory (canonicalized and checked).
 //!
-//! Limits: the limit options of the command line (`--timeout`, `--memory-limit`,
-//! `--memory-headroom`, `--safe-limits`, `--max-operations`, `--max-string-size`,
-//! `--max-array-size`, `--max-map-size`, `--max-traversers`, `--max-value-depth`) become the
-//! session's [`SessionPresets`] ([`session_presets`]): every query of the server runs under them,
-//! as every script of the one-shot runner does. Without them the server runs like the
-//! playground: no Rhai limits, the engine's traversal defaults, no time budget.
+//! Limits: the limit options of the command line (`--timeout`, `--safe-limits`,
+//! `--max-operations`, `--max-string-size`, `--max-array-size`, `--max-map-size`,
+//! `--max-traversers`, `--max-value-depth`) become the session's [`SessionPresets`]
+//! ([`session_presets`]): every query of the server runs under them, as every script of the
+//! one-shot runner does. Without them the server runs like the playground: no Rhai limits, the
+//! engine's traversal defaults, no time budget. `--memory-limit` and `--memory-headroom` are not
+//! presets: they set the process memory ceiling (on by default) before the server starts, so it
+//! covers every session, import and load of this process.
 //!
 //! Change feed: every job that changes the commit position of the served graph (or swaps the
 //! graph: a view, a rollback) is recorded with the client that sent it (`X-Graphersal-Client`
@@ -670,12 +672,13 @@ fn accept(server: &Server, serving: &Arc<Serving>) {
 /// set the engine's Rhai limits exactly as for a one-shot script; `--timeout` is the default
 /// `evaluationTimeout` of every traversal and the budget of a run as a whole.
 pub fn session_presets(cli: &Cli) -> SessionPresets {
-    let mut budget = ScriptBudget::new(cli.timeout_ms)
-        .with_max_value_depth(cli.max_value_depth)
-        .with_memory_limit(cli.memory_limit, cli.memory_headroom);
+    // The memory ceiling is not a preset: `--memory-limit` set it for the whole process
+    // (`Cli::apply_memory_limit`, before the server started).
+    let mut budget = ScriptBudget::new(cli.timeout_ms).with_max_value_depth(cli.max_value_depth);
     if cli.max_traversers.is_some() || cli.safe_limits {
         budget = budget.with_max_traversers(cli.traversal_max_traversers());
     }
+    budget = budget.with_max_materialized_bytes(cli.traversal_max_materialized_bytes());
     if cli.max_string_size.is_some() || cli.safe_limits {
         budget = budget.with_max_string_bytes(cli.traversal_max_string_bytes());
     }
@@ -698,7 +701,8 @@ fn presets_summary(presets: &Value) -> String {
         }
     }
     if parts.is_empty() {
-        "none (start with --timeout, --memory-limit, --safe-limits, --max-* to bound queries)"
+        "none (start with --timeout, --safe-limits, --max-* to bound queries; the process memory \
+         ceiling applies, --memory-limit)"
             .to_string()
     } else {
         format!("of every query: {}", parts.join(", "))

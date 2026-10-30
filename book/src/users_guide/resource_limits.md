@@ -20,7 +20,7 @@ all of them with two kinds of limit, both reported as one error,
 | | `evaluationTimeout` | none | wall-clock budget, see [Query Limits](query_limits.md) |
 | | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) on an edge or a path pattern |
 | | `bulk.max_expansion` | 10 000 000 | values one bulk expansion may materialize |
-| | `memory.limit` | none | memory in use (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set and at every outermost commit; `"auto"` = cgroup limit minus `memory.headroom` |
+| Process (`exec::set_memory_limit`) | `memory.limit` | on: cgroup limit minus headroom, else 80 % of RAM (3.5 GiB on wasm32) | memory in use by the whole process (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set and at every outermost commit; NOT a `g.with()` option, see [the process memory ceiling](#the-process-memory-ceiling) |
 
 A `0` for any of the four script counters means *unlimited*; the call depth and the value depth
 are never unlimited because they protect the native stack of the thread (`0` reads as the
@@ -73,7 +73,7 @@ unchecked up-front reservation. Where the engine reserves an exact size it asks 
 fallibly: when the system cannot provide that block (the limit raised to "unlimited" and a
 product of trillions of rows), the run fails with `ResourceLimitExceeded` of `memory.allocation`
 and is rolled back instead of the process aborting. `memory.allocation` is not an option: narrow
-the query, or bound the run with the [memory budget](#memory-budget).
+the query, or bound the run with the [process memory ceiling](#the-process-memory-ceiling).
 
 ```rhai,graph=modern
 g.with("traversal.max_traversers", 50000000).v().out().out().count()
@@ -152,85 +152,103 @@ g.with("traversal.max_materialized_bytes", 2147483648).v().repeat(__.both()).tim
 Prefer a step that works on the multiplicity directly (`count()`, `groupCount()`, `dedup()`,
 `limit(n)`) over raising either limit.
 
-## Memory budget
+## The process memory ceiling
 
-The limits above bound *one* value or buffer. **`memory.limit`** bounds the whole: the memory in
-use while a traversal runs. It exists so that a query which would exhaust the memory of the
-process fails with `ResourceLimitExceeded` (and is rolled back, like every failing traversal)
+There are exactly **two memory limits**, never mixed:
+
+- the **process memory ceiling** `memory.limit`: what the whole PROCESS may hold. One setting of
+  the process, set by the host, on by default;
+- the **per-query limit** `traversal.max_materialized_bytes` (above): the estimated size of one
+  value or buffer a query materializes, an ordinary `g.with()` option.
+
+The ceiling exists so that a query (or an import, or a write) which would exhaust the memory of
+the process fails with `ResourceLimitExceeded` and is rolled back, like every failing traversal,
 instead of the operating system killing the process (a Kubernetes or cgroup OOM kill).
 
-There is **no budget by default**. A host opts in, either with an explicit number of bytes or with
-`"auto"`:
+**It is on by default.** Unless the host sets it, the ceiling is resolved once, in this order,
+and the result carries its source (`graphersal::exec::memory_limit()`, `MemoryLimitSource`):
 
-- **bytes**: `g.with("memory.limit", 4294967296)`, or better a host setting (below).
-- **`"auto"`**: the cgroup memory limit of the process minus a headroom. Graphersal reads
-  `/sys/fs/cgroup/memory.max` (cgroup v2) or, failing that,
-  `/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1), once per process. `max`, the v1
-  "unlimited" value or no file at all means no limit, so `"auto"` is no budget outside a
-  memory-limited container, and always on `wasm32`. **`memory.headroom`** (bytes) is what stays
-  free below the cgroup limit for the stack, the code, allocator overhead and whatever the engine
-  does not count; the default is a tenth of the limit, at least 64 MiB and at most half of it (a
-  512 MiB container gets a budget of 448 MiB).
+| Source | Ceiling |
+|---|---|
+| `configured` | the bytes the host set |
+| `none` | the host turned it off (`MemoryLimit::Unlimited`, CLI `--memory-limit none`) |
+| `cgroup` | the cgroup memory limit of the process minus the headroom: Graphersal reads `/sys/fs/cgroup/memory.max` (cgroup v2) or, failing that, `/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1), once per process; `max` or the v1 "unlimited" value is no cgroup limit. The **headroom** (`memory.headroom`) stays free for the stack, the code, allocator overhead and what the engine does not count: by default a tenth of the limit, at least 64 MiB and at most half of it (a 512 MiB container gets 448 MiB) |
+| `physical` | 80 % of the machine's physical memory (Linux `/proc/meminfo`, macOS `hw.memsize`, Windows `GlobalMemoryStatusEx`), read once per process |
+| `wasm` | 3.5 GiB on `wasm32` (a 32-bit linear memory ends at 4 GiB; a browser may grant less) |
+| `unknown` | a platform where none of the above can be read: no ceiling |
 
-What is compared with the budget:
+A host sets it once, for the whole process (every graph, every session of a server):
 
-- **with a tracking allocator** (the `alloc-tracking` feature and
+```rust
+use graphersal::exec::{self, MemoryLimit, MemoryLimitSource};
+
+exec::set_memory_limit(MemoryLimit::Bytes(4 << 30)).unwrap(); // 4 GiB
+let limit = exec::memory_limit().unwrap();
+assert_eq!(limit.bytes(), Some(4 << 30));
+assert_eq!(limit.source(), MemoryLimitSource::Configured);
+
+exec::set_memory_limit("auto".parse().unwrap()).unwrap();    // back to the default
+exec::set_memory_headroom(Some(256 << 20)).unwrap();          // for a cgroup limit
+```
+
+`MemoryLimit` reads and prints the text forms the front ends accept: a positive number of bytes,
+`auto` or `none`. It is **not an execution option**: a query's `g.with("memory.limit", ..)` (or
+`memory.headroom`), an `ExecutionPolicy` default or a session preset of these keys fails with
+`InvalidOption`, whose `help()` names the process setting (changed in 0.5.0; before, the budget
+was an opt-in option per execution). A scheduled job's `memory_limit` does not touch the
+ceiling: it is the per-query limit `traversal.max_materialized_bytes` of every traversal the
+job's run executes (the smaller of the two values; see
+[Scheduled jobs](../persistence/scheduled_jobs.md#limits-per-run)).
+
+What is compared with the ceiling (the error's `help()` says which one applied):
+
+- **tracked**: with a tracking allocator (the `alloc-tracking` feature and
   `graphersal::alloc_tracking::TrackingAllocator` installed as the binary's global allocator, as
   the `graphersal` command line, the playground and the Python binding do; in Python it counts
-  the extension's Rust heap only, not Python objects): the process's exact live heap bytes, plus
+  the extension's Rust heap only, not Python objects), the process's exact live heap bytes, plus
   what a check is about to allocate;
-- **otherwise** the engine's estimate: the graph's footprint (`g.memory_usage()`), taken once when
-  the traversal starts, plus the traversers alive between two steps, the elements the traversal
-  added (at the graph's average element size) and what a check is about to allocate. Property
-  values written to existing elements are not counted. The footprint is a walk of the graph (time
-  proportional to its size), cached by the graph's commit position: a traversal on a graph that
-  has not changed since the last walk reuses the figure, and only the first traversal after a
-  committed change walks again (a rolled-back traversal changes nothing, so the figure stays;
-  inside an explicit unit with uncommitted changes every traversal walks). For large graphs that
-  change often, prefer the tracking allocator.
+- **estimated**: otherwise (a library host with the system allocator), the engine's estimate: the
+  graph's footprint (`g.memory_usage()`) when the traversal starts, plus the traversers alive
+  between two steps, the elements the traversal added (at the graph's average element size) and
+  what a check is about to allocate. Property values written to existing elements are not
+  counted, and loops that grow their values are undercounted, so the real process can hold
+  more. Because the ceiling is on by default, the start of a run never walks the graph while the
+  graph is far from the ceiling: it takes the footprint of the last walk, adjusted by the
+  elements added or removed since. The graph is walked (time proportional to its size, cached by
+  its commit position) only on the first run, once its element count has doubled or halved since
+  the last walk, and on every run after a committed change while the figure is at least half of
+  the ceiling. `g.memory_usage()` walks the graph too and keeps its figure for the next runs:
+  call it after rewriting many property values to refresh the estimate. For large graphs that
+  change often near the ceiling, prefer the tracking allocator.
 
-The budget is cooperative (an allocator cannot fail softly): it is checked at every step boundary
-and at the places that check `traversal.max_materialized_bytes`, before a bulk expansion
+The ceiling is cooperative (an allocator cannot fail softly): it is checked at every step
+boundary and at the places that check `traversal.max_materialized_bytes`, before a bulk expansion
 allocates, before a bucket push of copies and on every `repeat()` iteration. A single step can
 overshoot it by what it builds before the next check. Writes are checked the same way: a
-traversal that grows the graph past the budget fails and leaves nothing behind. When the graph
-*alone* is over the budget, every traversal fails at its first step; a trusted host frees memory
-with a raised budget for one query, for example
-`g.with("memory.limit", 8589934592).v().has_label("tmp").drop()`.
+traversal that grows the graph past the ceiling fails and leaves nothing behind. When the graph
+*alone* is over the ceiling, every traversal fails at its first step; a trusted host raises the
+ceiling for a moment, drops what it does not need (`g.v().has_label("tmp").drop()`) and lowers it
+again.
 
-Units that are not traversals are checked too, against the budget of the graph's
-`ExecutionPolicy` default (and, for a script's `g.import_graphml(..)`/`g.import_graphson(..)`,
-the session's preset options; a query's own `g.with(..)` does not reach them):
+Units that are not traversals are checked against the same ceiling:
 
 - a **GraphML or GraphSON import into a live graph** (`import_graphml*`, `import_graphson*`,
   `GraphMLImport::import_reader`, `GraphSONImport::import_reader`) and
   **`apply_change_set`** every 4096 elements (imported vertices and edges, applied mutations) and
   at their end;
 - **every outermost unit at its commit**: a `transaction(|g| ..)` closure, an applied change
-  set, an import, a traversal (whose steps already checked their own budget).
+  set, an import, a traversal (whose steps already checked their own).
 
-Over the budget the whole unit is rolled back and fails with `GraphError::ResourceLimitExceeded`
+Over the ceiling the whole unit is rolled back and fails with `GraphError::ResourceLimitExceeded`
 (wrapped in `IOError::Graph` for an import), whose message names the operation: `Resource limit
 'memory.limit' exceeded by the GraphML import (limit N, reached M)`; the `help()` gives the same
 host advice as a traversal's. The measure is the one above: the live heap with a tracking
 allocator, else the footprint when the unit started plus the elements it added. Only a unit that
 **grew** that measure is stopped, so a unit that only removes or rewrites data commits even on a
-graph that is already over its budget. Without a budget nothing is paid: no walk, no check.
-Loading a graph nobody sees yet (`GraphSource::from_graphml`, `from_graphson`,
-`GraphSONImport::load`, a snapshot or store load) is not checked; the next traversal is.
-
-The budget is a host setting, like the other ceilings: an `ExecutionPolicy` default (locked or
-not) on the graph, or a session preset of `graph_scope_with_options`/`engine_with_options`:
-
-```rust,ignore
-let policy = ExecutionPolicy::permissive()
-    .with_default("memory.limit", "auto")
-    .with_locked("memory.limit");
-let graph = TraversalGraph::new().with_execution_policy(policy);
-```
-
-A query's own `g.with("memory.limit", ..)` is an administrative option (`Update` on its
-`Option`), refused outright when the host locked the key.
+graph that is already over the ceiling. With the ceiling turned off (`none`) nothing is paid: no
+footprint, no check. Loading a graph nobody sees yet (`GraphSource::from_graphml`,
+`from_graphson`, `GraphSONImport::load`, a snapshot or store load) is not checked yet; the next
+traversal is.
 
 ## Strings built by steps
 
@@ -301,19 +319,29 @@ changed.
   `--max-map-size` and `--max-traversers` set one limit (`0` is unlimited; `--max-string-size`
   also sets `traversal.max_string_bytes`, which follows the script's string limit and is
   unlimited by default). `--max-value-depth <n>` sets `script.max_value_depth` and
-  `traversal.max_value_depth` (`0` is the default, 128). `--memory-limit <bytes|auto>` (and
-  `--memory-headroom <bytes>`) sets the [memory budget](#memory-budget) of the session, measured
-  on the live heap (the CLI installs the tracking allocator); `0` or no flag is no budget. In the REPL, `/set max-operations <n>`
+  `traversal.max_value_depth` (`0` is the default, 128). `--max-materialized-bytes <n>` sets
+  the default of the per-query memory limit `traversal.max_materialized_bytes` (`0` is
+  unlimited; without it the library default, 1 GiB, applies); a query's own `g.with(..)`
+  overrides it. `--memory-limit <bytes|auto|none>` (and
+  `--memory-headroom <bytes>`) sets the [process memory ceiling](#the-process-memory-ceiling),
+  measured on the live heap (the CLI installs the tracking allocator); no flag keeps the default
+  (`auto`), `none` or `0` turns it off. With `--server` it covers every session of the server.
+  In the REPL, `/set max-operations <n>`
   (and the other script limits, `max-value-depth` included) and `/set safe-limits`. The
   presets reach every source a script creates. The session runs on a thread with a 64 MiB stack.
-- **Web playground**: no script limits, no default timeout and no memory budget, like the CLI
-  (it runs in your own browser); its Stop button restarts the engine to end a runaway query.
+- **Web playground**: no script limits and no default timeout, like the CLI (it runs in your own
+  browser); the process memory ceiling is the `wasm32` default, 3.5 GiB of tracked heap. Its Stop
+  button restarts the engine to end a runaway query.
 - **Python**: SAFE defaults; `graph.set_limits(max_operations=..., max_value_depth=...,
-  unlimited=True, ...)`. The memory budget is a graph setting:
-  `Graph(memory_limit=..., memory_headroom=...)` (also on `Graph.tinkerpop_modern`,
-  `Graph.from_graphml` and `Graph.from_graphson`), measured on the live Rust heap of the extension (the binding installs
-  the tracking allocator). Python objects are not counted, so with `memory_limit="auto"` the
-  `memory_headroom` must also cover the Python side of the process. Scripts run on a worker
+  max_materialized_bytes=..., unlimited=True, ...)`; `max_materialized_bytes` is the default of
+  the per-query memory limit `traversal.max_materialized_bytes` for every traversal of that
+  graph's scripts (a query's own `g.with(..)` overrides it). The process memory ceiling is not
+  a keyword of a graph: it is set with
+  `graphersal.set_memory_limit(bytes | "auto" | "none", headroom=...)` and read with
+  `graphersal.memory_limit()`, one value for the whole process; `Graph.load` also refuses a
+  snapshot whose size estimate exceeds it. It is measured on the live Rust heap of the
+  extension (the binding installs the tracking allocator); Python objects are not counted, so
+  leave room for the Python side of the process. Scripts run on a worker
   thread with a 64 MiB stack (one per calling Python thread).
 
 The large stack is a mitigation for the scripting engine itself: Rhai copies a nested map value
@@ -368,4 +396,4 @@ units:
   (`script::eval_value_atomic`) commit as one, so keep each below the limit.
 
 A graph without a journal (in memory only) has no such limit; the
-[memory budget](#memory-budget) bounds it instead.
+[process memory ceiling](#the-process-memory-ceiling) bounds it instead.

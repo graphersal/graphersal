@@ -29,13 +29,6 @@ use crate::persist::{PersistError, SnapshotInfo};
 #[cfg(feature = "script")]
 use crate::script::plan::{ScriptPlan, Terminal, TerminalOutput, UnitBody, UnitKind, UnitResult};
 
-/// The preset options of a host session (the script layer's presets): they win over a
-/// storage's [`ExecutionPolicy`](crate::graph::ExecutionPolicy) defaults unless the policy
-/// locks the key. Only the memory budget of an import reads them.
-#[cfg(feature = "io")]
-type PresetOptions =
-    std::collections::HashMap<compact_str::CompactString, crate::value::ElementProperty>;
-
 mod sealed {
     /// Seals [`AnyGraph`](super::AnyGraph): only [`Graph`](crate::graph::Graph) implements it.
     pub trait Sealed {}
@@ -237,23 +230,15 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     /// Imports GraphML from `reader` as ONE unit
     /// ([`GraphMLImport::import_reader`](crate::io::GraphMLImport::import_reader)), under the
-    /// memory budget of the storage's policy and the host's `presets`.
+    /// process memory ceiling.
     #[cfg(feature = "io")]
-    fn import_graphml(
-        &self,
-        reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
-    ) -> Result<(), IOError>;
+    fn import_graphml(&self, reader: &mut dyn std::io::BufRead) -> Result<(), IOError>;
 
     /// Imports GraphSON from `reader` as ONE unit
     /// ([`GraphSONImport::import_reader`](crate::io::GraphSONImport::import_reader)) and returns
-    /// its report, under the memory budget like [`Self::import_graphml`].
+    /// its report, under the process memory ceiling like [`Self::import_graphml`].
     #[cfg(feature = "io")]
-    fn import_graphson(
-        &self,
-        reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
-    ) -> Result<ImportReport, IOError>;
+    fn import_graphson(&self, reader: &mut dyn std::io::BufRead) -> Result<ImportReport, IOError>;
 
     /// Exports the graph as GraphML to `writer`
     /// ([`GraphMLExport::export_writer`](crate::io::GraphMLExport::export_writer)), indented
@@ -464,29 +449,16 @@ where
     }
 
     #[cfg(feature = "io")]
-    fn import_graphml(
-        &self,
-        reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
-    ) -> Result<(), IOError> {
-        crate::io::GraphMLImport {}.import_reader_with(
+    fn import_graphml(&self, reader: &mut dyn std::io::BufRead) -> Result<(), IOError> {
+        crate::io::GraphMLImport {}.import_reader(
             &mut *self.write_checked()?,
             quick_xml::Reader::from_reader(reader),
-            presets,
         )
     }
 
     #[cfg(feature = "io")]
-    fn import_graphson(
-        &self,
-        reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
-    ) -> Result<ImportReport, IOError> {
-        crate::io::GraphSONImport::new().import_reader_with(
-            &mut *self.write_checked()?,
-            reader,
-            presets,
-        )
+    fn import_graphson(&self, reader: &mut dyn std::io::BufRead) -> Result<ImportReport, IOError> {
+        crate::io::GraphSONImport::new().import_reader(&mut *self.write_checked()?, reader)
     }
 
     #[cfg(feature = "io")]

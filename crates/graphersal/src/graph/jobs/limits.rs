@@ -3,9 +3,13 @@
 //!
 //! The engine cannot stop arbitrary code from outside (no thread of its own, none in wasm32), so
 //! the limits reach the checks that already run inside every execution: while a job runs, its
-//! remaining time caps each traversal's `evaluationTimeout` and its memory limit caps
-//! `memory.limit` (a query's own stricter value stays). A breach is the engine's ordinary
-//! `Timeout` / `ResourceLimitExceeded`; the work is rolled back and the run recorded as failed.
+//! remaining time caps each traversal's `evaluationTimeout` and its memory limit caps each
+//! traversal's per-execution limit `traversal.max_materialized_bytes` (a query's own stricter
+//! value stays). The memory limit is compared with what the traversal itself holds, checked
+//! where `traversal.max_materialized_bytes` is checked, never with the memory of the whole
+//! process: it does not touch the process memory ceiling `memory.limit`. A breach is the
+//! engine's ordinary `Timeout` / `ResourceLimitExceeded`; the work is rolled back and the run
+//! recorded as failed.
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -29,7 +33,10 @@ use web_time::Instant;
 pub struct JobLimits {
     /// The longest a run may take.
     pub timeout: Option<Duration>,
-    /// The most memory a run may use, in bytes (the traversals' `memory.limit`).
+    /// The most memory a run's traversals may hold, in bytes: each traversal the run executes
+    /// gets it as its `traversal.max_materialized_bytes` (the smaller of it and the traversal's
+    /// own value). Not compared with the process's memory: the process ceiling `memory.limit`
+    /// is unchanged by a job.
     pub memory_limit: Option<u64>,
 }
 
@@ -45,7 +52,8 @@ impl JobLimits {
         self
     }
 
-    /// With a memory limit per run, in bytes.
+    /// With a memory limit per run, in bytes (the `traversal.max_materialized_bytes` of every
+    /// traversal the run executes, see [`JobLimits::memory_limit`]).
     pub fn with_memory_limit(mut self, bytes: u64) -> Self {
         self.memory_limit = Some(bytes);
         self

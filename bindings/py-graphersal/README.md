@@ -691,31 +691,41 @@ one limit, `0` meaning unlimited, and `unlimited=True` starts from no limits:
 ```python
 graph.set_limits(max_operations=1_000_000, max_string_size=1 << 20)
 graph.set_limits(unlimited=True, max_value_depth=256)
+graph.set_limits(max_materialized_bytes=256 << 20)   # the per-query memory limit
+graph.limits()   # {"max_operations": 10000000, ..., "max_materialized_bytes": 268435456}
 ```
 
 `max_value_depth` is never unlimited (`0` means its default, 128): deeper values are read
 recursively and would overflow the native stack. Scripts run on a worker thread with a 64 MiB
 stack (one per calling Python thread), so the scripting engine's own recursion over nested values
-has room. A limit hit raises `GraphersalError` whose `help` names the limit to raise. Traversal
-limits (`evaluationTimeout`, `traversal.max_materialized_bytes`, `traversal.max_string_bytes`, ...)
-are set per query with `g.with(key, value)`; see the book's "Resource Limits" page.
+has room. A limit hit raises `GraphersalError` whose `help` names the limit to raise.
+`max_materialized_bytes` is the default of the per-query memory limit
+`traversal.max_materialized_bytes` (the estimated size of one value or buffer a query
+materializes; without it the library default, 1 GiB) for every traversal of the graph's scripts.
+Traversal limits (`evaluationTimeout`, `traversal.max_materialized_bytes`,
+`traversal.max_string_bytes`, ...) are also set per query with `g.with(key, value)`, which
+overrides the default; see the book's "Resource Limits" page.
 
-A graph can carry a memory budget (off by default): every traversal on it that would take the
-memory in use over the budget raises `GraphersalError` and is rolled back, instead of the process
-being killed for lack of memory. Pass a number of bytes, or `"auto"` for the cgroup memory limit
-of the process (a Linux container) minus a headroom (`memory_headroom`, default a tenth of the
-limit, at least 64 MiB):
+The process has a memory ceiling, ON by default: every traversal, import or write that would
+take the memory in use over it raises `GraphersalError` and is rolled back, instead of the process
+being killed for lack of memory. It is ONE setting for the whole Python process (every graph),
+by default `"auto"`: the cgroup memory limit of the process (a Linux container) minus a headroom
+(default a tenth of the limit, at least 64 MiB), else 80 % of the physical memory. Set a number of
+bytes, `"auto"`, or `"none"` to turn it off; `graphersal.memory_limit()` reports the value in
+effect and where it comes from:
 
 ```python
-graph = graphersal.Graph(memory_limit=2 << 30)
-graph = graphersal.Graph.from_graphml("data.graphml", memory_limit="auto")
+graphersal.set_memory_limit(2 << 30)
+graphersal.set_memory_limit("auto", headroom=512 << 20)
+graphersal.memory_limit()   # {'bytes': ..., 'source': 'configured', 'setting': ..., 'headroom': ...}
 ```
 
-The extension installs Graphersal's tracking allocator as its own global allocator, so the budget
+`Graph.load` also refuses a snapshot whose size estimate exceeds the ceiling, before reading it.
+
+The extension installs Graphersal's tracking allocator as its own global allocator, so the ceiling
 compares the exact live heap of the extension's Rust code (every graph and query of the process,
-read with one atomic load, no walk of the graph). That count does not include Python objects:
-with `memory_limit="auto"` the Rust heap is compared with a limit for the whole process, so
-`memory_headroom` must also cover the Python side (the interpreter, your own data, the converted
+read with one atomic load, no walk of the graph). That count does not include Python objects: the
+ceiling must leave room for the Python side (the interpreter, your own data, the converted
 results). The same allocator makes Memory profiles exact:
 `g.v().out().profile_with(ProfileType.Memory)` reports `"source": "tracked"` bytes per step
 (a bare `profile()` collects no memory data). The cost is a few counter increments per

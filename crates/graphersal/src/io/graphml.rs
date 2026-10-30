@@ -154,29 +154,17 @@ impl GraphMLImport {
     /// ([`GraphSource::from_graphml`](crate::GraphSource::from_graphml),
     /// [`GraphSource::from_graphml_reader`](crate::GraphSource::from_graphml_reader)).
     ///
-    /// Under a memory budget (a `memory.limit` default of the graph's
-    /// [`ExecutionPolicy`](crate::graph::ExecutionPolicy)) the import checks it every 4096
-    /// elements and at its end: an import that grows the memory in use over it is rolled back
-    /// and fails with [`IOError::Graph`] holding [`GraphError::ResourceLimitExceeded`]
-    /// (operation `"GraphML import"`). Without a budget nothing is checked.
+    /// Under the process memory ceiling (`memory.limit`, [`crate::exec::memory_limit`], on by
+    /// default) the import checks it every 4096 elements and at its end: an import that grows
+    /// the memory in use over it is rolled back and fails with [`IOError::Graph`] holding
+    /// [`GraphError::ResourceLimitExceeded`] (operation `"GraphML import"`). Without a ceiling
+    /// (`none`) nothing is checked.
     pub fn import_reader<S: GraphStorage, R: std::io::BufRead>(
         &self,
         g: &mut S,
         reader: Reader<R>,
     ) -> Result<(), IOError> {
-        self.import_reader_with(g, reader, None)
-    }
-
-    /// [`Self::import_reader`] whose memory budget also honours a host's preset options
-    /// (`presets`, such as a script session's: they win over the policy's default unless the
-    /// policy locks the key).
-    pub(crate) fn import_reader_with<S: GraphStorage, R: std::io::BufRead>(
-        &self,
-        g: &mut S,
-        reader: Reader<R>,
-        presets: Option<&std::collections::HashMap<CompactString, crate::value::ElementProperty>>,
-    ) -> Result<(), IOError> {
-        let mut budget = UnitBudget::start(&*g, presets, GRAPHML_IMPORT)?;
+        let mut budget = UnitBudget::start(&*g, GRAPHML_IMPORT)?;
         let mark = g.begin_unit()?;
         let imported = crate::graph::storage::close_on_unwind(
             g,

@@ -159,7 +159,10 @@ impl ScriptGraphTraversalSource {
     /// store) or `"backup"` (backs the store up into the directory `path`). The definer's rights
     /// are checked now for everything the job does (`Execute` on the query and every data write
     /// it may make, `Create` on the backup directory) and stored with it: a run may do exactly
-    /// that. Asks for `Create` on the job (`Update` when it replaces one).
+    /// that. Asks for `Create` on the job (`Update` when it replaces one). `timeout_ms` caps the
+    /// `evaluationTimeout` of every traversal a run executes; `memory_limit` (bytes) caps their
+    /// `traversal.max_materialized_bytes`, the memory each traversal itself holds (not the
+    /// process's: the process ceiling `memory.limit` is unchanged by a job).
     pub fn define_job(
         ctx: NativeCallContext,
         this: &mut Self,

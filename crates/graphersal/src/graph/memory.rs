@@ -4,9 +4,10 @@
 //! This is entirely separate from traversal execution (see `.profile()`'s `bytes_materialized`
 //! in `traversal/step/profile.rs` for the other, execution-scoped question). `memory_usage()`
 //! takes `&self` and never touches `TraverserContext`/`ProfileContext`/any query path. The only
-//! caller on the execution path is the estimated memory budget (`memory.limit` without a
-//! tracking allocator), once per run and through the cache of `footprint_bytes`, which walks again
-//! only after the graph changed.
+//! callers on the execution path are the estimated memory checks (the process memory ceiling
+//! `memory.limit` without a tracking allocator): once per run they take `footprint_hint` (the
+//! last walk adjusted by the element counts, no walk) and, only near the ceiling or before the
+//! first walk, `footprint_bytes` (cached; walks again only after the graph changed).
 
 /// Snapshot of a graph's approximate in-memory footprint, in bytes, broken down by subsystem.
 ///
@@ -357,11 +358,7 @@ pub(crate) struct FootprintCache {
 /// data and leaves the commit position, so the cached figure stays valid. While an open unit
 /// holds uncommitted changes the figure is walked and not cached.
 pub(crate) fn footprint_bytes(graph: &super::TraversalGraph) -> u64 {
-    let key = FootprintKey {
-        commit_seq: graph.commit_seq(),
-        vertices: graph.graph.node_count() as u64,
-        edges: graph.graph.edge_count() as u64,
-    };
+    let key = footprint_key(graph);
     let cacheable = graph.undo.entries().is_empty();
     if cacheable
         && let Some((cached, bytes)) = *graph.footprint.entry.lock()
@@ -369,14 +366,51 @@ pub(crate) fn footprint_bytes(graph: &super::TraversalGraph) -> u64 {
     {
         return bytes;
     }
+    walk(graph).total_bytes()
+}
+
+/// [`compute`] for `graph`, remembered as the footprint cache when no open unit holds
+/// uncommitted changes: `memory_usage()` goes through it, so asking for the footprint also
+/// refreshes [`footprint_hint`] (a manual full walk, e.g. after many property rewrites).
+pub(crate) fn walk(graph: &super::TraversalGraph) -> MemoryStats {
     #[cfg(test)]
     graph
         .footprint
         .walks
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let bytes = compute(graph).total_bytes();
-    if cacheable {
-        *graph.footprint.entry.lock() = Some((key, bytes));
+    let stats = compute(graph);
+    if graph.undo.entries().is_empty() {
+        *graph.footprint.entry.lock() = Some((footprint_key(graph), stats.total_bytes()));
     }
-    bytes
+    stats
+}
+
+fn footprint_key(graph: &super::TraversalGraph) -> FootprintKey {
+    FootprintKey {
+        commit_seq: graph.commit_seq(),
+        vertices: graph.graph.node_count() as u64,
+        edges: graph.graph.edge_count() as u64,
+    }
+}
+
+/// A cheap estimate of [`footprint_bytes`] without a walk: the total of the last walk plus the
+/// elements added since (minus those removed) at that walk's average element size (at least 128
+/// bytes). `None` before the first walk, and once the element count has more than doubled
+/// (plus 1024) or halved since it: then the caller walks again, so a growing graph is walked
+/// O(log n) times, amortized a constant per added element. Property values rewritten since the
+/// walk are not seen; the memory checks also walk again when the estimate reaches half of the
+/// ceiling.
+pub(crate) fn footprint_hint(graph: &super::TraversalGraph) -> Option<u64> {
+    let (key, bytes) = (*graph.footprint.entry.lock())?;
+    let walked = key.vertices.saturating_add(key.edges);
+    let now = (graph.graph.node_count() as u64).saturating_add(graph.graph.edge_count() as u64);
+    if now > walked.saturating_mul(2).saturating_add(1024) || now < walked / 2 {
+        return None;
+    }
+    let per_element = bytes.checked_div(walked).unwrap_or(0).max(128);
+    Some(if now >= walked {
+        bytes.saturating_add((now - walked).saturating_mul(per_element))
+    } else {
+        bytes.saturating_sub((walked - now).saturating_mul(per_element))
+    })
 }

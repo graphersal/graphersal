@@ -37,8 +37,13 @@ def test_load_refuses_a_damaged_file_and_a_too_small_memory_limit(tmp_path):
     graph = graphersal.Graph.tinkerpop_modern()
     path = tmp_path / "g.gsnap"
     graph.save(str(path))
-    with pytest.raises(graphersal.GraphersalError):
-        graphersal.Graph.load(str(path), memory_limit=1)
+    # A snapshot over the process memory ceiling is refused before it is read.
+    try:
+        graphersal.set_memory_limit(1)
+        with pytest.raises(graphersal.GraphersalError):
+            graphersal.Graph.load(str(path))
+    finally:
+        graphersal.set_memory_limit("auto")
     data = bytearray(path.read_bytes())
     data[len(data) // 2] ^= 0x01
     path.write_bytes(bytes(data))
