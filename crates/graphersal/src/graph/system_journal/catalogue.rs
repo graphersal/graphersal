@@ -249,7 +249,8 @@ pub(crate) static CHECKPOINT_FAILED: EventKind = event(
     "store.checkpoint_failed",
     "store.checkpoint",
     Level::Error,
-    "A checkpoint failed; nothing visible was written.",
+    "A checkpoint failed; nothing visible was written (level warn when the memory ceiling \
+     refused it).",
     &[
         f("error", "the error"),
         f("automatic", "whether the store started it itself"),
@@ -275,7 +276,7 @@ pub(crate) static BACKUP_FAILED: EventKind = event(
     "store.backup_failed",
     "store.backup",
     Level::Error,
-    "A backup failed.",
+    "A backup failed (level warn when the memory ceiling refused it).",
     &[
         f("target", "where it should have gone"),
         f("side", "where damage was found: store, backup or none"),

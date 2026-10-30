@@ -2789,9 +2789,15 @@ impl StoreCore {
                     },
                     _ => "none",
                 };
+                let level = if is_refusal(err) {
+                    crate::graph::system_journal::Level::Warn
+                } else {
+                    crate::graph::system_journal::Level::Error
+                };
                 self.shared.system_journal.emit(
                     &catalogue::BACKUP_FAILED,
                     Event::new(format!("a backup to {target} failed: {err}"))
+                        .level(level)
                         .field("target", target)
                         .field("side", side)
                         .field("error", err.to_string()),
@@ -3545,12 +3551,22 @@ impl Shared {
                         .field("automatic", !sync),
                 );
             }
-            Err(err) => self.system_journal.emit(
-                &catalogue::CHECKPOINT_FAILED,
-                Event::new(format!("a checkpoint failed: {err}"))
-                    .field("error", err.to_string())
-                    .field("automatic", !sync),
-            ),
+            Err(err) => {
+                // A refusal of the memory ceiling is no failure of the store: a warning,
+                // written with the next batch (the refused checkpoint changes no file).
+                let level = if is_refusal(err) {
+                    crate::graph::system_journal::Level::Warn
+                } else {
+                    crate::graph::system_journal::Level::Error
+                };
+                self.system_journal.emit(
+                    &catalogue::CHECKPOINT_FAILED,
+                    Event::new(format!("a checkpoint failed: {err}"))
+                        .level(level)
+                        .field("error", err.to_string())
+                        .field("automatic", !sync),
+                );
+            }
         }
         result
     }
@@ -3790,6 +3806,16 @@ fn is_damage(err: &PersistError) -> bool {
         PersistError::NotAStore { reason, .. } => reason.contains("no snapshot"),
         PersistError::Graph(crate::error::GraphError::ResourceLimitExceeded { .. }) => false,
         PersistError::Graph(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether `err` is a refusal of the process memory ceiling (nothing was changed).
+fn is_refusal(err: &PersistError) -> bool {
+    match err {
+        PersistError::MemoryBudget { .. }
+        | PersistError::Graph(crate::error::GraphError::ResourceLimitExceeded { .. }) => true,
+        PersistError::Io { source, .. } => source.kind() == std::io::ErrorKind::OutOfMemory,
         _ => false,
     }
 }

@@ -449,7 +449,8 @@ fn read_segment(path: &DirPath) -> std::io::Result<Vec<u8>> {
             format!("a journal segment of {len} bytes (larger than {MAX_SEGMENT_READ})"),
         ));
     }
-    crate::traversal::memory_budget::ensure_room_io(JOURNAL_READ, len)?;
+    crate::traversal::memory_budget::ensure_room(JOURNAL_READ, len, 0)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::OutOfMemory, err))?;
     files::read_bounded(path, MAX_SEGMENT_READ)
 }
 
