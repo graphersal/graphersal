@@ -491,6 +491,11 @@ class Graph:
         the per-query memory limit ``traversal.max_materialized_bytes`` of every traversal these
         scripts run (``None``: the library default, 1 GiB); a query's own ``g.with(..)``
         overrides it."""
+
+    def limits(self) -> Dict[str, Optional[int]]:
+        """The limits ``set_limits`` set, under its keyword names (``0`` = unlimited;
+        ``max_materialized_bytes`` is ``None`` while the library default applies)."""
+        ...
     def get_schema(self, *, policy: Optional[AccessPolicy] = None) -> Optional[dict[str, Any]]:
         """The stored schema (the schema format as a ``dict``), or ``None`` without one. Never
         inferred."""

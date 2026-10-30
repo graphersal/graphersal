@@ -619,3 +619,26 @@ def test_set_limits_sets_the_per_query_memory_limit():
     assert graph.execute(fold) > 0
     # Another graph is not affected.
     assert graphersal.Graph.tinkerpop_modern().execute(fold) > 0
+
+
+def test_limits_reports_what_set_limits_set():
+    graph = graphersal.Graph.tinkerpop_modern()
+    defaults = graph.limits()
+    assert defaults["max_materialized_bytes"] is None
+    assert defaults["max_operations"] == 10_000_000
+    assert set(defaults) == {
+        "max_operations",
+        "max_string_size",
+        "max_array_size",
+        "max_map_size",
+        "max_value_depth",
+        "max_materialized_bytes",
+    }
+    graph.set_limits(max_operations=5, max_materialized_bytes=4096)
+    assert graph.limits()["max_operations"] == 5
+    assert graph.limits()["max_materialized_bytes"] == 4096
+    graph.set_limits(unlimited=True, max_materialized_bytes=0)
+    limits = graph.limits()
+    assert limits["max_operations"] == 0
+    assert limits["max_materialized_bytes"] == 0
+    assert limits["max_value_depth"] == 128

@@ -595,6 +595,32 @@ impl Graph {
         self.limits.clear_poison();
     }
 
+    /// ``graph.limits()``: the limits ``set_limits`` set, as a dict with the same keys
+    /// (``max_operations``, ``max_string_size``, ``max_array_size``, ``max_map_size``,
+    /// ``max_value_depth``, ``max_materialized_bytes``). ``0`` means unlimited, as in
+    /// ``set_limits``; ``max_materialized_bytes`` is ``None`` while the library default applies.
+    /// The process memory ceiling is ``graphersal.memory_limit()``.
+    fn limits<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let limits = self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let dict = PyDict::new(py);
+        dict.set_item("max_operations", limits.script.max_operations)?;
+        dict.set_item("max_string_size", limits.script.max_string_size)?;
+        dict.set_item("max_array_size", limits.script.max_array_size)?;
+        dict.set_item("max_map_size", limits.script.max_map_size)?;
+        dict.set_item("max_value_depth", limits.script.max_value_depth)?;
+        dict.set_item(
+            "max_materialized_bytes",
+            limits
+                .max_materialized_bytes
+                .map(|n| if n == u64::MAX { 0 } else { n }),
+        )?;
+        Ok(dict)
+    }
+
     /// ``graph.execute(script, params=None, *, atomic=False, policy=None)``: evaluates a
     /// script against this graph and returns its result as native Python values.
     ///
