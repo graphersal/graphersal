@@ -1688,6 +1688,7 @@ impl StoreCore {
             }))?;
             recovered
         };
+        graph.clock().raise(recovered.clock_floor);
         let report = OpenReport {
             clean_close: true,
             snapshot_commit_seq: recovered.snapshot_commit_seq,
@@ -1904,6 +1905,9 @@ impl StoreCore {
             Err(err) => return Err(err),
         };
         report.warnings.extend(manifest_copy_warnings(&dir));
+        // The instance clock starts at the latest time the files hold (the floor is not stored:
+        // format spec 2, "Conventions").
+        graph.clock().raise(loaded.clock_floor);
         if let Some(reason) = loaded.read_only.clone() {
             return Self::open_read_only_mode(
                 dir, lock, options, graph_file, report, graph, reason,
@@ -2213,7 +2217,14 @@ impl StoreCore {
         target: RecoveryTarget,
         empty: S,
     ) -> Result<Recovered<S>, PersistError> {
-        Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?.run_in(empty)
+        let recovered = Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?
+            .run_in(empty)?;
+        // A view of the past keeps the instance floor (every time the files and this instance
+        // wrote), not the target's commit time.
+        if let Some(clock) = recovered.graph.commit_clock()? {
+            clock.raise(self.shared.graph.clock().floor());
+        }
+        Ok(recovered)
     }
 
     fn load_at(
@@ -2935,6 +2946,8 @@ impl StoreCore {
         let mut report = OpenReport::default();
         // Cleared and loaded in place: the hooks registered on the graph stay.
         let loaded = load_latest(dir, &self.shared.options, &graph_file, &mut report, graph)?;
+        // The same clock as before the reload: a rollback is a later event, its floor stays.
+        self.shared.graph.clock().raise(loaded.clock_floor);
         let graph_id = graph_file.graph_id;
         if let Some(reason) = loaded.read_only.clone() {
             // The restored history holds something critical this version does not know: the
@@ -3390,7 +3403,7 @@ impl Shared {
         let _graph = self.graph.write();
         if let Some(Err(err)) = self
             .journal
-            .record_checkpoint(report.snapshot.commit_seq, now())
+            .record_checkpoint(report.snapshot.commit_seq, self.graph.clock().now())
         {
             return Err(PersistError::store(
                 "record the checkpoint in the WAL",
@@ -3687,6 +3700,9 @@ struct LoadedFiles {
     marks: Vec<Mark>,
     /// Why the state must not be written by this version (format spec 16 rule 3).
     read_only: Option<String>,
+    /// The latest time the loaded files hold ([`RecoveryReport::clock_floor`] and the
+    /// snapshot manifest's `created_at`): the floor of the instance clock after the open.
+    clock_floor: i64,
 }
 
 /// Loads the latest snapshot and replays the WAL after it (format spec 12.1, 12.2) into `graph`
@@ -3784,16 +3800,19 @@ fn load_latest(
     // nothing is written from here on, not even the torn-tail cut.
     // The manifest was read by the load just now: a failure here is a real one (an I/O error,
     // or damage that opens the store in maintenance mode), never "nothing critical".
+    let manifest = read_manifest(&snapshot_path)?.1;
     let read_only = match graph.critical_definition()?.or_else(|| newer.first()) {
         Some(reason) => Some(reason),
-        None => read_manifest(&snapshot_path)?.1.critical_segment_reason(),
+        None => manifest.critical_segment_reason(),
     };
+    let clock_floor = recovered.clock_floor.max(manifest.fixed.created_at);
     if read_only.is_some() {
         return Ok(LoadedFiles {
             segments,
             replay,
             marks: recovered.marks,
             read_only,
+            clock_floor,
         });
     }
     if let Some(torn) = recovered.torn_tail
@@ -3812,6 +3831,7 @@ fn load_latest(
         replay,
         marks: recovered.marks,
         read_only: None,
+        clock_floor,
     })
 }
 

@@ -23,7 +23,7 @@ use super::wal_files::{WalWriter, open_segment_reader};
 use crate::error::GraphError;
 use crate::graph::hooks::{CommitHook, HookError, JournalHook, JournalSlot, Mark};
 use crate::graph::{
-    ChangeSet, DefinitionKind, Graph, GraphStorage, PersistentStorage, RollbackReason,
+    ChangeSet, CommitClock, DefinitionKind, Graph, GraphStorage, PersistentStorage, RollbackReason,
     StorageCapabilities, TraversalGraph,
 };
 use crate::persist::error::{PersistError, StoreFailure};
@@ -40,6 +40,9 @@ pub(crate) trait StoreGraph: Send + Sync + 'static {
     fn read(&self) -> Box<dyn LiveRead + '_>;
     /// Takes the write lock (commits wait).
     fn write(&self) -> Box<dyn LiveWrite + '_>;
+    /// The instance clock ([`Graph::clock`]): the Store times its checkpoint records with it
+    /// and raises it at the open to the latest time its files hold. No lock.
+    fn clock(&self) -> &CommitClock;
 }
 
 /// What the Store reads from its graph under the read lock.
@@ -100,6 +103,10 @@ impl<S: PersistentStorage + Default> StoreGraph for Graph<S> {
 
     fn write(&self) -> Box<dyn LiveWrite + '_> {
         Box::new(Live(Graph::write(self)))
+    }
+
+    fn clock(&self) -> &CommitClock {
+        Graph::clock(self)
     }
 }
 
@@ -771,5 +778,29 @@ mod tests {
         assert!(graph.write().mark("m").is_err());
         assert!(cell.sync_now().is_none());
         assert!(cell.record_checkpoint(1, 1).is_none());
+    }
+
+    /// A `Graph` over a storage with a clock shares it (the Store's `clock()` is the commits'
+    /// clock); over one without (`commit_clock` default `None`) it keeps its own, starting at
+    /// the storage's last commit time (Q2.3).
+    #[test]
+    fn the_graph_clock_is_the_storages_or_its_own() {
+        let storage = TraversalGraph::new().with_last_committed_at(42);
+        let inner = storage.commit_clock().unwrap().unwrap();
+        let graph = Graph::new_persistent(storage);
+        assert!(StoreGraph::clock(&graph).same_as(&inner));
+        assert!(Graph::new(TraversalGraph::new()).clock().floor() == 0);
+
+        let foreign = ClaimsLess {
+            inner: TraversalGraph::new().with_last_committed_at(1_000),
+            claims: StorageCapabilities::none(),
+        };
+        assert!(foreign.commit_clock().unwrap().is_none());
+        let own_inner = foreign.inner.commit_clock().unwrap().unwrap();
+        let graph = Graph::new_persistent(foreign);
+        let clock = StoreGraph::clock(&graph);
+        assert!(!clock.same_as(&own_inner));
+        assert_eq!(clock.floor(), 1_000);
+        assert_eq!(Graph::new(ClaimsLess::default()).clock().floor(), 0);
     }
 }

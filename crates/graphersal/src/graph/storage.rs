@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::error::GraphError;
 use crate::graph::change::{ChangeSet, CommitMetadata};
+use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::{Mark, RollbackReason};
 use crate::graph::schema::defaults::CreateContext;
@@ -266,7 +267,10 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// [`Mutation`](crate::graph::Mutation) constructors (there is no reusable undo log or capture
 /// component: the storage derives what a unit changed itself) and embeds a
 /// [`CommitHooks`](crate::graph::CommitHooks), which runs the hooks in the required order (user
-/// hooks, then the journal slot) and whose documentation says when to call each event. A
+/// hooks, then the journal slot) and whose documentation says when to call each event. It
+/// times its commits with [`CommitHooks::commit_time`](crate::graph::CommitHooks::commit_time)
+/// (the instance clock, shared with marks and the system journal) and hands that clock out
+/// through [`Self::commit_clock`]. A
 /// storage that must also be persisted implements `PersistentStorage` (feature `persist`).
 ///
 /// ## Applying change sets
@@ -1299,6 +1303,19 @@ pub trait GraphStorage: Send + Sync {
         Err(GraphError::Unsupported {
             operation: "commit hooks",
         })
+    }
+
+    /// The instance clock this storage times its commits with ([`CommitClock`], microseconds
+    /// since the Unix epoch, never going back), so a [`Graph`](crate::graph::Graph) and the
+    /// system journal share it: a record about a commit is never earlier than the commit.
+    /// A storage that embeds [`CommitHooks`](crate::graph::CommitHooks) returns
+    /// `Some(hooks.clock())` and times its commits with
+    /// [`CommitHooks::commit_time`](crate::graph::CommitHooks::commit_time); a wrapper forwards.
+    ///
+    /// Default: `Ok(None)` (the storage times its commits itself; a `Graph` over it keeps a
+    /// clock of its own for its other times). `Err`: the storage cannot answer now.
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        Ok(None)
     }
 
     /// The commit sequence number of the last committed unit that changed something (`0`: none
@@ -2800,6 +2817,11 @@ impl GraphStorage for TraversalGraph {
         Ok(())
     }
 
+    /// The clock of the embedded [`CommitHooks`](crate::graph::CommitHooks).
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        Ok(Some(self.undo.hooks.clock()))
+    }
+
     #[inline]
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         Ok(self.commit_seq())
@@ -3239,6 +3261,12 @@ impl<G: GraphStorage> GraphStorage for &G {
         Err(GraphError::Unsupported {
             operation: READ_ONLY_MARK,
         })
+    }
+
+    /// The viewed storage's clock (reading it changes nothing the view could not).
+    #[inline]
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        (**self).commit_clock()
     }
 
     #[inline]
@@ -3706,6 +3734,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         hook: Box<dyn crate::graph::CommitHook>,
     ) -> Result<(), GraphError> {
         (**self).register_commit_hook(hook)
+    }
+
+    #[inline]
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        (**self).commit_clock()
     }
 
     #[inline]
@@ -4187,6 +4220,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         hook: Box<dyn crate::graph::CommitHook>,
     ) -> Result<(), GraphError> {
         (**self).register_commit_hook(hook)
+    }
+
+    #[inline]
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        (**self).commit_clock()
     }
 
     #[inline]
@@ -4848,6 +4886,12 @@ impl GraphStorage for Arc<TraversalGraph> {
                 reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
             }),
         }
+    }
+
+    /// The shared [`TraversalGraph`]'s clock.
+    #[inline]
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        GraphStorage::commit_clock(self.as_ref())
     }
 
     #[inline]

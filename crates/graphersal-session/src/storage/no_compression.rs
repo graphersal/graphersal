@@ -246,6 +246,9 @@ impl GraphStorage for NoCompression {
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
         GraphStorage::register_commit_hook(&mut self.0, hook)
     }
+    fn commit_clock(&self) -> Result<Option<graphersal::storage::CommitClock>, GraphError> {
+        GraphStorage::commit_clock(&self.0)
+    }
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         GraphStorage::last_commit_seq(&self.0)
     }

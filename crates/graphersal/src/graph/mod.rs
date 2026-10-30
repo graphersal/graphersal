@@ -18,6 +18,8 @@ pub mod capabilities;
 pub(crate) mod capture;
 /// Change capture: [`ChangeSet`] and [`Mutation`], what one committed unit changed.
 pub mod change;
+/// The instance clock ([`CommitClock`]) commit, mark and journal times share.
+pub mod clock;
 /// Compressed properties: compression rules ([`compression::CompressionDefinition`]) and their
 /// in-memory state.
 pub mod compression;
@@ -69,6 +71,7 @@ pub use capabilities::{IsolationLevel, StorageCapabilities};
 pub use change::{
     ChangeSet, ChangeSetBuilder, CommitMetadata, EdgeState, ElementRef, Mutation, VertexState,
 };
+pub use clock::CommitClock;
 pub use compression::{CompressionDefinition, CompressionStats};
 pub use compression_estimate::{CompressionEstimate, CompressionEstimateRequest};
 pub use definition::{Definition, DefinitionKind, QueryDefinition};
@@ -272,6 +275,7 @@ impl TraversalGraph {
     /// [`Self::with_last_commit_seq`]. The next commit's time is never earlier.
     pub fn with_last_committed_at(mut self, last_committed_at: i64) -> Self {
         self.undo.last_committed_at = last_committed_at;
+        self.undo.hooks.clock_ref().raise(last_committed_at);
         self
     }
 
@@ -306,7 +310,8 @@ impl TraversalGraph {
     /// The commit time of the last committed unit that changed something, in microseconds since
     /// the Unix epoch (UTC); `0` before the first commit. It is the
     /// [`ChangeSet::committed_at`] of that unit (also without commit hooks) and never goes
-    /// back: every commit takes `max(now, last_committed_at)`. [`Self::replay`] raises it to
+    /// back: every commit takes the instance clock's time ([`CommitHooks::commit_time`]:
+    /// `max(now, last_committed_at, the clock's floor)`). [`Self::replay`] raises it to
     /// the replayed change set's time. (With feature `persist` it is also
     /// `PersistentStorage::last_committed_at`.)
     pub fn last_committed_at(&self) -> i64 {

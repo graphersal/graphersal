@@ -834,6 +834,43 @@ pub fn transactional_panic_rolls_back<S: GraphStorage>(storage: &mut S) {
     assert_consistent(storage);
 }
 
+/// `change_capture` with a [`GraphStorage::commit_clock`]: the clock handed out is the one the
+/// storage times its commits with (the instance clock the system journal shares), so a commit
+/// is never earlier than its floor, also when the system clock is behind it (simulated by
+/// raising the floor an hour ahead). A storage that keeps no clock of its own (`Ok(None)`, the
+/// default) or does not capture changes is not checked.
+pub fn commit_clock_is_shared_with_hooks<S: GraphStorage>(storage: &mut S) {
+    if !storage.capabilities().unwrap().change_capture {
+        return;
+    }
+    let Some(clock) = storage.commit_clock().expect("commit_clock") else {
+        return;
+    };
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let hook = ContractHook {
+        accepted: accepted.clone(),
+        rollbacks: Arc::default(),
+        veto: Arc::default(),
+    };
+    storage
+        .register_commit_hook(Box::new(hook))
+        .expect("change_capture: hooks are supported");
+    let floor = clock.now() + 3_600_000_000;
+    clock.raise(floor);
+    let mark = storage.begin_unit().unwrap();
+    vertex(storage, Some("clocked"), &[], props(&[]));
+    storage.commit_unit(mark).expect("commit");
+    let sets = accepted.lock().map(|s| s.clone()).unwrap_or_default();
+    let times: Vec<i64> = sets.iter().map(ChangeSet::committed_at).collect();
+    assert_eq!(
+        times,
+        [floor],
+        "the commit is timed by the clock handed out"
+    );
+    let again = storage.commit_clock().unwrap().expect("the clock stays");
+    assert!(again.floor() >= floor, "clones share one floor");
+}
+
 /// The capabilities a reference `TraversalGraph` reports (for a backend's own comparisons).
 pub fn reference_capabilities() -> StorageCapabilities {
     graphersal::TraversalGraph::new().capabilities().unwrap()
