@@ -13,7 +13,7 @@ use graphersal::prelude::ElementProperty;
 use graphersal::schema::{GraphSchema, SchemaMode, SchemaPatch};
 use graphersal::script::{
     ScriptLimits, eval_value_atomic, eval_value_dry_run, eval_value_with_limits,
-    materialize_traversals,
+    materialize_traversals, with_traversal_presets,
 };
 use graphersal::storage::ElementKind;
 use graphersal::vector::EmbedJob;
@@ -38,7 +38,7 @@ use crate::script_thread::on_script_thread;
 pub struct Graph {
     inner: Arc<EngineGraph>,
     /// Resource limits of every script this graph runs: the SAFE defaults until `set_limits`.
-    limits: Mutex<ScriptLimits>,
+    limits: Mutex<GraphLimits>,
     /// The embedders of its scripts and `embed_property` (shared with the `Store` it came from).
     embedders: RegistryCell,
 }
@@ -54,7 +54,31 @@ fn effective_authorizer(policy: Option<&AccessPolicy>) -> Arc<dyn Authorizer> {
     }
 }
 
-/// The process memory ceiling of a `memory_limit=` argument: a positive number of bytes,
+/// What `set_limits` sets: the script's resource limits and the per-query defaults of the
+/// traversals it runs.
+#[derive(Clone, Default)]
+struct GraphLimits {
+    script: ScriptLimits,
+    /// The `traversal.max_materialized_bytes` default (`None`: the engine default).
+    max_materialized_bytes: Option<u64>,
+}
+
+impl GraphLimits {
+    /// The traversal presets of a run (`with_traversal_presets`).
+    fn traversal_presets(&self) -> Vec<(&'static str, ElementProperty)> {
+        self.max_materialized_bytes
+            .map(|bytes| {
+                (
+                    "traversal.max_materialized_bytes",
+                    ElementProperty::from(i64::try_from(bytes).unwrap_or(i64::MAX)),
+                )
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+/// The process memory ceiling of a `set_memory_limit` argument: a positive number of bytes,
 /// `"auto"` (the default: the cgroup memory limit minus the headroom, else 80 % of the physical
 /// memory) or `"none"` (no ceiling); `None`: not given.
 pub(crate) fn memory_limit_value(
@@ -100,29 +124,12 @@ pub(crate) fn set_process_memory_limit(
     Ok(())
 }
 
-/// Applies `memory_limit=` / `memory_headroom=` of a constructor to the process and returns
-/// `inner` unchanged (the ceiling is one setting of the whole process, not of this graph).
-fn with_memory_budget(
-    inner: EngineGraph,
-    memory_limit: Option<&Bound<'_, PyAny>>,
-    memory_headroom: Option<u64>,
-) -> PyResult<EngineGraph> {
-    let limit = memory_limit_value(memory_limit)?;
-    if limit.is_none() && memory_headroom.is_some() {
-        return Err(PyValueError::new_err(
-            "memory_headroom applies only to memory_limit=\"auto\"",
-        ));
-    }
-    set_process_memory_limit(limit, memory_headroom)?;
-    Ok(inner)
-}
-
 impl Graph {
     /// A Python graph over a graph another owner keeps (a `Store`'s), with its registry.
     pub(crate) fn from_shared(inner: Arc<EngineGraph>, embedders: RegistryCell) -> Self {
         Graph {
             inner,
-            limits: Mutex::new(ScriptLimits::default()),
+            limits: Mutex::new(GraphLimits::default()),
             embedders,
         }
     }
@@ -130,7 +137,7 @@ impl Graph {
     fn wrap(inner: EngineGraph, embedders: RegistryCell) -> Self {
         Graph {
             inner: Arc::new(inner),
-            limits: Mutex::new(ScriptLimits::default()),
+            limits: Mutex::new(GraphLimits::default()),
             embedders,
         }
     }
@@ -138,18 +145,10 @@ impl Graph {
 
 #[pymethods]
 impl Graph {
-    /// ``Graph(*, memory_limit=None, memory_headroom=None)``: a new, empty graph.
+    /// ``Graph(*, embedders=None, default_embedder=None)``: a new, empty graph.
     ///
-    /// ``memory_limit`` sets the PROCESS memory ceiling (``memory.limit``, the same as
-    /// ``graphersal.set_memory_limit``): ONE setting for every graph of this process, on by
-    /// default. A positive number of bytes, ``"auto"`` (the cgroup memory limit of the process
-    /// minus ``memory_headroom`` bytes, default a tenth of the limit, at least 64 MiB; else 80 %
-    /// of the physical memory) or ``"none"`` (no ceiling). A traversal, import or write that
-    /// would take the process over it raises ``GraphersalError`` and is rolled back, instead of
-    /// the process running out of memory. ``None`` (the default): the setting is left as it is.
-    /// It applies once the graph is built. The figure is the exact live Rust heap of the
-    /// extension (it installs the tracking allocator), which does not count Python objects: the
-    /// ceiling must leave room for the Python side of the process.
+    /// The process memory ceiling is not a keyword of a graph: it is one setting of the whole
+    /// process, ``graphersal.set_memory_limit``.
     ///
     /// ``embedders`` is a list of ``Embedder`` (also ``Model2Vec``) the graph's scripts
     /// (``embed()``, text queries in ``nearest``/``similarity``) and ``embed_property`` call,
@@ -157,43 +156,29 @@ impl Graph {
     /// call names none (default ``"hash-ngram/1"``). A duplicate or reserved name raises
     /// ``ValueError``. Every graph constructor and loader takes the same two keywords.
     #[new]
-    #[pyo3(signature = (*, memory_limit=None, memory_headroom=None, embedders=None, default_embedder=None))]
+    #[pyo3(signature = (*, embedders=None, default_embedder=None))]
     fn new(
-        memory_limit: Option<&Bound<'_, PyAny>>,
-        memory_headroom: Option<u64>,
         embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
         let registry = registry_of(embedders, default_embedder)?;
-        Ok(Graph::wrap(
-            with_memory_budget(GraphSource::empty(), memory_limit, memory_headroom)?,
-            registry,
-        ))
+        Ok(Graph::wrap(GraphSource::empty(), registry))
     }
 
-    /// ``Graph.tinkerpop_modern(*, memory_limit=None, memory_headroom=None)``: the standard
+    /// ``Graph.tinkerpop_modern(*, embedders=None, default_embedder=None)``: the standard
     /// TinkerPop "modern" toy graph (6 vertices, 6 edges). The keywords are those of ``Graph()``.
     #[staticmethod]
-    #[pyo3(signature = (*, memory_limit=None, memory_headroom=None, embedders=None, default_embedder=None))]
+    #[pyo3(signature = (*, embedders=None, default_embedder=None))]
     fn tinkerpop_modern(
-        memory_limit: Option<&Bound<'_, PyAny>>,
-        memory_headroom: Option<u64>,
         embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
         let registry = registry_of(embedders, default_embedder)?;
-        Ok(Graph::wrap(
-            with_memory_budget(
-                GraphSource::tinkerpop_modern(),
-                memory_limit,
-                memory_headroom,
-            )?,
-            registry,
-        ))
+        Ok(Graph::wrap(GraphSource::tinkerpop_modern(), registry))
     }
 
-    /// ``Graph.from_graphml(path, *, schema=None, mode=None, memory_limit=None,
-    /// memory_headroom=None)``: loads a graph from a GraphML file (see also
+    /// ``Graph.from_graphml(path, *, schema=None, mode=None, embedders=None,
+    /// default_embedder=None)``: loads a graph from a GraphML file (see also
     /// ``Graph.from_graphson``). Raises ``GraphersalError`` when the file cannot be read or
     /// parsed.
     ///
@@ -202,18 +187,15 @@ impl Graph {
     /// its own mode), then the file is imported into it as one unit: properties the schema
     /// declares ``uuid``, ``array`` or ``object`` come back with that type instead of as strings,
     /// and in ``open``/``closed`` a violation fails the load with the usual report. The other
-    /// keywords are those of ``Graph()``; the budget applies to the traversals after the load,
-    /// not to the load.
+    /// keywords are those of ``Graph()``.
     #[staticmethod]
-    #[pyo3(signature = (path, *, schema=None, mode=None, memory_limit=None, memory_headroom=None, embedders=None, default_embedder=None))]
+    #[pyo3(signature = (path, *, schema=None, mode=None, embedders=None, default_embedder=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_graphml(
         py: Python<'_>,
         path: &str,
         schema: Option<&Bound<'_, PyAny>>,
         mode: Option<String>,
-        memory_limit: Option<&Bound<'_, PyAny>>,
-        memory_headroom: Option<u64>,
         embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
@@ -232,14 +214,11 @@ impl Graph {
                 .map_err(|text: String| map_diagnostic(py, &text))?
             }
         };
-        Ok(Graph::wrap(
-            with_memory_budget(inner, memory_limit, memory_headroom)?,
-            registry,
-        ))
+        Ok(Graph::wrap(inner, registry))
     }
 
-    /// ``Graph.from_graphson(path, *, schema=None, mode=None, memory_limit=None,
-    /// memory_headroom=None)``: loads a graph from a GraphSON 3.0 file (one vertex per line,
+    /// ``Graph.from_graphson(path, *, schema=None, mode=None, embedders=None,
+    /// default_embedder=None)``: loads a graph from a GraphSON 3.0 file (one vertex per line,
     /// TinkerPop's default, or one ``{"vertices": [...]}`` document; 2.0 and untyped 1.0 read
     /// too). Data the import skips (dates, types Graphersal cannot hold, edges to missing
     /// vertices) is not an error: it is reported in one ``UserWarning``. Raises
@@ -247,15 +226,13 @@ impl Graph {
     /// as in ``Graph.from_graphml`` (set first, then the file imported as one unit; a violation
     /// in ``open``/``closed`` fails the load). The other keywords are those of ``Graph()``.
     #[staticmethod]
-    #[pyo3(signature = (path, *, schema=None, mode=None, memory_limit=None, memory_headroom=None, embedders=None, default_embedder=None))]
+    #[pyo3(signature = (path, *, schema=None, mode=None, embedders=None, default_embedder=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_graphson(
         py: Python<'_>,
         path: &str,
         schema: Option<&Bound<'_, PyAny>>,
         mode: Option<String>,
-        memory_limit: Option<&Bound<'_, PyAny>>,
-        memory_headroom: Option<u64>,
         embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
@@ -277,10 +254,7 @@ impl Graph {
             }
         };
         warn_graphson_skips(py, path, &report)?;
-        Ok(Graph::wrap(
-            with_memory_budget(inner, memory_limit, memory_headroom)?,
-            registry,
-        ))
+        Ok(Graph::wrap(inner, registry))
     }
 
     /// ``graph.import_graphml(path)``: imports a GraphML file into this live graph as one unit:
@@ -379,24 +353,27 @@ impl Graph {
         Ok(dict.into_any().unbind())
     }
 
-    /// ``Graph.load(path, *, memory_limit=None, memory_headroom=None)``: reads a packed
+    /// ``Graph.load(path, *, embedders=None, default_embedder=None)``: reads a packed
     /// snapshot written by ``graph.save``. No schema validation (the checksums protect the
-    /// data); a damaged file raises ``GraphersalError`` naming the section and byte. A numeric
-    /// ``memory_limit`` also refuses a snapshot whose size estimate does not fit; the keywords
-    /// are those of ``Graph()``.
+    /// data); a damaged file raises ``GraphersalError`` naming the section and byte. A snapshot
+    /// whose size estimate exceeds the process memory ceiling (``graphersal.set_memory_limit``)
+    /// is refused before any element is read. The keywords are those of ``Graph()``.
     #[staticmethod]
-    #[pyo3(signature = (path, *, memory_limit=None, memory_headroom=None, embedders=None, default_embedder=None))]
+    #[pyo3(signature = (path, *, embedders=None, default_embedder=None))]
     fn load(
         py: Python<'_>,
         path: &str,
-        memory_limit: Option<&Bound<'_, PyAny>>,
-        memory_headroom: Option<u64>,
         embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
         let registry = registry_of(embedders, default_embedder)?;
         let mut options = persist::ReadOptions::new();
-        if let Some(MemoryLimit::Bytes(bytes)) = memory_limit_value(memory_limit)? {
+        // The process memory ceiling also refuses a snapshot whose size estimate exceeds it,
+        // before any element is read.
+        if let Some(bytes) = graphersal::exec::memory_limit()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?
+            .bytes()
+        {
             options = options.with_memory_limit(bytes);
         }
         let source = path.to_string();
@@ -408,10 +385,7 @@ impl Graph {
                     .map_err(|err| format_diagnostic(&err))
             })
             .map_err(|text| map_diagnostic(py, &text))?;
-        Ok(Graph::wrap(
-            with_memory_budget(EngineGraph::new(graph), memory_limit, memory_headroom)?,
-            registry,
-        ))
+        Ok(Graph::wrap(EngineGraph::new(graph), registry))
     }
 
     /// ``graph.start_journal(path, *, durability="every_commit")``: attaches a journal
@@ -561,14 +535,21 @@ impl Graph {
     }
 
     /// ``graph.set_limits(*, max_operations=None, max_string_size=None, max_array_size=None,
-    /// max_map_size=None, max_value_depth=None, unlimited=False)``: changes the resource limits
-    /// of the scripts this graph runs. A new graph runs under the SAFE defaults (10M operations,
+    /// max_map_size=None, max_value_depth=None, max_materialized_bytes=None, unlimited=False)``:
+    /// changes the resource limits of the scripts this graph runs. A new graph runs under the SAFE defaults (10M operations,
     /// 16 MiB strings, 100k array items, 100k map entries, 128 levels of nested values);
     /// ``unlimited=True`` starts from no limits instead (the value depth stays 128). Each given
     /// keyword then overrides one field (``0`` means unlimited; for ``max_value_depth`` the
     /// default, since the depth is never unlimited). A script that hits a limit raises
     /// ``GraphersalError`` whose ``help`` names the field to raise.
-    #[pyo3(signature = (*, max_operations=None, max_string_size=None, max_array_size=None, max_map_size=None, max_value_depth=None, unlimited=false))]
+    ///
+    /// ``max_materialized_bytes`` is the default of the per-query memory limit
+    /// ``traversal.max_materialized_bytes`` of every traversal these scripts run (the estimated
+    /// size of one value or buffer a query materializes; ``None``: the library default, 1 GiB;
+    /// ``0`` means unlimited). A query's own ``g.with("traversal.max_materialized_bytes", n)``
+    /// overrides it. The process memory ceiling is ``graphersal.set_memory_limit``.
+    #[pyo3(signature = (*, max_operations=None, max_string_size=None, max_array_size=None, max_map_size=None, max_value_depth=None, max_materialized_bytes=None, unlimited=false))]
+    #[allow(clippy::too_many_arguments)]
     fn set_limits(
         &self,
         max_operations: Option<u64>,
@@ -576,6 +557,7 @@ impl Graph {
         max_array_size: Option<usize>,
         max_map_size: Option<usize>,
         max_value_depth: Option<usize>,
+        max_materialized_bytes: Option<u64>,
         unlimited: bool,
     ) {
         let mut limits = if unlimited {
@@ -598,6 +580,12 @@ impl Graph {
         if let Some(n) = max_value_depth {
             limits.max_value_depth = n;
         }
+        let limits = GraphLimits {
+            script: limits,
+            // 0 means unlimited, like the CLI's --max-materialized-bytes 0.
+            max_materialized_bytes: max_materialized_bytes
+                .map(|n| if n == 0 { u64::MAX } else { n }),
+        };
         // The whole value is replaced, so a lock poisoned by an earlier panic holds a
         // consistent value again afterwards: written through, then the poison cleared.
         *self
@@ -679,16 +667,18 @@ impl Graph {
             script,
             params,
             limits,
+            presets,
             authorizer,
         } = self.request(script, params, policy.as_deref())?;
         let graph = Arc::clone(&self.inner);
         let embedders = self.embedders.current();
         let AssertUngil(result) = py.detach(move || {
             on_script_thread(move || {
-                AssertUngil(
-                    embedders
-                        .scope(|| eval_value_dry_run(graph, &script, params, &limits, authorizer)),
-                )
+                AssertUngil(embedders.scope(|| {
+                    with_traversal_presets(&presets, || {
+                        eval_value_dry_run(graph, &script, params, &limits, authorizer)
+                    })
+                }))
             })
         });
         match result {
@@ -1565,6 +1555,8 @@ struct ScriptRequest {
     script: String,
     params: std::collections::HashMap<String, ElementProperty>,
     limits: ScriptLimits,
+    /// The traversal presets of `set_limits` (`with_traversal_presets`).
+    presets: Vec<(&'static str, ElementProperty)>,
     authorizer: Arc<dyn Authorizer>,
 }
 
@@ -1580,7 +1572,7 @@ impl Graph {
         let limits = self
             .limits
             .lock()
-            .map(|limits| limits.clone())
+            .map(|limits| (limits.script.clone(), limits.traversal_presets()))
             .map_err(|_| {
                 pyo3::exceptions::PyRuntimeError::new_err(
                     "the graph's limits lock is poisoned: a thread panicked while it held it",
@@ -1590,10 +1582,12 @@ impl Graph {
             None => Default::default(),
             Some(params) => python_params_to_element_properties(params)?,
         };
+        let (limits, presets) = limits;
         Ok(ScriptRequest {
             script: script.to_string(),
             params,
             limits,
+            presets,
             authorizer: effective_authorizer(policy),
         })
     }
@@ -1616,6 +1610,7 @@ impl Graph {
                     script,
                     params,
                     limits,
+                    presets,
                     authorizer,
                 } = request;
                 let eval = if atomic {
@@ -1626,10 +1621,13 @@ impl Graph {
                 // A traversal returned without a terminal runs as with `.to_list()`: Python gets
                 // data, never a traversal object (after the commit for `atomic=True`).
                 // The engine and scope `eval` builds take the graph's registry
-                // (`Embedders::scope`).
+                // (`Embedders::scope`), and the presets of `set_limits` reach every traversal
+                // source of the script (`with_traversal_presets`).
                 AssertUngil(embedders.scope(|| {
-                    eval(graph, &script, params, &limits, authorizer)
-                        .and_then(|value| materialize_traversals(value, limits.max_value_depth))
+                    with_traversal_presets(&presets, || {
+                        eval(graph, &script, params, &limits, authorizer)
+                            .and_then(|value| materialize_traversals(value, limits.max_value_depth))
+                    })
                 }))
             })
         });

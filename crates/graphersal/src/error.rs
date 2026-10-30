@@ -6000,7 +6000,7 @@ const MEMORY_CEILING_SETTING: &str = "The ceiling is ONE setting of the whole pr
      default (the cgroup memory limit minus 'memory.headroom' in a container, else 80 % of the \
      physical memory, 3.5 GiB in the browser). The host raises it or turns it off: the \
      graphersal command line takes --memory-limit <bytes|auto|none> (and --memory-headroom), the \
-     Python binding graphersal.set_memory_limit(...) or Graph(memory_limit=...), a Rust host \
+     Python binding graphersal.set_memory_limit(...), a Rust host \
      graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
      off). A query cannot set it.";
 

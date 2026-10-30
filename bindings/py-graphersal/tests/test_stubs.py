@@ -28,7 +28,9 @@ def test_stub_all_matches_the_runtime_module():
     stub_all = {ast.literal_eval(elt) for elt in exported.elts}
     assert stub_all == runtime_public_names()
     stub_classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
-    assert stub_classes == stub_all
+    # The module-level functions (`set_memory_limit`, `memory_limit`) are exported too.
+    stub_functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    assert stub_classes | stub_functions == stub_all
 
 
 def test_stub_methods_exist_at_runtime_and_vice_versa():

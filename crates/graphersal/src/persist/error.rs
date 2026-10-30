@@ -868,7 +868,7 @@ impl DiagnosticError for PersistError {
                  cannot read). Do not run graphersal store repair on it with this version."
                 .to_string(),
             PersistError::MemoryBudget { .. } => "Raise the memory limit of the load \
-                 (ReadOptions::with_memory_limit, Python memory_limit=...) or load the graph on \
+                 (ReadOptions::with_memory_limit, in Python the process ceiling graphersal.set_memory_limit(...)) or load the graph on \
                  a machine with more memory."
                 .to_string(),
             PersistError::LineageMismatch { .. } => "Recover each graph from its own snapshot \

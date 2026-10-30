@@ -23,6 +23,8 @@ __all__ = [
     "CommitRejectedError",
     "EmbedPropertyError",
     "ReturnedClosureError",
+    "set_memory_limit",
+    "memory_limit",
 ]
 
 #: A value a script parameter may take (a ``Vertex``/``Edge`` by its id and label). The date and
@@ -374,8 +376,6 @@ class Graph:
     def __init__(
         self,
         *,
-        memory_limit: Union[int, Literal["auto", "none"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> None:
@@ -386,21 +386,11 @@ class Graph:
         names the one used when a call names none (default ``"hash-ngram/1"``). A duplicate or
         reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
 
-        ``memory_limit``: sets the PROCESS memory ceiling, like ``set_memory_limit`` (one
-        setting for every graph of the process, on by default), once the graph is built: bytes,
-        ``"auto"`` (the cgroup memory limit of the process minus ``memory_headroom`` bytes, else
-        80 % of the physical memory) or ``"none"`` (no ceiling). A traversal, import or write
-        that would exceed it raises ``GraphersalError`` and is rolled back. ``None`` (the
-        default): the setting is left as it is.
-
-        The ceiling is compared with the exact live Rust heap of the extension (it installs a
-        tracking allocator), which does not count Python objects: leave room for the Python
-        side of the process."""
+        The process memory ceiling is not a keyword of a graph: it is one setting of the whole
+        process, ``set_memory_limit``."""
     @staticmethod
     def tinkerpop_modern(
         *,
-        memory_limit: Union[int, Literal["auto", "none"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -412,8 +402,6 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto", "none"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -429,8 +417,6 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto", "none"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
@@ -459,14 +445,13 @@ class Graph:
     def load(
         path: str,
         *,
-        memory_limit: Union[int, Literal["auto", "none"], None] = None,
-        memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
     ) -> Graph:
         """Reads a packed snapshot written by ``save`` (no schema validation; damage raises
-        ``GraphersalError``). A numeric ``memory_limit`` also refuses a snapshot whose size
-        estimate does not fit; the keywords are those of ``Graph()``."""
+        ``GraphersalError``). A snapshot whose size estimate exceeds the process memory ceiling
+        (``set_memory_limit``) is refused before any element is read; the keywords are those of
+        ``Graph()``."""
     def start_journal(
         self, path: str, *, durability: Union[Literal["every_commit", "os"], float, None] = None
     ) -> None:
@@ -497,11 +482,15 @@ class Graph:
         max_array_size: Optional[int] = None,
         max_map_size: Optional[int] = None,
         max_value_depth: Optional[int] = None,
+        max_materialized_bytes: Optional[int] = None,
         unlimited: bool = False,
     ) -> None:
         """Changes the resource limits of the scripts this graph runs (``0`` = unlimited;
         ``max_value_depth``, the deepest nesting of lists and maps in one value, is never
-        unlimited: ``0`` means its default, 128)."""
+        unlimited: ``0`` means its default, 128). ``max_materialized_bytes`` is the default of
+        the per-query memory limit ``traversal.max_materialized_bytes`` of every traversal these
+        scripts run (``None``: the library default, 1 GiB); a query's own ``g.with(..)``
+        overrides it."""
     def get_schema(self, *, policy: Optional[AccessPolicy] = None) -> Optional[dict[str, Any]]:
         """The stored schema (the schema format as a ``dict``), or ``None`` without one. Never
         inferred."""

@@ -5833,7 +5833,6 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         "ONE setting of the whole process, on by default",
         "--memory-limit <bytes|auto|none>",
         "graphersal.set_memory_limit(...)",
-        "Graph(memory_limit=...)",
         "graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))",
         "'memory.headroom'",
     ] {

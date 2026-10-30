@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{TraverserError, TraverserResult};
 
-/// The name of the process setting (the error's `limit`, `--memory-limit`, `memory_limit=`).
+/// The name of the process setting (the error's `limit`, `--memory-limit`, Python `set_memory_limit`).
 pub(crate) const MEMORY_LIMIT: &str = "memory.limit";
 
 /// The name of the headroom `auto` keeps below a cgroup limit (`--memory-headroom`).

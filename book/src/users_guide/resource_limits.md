@@ -319,7 +319,10 @@ changed.
   `--max-map-size` and `--max-traversers` set one limit (`0` is unlimited; `--max-string-size`
   also sets `traversal.max_string_bytes`, which follows the script's string limit and is
   unlimited by default). `--max-value-depth <n>` sets `script.max_value_depth` and
-  `traversal.max_value_depth` (`0` is the default, 128). `--memory-limit <bytes|auto|none>` (and
+  `traversal.max_value_depth` (`0` is the default, 128). `--max-materialized-bytes <n>` sets
+  the default of the per-query memory limit `traversal.max_materialized_bytes` (`0` is
+  unlimited; without it the library default, 1 GiB, applies); a query's own `g.with(..)`
+  overrides it. `--memory-limit <bytes|auto|none>` (and
   `--memory-headroom <bytes>`) sets the [process memory ceiling](#the-process-memory-ceiling),
   measured on the live heap (the CLI installs the tracking allocator); no flag keeps the default
   (`auto`), `none` or `0` turns it off. With `--server` it covers every session of the server.
@@ -330,11 +333,13 @@ changed.
   browser); the process memory ceiling is the `wasm32` default, 3.5 GiB of tracked heap. Its Stop
   button restarts the engine to end a runaway query.
 - **Python**: SAFE defaults; `graph.set_limits(max_operations=..., max_value_depth=...,
-  unlimited=True, ...)`. The process memory ceiling is set with
+  max_materialized_bytes=..., unlimited=True, ...)`; `max_materialized_bytes` is the default of
+  the per-query memory limit `traversal.max_materialized_bytes` for every traversal of that
+  graph's scripts (a query's own `g.with(..)` overrides it). The process memory ceiling is not
+  a keyword of a graph: it is set with
   `graphersal.set_memory_limit(bytes | "auto" | "none", headroom=...)` and read with
-  `graphersal.memory_limit()`; the `memory_limit=`/`memory_headroom=` keywords of `Graph(..)`,
-  `Graph.tinkerpop_modern`, `Graph.from_graphml`, `Graph.from_graphson` and `Graph.load` set the
-  same process-wide value once the graph is built. It is measured on the live Rust heap of the
+  `graphersal.memory_limit()`, one value for the whole process; `Graph.load` also refuses a
+  snapshot whose size estimate exceeds it. It is measured on the live Rust heap of the
   extension (the binding installs the tracking allocator); Python objects are not counted, so
   leave room for the Python side of the process. Scripts run on a worker
   thread with a 64 MiB stack (one per calling Python thread).
