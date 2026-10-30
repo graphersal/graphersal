@@ -5,7 +5,7 @@ traversal engine). Shipped in the wheel by maturin together with a `py.typed` ma
 import datetime
 import os
 import uuid
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, Union
 
 __all__ = [
     "Graph",
@@ -278,6 +278,22 @@ _Action = Literal["read", "create", "update", "delete", "execute", "custom", "*"
 #: The name of a resource kind of an ``AccessPolicy`` rule (``"*"``: every one).
 _Resource = Literal["data", "schema", "file", "option", "definition", "custom", "embedder", "*"]
 
+def set_memory_limit(
+    limit: Union[int, Literal["auto", "none"]], *, headroom: Optional[int] = None
+) -> None:
+    """Sets the PROCESS memory ceiling (``memory.limit``): one setting for every graph of this
+    Python process, on by default. ``limit``: a positive number of bytes, ``"auto"`` (the
+    default: the cgroup memory limit minus ``headroom`` bytes, default a tenth of the limit, at
+    least 64 MiB; else 80 % of the physical memory) or ``"none"`` (no ceiling). A query, import
+    or write that would take the process's live Rust heap over it raises ``GraphersalError`` and
+    is rolled back. Python objects are not counted: leave room for them. A bad value raises
+    ``ValueError``/``TypeError``."""
+
+def memory_limit() -> Dict[str, Any]:
+    """The process memory ceiling in effect: ``{"bytes": int | None, "source": "configured" |
+    "cgroup" | "physical" | "wasm" | "none" | "unknown", "setting": "auto" | "none" | "<bytes>",
+    "headroom": int | None}``."""
+
 class GraphersalError(Exception):
     """Raised for any script/engine error: parse errors, traversal failures, GraphSON/GraphML import
     errors. Subclasses name the failures a caller handles on purpose."""
@@ -358,7 +374,7 @@ class Graph:
     def __init__(
         self,
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
+        memory_limit: Union[int, Literal["auto", "none"], None] = None,
         memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
@@ -370,18 +386,20 @@ class Graph:
         names the one used when a call names none (default ``"hash-ngram/1"``). A duplicate or
         reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
 
-        ``memory_limit``: the memory budget of every traversal on this graph, in bytes, or
-        ``"auto"`` (the cgroup memory limit of the process minus ``memory_headroom`` bytes;
-        no budget without a cgroup limit). A traversal that would exceed it raises
-        ``GraphersalError`` and is rolled back. ``None`` (the default): no budget.
+        ``memory_limit``: sets the PROCESS memory ceiling, like ``set_memory_limit`` (one
+        setting for every graph of the process, on by default), once the graph is built: bytes,
+        ``"auto"`` (the cgroup memory limit of the process minus ``memory_headroom`` bytes, else
+        80 % of the physical memory) or ``"none"`` (no ceiling). A traversal, import or write
+        that would exceed it raises ``GraphersalError`` and is rolled back. ``None`` (the
+        default): the setting is left as it is.
 
-        The budget is compared with the exact live Rust heap of the extension (it installs a
-        tracking allocator), which does not count Python objects: with ``"auto"`` choose a
-        ``memory_headroom`` that also covers the Python side of the process."""
+        The ceiling is compared with the exact live Rust heap of the extension (it installs a
+        tracking allocator), which does not count Python objects: leave room for the Python
+        side of the process."""
     @staticmethod
     def tinkerpop_modern(
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
+        memory_limit: Union[int, Literal["auto", "none"], None] = None,
         memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
@@ -394,7 +412,7 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto"], None] = None,
+        memory_limit: Union[int, Literal["auto", "none"], None] = None,
         memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
@@ -411,7 +429,7 @@ class Graph:
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        memory_limit: Union[int, Literal["auto"], None] = None,
+        memory_limit: Union[int, Literal["auto", "none"], None] = None,
         memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,
@@ -441,7 +459,7 @@ class Graph:
     def load(
         path: str,
         *,
-        memory_limit: Union[int, Literal["auto"], None] = None,
+        memory_limit: Union[int, Literal["auto", "none"], None] = None,
         memory_headroom: Optional[int] = None,
         embedders: Optional[Sequence[Embedder]] = None,
         default_embedder: Optional[str] = None,

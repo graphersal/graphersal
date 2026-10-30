@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use graphersal::error::format_diagnostic;
-use graphersal::exec::CancelToken;
+use graphersal::exec::{CancelToken, MemoryLimit};
 use graphersal::io::{GraphExport, GraphImport, ImportReport};
 use graphersal::persist;
 use graphersal::prelude::ElementProperty;
@@ -18,7 +18,7 @@ use graphersal::script::{
 use graphersal::storage::ElementKind;
 use graphersal::vector::EmbedJob;
 use graphersal::{GraphSource, prelude::Graph as EngineGraph};
-use graphersal::{auth::Authorizer, exec::ExecutionPolicy, storage::GraphStorage};
+use graphersal::{auth::Authorizer, storage::GraphStorage};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -54,59 +54,67 @@ fn effective_authorizer(policy: Option<&AccessPolicy>) -> Arc<dyn Authorizer> {
     }
 }
 
-/// The `memory.limit` value of a `memory_limit=` argument: a positive number of bytes or
-/// `"auto"` (the cgroup memory limit minus the headroom); `None` is no budget.
-fn memory_limit_value(limit: Option<&Bound<'_, PyAny>>) -> PyResult<Option<ElementProperty>> {
+/// The process memory ceiling of a `memory_limit=` argument: a positive number of bytes,
+/// `"auto"` (the default: the cgroup memory limit minus the headroom, else 80 % of the physical
+/// memory) or `"none"` (no ceiling); `None`: not given.
+pub(crate) fn memory_limit_value(
+    limit: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<MemoryLimit>> {
     let Some(limit) = limit else {
         return Ok(None);
     };
     if let Ok(text) = limit.extract::<String>() {
-        if text.eq_ignore_ascii_case("auto") {
-            return Ok(Some(ElementProperty::from("auto")));
+        let trimmed = text.trim();
+        if trimmed.eq_ignore_ascii_case("auto") || trimmed.eq_ignore_ascii_case("none") {
+            return trimmed
+                .parse::<MemoryLimit>()
+                .map(Some)
+                .map_err(|err| PyValueError::new_err(err.to_string()));
         }
         return Err(PyValueError::new_err(format!(
-            "memory_limit must be a positive number of bytes or \"auto\", got {text:?}"
+            "memory_limit must be a positive number of bytes, \"auto\" or \"none\", got {text:?}"
         )));
     }
     match limit.extract::<i64>() {
-        Ok(bytes) if bytes >= 1 => Ok(Some(ElementProperty::from(bytes))),
+        Ok(bytes) if bytes >= 1 => Ok(Some(MemoryLimit::Bytes(bytes as u64))),
         Ok(bytes) => Err(PyValueError::new_err(format!(
-            "memory_limit must be a positive number of bytes or \"auto\", got {bytes}"
+            "memory_limit must be a positive number of bytes, \"auto\" or \"none\", got {bytes}"
         ))),
         Err(_) => Err(PyTypeError::new_err(
-            "memory_limit must be an int (bytes), \"auto\" or None",
+            "memory_limit must be an int (bytes), \"auto\", \"none\" or None",
         )),
     }
 }
 
-/// Puts the memory budget into the execution policy of `inner` (a default every traversal runs
-/// under; a script's own `g.with("memory.limit", ..)` needs `Update` on that option). Nothing
-/// changes without a limit.
+/// Sets the process memory ceiling (`limit` `None`: unchanged) and the headroom of `auto`.
+pub(crate) fn set_process_memory_limit(
+    limit: Option<MemoryLimit>,
+    headroom: Option<u64>,
+) -> PyResult<()> {
+    let runtime =
+        |err: Box<graphersal::prelude::TraverserError>| PyValueError::new_err(err.to_string());
+    if let Some(limit) = limit {
+        graphersal::exec::set_memory_limit(limit).map_err(runtime)?;
+        graphersal::exec::set_memory_headroom(headroom).map_err(runtime)?;
+    }
+    Ok(())
+}
+
+/// Applies `memory_limit=` / `memory_headroom=` of a constructor to the process and returns
+/// `inner` unchanged (the ceiling is one setting of the whole process, not of this graph).
 fn with_memory_budget(
     inner: EngineGraph,
     memory_limit: Option<&Bound<'_, PyAny>>,
     memory_headroom: Option<u64>,
 ) -> PyResult<EngineGraph> {
-    let Some(limit) = memory_limit_value(memory_limit)? else {
-        if memory_headroom.is_some() {
-            return Err(PyValueError::new_err(
-                "memory_headroom applies only to memory_limit=\"auto\"",
-            ));
-        }
-        return Ok(inner);
-    };
-    let graph = inner.into_inner();
-    let mut policy: ExecutionPolicy = graph
-        .execution_policy()
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?
-        .with_default("memory.limit", limit);
-    if let Some(headroom) = memory_headroom {
-        policy = policy.with_default(
-            "memory.headroom",
-            i64::try_from(headroom).unwrap_or(i64::MAX),
-        );
+    let limit = memory_limit_value(memory_limit)?;
+    if limit.is_none() && memory_headroom.is_some() {
+        return Err(PyValueError::new_err(
+            "memory_headroom applies only to memory_limit=\"auto\"",
+        ));
     }
-    Ok(EngineGraph::new(graph.with_execution_policy(policy)))
+    set_process_memory_limit(limit, memory_headroom)?;
+    Ok(inner)
 }
 
 impl Graph {
@@ -132,14 +140,16 @@ impl Graph {
 impl Graph {
     /// ``Graph(*, memory_limit=None, memory_headroom=None)``: a new, empty graph.
     ///
-    /// ``memory_limit`` is the memory budget of every traversal on this graph (``memory.limit``):
-    /// a positive number of bytes, or ``"auto"`` for the cgroup memory limit of the process
-    /// (Linux containers) minus ``memory_headroom`` bytes (default a tenth of the limit, at least
-    /// 64 MiB). A traversal that would exceed it raises ``GraphersalError`` and is rolled back,
-    /// instead of the process running out of memory. ``None`` (the default): no budget. The
-    /// figure is the exact live Rust heap of the extension (it installs the tracking allocator),
-    /// which does not count Python objects: with ``"auto"``, ``memory_headroom`` must also cover
-    /// the Python side of the process.
+    /// ``memory_limit`` sets the PROCESS memory ceiling (``memory.limit``, the same as
+    /// ``graphersal.set_memory_limit``): ONE setting for every graph of this process, on by
+    /// default. A positive number of bytes, ``"auto"`` (the cgroup memory limit of the process
+    /// minus ``memory_headroom`` bytes, default a tenth of the limit, at least 64 MiB; else 80 %
+    /// of the physical memory) or ``"none"`` (no ceiling). A traversal, import or write that
+    /// would take the process over it raises ``GraphersalError`` and is rolled back, instead of
+    /// the process running out of memory. ``None`` (the default): the setting is left as it is.
+    /// It applies once the graph is built. The figure is the exact live Rust heap of the
+    /// extension (it installs the tracking allocator), which does not count Python objects: the
+    /// ceiling must leave room for the Python side of the process.
     ///
     /// ``embedders`` is a list of ``Embedder`` (also ``Model2Vec``) the graph's scripts
     /// (``embed()``, text queries in ``nearest``/``similarity``) and ``embed_property`` call,
@@ -386,10 +396,8 @@ impl Graph {
     ) -> PyResult<Self> {
         let registry = registry_of(embedders, default_embedder)?;
         let mut options = persist::ReadOptions::new();
-        if let Some(ElementProperty::Number(bytes)) = memory_limit_value(memory_limit)?
-            && let Some(bytes) = bytes.as_i64()
-        {
-            options = options.with_memory_limit(u64::try_from(bytes).unwrap_or(0));
+        if let Some(MemoryLimit::Bytes(bytes)) = memory_limit_value(memory_limit)? {
+            options = options.with_memory_limit(bytes);
         }
         let source = path.to_string();
         let graph = py

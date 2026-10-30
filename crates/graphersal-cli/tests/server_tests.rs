@@ -1300,8 +1300,9 @@ fn the_limit_options_are_session_presets() {
     // /api/info reports what applies.
     let presets = get(port, "/api/info").json()["presets"].clone();
     assert_eq!(presets["options"]["evaluationTimeout"], 200, "{presets}");
-    assert_eq!(presets["options"]["memory.limit"], 64000000, "{presets}");
-    assert_eq!(presets["options"]["memory.headroom"], 1000000, "{presets}");
+    // --memory-limit / --memory-headroom set the process memory ceiling, not a preset.
+    assert!(presets["options"]["memory.limit"].is_null(), "{presets}");
+    assert!(presets["options"]["memory.headroom"].is_null(), "{presets}");
     assert_eq!(
         presets["options"]["traversal.max_traversers"], 3,
         "{presets}"

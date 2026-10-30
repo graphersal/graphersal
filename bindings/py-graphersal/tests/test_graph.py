@@ -387,6 +387,36 @@ def test_memory_budget_fails_an_oversized_traversal_and_rolls_back():
         graphersal.Graph(memory_headroom=10)
 
 
+def test_the_process_memory_ceiling_is_on_by_default_and_can_be_turned_off():
+    try:
+        limit = graphersal.memory_limit()
+        assert set(limit) == {"bytes", "source", "setting", "headroom"}
+        assert limit["source"] in {"cgroup", "physical", "configured"}
+        graphersal.set_memory_limit(1000)
+        assert graphersal.memory_limit()["bytes"] == 1000
+        assert graphersal.memory_limit()["source"] == "configured"
+        graph = graphersal.Graph.tinkerpop_modern()
+        with pytest.raises(graphersal.GraphersalError) as excinfo:
+            graph.execute("g.v().count().next()")
+        assert "memory.limit" in str(excinfo.value)
+        assert "The figure is tracked" in (excinfo.value.help or "")
+        graphersal.set_memory_limit("none")
+        assert graphersal.memory_limit()["source"] == "none"
+        assert graph.execute("g.v().count().next()") == 6
+        # The constructor keyword sets the same process-wide value.
+        graphersal.Graph(memory_limit=1 << 40)
+        assert graphersal.memory_limit()["bytes"] == 1 << 40
+        for bad, error in [("lots", ValueError), (0, ValueError), (1.5, TypeError)]:
+            with pytest.raises(error):
+                graphersal.set_memory_limit(bad)
+        # Not an option of a query.
+        with pytest.raises(graphersal.GraphersalError):
+            graph.execute('g.with("memory.limit", 1000).v().count().next()')
+    finally:
+        graphersal.set_memory_limit("auto")
+    assert graphersal.memory_limit()["setting"] == "auto"
+
+
 def test_memory_profile_reports_tracked_bytes():
     # The extension installs `TrackingAllocator`: exact allocator figures, not estimates.
     graph = graphersal.Graph.tinkerpop_modern()
