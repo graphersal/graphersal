@@ -639,7 +639,7 @@ mod tests {
     }
 
     /// The job's limits reach the traversals it runs: its timeout caps their
-    /// `evaluationTimeout`, its memory limit their `memory.limit`.
+    /// `evaluationTimeout`, its memory limit their `traversal.max_materialized_bytes`.
     #[test]
     fn limits_reach_the_traversals_of_a_run() {
         use crate::graph::TraversalGraph;
@@ -670,12 +670,21 @@ mod tests {
         )
         .unwrap();
         s.add(
-            Job::new(
-                "greedy",
-                JobKind::User,
-                "* * * * *".parse().unwrap(),
-                work(graph.clone()),
-            )
+            Job::new("greedy", JobKind::User, "* * * * *".parse().unwrap(), {
+                // A traversal that materializes a value (`count()` stays lazy).
+                let graph = graph.clone();
+                move |_run: &JobContext| {
+                    let graph = graph.lock();
+                    crate::GraphTraversalSource::new(&*graph)
+                        .v(None)
+                        .repeat(crate::traversal::__::both(None))
+                        .times(3)
+                        .fold()
+                        .next()
+                        .map(|_| ())
+                        .map_err(|err| crate::error::format_diagnostic(&*err))
+                }
+            })
             .with_limits(JobLimits::new().with_memory_limit(1)),
         )
         .unwrap();
@@ -697,7 +706,7 @@ mod tests {
             error(0)
         );
         assert!(
-            error(1).is_some_and(|e| e.contains("memory.limit")),
+            error(1).is_some_and(|e| e.contains("traversal.max_materialized_bytes")),
             "{:?}",
             error(1)
         );

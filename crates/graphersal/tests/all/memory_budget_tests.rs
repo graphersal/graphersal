@@ -480,3 +480,67 @@ fn a_script_import_is_checked_against_the_ceiling() {
     assert_eq!(graph.read().vertex_count(), 106);
     let _ = std::fs::remove_file(&path);
 }
+
+/// Runs `script` on `graph` as a job with a memory limit of `bytes` per run; the run's error.
+fn job_error(graph: &Arc<Graph>, bytes: u64, script: &'static str) -> Option<String> {
+    use graphersal::jobs::{Job, JobKind, JobLimits, Scheduler};
+    let target = graph.clone();
+    let mut scheduler = Scheduler::new();
+    scheduler
+        .add(
+            Job::new(
+                "bounded",
+                JobKind::User,
+                "* * * * *".parse().unwrap(),
+                move |_run| run(&target, script).map(|_| ()),
+            )
+            .with_limits(JobLimits::new().with_memory_limit(bytes)),
+        )
+        .unwrap();
+    scheduler.run_now("bounded", 1_800_000_000_000_000).unwrap();
+    let jobs = scheduler.jobs();
+    jobs[0].last.as_ref().unwrap().error.clone()
+}
+
+#[test]
+fn a_job_memory_limit_is_the_per_query_limit_not_the_process_ceiling() {
+    let graph = modern();
+    let footprint = footprint(&graph);
+    // Below the memory the graph (and so the process) already holds: as a process ceiling it
+    // would fail every query at once; as the per-query limit it bounds what the query holds.
+    let below_the_graph = (footprint / 2).max(1);
+    assert_eq!(
+        job_error(&graph, below_the_graph, "g.v().count().next()"),
+        None
+    );
+    // A query that materializes more than the limit fails on the per-query key.
+    let error = job_error(&graph, 1024, "g.v().both().both().both().fold().next()")
+        .expect("the fold is over the job's limit");
+    assert!(
+        error.contains("traversal.max_materialized_bytes"),
+        "{error}"
+    );
+    assert!(!error.contains("memory.limit"), "{error}");
+    // A query's own stricter value stays.
+    let error = job_error(
+        &graph,
+        1 << 30,
+        r#"g.with("traversal.max_materialized_bytes", 1024).v().both().both().both().fold().next()"#,
+    )
+    .expect("the query's own limit applies");
+    assert!(
+        error.contains("traversal.max_materialized_bytes"),
+        "{error}"
+    );
+    // ... and a larger own value does not lift the job's limit.
+    let error = job_error(
+        &graph,
+        1024,
+        r#"g.with("traversal.max_materialized_bytes", 1 << 30).v().both().both().both().fold().next()"#,
+    )
+    .expect("the job's limit caps the query's own value");
+    assert!(
+        error.contains("traversal.max_materialized_bytes"),
+        "{error}"
+    );
+}

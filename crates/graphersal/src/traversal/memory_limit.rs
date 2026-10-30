@@ -354,18 +354,16 @@ pub fn memory_limit_scope<R>(bytes: u64, run: impl FnOnce() -> R) -> R {
 }
 
 /// The ceiling an execution or unit on this thread runs under, in bytes (`None`: none): the
-/// process ceiling, lowered by a running job's memory limit and a test scope.
+/// process ceiling, lowered by a test scope. A scheduled job's memory limit is not part of it:
+/// it is the per-execution limit `traversal.max_materialized_bytes` of the job's traversals
+/// (`ExecutionOptions::parse`).
 #[inline]
 pub(crate) fn effective_limit() -> Option<u64> {
-    let mut limit = process_limit();
-    let mut lower = |cap: Option<u64>| {
-        if let Some(cap) = cap {
-            limit = Some(limit.map_or(cap, |limit| limit.min(cap)));
-        }
-    };
-    lower(SCOPED.try_with(Cell::get).ok().flatten());
-    lower(crate::graph::jobs::limits::current().and_then(|job| job.memory_limit));
-    limit
+    let limit = process_limit();
+    match SCOPED.try_with(Cell::get).ok().flatten() {
+        Some(cap) => Some(limit.map_or(cap, |limit| limit.min(cap))),
+        None => limit,
+    }
 }
 
 /// The error of an invalid `memory.limit` value `text`.

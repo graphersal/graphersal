@@ -758,8 +758,8 @@ pub(crate) struct ExecutionOptions {
     pub(crate) max_materialized_bytes: u64,
     /// `traversal.max_string_bytes`: the longest string a step may build.
     pub(crate) max_string_bytes: u64,
-    /// The process memory ceiling `memory.limit` the run is checked against (lowered by a
-    /// running job's memory limit; [`crate::traversal::memory_limit::effective_limit`]), `None`
+    /// The process memory ceiling `memory.limit` the run is checked against
+    /// ([`crate::traversal::memory_limit::effective_limit`]), `None`
     /// without one. Not an execution option: read from the process setting when the options are
     /// parsed, with no starting point; the run takes it ([`MemoryBudget::start`]) before the
     /// first step.
@@ -878,17 +878,21 @@ impl ExecutionOptions {
         }
         reject_process_setting(MEMORY_LIMIT, options, policy)?;
         reject_process_setting(MEMORY_HEADROOM, options, policy)?;
-        // The process memory ceiling, lowered by a running job's memory limit.
+        // The process memory ceiling (process-wide; a job does not change it).
         parsed.memory = crate::traversal::memory_limit::effective_limit().map(MemoryBudget::new);
-        // A scheduled job's limits cap the run's own (the stricter value stays).
-        if let Some(job) = crate::graph::jobs::limits::current()
-            && let Some(remaining) = job.remaining()
-        {
-            parsed.evaluation_timeout = Some(
-                parsed
-                    .evaluation_timeout
-                    .map_or(remaining, |own| own.min(remaining)),
-            );
+        // A scheduled job's limits cap the run's own (the stricter value stays): its remaining
+        // time caps `evaluationTimeout`, its memory limit `traversal.max_materialized_bytes`.
+        if let Some(job) = crate::graph::jobs::limits::current() {
+            if let Some(remaining) = job.remaining() {
+                parsed.evaluation_timeout = Some(
+                    parsed
+                        .evaluation_timeout
+                        .map_or(remaining, |own| own.min(remaining)),
+                );
+            }
+            if let Some(bytes) = job.memory_limit {
+                parsed.max_materialized_bytes = parsed.max_materialized_bytes.min(bytes.max(1));
+            }
         }
         if let Some(name) = parsed
             .optimizer_disabled

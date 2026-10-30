@@ -284,10 +284,10 @@ pub(crate) struct UnitBudget {
 }
 
 impl UnitBudget {
-    /// The ceiling of a unit `operation` on `storage` (the process ceiling, lowered by a running
-    /// job's memory limit), started on `storage` as it is now (no walk of the graph far below the
-    /// ceiling, see [`MemoryBudget::start`]). `None` when there is no ceiling. `Err`: the storage
-    /// cannot measure itself (the unit fails before it starts).
+    /// The ceiling of a unit `operation` on `storage` (the process ceiling), started on
+    /// `storage` as it is now (no walk of the graph far below the ceiling, see
+    /// [`MemoryBudget::start`]). `None` when there is no ceiling. `Err`: the storage cannot
+    /// measure itself (the unit fails before it starts).
     pub(crate) fn start<S: GraphStorage + ?Sized>(
         storage: &S,
         operation: &'static str,

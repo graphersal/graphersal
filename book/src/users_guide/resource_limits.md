@@ -195,8 +195,10 @@ exec::set_memory_headroom(Some(256 << 20)).unwrap();          // for a cgroup li
 `auto` or `none`. It is **not an execution option**: a query's `g.with("memory.limit", ..)` (or
 `memory.headroom`), an `ExecutionPolicy` default or a session preset of these keys fails with
 `InvalidOption`, whose `help()` names the process setting (changed in 0.5.0; before, the budget
-was an opt-in option per execution). A scheduled job's `memory_limit` still lowers the ceiling
-for the queries of its run.
+was an opt-in option per execution). A scheduled job's `memory_limit` does not touch the
+ceiling: it is the per-query limit `traversal.max_materialized_bytes` of every traversal the
+job's run executes (the smaller of the two values; see
+[Scheduled jobs](../persistence/scheduled_jobs.md#limits-per-run)).
 
 What is compared with the ceiling (the error's `help()` says which one applied):
 
