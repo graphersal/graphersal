@@ -834,29 +834,17 @@ impl GraphSONImport {
     /// [`IOError::Graph`] holding a `GraphError::CommitRejected`). Skipped data is not a failure:
     /// it is listed in the returned report.
     ///
-    /// Under a memory budget (a `memory.limit` default of the graph's
-    /// [`ExecutionPolicy`](crate::graph::ExecutionPolicy)) the import checks it every 4096
-    /// elements and at its end: an import that grows the memory in use over it is rolled back
-    /// and fails with [`IOError::Graph`] holding a `GraphError::ResourceLimitExceeded`
-    /// (operation `"GraphSON import"`). Without a budget nothing is checked.
+    /// Under the process memory ceiling (`memory.limit`, [`crate::exec::memory_limit`], on by
+    /// default) the import checks it every 4096 elements and at its end: an import that grows
+    /// the memory in use over it is rolled back and fails with [`IOError::Graph`] holding a
+    /// `GraphError::ResourceLimitExceeded` (operation `"GraphSON import"`). Without a ceiling
+    /// (`none`) nothing is checked.
     pub fn import_reader<S: GraphStorage, R: BufRead>(
         &self,
         g: &mut S,
         reader: R,
     ) -> Result<ImportReport, IOError> {
-        self.import_reader_with(g, reader, None)
-    }
-
-    /// [`Self::import_reader`] whose memory budget also honours a host's preset options
-    /// (`presets`, such as a script session's: they win over the policy's default unless the
-    /// policy locks the key).
-    pub(crate) fn import_reader_with<S: GraphStorage, R: BufRead>(
-        &self,
-        g: &mut S,
-        reader: R,
-        presets: Option<&HashMap<CompactString, ElementProperty>>,
-    ) -> Result<ImportReport, IOError> {
-        let mut budget = UnitBudget::start(&*g, presets, GRAPHSON_IMPORT)?;
+        let mut budget = UnitBudget::start(&*g, GRAPHSON_IMPORT)?;
         let mark = g.begin_unit()?;
         let imported = crate::graph::storage::close_on_unwind(
             g,

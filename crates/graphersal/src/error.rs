@@ -1897,7 +1897,7 @@ pub enum GraphError {
     /// A unit that is not a traversal (a GraphML or GraphSON import into a live graph, an
     /// applied change set, the commit of an outermost unit such as a
     /// [`transaction`](crate::graph::Transactional::transaction) closure) grew the memory in use over
-    /// the memory budget `memory.limit`: the whole unit was rolled back. The same limit as
+    /// the process memory ceiling `memory.limit`: the whole unit was rolled back. The same limit as
     /// [`TraverserError::ResourceLimitExceeded`] of a traversal, with the same `help()`
     /// advice for the host setting, naming the operation.
     #[error(
@@ -4217,7 +4217,9 @@ pub enum TraverserError {
     /// One error family for every resource bound: the script limits of the Rhai engine
     /// (`script::ScriptLimits`, feature `script`, named `script.*`) and the traversal limits set with
     /// `g.with()` or a host's [`crate::graph::ExecutionPolicy`] (named after their option key,
-    /// such as `traversal.max_traversers`).
+    /// such as `traversal.max_traversers`), and the process memory ceiling `memory.limit`
+    /// ([`crate::exec::set_memory_limit`]; its `help()` says whether the figure was tracked or
+    /// estimated).
     #[error("Resource limit '{limit}' exceeded{}", limit_detail(*.max, *.observed))]
     #[non_exhaustive]
     ResourceLimitExceeded {
@@ -5992,39 +5994,54 @@ fn limit_detail(max: Option<u64>, observed: Option<u64>) -> String {
     }
 }
 
-/// How a host sets the memory budget `memory.limit`: the closing advice of every memory-budget
-/// help text (a traversal's and a unit's).
-const MEMORY_BUDGET_SETTING: &str = "The budget is a host setting (off by default): the \
-     graphersal command line takes --memory-limit <bytes|auto>, the Python binding \
-     Graph(memory_limit=...), a Rust host ExecutionPolicy::with_default(\"memory.limit\", bytes) \
-     or a preset of graph_scope_with_options; \"auto\" is the cgroup memory limit minus \
-     'memory.headroom'. Setting it in a query is an administrative option: it needs Update on \
-     that Option, and is refused when the host locked it.";
+/// How a host sets the process memory ceiling `memory.limit`: the closing advice of every
+/// memory-ceiling help text (a traversal's and a unit's).
+const MEMORY_CEILING_SETTING: &str = "The ceiling is ONE setting of the whole process, on by \
+     default (the cgroup memory limit minus 'memory.headroom' in a container, else 80 % of the \
+     physical memory, 3.5 GiB in the browser). The host raises it or turns it off: the \
+     graphersal command line takes --memory-limit <bytes|auto|none> (and --memory-headroom), the \
+     Python binding graphersal.set_memory_limit(...) or Graph(memory_limit=...), a Rust host \
+     graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it \
+     off). A query cannot set it.";
+
+/// What the memory ceiling compared in this process: the live heap when a tracking allocator
+/// counts (the process's allocator mode is fixed for its lifetime), else the engine's estimate.
+fn memory_measure(unit: bool) -> &'static str {
+    if crate::traversal::memory_budget::tracked_live_bytes().is_some() {
+        "The figure is tracked: the process's exact live heap (the host installs the tracking \
+         allocator, as the graphersal command line, the playground and the Python binding do)."
+    } else if unit {
+        "The figure is estimated (no tracking allocator in this process): the graph's footprint \
+         when the unit started (see g.memory_usage()) plus the elements it added; the real \
+         process can hold more."
+    } else {
+        "The figure is estimated (no tracking allocator in this process): the graph's footprint \
+         (see g.memory_usage()) plus what the traversal holds and adds; the real process can \
+         hold more."
+    }
+}
 
 /// Help for [`GraphError::ResourceLimitExceeded`]: a unit that is not a traversal (an import,
 /// an applied change set, an outermost commit) grew the memory in use over `memory.limit`.
-/// Names the operation and closes with the same host advice as a traversal's memory budget.
+/// Names the operation and closes with the same host advice as a traversal's memory ceiling.
 fn unit_resource_limit_help(
     operation: &str,
     limit: &str,
     max: Option<u64>,
     observed: Option<u64>,
 ) -> String {
-    let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
     format!(
-        "The {operation} would take the memory in use over the memory budget '{limit}'{}{}, so \
-         it was stopped and everything it changed was rolled back, instead of the process \
-         running out of memory. The figure is the process's live heap when the host installs \
-         the tracking allocator (the graphersal command line does), else the engine's estimate: \
-         the graph's footprint when the unit started (see g.memory_usage()) plus the elements it \
-         added. A unit that only removes or rewrites data is never stopped, so make room first: \
-         drop data you do not need, for example \
-         g.with(\"memory.limit\", {raised}).v().has_label(\"tmp\").drop(), then import or \
-         apply again; or give the host more memory. {MEMORY_BUDGET_SETTING}",
+        "The {operation} would take the memory in use over the process memory ceiling \
+         '{limit}'{}{}, so it was stopped and everything it changed was rolled back, instead of \
+         the process running out of memory. {} A unit that only removes or rewrites data is \
+         never stopped, so make room first: drop data you do not need, for example \
+         g.v().has_label(\"tmp\").drop(), then import or apply again; or give the host more \
+         memory. {MEMORY_CEILING_SETTING}",
         max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
         observed
             .map(|observed| format!("; it reached {observed} bytes"))
             .unwrap_or_default(),
+        memory_measure(true),
     )
 }
 
@@ -6100,25 +6117,23 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
                 .unwrap_or_default(),
         ),
         "memory.limit" => format!(
-            "The traversal would take the memory in use over the memory budget \
+            "The traversal would take the memory in use over the process memory ceiling \
              'memory.limit'{}{}, so it was stopped and everything it changed was rolled back, \
-             instead of the process running out of memory. The figure is the process's live \
-             heap when the host installs the tracking allocator (the graphersal command line \
-             does), else the engine's estimate: the graph's footprint (see g.memory_usage()) \
-             plus what the traversal holds and adds. Make the traversal hold less: count() \
-             instead of fold(), for example g.v().repeat(__.both()).times(8).count(); \
+             instead of the process running out of memory. {} Make the traversal hold less: \
+             count() instead of fold(), for example g.v().repeat(__.both()).times(8).count(); \
              dedup() or limit(n) before a materializing step, for example \
              g.v().out().dedup().fold(); bound a loop that grows its value, for example \
              g.inject(1).repeat(__.path()).times(10).count(); write in smaller batches, for example \
              g.v().has_label(\"person\").limit(1000).property(\"seen\", true). When the graph \
-             itself is over the budget, every traversal fails at its first step: drop data you \
-             do not need under a raised budget, for example \
-             g.with(\"memory.limit\", {raised}).v().has_label(\"tmp\").drop(), or give the \
-             host more memory. {MEMORY_BUDGET_SETTING}",
+             itself is over the ceiling, every traversal fails at its first step: the host \
+             raises the ceiling for a moment, then drop data you do not need, for example \
+             g.v().has_label(\"tmp\").drop(), or give the host more memory. \
+             {MEMORY_CEILING_SETTING}",
             max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
             observed
                 .map(|observed| format!("; it reached {observed} bytes"))
                 .unwrap_or_default(),
+            memory_measure(false),
         ),
         "traversal.max_string_bytes" => format!(
             "A step built a string longer than 'traversal.max_string_bytes' allows{}{}. \
@@ -6157,8 +6172,8 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
              out of memory. This is not an option that can be raised: the query builds too many \
              values at once. Narrow it before the step that grows the stream, for example \
              g.v().has_label(\"person\").out().limit(100), aggregate with count() or \
-             group_count() instead of listing, or bound the run with a memory budget, for \
-             example g.with(\"memory.limit\", 1000000000).v().out().out().count(). {MEMORY_BUDGET_SETTING}",
+             group_count() instead of listing, or give the process a memory ceiling that \
+             stops such a query earlier. {MEMORY_CEILING_SETTING}",
             observed
                 .map(|elements| format!(" for {elements} items"))
                 .unwrap_or_default()
@@ -6226,17 +6241,25 @@ fn invalid_option_help(key: &str) -> String {
              g.with(\"traversal.max_materialized_bytes\", 2147483648).v().repeat(__.both()).times(8).fold(); \
              the default is 1073741824 (1 GiB; 268435456 on wasm32)."
             .to_string(),
-        "memory.limit" => "Set 'memory.limit' to a positive integer number of bytes, or to \
-             \"auto\" for the cgroup memory limit of the process minus 'memory.headroom', for \
-             example g.with(\"memory.limit\", 4294967296).v().out().fold() or \
-             g.with(\"memory.limit\", \"auto\").v().out().fold(). Without the option there is \
-             no memory budget (the default)."
+        "memory.limit" => "'memory.limit' is not an execution option: it is the process memory \
+             ceiling, ONE setting of the whole process that the host sets once, as a positive \
+             integer number of bytes, \"auto\" (the default: the cgroup limit minus \
+             'memory.headroom', else 80 % of the physical memory) or \"none\" (no ceiling). \
+             Remove it from g.with(..), the host's presets and ExecutionPolicy defaults, for \
+             example g.v().out().fold() instead of g.with(\"memory.limit\", 4294967296).v().out().fold(), \
+             and set it on the host: the graphersal command line --memory-limit 4294967296, \
+             Python graphersal.set_memory_limit(4294967296), Rust \
+             graphersal::exec::set_memory_limit(MemoryLimit::Bytes(4294967296)). Limit one \
+             query with 'traversal.max_materialized_bytes' instead, for example \
+             g.with(\"traversal.max_materialized_bytes\", 268435456).v().out().fold()."
             .to_string(),
-        "memory.headroom" => "Set 'memory.headroom' to a non-negative integer number of bytes: \
-             what memory.limit \"auto\" keeps free below the cgroup limit, for example \
-             g.with(\"memory.limit\", \"auto\").with(\"memory.headroom\", 268435456).v().out().fold(). \
-             The default is a tenth of the cgroup limit, at least 67108864 (64 MiB) and at most \
-             half of the limit."
+        "memory.headroom" => "'memory.headroom' is not an execution option: it is part of the \
+             process memory ceiling, what memory.limit \"auto\" keeps free below a cgroup \
+             limit, a non-negative integer number of bytes the host sets once: the graphersal \
+             command line --memory-headroom 268435456, Python \
+             graphersal.set_memory_limit(\"auto\", headroom=268435456), Rust \
+             graphersal::exec::set_memory_headroom(Some(268435456)). The default is a tenth of \
+             the cgroup limit, at least 67108864 (64 MiB) and at most half of the limit."
             .to_string(),
         "traversal.max_string_bytes" => "Set 'traversal.max_string_bytes' to a positive integer \
              number of bytes when the traversal source is created, for example \
@@ -10160,10 +10183,7 @@ mod tests {
                 help.contains("g.v().has_label(\"person\").out().limit(100)"),
                 "{help}"
             );
-            assert!(
-                help.contains("g.with(\"memory.limit\", 1000000000)"),
-                "{help}"
-            );
+            assert!(help.contains("--memory-limit"), "{help}");
         }
 
         #[test]

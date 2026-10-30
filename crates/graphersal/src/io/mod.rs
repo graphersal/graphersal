@@ -78,43 +78,36 @@ pub trait GraphExport {
     fn export_graphson_writer<W: std::io::Write>(&self, writer: W) -> Result<(), IOError>;
 }
 
-/// Imports the GraphML file at `path` into the live graph `g` as one unit, under the memory
-/// budget of `g`'s execution policy and the host's preset options `presets` (a script
-/// session's; `None`: the policy only).
+/// Imports the GraphML file at `path` into the live graph `g` as one unit, under the process
+/// memory ceiling.
 pub(crate) fn import_graphml_file_with<S: GraphStorage>(
     g: &mut S,
     path: &str,
-    presets: Option<&std::collections::HashMap<compact_str::CompactString, crate::ElementProperty>>,
 ) -> Result<(), IOError> {
     let f = std::fs::File::open(path).map_err(|err| IOError::FileRead {
         path: path.to_string(),
         source: err,
     })?;
     let reader = quick_xml::Reader::from_reader(std::io::BufReader::with_capacity(128 * 1024, f));
-    GraphMLImport {}.import_reader_with(g, reader, presets)
+    GraphMLImport {}.import_reader(g, reader)
 }
 
-/// Imports the GraphSON file at `path` into the live graph `g` as one unit, under the memory
-/// budget of [`import_graphml_file_with`].
+/// Imports the GraphSON file at `path` into the live graph `g` as one unit, under the process
+/// memory ceiling.
 pub(crate) fn import_graphson_file_with<S: GraphStorage>(
     g: &mut S,
     path: &str,
-    presets: Option<&std::collections::HashMap<compact_str::CompactString, crate::ElementProperty>>,
 ) -> Result<ImportReport, IOError> {
     let f = std::fs::File::open(path).map_err(|err| IOError::FileRead {
         path: path.to_string(),
         source: err,
     })?;
-    GraphSONImport::new().import_reader_with(
-        g,
-        std::io::BufReader::with_capacity(128 * 1024, f),
-        presets,
-    )
+    GraphSONImport::new().import_reader(g, std::io::BufReader::with_capacity(128 * 1024, f))
 }
 
 impl<S: GraphStorage> GraphImport for S {
     fn import_graphml(&mut self, path: &str) -> Result<(), IOError> {
-        import_graphml_file_with(self, path, None)
+        import_graphml_file_with(self, path)
     }
 
     fn import_graphml_reader<R: std::io::BufRead>(&mut self, reader: R) -> Result<(), IOError> {
@@ -124,7 +117,7 @@ impl<S: GraphStorage> GraphImport for S {
     }
 
     fn import_graphson(&mut self, path: &str) -> Result<ImportReport, IOError> {
-        import_graphson_file_with(self, path, None)
+        import_graphson_file_with(self, path)
     }
 
     fn import_graphson_reader<R: std::io::BufRead>(

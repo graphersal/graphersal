@@ -237,7 +237,8 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     /// Imports GraphML from `reader` as ONE unit
     /// ([`GraphMLImport::import_reader`](crate::io::GraphMLImport::import_reader)), under the
-    /// memory budget of the storage's policy and the host's `presets`.
+    /// process memory ceiling. `presets` (a host's preset options) no longer affect an import
+    /// since the memory ceiling became a process setting (0.5.0); kept so callers compile.
     #[cfg(feature = "io")]
     fn import_graphml(
         &self,
@@ -247,7 +248,7 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     /// Imports GraphSON from `reader` as ONE unit
     /// ([`GraphSONImport::import_reader`](crate::io::GraphSONImport::import_reader)) and returns
-    /// its report, under the memory budget like [`Self::import_graphml`].
+    /// its report, under the process memory ceiling like [`Self::import_graphml`].
     #[cfg(feature = "io")]
     fn import_graphson(
         &self,
@@ -467,12 +468,11 @@ where
     fn import_graphml(
         &self,
         reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
+        _presets: Option<&PresetOptions>,
     ) -> Result<(), IOError> {
-        crate::io::GraphMLImport {}.import_reader_with(
+        crate::io::GraphMLImport {}.import_reader(
             &mut *self.write_checked()?,
             quick_xml::Reader::from_reader(reader),
-            presets,
         )
     }
 
@@ -480,13 +480,9 @@ where
     fn import_graphson(
         &self,
         reader: &mut dyn std::io::BufRead,
-        presets: Option<&PresetOptions>,
+        _presets: Option<&PresetOptions>,
     ) -> Result<ImportReport, IOError> {
-        crate::io::GraphSONImport::new().import_reader_with(
-            &mut *self.write_checked()?,
-            reader,
-            presets,
-        )
+        crate::io::GraphSONImport::new().import_reader(&mut *self.write_checked()?, reader)
     }
 
     #[cfg(feature = "io")]

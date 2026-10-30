@@ -374,6 +374,10 @@ impl GraphStorage for Forwarding {
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         GraphStorage::memory_footprint_bytes(&self.0)
     }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        GraphStorage::memory_footprint_hint(&self.0)
+    }
     fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         GraphStorage::execution_policy(&self.0)
     }

@@ -515,6 +515,10 @@ impl GraphStorage for Failing {
         GraphStorage::memory_footprint_bytes(&self.inner)
     }
 
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        GraphStorage::memory_footprint_hint(&self.inner)
+    }
+
     fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         self.faults
             .check(&self.faults.execution_policy, "read its execution policy")?;

@@ -623,6 +623,7 @@ dependencies = [
  "hashbrown",
  "indexmap",
  "jiff",
+ "libc",
  "lz4_flex",
  "model2vec-rs",
  "ordered-float",
@@ -641,6 +642,7 @@ dependencies = [
  "tokenizers",
  "tracing",
  "web-time",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

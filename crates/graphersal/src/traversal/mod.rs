@@ -10,6 +10,7 @@ pub(crate) mod context;
 /// The `execute()` terminal and its [`Execution`] result.
 pub mod execution;
 pub(crate) mod memory_budget;
+pub(crate) mod memory_limit;
 /// Structured profiling results ([`TraversalMetrics`]).
 pub mod metrics;
 pub(crate) mod optimizer;

@@ -250,6 +250,10 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.memory_footprint_bytes()
     }
 
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        self.0.memory_footprint_hint()
+    }
+
     fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         self.0.execution_policy()
     }

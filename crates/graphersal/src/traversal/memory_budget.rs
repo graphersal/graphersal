@@ -1,15 +1,9 @@
-//! The memory budget (`memory.limit`): a host-level ceiling on the memory a traversal may leave
-//! the process at, so an oversized query fails with
-//! [`TraverserError::ResourceLimitExceeded`] (and its unit rolls back) instead of the process
-//! being killed by the operating system (a Kubernetes/cgroup OOM kill).
+//! The memory checks against the process memory ceiling (`memory.limit`,
+//! [`crate::traversal::memory_limit`]: one process-wide setting, ON by default), so an oversized
+//! query fails with [`TraverserError::ResourceLimitExceeded`] (and its unit rolls back) instead
+//! of the process being killed by the operating system (a Kubernetes/cgroup OOM kill).
 //!
-//! **Off by default.** A host opts in with an explicit byte value, or with `"auto"`: the cgroup
-//! memory limit of the process (cgroup v2 `memory.max`, else v1 `memory.limit_in_bytes`; `max` or
-//! no file means no limit) minus a headroom (`memory.headroom`, default
-//! [`default_headroom`]). `"auto"` never limits on `wasm32` (there is no cgroup); an explicit value
-//! works there too.
-//!
-//! A Rust allocator cannot fail softly, so the budget is cooperative: it is compared at the
+//! A Rust allocator cannot fail softly, so the ceiling is cooperative: it is compared at the
 //! places that already check `traversal.max_materialized_bytes` (a bulk expansion before it
 //! allocates, a bucket push of copies, every `repeat()` iteration) and at every step boundary.
 //! What is compared:
@@ -17,40 +11,27 @@
 //!   and the `alloc-tracking` feature is on): the process's exact live heap bytes
 //!   (`alloc_tracking::global_live_bytes`, one relaxed atomic load) plus the estimated size of
 //!   what a check is about to allocate;
-//! - **estimated** otherwise: the graph footprint taken ONCE when the run starts
-//!   ([`GraphStorage::memory_footprint_bytes`], a walk of the graph that `TraversalGraph` caches
-//!   by its commit position, so a run on an unchanged graph does not walk it again), plus the
-//!   elements the run added since
-//!   (at the graph's average element size), plus the traversers alive at a step boundary, plus
-//!   the estimated size of what a check is about to allocate.
+//! - **estimated** otherwise: the graph footprint when the run starts, plus the elements the run
+//!   added since (at the graph's average element size), plus the traversers alive at a step
+//!   boundary, plus the estimated size of what a check is about to allocate.
 //!
-//! Every check is a few loads and one comparison; nothing walks the graph per check.
+//! **No walk of the graph per run** (the ceiling is on by default, so a run must not pay for
+//! it): the estimated start takes the storage's cheap
+//! [`GraphStorage::memory_footprint_hint`] (for `TraversalGraph` the last walked figure,
+//! adjusted by the elements added or removed since, at the average element size) and walks the
+//! graph ([`GraphStorage::memory_footprint_bytes`], cached by the commit position) only when
+//! there is no hint yet (the first run on a graph) or the hint is at least half of the ceiling,
+//! where precision matters. Every check is a few loads and one comparison.
 //!
 //! Units that are not traversals ([`UnitBudget`]: a GraphML/GraphSON import into a live graph,
-//! `apply_change_set`) take their budget from the storage's execution policy (plus a script
-//! session's presets for a script import) and check it every [`UNIT_CHECK_INTERVAL`] elements
-//! and at their end; `TraversalGraph` checks every outermost unit at its commit
+//! `apply_change_set`) check the same ceiling every [`UNIT_CHECK_INTERVAL`] elements and at
+//! their end; `TraversalGraph` checks every outermost unit at its commit
 //! ([`MemoryBudget::unit_check`]). Only a unit that grew the measure fails, with
 //! [`GraphError::ResourceLimitExceeded`] naming the operation; the caller rolls it back.
 
-use std::collections::HashMap;
-
-use compact_str::CompactString;
-
 use crate::error::{GraphError, TraverserError, TraverserResult};
-use crate::graph::{ExecutionPolicy, GraphStorage};
-use crate::value::ElementProperty;
-
-/// Option key of the memory budget, in bytes, or `"auto"` (see the module documentation). Not
-/// set by default: no budget.
-pub(crate) const MEMORY_LIMIT: &str = "memory.limit";
-
-/// Option key of the headroom `"auto"` keeps below the cgroup limit, in bytes (a non-negative
-/// integer). Ignored for an explicit `memory.limit`. Default: [`default_headroom`].
-pub(crate) const MEMORY_HEADROOM: &str = "memory.headroom";
-
-/// The `memory.limit` value that derives the budget from the cgroup limit.
-pub(crate) const MEMORY_LIMIT_AUTO: &str = "auto";
+use crate::graph::GraphStorage;
+pub(crate) use crate::traversal::memory_limit::MEMORY_LIMIT;
 
 /// The smallest default headroom: 64 MiB for the stack, the code, allocator overhead and what the
 /// engine does not count.
@@ -65,13 +46,13 @@ const CGROUP_UNLIMITED_FROM: u64 = 1 << 62;
 /// average to take): a topology slot, a handle generation and an index entry.
 const MIN_ELEMENT_BYTES: u64 = 128;
 
-/// The default headroom `"auto"` keeps below a cgroup limit of `limit` bytes: a tenth of it, at
+/// The default headroom `auto` keeps below a cgroup limit of `limit` bytes: a tenth of it, at
 /// least [`MIN_DEFAULT_HEADROOM`], but never more than half of the limit.
 pub(crate) fn default_headroom(limit: u64) -> u64 {
     (limit / 10).max(MIN_DEFAULT_HEADROOM).min(limit / 2)
 }
 
-/// The budget `"auto"` yields for a cgroup limit `cgroup` (`None`: no limit, so no budget) and an
+/// The ceiling `auto` yields for a cgroup limit `cgroup` (`None`: no limit, so no budget) and an
 /// optional explicit `headroom`: the limit minus the headroom, at least 1 byte.
 pub(crate) fn auto_budget(cgroup: Option<u64>, headroom: Option<u64>) -> Option<u64> {
     let limit = cgroup?;
@@ -107,7 +88,7 @@ pub(crate) fn cgroup_limit_at(root: &std::path::Path) -> Option<u64> {
 
 /// The cgroup memory limit of this process, read once per process from `/sys/fs/cgroup` (a
 /// container's limit does not change while it runs). Never on `wasm32`.
-fn cgroup_limit() -> Option<u64> {
+pub(crate) fn cgroup_limit() -> Option<u64> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
@@ -117,12 +98,6 @@ fn cgroup_limit() -> Option<u64> {
     {
         None
     }
-}
-
-/// The budget `memory.limit = "auto"` resolves to in this process: [`auto_budget`] of the
-/// process's cgroup limit.
-pub(crate) fn resolve_auto(headroom: Option<u64>) -> Option<u64> {
-    auto_budget(cgroup_limit(), headroom)
 }
 
 /// The exact live heap bytes of the process when a `TrackingAllocator` is installed (feature
@@ -174,10 +149,13 @@ impl MemoryBudget {
     }
 
     /// Takes the starting point of a run on `storage`: nothing with a tracking allocator (the
-    /// live counter already includes the graph), else the graph's footprint
-    /// ([`GraphStorage::memory_footprint_bytes`]: at most ONE walk, none when the graph has not
-    /// changed since the last run; a storage without introspection counts as 0 bytes) and its
-    /// element count. A storage that cannot measure itself fails the run with its error.
+    /// live counter already includes the graph), else the graph's footprint and its element
+    /// count. The footprint is the storage's cheap hint
+    /// ([`GraphStorage::memory_footprint_hint`]) while that is below half of the ceiling, else
+    /// the exact figure ([`GraphStorage::memory_footprint_bytes`]: at most ONE walk, none when
+    /// the graph has not changed since the last one; a storage without introspection counts as
+    /// 0 bytes), so a run far below the ceiling never walks the graph. A storage that cannot
+    /// measure itself fails the run with its error.
     pub(crate) fn start<S: GraphStorage + ?Sized>(self, storage: &S) -> Result<Self, GraphError> {
         if let Some(live) = tracked_live_bytes() {
             return Ok(Self {
@@ -186,7 +164,10 @@ impl MemoryBudget {
                 ..self
             });
         }
-        let base = storage.memory_footprint_bytes()?.unwrap_or(0);
+        let base = match storage.memory_footprint_hint()? {
+            Some(hint) if hint < self.limit / 2 => hint,
+            _ => storage.memory_footprint_bytes()?.unwrap_or(0),
+        };
         let elements =
             (storage.vertex_count()? as u64).saturating_add(storage.edge_count()? as u64);
         let element_bytes = base
@@ -290,10 +271,9 @@ impl MemoryBudget {
 /// checked too, so this bounds only how far past the budget a unit gets before it stops.
 pub(crate) const UNIT_CHECK_INTERVAL: u32 = 4096;
 
-/// The memory budget of a unit that is not a traversal: a GraphML or GraphSON import into a
-/// live graph, an applied change set. Built only when a budget is configured
-/// ([`Self::start`]: the storage's [`ExecutionPolicy`] default of `memory.limit`, or a host's
-/// preset options); without one nothing is paid, neither a walk nor a check.
+/// The memory ceiling of a unit that is not a traversal: a GraphML or GraphSON import into a
+/// live graph, an applied change set. Built only when there is a ceiling ([`Self::start`]);
+/// without one nothing is paid, neither a walk nor a check.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UnitBudget {
     budget: MemoryBudget,
@@ -304,19 +284,15 @@ pub(crate) struct UnitBudget {
 }
 
 impl UnitBudget {
-    /// The budget of a unit `operation` on `storage`: `memory.limit` resolved from `presets`
-    /// (a host's preset options, such as a session's; they win over the policy unless it locks
-    /// the key) and the storage's execution policy, started on `storage` as it is now (at most
-    /// one walk of the graph, none when its footprint is cached). `None` when no budget is
-    /// configured, or the configuration is invalid (a traversal on the same graph reports that
-    /// as `TraverserError::InvalidOption`; the unit is not stopped for it). `Err`: the storage
-    /// cannot read its policy or measure itself (the unit fails before it starts).
+    /// The ceiling of a unit `operation` on `storage` (the process ceiling, lowered by a running
+    /// job's memory limit), started on `storage` as it is now (no walk of the graph far below the
+    /// ceiling, see [`MemoryBudget::start`]). `None` when there is no ceiling. `Err`: the storage
+    /// cannot measure itself (the unit fails before it starts).
     pub(crate) fn start<S: GraphStorage + ?Sized>(
         storage: &S,
-        presets: Option<&HashMap<CompactString, ElementProperty>>,
         operation: &'static str,
     ) -> Result<Option<Self>, GraphError> {
-        let Some(limit) = unit_limit(&storage.execution_policy()?, presets) else {
+        let Some(limit) = crate::traversal::memory_limit::effective_limit() else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -366,28 +342,6 @@ pub(crate) fn check<S: GraphStorage + ?Sized>(
     match budget {
         Some(budget) => budget.check(storage),
         None => Ok(()),
-    }
-}
-
-/// The budget in bytes a unit outside a traversal runs under: `memory.limit` of `presets` and
-/// `policy` ([`crate::traversal::context::resolve_memory_limit`]); `None` without one. Costs a
-/// lookup in the policy's (usually empty) defaults when nothing is configured. An invalid
-/// configuration is logged and counts as none.
-pub(crate) fn unit_limit(
-    policy: &ExecutionPolicy,
-    presets: Option<&HashMap<CompactString, ElementProperty>>,
-) -> Option<u64> {
-    let configured = |map: &HashMap<CompactString, ElementProperty>| map.contains_key(MEMORY_LIMIT);
-    if !configured(&policy.defaults) && !presets.is_some_and(configured) {
-        return None;
-    }
-    let empty = HashMap::new();
-    match crate::traversal::context::resolve_memory_limit(presets.unwrap_or(&empty), policy) {
-        Ok(limit) => limit,
-        Err(err) => {
-            tracing::warn!(%err, "invalid memory budget configuration; the unit runs without one");
-            None
-        }
     }
 }
 
@@ -495,91 +449,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The estimated budget walks the graph once per commit position: reads reuse the figure,
-    /// a committed write walks again, a rolled-back unit does not, and a run inside a unit with
-    /// uncommitted changes walks without caching.
+    /// Near the ceiling (the hint at least half of it) the estimated check walks the graph
+    /// once per commit position: reads reuse the figure, a committed write walks again, a
+    /// rolled-back unit does not, and a run inside a unit with uncommitted changes walks without
+    /// caching.
     #[test]
-    fn estimated_footprint_is_walked_once_per_commit_position() {
+    fn estimated_footprint_is_walked_once_per_commit_position_near_the_ceiling() {
         use std::sync::atomic::Ordering;
-        const LIMIT: i64 = 1 << 40;
+        let mut graph = crate::TraversalGraph::tinkerpop_modern();
+        // A ceiling of 1.5 times the footprint: the hint is above half of it, so every start
+        // takes the exact (cached) figure.
+        let limit = graph.memory_usage().unwrap().unwrap().total_bytes() * 3 / 2;
+        crate::traversal::memory_limit::memory_limit_scope(limit, || {
+            let walks =
+                |graph: &crate::TraversalGraph| graph.footprint.walks.load(Ordering::Relaxed);
+            let read = |graph: &crate::TraversalGraph| {
+                let names = graph.traversal().v(None).values("name").to_list().unwrap();
+                assert_eq!(names.len(), 6);
+            };
+            assert_eq!(walks(&graph), 0);
+            read(&graph);
+            read(&graph);
+            assert_eq!(walks(&graph), 1, "two reads, one walk");
+
+            graph.traversal_mut().add_v("extra").to_list().unwrap();
+            assert_eq!(walks(&graph), 1, "the write's own start reuses the figure");
+            read(&graph);
+            assert_eq!(walks(&graph), 2, "a committed write: walked again");
+            read(&graph);
+            assert_eq!(walks(&graph), 2);
+
+            // A failing unit rolls back: data, counts and commit position are as before.
+            let failed: Result<(), GraphError> = graph.transaction(|g| {
+                g.insert_vertex(Some("gone".into()), vec!["x".into()], Default::default())?;
+                Err(GraphError::Unsupported {
+                    operation: "test rollback",
+                })
+            });
+            assert!(failed.is_err());
+            read(&graph);
+            assert_eq!(walks(&graph), 2, "a rolled-back unit keeps the figure");
+
+            // Inside a unit with uncommitted changes every run walks and nothing is cached.
+            let mark = graph.begin_unit().unwrap();
+            graph
+                .insert_vertex(Some("open".into()), vec!["x".into()], Default::default())
+                .unwrap();
+            let seq = graph.last_commit_seq();
+            graph.traversal_mut().v(None).count().to_list().unwrap();
+            graph.traversal_mut().v(None).count().to_list().unwrap();
+            assert_eq!(walks(&graph), 4, "uncommitted changes are never cached");
+            graph
+                .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+                .unwrap();
+            assert_eq!(graph.last_commit_seq(), seq);
+            read(&graph);
+            assert_eq!(
+                walks(&graph),
+                4,
+                "after the rollback the cached figure applies again"
+            );
+
+            // A direct call outside any unit is not counted, but it changes the element counts.
+            graph
+                .insert_vertex(Some("direct".into()), vec!["x".into()], Default::default())
+                .unwrap();
+            read(&graph);
+            assert_eq!(walks(&graph), 5, "changed element counts: walked again");
+        });
+    }
+
+    /// Far below the ceiling the estimated check takes the hint: one walk on the first run,
+    /// none after a committed write, again once the element count has more than doubled.
+    #[test]
+    fn far_below_the_ceiling_a_write_does_not_walk_the_graph() {
+        use std::sync::atomic::Ordering;
         let mut graph = crate::TraversalGraph::tinkerpop_modern();
         let walks = |graph: &crate::TraversalGraph| graph.footprint.walks.load(Ordering::Relaxed);
-        let read = |graph: &crate::TraversalGraph| {
-            let names = graph
-                .traversal()
-                .with(MEMORY_LIMIT, LIMIT)
-                .v(None)
-                .values("name")
-                .to_list()
-                .unwrap();
-            assert_eq!(names.len(), 6);
-        };
-        assert_eq!(walks(&graph), 0);
-        read(&graph);
-        read(&graph);
-        assert_eq!(walks(&graph), 1, "two reads, one walk");
-
-        graph
-            .traversal_mut()
-            .with(MEMORY_LIMIT, LIMIT)
-            .add_v("extra")
-            .to_list()
-            .unwrap();
-        assert_eq!(walks(&graph), 1, "the write's own start reuses the figure");
-        read(&graph);
-        assert_eq!(walks(&graph), 2, "a committed write: walked again");
-        read(&graph);
-        assert_eq!(walks(&graph), 2);
-
-        // A failing unit rolls back: data, counts and commit position are as before.
-        let failed: Result<(), GraphError> = graph.transaction(|g| {
-            g.insert_vertex(Some("gone".into()), vec!["x".into()], Default::default())?;
-            Err(GraphError::Unsupported {
-                operation: "test rollback",
-            })
+        crate::traversal::memory_limit::memory_limit_scope(1 << 40, || {
+            let count = |graph: &crate::TraversalGraph| {
+                graph.traversal().v(None).count().to_list().unwrap();
+            };
+            count(&graph);
+            assert_eq!(walks(&graph), 1, "the first run walks once");
+            for i in 0..10 {
+                graph
+                    .traversal_mut()
+                    .add_v(format!("extra{i}").as_str())
+                    .to_list()
+                    .unwrap();
+                count(&graph);
+            }
+            assert_eq!(walks(&graph), 1, "committed writes: the hint, no walk");
+            let hint = crate::graph::memory::footprint_hint(&graph).unwrap();
+            let exact = graph.memory_usage().unwrap().unwrap().total_bytes();
+            assert!(hint >= exact / 2 && hint <= exact * 2, "{hint} vs {exact}");
+            // More than double the elements (plus 1024): the hint expires, one walk.
+            for i in 0..1100 {
+                graph
+                    .insert_vertex(
+                        Some(format!("bulk{i}").into()),
+                        vec!["x".into()],
+                        Default::default(),
+                    )
+                    .unwrap();
+            }
+            count(&graph);
+            assert_eq!(walks(&graph), 2, "a doubled graph is walked again");
+            count(&graph);
+            assert_eq!(walks(&graph), 2);
         });
-        assert!(failed.is_err());
-        read(&graph);
-        assert_eq!(walks(&graph), 2, "a rolled-back unit keeps the figure");
-
-        // Inside a unit with uncommitted changes every run walks and nothing is cached.
-        let mark = graph.begin_unit().unwrap();
-        graph
-            .insert_vertex(Some("open".into()), vec!["x".into()], Default::default())
-            .unwrap();
-        let seq = graph.last_commit_seq();
-        graph
-            .traversal_mut()
-            .with(MEMORY_LIMIT, LIMIT)
-            .v(None)
-            .count()
-            .to_list()
-            .unwrap();
-        graph
-            .traversal_mut()
-            .with(MEMORY_LIMIT, LIMIT)
-            .v(None)
-            .count()
-            .to_list()
-            .unwrap();
-        assert_eq!(walks(&graph), 4, "uncommitted changes are never cached");
-        graph
-            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
-            .unwrap();
-        assert_eq!(graph.last_commit_seq(), seq);
-        read(&graph);
-        assert_eq!(
-            walks(&graph),
-            4,
-            "after the rollback the cached figure applies again"
-        );
-
-        // A direct call outside any unit is not counted, but it changes the element counts.
-        graph
-            .insert_vertex(Some("direct".into()), vec!["x".into()], Default::default())
-            .unwrap();
-        read(&graph);
-        assert_eq!(walks(&graph), 5, "changed element counts: walked again");
     }
 
     #[test]

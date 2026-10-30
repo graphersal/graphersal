@@ -90,7 +90,7 @@ pub(crate) struct UndoLog {
     /// [`Transactional::transaction_with`](crate::graph::Transactional::transaction_with)); reset when the outermost unit closes.
     pub(crate) metadata: CommitMetadata,
     /// The memory budget the outermost open unit is checked against at its commit, started
-    /// when it opened; `None` when the graph's execution policy sets no `memory.limit` (then
+    /// when it opened; `None` when the process has no memory ceiling (then
     /// nothing is paid). Reset when the outermost unit closes.
     budget: Option<MemoryBudget>,
     /// The start of the outermost open unit, in nanoseconds since the Unix epoch (`None`
@@ -303,14 +303,12 @@ impl TraversalGraph {
     /// monotonic floor; `GraphStorage::begin_unit_at`).
     pub(crate) fn begin_undo_unit_at(&mut self, clock: i128) -> UnitMark {
         if self.undo.depth == 0 {
-            // The outermost unit takes the starting point of the graph's memory budget, if its
-            // policy sets one: the footprint is cached by the commit position, so this is no
-            // walk on a graph that has not changed since the last one.
-            self.undo.budget =
-                crate::traversal::memory_budget::unit_limit(&self.execution_policy, None)
-                    // `TraversalGraph` measures itself without failing (its
-                    // `memory_footprint_bytes` is always `Ok`).
-                    .and_then(|limit| MemoryBudget::new(limit).start(&*self).ok());
+            // The outermost unit takes the starting point of the process memory ceiling, if
+            // there is one: no walk of the graph far below the ceiling (`MemoryBudget::start`).
+            self.undo.budget = crate::traversal::memory_limit::effective_limit()
+                // `TraversalGraph` measures itself without failing (its
+                // `memory_footprint_bytes` is always `Ok`).
+                .and_then(|limit| MemoryBudget::new(limit).start(&*self).ok());
             // The unit's time (`defaultFunction` `now`): never earlier than the previous unit's
             // or the last commit's, so a later unit never stores an earlier `now`.
             let started_at = self.unit_start_from(clock);
@@ -337,8 +335,8 @@ impl TraversalGraph {
     /// continues; the sequence number stays where it was. A panic in an `after_commit` comes
     /// after the unit became final: it stays committed and the panic continues.
     ///
-    /// Before all that, when the graph's execution policy sets a memory budget (`memory.limit`),
-    /// the outermost unit is checked against it (`MemoryBudget::unit_check`): a unit that grew
+    /// Before all that, when the process has a memory ceiling (`memory.limit`), the outermost
+    /// unit is checked against it (`MemoryBudget::unit_check`): a unit that grew
     /// the memory in use over the budget is rolled back (the hooks get `after_rollback`) and
     /// fails with [`GraphError::ResourceLimitExceeded`] (operation `"commit"`).
     pub(crate) fn commit_undo_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
