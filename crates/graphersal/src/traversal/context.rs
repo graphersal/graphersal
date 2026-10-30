@@ -333,8 +333,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     }
 
     /// Fails with [`TraverserError::ResourceLimitExceeded`] (`memory.limit`) when the run is over
-    /// its memory budget at a step boundary with `alive` traversers between the steps. Without a
-    /// budget (the default) one branch.
+    /// the process memory ceiling at a step boundary with `alive` traversers between the steps.
+    /// Without a ceiling (`none`) one branch.
     #[inline]
     pub(crate) fn check_memory_budget(&self, alive: usize) -> TraverserResult<()> {
         match &self.options.memory {
@@ -373,8 +373,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     /// value, the sack and the values the execution's path records hold
     /// ([`PathArena::value_bytes`]) against `traversal.max_materialized_bytes`, so a body that
     /// doubles its value (`repeat(__.path())`, `repeat(__.group())`) stops at the byte budget,
-    /// at most one doubling past it. The same estimate counts against the memory budget
-    /// (`memory.limit`) when one is set. A scalar or element handle costs a `match`; a container
+    /// at most one doubling past it. The same estimate counts against the process memory ceiling
+    /// (`memory.limit`) when there is one. A scalar or element handle costs a `match`; a container
     /// is walked once, as the depth check already does.
     #[inline]
     pub(crate) fn check_loop_traverser(
@@ -638,7 +638,8 @@ pub(crate) const PATH_ANALYSIS: &str = "path.analysis";
 pub(crate) const RENDER_SPELLING: &str = "render.spelling";
 
 /// Every `g.with()` key this crate recognises, in the order [`ExecutionOptions::parse`] resolves
-/// them. A host's [`ExecutionPolicy`] can lock or default any of these; used by
+/// them. Not `memory.limit`/`memory.headroom`: they are the process memory ceiling, refused as
+/// options (`reject_process_setting`), though still administrative ([`ADMIN_OPTION_KEYS`]). A host's [`ExecutionPolicy`] can lock or default any of these; used by
 /// [`ExecutionPolicy`]-aware code (and tests) that needs to iterate every known key rather than
 /// name them one by one. Keep in sync with the book's canonical options reference page.
 // Only exercised by this module's own tests today (iterating every key to assert the generic
@@ -662,8 +663,6 @@ pub(crate) const KNOWN_OPTION_KEYS: &[&str] = &[
     MAX_VALUE_DEPTH,
     MAX_MATERIALIZED_BYTES,
     MAX_STRING_BYTES,
-    MEMORY_LIMIT,
-    MEMORY_HEADROOM,
 ];
 
 /// The administrative `g.with()` keys: the resource ceilings and the engine switches. A
@@ -785,7 +784,8 @@ impl Default for ExecutionOptions {
             max_value_depth: crate::value::depth::DEFAULT_MAX_VALUE_DEPTH,
             max_materialized_bytes: DEFAULT_MAX_MATERIALIZED_BYTES,
             max_string_bytes: DEFAULT_MAX_STRING_BYTES,
-            memory: None,
+            // The process memory ceiling in effect (on by default), as `parse` reads it.
+            memory: crate::traversal::memory_limit::effective_limit().map(MemoryBudget::new),
         }
     }
 }
