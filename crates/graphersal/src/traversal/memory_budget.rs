@@ -459,7 +459,7 @@ mod tests {
         let mut graph = crate::TraversalGraph::tinkerpop_modern();
         // A ceiling of 1.5 times the footprint: the hint is above half of it, so every start
         // takes the exact (cached) figure.
-        let limit = graph.memory_usage().unwrap().unwrap().total_bytes() * 3 / 2;
+        let limit = crate::graph::memory::compute(&graph).total_bytes() * 3 / 2;
         crate::traversal::memory_limit::memory_limit_scope(limit, || {
             let walks =
                 |graph: &crate::TraversalGraph| graph.footprint.walks.load(Ordering::Relaxed);
@@ -542,7 +542,7 @@ mod tests {
             }
             assert_eq!(walks(&graph), 1, "committed writes: the hint, no walk");
             let hint = crate::graph::memory::footprint_hint(&graph).unwrap();
-            let exact = graph.memory_usage().unwrap().unwrap().total_bytes();
+            let exact = crate::graph::memory::compute(&graph).total_bytes();
             assert!(hint >= exact / 2 && hint <= exact * 2, "{hint} vs {exact}");
             // More than double the elements (plus 1024): the hint expires, one walk.
             for i in 0..1100 {
@@ -559,6 +559,30 @@ mod tests {
             count(&graph);
             assert_eq!(walks(&graph), 2);
         });
+    }
+
+    #[test]
+    fn memory_usage_refreshes_the_footprint_hint() {
+        let mut graph = crate::TraversalGraph::tinkerpop_modern();
+        assert!(
+            crate::graph::memory::footprint_hint(&graph).is_none(),
+            "no walk yet"
+        );
+        let exact = graph.memory_usage().unwrap().unwrap().total_bytes();
+        assert_eq!(crate::graph::memory::footprint_hint(&graph), Some(exact));
+        // A property rewrite keeps the element counts: the hint does not see it until the
+        // next walk, which `memory_usage()` is.
+        graph
+            .traversal_mut()
+            .v(None)
+            .has_label("person")
+            .property("bio", "x".repeat(100_000))
+            .iterate()
+            .unwrap();
+        assert_eq!(crate::graph::memory::footprint_hint(&graph), Some(exact));
+        let grown = graph.memory_usage().unwrap().unwrap().total_bytes();
+        assert!(grown > exact + 300_000, "{grown} vs {exact}");
+        assert_eq!(crate::graph::memory::footprint_hint(&graph), Some(grown));
     }
 
     #[test]

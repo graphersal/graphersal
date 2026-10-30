@@ -2711,7 +2711,7 @@ impl GraphStorage for TraversalGraph {
 
     #[inline]
     fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
-        Ok(Some(crate::graph::memory::compute(self)))
+        Ok(Some(crate::graph::memory::walk(self)))
     }
 
     fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {

@@ -358,11 +358,7 @@ pub(crate) struct FootprintCache {
 /// data and leaves the commit position, so the cached figure stays valid. While an open unit
 /// holds uncommitted changes the figure is walked and not cached.
 pub(crate) fn footprint_bytes(graph: &super::TraversalGraph) -> u64 {
-    let key = FootprintKey {
-        commit_seq: graph.commit_seq(),
-        vertices: graph.graph.node_count() as u64,
-        edges: graph.graph.edge_count() as u64,
-    };
+    let key = footprint_key(graph);
     let cacheable = graph.undo.entries().is_empty();
     if cacheable
         && let Some((cached, bytes)) = *graph.footprint.entry.lock()
@@ -370,16 +366,31 @@ pub(crate) fn footprint_bytes(graph: &super::TraversalGraph) -> u64 {
     {
         return bytes;
     }
+    walk(graph).total_bytes()
+}
+
+/// [`compute`] for `graph`, remembered as the footprint cache when no open unit holds
+/// uncommitted changes: `memory_usage()` goes through it, so asking for the footprint also
+/// refreshes [`footprint_hint`] (a manual full walk, e.g. after many property rewrites).
+pub(crate) fn walk(graph: &super::TraversalGraph) -> MemoryStats {
     #[cfg(test)]
     graph
         .footprint
         .walks
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let bytes = compute(graph).total_bytes();
-    if cacheable {
-        *graph.footprint.entry.lock() = Some((key, bytes));
+    let stats = compute(graph);
+    if graph.undo.entries().is_empty() {
+        *graph.footprint.entry.lock() = Some((footprint_key(graph), stats.total_bytes()));
     }
-    bytes
+    stats
+}
+
+fn footprint_key(graph: &super::TraversalGraph) -> FootprintKey {
+    FootprintKey {
+        commit_seq: graph.commit_seq(),
+        vertices: graph.graph.node_count() as u64,
+        edges: graph.graph.edge_count() as u64,
+    }
 }
 
 /// A cheap estimate of [`footprint_bytes`] without a walk: the total of the last walk plus the

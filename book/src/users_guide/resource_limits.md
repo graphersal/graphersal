@@ -215,8 +215,9 @@ What is compared with the ceiling (the error's `help()` says which one applied):
   elements added or removed since. The graph is walked (time proportional to its size, cached by
   its commit position) only on the first run, once its element count has doubled or halved since
   the last walk, and on every run after a committed change while the figure is at least half of
-  the ceiling. For large graphs that change often near the ceiling, prefer the tracking
-  allocator.
+  the ceiling. `g.memory_usage()` walks the graph too and keeps its figure for the next runs:
+  call it after rewriting many property values to refresh the estimate. For large graphs that
+  change often near the ceiling, prefer the tracking allocator.
 
 The ceiling is cooperative (an allocator cannot fail softly): it is checked at every step
 boundary and at the places that check `traversal.max_materialized_bytes`, before a bulk expansion
