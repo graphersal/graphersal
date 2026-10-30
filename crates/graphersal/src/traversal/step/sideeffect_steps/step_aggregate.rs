@@ -39,7 +39,7 @@ pub(crate) fn push_side_effect_n<S: GraphStorage>(
         })
     };
     let copies = if n > 1 {
-        limits.check_copies(&value, n, step)?;
+        limits.check_copies(&context.memory, &value, n, step)?;
         usize::try_from(n).map_err(|_| too_many(n))?
     } else {
         1

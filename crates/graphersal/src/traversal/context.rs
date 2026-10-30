@@ -92,6 +92,10 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// Execution options of this run, parsed once from the source options. `evaluationTimeout`
     /// is consumed into `deadline` at creation; `repeat()` reads its order and loop limit here.
     pub(crate) options: ExecutionOptions,
+    /// What this execution holds now against `traversal.max_materialized_bytes` and the process
+    /// ceiling, and its peak (`traversal/run_memory.rs`); one per run, shared by every nested
+    /// traversal.
+    pub(crate) memory: crate::traversal::run_memory::RunMemory,
     /// Wall-clock budget of this execution, shared by every nested traversal that runs on the
     /// context. `None` when no `evaluationTimeout` is set.
     pub(crate) deadline: Option<Deadline>,
@@ -230,6 +234,10 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             scratch_path: Vec::new(),
             exists_scratch: Vec::new(),
             glob_path: Default::default(),
+            memory: crate::traversal::run_memory::RunMemory::new(
+                DEFAULT_MAX_MATERIALIZED_BYTES,
+                None,
+            ),
             options: ExecutionOptions::default(),
             deadline: None,
             step_inputs: None,
@@ -289,6 +297,10 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             options.evaluation_timeout,
             crate::traversal::cancel::CancelToken::current(),
         );
+        context.memory = crate::traversal::run_memory::RunMemory::new(
+            options.max_materialized_bytes,
+            options.memory,
+        );
         context.options = options;
         context
     }
@@ -332,15 +344,21 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
         Ok(())
     }
 
-    /// Fails with [`TraverserError::ResourceLimitExceeded`] (`memory.limit`) when the run is over
-    /// the process memory ceiling at a step boundary with `alive` traversers between the steps.
-    /// Without a ceiling (`none`) one branch.
+    /// Fails with [`TraverserError::ResourceLimitExceeded`] when what the run holds plus
+    /// `pending` bytes it is about to allocate exceeds `traversal.max_materialized_bytes`, or the
+    /// process is over its memory ceiling (`memory.limit`). See [`RunMemory`](crate::traversal::run_memory::RunMemory).
     #[inline]
-    pub(crate) fn check_memory_budget(&self, alive: usize) -> TraverserResult<()> {
-        match &self.options.memory {
-            None => Ok(()),
-            Some(budget) => budget.check_boundary(&*self.storage, alive),
-        }
+    pub(crate) fn check_memory(&self, pending: u64) -> TraverserResult<()> {
+        self.memory.set_arena(self.paths.value_bytes());
+        self.memory.check(pending)
+    }
+
+    /// [`Self::check_memory`] at a step boundary (the graph's growth refreshed where a measure
+    /// needs it).
+    #[inline]
+    pub(crate) fn check_memory_boundary(&self) -> TraverserResult<()> {
+        self.memory.set_arena(self.paths.value_bytes());
+        self.memory.check_boundary(&*self.storage)
     }
 
     /// Fails with [`TraverserError::ResourceLimitExceeded`] when `value` nests deeper than
@@ -369,33 +387,38 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     }
 
     /// What `repeat()` checks on every traverser after every iteration: the depth
-    /// ([`check_traverser_depth`](Self::check_traverser_depth)) and the estimated size of the
-    /// value, the sack and the values the execution's path records hold
-    /// ([`PathArena::value_bytes`]) against `traversal.max_materialized_bytes`, so a body that
-    /// doubles its value (`repeat(__.path())`, `repeat(__.group())`) stops at the byte budget,
-    /// at most one doubling past it. The same estimate counts against the process memory ceiling
-    /// (`memory.limit`) when there is one. A scalar or element handle costs a `match`; a container
-    /// is walked once, as the depth check already does.
+    /// ([`check_traverser_depth`](Self::check_traverser_depth)) and the memory the next frontier
+    /// holds so far: `frontier` is its estimated bytes before this traverser, which is added (its
+    /// slot, the estimated size of its value and its sack) and returned. The run's memory (its
+    /// stream, the path records, and `frontier` with this traverser as pending) is checked
+    /// against `traversal.max_materialized_bytes` and the process ceiling, so a body that
+    /// multiplies its traversers or doubles its value (`repeat(__.constant([..]).unfold())`,
+    /// `repeat(__.path())`) stops WHILE the frontier is built, not one iteration later. Tracked:
+    /// the value sizes are not estimated (the live heap is read instead). A scalar or element
+    /// handle costs a `match`; a container is walked once, as the depth check already does.
     #[inline]
     pub(crate) fn check_loop_traverser(
         &self,
         traverser: &crate::Traverser<S>,
-    ) -> TraverserResult<()> {
+        frontier: u64,
+    ) -> TraverserResult<u64> {
         self.check_traverser_depth(traverser)?;
-        let max = self.options.max_materialized_bytes;
-        let mut bytes =
-            crate::traversal::step::profile::estimate_traverser_value_bytes(&traverser.value)
-                .saturating_add(self.paths.value_bytes());
-        if !traverser.sack.is_none() {
-            bytes = bytes.saturating_add(self.sacks.get(traverser.sack).estimated_heap_bytes());
+        let mut bytes = std::mem::size_of::<crate::Traverser<S>>() as u64;
+        if !self.memory.is_tracked() {
+            bytes = bytes.saturating_add(
+                crate::traversal::step::profile::estimate_traverser_value_bytes(&traverser.value),
+            );
+            if !traverser.sack.is_none() {
+                bytes = bytes.saturating_add(self.sacks.get(traverser.sack).estimated_heap_bytes());
+            }
         }
-        if bytes > max {
-            return Err(crate::traversal::bulk::materialized_bytes_error(max, bytes));
-        }
-        if let Some(budget) = &self.options.memory {
-            budget.check(bytes)?;
-        }
-        Ok(())
+        let frontier = frontier.saturating_add(bytes);
+        self.check_memory(if self.memory.is_tracked() {
+            0
+        } else {
+            frontier
+        })?;
+        Ok(frontier)
     }
 
     /// Fails with [`TraverserError::ResourceLimitExceeded`] (`traversal.max_string_bytes`) when
@@ -404,7 +427,10 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
     /// outgrow the input (`replace()`, `concat()`, `conjoin()`, `format()`), after it otherwise.
     #[inline]
     pub(crate) fn check_string_bytes(&self, len: usize) -> TraverserResult<()> {
-        check_string_bytes(len, self.options.max_string_bytes)
+        check_string_bytes(len, self.options.max_string_bytes)?;
+        // The string is (about to be) held by the stream: the run's estimated memory counts it.
+        self.memory.charge(len as u64);
+        Ok(())
     }
 
     /// [`check_value_depth`](Self::check_value_depth) for a stored or written property value.
@@ -753,8 +779,8 @@ pub(crate) struct ExecutionOptions {
     pub(crate) render_spelling: crate::traversal::Spelling,
     /// `traversal.max_value_depth`: the deepest nesting one value may reach inside the engine.
     pub(crate) max_value_depth: usize,
-    /// `traversal.max_materialized_bytes`: the largest estimated size of one value or buffer a
-    /// step materializes.
+    /// `traversal.max_materialized_bytes`: the most memory the execution may hold at once (live
+    /// bytes, see `traversal/run_memory.rs`).
     pub(crate) max_materialized_bytes: u64,
     /// `traversal.max_string_bytes`: the longest string a step may build.
     pub(crate) max_string_bytes: u64,

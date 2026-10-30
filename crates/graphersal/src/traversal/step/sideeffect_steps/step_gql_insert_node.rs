@@ -180,6 +180,7 @@ pub(crate) fn insert_rows<S: GraphStorage>(
         Some(source) => {
             if source.bulk > 1 {
                 crate::traversal::bulk::ExpansionLimits::of(&context.options).check_copies(
+                    &context.memory,
                     &source.value,
                     source.bulk,
                     step,

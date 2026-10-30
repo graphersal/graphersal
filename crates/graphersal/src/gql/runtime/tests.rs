@@ -685,6 +685,8 @@ fn row_reads_properties_endpoints_and_reserves() {
     };
     let mut context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());
     context.options.max_materialized_bytes = 1_000;
+    // The run's memory takes its limit from the options when the run starts.
+    context.memory = crate::traversal::run_memory::RunMemory::new(1_000, None);
     let traverser = Traverser::start(&context, TraverserValue::Vertex(marko));
     let row = Row::new(&context, &traverser, &[]);
     // Stored order, values as stored.
@@ -701,13 +703,14 @@ fn row_reads_properties_endpoints_and_reserves() {
     // Within the limit: granted, nothing kept.
     assert!(row.reserve(1_000));
     assert!(row.finish().is_ok());
-    // Over it: refused, the limit error kept for the step.
+    // Over it: refused, the limit error kept for the step. The granted 1 000 bytes are held
+    // (the limit counts what the run holds at once), so the refusal reached 2 001.
     assert!(!row.reserve(1_001));
     match row.finish() {
         Err(error) => assert!(
             matches!(
                 &*error,
-                TraverserError::ResourceLimitExceeded { limit, max: Some(1_000), observed: Some(1_001) }
+                TraverserError::ResourceLimitExceeded { limit, max: Some(1_000), observed: Some(2_001) }
                     if limit == "traversal.max_materialized_bytes"
             ),
             "{error}"

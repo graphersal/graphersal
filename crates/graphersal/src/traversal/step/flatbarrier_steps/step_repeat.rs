@@ -275,6 +275,11 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
     }
 
     /// Breadth first: every traverser of iteration `k` before any of iteration `k + 1`.
+    ///
+    /// The run's estimated memory holds the current frontier (slots, values, sacks) and the
+    /// emitted output's buffer; a new frontier is checked traverser by traverser WHILE it is
+    /// built, and replaces the old one's charge at the swap. Everything is released when the loop
+    /// returns (its level charges the output buffer).
     fn run_bfs(
         &self,
         context: &mut TraverserContext<'_, S>,
@@ -283,6 +288,24 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
         frame: usize,
         stats: &mut LoopStats,
     ) -> TraverserResult<Vec<Traverser<S>>> {
+        let mark = context.memory.mark();
+        let result = self.run_bfs_frontiers(context, body, source, frame, stats);
+        context.memory.restore(mark);
+        result
+    }
+
+    /// The frontier loop of [`Self::run_bfs`].
+    fn run_bfs_frontiers(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        body: &AnonymousTraversal<'g, S>,
+        source: Vec<Traverser<S>>,
+        frame: usize,
+        stats: &mut LoopStats,
+    ) -> TraverserResult<Vec<Traverser<S>>> {
+        let slot = std::mem::size_of::<Traverser<S>>() as u64;
+        let mut frontier_charge: u64 = 0;
+        let mut out_charge: u64 = 0;
         let max_loops = self.max_loops(context);
         let mut out = Vec::new();
         // Merge points of the BFS frontier: the input and every iteration's body output. All
@@ -338,15 +361,30 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             stats.total_loops += 1;
             stats.max_depth = stats.max_depth.max(k_next as usize);
             set_loops(context, frame, k_next);
+            // The old frontier went into the body; the body's output is held while the new
+            // frontier is built from it.
+            let memory = &context.memory;
+            memory.release(frontier_charge);
+            let produced_charge = (produced.capacity() as u64).saturating_mul(slot);
+            memory.charge(produced_charge);
             frontier = Vec::with_capacity(produced.len());
+            let mut next_charge: u64 = 0;
             for traverser in produced {
                 context.tick()?;
-                // The body may wrap the value again on every iteration (`repeat(__.fold())`).
-                context.check_loop_traverser(&traverser)?;
+                // The body may wrap the value again on every iteration (`repeat(__.fold())`),
+                // or multiply the traversers: checked with what the new frontier holds so far.
+                next_charge = context.check_loop_traverser(&traverser, next_charge)?;
                 if let Some(t) = self.postfix(context, traverser, k_next, &mut out, stats)? {
                     frontier.push(t);
                 }
             }
+            let memory = &context.memory;
+            memory.release(produced_charge);
+            memory.charge(next_charge);
+            frontier_charge = next_charge;
+            memory.release(out_charge);
+            out_charge = (out.capacity() as u64).saturating_mul(slot);
+            memory.charge(out_charge);
             k = k_next;
         }
         Ok(out)
@@ -354,6 +392,9 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
 
     /// Depth first, pre-order, with an explicit stack: a traverser's children are visited, in
     /// body order, before its siblings.
+    ///
+    /// The run's estimated memory holds the stack and the output buffers by capacity; every
+    /// child is checked with its own value as pending. Released when the loop returns.
     fn run_dfs(
         &self,
         context: &mut TraverserContext<'_, S>,
@@ -362,6 +403,24 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
         frame: usize,
         stats: &mut LoopStats,
     ) -> TraverserResult<Vec<Traverser<S>>> {
+        let mark = context.memory.mark();
+        let result = self.run_dfs_stack(context, body, source, frame, stats);
+        context.memory.restore(mark);
+        result
+    }
+
+    /// The stack loop of [`Self::run_dfs`].
+    fn run_dfs_stack(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        body: &AnonymousTraversal<'g, S>,
+        source: Vec<Traverser<S>>,
+        frame: usize,
+        stats: &mut LoopStats,
+    ) -> TraverserResult<Vec<Traverser<S>>> {
+        let entry = std::mem::size_of::<(Traverser<S>, u32)>() as u64;
+        let slot = std::mem::size_of::<Traverser<S>>() as u64;
+        let mut held: u64 = 0;
         let max_loops = self.max_loops(context);
         let mut out = Vec::new();
         let mut stack: Vec<(Traverser<S>, u32)> =
@@ -385,7 +444,7 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             let mark = stack.len();
             for child in produced {
                 context.tick()?;
-                context.check_loop_traverser(&child)?;
+                context.check_loop_traverser(&child, 0)?;
                 if let Some(c) = self.postfix(context, child, k_next, &mut out, stats)? {
                     stack.push((c, k_next));
                 }
@@ -394,6 +453,12 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             if let Some(children) = stack.get_mut(mark..) {
                 children.reverse();
             }
+            let memory = &context.memory;
+            memory.release(held);
+            held = (stack.capacity() as u64)
+                .saturating_mul(entry)
+                .saturating_add((out.capacity() as u64).saturating_mul(slot));
+            memory.charge(held);
         }
         Ok(out)
     }

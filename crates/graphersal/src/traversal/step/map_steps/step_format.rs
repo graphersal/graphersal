@@ -242,8 +242,13 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepFormat<'g, S> {
                 // Unproductive: TinkerPop's `EmptyTraverser`.
                 Some(_) | None => return Ok(None),
             }
-            context.check_string_bytes(out.len())?;
+            crate::traversal::context::check_string_bytes(
+                out.len(),
+                context.options.max_string_bytes,
+            )?;
         }
+        // The finished string counts once in the run's estimated memory.
+        context.memory.charge(out.len() as u64);
         Ok(Some(Traverser::with_parts(
             TraverserValue::Computed(ElementProperty::String(out.into()), None),
             source.path,

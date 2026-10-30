@@ -6038,6 +6038,16 @@ fn memory_measure(unit: bool) -> &'static str {
     }
 }
 
+/// What the per-execution limit `traversal.max_materialized_bytes` measured: the live heap of the
+/// query's thread (tracked) or the engine's count of what the run holds (estimated).
+fn query_memory_measure() -> &'static str {
+    if crate::traversal::memory_budget::tracked_live_bytes().is_some() {
+        "tracked: the live heap this query's thread holds, without what it added to the graph"
+    } else {
+        "estimated: the engine's count of its buffers and values"
+    }
+}
+
 /// What a check BEFORE an allocation compared ([`crate::exec::check_memory_for`] and the load,
 /// read and checkpoint checks): the live heap plus what is needed (tracked), else only what the
 /// operation holds and needs.
@@ -6177,12 +6187,12 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
                 .unwrap_or_default()
         ),
         "traversal.max_materialized_bytes" => format!(
-            "A step had to materialize a value or buffer larger than \
-             'traversal.max_materialized_bytes' allows{}{}, by the engine's size estimate. \
-             Steps that expand merged traversers into single items (fold(), aggregate(), \
-             store(), group() value lists, a terminal list) do this, and so does a repeat() \
-             whose body doubles its value on every iteration (repeat(__.path()), \
-             repeat(__.group())). Prefer a step that works on the multiplicity directly: count() \
+            "The traversal held more memory at once than 'traversal.max_materialized_bytes' \
+             allows{}{} ({}). Memory a step frees is given back, so only what is held at the \
+             same time counts. Steps that expand merged traversers into single items (fold(), \
+             aggregate(), store(), group() value lists, a terminal list) hold the most, and so \
+             does a repeat() whose body multiplies its traversers or doubles its value on every \
+             iteration (repeat(__.path()), repeat(__.group())). Prefer a step that works on the multiplicity directly: count() \
              instead of fold(), for example g.v().repeat(__.both()).times(8).count(); \
              group_count() to see how often each result occurs, for example \
              g.v().repeat(__.both()).times(8).group_count(); dedup() or limit(n) before the \
@@ -6196,8 +6206,9 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
              administrative option: a script whose host restricts it needs Update on that Option.",
             max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
             observed
-                .map(|observed| format!("; this one needed at least {observed} bytes"))
+                .map(|observed| format!("; it reached {observed} bytes"))
                 .unwrap_or_default(),
+            query_memory_measure(),
         ),
         "memory.limit" => format!(
             "The traversal would take the memory in use over the process memory ceiling \
@@ -8580,8 +8591,9 @@ fn gql_traverser_limit_help(
 fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> String {
     let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
     format!(
-        "The gql() query built a value larger than 'traversal.max_materialized_bytes' \
-         allows{}{}, by the engine's size estimate. A function whose result can be larger than \
+        "The gql() query held more memory at once than 'traversal.max_materialized_bytes' \
+         allows{}{} ({}). Memory a step frees is given back, so only what is held at the same \
+         time counts. A function whose result can be larger than \
          its arguments (range(), split(), replace(), || and CAST(x AS STRING) of a list or map) and \
          the list of collect_list() are checked before they are built, as is the list of a \
          pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out \
@@ -8601,8 +8613,9 @@ fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> Strin
          administrative option: a script whose host restricts it needs Update on that Option.",
         max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
         observed
-            .map(|observed| format!("; this one needed at least {observed} bytes"))
+            .map(|observed| format!("; it reached {observed} bytes"))
             .unwrap_or_default(),
+        query_memory_measure(),
     )
 }
 
