@@ -1977,7 +1977,7 @@ fn a_store_over_the_memory_limit_exits_1_naming_the_minimum() {
     );
     assert_eq!(res.code, 1, "stdout: {}", res.stdout);
     assert!(
-        res.stderr.contains("The store open needs about"),
+        res.stderr.contains("store open") && res.stderr.contains("The graph does not fit"),
         "{}",
         res.stderr
     );

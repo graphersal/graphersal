@@ -329,7 +329,8 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 break;
             }
             let mut reader = JournalReader::open(source, index, depth)?
-                .with_newer_schema(options.newer_schema.clone());
+                .with_newer_schema(options.newer_schema.clone())
+                .with_operation(operation);
             let lineage = if based {
                 graph.graph_id()
             } else {
