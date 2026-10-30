@@ -170,6 +170,21 @@ fn copy_measured(
     Ok((len, check, hash.finish()))
 }
 
+/// Checks a blob's bytes read from a stream (a ZIP entry read back) against its reference:
+/// length, CRC-32C and SHA-256. Returns the problems.
+pub(crate) fn check_stream(blob: &BlobRef, data: &mut dyn Read) -> Vec<String> {
+    let mut sink = std::io::sink();
+    match copy_measured(data, &mut sink) {
+        Ok((len, _, _)) if len != blob.length() => {
+            vec![format!("{len} bytes, the blob has {}", blob.length())]
+        }
+        Ok((_, check, _)) if check != blob.crc32c() => vec!["CRC-32C mismatch".into()],
+        Ok((_, _, sha)) if sha.as_slice() != blob.hash() => vec!["hash mismatch".into()],
+        Ok(_) => Vec::new(),
+        Err(err) => vec![err.to_string()],
+    }
+}
+
 /// Streams a file, computing its CRC-32C and length (and the SHA-256 when `hash`).
 fn measure(path: &DirPath, hash: bool) -> Result<(u64, u32, Option<[u8; 32]>), BlobError> {
     let mut reader = path.open_read()?;
@@ -470,6 +485,18 @@ pub(crate) fn list_blobs(root: &DirPath) -> std::io::Result<BlobListing> {
     Ok(out)
 }
 
+/// Whether `prefix`/`hash` name a blob of algorithm `code` (lowercase hex, the prefix the
+/// hash's first two digits; SHA-256: 64 digits).
+pub(crate) fn is_blob_name(code: u8, prefix: &str, hash: &str) -> bool {
+    is_prefix(prefix)
+        && hash.starts_with(prefix)
+        && hash.len() >= 2
+        && hash.len() <= 2 * crate::value::blob::MAX_BLOB_HASH_BYTES
+        && hash.len() % 2 == 0
+        && (code != 1 || hash.len() == 64)
+        && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn is_prefix(name: &str) -> bool {
     name.len() == 2 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -508,6 +535,15 @@ fn list_prefix(
         }
     }
     Ok(())
+}
+
+/// Whether the store at `root` holds any blob file (a cheap listing: no blob, no reference
+/// work for a copy).
+pub(crate) fn holds_blobs(root: &DirPath) -> Result<bool, PersistError> {
+    Ok(!list_blobs(root)
+        .map_err(|err| PersistError::io("listing the blobs", err))?
+        .blobs
+        .is_empty())
 }
 
 /// Removes the `blobs/tmp-*` leftovers of an interrupted write (the open of a writable store).
@@ -974,6 +1010,212 @@ pub(crate) fn estimate_unreferenced(root: &DirPath, kept_from: u64) -> (u64, u64
         .iter()
         .filter(|b| !referenced.contains(&b.key))
         .fold((0, 0), |(count, bytes), b| (count + 1, bytes + b.len))
+}
+
+/// Checks the blobs of a store that came from outside (a restored ZIP archive): every blob
+/// file's SHA-256 against its name, and the length and CRC-32C of every one the history
+/// references against its reference (format spec 12.8: a foreign blob is hostile input).
+/// Returns the first problem as `(path, reason)`.
+pub(crate) fn check_foreign_dir(root: &DirPath) -> Result<(), (String, String)> {
+    let listing = list_blobs(root).map_err(|err| (BLOBS_DIR.to_string(), err.to_string()))?;
+    if let Some(stray) = listing.strays.first() {
+        return Err((stray.clone(), "not a blob".into()));
+    }
+    for file in &listing.blobs {
+        if file.key.0 != 1 {
+            continue;
+        }
+        let path = root.join(&file.name);
+        match measure(&path, true) {
+            Ok((_, _, Some(sha))) if sha.as_slice() == file.key.1.as_slice() => {}
+            Ok(_) => return Err((file.name.clone(), "its content does not match its hash".into())),
+            Err(_) => return Err((file.name.clone(), "unreadable".into())),
+        }
+    }
+    let Ok(file) = files::read_graph_file(root) else {
+        return Ok(());
+    };
+    let referenced = referenced(root, &file.file.chain(), false)
+        .map_err(|err| (BLOBS_DIR.to_string(), err.to_string()))?;
+    for blob in referenced.blobs.values() {
+        match check_blob(root, blob, false) {
+            Ok(()) | Err(BlobError::Fault(BlobFault::Missing)) | Err(BlobError::Unsupported) => {}
+            Err(err) => {
+                return Err((
+                    blob_name(blob),
+                    format!(
+                        "its {} does not match its reference",
+                        err.fault().map_or("content", BlobFault::name)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copies into the store (or backup) `to` every blob its history references that it lacks,
+/// from the store `from` (checked by length and CRC-32C on both sides). Returns the names
+/// copied and the names that could not be carried (missing or damaged in `from`).
+pub(crate) fn sync_into(
+    from: &DirPath,
+    to: &DirPath,
+) -> Result<(Vec<String>, Vec<String>), PersistError> {
+    if !holds_blobs(from)? {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let chain = files::read_graph_file(to)?.file.chain();
+    let wanted = referenced(to, &chain, true)?;
+    copy_set(from, to, wanted.blobs.values())
+}
+
+/// Copies `blobs` from `from` into `to` (see [`copy_blob`]): names copied and names not
+/// carried.
+pub(crate) fn copy_set<'a>(
+    from: &DirPath,
+    to: &DirPath,
+    blobs: impl IntoIterator<Item = &'a BlobRef>,
+) -> Result<(Vec<String>, Vec<String>), PersistError> {
+    let mut copied = Vec::new();
+    let mut missing = Vec::new();
+    for blob in blobs {
+        match copy_blob(from, to, blob, false) {
+            Ok(true) => copied.push(blob_name(blob)),
+            Ok(false) => {}
+            Err(BlobError::Io(err)) => return Err(PersistError::io("copying a blob", err)),
+            Err(BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
+            Err(BlobError::Fault(_) | BlobError::Unsupported) => missing.push(blob_name(blob)),
+        }
+    }
+    Ok((copied, missing))
+}
+
+/// Copies into the new store `to` the blobs its newest snapshot's table references, from the
+/// store `from` (a fork, an attic fork, a repair: format spec 12.5, 13.4), checked by length
+/// and CRC-32C (and SHA-256 when `hash`). Returns the names copied and the names not carried
+/// (missing or damaged in `from`); an I/O failure is the error.
+pub(crate) fn carry_state(
+    from: &DirPath,
+    to: &DirPath,
+    hash: bool,
+) -> Result<(Vec<String>, Vec<String>), PersistError> {
+    let Some((_, snapshot)) = files::list_snapshots(to)?.pop() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let (_, manifest) = super::snapshot_dir::read_manifest(&snapshot)?;
+    let mut copied = Vec::new();
+    let mut missing = Vec::new();
+    for (blob, _) in &manifest.blobs {
+        match copy_blob(from, to, blob, hash) {
+            Ok(true) => copied.push(blob_name(blob)),
+            Ok(false) => {}
+            Err(BlobError::Io(err)) => return Err(PersistError::io("copying a blob", err)),
+            Err(BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
+            Err(BlobError::Fault(_) | BlobError::Unsupported) => missing.push(blob_name(blob)),
+        }
+    }
+    Ok((copied, missing))
+}
+
+/// The segment-table kind of a blob in a packed snapshot (format spec 7.5, 8): IGNORABLE, so a
+/// reader without blobs checks its length and CRC and otherwise skips it. The row's path is
+/// the hash hex (64 digits for SHA-256), its first id the algorithm's name (`sha256`), its last
+/// id empty, its element count 0; its length and CRC-32C are the blob's.
+pub(crate) const PACKED_BLOB_KIND: u8 = 4;
+
+/// The blobs a packed export of the snapshot `snapshot` carries: the rows of its blob table,
+/// each checked in the store (length, CRC-32C); a missing or damaged one refuses the export.
+pub(crate) fn packed_files(
+    root: &DirPath,
+    snapshot: &DirPath,
+) -> Result<Vec<super::models::PackedModelFile>, PersistError> {
+    let (_, manifest) = super::snapshot_dir::read_manifest(snapshot)?;
+    let mut out = Vec::new();
+    for (blob, _) in &manifest.blobs {
+        if blob.hash_algo() != BlobHashAlgo::Sha256 {
+            // A newer version's algorithm: not carried (never read).
+            continue;
+        }
+        check_blob(root, blob, false).map_err(|err| err.into_persist("export the snapshot", blob))?;
+        out.push(super::models::PackedModelFile {
+            kind: PACKED_BLOB_KIND,
+            name: blob.hash_hex(),
+            id: blob.hash_algo().name(),
+            file: String::new(),
+            source: super::models::PackedSource::File(blob_path(root, blob)),
+            len: blob.length(),
+            crc: blob.crc32c(),
+        });
+    }
+    Ok(out)
+}
+
+/// The reference of a packed snapshot's blob row: by the hash its path names, found in the
+/// manifest's blob table (length and CRC-32C must match the row's).
+pub(crate) fn packed_blob_ref(
+    entry: &super::super::manifest::SegmentEntry,
+    table: &[(BlobRef, u64)],
+) -> Result<BlobRef, PersistError> {
+    let bad = |reason: &str| PersistError::corrupt("packed snapshot", 0, format!("blob row {:?}: {reason}", entry.path));
+    if entry.first_id != "sha256" || !entry.last_id.is_empty() || entry.count != 0 {
+        return Err(bad("not a SHA-256 blob row"));
+    }
+    let hash = BlobRef::parse_hex(&entry.path).map_err(|_| bad("its name is not a hash"))?;
+    let blob = table
+        .iter()
+        .map(|(blob, _)| blob)
+        .find(|blob| blob.hash_algo() == BlobHashAlgo::Sha256 && blob.hash() == hash.as_slice())
+        .ok_or_else(|| bad("the snapshot's blob table does not name it"))?;
+    if blob.length() != entry.byte_len || blob.crc32c() != entry.crc {
+        return Err(bad("its length or CRC-32C is not the blob table's"));
+    }
+    Ok(blob.clone())
+}
+
+/// A new staging file `blobs/tmp-<32 hex>` (the directory created).
+pub(crate) fn stage(root: &DirPath) -> Result<DirPath, PersistError> {
+    let blobs = root.join(BLOBS_DIR);
+    blobs
+        .create_dir_all()
+        .map_err(|err| PersistError::io("creating the blobs directory", err))?;
+    Ok(blobs.join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7())))
+}
+
+/// Moves the staged file `staged` into place as `blob` after checking its SHA-256, length and
+/// CRC-32C (foreign input); a mismatch removes it and is damage of the input. An intact blob
+/// of the same hash already present is kept.
+pub(crate) fn install_staged(
+    root: &DirPath,
+    blob: &BlobRef,
+    staged: &DirPath,
+) -> Result<(), PersistError> {
+    let mut tmp = TmpBlob {
+        path: staged.clone(),
+        done: false,
+    };
+    let (len, check, sha) = measure(staged, true).map_err(|err| err.into_persist("import a blob", blob))?;
+    if len != blob.length() || check != blob.crc32c() || sha.as_ref().map(|s| s.as_slice()) != Some(blob.hash()) {
+        return Err(PersistError::corrupt(
+            "packed snapshot",
+            0,
+            format!("the blob {} does not match its reference", blob.hash_hex()),
+        ));
+    }
+    if check_blob(root, blob, false).is_ok() {
+        return Ok(());
+    }
+    let target = blob_path(root, blob);
+    let parent = target.parent().unwrap_or_else(|| root.join(BLOBS_DIR));
+    parent
+        .create_dir_all()
+        .map_err(|err| PersistError::io("importing a blob", err))?;
+    let _ = target.remove_file();
+    tmp.path
+        .rename_to(&target)
+        .map_err(|err| PersistError::io("moving a blob into place", err))?;
+    tmp.done = true;
+    files::sync_dir(&parent)?;
+    files::sync_dir(&root.join(BLOBS_DIR))
 }
 
 /// What a collection removed.

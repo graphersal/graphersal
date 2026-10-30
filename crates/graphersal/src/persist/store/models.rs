@@ -1282,7 +1282,10 @@ pub(crate) enum PackedSource {
 /// One model file a packed export carries as a segment-table row of kind
 /// [`PACKED_MODEL_KIND`] (format spec 4.5, 8).
 pub(crate) struct PackedModelFile {
-    /// The row's path: [`packed_name`].
+    /// The row's segment kind: [`PACKED_MODEL_KIND`], or
+    /// [`PACKED_BLOB_KIND`](super::blobs::PACKED_BLOB_KIND) for a blob.
+    pub(crate) kind: u8,
+    /// The row's path: [`packed_name`] (a blob: its hash hex).
     pub(crate) name: String,
     /// The model id.
     pub(crate) id: String,
@@ -1341,6 +1344,7 @@ pub(crate) fn packed_files(
                 ));
             }
             out.push(PackedModelFile {
+                kind: PACKED_MODEL_KIND,
                 name: packed_name(&id, &file.name),
                 id: id.clone(),
                 file: file.name.clone(),
@@ -1350,6 +1354,7 @@ pub(crate) fn packed_files(
             });
         }
         out.push(PackedModelFile {
+            kind: PACKED_MODEL_KIND,
             name: packed_name(&id, MODEL_MANIFEST),
             id: id.clone(),
             file: MODEL_MANIFEST.to_string(),

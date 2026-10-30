@@ -991,6 +991,16 @@ impl Store {
             files::undo_new_dir(&dir, existed);
             return Err(err);
         }
+        // The blobs are foreign input (format spec 12.8): every one against its hash, length
+        // and CRC-32C.
+        if let Err((path, reason)) = blobs::check_foreign_dir(&dir) {
+            files::undo_new_dir(&dir, existed);
+            return Err(PersistError::corrupt(
+                format!("backup archive entry {path}"),
+                0,
+                reason,
+            ));
+        }
         let mut file = match read_graph_file(&dir) {
             Ok(read) => read.file,
             // A backup of a released older store format is upgraded through the converter
@@ -2345,7 +2355,13 @@ impl StoreCore {
         };
         // The intact models are carried; a damaged one is reported (format spec 4.5).
         let (models, models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
-        let verified = maintenance::verify(new_dir, None)?;
+        // The blobs the repaired state references, each checked by its hash too (the source
+        // is damaged); a missing or damaged one is reported, never fails the repair.
+        let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
+        let mut verified = maintenance::verify(new_dir, None)?;
+        verified.problems.retain(|p| {
+            !(p.path.starts_with("blobs/") && blobs_not_carried.contains(&p.path))
+        });
         if !verified.is_ok() {
             return Err(PersistError::store(
                 "repair the store",
@@ -2370,6 +2386,8 @@ impl StoreCore {
             marks_not_carried,
             models,
             models_not_carried,
+            blobs: blobs_carried,
+            blobs_not_carried,
             marks_unreadable,
         })
     }
@@ -2621,6 +2639,8 @@ impl StoreCore {
             ("fork", Some((parent.store_id, branched_at))),
         )?;
         let models = models::carry_into_new(dir, new_dir, existed)?;
+        let (blobs, blobs_not_carried) = blobs::carry_state(dir, new_dir, false)
+            .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
         let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
             PersistError::store(
                 "fork the store",
@@ -2632,6 +2652,8 @@ impl StoreCore {
             snapshot: read_listing(&path)?,
             marks_not_carried,
             models,
+            blobs,
+            blobs_not_carried,
         })
     }
 
@@ -4328,10 +4350,14 @@ fn sync_ledger(
     let rebuild = |reason: &str, report: &mut OpenReport| -> Result<(), PersistError> {
         let frames = blobs::scan_frames(&loaded.segments);
         blobs::write_ledger(dir, &frames)?;
-        report.warnings.push(format!(
-            "the blob ledger was {reason} and was rebuilt from the WAL ({} frames)",
-            frames.len()
-        ));
+        // A store that never had a ledger (made before 0.5, or from a packed snapshot) and
+        // whose WAL references no blob gets an empty one without a word.
+        if reason == "damaged" || !frames.is_empty() {
+            report.warnings.push(format!(
+                "the blob ledger was {reason} and was rebuilt from the WAL ({} frames)",
+                frames.len()
+            ));
+        }
         Ok(())
     };
     match blobs::read_ledger(dir)? {
@@ -4652,6 +4678,22 @@ impl Shared {
     /// Writes `store.opened` (and `store.recovered` when the open repaired traces of a crash or
     /// of an interrupted operation).
     fn journal_opened(&self, report: &OpenReport, started: web_time::Instant, read_only: bool) {
+        for warning in &report.warnings {
+            if let Some(rest) = warning.strip_prefix("the blob ledger was ") {
+                let reason = rest.split_whitespace().next().unwrap_or("missing");
+                let frames = rest
+                    .rsplit_once('(')
+                    .and_then(|(_, n)| n.split_whitespace().next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                self.system_journal.emit(
+                    &catalogue::LEDGER_REBUILT,
+                    Event::new(warning.clone())
+                        .count("frames", frames)
+                        .field("reason", reason),
+                );
+            }
+        }
         let torn = report.torn_tail.map_or(0, |cut| cut.bytes);
         if torn > 0
             || report.intent_completed.is_some()
@@ -4906,7 +4948,11 @@ fn export_packed_from(
         ));
     };
     let model_files = match models {
-        ModelCopy::Include => models::packed_files(dir)?.0,
+        ModelCopy::Include => {
+            let mut files = models::packed_files(dir)?.0;
+            files.extend(blobs::packed_files(dir, path)?);
+            files
+        }
         ModelCopy::Exclude => Vec::new(),
     };
     let mut reader = DirSnapshotReader::open_with_models(path, model_files)?;

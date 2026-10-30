@@ -483,7 +483,7 @@ pub(crate) static BLOB_COLLECTED: EventKind = event(
 
 pub(crate) static LEDGER_REBUILT: EventKind = event(
     "ledger.rebuilt",
-    "blob.ledger",
+    "ledger",
     Level::Notice,
     "The derived blob ledger was missing or damaged and was rebuilt from the WAL.",
     &[

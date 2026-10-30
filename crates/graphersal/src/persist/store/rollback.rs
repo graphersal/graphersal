@@ -85,6 +85,12 @@ pub struct ForkReport {
     /// The embedding models the new store holds: every model of the source is carried
     /// (format spec 4.5).
     pub models: Vec<super::StoredModel>,
+    /// The blobs the new store's state references, copied from the source (format spec 4.6),
+    /// relative names.
+    pub blobs: Vec<String>,
+    /// The blobs the state references that could not be carried (missing or damaged in the
+    /// source), relative names: the new store's catalog still references them.
+    pub blobs_not_carried: Vec<String>,
 }
 
 impl std::fmt::Display for ForkReport {
@@ -1310,6 +1316,8 @@ pub(super) fn attic_fork(
         ("attic_fork", Some((old.store_id, branched_at))),
     )?;
     let models = super::models::carry_into_new(dir, new_dir, existed)?;
+    let (blobs, blobs_not_carried) = super::blobs::carry_state(dir, new_dir, false)
+        .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
     let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
         PersistError::store(
             "fork the attic entry",
@@ -1321,6 +1329,8 @@ pub(super) fn attic_fork(
         snapshot: super::snapshot_dir::read_listing(&path)?,
         marks_not_carried,
         models,
+        blobs,
+        blobs_not_carried,
     })
 }
 

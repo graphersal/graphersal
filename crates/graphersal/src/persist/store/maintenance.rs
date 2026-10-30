@@ -154,6 +154,13 @@ pub struct BackupReport {
     /// The system journal's segments copied (relative name, bytes; format spec 12.6, 12.7):
     /// not counted in [`Self::files`] and [`Self::bytes`], which are the graph's files.
     pub journal_files: Vec<(String, u64)>,
+    /// The blobs this backup copied (format spec 4.6, 12.6), relative names (`blobs/..`);
+    /// they are in [`Self::files`] too.
+    pub blobs: Vec<String>,
+    /// Blobs the copied history references that the backup could not carry (missing or
+    /// damaged in the store, or unreadable from memory's store directory), relative names;
+    /// the copy's catalog still references them.
+    pub blobs_not_carried: Vec<String>,
 }
 
 fn relative(dir: &DirPath, path: &DirPath) -> String {
@@ -1116,6 +1123,11 @@ pub(super) struct BackupPlan {
     /// The system journal's segments (format spec 4.7, 12.6): copied and checked frame by
     /// frame; a problem is a warning, never damage.
     journal: Vec<super::system_journal::CopiedSegment>,
+    /// The blobs copied (format spec 4.6, 12.6): those the copied history references, checked
+    /// by length and CRC-32C in the store; their files are in `files`.
+    blobs: Vec<crate::value::BlobRef>,
+    /// The blobs the copied history references that stay out (missing or damaged).
+    blobs_not_carried: Vec<String>,
 }
 
 /// Plans a full backup of the store in `dir` and checks every checksum of what it would copy
@@ -1314,6 +1326,41 @@ fn plan_backup(
     graph_file.closed_at = Some(commit_seq);
     let (journal, journal_warnings) = super::system_journal::plan_copy(dir);
     findings.warnings.extend(journal_warnings);
+    // The blobs the copied history references (format spec 4.6, 12.6): checked in the store
+    // (length, CRC-32C); a missing or damaged one is a warning and stays out (blob damage is
+    // never store damage).
+    let mut blobs = Vec::new();
+    let mut blobs_not_carried = Vec::new();
+    if with_models && super::blobs::holds_blobs(dir)? {
+        let copied: Vec<(u64, DirPath)> = checked
+            .iter()
+            .filter_map(|(first, _)| replay.iter().find(|(f, _)| f == first).cloned())
+            .collect();
+        for blob in super::blobs::referenced_by_copy(&[snapshot.clone()], &copied, commit_seq)? {
+            match super::blobs::check_blob(dir, &blob, false) {
+                Ok(()) => {
+                    files.push(BackupFile {
+                        relative: super::blobs::blob_name(&blob),
+                        source: super::blobs::blob_path(dir, &blob),
+                        len: blob.length(),
+                        bytes: None,
+                    });
+                    blobs.push(blob);
+                }
+                Err(err) => {
+                    findings.warnings.push(format!(
+                        "{}: not carried ({})",
+                        super::blobs::blob_name(&blob),
+                        match err.fault() {
+                            Some(fault) => fault.name().to_string(),
+                            None => "unreadable".to_string(),
+                        }
+                    ));
+                    blobs_not_carried.push(super::blobs::blob_name(&blob));
+                }
+            }
+        }
+    }
     Ok(Some(BackupPlan {
         graph: graph_file.encode(),
         marks,
@@ -1325,6 +1372,8 @@ fn plan_backup(
         warnings: std::mem::take(&mut findings.warnings),
         models,
         journal,
+        blobs,
+        blobs_not_carried,
     }))
 }
 
@@ -1374,6 +1423,18 @@ fn check_copy(target: &DirPath, plan: &BackupPlan) -> Findings {
     for (model, _) in &plan.models {
         for (path, reason) in super::models::check(target, &model.id).1 {
             findings.problem(path, None, reason);
+        }
+    }
+    for blob in &plan.blobs {
+        if let Err(err) = super::blobs::check_blob(target, blob, false) {
+            findings.problem(
+                super::blobs::blob_name(blob),
+                None,
+                format!(
+                    "the copied blob does not read back ({})",
+                    err.fault().map_or("unreadable", |fault| fault.name())
+                ),
+            );
         }
     }
     let graph_file = GraphFile::decode(&plan.graph).ok();
@@ -1434,6 +1495,8 @@ fn full_report(plan: &BackupPlan) -> BackupReport {
         taken_at: plan.taken_at,
         warnings: plan.warnings.clone(),
         models: plan.models.iter().map(|(model, _)| model.clone()).collect(),
+        blobs: plan.blobs.iter().map(super::blobs::blob_name).collect(),
+        blobs_not_carried: plan.blobs_not_carried.clone(),
         ..BackupReport::default()
     }
 }
@@ -1687,6 +1750,12 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Result<Findings, Persi
         }
         if name == MARKS_FILE {
             return expect(read_all(data), &plan.marks);
+        }
+        if name.starts_with(&format!("{}/", super::blobs::BLOBS_DIR)) {
+            let Some(blob) = plan.blobs.iter().find(|b| super::blobs::blob_name(b) == name) else {
+                return vec!["a blob the backup did not copy".into()];
+            };
+            return super::blobs::check_stream(blob, data);
         }
         if let Some(rest) = name.strip_prefix(&format!("{}/", super::models::MODELS_DIR)) {
             let Some((id, file)) = rest.split_once('/') else {

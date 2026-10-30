@@ -377,12 +377,13 @@ fn patch_wal(dir: &MemDir, from: &[u8], to: &[u8]) {
 
 #[test]
 fn every_file_this_build_writes_is_of_file_format_version_3() {
-    assert_eq!(persist::FORMAT_VERSION, 3);
+    // File format version 4 since P4 (blob references); the temporal tags are unchanged.
+    assert_eq!(persist::FORMAT_VERSION, 4);
     assert_eq!(persist::STORE_FORMAT_VERSION, 3, "the store version stays");
     let mut packed = Vec::new();
     persist::write_snapshot(&v3_graph(), &mut packed, &WriteOptions::new()).unwrap();
     assert_eq!(&packed[..8], b"GRSLPACK");
-    assert_eq!(version_word(&packed), 3);
+    assert_eq!(version_word(&packed), 4);
 
     let dir = MemDir::new();
     let store = Store::create_with(&dir, v3_graph(), StoreOptions::new()).unwrap();
@@ -399,7 +400,7 @@ fn every_file_this_build_writes_is_of_file_format_version_3() {
         versions.iter().any(|(n, _)| n.ends_with(".seg")),
         "{versions:?}"
     );
-    assert!(versions.iter().all(|(_, v)| *v == 3), "{versions:?}");
+    assert!(versions.iter().all(|(_, v)| *v == 4), "{versions:?}");
     let graph = dir.read("GRAPH", u64::MAX).unwrap();
     assert_eq!(version_word(&graph), 3, "the store format version");
 }
@@ -420,7 +421,7 @@ fn a_packed_snapshot_keeps_every_temporal_value_exactly() {
 fn a_journal_keeps_every_temporal_value_exactly() {
     for (name, value) in v3_values() {
         let bytes = journal_with(value.clone());
-        assert_eq!(version_word(&bytes), 3);
+        assert_eq!(version_word(&bytes), 4);
         assert_eq!(
             exact(&journal_value(&bytes).unwrap()),
             exact(&value),
@@ -482,7 +483,7 @@ fn a_store_keeps_every_temporal_value_through_every_path() {
         assert_v3_graph(&lock);
         assert_holds_v3_values(&lock, "closed");
     }
-    assert!(file_versions(&backup).iter().all(|(_, v)| *v == 3));
+    assert!(file_versions(&backup).iter().all(|(_, v)| *v == 4));
 
     // A ZIP backup, unpacked into a live store.
     #[cfg(feature = "persist-zip")]
@@ -500,7 +501,7 @@ fn a_store_keeps_every_temporal_value_through_every_path() {
     // A packed export of the latest snapshot, and a new store from it.
     let mut packed = Vec::new();
     store.export_packed(None, &mut packed).unwrap();
-    assert_eq!(version_word(&packed), 3);
+    assert_eq!(version_word(&packed), 4);
     let from_packed = MemDir::new();
     {
         let created =
@@ -679,10 +680,10 @@ fn the_packed_snapshot_of_0_2_3_loads_exactly_and_a_store_from_it_continues_in_v
         assert_holds_v3_values(&lock, "v3");
     }
     assert!(store.verify().unwrap().problems.is_empty());
-    // The imported files keep version 2; everything this build wrote is version 3.
+    // The imported files keep version 2; everything this build wrote is version 4 (P4).
     let versions = file_versions(&dir);
     assert!(versions.iter().any(|(_, v)| *v == 2), "{versions:?}");
-    assert!(versions.iter().any(|(_, v)| *v == 3), "{versions:?}");
+    assert!(versions.iter().any(|(_, v)| *v == 4), "{versions:?}");
 }
 
 #[test]
@@ -716,7 +717,7 @@ fn the_store_of_0_2_3_reads_exactly_and_continues_in_version_3() {
         "the version 2 segment is never appended to"
     );
     let new_wal = dir.read("wal/00000000000000000005.wal", u64::MAX).unwrap();
-    assert_eq!(version_word(&new_wal), 3);
+    assert_eq!(version_word(&new_wal), 4);
 
     // The mixed store (version 2 snapshot and segment, version 3 segment) reads back.
     assert!(Store::verify_dir(&shared).unwrap().is_ok());
@@ -751,10 +752,10 @@ fn the_store_of_0_2_3_reads_exactly_and_continues_in_version_3() {
         .filter(|(name, _)| name.starts_with("snapshots/"))
         .max()
         .unwrap();
-    assert_eq!(newest.1, 3, "{after:?}");
+    assert_eq!(newest.1, 4, "{after:?}");
     // From now on the store holds version 3 files, which Graphersal 0.2.x refuses as written by
     // a newer version (its `refuse_newer_version`), never as damage (format spec 15).
-    assert!(after.iter().any(|(_, v)| *v == 3));
+    assert!(after.iter().any(|(_, v)| *v == 4));
 }
 
 #[cfg(feature = "persist-zip")]
@@ -1012,8 +1013,8 @@ fn out_of_range_nanosecond_payloads_are_damage() {
     svar(&mut case, i64::MAX);
     uvar(&mut case, 1_000_000_000);
     cases.push(("dur nanos", case));
-    // An unknown tag after the last one.
-    cases.push(("tag 21", vec![21u8]));
+    // An unknown tag after the last one (21 is the blob reference of version 4).
+    cases.push(("tag 22", vec![22u8]));
     for (name, case) in cases {
         let mut damaged = payload[..at].to_vec();
         damaged.extend_from_slice(&case);

@@ -352,6 +352,12 @@ pub struct RepairReport {
     /// The models that were NOT carried because their files are damaged, with the reason:
     /// add them to the repaired store again.
     pub models_not_carried: Vec<String>,
+    /// The blobs the repaired state references, copied (format spec 4.6, 13.4), relative
+    /// names.
+    pub blobs: Vec<String>,
+    /// The blobs the repaired state references that could not be carried (missing or
+    /// damaged in the damaged store): the repaired store's catalog still references them.
+    pub blobs_not_carried: Vec<String>,
     /// Why [`Self::marks_not_carried`] is empty although the damaged store may have marks: its
     /// `marks` file and WAL could not be read (`None`: they were read). A repair still
     /// completes then, because the damaged store's marks are not carried anyway.
