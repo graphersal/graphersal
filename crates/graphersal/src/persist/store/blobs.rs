@@ -24,8 +24,9 @@ use super::super::wal::{JournalReader, JournalRecord};
 use super::files::{self, DirPath, EntryKind};
 use crate::graph::Definition;
 use crate::graph::change::{ChangeSet, Mutation};
+use crate::value::BlobRef;
+use crate::value::blob::BlobHashAlgo;
 use crate::value::vector::embed::sha256::Sha256;
-use crate::value::{BlobHashAlgo, BlobRef};
 
 /// The directory of a store's blobs (format spec 4.6).
 pub(crate) const BLOBS_DIR: &str = "blobs";

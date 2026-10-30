@@ -9,12 +9,13 @@
 
 use compact_str::CompactString;
 
+use crate::value::blob::BlobHashAlgo;
 use crate::value::blob::MAX_BLOB_HASH_BYTES;
 use crate::value::number::{N, Number};
 use crate::value::temporal::zone::ZoneId;
 use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
-use crate::value::{BlobHashAlgo, BlobRef, ElementProperty, PropertyMap, Vector, VectorElement};
+use crate::value::{BlobRef, ElementProperty, PropertyMap, Vector, VectorElement};
 
 /// The file format version every file of this build writes (format spec 15).
 pub(crate) const FORMAT_VERSION: u32 = 4;

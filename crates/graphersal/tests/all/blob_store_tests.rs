@@ -298,3 +298,38 @@ fn every_backend_keeps_blobs() {
     )));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The throughput of a blob write (SHA-256 + CRC-32C + the file write) on a 500 MB stream:
+/// `cargo test --release ... blob_store_tests::write_throughput -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn write_throughput() {
+    struct Generated(u64);
+    impl std::io::Read for Generated {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buf.len() as u64).min(self.0) as usize;
+            for (i, byte) in buf[..n].iter_mut().enumerate() {
+                *byte = (i as u8).wrapping_mul(31) ^ (self.0 as u8);
+            }
+            self.0 -= n as u64;
+            Ok(n)
+        }
+    }
+    let base = std::env::temp_dir().join(format!("graphersal-blob-speed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let dir: Arc<dyn StoreDir> = Arc::new(graphersal::persist::FsDir::new(base.join("s")));
+    let store = Store::create(&dir, StoreOptions::new()).unwrap();
+    let bytes = 500_000_000u64;
+    let started = std::time::Instant::now();
+    let pending = store.write_blob(&mut Generated(bytes)).unwrap();
+    let seconds = started.elapsed().as_secs_f64();
+    assert_eq!(pending.blob().length(), bytes);
+    println!(
+        "blob write: {:.0} MB/s ({bytes} bytes in {seconds:.2} s)",
+        bytes as f64 / 1e6 / seconds
+    );
+    drop(pending);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&base);
+}

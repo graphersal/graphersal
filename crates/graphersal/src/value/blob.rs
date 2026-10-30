@@ -299,6 +299,7 @@ pub(crate) fn from_payload(value: &PhysicalValue<'_>) -> Result<BlobRef, String>
     }
 }
 
+#[cfg(feature = "persist")]
 /// Collects every blob reference `value` holds, at any depth, into `out` (one entry per
 /// occurrence).
 pub(crate) fn collect_blobs(value: &crate::value::ElementProperty, out: &mut Vec<BlobRef>) {

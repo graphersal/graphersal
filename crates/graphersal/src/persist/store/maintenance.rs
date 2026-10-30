@@ -681,7 +681,7 @@ fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport)
     }
     for (key, blob) in &referenced.blobs {
         let name = blobs::blob_name(blob);
-        if blob.hash_algo() != crate::value::BlobHashAlgo::Sha256 {
+        if blob.hash_algo() != crate::value::blob::BlobHashAlgo::Sha256 {
             report.notes.push(format!(
                 "{name}: named by the hash algorithm {} of a newer version: not checked",
                 blob.hash_algo().code()

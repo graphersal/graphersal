@@ -74,7 +74,7 @@ pub mod vector;
 pub mod with_options;
 
 pub use barrier::Barrier;
-pub use blob::{BlobHashAlgo, BlobRef};
+pub use blob::BlobRef;
 pub use cardinality::Cardinality;
 pub use cast::CastPolicy;
 pub use column::Column;
