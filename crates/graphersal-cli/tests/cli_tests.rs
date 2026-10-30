@@ -5595,3 +5595,101 @@ fn an_args_file_sets_max_materialized_bytes() {
         res.stderr
     );
 }
+
+/// `store journal`: the system journal as text lines, as JSON objects, filtered by level, kind
+/// and source, from a cursor; `--follow` keeps printing new records until it is stopped.
+#[test]
+fn store_journal_prints_filters_and_follows() {
+    let dir = temp_path("store-journal");
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_str().unwrap();
+    assert_eq!(run(&["store", "create", d], "").code, 0);
+    let res = run(&["--graph", d, "-e", r#"g.add_v("person").to_list()"#], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+
+    let res = run(&["store", "journal", d], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let lines: Vec<String> = res.stdout.lines().map(str::to_string).collect();
+    assert!(lines.len() >= 3, "{}", res.stdout);
+    assert!(lines[0].contains("store.created"), "{}", lines[0]);
+    assert!(lines.iter().any(|l| l.contains("store.opened")));
+    assert!(lines.last().unwrap().contains("store.closed"));
+
+    let res = run(&["store", "journal", d, "--json", "--level", "notice"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let records: Vec<serde_json::Value> = res
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{}", res.stdout);
+    assert_eq!(records[0]["kind"], "store.created");
+    assert_eq!(records[0]["level"], "notice");
+    assert_eq!(records[0]["fields"]["how"], "create");
+
+    let res = run(
+        &["store", "journal", d, "--kind", "store.closed", "--json"],
+        "",
+    );
+    assert_eq!(res.stdout.lines().count(), 2, "{}", res.stdout);
+    let res = run(&["store", "journal", d, "--source", "store.backup"], "");
+    assert_eq!(res.code, 0);
+    assert!(res.stdout.is_empty(), "{}", res.stdout);
+    let res = run(
+        &[
+            "store", "journal", d, "--after", "1", "--limit", "1", "--json",
+        ],
+        "",
+    );
+    let second: serde_json::Value =
+        serde_json::from_str(res.stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(second["seq"], 2);
+
+    let res = run(&["store", "journal", d, "--level", "loud"], "");
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    let res = run(&["store", "journal", d, "--bogus"], "");
+    assert_eq!(res.code, 2);
+
+    // --follow: the existing records at once, then new ones; stopped by the test.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["store", "journal", d, "--follow", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut seen = Vec::new();
+    let mut opened_again = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            seen.push(line);
+        }
+        if !opened_again && seen.len() >= lines.len() {
+            // A new open of the store while the follower runs.
+            let res = run(&["--graph", d, "-e", "1"], "");
+            assert_eq!(res.code, 0, "{}", res.stderr);
+            opened_again = true;
+        }
+        if seen.len() >= lines.len() + 2 {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(seen.len() >= lines.len() + 2, "{seen:?}");
+    assert!(seen[lines.len()].contains("store.opened"), "{seen:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

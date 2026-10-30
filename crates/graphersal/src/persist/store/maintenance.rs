@@ -89,6 +89,9 @@ pub struct VerifyReport {
     /// A damaged model is a problem with a path under `models/`; it does not make an open
     /// store read-only (it is no graph data).
     pub models_checked: usize,
+    /// Problems of the system journal (format spec 4.7: damaged records, unreadable
+    /// segments). Never damage of the store; each one is also in [`Self::notes`].
+    pub journal_notes: Vec<String>,
 }
 
 impl VerifyReport {
@@ -136,6 +139,9 @@ pub struct BackupReport {
     /// The embedding models the backup holds (format spec 4.5) with their licences: who hands
     /// the backup on redistributes them.
     pub models: Vec<super::StoredModel>,
+    /// The system journal's segments copied (relative name, bytes; format spec 12.6, 12.7):
+    /// not counted in [`Self::files`] and [`Self::bytes`], which are the graph's files.
+    pub journal_files: Vec<(String, u64)>,
 }
 
 fn relative(dir: &DirPath, path: &DirPath) -> String {
@@ -698,6 +704,10 @@ pub(super) fn verify(
         }
     }
 
+    // The system journal (format spec 4.7): notes, never damage.
+    report.journal_notes = super::system_journal::verify_notes(dir);
+    report.notes.extend(report.journal_notes.iter().cloned());
+
     // The donor rule (format spec 12.3, 13.1): the newest snapshot shares no segment file with
     // the previous one, which is the donor of every id range.
     if let Ok(shared) = files_without_donor(dir, &snapshots) {
@@ -965,6 +975,9 @@ pub(super) struct BackupPlan {
     /// The models copied (format spec 4.5) with their manifests' bytes; their files are in
     /// `files`.
     models: Vec<(super::StoredModel, Vec<u8>)>,
+    /// The system journal's segments (format spec 4.7, 12.6): copied and checked frame by
+    /// frame; a problem is a warning, never damage.
+    journal: Vec<super::system_journal::CopiedSegment>,
 }
 
 /// Plans a full backup of the store in `dir` and checks every checksum of what it would copy
@@ -1161,6 +1174,8 @@ fn plan_backup(
     // The backup's own newest segment and position (format spec 9.8).
     graph_file.wal_head = checked.last().map(|(first, _)| *first);
     graph_file.closed_at = Some(commit_seq);
+    let (journal, journal_warnings) = super::system_journal::plan_copy(dir);
+    findings.warnings.extend(journal_warnings);
     Ok(Some(BackupPlan {
         graph: graph_file.encode(),
         marks,
@@ -1171,6 +1186,7 @@ fn plan_backup(
         taken_at,
         warnings: std::mem::take(&mut findings.warnings),
         models,
+        journal,
     }))
 }
 
@@ -1347,6 +1363,9 @@ pub(super) fn backup_to_dir(
             report.files.push((file.relative.clone(), file.len));
             report.bytes += file.len;
         }
+        // The system journal (format spec 12.6): its problems are warnings.
+        super::system_journal::write_copies(target, &plan.journal, &mut report.journal_files)
+            .map_err(|err| PersistError::io("copying the system journal to the backup", err))?;
         let marks = if plan.marks.is_empty() {
             // The store's marks file was damaged (or there is none): rebuilt from the WAL
             // copied (the source of truth, format spec 10).
@@ -1386,6 +1405,9 @@ pub(super) fn backup_to_dir(
         if !copy.is_ok() {
             return Err(copy_damage(dir, durable, target.display(), copy, true));
         }
+        report
+            .warnings
+            .extend(super::system_journal::check_copies(target, &plan.journal));
         Ok(report)
     })();
     if result.is_err() {
@@ -1437,6 +1459,13 @@ where
             report.files.push((file.relative.clone(), file.len));
             report.bytes += file.len;
         }
+        // The system journal after the WAL (format spec 12.8).
+        for segment in &plan.journal {
+            zip.add_file(&segment.relative, &segment.source, segment.len)?;
+            report
+                .journal_files
+                .push((segment.relative.clone(), segment.len));
+        }
         zip.finish()?;
     }
     // Every checksum again, in the archive as written.
@@ -1453,6 +1482,7 @@ where
             with_models,
         ));
     }
+    report.warnings.extend(copy.warnings);
     Ok(report)
 }
 
@@ -1469,11 +1499,33 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Result<Findings, Persi
     let mut manifest: Option<Manifest> = None;
     let mut seen = BTreeSet::new();
     let mut segments = Vec::new();
+    let mut journal_warnings = Vec::new();
     // The first refusal of the memory ceiling: the verify stops with it (not a damage finding).
     let mut refused: Option<crate::error::GraphError> = None;
     let problems = super::zip::check_entries(reader, &mut |name, size, data| {
         seen.insert(name.to_string());
         if refused.is_some() {
+            return Vec::new();
+        }
+        // A journal segment is read whole: it must fit under the memory ceiling (its size from
+        // the ZIP header, checked before the read); a refusal stops the verify, anything else
+        // is a warning (the journal decides nothing).
+        if super::system_journal::is_segment_entry(name) {
+            if let Err(err) = crate::traversal::memory_budget::ensure_room(BACKUP_VERIFY, size, 0) {
+                refused = Some(err);
+                return Vec::new();
+            }
+            let mut bytes = Vec::new();
+            match data.read_to_end(&mut bytes) {
+                Ok(_) => {
+                    for warning in
+                        super::system_journal::check_copy_bytes(name, &bytes, &plan.journal)
+                    {
+                        journal_warnings.push(format!("{name}: {warning} (system journal)"));
+                    }
+                }
+                Err(err) => journal_warnings.push(format!("{name}: {err} (system journal)")),
+            }
             return Vec::new();
         }
         // An entry read whole (the metadata files) must fit under the memory ceiling; its size
@@ -1581,6 +1633,15 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Result<Findings, Persi
             findings.problem(name, None, "missing in the archive".into());
         }
     }
+    for segment in &plan.journal {
+        if !seen.contains(&segment.relative) {
+            journal_warnings.push(format!(
+                "{}: missing in the archive (system journal)",
+                segment.relative
+            ));
+        }
+    }
+    findings.warnings.extend(journal_warnings);
     Ok(findings)
 }
 

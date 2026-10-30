@@ -765,12 +765,15 @@ fn newer_file_version(path: &DirPath) -> std::io::Result<Option<(&'static str, u
     }
     let head = path.read_range(0, HEADER)?;
     let magic = &head[..8];
-    if magic == SEGMENT_MAGIC || magic == WAL_MAGIC {
-        // Both headers: magic, version u32, ..., the CRC-32C of bytes 0..60 at 60.
+    let journal_magic: &[u8] = super::system_journal::JOURNAL_MAGIC;
+    if magic == SEGMENT_MAGIC || magic == WAL_MAGIC || magic == journal_magic {
+        // Every such header: magic, version u32, ..., the CRC-32C of bytes 0..60 at 60.
         let stored = u32::from_le_bytes([head[60], head[61], head[62], head[63]]);
         let version = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
         let what = if magic == WAL_MAGIC {
             "WAL segment"
+        } else if magic == journal_magic {
+            "system journal segment"
         } else {
             "snapshot segment"
         };

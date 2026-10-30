@@ -59,6 +59,7 @@ graphersal store rollback --help      # the same (-h works too)
 | [`mark`](#mark) | name the current position |
 | [`checkpoint`](#checkpoint) | merge a snapshot now (closed store) |
 | [`verify`](#verify) | scrub every checksum |
+| [`journal`](#journal) | the system journal: what the store did |
 | [`fork`](#fork) | a past state as a new store |
 | [`rollback`](#rollback) | take the store back in place |
 | [`attic`](#attic) | list, inspect, restore, fork, remove rolled-back history |
@@ -432,6 +433,35 @@ naming them, unless `--drop-marks` is given; `compact-advice` lists them beforeh
 $ graphersal store compact graph.gstore
 Pruned: kept from commit 0; removed 0 snapshot(s) and 0 WAL segment(s).
 Compacted the file: 23.7 KiB -> 22.8 KiB (930 B given back).
+```
+
+### journal
+
+```text
+graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>]
+                         [--after <SEQ>] [--limit <N>] [--follow] [--json]
+```
+
+Prints the store's [system journal](system_journal.md): one line per record (time in UTC, `#seq`,
+level, kind, message, fields), oldest first. It reads the files only (no lock, nothing written),
+so it works while a server has the store open; the records an open store has not written yet
+(below `error`, written in batches) appear after its next batch or its close.
+
+- `--level error|warn|notice|info`: that level and the more severe ones.
+- `--since TIME`: the records at or after TIME (the TIME forms of the other commands).
+- `--source P`: a source and the ones below it (`store` matches `store.backup`).
+- `--kind K`: one kind (`store.backup_done`, `auth.denied`, ...).
+- `--after SEQ`, `--limit N`: the records after a cursor, at most N (default 1000).
+- `--json`: one JSON object per record (`seq`, `origin`, `origin_seq`, `time` in µs, `level`,
+  `source`, `kind`, `message`, `fields`, ...).
+- `--follow`: keeps printing new records (it polls once a second) until it is interrupted.
+
+Damaged records are skipped with a `note:` on stderr; they never make the command fail.
+
+```text
+$ graphersal store journal data/ --level notice
+2026-10-30T09:12:01.000000Z #1 notice store.created the store was created (create) (how=create)
+2026-10-30T09:40:17.000000Z #9 notice store.backup_done a full backup to /backups/data holds commit 52 (...)
 ```
 
 ### compact-advice

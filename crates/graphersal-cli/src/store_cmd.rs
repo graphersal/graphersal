@@ -16,6 +16,7 @@ use graphersal::persist::{
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
+use graphersal::system_journal::{JournalQuery, Level};
 pub use graphersal_session::store::{bytes_text, format_time, parse_time, uuid_text};
 
 /// Usage of `graphersal store`.
@@ -46,6 +47,10 @@ USAGE:
     graphersal store mark <DIR> <NAME>              set a mark at the current position
     graphersal store checkpoint <DIR> [--name <N>]  merge a snapshot of the current state
     graphersal store verify <DIR>    scrub every checksum; exit 1 when damage is found
+    graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>]
+                                     [--after <SEQ>] [--limit <N>] [--follow] [--json]
+                                     the system journal: what the store did (opens, backups,
+                                     checkpoints, damage, ...); works while it is in use
     graphersal store prune <DIR> --up-to <COMMIT> [--drop-marks]
                                      remove snapshots and WAL only needed for targets before
                                      COMMIT (the last two snapshots always stay); refused when
@@ -216,6 +221,18 @@ pub fn command_help(command: &str) -> Option<String> {
              be closed: fails with \"in use\" while a server has it open (use its Store menu,\n\
              which checkpoints the same way without stopping commits). Damage in what it reads\n\
              stops it with nothing written; run `graphersal store verify <DIR>` then.",
+            false,
+        ),
+        "journal" => (
+            "graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>] [--after <SEQ>] [--limit <N>] [--follow] [--json]",
+            "Prints the store's system journal: one line per record (time UTC, seq, level, kind,\n\
+             message, fields), oldest first. Reads the files only (no lock, nothing written), so\n\
+             it works while a server has the store open. --level error|warn|notice|info shows\n\
+             that level and the more severe ones; --since TIME the records at or after TIME;\n\
+             --source a source and the ones below it (store matches store.backup); --kind one\n\
+             kind; --after SEQ the records after that seq; --limit at most N (default 1000).\n\
+             --json prints one JSON object per record. --follow keeps printing new records\n\
+             (polls once a second) until interrupted.",
             false,
         ),
         "verify" => (
@@ -639,6 +656,41 @@ fn fail(err: PersistError) -> i32 {
     EXIT_QUERY_ERROR
 }
 
+/// `store journal`: prints the pages of the journal (and, following, new records once a
+/// second until the process is interrupted).
+fn journal_command(dir: &str, mut query: JournalQuery, follow: bool, json: bool) -> i32 {
+    loop {
+        let page = match Store::journal_dir(dir, &query) {
+            Ok(page) => page,
+            Err(err) => return fail(err),
+        };
+        for note in &page.notes {
+            errln!("note: {note}");
+        }
+        if page.truncated {
+            errln!("note: older records are gone");
+        }
+        for record in &page.records {
+            if json {
+                outln!("{}", record.to_json());
+            } else {
+                outln!("{}", record.to_line());
+            }
+        }
+        query = query.after(page.next_after);
+        if page.more {
+            continue;
+        }
+        if !follow {
+            return EXIT_OK;
+        }
+        if !crate::out::stdout_open() {
+            return EXIT_OK;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 fn usage(message: &str) -> i32 {
     errln!("{message}\n\nRun `graphersal store help` for usage.");
     EXIT_USAGE_ERROR
@@ -692,6 +744,12 @@ pub fn run(args: &[String]) -> i32 {
                     | "min-ratio"
                     | "min-reclaimable"
                     | "min-size"
+                    | "level"
+                    | "since"
+                    | "source"
+                    | "kind"
+                    | "after"
+                    | "limit"
             );
             let value = if takes_value && inline.is_none() {
                 i += 1;
@@ -719,6 +777,9 @@ pub fn run(args: &[String]) -> i32 {
         "convert" => &["single-file"],
         "upgrade" => &["single-file", "in-place"],
         "compact-advice" => &["min-ratio", "min-reclaimable", "min-size"],
+        "journal" => &[
+            "level", "since", "source", "kind", "after", "limit", "follow", "json",
+        ],
         "checkpoint" => &["name"],
         "prune" => &["up-to", "drop-marks"],
         "compact" => &["drop-marks"],
@@ -1573,6 +1634,44 @@ pub fn run(args: &[String]) -> i32 {
                 Err(err) => fail(err),
             }
         }
+        "journal" => {
+            try_code!(need(1));
+            let mut query = JournalQuery::new();
+            if let Some(raw) = flag("level") {
+                match Level::from_name(&raw) {
+                    Some(level) => query = query.min_level(level),
+                    None => {
+                        return usage(&format!(
+                            "--level expects error, warn, notice or info, not {raw:?}"
+                        ));
+                    }
+                }
+            }
+            if let Some(raw) = flag("since") {
+                match parse_time(&raw) {
+                    Ok(time) => query = query.since(time),
+                    Err(err) => return usage(&format!("--since: {err}")),
+                }
+            }
+            if let Some(source) = flag("source") {
+                query = query.source_prefix(source);
+            }
+            if let Some(kind) = flag("kind") {
+                query = query.kind(kind);
+            }
+            if let Some(after) = try_code!(number("after")) {
+                query = query.after(after);
+            }
+            if let Some(limit) = try_code!(number("limit")) {
+                query = query.limit(limit as usize);
+            }
+            journal_command(
+                &positional[0],
+                query,
+                flag("follow").is_some(),
+                flag("json").is_some(),
+            )
+        }
         "compact-advice" => {
             try_code!(need(1));
             let mut policy = CompactionPolicy::new();
@@ -1932,6 +2031,7 @@ mod tests {
             "upgrade",
             "compact",
             "compact-advice",
+            "journal",
             "help",
         ] {
             let help = command_help(command).unwrap();

@@ -226,3 +226,56 @@ fn adversarial_headers_are_refused_without_allocating() {
         assert!(result.is_ok(), "case {i}: {result:?}");
     }
 }
+
+/// Mutated system journal segments (format spec 4.7): reading them through `journal_dir`,
+/// verifying the store and opening it never panic, hang or allocate from a hostile length; the
+/// store itself opens (the journal is never damage).
+#[test]
+fn mutated_system_journal_segments_never_crash_the_store() {
+    use graphersal::persist::{MemDir, Store, StoreOptions};
+    use graphersal::system_journal::JournalQuery;
+    let base = MemDir::new();
+    let options = StoreOptions::new().with_checkpoint_after_bytes(0);
+    let store = Store::create(&base, options.clone()).unwrap();
+    for _ in 0..3 {
+        store.checkpoint(None).unwrap();
+    }
+    store.close().unwrap();
+    let name = base
+        .file_names()
+        .into_iter()
+        .find(|name| name.starts_with("journal/"))
+        .unwrap();
+    let segment = base.file(&name).unwrap();
+    let mut rng = Rng::new(0x0005_EC7A);
+    let mut fatal = Vec::new();
+    for case in 0..budget(200) {
+        let input = if case % 20 == 19 {
+            // A hostile length right after a valid header.
+            let mut hostile = segment[..64].to_vec();
+            hostile.extend_from_slice(&0x4A52_5347u32.to_le_bytes());
+            hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+            hostile.extend_from_slice(&[0; 18]);
+            hostile
+        } else {
+            mutate(&mut rng, &segment)
+        };
+        let image = base.deep_copy();
+        image.put_file(&name, input);
+        let options = options.clone();
+        let result = guarded(WATCHDOG, move || {
+            let _ = Store::journal_dir(&image, &JournalQuery::new());
+            let report = Store::verify_dir(&image).unwrap();
+            assert!(report.is_ok(), "{:?}", report.problems);
+            let store = Store::open(&image, options).unwrap();
+            assert!(!store.open_report().maintenance);
+            let journal = store.journal().unwrap();
+            let _ = journal.query(&JournalQuery::new().limit(10_000));
+            store.close().unwrap();
+        });
+        if let Err(outcome) = result {
+            fatal.push(format!("case {case}: {outcome:?}"));
+        }
+    }
+    assert!(fatal.is_empty(), "{fatal:#?}");
+}

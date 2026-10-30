@@ -563,7 +563,9 @@ fn increment(
         copies: &copies,
         source_marks: source_marks.as_deref(),
     };
-    let result = apply_increment(target, &backup, &source, &mut report, &plan);
+    // The journal segments as they were, put back when the increment is rolled back.
+    let journal_before = super::system_journal::segment_lengths(target);
+    let result = apply_increment(dir, target, &backup, &source, &mut report, &plan);
     let result = match result {
         // The copy did not read back intact: the store's files again, to tell whose damage it
         // is (a store file that changed under the copy is the store's).
@@ -577,6 +579,7 @@ fn increment(
     match result {
         Ok(()) => Ok(report),
         Err(err) => {
+            super::system_journal::restore_lengths(target, &journal_before);
             roll_back_increment(target, &intent, &backup);
             Err(err)
         }
@@ -729,6 +732,7 @@ impl From<PersistError> for Copied {
 /// written first when it changed. Every copy is read back and checked against the store's
 /// checked file before it counts.
 fn apply_increment(
+    source_dir: &DirPath,
     target: &DirPath,
     backup: &GraphFile,
     source: &GraphFile,
@@ -867,6 +871,13 @@ fn apply_increment(
     if let Some((_, _, last)) = commits.last() {
         report.commit_seq = report.commit_seq.max(*last);
     }
+
+    // The system journal (format spec 12.7): missing segments copied, the newest one's tail
+    // appended, before the GRAPH file (an interrupted increment is rolled back without it: the
+    // journal decides nothing); a problem is a warning.
+    let (warnings, written) = super::system_journal::sync_into_backup(source_dir, target)?;
+    report.warnings.extend(warnings);
+    report.journal_files.extend(written);
 
     // The marks (all of them are in the WAL copied), then the GRAPH file with the new marker.
     let marks = match plan.source_marks {

@@ -45,6 +45,7 @@ pub mod schema;
 #[cfg(feature = "script")]
 pub mod script;
 pub mod storage;
+pub mod system_journal;
 pub mod temporal;
 // The traversal pipeline (source, steps, optimizer, execution) and the property values:
 // internal; the public items are re-exported by `prelude`, `profile` and `exec`.

@@ -54,7 +54,8 @@
 //! (reading) answers the scheduled jobs (`Session::jobs_view`); defining, switching or running
 //! a job stays the user's (the playground's job list, `/api/jobs*`). `advise` (reading)
 //! answers the storage advisor's recommendations (`Session::advise`), each with the command
-//! applying it through the catalog tools.
+//! applying it through the catalog tools. `journal` (reading) answers one page of the graph's
+//! system journal (`Session::journal`, at most 100 records unless `limit` says otherwise).
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
@@ -1151,6 +1152,28 @@ fn all_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "journal",
+            "System journal",
+            Kind::Read,
+            "The system journal of this graph: what the instance DID, one record per operational \
+             event (store opened or closed, checkpoints, backups, prunes, damage found, \
+             rollbacks, permission denials, clock steps), oldest first. Each record: seq (the \
+             cursor), time (microseconds since the Unix epoch, UTC), level (error, warn, notice, \
+             info), source, kind, message, fields. No data values or query text. Page with \
+             after = the answer's next_after; more says that more records follow.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "after": {"type": "integer", "minimum": 0, "description": "Only records after this seq (the previous page's next_after)."},
+                    "level": {"type": "string", "enum": ["error", "warn", "notice", "info"], "description": "Only this level and the more severe ones."},
+                    "since": {"type": "string", "description": "Only records at or after this time: RFC 3339 with a zone, or microseconds since the Unix epoch."},
+                    "source": {"type": "string", "description": "Only this source and the ones below it (store matches store.backup)."},
+                    "kind": {"type": "string", "description": "Only records of this kind (store.backup_done, auth.denied, ...)."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "At most this many records (default 100)."},
+                },
+            }),
+        ),
+        tool(
             "advise",
             "Storage advice",
             Kind::Read,
@@ -1694,6 +1717,23 @@ fn run_tool(
             Ok(format!(
                 "Workload statistics (times in microseconds, rows sorted by total time):\n{}",
                 compact(&report)
+            ))
+        }
+        "journal" => {
+            let mut spec = serde_json::Map::new();
+            for key in ["after", "level", "since", "source", "kind", "limit"] {
+                if let Some(value) = args.get(key).filter(|v| !v.is_null()) {
+                    spec.insert(key.to_string(), value.clone());
+                }
+            }
+            spec.entry("limit").or_insert(json!(100));
+            let spec = Value::Object(spec);
+            let page = context
+                .call(move |s| s.journal(&spec))
+                .map_err(http_failed)??;
+            Ok(format!(
+                "System journal (times in microseconds since the Unix epoch, UTC):\n{}",
+                compact(&page)
             ))
         }
         "advise" => {

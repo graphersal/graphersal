@@ -3251,6 +3251,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "patch_schema",
             "statistics",
             "workload_statistics",
+            "journal",
             "advise",
             "list_jobs",
             "memory_report",
@@ -6687,4 +6688,65 @@ fn max_materialized_bytes_is_a_session_preset() {
         r#"g.with("traversal.max_materialized_bytes", 1 << 30).v().both().both().both().fold().next().len()"#,
     );
     assert_eq!(own["ok"], true, "{own}");
+}
+
+/// `GET /api/journal` pages the served store's system journal by cursor and filters it; the
+/// MCP tool `journal` reads the same records.
+#[test]
+fn the_journal_endpoint_pages_by_cursor() {
+    let ui = ui_dir("journal");
+    let data = ui.parent().unwrap().join("journal-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let page = get(port, "/api/journal").json();
+    let records = page["records"].as_array().unwrap();
+    let kinds: Vec<&str> = records.iter().filter_map(|r| r["kind"].as_str()).collect();
+    assert!(kinds.contains(&"store.created"), "{page}");
+    assert!(kinds.contains(&"store.opened"), "{page}");
+    assert_eq!(page["more"], false);
+
+    // One record per page, by cursor.
+    let mut after = 0;
+    let mut paged = Vec::new();
+    loop {
+        let page = get(port, &format!("/api/journal?after={after}&limit=1")).json();
+        for record in page["records"].as_array().unwrap() {
+            paged.push(record["seq"].as_u64().unwrap());
+        }
+        after = page["next_after"].as_u64().unwrap();
+        if page["more"] != true {
+            break;
+        }
+    }
+    let all: Vec<u64> = records.iter().map(|r| r["seq"].as_u64().unwrap()).collect();
+    assert_eq!(paged, all);
+
+    let notice = get(port, "/api/journal?level=notice").json();
+    assert!(
+        notice["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["level"] == "notice" || r["level"] == "warn" || r["level"] == "error"),
+        "{notice}"
+    );
+    let bad = get(port, "/api/journal?level=loud");
+    assert_eq!(bad.status, 422, "{}", bad.body);
+
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call("journal", serde_json::json!({"kind": "store.created"}));
+    assert!(!error, "{text}");
+    assert!(text.contains("store.created"), "{text}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&data);
 }

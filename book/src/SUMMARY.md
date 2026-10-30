@@ -57,6 +57,7 @@
     - [Your Own Storage](persistence/store_own_storage.md)
     - [Creation Parameters](persistence/creation_parameters.md)
     - [Workload Statistics](persistence/workload_statistics.md)
+    - [System Journal](persistence/system_journal.md)
     - [Optimize](persistence/optimize.md)
     - [Scheduled Jobs](persistence/scheduled_jobs.md)
     - [Embedding Models in a Store](persistence/store_models.md)

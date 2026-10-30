@@ -318,6 +318,121 @@
         }
       }
     },
+    "/api/journal": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "System journal",
+        "description": "One page of the served graph's system journal (book page \"System Journal\"): `{records, next_after, truncated, more, notes}`, each record `{seq, origin: {id, name}, origin_seq, time, level, source, kind, message, op?, parent?, commit?, principal?, fields}`, oldest first. Page with `after` = the previous `next_after`. A bad parameter is a 422.",
+        "operationId": "getApiJournal",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Only records after this seq (the previous page's `next_after`).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "required": false,
+            "description": "Only this level and the more severe ones.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "error",
+                "warn",
+                "notice",
+                "info"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only records at or after this time: RFC 3339 with a zone, or microseconds since the Unix epoch.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Only records before this time.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "description": "Only this source and the ones below it (`store` matches `store.backup`).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Only records of this kind.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "op",
+            "in": "query",
+            "required": false,
+            "description": "Only records of this operation.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "description": "Only records of this instance id (a UUID).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "At most this many records (default 1000, at most 10000).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
     "/api/schema": {
       "get": {
         "tags": [
