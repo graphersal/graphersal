@@ -189,11 +189,12 @@ impl AccessPolicy {
 
     /// ``AccessPolicy.read_only()``: ``read`` on ``data``, ``schema`` and ``definition``, and
     /// ``execute`` on ``definition`` (calling a saved query, which is read-only itself) and on
-    /// ``embedder`` (embedding text changes nothing), as the engine's ``read_only``.
+    /// ``embedder`` (embedding text changes nothing), and ``read`` on ``journal``, as the
+    /// engine's ``read_only``.
     #[staticmethod]
     fn read_only() -> Self {
         AccessPolicy {
-            allowed: bit(0, 0) | bit(0, 1) | bit(0, 4) | bit(4, 4) | bit(4, 6),
+            allowed: bit(0, 0) | bit(0, 1) | bit(0, 4) | bit(4, 4) | bit(4, 6) | bit(0, 7),
             file_root: None,
         }
     }
