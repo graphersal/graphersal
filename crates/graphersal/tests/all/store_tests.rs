@@ -1962,3 +1962,164 @@ fn a_checkpoint_while_a_unit_is_open_keeps_the_committed_data() {
     );
     assert!(reopened.verify().unwrap().is_ok());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Commits in parts (format spec 9.3.1)
+// ---------------------------------------------------------------------------------------------
+
+/// Small Commit parts: a unit of a few people is a commit in parts.
+fn parts_options() -> StoreOptions {
+    StoreOptions::new().with_commit_part_bytes(128)
+}
+
+/// One unit adding `count` people: a commit in parts with [`parts_options`].
+fn add_people(store: &Store, prefix: &str, count: usize) {
+    store
+        .graph()
+        .write()
+        .transaction(|g| {
+            for i in 0..count {
+                g.traversal_mut()
+                    .add_v("person")
+                    .property("name", format!("{prefix}{i:02}").as_str())
+                    .property("about", "a text that makes the commit body long enough")
+                    .to_list()?;
+            }
+            Ok::<_, Box<TraverserError>>(())
+        })
+        .unwrap();
+}
+
+/// The record types of every WAL segment of `dir`, one list per segment.
+fn record_types(dir: &Path) -> Vec<Vec<u8>> {
+    wal_files(dir)
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).unwrap();
+            crate::persist_tests::frames(&bytes)
+                .iter()
+                .map(|f| f.2)
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn recovery_replays_a_commit_in_parts() {
+    let dir = TempDir::new("parts-recovery");
+    let store = Store::create(dir.path(), parts_options()).unwrap();
+    add_person(&store, "ann");
+    add_people(&store, "p", 10);
+    add_person(&store, "zed");
+    let before = graph_dump(&store);
+    assert!(
+        record_types(dir.path())
+            .concat()
+            .iter()
+            .filter(|&&t| t == 4)
+            .count()
+            > 4
+    );
+    // A crash image (no clean close) and a clean close both replay it, with any part size.
+    let image = TempDir::new("parts-recovery-image");
+    copy_dir(dir.path(), image.path());
+    store.close().unwrap();
+    for (path, options) in [
+        (dir.path(), StoreOptions::new()),
+        (image.path(), parts_options()),
+    ] {
+        let store = Store::open(path, options).unwrap();
+        assert_eq!(graph_dump(&store), before);
+        assert_eq!(store.open_report().commits_replayed, 3);
+        assert!(store.verify().unwrap().is_ok());
+        let changes: Vec<usize> = store
+            .changes_since(0)
+            .unwrap()
+            .map(|c| c.unwrap().mutations().len())
+            .collect();
+        assert_eq!(changes, [1, 10, 1]);
+        store.close().unwrap();
+    }
+    // A checkpoint merges the commit in parts into a snapshot.
+    let store = Store::open(dir.path(), parts_options()).unwrap();
+    store.checkpoint(None).unwrap();
+    store.close().unwrap();
+    let store = Store::open(dir.path(), StoreOptions::new()).unwrap();
+    assert_eq!(graph_dump(&store), before);
+    assert_eq!(store.open_report().commits_replayed, 0);
+}
+
+#[test]
+fn rotation_never_splits_a_commit() {
+    let dir = TempDir::new("parts-rotation");
+    // Every record would start a new segment: a commit in parts still stays in one.
+    let options = parts_options().with_wal_segment_bytes(1);
+    let store = Store::create(dir.path(), options.clone()).unwrap();
+    add_person(&store, "ann");
+    add_people(&store, "p", 8);
+    add_people(&store, "q", 8);
+    store.graph().write().mark("m").unwrap();
+    add_person(&store, "zed");
+    let before = graph_dump(&store);
+    store.close().unwrap();
+    let segments = record_types(dir.path());
+    let in_parts: Vec<&Vec<u8>> = segments.iter().filter(|s| s.contains(&4)).collect();
+    assert_eq!(in_parts.len(), 2, "{segments:?}");
+    for segment in &in_parts {
+        assert!(segment.iter().all(|&t| t == 4), "{segments:?}");
+        assert!(segment.len() > 2, "{segments:?}");
+    }
+    // Every segment reads on its own: no commit runs over its end.
+    for path in wal_files(dir.path()) {
+        let mut reader = persist::read_journal(fs::File::open(&path).unwrap()).unwrap();
+        for record in reader.by_ref() {
+            record.unwrap();
+        }
+        assert!(reader.torn_tail().is_none(), "{path:?}");
+    }
+    let store = Store::open(dir.path(), options).unwrap();
+    assert_eq!(graph_dump(&store), before);
+    assert!(store.verify().unwrap().is_ok());
+}
+
+#[test]
+fn salvage_resyncs_past_a_damaged_part() {
+    let dir = TempDir::new("parts-salvage");
+    let store = Store::create(dir.path(), parts_options()).unwrap();
+    add_person(&store, "ann");
+    add_people(&store, "p", 10);
+    add_person(&store, "zed");
+    store.close().unwrap();
+    let wal = wal_files(dir.path()).pop().unwrap();
+    let bytes = fs::read(&wal).unwrap();
+    let parts: Vec<_> = crate::persist_tests::frames(&bytes)
+        .into_iter()
+        .filter(|f| f.2 == 4)
+        .collect();
+    assert!(parts.len() > 4);
+    for damaged_part in [0, 2, parts.len() - 1] {
+        let copy = TempDir::new("parts-salvage-copy");
+        copy_dir(dir.path(), copy.path());
+        let segment = copy.join("wal").join(wal.file_name().unwrap());
+        flip(&segment, (parts[damaged_part].0 + 25 + 5) as u64);
+        let store = Store::open(copy.path(), StoreOptions::new()).unwrap();
+        let report = store.maintenance().expect("maintenance").clone();
+        let records: Vec<_> = report
+            .damage
+            .iter()
+            .filter(|d| d.kind == DamageKind::WalRecord)
+            .collect();
+        // One damaged event covering every part of the commit; the commit after it is read.
+        assert_eq!(records.len(), 1, "part {damaged_part}: {report}");
+        assert_eq!(records[0].commits, Some((2, 2)), "{report}");
+        assert_eq!(
+            records[0].offset,
+            Some(parts[0].0 as u64),
+            "part {damaged_part}: {report}"
+        );
+        assert_eq!(graph_names(&store), ["ann", "zed"], "part {damaged_part}");
+        let target = TempDir::new("parts-salvage-repaired");
+        let repaired = store.repair_to(target.path()).unwrap();
+        assert_eq!(repaired.lost_commits, [(2, 2)]);
+    }
+}

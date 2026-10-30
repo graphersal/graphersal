@@ -83,8 +83,9 @@ file records them; a reader MUST NOT assume a default where the file states the 
   unless a section says otherwise.
 - **Bounds.** Every length or count read from a file MUST be checked against the bytes that
   remain before anything is allocated for it; a count that the remaining bytes cannot hold is
-  invalid. An uncompressed chunk or WAL body is at most 1 GiB. A declared uncompressed size of
-  an LZ4 block above `255 * stored length + 64` is invalid.
+  invalid. An uncompressed chunk, single-record WAL body or slice of a commit in parts (9.3.1)
+  is at most 1 GiB; a commit in parts is not bounded by it. A declared uncompressed size of an
+  LZ4 block above `255 * stored length + 64` is invalid.
 
 ### 2.1 Compression codecs
 
@@ -921,13 +922,18 @@ A record is a 25-byte frame followed by its payload:
 | 1 | Commit (9.3) |
 | 2 | Mark (9.4) |
 | 3 | Checkpoint (9.5) |
-| 0, 4..255 | reserved: an unknown type is invalid, never skipped |
+| 4 | Commit part (9.3.1; file format version 4 and later) |
+| 0, 5..255 | reserved: an unknown type is invalid, never skipped |
+
+Type 4 is valid only in a WAL segment whose header (9.1) states file format version 4 or later;
+in an older segment it is an unknown type.
 
 The sync marker and `commit_seq` lie outside the possibly compressed payload, so a reader can
 resynchronise after a damaged record by searching for the next position that holds the sync
 marker, a valid header CRC and a valid body CRC. The separate header CRC makes a damaged length
 detectable, so it is never taken for an interrupted write (9.6). A record is never split between
-segments.
+segments, and neither is a commit: the parts of a commit in parts (9.3.1) are consecutive
+records of one segment.
 
 ### 9.3 Commit payload
 
@@ -940,9 +946,9 @@ body     = principal opt_string | attributes property map | uvar mutation count 
 
 `commit_seq` MUST equal the frame's. The auto-id sequences are written with every commit so
 that an id handed out before a crash, a drop or a rollback is never handed out again after a
-recovery. `body` is at most 1 GiB (the bound of section 2): a writer
-refuses a larger commit (`PersistError::CommitTooLarge`, the unit rolls back) instead of
-splitting it over records. A commit with a mutation count of 0 is valid: a *sequence-only commit*, a unit that
+recovery. A writer writes a commit whose `body` is at most the part size (64 MiB) as this one
+record, and a larger one in parts (9.3.1); a reader accepts a single-record `body` up to 1 GiB
+(the bound of section 2). A commit with a mutation count of 0 is valid: a *sequence-only commit*, a unit that
 changed nothing but raised an auto-id sequence (applying a change set whose mutations were all
 compacted away); replaying it only raises the sequences (and advances the commit position). The
 attributes are free metadata of the commit (keys inline). Every string is inline.
@@ -975,6 +981,37 @@ the state before each commit, and CDC consumers get before and after values. The
 drop removes appear as DropEdge mutations before the DropVertex. A write to a nested path inside
 a property is a SetProperty of the top-level key.
 
+### 9.3.1 Commit in parts
+
+A commit whose uncompressed `body` (9.3) is larger than the writer's part size (64 MiB) is
+written as `parts >= 2` consecutive records of type 4 (file format version 4); a commit up to
+the part size stays one Commit record (type 1), unchanged.
+
+```text
+frame        = 9.2 frame, type 4, commit_seq = the commit's (equal in every part)
+part payload = part u32 | parts u32 | part_body
+part_body    = (part = 0) commit_seq u64 | time i64 | node_sequence u64 | edge_sequence u64
+                          | body_length u64 | slice
+             | (part > 0) slice
+slice        = codec u8 | data                         codec 0: data = the raw bytes
+             | codec u8 | uncompressed u32 | stored    codec 1, 2 (as in 9.3)
+```
+
+- The uncompressed slices of parts `0..parts` concatenated are `body` of 9.3
+  (`principal | attributes | uvar mutation count | mutation*`); a mutation may span a part
+  boundary. Each slice is compressed on its own (section 2.1).
+- A writer writes slices of `1..=part size` uncompressed bytes (all but the last exactly the
+  part size). A reader accepts any slice of 1 byte to 1 GiB (the bound of section 2) and requires
+  their sum to equal `body_length`. It never allocates from `body_length` up front: the body
+  grows per part, checked against what it may use.
+- `parts` is `2..=1048576` (2^20, 64 TiB at 64 MiB per part) and equal in every part; `part`
+  runs `0..parts` without gaps; `commit_seq` of part 0 MUST equal the frame's. A commit needing
+  more parts is refused by the writer (`PersistError::CommitTooLarge`, the unit rolls back).
+- The parts of one commit are consecutive records of ONE segment: no other record lies between
+  them (rotation, 9.7, happens only before part 0).
+- A commit in parts is ONE commit for every reader: its position (where a recovery cuts a torn
+  tail, a rollback splits a segment, a backup compares records) is the start of part 0.
+
 ### 9.4 Mark payload
 
 `mark = commit_seq u64 | time i64 | name string`.
@@ -1005,10 +1042,20 @@ at the end are **damage**, wherever they are, also in the last record. Anything 
 valid record before the end of a segment that is not the last one is damage. A torn tail is cut
 off by the next read-write open (12.2), never by a reader; damage is never cut (13).
 
+A commit in parts (9.3.1) at the end of the last segment with fewer than `parts` complete parts
+(the last present one possibly torn by the rules above) is a torn tail too; it starts at part 0,
+where it is cut. Damage, wherever it is: a part other than 0 not preceded by its predecessor, a
+record of another type or `commit_seq` between parts, `part` or `parts` inconsistent, slices
+whose sum differs from `body_length`, and an incomplete commit in parts before the end of a
+segment that is not the last one. A resynchronisation (salvage, 13) that lands on a part other
+than 0 skips to the next record that is a part 0 or of type 1, 2 or 3; a commit with a damaged
+part is one damaged region covering all its parts.
+
 ### 9.7 WAL segments in a store
 
 - Segments are named by the first `commit_seq` they may contain. Rotation is lazy: before a
-  record is written, if the current segment exceeds the segment size (default 16 MiB) or a
+  record (before part 0 of a commit in parts, never between its parts) is written, if the
+  current segment exceeds the segment size (default 16 MiB) or a
   checkpoint asked for a new segment, the current file is synced, and a new segment named by the
   next commit sequence number is created with its header, synced, and its directory synced. A
   Mark or Checkpoint record may therefore be the first record of a segment named
@@ -1018,8 +1065,9 @@ off by the next read-write open (12.2), never by a reader; damage is never cut (
   MUST be exactly the previous + 1 (else the history has a gap: damage).
 - After an in-place rollback or a fork, the new lineage writes a new segment (its header carries
   the new `graph_id`).
-- A record whose write or sync failed is cut off again (the file truncated to the record's start
-  and synced) before the writer refuses further commits. When that cut fails, the valid end is
+- A record whose write or sync failed is cut off again (the file truncated to the record's start,
+  for a commit in parts to the start of part 0, whatever part failed, and synced) before the
+  writer refuses further commits. When that cut fails, the valid end is
   recorded in `GRAPH` (flag bit 1); readers MUST read only up to it, and the next read-write open
   truncates the segment there and removes later segments.
 
@@ -1051,13 +1099,16 @@ The writer of a journal MUST:
 1. assign the commit's sequence number (checked against overflow) before writing its record;
 2. run every other commit check (hooks that may veto) before writing, so that nothing fallible
    follows a written record and the WAL never holds a commit that did not happen;
-3. write the record, then make it durable according to the configured durability: a sync after
-   every commit (the default), at most once per interval, or left to the operating system;
+3. write the record (every part of a commit in parts, 9.3.1), then make it durable according to
+   the configured durability: a sync after every commit (the default), at most once per
+   interval, or left to the operating system; a commit in parts gets one sync, after its last
+   part;
 4. treat a failed write or sync as a vetoed commit (the unit rolls back) and refuse every later
    commit and mark until the WAL is reopened, because the state of the file is unknown.
 
-The **durable end** is the offset after the last record whose sync completed. Records after it
-may still be vetoed and MUST NOT be copied by a backup (12.6).
+The **durable end** is the offset after the last record whose sync completed; it moves only
+after the last part of a commit in parts, so it never lies inside one. Records after it may
+still be vetoed and MUST NOT be copied by a backup (12.6).
 
 ## 10. The `marks` file
 
@@ -1642,7 +1693,9 @@ many small appends).
 - Version history of the file format: 1 (Graphersal 0.1.x); 2 (Graphersal 0.2.0) added the
   temporal value tags 9 to 13 and the vector value tag 14 (3); 3 (Graphersal 0.3.0) added the
   nanosecond temporal value tags 15 to 20 (with `offsettime` and the zone name of a
-  `datetime`) and writes every temporal kind but `date` with them. Nothing else differs, so a
+  `datetime`) and writes every temporal kind but `date` with them; 4 (Graphersal 0.5.0) adds
+  the Commit part record type 4 of the WAL (9.2, 9.3.1), written for commits larger than one
+  part, besides the other additions of that version. Nothing else differs, so a
   reader of version 3 reads version 1 and 2 files as they are: a packed snapshot written by
   0.1.x or 0.2.x loads, and a store created from it keeps its older manifest and segment files
   byte for byte (8, 12.1). Every file carries its own version: a snapshot of file format version

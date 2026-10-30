@@ -1713,3 +1713,35 @@ fn an_intent_with_an_unsafe_path_is_refused() {
     assert!(err.contains("unsafe path"), "{err}");
     assert_eq!(listing(&backup), before);
 }
+
+/// Commits in parts (format spec 9.3.1): a full backup and every increment copy whole commits
+/// (the durable end only moves after a commit's last part), the copy reads back equal.
+#[test]
+fn full_and_incremental_backups_copy_whole_commits_in_parts() {
+    let source = MemDir::new();
+    let parts = options().with_commit_part_bytes(64);
+    let store = populated(&source, parts.clone());
+    let backup = MemDir::new();
+    let report = store.backup(&backup).unwrap();
+    assert!(!report.incremental);
+    assert_backup(&shared(&backup), &oracle(&shared(&source)), "full");
+    let mut rng = Rng(23);
+    for round in 0..4 {
+        history(store.graph(), &mut rng, 6, 200 + round * 6);
+        if round == 2 {
+            store.checkpoint(None).unwrap();
+        }
+        let expected = oracle(&shared(&source));
+        let report = store.backup(&backup).unwrap();
+        assert!(report.incremental, "round {round}");
+        assert_backup(&shared(&backup), &expected, &format!("round {round}"));
+    }
+    store.close().unwrap();
+    // The backup restores to a store that goes on writing commits in parts.
+    Store::restore_backup(&backup).unwrap();
+    let restored = Store::open(&backup, parts).unwrap();
+    history(restored.graph(), &mut rng, 4, 400);
+    let expected = exact(&restored.graph().read());
+    restored.close().unwrap();
+    assert_eq!(exact(&loaded(&shared(&backup))), expected, "restored");
+}

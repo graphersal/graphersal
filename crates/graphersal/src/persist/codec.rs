@@ -30,6 +30,12 @@ pub(crate) const TEMPORAL_FORMAT_VERSION: u32 = 2;
 /// `offsettime` and a `datetime` with a zone name among them.
 pub(crate) const NANOS_FORMAT_VERSION: u32 = 3;
 
+/// The first file format version whose WAL segments may hold a commit in parts (record type 4,
+/// format spec 9.3.1). File format 4 (Graphersal 0.5.0) introduces it together with the blob
+/// value tag; until `FORMAT_VERSION` is raised to 4 it equals the current version.
+// MERGE (P04): becomes the literal `4` once `FORMAT_VERSION` is 4.
+pub(crate) const COMMIT_PARTS_FORMAT_VERSION: u32 = FORMAT_VERSION;
+
 /// Nanoseconds per second, for the `svar seconds` + `uvar nanos` pairs of tags 15 to 20.
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 

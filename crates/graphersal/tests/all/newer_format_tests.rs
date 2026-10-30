@@ -544,3 +544,41 @@ fn the_upgrade_refuses_an_older_store_with_a_newer_file() {
         assert!(!new_dir.path().exists(), "{variant}: no copy");
     }
 }
+
+/// Commits in parts (record type 4, format spec 9.3.1) belong to file format 4: a reader of an
+/// older file format version meets them only in a WAL segment whose header says a newer
+/// version, and refuses the whole store as newer before reading a record, never as damage.
+/// Simulated as every test here: a segment holding commits in parts, its version word one
+/// above this build's.
+#[test]
+fn a_wal_with_commits_in_parts_of_a_newer_version_is_newer_not_damage() {
+    let dir = TempDir::new("parts");
+    let options = StoreOptions::new().with_commit_part_bytes(32);
+    let store = Store::create(dir.path(), options.clone()).unwrap();
+    add_person(&store, "a person with a name long enough for several parts");
+    add_person(&store, "another person with a name long enough for parts");
+    store.close().unwrap();
+    let wal = files_where(dir.path(), &|p| p.extension().is_some_and(|e| e == "wal"))
+        .pop()
+        .unwrap();
+    // The segment holds commits in parts (the record type at frame byte 16).
+    let bytes = fs::read(&wal).unwrap();
+    assert_eq!(bytes[64 + 16], 4);
+    bump_header64(&wal, NEWER_FILE);
+    let before = fs::read(&wal).unwrap();
+    assert_newer("open", "parts", err_of(Store::open(dir.path(), options)));
+    assert_newer(
+        "open_read_only",
+        "parts",
+        err_of(Store::open_read_only(dir.path(), RecoveryTarget::Latest)),
+    );
+    assert_newer("verify_dir", "parts", err_of(Store::verify_dir(dir.path())));
+    assert_newer(
+        "damage_report_dir",
+        "parts",
+        err_of(Store::damage_report_dir(dir.path())),
+    );
+    let err = err_of(persist::read_journal(fs::File::open(&wal).unwrap()));
+    assert_newer("read_journal", "parts", err);
+    assert_eq!(fs::read(&wal).unwrap(), before);
+}

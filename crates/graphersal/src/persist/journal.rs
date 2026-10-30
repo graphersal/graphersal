@@ -9,8 +9,8 @@ use std::time::Duration;
 use super::codec::Codec;
 use super::error::PersistError;
 use super::wal::{
-    RECORD_CHECKPOINT, RECORD_COMMIT, RECORD_MARK, WAL_HEADER_BYTES, WalHeader, encode_commit,
-    encode_mark, frame_record,
+    EncodedCommit, PART_BODY_BYTES, RECORD_CHECKPOINT, RECORD_COMMIT, RECORD_COMMIT_PART,
+    RECORD_MARK, WAL_HEADER_BYTES, WalHeader, encode_commit_body, encode_mark, frame_record,
 };
 use crate::graph::PersistentStorage;
 use crate::graph::TraversalGraph;
@@ -220,6 +220,10 @@ pub struct Journal<W: Write + Send + Sync + 'static> {
     /// The last commit sequence number written (or the graph's at attach).
     last_seq: u64,
     record: Vec<u8>,
+    /// The payload of the Commit part being written (reused per part).
+    part: Vec<u8>,
+    /// The uncompressed body bytes per Commit part (format spec 9.3.1).
+    part_bytes: usize,
     /// Where the record being written starts in the current segment, from its first byte
     /// until it is written and synced: what a panic in the write path must cut off again.
     pending: Option<u64>,
@@ -254,6 +258,8 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
             segment: 0,
             last_seq: 0,
             record: Vec::new(),
+            part: Vec::new(),
+            part_bytes: PART_BODY_BYTES,
             pending: None,
             files: None,
         }
@@ -301,6 +307,15 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
     /// The compression of large records (more than 4 KiB): [`Codec::Lz4`] by default.
     pub fn with_codec(mut self, codec: Codec) -> Self {
         self.codec = codec;
+        self
+    }
+
+    /// The uncompressed body bytes per Commit part (default 64 MiB, at least 1, at most
+    /// 1 GiB): a commit body above it is written in parts (format spec 9.3.1). A reader
+    /// accepts any part size, so this is a test knob, not a format parameter.
+    #[doc(hidden)]
+    pub fn with_commit_part_bytes(mut self, bytes: usize) -> Self {
+        self.part_bytes = bytes.clamp(1, super::codec::MAX_BLOCK_BYTES);
         self
     }
 
@@ -440,6 +455,42 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
     /// `next_seq` is the first commit sequence number the record's segment must allow (the
     /// commit's own, or the next one for a mark or a checkpoint).
     fn append(&mut self, commit_seq: u64, next_seq: u64) -> Result<(), HookError> {
+        let start = self.begin_record(next_seq)?;
+        self.write_record(start)?;
+        self.finish_record(start, commit_seq)
+    }
+
+    /// Writes a commit in parts (format spec 9.3.1): rotation once before part 0, the parts in
+    /// order through one reused buffer, ONE sync after the last part. A failed write or sync
+    /// of any part cuts the segment back to the start of part 0 (9.7) and poisons the journal;
+    /// the durable end moves only after the last part.
+    fn append_parts(
+        &mut self,
+        encoded: &EncodedCommit,
+        parts: u32,
+        commit_seq: u64,
+    ) -> Result<(), HookError> {
+        let start = self.begin_record(commit_seq)?;
+        for part in 0..parts {
+            encoded.put_part(part, parts, self.part_bytes, &mut self.part);
+            self.record.clear();
+            if let Err(err) =
+                frame_record(&mut self.record, RECORD_COMMIT_PART, commit_seq, &self.part)
+            {
+                return Err(self.refuse(start, err.to_string()));
+            }
+            self.write_record(start)?;
+        }
+        let written = self.finish_record(start, commit_seq);
+        // A commit in parts is large: its buffers are not kept for the next commit.
+        self.record = Vec::new();
+        self.part = Vec::new();
+        written
+    }
+
+    /// The checks and the segment rotation before a record (or the parts of one commit);
+    /// returns where it starts.
+    fn begin_record(&mut self, next_seq: u64) -> Result<u64, HookError> {
         if let Some(reason) = &self.poisoned {
             return Err(Box::new(PersistError::Poisoned {
                 reason: reason.clone(),
@@ -464,9 +515,12 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
         }
         let start = self.offset;
         self.pending = Some(start);
-        // The durable end never moves back: a Checkpoint record names the (older) snapshot
-        // position while later commits may already be in the WAL before it.
-        let durable_seq = commit_seq.max(self.last_seq);
+        Ok(start)
+    }
+
+    /// Writes the framed bytes in `self.record` after what was written so far; a failure
+    /// refuses everything from `start` on.
+    fn write_record(&mut self, start: u64) -> Result<(), HookError> {
         if let Err(err) = self
             .writer
             .write_all(&self.record)
@@ -476,6 +530,14 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
             return Err(self.refuse(start, reason));
         }
         self.offset += self.record.len() as u64;
+        Ok(())
+    }
+
+    /// Makes everything from `start` durable per the durability and publishes the durable end.
+    fn finish_record(&mut self, start: u64, commit_seq: u64) -> Result<(), HookError> {
+        // The durable end never moves back: a Checkpoint record names the (older) snapshot
+        // position while later commits may already be in the WAL before it.
+        let durable_seq = commit_seq.max(self.last_seq);
         let sync_now = match self.durability {
             Durability::EveryCommit => true,
             Durability::Interval(every) => {
@@ -496,7 +558,7 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
         }
         self.pending = None;
         if let Some(files) = &mut self.files {
-            files.record_written(self.record.len() as u64);
+            files.record_written(self.offset - start);
         }
         Ok(())
     }
@@ -580,8 +642,19 @@ impl<W: Write + Send + Sync + 'static> CommitHook for Journal<W> {
             }));
         }
         self.guarded("writing a commit record", |journal| {
-            let payload =
-                encode_commit(changes, journal.codec).map_err(|err| Box::new(err) as HookError)?;
+            let encoded = encode_commit_body(changes, journal.codec)
+                .map_err(|err| Box::new(err) as HookError)?;
+            let parts = encoded
+                .parts(journal.part_bytes)
+                .map_err(|err| Box::new(err) as HookError)?;
+            if parts > 1 {
+                // Format spec 9.3.1: a body above the part size is written in parts.
+                journal.append_parts(&encoded, parts, changes.commit_seq())?;
+                journal.last_seq = changes.commit_seq();
+                return Ok(());
+            }
+            let payload = encoded.single_payload();
+            drop(encoded);
             journal.record.clear();
             frame_record(
                 &mut journal.record,

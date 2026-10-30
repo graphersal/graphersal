@@ -26,9 +26,10 @@ A `0` for any of the four script counters means *unlimited*; the call depth and 
 are never unlimited because they protect the native stack of the thread (`0` reads as the
 default for them, and `ScriptLimits::unlimited()` keeps both defaults).
 
-A graph with a journal (a [Store](../persistence/store.md), or a journal attached by hand) has one
-more, fixed limit that is not an option: [the size of one commit](#the-size-of-one-commit-journal),
-1 GiB of uncompressed journal record per unit.
+A graph with a journal (a [Store](../persistence/store.md), or a journal attached by hand) writes
+a large unit in parts and has no practical commit size limit
+([the size of one commit](#the-size-of-one-commit-journal)); the process memory ceiling bounds
+it.
 
 ## Script limits
 
@@ -289,6 +290,8 @@ checkpoint leaves the store as it was.
 | `snapshot load` (`read_snapshot*`, Python `Graph.load`) | the snapshot header's estimate of the graph (plus the live heap when tracked) BEFORE anything is read: `PersistError::MemoryBudget`; while the graph is built every 4096 elements, each segment and its decoded chunks before they are read |
 | `store open` (`Store::open`, CLI `--graph <store>`, dev server, Python `Store.open`) | the same, plus the replay of the WAL after the snapshot: a graph that does not fit refuses the open, naming the minimum to raise to. Never maintenance mode, never read-only instead |
 | `recovery` (`Recovery`, past states, read-only views) | every WAL record before it is read, the replay every 4096 mutations |
+| `commit encoding` | the encoded body of a commit while the journal builds it (each time it doubles, from 1 MiB on): a unit that does not fit is rolled back |
+| `reading a commit in parts` | the assembled body of a commit written in parts before each growth (recovery, checkpoints, backups, verify, salvage) |
 | `store read` | a whole store file or range read into memory (an `io::Error` of kind `OutOfMemory` inside `PersistError::Io`) |
 | `checkpoint`, `snapshot write` | the encoder's id index (24 bytes per element) and one chunk before they are allocated; a merged checkpoint's chunks and its delta graph |
 | `maintenance copy` | the copy of a salvaged graph (twice the graph) |
@@ -470,18 +473,22 @@ abort rolls back the whole script.
 ## The size of one commit (journal)
 
 A journal (the write-ahead log of a [Store](../persistence/store_commits.md), or a
-`persist::Journal`) writes every committed unit as ONE record, and the body of a record is at most
-**1 GiB before compression** (format spec 9.3). The body holds every change of the unit with its
-before and after values, so dropping an element writes its full properties too: dropping 300 000
-vertices with long texts and creating them again in the same unit writes both. The limit is
-fixed (it is not an option, and the record is not split over several records).
+`persist::Journal`) writes every committed unit as one commit. Its body holds every change of the
+unit with its before and after values, so dropping an element writes its full properties too:
+dropping 300 000 vertices with long texts and creating them again in the same unit writes both.
+A body of more than 64 MiB before compression is written in parts of 64 MiB (format spec 9.3.1),
+so since 0.5.0 a commit has no practical size limit (up to 2^20 parts, 64 TiB; before 0.5.0 one
+commit was at most 1 GiB). What bounds it is memory: the unit's changes and its encoded body
+are held while it commits (operation `commit encoding` of the
+[process memory ceiling](#the-process-memory-ceiling)), and a recovery holds one commit's body
+while it replays it.
 
-A larger commit is refused by the journal's commit hook: the whole unit is rolled back, nothing
-is written, and the journal keeps working. The error is
+A commit beyond 2^20 parts, or one whose encoding does not fit under the ceiling, is refused by
+the journal's commit hook: the whole unit is rolled back, nothing is written, and the journal
+keeps working. The error is `CommitTooLarge` (or `ResourceLimitExceeded`) inside
 
 ```text
-The commit was rejected by the commit hook 'journal': Commit 2 is too large for the journal:
-its uncompressed record body is 1203145990 bytes, more than the limit of 1073741824 bytes per commit
+The commit was rejected by the commit hook 'journal': ...
 ```
 
 and its help says how to split the work. The limit applies per unit, so the fix is more, smaller

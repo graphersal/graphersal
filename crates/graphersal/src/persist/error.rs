@@ -144,10 +144,10 @@ pub enum PersistError {
     },
 
     /// One commit is too large for the journal: its record body (every mutation of the unit
-    /// with its before and after values, before compression) exceeds the per-commit limit of
-    /// 1 GiB (format spec 9.3). The journal refuses (vetoes) the commit, so the unit is rolled
-    /// back and nothing is written; the journal stays usable. Split the work into several
-    /// smaller units.
+    /// with its before and after values, before compression) needs more than the largest
+    /// number of parts of one commit (format spec 9.3.1: 2^20 parts of 64 MiB, 64 TiB). The
+    /// journal refuses (vetoes) the commit, so the unit is rolled back and nothing is written;
+    /// the journal stays usable. Split the work into several smaller units.
     #[error(
         "Commit {commit_seq} is too large for the journal: its uncompressed record body is \
          {bytes} bytes, more than the limit of {limit} bytes per commit"
@@ -158,7 +158,8 @@ pub enum PersistError {
         commit_seq: u64,
         /// The size of its uncompressed record body.
         bytes: usize,
-        /// The limit per commit (1 GiB).
+        /// The limit per commit: the part size times the largest number of parts (saturating
+        /// at `usize::MAX`).
         limit: usize,
     },
 
@@ -929,10 +930,11 @@ impl DiagnosticError for PersistError {
             PersistError::Encode { .. } => "Only storable property values (null, booleans, \
                  numbers, strings, uuids, arrays and string-keyed objects) can be persisted."
                 .to_string(),
-            PersistError::CommitTooLarge { .. } => "The journal writes every commit as one \
-                 record of at most 1 GiB before compression, and a unit's record holds all its \
-                 changes, dropped elements with their full properties included. The whole unit \
-                 was rolled back and nothing was written; the journal keeps working. Split the \
+            PersistError::CommitTooLarge { .. } => "The journal writes a large commit in \
+                 parts of 64 MiB before compression, at most 1048576 parts (64 TiB), and a \
+                 unit's commit holds all its changes, dropped elements with their full \
+                 properties included; this unit needs more parts. The whole unit was rolled \
+                 back and nothing was written; the journal keeps working. Split the \
                  work into several smaller units: in the web playground, which runs a whole \
                  script as one unit, drop the old data in a run of its own (for example \
                  g.v().drop().iterate()) and create the new data over several runs (for example \
@@ -1185,7 +1187,7 @@ mod tests {
              bytes, more than the limit of 1073741824 bytes per commit"
         );
         let help = err.help().unwrap_or_default();
-        assert!(help.contains("at most 1 GiB"), "{help}");
+        assert!(help.contains("in parts of 64 MiB"), "{help}");
         assert!(
             help.contains("drop the old data in a run of its own"),
             "{help}"
