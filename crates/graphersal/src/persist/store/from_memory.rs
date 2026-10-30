@@ -49,7 +49,21 @@ pub(super) fn backup_from_memory<S: PersistentStorage + ?Sized>(
             target.display()
         )));
     }
-    let mut report = increment(store, graph, graph_file, write, target)?;
+    // The readable part of the store's journal first (format spec 12.11), put back when the
+    // increment fails.
+    let journal_before = super::system_journal::segment_lengths(target);
+    let journal = super::system_journal::sync_into_backup(store, target).and_then(|journal| {
+        increment(store, graph, graph_file, write, target).map(|report| (report, journal))
+    });
+    let (mut report, (journal_warnings, journal_files)) = match journal {
+        Ok(done) => done,
+        Err(err) => {
+            super::system_journal::restore_lengths(target, &journal_before);
+            return Err(err);
+        }
+    };
+    report.warnings.extend(journal_warnings);
+    report.journal_files.extend(journal_files);
     // The models follow the store's, best effort (see `full`).
     if let Err(err) = super::models::sync_models(store, target) {
         report
@@ -182,7 +196,11 @@ fn full<S: PersistentStorage + ?Sized>(
         let mut files_written = write_files(store, graph, graph_file, write, target)?;
         // The models are files of the store, copied as they are; a damaged one is skipped
         // with a warning (this backup exists because the store's files are damaged).
-        let (models, model_warnings) = super::models::copy_all_lenient(store, target);
+        let (models, mut model_warnings) = super::models::copy_all_lenient(store, target);
+        // The readable part of the store's journal (format spec 12.11), before GRAPH.
+        let (journal_warnings, journal_files) =
+            super::system_journal::sync_into_backup(store, target)?;
+        model_warnings.extend(journal_warnings);
         let file = backup_graph_file(graph_file, seq, taken_at);
         write_graph_file(target, &file)?;
         files::sync_dir(target)?;
@@ -204,6 +222,7 @@ fn full<S: PersistentStorage + ?Sized>(
             from_memory: true,
             models,
             warnings: model_warnings,
+            journal_files,
             ..BackupReport::default()
         })
     })();

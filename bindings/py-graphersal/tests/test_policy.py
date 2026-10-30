@@ -37,12 +37,12 @@ def assert_denied(graph, script, policy, request):
 
 def test_presets_and_builders():
     assert AccessPolicy.deny_all().rules == frozenset()
-    assert AccessPolicy.read_only().rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder")}
-    assert len(AccessPolicy.allow_all().rules) == 6 * 7
+    assert AccessPolicy.read_only().rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("read", "journal")}
+    assert len(AccessPolicy.allow_all().rules) == 6 * 8
     p = AccessPolicy.read_only().allow("create", "data").allow("*", "option").deny("*", "option")
-    assert p.rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("create", "data")}
+    assert p.rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("read", "journal"), ("create", "data")}
     assert p == AccessPolicy(
-        ("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("create", "data")
+        ("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("read", "journal"), ("create", "data")
     )
     assert p.allows("create", "data") and not p.allows("read", "file")
     assert not p.allows("*", "data")
@@ -53,8 +53,8 @@ def test_presets_and_builders():
 def test_policies_are_immutable_hashable_and_repr_round_trips(tmp_path):
     base = AccessPolicy.read_only()
     widened = base.allow("update", "data")
-    assert base.rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder")}  # unchanged
-    same = AccessPolicy(("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"))
+    assert base.rules == {("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("read", "journal")}  # unchanged
+    same = AccessPolicy(("read", "data"), ("read", "schema"), ("read", "definition"), ("execute", "definition"), ("execute", "embedder"), ("read", "journal"))
     assert len({same, AccessPolicy.read_only(), widened}) == 2
     rooted = AccessPolicy(("read", "*"), ("create", "file"), file_root=tmp_path)
     assert rooted.file_root == os.fspath(tmp_path)

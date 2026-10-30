@@ -117,6 +117,9 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     /// graph's own (Q2.3: then it times only what the graph itself writes, such as journal
     /// records; the storage's commits are its own business).
     clock: crate::graph::CommitClock,
+    /// The system journal: the Store's ([`Graph::attach_system_journal`]), else an in-memory
+    /// one made at the first use.
+    system_journal: OnceLock<Arc<crate::graph::system_journal::SystemJournal>>,
 }
 
 /// The poison of a [`Graph`]: set once a rollback of one of its units failed, never cleared.
@@ -620,6 +623,7 @@ impl<S: GraphStorage> Graph<S> {
             unit: UnitOwner::default(),
             poison: Poison::default(),
             clock,
+            system_journal: OnceLock::new(),
         }
     }
 
@@ -628,6 +632,29 @@ impl<S: GraphStorage> Graph<S> {
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn clock(&self) -> &crate::graph::CommitClock {
         &self.clock
+    }
+
+    /// The graph's system journal (book page "System Journal"): a Store's (kept in its
+    /// `journal/` directory), else an in-memory one holding the newest
+    /// [`MEMORY_CAPACITY`](crate::system_journal::MEMORY_CAPACITY) records, made at the first
+    /// call and timed by the graph's instance clock.
+    pub fn system_journal(
+        &self,
+    ) -> Result<Arc<crate::graph::system_journal::SystemJournal>, GraphError> {
+        Ok(Arc::clone(self.system_journal.get_or_init(|| {
+            crate::graph::system_journal::SystemJournal::in_memory(self.clock.clone())
+        })))
+    }
+
+    /// Makes `journal` the graph's system journal (a Store attaches its own at open). Set
+    /// once: `false` when the graph has one already (also an in-memory one made by an earlier
+    /// [`Self::system_journal`]).
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn attach_system_journal(
+        &self,
+        journal: Arc<crate::graph::system_journal::SystemJournal>,
+    ) -> bool {
+        self.system_journal.set(journal).is_ok()
     }
 
     /// Counts the lock's wait and hold times in `stats` from now on (book page "Workload
@@ -1504,6 +1531,7 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
             unit: UnitOwner::default(),
             poison: Poison::default(),
             clock,
+            system_journal: OnceLock::new(),
         }
     }
 }

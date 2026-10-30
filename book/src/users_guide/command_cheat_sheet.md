@@ -227,6 +227,7 @@ graphersal store list data/                          # the snapshots
 graphersal store marks data/                         # the marks
 graphersal store checkpoint data/ --name nightly     # write a snapshot now
 graphersal store verify data/                        # scrub every checksum (exit 1 on damage)
+graphersal store journal data/ --level warn          # the system journal: what the store did
 graphersal store fork data/ branch/ --at-mark before-import          # a past state as a new store
 graphersal store fork data/ branch2/ --at-time 2026-10-08T02:43:00Z  # or --at-commit N
 graphersal store backup data/ /mnt/backup/data       # full the first time, incremental afterwards

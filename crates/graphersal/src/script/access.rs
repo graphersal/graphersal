@@ -92,6 +92,7 @@ impl ScriptAccess {
             private_graph,
             preset_options: self.presets.clone(),
             required: Vec::new(),
+            journal: None,
         }
     }
 }
@@ -390,6 +391,10 @@ impl ScriptGraphTraversalSource {
     pub(crate) fn restrictions(&self) -> Restrictions {
         let into_host = self.writes_into_host_graph();
         let mut restrictions = self.access.restrictions(self.private && !into_host);
+        // A denial on the host graph is recorded in its system journal.
+        if !self.private {
+            restrictions.journal = self.g.as_ref().and_then(|g| g.system_journal().ok());
+        }
         if into_host {
             restrictions.required.push((
                 "with_side_effect",

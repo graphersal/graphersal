@@ -103,6 +103,13 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>>;
 
+    /// The graph's system journal ([`Graph::system_journal`]). Unauthorized: a front end asks
+    /// its authorizer for `Read` on [`Resource::Journal`](crate::graph::Resource::Journal)
+    /// first.
+    fn system_journal(
+        &self,
+    ) -> Result<std::sync::Arc<crate::graph::system_journal::SystemJournal>, GraphError>;
+
     /// The memory report of the storage
     /// ([`GraphTraversalSource::memory_report`](crate::GraphTraversalSource::memory_report)),
     /// computed under one read lock. Fails for an invalid request and when cancelled (the
@@ -329,6 +336,12 @@ where
 
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {
         Graph::workload_stats(self).cloned()
+    }
+
+    fn system_journal(
+        &self,
+    ) -> Result<std::sync::Arc<crate::graph::system_journal::SystemJournal>, GraphError> {
+        Graph::system_journal(self)
     }
 
     fn memory_report(

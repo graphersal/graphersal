@@ -560,6 +560,7 @@ fn effect_value(effect: &AccessRequestBuf) -> ElementProperty {
         Resource::Schema
         | Resource::Option { .. }
         | Resource::Embedder { .. }
+        | Resource::Journal
         | Resource::Custom { .. } => {
             map.insert("resource", "other".into());
         }

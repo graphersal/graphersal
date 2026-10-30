@@ -22,7 +22,7 @@ const ACTIONS: [(&str, ActionKind); 6] = [
 ];
 
 /// The Python names of the resource kinds, in the engine's declaration order.
-const RESOURCES: [(&str, ResourceKind); 7] = [
+const RESOURCES: [(&str, ResourceKind); 8] = [
     ("data", ResourceKind::Data),
     ("schema", ResourceKind::Schema),
     ("file", ResourceKind::File),
@@ -30,6 +30,7 @@ const RESOURCES: [(&str, ResourceKind); 7] = [
     ("definition", ResourceKind::Definition),
     ("custom", ResourceKind::Custom),
     ("embedder", ResourceKind::Embedder),
+    ("journal", ResourceKind::Journal),
 ];
 
 /// Which actions a script may perform on which kinds of resource, plus an optional file root
@@ -40,7 +41,7 @@ const RESOURCES: [(&str, ResourceKind); 7] = [
 /// administrative ``g.with()`` options such as ``evaluationTimeout``), ``"definition"`` (the
 /// catalog of definitions: saved queries), ``"custom"``, ``"embedder"`` (``execute`` on it runs
 /// an embedder: the ``embed`` step, ``embed(text)``, a text query, ``embed_property`` in a
-/// script). ``"*"`` stands for every action or every resource.
+/// script), ``"journal"`` (``read`` on it reads the system journal). ``"*"`` stands for every action or every resource.
 ///
 /// An ``AccessPolicy`` is immutable: ``allow``, ``deny`` and ``with_file_root`` return a new
 /// value. ``AccessPolicy(("read", "data"), ("read", "schema"))`` allows exactly the given pairs;
@@ -188,11 +189,12 @@ impl AccessPolicy {
 
     /// ``AccessPolicy.read_only()``: ``read`` on ``data``, ``schema`` and ``definition``, and
     /// ``execute`` on ``definition`` (calling a saved query, which is read-only itself) and on
-    /// ``embedder`` (embedding text changes nothing), as the engine's ``read_only``.
+    /// ``embedder`` (embedding text changes nothing), and ``read`` on ``journal``, as the
+    /// engine's ``read_only``.
     #[staticmethod]
     fn read_only() -> Self {
         AccessPolicy {
-            allowed: bit(0, 0) | bit(0, 1) | bit(0, 4) | bit(4, 4) | bit(4, 6),
+            allowed: bit(0, 0) | bit(0, 1) | bit(0, 4) | bit(4, 4) | bit(4, 6) | bit(0, 7),
             file_root: None,
         }
     }

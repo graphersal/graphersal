@@ -278,7 +278,7 @@ class Edge:
 _Action = Literal["read", "create", "update", "delete", "execute", "custom", "*"]
 
 #: The name of a resource kind of an ``AccessPolicy`` rule (``"*"``: every one).
-_Resource = Literal["data", "schema", "file", "option", "definition", "custom", "embedder", "*"]
+_Resource = Literal["data", "schema", "file", "option", "definition", "custom", "embedder", "journal", "*"]
 
 def set_memory_limit(
     limit: Union[int, Literal["auto", "none"]], *, headroom: Optional[int] = None

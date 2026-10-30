@@ -329,3 +329,85 @@ fn the_per_query_limit_counts_live_bytes_when_tracked() {
         "the graph's growth is not the query's: {peak} vs {grown}"
     );
 }
+
+/// A system journal segment the PROCESS ceiling does not let be read whole: a query of the
+/// journal fails with `JournalError::MemoryLimit` (never a partial answer); the store still opens
+/// (the journal decides nothing) and continues in a new segment without reusing a seq; with
+/// the ceiling raised every record is there, in order.
+#[test]
+#[cfg(feature = "persist")]
+fn a_journal_segment_over_the_process_ceiling_refuses_the_query_not_the_store() {
+    use graphersal::error::DiagnosticError;
+    use graphersal::persist::{MemDir, PersistError, Store, StoreDir, StoreOptions};
+    use graphersal::system_journal::{JournalError, JournalQuery};
+    let _guard = exclusive();
+    let mem = MemDir::named("ceiling-journal");
+    let dir: std::sync::Arc<dyn StoreDir> = std::sync::Arc::new(mem.clone());
+    let options = || StoreOptions::new().with_checkpoint_after_bytes(0);
+    Store::create(&dir, options()).unwrap().close().unwrap();
+    let before = Store::journal_dir(&dir, &JournalQuery::new())
+        .unwrap()
+        .records;
+    let last_seq = before.last().unwrap().seq;
+    let name = mem
+        .file_names()
+        .into_iter()
+        .find(|name| name.starts_with("journal/"))
+        .unwrap();
+    // The segment grows by 1 MiB of zeros (a torn tail of a crashed writer, as far as the
+    // format is concerned): too large to read under the ceiling below.
+    let mut bytes = mem.file(&name).unwrap();
+    bytes.resize(bytes.len() + (1 << 20), 0);
+    let padded = bytes.len() as u64;
+    mem.put_file(&name, bytes);
+
+    let live = exec::memory_room().unwrap().live_bytes();
+    exec::set_memory_limit(MemoryLimit::Bytes(live.unwrap_or(0) + (256 << 10))).unwrap();
+    let err = Store::journal_dir(&dir, &JournalQuery::new()).unwrap_err();
+    let PersistError::Journal(journal) = &err else {
+        panic!("expected a journal error, got {err:?}");
+    };
+    assert!(
+        matches!(journal, JournalError::MemoryLimit { .. }),
+        "{journal:?}"
+    );
+    assert!(
+        journal.help().contains("memory ceiling"),
+        "{}",
+        journal.help()
+    );
+    assert!(err.help().unwrap().contains("memory ceiling"));
+
+    // The store opens; its journal goes on in a new segment.
+    let store = Store::open(&dir, options()).unwrap();
+    // Its own query of the old records needs the segment: refused the same way.
+    assert!(matches!(
+        store.journal().unwrap().query(&JournalQuery::new()),
+        Err(JournalError::MemoryLimit { .. })
+    ));
+    store.close().unwrap();
+    let segments: Vec<String> = mem
+        .file_names()
+        .into_iter()
+        .filter(|name| name.starts_with("journal/"))
+        .collect();
+    assert_eq!(segments.len(), 2, "{segments:?}");
+
+    exec::set_memory_limit(MemoryLimit::Auto).unwrap();
+    let after = Store::journal_dir(&dir, &JournalQuery::new().limit(10_000))
+        .unwrap()
+        .records;
+    assert_eq!(&after[..before.len()], &before[..]);
+    let added = &after[before.len()..];
+    assert_eq!(added.first().map(|r| r.kind.as_str()), Some("store.opened"));
+    let new_seq = added.first().unwrap().seq;
+    // Past every frame the unread segment could have held: no seq reused.
+    let first = name
+        .trim_start_matches("journal/")
+        .trim_end_matches(".jnl")
+        .parse::<u64>()
+        .unwrap();
+    assert!(new_seq > last_seq);
+    assert!(new_seq > first + padded / 26, "{new_seq}");
+    assert!(after.windows(2).all(|w| w[0].seq < w[1].seq));
+}

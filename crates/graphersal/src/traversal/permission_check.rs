@@ -33,6 +33,9 @@ pub(crate) struct Restrictions {
     /// script DSL adds `("with_side_effect", Create Data)` for a `subgraph()` into a host
     /// graph).
     pub(crate) required: Vec<(&'static str, AccessRequest<'static>)>,
+    /// Where a denial is recorded (`auth.denied`, book page "System Journal"): the host
+    /// graph's journal; `None` records nothing.
+    pub(crate) journal: Option<Arc<crate::graph::system_journal::SystemJournal>>,
 }
 
 impl Default for Restrictions {
@@ -42,6 +45,7 @@ impl Default for Restrictions {
             private_graph: false,
             preset_options: Arc::default(),
             required: Vec::new(),
+            journal: None,
         }
     }
 }
@@ -81,9 +85,32 @@ impl Restrictions {
         if self.private_graph && request.writes_graph() {
             return Ok(());
         }
-        self.authorizer
-            .authorize(request)
-            .map_err(|denied| permission_denied(operation, request, denied.reason()))
+        self.authorizer.authorize(request).map_err(|denied| {
+            self.record_denial(request);
+            permission_denied(operation, request, denied.reason())
+        })
+    }
+
+    /// Records a denial in the system journal (no query text, no data: the action, the
+    /// resource kind and the channel).
+    fn record_denial(&self, request: &AccessRequest<'_>) {
+        use crate::graph::system_journal::{Event, catalogue};
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let channel = crate::graph::workload::current_channel().name();
+        let action = request.action.to_string();
+        let resource = request.resource.kind().name();
+        journal.emit(
+            &catalogue::AUTH_DENIED,
+            Event::new(format!(
+                "the authorizer denied {action} on {resource} ({channel})"
+            ))
+            .principal(channel)
+            .field("action", action.as_str())
+            .field("resource_kind", resource)
+            .field("channel", channel),
+        );
     }
 
     /// The file `operation` may `action` for `path`: asks the authorizer for `action` on

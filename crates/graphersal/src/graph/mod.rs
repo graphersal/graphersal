@@ -56,6 +56,7 @@ mod statistics;
 /// The [`GraphStorage`] trait and its implementations.
 pub mod storage;
 pub(crate) mod subgraph;
+pub mod system_journal;
 pub(crate) mod topology;
 mod transaction;
 pub(crate) mod undo;

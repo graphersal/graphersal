@@ -516,6 +516,15 @@ impl Playground {
         }
     }
 
+    /// One page of the served graph's system journal (JSON text, see [`Session::journal`]);
+    /// `spec` is the request object as JSON text (`{after?, level?, since?, until?, source?,
+    /// kind?, op?, origin?, limit?}`).
+    #[wasm_bindgen(js_name = journal)]
+    pub fn journal(&self, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        json_text(self.session.journal(&spec))
+    }
+
     /// Sets the time zone the scheduled jobs run in (the browser's zone, from
     /// `Intl.DateTimeFormat().resolvedOptions().timeZone`).
     #[wasm_bindgen(js_name = setTimeZone)]

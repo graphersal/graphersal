@@ -32,6 +32,7 @@ Every step and every file or schema operation of a query makes one or more
 | `File { path }` | a file, with the path as the script wrote it |
 | `Option { key }` | an administrative `g.with()` option ([below](#administrative-gwith-options)) |
 | `Embedder { name }` | an embedder of the registry the host gave its traversals, by its registry name (`"hash-ngram/1"`; [Vectors](vectors.md#embeddings)) |
+| `Journal` | the [system journal](../persistence/system_journal.md): `Read` to query or follow it, asked by the session, the dev server (`GET /api/journal`) and MCP (the Rust API itself asks nothing); a denial of any request is recorded there as `auth.denied` (action, resource kind and channel only) |
 | `Custom { kind, name }` | a resource of an embedding server (a database, a tenant, ...), never produced by the library |
 
 What each step requests is decided in one place in the engine (`GraphStep::for_each_access`):
@@ -125,7 +126,7 @@ use graphersal::catalog::Definition;
 
 let query_service = AccessPolicy::read_only();             // Read on Data, Schema, Definition;
                                                            // Execute on Definition (saved queries)
-                                                           // and on Embedder
+                                                           // and on Embedder; Read on Journal
 let editor = AccessPolicy::read_only()
     .allow(ActionKind::Create, ResourceKind::Data)
     .allow(ActionKind::Update, ResourceKind::Data)
