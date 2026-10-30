@@ -98,7 +98,11 @@ impl StepEmbed {
         };
         match text {
             Ok(text) => {
-                context.check_string_bytes(text.len())?;
+                // The text is embedded, not kept: checked, not charged to the run's memory.
+                crate::traversal::context::check_string_bytes(
+                    text.len(),
+                    context.options.max_string_bytes,
+                )?;
                 Ok(Some(text))
             }
             Err(found) => Err(Box::new(TraverserError::Embed(EmbedError::not_text(found)))),

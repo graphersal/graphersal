@@ -2,7 +2,8 @@
 //! check of the engine compares with ([`crate::traversal::memory_budget`]), on by default.
 //!
 //! There are two memory limits, never mixed: this ceiling, on what the whole PROCESS holds, and
-//! the per-query `traversal.max_materialized_bytes`, on what one query materializes.
+//! the per-query `traversal.max_materialized_bytes`, on the live bytes one query holds at once
+//! (`traversal/run_memory.rs`; profiles report its peak, never against this ceiling).
 //!
 //! The ceiling is set by the host, once, for the process ([`set_memory_limit`],
 //! [`set_memory_headroom`]; the graphersal command line's `--memory-limit`, Python's

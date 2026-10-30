@@ -9,7 +9,7 @@
 use crate::error::{TraverserError, TraverserResult};
 use crate::graph::GraphStorage;
 use crate::traversal::context::{Deadline, ExecutionOptions, tick_deadline};
-use crate::traversal::memory_budget::MemoryBudget;
+use crate::traversal::run_memory::RunMemory;
 use crate::traversal::{Traverser, TraverserContext};
 use crate::value::{ElementProperty, PathRef, SackRef, TraverserValue};
 use fnv::FnvBuildHasher;
@@ -92,18 +92,14 @@ pub(crate) fn tail_units<S: GraphStorage>(items: Vec<Traverser<S>>, n: u64) -> V
     slice_units(items, total.saturating_sub(n), n)
 }
 
-/// The bounds of one bulk expansion: `bulk.max_expansion` (values),
-/// `traversal.max_materialized_bytes` (estimated bytes) and the run's memory budget
-/// (`memory.limit`, when set). Plain numbers, copied once per expansion; nothing here is read per
-/// item of a stream that has no bulk.
+/// The value bound of one bulk expansion: `bulk.max_expansion`. A plain number, copied once per
+/// expansion; nothing here is read per item of a stream that has no bulk. The byte bounds
+/// (`traversal.max_materialized_bytes`, `memory.limit`) are the run's
+/// [`RunMemory`](crate::traversal::run_memory::RunMemory), passed beside it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExpansionLimits {
     /// `bulk.max_expansion`: the most values one expansion may produce.
     pub(crate) max_values: u64,
-    /// `traversal.max_materialized_bytes`: the largest estimated size of one expansion.
-    pub(crate) max_bytes: u64,
-    /// The run's memory budget (`memory.limit`): what is in use plus the expansion must fit.
-    pub(crate) memory: Option<MemoryBudget>,
 }
 
 impl ExpansionLimits {
@@ -112,16 +108,12 @@ impl ExpansionLimits {
     pub(crate) fn of(options: &ExecutionOptions) -> Self {
         Self {
             max_values: options.bulk_max_expansion,
-            max_bytes: options.max_materialized_bytes,
-            memory: options.memory,
         }
     }
 
     /// No bound at all (a run that failed before its options were parsed expands nothing).
     pub(crate) const UNBOUNDED: Self = Self {
         max_values: u64::MAX,
-        max_bytes: u64::MAX,
-        memory: None,
     };
 
     /// The `BulkExpansionLimit` error of `requested` values at `step`.
@@ -135,10 +127,12 @@ impl ExpansionLimits {
     }
 
     /// Checks `copies` copies of `value` (one bucket push of a bulk, `aggregate()`, `group()`
-    /// value lists) against both bounds. Called only for `copies > 1`, so a stream without bulk
-    /// never pays for the size estimate.
+    /// value lists) against `bulk.max_expansion` and the run's memory (what it holds plus the
+    /// copies), then charges the copies to the run's estimated memory. Called only for
+    /// `copies > 1`, so a stream without bulk never pays for the size estimate.
     pub(crate) fn check_copies<S: GraphStorage>(
         &self,
+        memory: &RunMemory,
         value: &TraverserValue<S>,
         copies: u64,
         step: &str,
@@ -149,19 +143,9 @@ impl ExpansionLimits {
         let each = std::mem::size_of::<TraverserValue<S>>() as u64
             + crate::traversal::step::profile::estimate_traverser_value_bytes(value);
         let bytes = each.saturating_mul(copies);
-        if bytes > self.max_bytes {
-            return Err(materialized_bytes_error(self.max_bytes, bytes));
-        }
-        self.check_memory(bytes)
-    }
-
-    /// Checks `bytes` the caller is about to materialize against the memory budget, if any.
-    #[inline]
-    fn check_memory(&self, bytes: u64) -> TraverserResult<()> {
-        match &self.memory {
-            None => Ok(()),
-            Some(budget) => budget.check(bytes),
-        }
+        memory.check(bytes)?;
+        memory.charge(bytes);
+        Ok(())
     }
 }
 
@@ -180,14 +164,17 @@ pub(crate) fn materialized_bytes_error(max: u64, observed: u64) -> Box<Traverser
 ///
 /// Returns `items` untouched (one scan, no allocation) when no bulk is above 1. Otherwise the
 /// total must not exceed `limits.max_values` (else `BulkExpansionLimit`; a failed reservation of
-/// the output maps to the same error), and its estimated size (`size_of::<Traverser>()` plus the
-/// value estimate per copy) must not exceed `limits.max_bytes` (else `ResourceLimitExceeded` of
-/// `traversal.max_materialized_bytes`), both checked before anything is allocated. The copy loop
-/// counts every copy against the `evaluationTimeout` `deadline` (a clock read every 1024 copies),
-/// so a long expansion stops in time and the timeout is reported at the expanding step.
+/// the output maps to the same error), and what the run holds plus the expansion's estimated
+/// size (`size_of::<Traverser>()` plus the value estimate per copy) must fit the run's
+/// `memory` (else `ResourceLimitExceeded` of `traversal.max_materialized_bytes` or
+/// `memory.limit`), both checked before anything is allocated; the expansion is then charged to
+/// the run's estimated memory. The copy loop counts every copy against the
+/// `evaluationTimeout` `deadline` (a clock read every 1024 copies), so a long expansion stops
+/// in time and the timeout is reported at the expanding step.
 pub(crate) fn expand<S: GraphStorage>(
     items: Vec<Traverser<S>>,
     limits: ExpansionLimits,
+    memory: &RunMemory,
     deadline: &mut Option<Deadline>,
     step: &str,
 ) -> TraverserResult<Vec<Traverser<S>>> {
@@ -206,16 +193,18 @@ pub(crate) fn expand<S: GraphStorage>(
         let each = each_traverser
             + crate::traversal::step::profile::estimate_traverser_value_bytes(&item.value);
         bytes = bytes.saturating_add(each.saturating_mul(item.bulk));
-        if bytes > limits.max_bytes {
-            return Err(materialized_bytes_error(limits.max_bytes, bytes));
+        if bytes > memory.limit() {
+            // Over the limit on its own: no need to size the rest.
+            break;
         }
     }
-    limits.check_memory(bytes)?;
+    memory.check(bytes)?;
     let capacity = usize::try_from(total).map_err(|_| limits.too_many(total, step))?;
     let mut expanded = Vec::new();
     expanded
         .try_reserve_exact(capacity)
         .map_err(|_| limits.too_many(total, step))?;
+    memory.charge(bytes);
     for item in items {
         let copies = item.bulk;
         for _ in 1..copies {
@@ -233,16 +222,19 @@ pub(crate) fn expand<S: GraphStorage>(
     Ok(expanded)
 }
 
-/// [`expand`] under the limits and the deadline of `context` (a step inside an execution).
+/// [`expand`] under the limits, the memory and the deadline of `context` (a step inside an
+/// execution).
 #[inline]
 pub(crate) fn expand_in<S: GraphStorage>(
     context: &mut TraverserContext<'_, S>,
     items: Vec<Traverser<S>>,
     step: &str,
 ) -> TraverserResult<Vec<Traverser<S>>> {
+    context.memory.set_arena(context.paths.value_bytes());
     expand(
         items,
         ExpansionLimits::of(&context.options),
+        &context.memory,
         &mut context.deadline,
         step,
     )
@@ -254,10 +246,25 @@ pub(crate) fn expand_values_in<S: GraphStorage>(
     items: Vec<Traverser<S>>,
     step: &str,
 ) -> TraverserResult<Vec<crate::value::TraverserValue<S>>> {
-    Ok(expand_in(context, items, step)?
+    let expands = items.iter().any(|item| item.bulk > 1);
+    let expanded = expand_in(context, items, step)?;
+    let traversers = if expands {
+        expanded.capacity() as u64
+    } else {
+        0
+    };
+    let values: Vec<_> = expanded
         .into_iter()
         .map(|traverser| traverser.value)
-        .collect())
+        .collect();
+    // The list replaces the traversers an expansion built (and charged) for it.
+    let memory = &context.memory;
+    memory.release(traversers.saturating_mul(std::mem::size_of::<Traverser<S>>() as u64));
+    memory.charge(
+        (values.capacity() as u64)
+            .saturating_mul(std::mem::size_of::<crate::value::TraverserValue<S>>() as u64),
+    );
+    Ok(values)
 }
 
 /// Pushes `copies` copies of `value` onto `bucket` (one unit of bulk each), counting every copy
@@ -662,11 +669,12 @@ mod tests {
     type T = Traverser<TraversalGraph>;
 
     fn limits(max_values: u64) -> ExpansionLimits {
-        ExpansionLimits {
-            max_values,
-            max_bytes: u64::MAX,
-            memory: None,
-        }
+        ExpansionLimits { max_values }
+    }
+
+    /// A run memory without a byte limit or a process ceiling.
+    fn unbounded() -> RunMemory {
+        RunMemory::new(u64::MAX, None)
     }
 
     fn item(n: i64, bulk: u64) -> T {
@@ -717,6 +725,7 @@ mod tests {
         let expanded = expand(
             vec![item(1, 1), item(2, 3), item(3, 2)],
             limits(100),
+            &unbounded(),
             &mut None,
             "fold",
         )
@@ -728,21 +737,41 @@ mod tests {
 
     #[test]
     fn expand_without_bulk_returns_the_input() {
-        let expanded = expand(vec![item(1, 1), item(2, 1)], limits(1), &mut None, "fold").unwrap();
+        let expanded = expand(
+            vec![item(1, 1), item(2, 1)],
+            limits(1),
+            &unbounded(),
+            &mut None,
+            "fold",
+        )
+        .unwrap();
         assert_eq!(expanded.len(), 2);
     }
 
     #[test]
     fn expand_enforces_the_limit() {
-        let err = expand(vec![item(1, 6), item(2, 5)], limits(10), &mut None, "fold").unwrap_err();
+        let err = expand(
+            vec![item(1, 6), item(2, 5)],
+            limits(10),
+            &unbounded(),
+            &mut None,
+            "fold",
+        )
+        .unwrap_err();
         assert!(matches!(
             *err,
             TraverserError::BulkExpansionLimit { ref step, requested: 11, limit: 10 } if step == "fold"
         ));
         assert_eq!(
-            expand(vec![item(1, 6), item(2, 4)], limits(10), &mut None, "fold")
-                .unwrap()
-                .len(),
+            expand(
+                vec![item(1, 6), item(2, 4)],
+                limits(10),
+                &unbounded(),
+                &mut None,
+                "fold"
+            )
+            .unwrap()
+            .len(),
             10
         );
     }
@@ -750,15 +779,26 @@ mod tests {
     #[test]
     fn expand_enforces_the_byte_budget_before_it_allocates() {
         let each = std::mem::size_of::<T>() as u64;
-        let bounded = |max_bytes| ExpansionLimits {
-            max_values: u64::MAX,
-            max_bytes,
-            memory: None,
-        };
+        // A run that holds nothing yet, limited to `max_bytes` (`traversal.max_materialized_bytes`).
+        let bounded = |max_bytes| RunMemory::new(max_bytes, None);
         // Exactly the budget: 5 traversers of a number (no heap) fit into 5 x 80 bytes.
-        let expanded = expand(vec![item(1, 5)], bounded(5 * each), &mut None, "fold").unwrap();
+        let expanded = expand(
+            vec![item(1, 5)],
+            limits(u64::MAX),
+            &bounded(5 * each),
+            &mut None,
+            "fold",
+        )
+        .unwrap();
         assert_eq!(expanded.len(), 5);
-        let err = expand(vec![item(1, 6)], bounded(5 * each), &mut None, "fold").unwrap_err();
+        let err = expand(
+            vec![item(1, 6)],
+            limits(u64::MAX),
+            &bounded(5 * each),
+            &mut None,
+            "fold",
+        )
+        .unwrap_err();
         assert!(matches!(
             *err,
             TraverserError::ResourceLimitExceeded { ref limit, max: Some(_), observed: Some(o) }
@@ -766,9 +806,15 @@ mod tests {
         ));
         // Without bulk nothing is expanded, so nothing is checked.
         assert_eq!(
-            expand(vec![item(1, 1), item(2, 1)], bounded(1), &mut None, "fold")
-                .unwrap()
-                .len(),
+            expand(
+                vec![item(1, 1), item(2, 1)],
+                limits(u64::MAX),
+                &bounded(1),
+                &mut None,
+                "fold"
+            )
+            .unwrap()
+            .len(),
             2
         );
         // The copies of one bucket push count the value's own heap bytes too.
@@ -776,13 +822,19 @@ mod tests {
             ElementProperty::String("x".repeat(1000).into()),
             None,
         );
-        assert!(bounded(10_000).check_copies(&text, 9, "aggregate").is_ok());
         assert!(
-            bounded(10_000)
-                .check_copies(&text, 10, "aggregate")
+            limits(u64::MAX)
+                .check_copies(&bounded(10_000), &text, 9, "aggregate")
+                .is_ok()
+        );
+        assert!(
+            limits(u64::MAX)
+                .check_copies(&bounded(10_000), &text, 10, "aggregate")
                 .is_err()
         );
-        let err = limits(3).check_copies(&text, 4, "aggregate").unwrap_err();
+        let err = limits(3)
+            .check_copies(&unbounded(), &text, 4, "aggregate")
+            .unwrap_err();
         assert!(matches!(
             *err,
             TraverserError::BulkExpansionLimit { requested: 4, .. }
@@ -793,18 +845,32 @@ mod tests {
     fn expand_enforces_the_memory_budget_before_it_allocates() {
         let each = std::mem::size_of::<T>() as u64;
         // A budget without a starting point: nothing in use, so the expansion alone counts.
-        let budgeted = |limit| ExpansionLimits {
-            max_values: u64::MAX,
-            max_bytes: u64::MAX,
-            memory: Some(MemoryBudget::new(limit)),
+        let budgeted = |limit| {
+            RunMemory::new(
+                u64::MAX,
+                Some(crate::traversal::memory_budget::MemoryBudget::new(limit)),
+            )
         };
         assert_eq!(
-            expand(vec![item(1, 5)], budgeted(5 * each), &mut None, "fold")
-                .unwrap()
-                .len(),
+            expand(
+                vec![item(1, 5)],
+                limits(u64::MAX),
+                &budgeted(5 * each),
+                &mut None,
+                "fold"
+            )
+            .unwrap()
+            .len(),
             5
         );
-        let err = expand(vec![item(1, 6)], budgeted(5 * each), &mut None, "fold").unwrap_err();
+        let err = expand(
+            vec![item(1, 6)],
+            limits(u64::MAX),
+            &budgeted(5 * each),
+            &mut None,
+            "fold",
+        )
+        .unwrap_err();
         assert!(matches!(
             *err,
             TraverserError::ResourceLimitExceeded { ref limit, max: Some(max), observed: Some(o) }
@@ -815,8 +881,8 @@ mod tests {
             None,
         );
         assert!(
-            budgeted(10_000)
-                .check_copies(&text, 10, "aggregate")
+            limits(u64::MAX)
+                .check_copies(&budgeted(10_000), &text, 10, "aggregate")
                 .is_err()
         );
     }
@@ -829,6 +895,7 @@ mod tests {
         let err = expand(
             vec![item(1, 5000)],
             ExpansionLimits::UNBOUNDED,
+            &unbounded(),
             &mut deadline,
             "fold",
         )
@@ -841,6 +908,7 @@ mod tests {
         let err = expand(
             vec![item(1, u64::MAX), item(2, 2)],
             ExpansionLimits::UNBOUNDED,
+            &unbounded(),
             &mut None,
             "fold",
         )
@@ -853,6 +921,7 @@ mod tests {
         let err = expand(
             vec![item(1, u64::MAX)],
             ExpansionLimits::UNBOUNDED,
+            &unbounded(),
             &mut None,
             "fold",
         )

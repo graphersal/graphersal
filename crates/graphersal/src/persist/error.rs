@@ -1108,7 +1108,7 @@ fn memory_budget_help(
             "Raise the process memory ceiling 'memory.limit' to at least {minimum} bytes: the \
              graphersal command line takes --memory-limit <bytes|auto|none>, the Python binding \
              graphersal.set_memory_limit(...), a Rust host \
-             graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))."
+             exec::set_memory_limit(MemoryLimit::Bytes(n))."
         )
     };
     format!(

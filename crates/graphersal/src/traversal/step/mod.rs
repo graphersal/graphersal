@@ -877,6 +877,47 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         )
     }
 
+    /// Whether the step passes the values of its input stream through (filters, labels,
+    /// side effects, modulators, `inject()` appending to the stream): the run's estimated memory
+    /// (`traversal/run_memory.rs`) keeps the values charged before it. A step that replaces
+    /// the values (`Map`, `FlatMap`, barriers, a mid-traversal `v()`, a fused count) releases
+    /// them at its boundary. A static fact of the category, so no element is ever re-estimated
+    /// (user decision Q2 of stage S3).
+    pub(crate) fn keeps_values(&self) -> bool {
+        match self {
+            GraphStep::Init(_, _)
+            | GraphStep::Map(_, _)
+            | GraphStep::FlatMap(_, _)
+            | GraphStep::Barrier(_, _)
+            | GraphStep::FlatBarrier(_, _)
+            | GraphStep::Count(_, _) => false,
+            GraphStep::Append(_, _)
+            | GraphStep::Filter(_, _)
+            | GraphStep::As(_, _)
+            | GraphStep::SideEffect(_, _)
+            | GraphStep::SideEffectMut(_, _)
+            | GraphStep::Modulator(_, _) => true,
+        }
+    }
+
+    /// Whether what the step charges to the run's estimated memory is held until the run ends
+    /// (side-effect steps keep their buckets for `cap()`/`select()`), rather than by the stream.
+    pub(crate) fn holds_values_for_the_run(&self) -> bool {
+        match self {
+            GraphStep::SideEffect(_, _) | GraphStep::SideEffectMut(_, _) => true,
+            GraphStep::Init(_, _)
+            | GraphStep::Append(_, _)
+            | GraphStep::Map(_, _)
+            | GraphStep::FlatMap(_, _)
+            | GraphStep::Barrier(_, _)
+            | GraphStep::FlatBarrier(_, _)
+            | GraphStep::Filter(_, _)
+            | GraphStep::As(_, _)
+            | GraphStep::Modulator(_, _)
+            | GraphStep::Count(_, _) => false,
+        }
+    }
+
     /// Whether this step genuinely owns new heap data at the end of its execution — see
     /// `GraphStepMap::materializes` and its siblings. `Modulator` never materializes (it doesn't
     /// execute independently); `Count`'s fused output is a scalar, so it doesn't either.

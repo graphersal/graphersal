@@ -951,7 +951,8 @@ fn a_pattern_comprehension_list_obeys_the_memory_budget() {
     let footprint = graph.read().memory_usage().unwrap().unwrap().total_bytes();
     let query = "RETURN size([(a)--(b)--(c)--(d) | [a, b, c, d]]) AS n";
     let lock = graph.read();
-    let error = graphersal::exec::memory_limit_scope(footprint + 2_000, || {
+    // Room for the query's buffers (they count too), not for the list.
+    let error = graphersal::exec::memory_limit_scope(footprint + 4_000, || {
         lock.traversal().gql(query).to_list()
     })
     .expect_err("over the budget");

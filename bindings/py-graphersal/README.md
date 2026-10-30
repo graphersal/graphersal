@@ -700,8 +700,10 @@ recursively and would overflow the native stack. Scripts run on a worker thread 
 stack (one per calling Python thread), so the scripting engine's own recursion over nested values
 has room. A limit hit raises `GraphersalError` whose `help` names the limit to raise.
 `max_materialized_bytes` is the default of the per-query memory limit
-`traversal.max_materialized_bytes` (the estimated size of one value or buffer a query
-materializes; without it the library default, 1 GiB) for every traversal of the graph's scripts.
+`traversal.max_materialized_bytes` (the memory one query holds at once, live bytes: memory a
+step frees is given back; without it the library default, 1 GiB) for every traversal of the
+graph's scripts. Since 0.5.0 the limit counts what a query holds at the same time, no longer the
+size of one value: a profile reports the query's peak (`query_memory`).
 Traversal limits (`evaluationTimeout`, `traversal.max_materialized_bytes`,
 `traversal.max_string_bytes`, ...) are also set per query with `g.with(key, value)`, which
 overrides the default; see the book's "Resource Limits" page.

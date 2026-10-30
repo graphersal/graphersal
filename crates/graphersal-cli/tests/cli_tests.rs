@@ -675,6 +675,38 @@ fn profile_reports_tracked_memory_figures() {
     );
 }
 
+/// With `ProfileType::Memory` the table ends with the query's peak against its per-query limit
+/// (tracked in this binary, so without `~`); a bare `.profile()` table has no such line.
+#[test]
+fn profile_memory_shows_the_peak_line() {
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "-e",
+            "g.with(\"traversal.max_materialized_bytes\", 1073741824).v().both().fold().profile(ProfileType::Memory)",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    let line = res
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("Peak memory: "))
+        .unwrap_or_else(|| panic!("no peak line: {}", res.stdout));
+    assert!(
+        line.ends_with(" of 1 GiB (traversal.max_materialized_bytes, tracked)"),
+        "{line}"
+    );
+    assert!(!line.contains('~'), "{line}");
+    let bare = run(
+        &["--graph", "modern", "-e", "g.v().both().fold().profile()"],
+        "",
+    );
+    assert_eq!(bare.code, 0, "stderr: {}", bare.stderr);
+    assert!(!bare.stdout.contains("Peak memory"), "{}", bare.stdout);
+}
+
 /// A bare `.profile()` (no `ProfileType` argument) shows no memory data whatsoever: no `Mem`
 /// column, no `TOTAL: memory materialized:` row (`ProfileType` bitmask spec, D2/D4's opt-in
 /// behavior change from the previous always-on-memory `.profile()`).

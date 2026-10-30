@@ -17,6 +17,7 @@ pub(crate) mod optimizer;
 pub(crate) mod permission_check;
 /// Rendering a traversal result for display (tables, JSON, tree).
 pub mod render;
+pub(crate) mod run_memory;
 pub(crate) mod side_effect;
 /// [`GraphSource`] and [`GraphTraversalSource`], the traversal entry points.
 pub mod source;
@@ -40,7 +41,8 @@ pub use cancel::CancelToken;
 pub use context::*;
 pub use execution::{ExecOptions, Execution};
 pub use metrics::{
-    LoopMetrics, MemoryMetrics, MemorySource, Metrics, StepCounts, TimingMetrics, TraversalMetrics,
+    LoopMetrics, MemoryMetrics, MemorySource, Metrics, QueryMemory, StepCounts, TimingMetrics,
+    TraversalMetrics,
 };
 pub use render::{RenderOptions, RenderedOutput, Truncation};
 pub use spelling::Spelling;

@@ -534,13 +534,8 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                     .saturating_mul(slot.saturating_mul(3))
                     .saturating_add(left_bytes.saturating_mul(right.len() as u64))
                     .saturating_add(right_bytes.saturating_mul(left.len() as u64));
-                let max = context.options.max_materialized_bytes;
-                if bytes > max {
-                    return Err(crate::traversal::bulk::materialized_bytes_error(max, bytes));
-                }
-                if let Some(budget) = &context.options.memory {
-                    budget.check(bytes)?;
-                }
+                context.check_memory(bytes)?;
+                context.memory.charge(bytes);
                 let mut out = Vec::new();
                 crate::traversal::capacity::try_reserve_exact(&mut out, pairs)?;
                 for a in &left {

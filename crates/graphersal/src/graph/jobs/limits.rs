@@ -5,7 +5,8 @@
 //! the limits reach the checks that already run inside every execution: while a job runs, its
 //! remaining time caps each traversal's `evaluationTimeout` and its memory limit caps each
 //! traversal's per-execution limit `traversal.max_materialized_bytes` (a query's own stricter
-//! value stays). The memory limit is compared with what the traversal itself holds, checked
+//! value stays). The memory limit is compared with what the traversal itself holds at once
+//! (live bytes, freed memory given back, the graph's growth from writes not counted), checked
 //! where `traversal.max_materialized_bytes` is checked, never with the memory of the whole
 //! process: it does not touch the process memory ceiling `memory.limit`. A breach is the
 //! engine's ordinary `Timeout` / `ResourceLimitExceeded`; the work is rolled back and the run

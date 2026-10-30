@@ -12,8 +12,10 @@
 //!   (`alloc_tracking::global_live_bytes`, one relaxed atomic load) plus the estimated size of
 //!   what a check is about to allocate;
 //! - **estimated** otherwise: the graph footprint when the run starts, plus the elements the run
-//!   added since (at the graph's average element size), plus the traversers alive at a step
-//!   boundary, plus the estimated size of what a check is about to allocate.
+//!   added since (at the graph's average element size), plus what the run holds by the engine's
+//!   count (its step buffers, values and `repeat()` frontier: `traversal/run_memory.rs`, the same
+//!   counter as the per-execution limit), plus the estimated size of what a check is about to
+//!   allocate.
 //!
 //! **No walk of the graph per run** (the ceiling is on by default, so a run must not pay for
 //! it): the estimated start takes the storage's cheap
@@ -206,29 +208,13 @@ impl MemoryBudget {
         Ok(())
     }
 
-    /// The check at a step boundary, with `alive` traversers between the steps. Estimated: the
-    /// traversers plus the elements the run added to `storage` since it started (at the
-    /// average element size) count on top of the starting footprint. Tracked: the live heap
-    /// already holds both.
-    #[inline]
-    pub(crate) fn check_boundary<S: GraphStorage>(
-        &self,
-        storage: &S,
-        alive: usize,
-    ) -> TraverserResult<()> {
-        if self.tracked {
-            return self.check(0);
-        }
-        let traversers = (alive as u64).saturating_mul(std::mem::size_of::<
-            crate::traversal::traverser::Traverser<S>,
-        >() as u64);
-        self.check(traversers.saturating_add(self.grown_bytes(storage)?))
-    }
-
     /// Estimated: the elements added to `storage` since the start (net), at the average
     /// element size. Tracked: 0 (the live heap holds them).
     #[inline]
-    fn grown_bytes<S: GraphStorage + ?Sized>(&self, storage: &S) -> Result<u64, GraphError> {
+    pub(crate) fn grown_bytes<S: GraphStorage + ?Sized>(
+        &self,
+        storage: &S,
+    ) -> Result<u64, GraphError> {
         if self.tracked {
             return Ok(0);
         }
@@ -865,8 +851,15 @@ mod tests {
             TraverserError::ResourceLimitExceeded { ref limit, max: Some(max), observed: Some(observed) }
                 if limit == MEMORY_LIMIT && max == base + 1000 && observed == base + 1001
         ));
-        assert!(budget.check_boundary(&graph, 1).is_ok());
-        assert!(budget.check_boundary(&graph, 1000).is_err());
+        // The run's held bytes (here: one traverser slot, then a thousand) count on top
+        // (`RunMemory` feeds both limits; the per-execution limit is out of the way).
+        let slot = std::mem::size_of::<crate::traversal::Traverser<crate::TraversalGraph>>() as u64;
+        let run = crate::traversal::run_memory::RunMemory::new(u64::MAX, Some(budget));
+        run.charge(slot);
+        assert!(run.check_boundary(&graph).is_ok());
+        run.charge(999 * slot);
+        assert!(run.check_boundary(&graph).is_err());
+        run.release(1000 * slot);
         // Added elements count at the average element size.
         let per = budget.element_bytes;
         assert!(per >= MIN_ELEMENT_BYTES);
@@ -880,6 +873,6 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(budget.check_boundary(&graph, 0).is_err());
+        assert!(run.check_boundary(&graph).is_err());
     }
 }

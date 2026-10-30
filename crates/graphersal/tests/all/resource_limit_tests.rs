@@ -510,22 +510,23 @@ fn query_error(script: &str) -> String {
 #[test]
 fn a_bulk_expansion_larger_than_the_byte_budget_fails_before_it_allocates() {
     // `repeat(__.both()).times(3)` merges into a few traversers with a bulk; `fold()` expands
-    // them into 22+ copies of 80 bytes each.
+    // them into 30 copies of 80 bytes each. The limit counts what the query holds at once (the
+    // loop's buffers too), so it is set where the loop fits and the expansion does not.
     let text = query_error(
-        r#"g.with("traversal.max_materialized_bytes", 1000).v().repeat(__.both()).times(3).fold().next()"#,
+        r#"g.with("traversal.max_materialized_bytes", 4000).v().repeat(__.both()).times(3).fold().next()"#,
     );
     assert!(
-        text.contains("Resource limit 'traversal.max_materialized_bytes' exceeded (limit 1000"),
+        text.contains("Resource limit 'traversal.max_materialized_bytes' exceeded (limit 4000"),
         "{text}"
     );
     assert!(text.contains("Step #2 'fold()'"), "{text}");
     assert!(
-        text.contains("g.with(\"traversal.max_materialized_bytes\", 2000)"),
+        text.contains("g.with(\"traversal.max_materialized_bytes\", 8000)"),
         "{text}"
     );
     // A terminal list expands under the same budget.
     let text = query_error(
-        r#"g.with("traversal.max_materialized_bytes", 1000).v().repeat(__.both()).times(3).toList()"#,
+        r#"g.with("traversal.max_materialized_bytes", 4000).v().repeat(__.both()).times(3).toList()"#,
     );
     assert!(text.contains("traversal.max_materialized_bytes"), "{text}");
     // Raised, the same queries run.
@@ -558,7 +559,16 @@ fn bucket_copies_of_a_merged_traverser_are_bounded_by_the_byte_budget() {
 
 #[test]
 fn a_loop_that_doubles_its_value_stops_at_the_byte_budget() {
-    for body in ["__.path()", "__.group()"] {
+    // Where each loop stops is deterministic: `path()` at its own boundary in the body (the
+    // path records it keeps count at every check), `group()` at the loop's per-traverser check
+    // of the new frontier (its doubled map is sized there).
+    for (body, stops_at) in [
+        ("__.path()", "Step #1.0.0 'path()' execution failed"),
+        (
+            "__.group()",
+            "Step #1 'repeat(__.group()).times(60)' execution failed",
+        ),
+    ] {
         let text = query_error(&format!(
             r#"g.with("traversal.max_materialized_bytes", 100000).inject(1).repeat({body}).times(60).count().next()"#
         ));
@@ -566,7 +576,7 @@ fn a_loop_that_doubles_its_value_stops_at_the_byte_budget() {
             text.contains("traversal.max_materialized_bytes"),
             "{body}: {text}"
         );
-        assert!(text.contains("Step #1 'repeat("), "{body}: {text}");
+        assert!(text.contains(stops_at), "{body}: {text}");
     }
     // A bounded loop within the budget runs.
     let ok = eval_value(

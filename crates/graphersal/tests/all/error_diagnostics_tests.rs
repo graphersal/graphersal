@@ -5791,7 +5791,7 @@ fn materialized_bytes_help_names_the_option_and_the_alternatives() {
     );
     let help = err.help().expect("help");
     for needle in [
-        "'traversal.max_materialized_bytes' allows (100000 bytes); this one needed at least",
+        "'traversal.max_materialized_bytes' allows (100000 bytes); it reached",
         "fold(), aggregate(), store(), group() value lists, a terminal list",
         "repeat(__.path()), repeat(__.group())",
         "g.v().repeat(__.both()).times(8).count()",
@@ -5833,11 +5833,13 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         "ONE setting of the whole process, on by default",
         "--memory-limit <bytes|auto|none>",
         "graphersal.set_memory_limit(...)",
-        "graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))",
+        "a Rust host exec::set_memory_limit(MemoryLimit::Bytes(n))",
         "'memory.headroom'",
     ] {
         assert!(help.contains(needle), "{needle} missing in: {help}");
     }
+    // Seen from a script: no Rust crate path (the fuzz campaign's type-leak check).
+    assert!(!help.contains("graphersal::"), "{help}");
     let err = lock
         .traversal()
         .with("memory.limit", "plenty")
@@ -5864,9 +5866,57 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         .expect_err("not an execution option");
     let help = err.help().expect("help");
     assert!(
-        help.contains("graphersal::exec::set_memory_headroom(Some(268435456))"),
+        help.contains("Rust exec::set_memory_headroom(Some(268435456))"),
         "{help}"
     );
+    assert!(!help.contains("graphersal::"), "{help}");
+}
+
+/// The memory-ceiling diagnostics a script sees name the host settings without a Rust crate
+/// path (the robustness campaign's type-leak finding, seed 23030953: `g.inject(1)
+/// .repeat(__.path())` stopped by `memory.limit`), and keep naming every front end.
+#[test]
+fn memory_ceiling_diagnostics_name_no_rust_crate_path() {
+    let graph = GraphSource::tinkerpop_modern();
+    let lock = graph.read();
+    let err = graphersal::exec::memory_limit_scope(64 * 1024 * 1024, || {
+        lock.traversal()
+            .with("evaluationTimeout", 600_000)
+            .inject(vec![1])
+            .repeat(__::path())
+            .to_list()
+    })
+    .expect_err("the loop grows past the ceiling");
+    assert!(
+        err.root_cause()
+            .to_string()
+            .contains("'memory.limit' exceeded"),
+        "{err}"
+    );
+    let help = err.help().expect("help");
+    for needle in [
+        "--memory-limit <bytes|auto|none>",
+        "graphersal.set_memory_limit(...)",
+        "a Rust host exec::set_memory_limit(MemoryLimit::Bytes(n)) (MemoryLimit::Unlimited turns it off)",
+    ] {
+        assert!(help.contains(needle), "{needle} missing in: {help}");
+    }
+    assert!(!help.contains("graphersal::"), "{help}");
+    // Set as an execution option: the refusal's reason names the host setting the same way.
+    let err = lock
+        .traversal()
+        .with("memory.limit", 1 << 30)
+        .v(None)
+        .to_list()
+        .expect_err("not an execution option");
+    let text = format!("{err}\n{}", err.help().unwrap_or_default());
+    assert!(
+        text.contains(
+            "the host sets it once (a Rust host exec::set_memory_limit / set_memory_headroom"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("graphersal::"), "{text}");
 }
 
 /// `traversal.max_string_bytes`: the help names the amplifying steps, the script-side
@@ -9101,38 +9151,62 @@ mod gql {
                  that Option."
             )
         };
-        for query in [
-            "MATCH (p:person {name: 'marko'}) RETURN range(1, 100000) AS r",
-            "MATCH (p:person {name: 'marko'}) RETURN size(split(replace(p.name, '', p.name || \
-             p.name, 9223372036854775807), '')) AS n",
-            "MATCH (p), (q) RETURN collect_list(p.name) AS r",
-            "MATCH (p) WHERE size(range(1, 100000)) > 0 RETURN p",
-            "MATCH (p) WITH p ORDER BY toString(range(1, 100000)) RETURN p",
+        // The limit counts what the query holds at once, its step buffers included: the
+        // collect_list() list is made the largest part of its query (lists of 50 numbers over
+        // the 36 rows of a cross product) under a limit its buffers fit in.
+        for (query, max) in [
+            (
+                "MATCH (p:person {name: 'marko'}) RETURN range(1, 100000) AS r",
+                1_000,
+            ),
+            (
+                "MATCH (p:person {name: 'marko'}) RETURN size(split(replace(p.name, '', p.name || \
+                 p.name, 9223372036854775807), '')) AS n",
+                1_000,
+            ),
+            (
+                "MATCH (p), (q) RETURN collect_list(range(1, 50)) AS r",
+                10_000,
+            ),
+            ("MATCH (p) WHERE size(range(1, 100000)) > 0 RETURN p", 1_000),
+            (
+                "MATCH (p) WITH p ORDER BY toString(range(1, 100000)) RETURN p",
+                1_000,
+            ),
             // gql:aggregate: a grouping key, an aggregate's argument, an item over aggregates.
-            "MATCH (p) RETURN size(range(1, 100000)) AS k, count(*) AS c",
-            "MATCH (p) RETURN count(range(1, 100000)) AS c",
-            "MATCH (p) RETURN size(range(1, count(*) * 100000)) AS c",
+            (
+                "MATCH (p) RETURN size(range(1, 100000)) AS k, count(*) AS c",
+                1_000,
+            ),
+            ("MATCH (p) RETURN count(range(1, 100000)) AS c", 1_000),
+            (
+                "MATCH (p) RETURN size(range(1, count(*) * 100000)) AS c",
+                1_000,
+            ),
         ] {
             let (err, report) = gql_failure(|g| {
-                g.with("traversal.max_materialized_bytes", 1_000)
+                g.with("traversal.max_materialized_bytes", max)
                     .gql(query)
                     .to_list()
             });
             match err.root_cause() {
-                TraverserError::ResourceLimitExceeded { limit, max, .. } => {
+                TraverserError::ResourceLimitExceeded {
+                    limit,
+                    max: reached_max,
+                    ..
+                } => {
                     assert_eq!(limit, "traversal.max_materialized_bytes", "{query}");
-                    assert_eq!(*max, Some(1_000), "{query}");
+                    assert_eq!(*reached_max, Some(max as u64), "{query}");
                 }
                 other => panic!("{query}: expected the limit error, got {other}"),
             }
             assert!(report.contains("Step #"), "{report}");
             let help = err.help().expect("help");
             assert!(
-                help.starts_with(
-                    "The gql() query built a value larger than \
-                     'traversal.max_materialized_bytes' allows (1000 bytes); this one needed at \
-                     least "
-                ),
+                help.starts_with(&format!(
+                    "The gql() query held more memory at once than \
+                     'traversal.max_materialized_bytes' allows ({max} bytes); it reached "
+                )),
                 "{query}: {help}"
             );
             assert!(
@@ -9143,7 +9217,7 @@ mod gql {
                 ),
                 "{help}"
             );
-            assert!(help.ends_with(&tail(2_000)), "{query}: {help}");
+            assert!(help.ends_with(&tail(max as u64 * 2)), "{query}: {help}");
             assert!(!help.contains("fold()"), "{help}");
             assert_examples_run(&help);
         }
@@ -9172,7 +9246,7 @@ mod gql {
         });
         let help = err.help().expect("help");
         assert!(
-            help.starts_with("A step had to materialize a value or buffer larger"),
+            help.starts_with("The traversal held more memory at once than"),
             "{help}"
         );
     }
@@ -9905,9 +9979,11 @@ mod gql {
     /// advice naming the comprehension and counting its matches instead.
     #[test]
     fn gql_pattern_comprehension_list_limit_names_it() {
+        // The limit counts what the query holds at once, its step buffers included: the
+        // comprehension's list is made the largest part (a list of 50 numbers per match).
         let (err, _) = gql_failure(|g| {
-            g.with("traversal.max_materialized_bytes", 300)
-                .gql("MATCH (p:person) RETURN [(p)-[]-{1,3}(f) | f.name] AS l")
+            g.with("traversal.max_materialized_bytes", 10_000)
+                .gql("MATCH (p:person) RETURN [(p)-[]-{1,3}(f) | range(1, 50)] AS l")
                 .to_list()
         });
         let help = err.help().expect("help");
@@ -9981,11 +10057,13 @@ mod gql {
     /// counting the matches instead.
     #[test]
     fn gql_collect_subquery_list_limit_names_it() {
+        // The limit counts what the query holds at once, its step buffers included: the
+        // subquery's list is made the largest part (a list of 50 numbers per match).
         let (err, _) = gql_failure(|g| {
-            g.with("traversal.max_materialized_bytes", 300)
+            g.with("traversal.max_materialized_bytes", 10_000)
                 .gql(
-                    "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,3}(f) RETURN f.name } \
-                     AS l",
+                    "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,3}(f) RETURN range(1, \
+                     50) } AS l",
                 )
                 .to_list()
         });

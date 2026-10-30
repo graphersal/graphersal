@@ -952,17 +952,17 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     /// `traversal.max_materialized_bytes` and the memory budget, like `collect_list` in
     /// `gql:aggregate`; a refusal keeps the limit error for [`Row::finish`].
     fn reserve(&self, bytes: u64) -> bool {
-        let max = self.context.options.max_materialized_bytes;
-        let checked = if bytes > max {
-            Err(bulk::materialized_bytes_error(max, bytes))
+        let checked = if bytes > 0 {
+            self.context.check_memory(bytes)
         } else {
-            match &self.context.options.memory {
-                Some(budget) if bytes > 0 => budget.check(bytes),
-                _ => Ok(()),
-            }
+            Ok(())
         };
         match checked {
-            Ok(()) => true,
+            Ok(()) => {
+                // The value is built now: the run's estimated memory holds it.
+                self.context.memory.charge(bytes);
+                true
+            }
             Err(error) => {
                 self.failure.borrow_mut().get_or_insert(error);
                 false
@@ -1270,7 +1270,7 @@ fn collect_list<S: GraphStorage>(
     let produced = child.apply_to(context, source_unit)?;
     let values = if produced.iter().all(|item| item.bulk == 1) {
         // `bulk::expand` returns these untouched without a size check: check them here.
-        let max = context.options.max_materialized_bytes;
+        let max = context.memory.limit();
         let each = std::mem::size_of::<TraverserValue<S>>() as u64;
         let mut bytes: u64 = 0;
         for item in &produced {
@@ -1278,13 +1278,13 @@ fn collect_list<S: GraphStorage>(
                 crate::traversal::step::profile::estimate_traverser_value_bytes(&item.value);
             bytes = bytes.saturating_add(each.saturating_add(estimate));
             if bytes > max {
-                return Err(bulk::materialized_bytes_error(max, bytes));
+                // Over the limit on its own: no need to size the rest.
+                break;
             }
         }
-        if let Some(budget) = &context.options.memory
-            && bytes > 0
-        {
-            budget.check(bytes)?;
+        if bytes > 0 {
+            context.check_memory(bytes)?;
+            context.memory.charge(bytes);
         }
         produced.into_iter().map(|item| item.value).collect()
     } else {
