@@ -117,6 +117,10 @@
  * @property {number} duration_ns
  * @property {Metrics[]} metrics
  * @property {string[]} optimizer_rules_applied  Rules that rewrote the plan (may be empty).
+ * @property {{peak_bytes:number, limit_bytes:number, limit:string, source:'estimated'|'tracked'}} [query_memory]
+ *   Optional: the most memory the run held at once, against the per-query limit `limit`
+ *   (`traversal.max_materialized_bytes`), never the process ceiling. Present on every profile
+ *   of a run that started; the Profile panel shows it as the "Peak memory" line.
  */
 
 /**
@@ -350,6 +354,20 @@
  *   `g.statistics()`: `count` = vertices carrying the label anywhere in their label set, `primary`
  *   = those whose first label it is; ordered by count, at most 50 labels per kind (`truncated`).
  * @property {MemoryUsage|null} memory  The graph's own footprint (`g.memory_usage()`).
+ * @property {{models:Array<{name:string, model:string, dimension:number, bytes:number, default:boolean}>,
+ *             memory?:{liveHeapBytes?:number, rssBytes?:number, peakRssBytes?:number,
+ *               wasmMemoryBytes?:number, source:string, usedBytes?:number, usedTracked?:boolean,
+ *               limitBytes?:number, limitSource?:string, usedPercent?:number,
+ *               segments?:Array<{name:string, bytes:number}>,
+ *               compression?:{plainBytes:number, storedBytes:number},
+ *               estimateAboveHeap?:boolean, limitError?:string},
+ *             aiChat?:Object}} process
+ *   Memory beside the graph. `memory` (added by the host, volatile) is the whole process and
+ *   its ceiling bar, computed in Rust (`graphersal_session::process::MemoryBar`): `usedBytes`
+ *   (the tracked live heap, else the known segments: `usedTracked` false), `limitBytes` and
+ *   `usedPercent` (absent without a ceiling), `limitSource` (`configured`, `cgroup`, `physical`,
+ *   `wasm`, `none`, `unknown`), `segments` (`structure`, `properties`, `compressed`, `indexes`,
+ *   `models`, then `other` when tracked). Rendered by `js/memory-bar.js`.
  * @property {{presets:{options:Object<string,*>, scriptLimits:Object<string,number>, scriptTimeoutMs:number|null},
  *             defaults:Object<string,*>}} limits
  *   `presets`: what the host applies to every query (the dev server's `--timeout`, `--max-*`, ...;

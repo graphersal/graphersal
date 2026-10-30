@@ -712,8 +712,8 @@ fn presets_summary(presets: &Value) -> String {
 /// Starts the session thread with the graph of `spec` loaded and `presets` applied (or the
 /// Store `shared`, or the graph `preloaded` with its title); returns its job queue, its
 /// cancellation token, the commit position of the loaded graph and its statistics
-/// ([`Session::statistics`], printed at start), or the diagnostic of a graph that could not be
-/// loaded.
+/// ([`Session::statistics`] with `process.memory` added, printed at start), or the diagnostic
+/// of a graph that could not be loaded.
 fn start_session(
     spec: &GraphSpec,
     source: Option<&Path>,
@@ -764,7 +764,9 @@ fn start_session(
             let started = position(&session)
                 .map_err(|err| err.to_string())
                 .and_then(|(_, seq)| {
-                    let statistics = session.statistics().map_err(|err| err.to_string())?;
+                    let mut statistics = session.statistics().map_err(|err| err.to_string())?;
+                    // The banner's memory row shows the process against its ceiling.
+                    graphersal_session::process::add_to_statistics(&mut statistics);
                     Ok((session.cancel_token(), seq, statistics))
                 });
             let failed = started.is_err();

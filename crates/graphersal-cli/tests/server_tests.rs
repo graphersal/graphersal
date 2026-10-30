@@ -5277,6 +5277,76 @@ fn the_statistics_report_the_memory_of_the_whole_process() {
     }
 }
 
+/// `GET /api/statistics` and the MCP `statistics` tool carry the process memory bar: used,
+/// limit (the `--memory-limit`), its source, the percentage and the segments.
+#[test]
+fn statistics_report_used_limit_and_percent() {
+    let server = start(&["--graph", "modern", "--memory-limit", "4294967296", "--mcp"]);
+    let stats = get(server.port, "/api/statistics").json();
+    let memory = &stats["process"]["memory"];
+    assert_eq!(memory["limitBytes"], 4_294_967_296u64, "{memory}");
+    assert_eq!(memory["limitSource"], "configured", "{memory}");
+    // The CLI installs the tracking allocator: the used figure is the live heap.
+    assert_eq!(memory["usedTracked"], true, "{memory}");
+    let used = memory["usedBytes"].as_u64().unwrap();
+    assert!(used > 0, "{memory}");
+    let percent = memory["usedPercent"].as_f64().unwrap();
+    assert!(
+        (percent - used as f64 / 4_294_967_296f64 * 100.0).abs() < 0.1,
+        "{memory}"
+    );
+    let names: Vec<&str> = memory["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.first(), Some(&"structure"), "{memory}");
+    assert_eq!(names.last(), Some(&"other"), "{memory}");
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (error, text) = mcp.call("statistics", serde_json::json!({}));
+    assert!(!error, "{text}");
+    for key in [
+        "\"usedBytes\"",
+        "\"limitBytes\":4294967296",
+        "\"usedPercent\"",
+        "\"segments\"",
+    ] {
+        assert!(text.contains(key), "{key}: {text}");
+    }
+}
+
+/// The start banner's memory row shows the process against its ceiling.
+#[test]
+fn the_start_banner_shows_the_ceiling_percentage() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--graph", "modern", "--memory-limit", "4294967296"])
+        .args(["--server", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("graphersal starts");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut banner = Vec::new();
+    let mut lines = BufReader::new(stderr).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let last = line.starts_with("  listening:");
+        banner.push(line);
+        if last {
+            break;
+        }
+    }
+    std::thread::spawn(move || lines.for_each(drop));
+    let _ = child.kill();
+    let _ = child.wait();
+    let banner = banner.join("\n");
+    assert!(
+        banner.contains("process ") && banner.contains(" % of 4.0 GiB (configured)"),
+        "{banner}"
+    );
+}
+
 /// `--embedder` with `--server`: the process memory block of `GET /api/statistics` lists the
 /// loaded model with its estimated size, and has no AI Chat member without `--ai`.
 #[cfg(feature = "model2vec")]

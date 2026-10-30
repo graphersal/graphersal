@@ -1360,6 +1360,37 @@ fn json_format_renders_plain_json_values() {
     }
 }
 
+/// `/memory` starts with the process memory bar: used of the `--memory-limit` ceiling, its
+/// source, the percentage, the bar and the segments, then the graph's memory report.
+#[test]
+fn repl_memory_shows_the_bar_with_the_limit_source() {
+    let out = run(&["--memory-limit", "4294967296", "--repl"], "/memory\n");
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let text = out.stdout;
+    let head = text
+        .lines()
+        .find(|l| l.starts_with("Memory   "))
+        .unwrap_or_else(|| panic!("no bar: {text}"));
+    assert!(head.contains(" of 4.0 GiB (configured)"), "{head}");
+    assert!(head.ends_with(" %") && head.len() == 80, "{head:?}");
+    assert!(
+        text.contains("\n         [#") || text.contains("\n         [."),
+        "{text}"
+    );
+    assert!(
+        text.contains("structure ") && text.contains("other "),
+        "{text}"
+    );
+    let bar = text.find("Memory   ").unwrap();
+    let report = text
+        .find("Memory report at commit")
+        .expect("the report follows");
+    assert!(bar < report, "{text}");
+    // The help line names the bar.
+    let help = run(&["--repl"], "/help memory\n").stdout;
+    assert!(help.contains("process memory bar"), "{help}");
+}
+
 /// The REPL's `/` commands, driven through `--repl` (the shell on a piped stdin): `/help` lists
 /// the commands, `/help <name>` prints the engine's doc in either spelling, an unknown name and
 /// the removed `:` prefix each get one pointer, and statements still run.

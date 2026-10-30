@@ -28,7 +28,8 @@ pub(super) fn loaded(load_time: Duration, replayed: Option<u64>) -> String {
 /// The rows of the Graph section: the totals, the vertex and edge labels (when there are any),
 /// the memory (the graph's; its workload statistics, `0 B` until queries ran unless a Store
 /// brought its saved ones; the loaded embedding models when there are any; the process heap,
-/// `live_heap`, `0` = unknown), the compressed and the deduplicated
+/// `live_heap`, `0` = unknown; the process against its memory ceiling when `process.memory`
+/// has the bar keys), the compressed and the deduplicated
 /// values (when there are any).
 pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> {
     let mut rows = Vec::new();
@@ -77,6 +78,9 @@ pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> 
     if live_heap > 0 {
         parts.push(format!("process heap {}", bytes_text(live_heap)));
     }
+    if let Some(ceiling) = ceiling_text(&statistics["process"]["memory"]) {
+        parts.push(ceiling);
+    }
     if !parts.is_empty() {
         rows.push(("memory".to_string(), parts.join("\n")));
     }
@@ -108,6 +112,24 @@ pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> 
         ));
     }
     rows
+}
+
+/// `process 47 % of 3.4 GiB (cgroup)`: the process against its memory ceiling, from the bar keys
+/// of `process.memory` (`graphersal_session::process::add_to_statistics`); the known part only
+/// when the process total is not tracked. `None` without a ceiling or without the keys.
+fn ceiling_text(memory: &Value) -> Option<String> {
+    let percent = memory["usedPercent"].as_f64()?;
+    let limit = memory["limitBytes"].as_u64()?;
+    let source = memory["limitSource"].as_str().unwrap_or("unknown");
+    let known = if memory["usedTracked"] == Value::Bool(false) {
+        " (known part, process total not tracked)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "process {percent:.0} % of {} ({source}){known}",
+        bytes_text(limit)
+    ))
 }
 
 /// `models 61.2 MiB (minilm 30.6 MiB, potion 30.6 MiB)`: the loaded embedding models of
@@ -308,6 +330,26 @@ mod tests {
             "{memory}"
         );
         assert!(memory.contains("\nworkload statistics 0 B\n"), "{memory}");
+    }
+
+    #[test]
+    fn the_memory_row_shows_the_percentage_of_the_ceiling() {
+        let statistics = json!({"statistics": {}, "memory": {"total_bytes": 0},
+            "process": {"memory": {"usedPercent": 47.06, "limitBytes": 3_650_722_201u64,
+                                   "limitSource": "cgroup", "usedTracked": true}}});
+        let rows = rows(&statistics, 0);
+        let memory = &rows.iter().find(|(name, _)| name == "memory").unwrap().1;
+        assert!(
+            memory.ends_with("\nprocess 47 % of 3.4 GiB (cgroup)"),
+            "{memory}"
+        );
+        let untracked = json!({"usedPercent": 10.0, "limitBytes": 1u64 << 30,
+                               "limitSource": "physical", "usedTracked": false});
+        assert_eq!(
+            ceiling_text(&untracked).unwrap(),
+            "process 10 % of 1.0 GiB (physical) (known part, process total not tracked)"
+        );
+        assert_eq!(ceiling_text(&json!({"limitSource": "none"})), None);
     }
 
     #[test]

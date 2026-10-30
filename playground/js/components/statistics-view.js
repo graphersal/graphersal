@@ -2,13 +2,16 @@
 // footprint, and beside them the limits a query runs under (the host's presets, the engine's
 // defaults). Loaded when the tab becomes active; while active it reloads after a run that changed
 // the data (`changes.data`, state.dataVersion) or a graph load. The rows come from the pure model
-// in js/statistics.js.
+// in js/statistics.js; the process memory bar above the Memory section is the shared MemoryBar
+// (components/memory-bar.js, also in Optimize -> Memory).
 
 import { ref, computed, watch } from 'vue';
 import { state, isServerMode } from '../store.js';
 import { statisticsModel, formatCount, counted } from '../statistics.js';
+import { MemoryBar } from './memory-bar.js';
 
 export const StatisticsView = {
+  components: { MemoryBar },
   props: { active: { type: Boolean, default: false } },
   setup(props) {
     const open = computed(() => props.active);
@@ -44,7 +47,7 @@ export const StatisticsView = {
 
     const model = computed(() => statisticsModel(raw.value));
     const server = computed(() => isServerMode());
-    return { error, loading, model, server, load, formatCount, counted };
+    return { error, loading, raw, model, server, load, formatCount, counted };
   },
   template: `
   <div class="stats-view">
@@ -72,6 +75,10 @@ export const StatisticsView = {
           <p v-if="model.counts.truncated" class="muted">The largest labels are listed; the totals count all of them.</p>
         </section>
       </template>
+      <section v-if="raw && raw.process && raw.process.memory" class="stats-section">
+        <h4>Process memory ceiling <span class="muted">(the whole process against memory.limit; the segments say where the memory goes)</span></h4>
+        <memory-bar :stats="raw"></memory-bar>
+      </section>
       <section v-if="model.memory" class="stats-section">
         <h4>Memory <span class="muted">(g.memory_usage(), an estimate of the graph's own footprint)</span></h4>
         <p><span v-for="m in model.memory" :key="m.name" class="stats-pair" :title="m.hint || null">{{ m.name }} <b>{{ m.text }}</b></span></p>

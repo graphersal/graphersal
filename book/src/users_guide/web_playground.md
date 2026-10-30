@@ -84,6 +84,20 @@ answers questions by querying the served graph. In the WebAssembly playground th
   with its estimated size and, on the dev server with `--ai`, the AI Chat history (conversations
   and an estimate of their bytes). The WebAssembly playground has no loaded models, no chat and no RSS; it shows the live heap
   and the size of its WebAssembly memory.
+  Above the Memory section, the **process memory bar** shows how full the process is against its
+  [memory ceiling](resource_limits.md#seeing-how-full-the-process-is): used of the ceiling, where
+  the ceiling comes from (configured, cgroup limit, 80 % of RAM, WebAssembly default), and the
+  percentage (normal below 70 %, amber from 70 to 90 %, red above). One coloured segment per
+  place the memory goes: **structure** (vertex and edge slots, ids, the id and label indexes),
+  **properties** (plain values), **compressed** (compressed and deduplicated values with their
+  dictionaries), **indexes** (property indexes), **models** (embedding models in memory) and
+  **other** (the rest of the heap: query buffers, caches, the session). The legend lists every
+  segment with its size, also a tiny one, and a line says what compression saves. Without a
+  tracking allocator only the known segments are shown, marked "process total not tracked";
+  without a ceiling there is no percentage. The same bar opens the Memory tab of **Optimize**.
+  With **Profile** on, a line under the step tree, **Peak memory**, shows the most memory the run
+  held at once against the per-query limit `traversal.max_materialized_bytes` (amber and red by
+  the same thresholds): a different figure from the process bar, against a different limit.
 - **Errors** show the message, the step path of a runtime error (the same step ids as the profile),
   the `help()` advice, a "Go to line" for script errors, and the full diagnostic.
 - **Graph, Schema, Profile** panels draw the graph (capped), show and edit the schema (see
