@@ -692,7 +692,7 @@ one limit, `0` meaning unlimited, and `unlimited=True` starts from no limits:
 graph.set_limits(max_operations=1_000_000, max_string_size=1 << 20)
 graph.set_limits(unlimited=True, max_value_depth=256)
 graph.set_limits(max_materialized_bytes=256 << 20)   # the per-query memory limit
-graph.limits()   # {"max_operations": 0, ..., "max_materialized_bytes": 268435456}
+graph.limits()   # {"max_operations": 10000000, ..., "max_materialized_bytes": 268435456}
 ```
 
 `max_value_depth` is never unlimited (`0` means its default, 128): deeper values are read
