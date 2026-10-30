@@ -1123,7 +1123,7 @@ pub(super) fn prune(
         return Err(not_a_backup(dir, "prune the backup"));
     }
     recover_interrupted(dir)?;
-    super::maintenance::prune(dir, up_to)
+    super::maintenance::prune(dir, up_to, None)
 }
 
 fn not_a_backup(dir: &DirPath, operation: &'static str) -> PersistError {

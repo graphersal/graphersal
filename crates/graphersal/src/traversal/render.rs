@@ -300,6 +300,7 @@ pub(crate) fn cut_nested(prop: &ElementProperty, limit: &ItemLimit) -> ElementPr
         ElementProperty::Temporal(t) => ElementProperty::Temporal(*t),
         // A vector is one value: never cut (its JSON form is the list of its values).
         ElementProperty::Vector(v) => ElementProperty::Vector(v.clone()),
+        ElementProperty::Blob(blob) => ElementProperty::Blob(blob.clone()),
         ElementProperty::Array(items) => {
             let keep = limit.keep(items.len());
             ElementProperty::Array(

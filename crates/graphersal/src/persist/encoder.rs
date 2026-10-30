@@ -305,7 +305,9 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     ) -> Result<(Manifest, Vec<u8>, SnapshotInfo), PersistError> {
         let graph = self.graph;
         let options = self.options;
-        let definitions = super::definitions::records_of(graph.definitions()?)
+        let catalog: Vec<&crate::graph::Definition> = graph.definitions()?.collect();
+        let blobs = super::store::blobs::blob_table(catalog.iter().copied());
+        let definitions = super::definitions::records_of(catalog.iter().copied())
             .map_err(|reason| PersistError::encode("the catalog of definitions", reason))?;
         let (node_sequence, edge_sequence) = graph.id_sequences();
         let mut rows = Vec::new();
@@ -348,6 +350,7 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
             segments: segments.iter().map(|(entry, _)| entry.clone()).collect(),
             definitions,
             chunks: rows,
+            blobs,
         };
         let bytes = manifest.encode();
         let info = SnapshotInfo::from_manifest(&manifest);

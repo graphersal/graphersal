@@ -104,6 +104,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepAppend<'g, S> for StepInject {
                 | ElementProperty::Uuid(_)
                 | ElementProperty::Temporal(_)
                 | ElementProperty::Vector(_)
+                | ElementProperty::Blob(_)
                 | ElementProperty::Object(_)
                 | ElementProperty::Map(_)
                 | ElementProperty::Array(_) => {

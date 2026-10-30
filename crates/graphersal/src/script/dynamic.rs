@@ -439,6 +439,8 @@ pub(crate) fn element_property_to_dynamic(value: ElementProperty) -> Dynamic {
         ElementProperty::Temporal(value) => temporal_to_dynamic(value),
         // The Rhai vector type: prints as its literal, fed back into the DSL as a vector.
         ElementProperty::Vector(value) => Dynamic::from(ScriptVector(value)),
+        // A blob reference (catalog payloads only) is its text: `blob(sha256:<hex>, <n> bytes)`.
+        ElementProperty::Blob(value) => Dynamic::from(value.to_string()),
         ElementProperty::Number(value) => {
             if let Some(int) = value.as_i64() {
                 Dynamic::from_int(int)

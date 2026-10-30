@@ -1727,14 +1727,14 @@ pub enum GraphError {
     /// A vertex/edge was written as a property value, which is never allowed.
     #[error(
         "Property '{property_name}' cannot hold {}: {}",
-        match *.kind { "edge" => "an edge", "map with a non-string key" => "a map with a non-string key", _ => "a vertex" },
-        if *.kind == "map with a non-string key" { "a property map is keyed by strings" } else { "vertices and edges are not property values" }
+        match *.kind { "edge" => "an edge", "map with a non-string key" => "a map with a non-string key", "blob reference" => "a blob reference", _ => "a vertex" },
+        match *.kind { "map with a non-string key" => "a property map is keyed by strings", "blob reference" => "blob references are reserved for model definitions in this version", _ => "vertices and edges are not property values" }
     )]
     #[non_exhaustive]
     InvalidPropertyValue {
         /// The property key that was assigned an element.
         property_name: String,
-        /// `"vertex"`, `"edge"` or `"map with a non-string key"`.
+        /// `"vertex"`, `"edge"`, `"map with a non-string key"` or `"blob reference"`.
         kind: &'static str,
     },
 
@@ -2080,7 +2080,7 @@ impl GraphError {
 
     /// [`GraphError::InvalidPropertyValue`]: the property `property_name` was given a value it
     /// cannot hold. `kind` names what was found, with the texts the crate uses: `"vertex"`,
-    /// `"edge"` or `"map with a non-string key"`. A storage normally gets this error from
+    /// `"edge"`, `"map with a non-string key"` or `"blob reference"`. A storage normally gets this error from
     /// `graphersal::storage::check_property_value` instead of building it.
     pub fn invalid_property_value(property_name: impl Into<String>, kind: &'static str) -> Self {
         GraphError::InvalidPropertyValue {
@@ -2247,6 +2247,15 @@ impl DiagnosticError for GraphError {
                  property(\"{property_name}\", #{{\"29\": 1}}), or keep the data in the stream and \
                  show a map with a non-string key with to_json(), for example \
                  g.v().group_count().by(\"age\").to_json()."
+            )),
+            GraphError::InvalidPropertyValue {
+                property_name,
+                kind,
+            } if *kind == "blob reference" => Some(format!(
+                "Blob references are reserved for model definitions in this version: a blob \
+                 reference belongs in a catalog definition's payload, not in the property \
+                 \"{property_name}\". Store the blob's hash text instead, for example \
+                 property(\"{property_name}\", \"sha256:<hex>\")."
             )),
             GraphError::InvalidPropertyValue {
                 property_name,

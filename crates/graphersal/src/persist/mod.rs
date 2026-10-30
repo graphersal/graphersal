@@ -56,7 +56,7 @@ mod segment;
 #[cfg(not(target_arch = "wasm32"))]
 mod single_file;
 mod snapshot;
-mod store;
+pub(crate) mod store;
 mod wal;
 
 pub use codec::Codec;
@@ -89,6 +89,7 @@ pub use store::{
     StoreOptions, StoredModel, UpgradeReport, VerifyProblem, VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
+
 
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 pub use store::StoredEmbedders;

@@ -31,6 +31,7 @@ pub(crate) fn format_cell(prop: &ElementProperty, limit: &ItemLimit) -> String {
         ElementProperty::Temporal(t) => t.to_string(),
         // `vector[768 f32] [0.1, -0.2, 0.3, …]`: the kind, then the first components.
         ElementProperty::Vector(v) => v.preview(VECTOR_PREVIEW_COMPONENTS),
+        ElementProperty::Blob(blob) => blob.to_string(),
         ElementProperty::Array(arr) => {
             let keep = limit.keep(arr.len());
             let mut items: Vec<String> = arr

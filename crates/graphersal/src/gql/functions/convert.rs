@@ -121,6 +121,7 @@ fn to_integer<E>(conversion: Conversion, arg: &Arg<E>) -> Result<Value<E>, Failu
         ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
         | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Object(_)
         | ElementProperty::Array(_)
         | ElementProperty::Vertex(_)
@@ -178,6 +179,7 @@ fn to_float<E>(conversion: Conversion, arg: &Arg<E>) -> Result<Value<E>, Failure
         | ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
         | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Object(_)
         | ElementProperty::Array(_)
         | ElementProperty::Vertex(_)
@@ -250,6 +252,7 @@ fn to_boolean<E>(conversion: Conversion, arg: &Arg<E>) -> Result<Value<E>, Failu
         ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
         | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Object(_)
         | ElementProperty::Array(_)
         | ElementProperty::Vertex(_)
@@ -589,6 +592,7 @@ fn write_scalar<E>(
         ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
         | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Compressed(_)
         | ElementProperty::Deduped(_) => match property.cast(&ValueType::String) {
             Ok(ElementProperty::String(text)) => out.push(&text),

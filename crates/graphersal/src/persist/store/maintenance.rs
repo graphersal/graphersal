@@ -47,6 +47,11 @@ pub struct PruneReport {
     /// oldest kept snapshot (format spec 10). [`Store::marks`](super::Store::marks) leaves them
     /// out from now on; their names stay taken.
     pub marks_unreachable: Vec<String>,
+    /// Blob files removed (format spec 12.4): those no retained history references any more,
+    /// orphans of interrupted writes included.
+    pub blobs_removed: u64,
+    /// Their bytes.
+    pub blob_bytes_removed: u64,
 }
 
 /// One problem a scrub found.
@@ -92,6 +97,13 @@ pub struct VerifyReport {
     /// Problems of the system journal (format spec 4.7: damaged records, unreadable
     /// segments). Never damage of the store; each one is also in [`Self::notes`].
     pub journal_notes: Vec<String>,
+    /// Blobs checked (format spec 4.6, 12.9): every blob a retained history references, read
+    /// whole (SHA-256, CRC-32C, length). A missing or damaged blob is a problem with a path
+    /// under `blobs/`; it never makes an open store read-only. A blob file nothing references
+    /// is a note (an orphan the next prune removes).
+    pub blobs_checked: usize,
+    /// The missing or damaged blobs found (for the journal's `blob.damaged`).
+    pub(crate) blob_faults: Vec<(crate::value::BlobRef, super::blobs::BlobFault)>,
 }
 
 impl VerifyReport {
@@ -254,11 +266,14 @@ pub(super) fn prune_estimate(
     let retained = referenced_files(dir, users).unwrap_or_default();
     let (removed, files_retained) = spare_retained(dir, doomed, &retained, report.kept_from)?;
     report.files_retained = files_retained;
-    let bytes = removed
+    let bytes: u64 = removed
         .iter()
         .map(|path| super::rollback::tree_bytes(&dir.join(path)))
         .sum();
-    Ok((report, bytes))
+    let (blobs, blob_bytes) = super::blobs::estimate_unreferenced(dir, report.kept_from);
+    report.blobs_removed = blobs;
+    report.blob_bytes_removed = blob_bytes;
+    Ok((report, bytes + blob_bytes))
 }
 
 /// The files of other snapshot directories that `snapshots` reference (incremental snapshots,
@@ -407,7 +422,38 @@ fn spare_retained(
     Ok((remove, kept))
 }
 
-pub(super) fn prune(dir: &DirPath, up_to: u64) -> Result<PruneReport, PersistError> {
+/// Prunes up to `up_to` (format spec 12.4), then rewrites the blob ledger and removes every
+/// blob no retained history references (`gate`: the open store's pending writes; `stale`: its
+/// ledger lacks frames).
+pub(super) fn prune(
+    dir: &DirPath,
+    up_to: u64,
+    live: Option<(&super::blobs::BlobGate, &super::wal_files::WalShared)>,
+) -> Result<PruneReport, PersistError> {
+    let mut report = prune_files(dir, up_to)?;
+    let chain = super::files::read_graph_file(dir)?.file.chain();
+    if dir.join(super::blobs::LEDGER_FILE).exists() || dir.join(super::blobs::BLOBS_DIR).exists()
+    {
+        let _ledger = live.map(|(_, wal)| {
+            wal.ledger_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
+        let stale = live.is_some_and(|(_, wal)| {
+            wal.ledger_stale.load(std::sync::atomic::Ordering::Acquire)
+        });
+        let gate = live.map(|(gate, _)| gate);
+        if !stale {
+            super::blobs::rewrite_after_prune(dir, &chain, report.kept_from)?;
+        }
+        let collected = super::blobs::collect(dir, &chain, stale, gate)?;
+        report.blobs_removed = collected.count;
+        report.blob_bytes_removed = collected.bytes;
+    }
+    Ok(report)
+}
+
+fn prune_files(dir: &DirPath, up_to: u64) -> Result<PruneReport, PersistError> {
     let _pin = BackupPin::exclusive(dir)?;
     let PrunePlan {
         mut report,
@@ -577,6 +623,94 @@ pub(super) fn definitions_in_files(
     ))
 }
 
+/// The blob part of [`verify`].
+fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport) {
+    use super::blobs::{self, BlobError};
+    let listing = match blobs::list_blobs(dir) {
+        Ok(listing) => listing,
+        Err(err) => {
+            report.problems.push(VerifyProblem {
+                path: blobs::BLOBS_DIR.to_string(),
+                offset: None,
+                reason: format!("the blobs cannot be listed: {err}"),
+            });
+            return;
+        }
+    };
+    for stray in &listing.strays {
+        report.problems.push(VerifyProblem {
+            path: stray.clone(),
+            offset: None,
+            reason: "not a blob: blobs/ holds only <2 hex>/<hash> files".into(),
+        });
+    }
+    let has_ledger = dir.join(blobs::LEDGER_FILE).exists();
+    if listing.blobs.is_empty() && !has_ledger {
+        return;
+    }
+    if has_ledger && matches!(blobs::read_ledger(dir), Ok(None)) {
+        report
+            .notes
+            .push("the blob ledger is damaged: the next open rebuilds it from the WAL".into());
+    }
+    let referenced = match blobs::referenced(dir, chain, false) {
+        Ok(referenced) => referenced,
+        Err(err) => {
+            report.notes.push(format!(
+                "the blobs the history references could not be listed ({err}); blobs not checked"
+            ));
+            return;
+        }
+    };
+    let present: BTreeSet<blobs::BlobKey> = listing.blobs.iter().map(|b| b.key.clone()).collect();
+    for file in &listing.blobs {
+        if !referenced.contains(&file.key) {
+            report.notes.push(format!(
+                "{}: no retained history references this blob (the next prune removes it)",
+                file.name
+            ));
+        }
+    }
+    for (key, blob) in &referenced.blobs {
+        let name = blobs::blob_name(blob);
+        if blob.hash_algo() != crate::value::BlobHashAlgo::Sha256 {
+            report.notes.push(format!(
+                "{name}: named by the hash algorithm {} of a newer version: not checked",
+                blob.hash_algo().code()
+            ));
+            continue;
+        }
+        report.blobs_checked += 1;
+        let result = if present.contains(key) {
+            blobs::check_blob(dir, blob, true)
+        } else {
+            Err(BlobError::Fault(blobs::BlobFault::Missing))
+        };
+        match result {
+            Ok(()) => {}
+            Err(err) => {
+                let reason = match &err {
+                    BlobError::Fault(fault) => {
+                        report.blob_faults.push((blob.clone(), *fault));
+                        match fault {
+                            blobs::BlobFault::Missing => "the blob is missing".to_string(),
+                            other => format!("the blob's {} check failed", other.name()),
+                        }
+                    }
+                    BlobError::Io(err) => format!("the blob cannot be read: {err}"),
+                    BlobError::DoesNotFit(err) => format!("the blob cannot be read: {err}"),
+                    BlobError::Unsupported => "the blob's algorithm is unknown".to_string(),
+                };
+                report.problems.push(VerifyProblem {
+                    path: name,
+                    offset: None,
+                    reason,
+                });
+            }
+        }
+    }
+}
+
 pub(super) fn verify(
     dir: &DirPath,
     durable: Option<DurablePosition>,
@@ -703,6 +837,10 @@ pub(super) fn verify(
                 .push(format!("{}/{id}: {note}", super::models::MODELS_DIR));
         }
     }
+
+    // The blobs (format spec 4.6, 12.9): every referenced blob read whole; strays are problems,
+    // unreferenced blob files notes.
+    verify_blobs(dir, &chain.chain(), &mut report);
 
     // The system journal (format spec 4.7): notes, never damage.
     report.journal_notes = super::system_journal::verify_notes(dir);

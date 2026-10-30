@@ -147,7 +147,8 @@ pub fn type_of(prop: &ElementProperty) -> Option<ValueType> {
             }
             Some(ValueType::Object)
         }
-        ElementProperty::Vertex(_) | ElementProperty::Edge(_) => None,
+        // A blob reference is never a property value (catalog payloads only).
+        ElementProperty::Vertex(_) | ElementProperty::Edge(_) | ElementProperty::Blob(_) => None,
     }
 }
 

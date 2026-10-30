@@ -218,6 +218,7 @@ pub(super) fn convert(value: &ElementProperty, kind: TemporalKind) -> Result<Tem
         ElementProperty::Boolean(_)
         | ElementProperty::Uuid(_)
         | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Array(_)
         | ElementProperty::Object(_)
         | ElementProperty::Map(_)

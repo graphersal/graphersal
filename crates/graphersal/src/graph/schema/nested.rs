@@ -130,7 +130,9 @@ fn kind_of(
         ElementProperty::Array(_) if vector.is_some() => return None,
         ElementProperty::Array(_) => JsonType::Array,
         ElementProperty::Object(_) | ElementProperty::Map(_) => JsonType::Object,
-        ElementProperty::Vertex(_) | ElementProperty::Edge(_) => return None,
+        ElementProperty::Vertex(_) | ElementProperty::Edge(_) | ElementProperty::Blob(_) => {
+            return None;
+        }
     })
 }
 

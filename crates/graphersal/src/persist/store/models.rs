@@ -172,18 +172,9 @@ pub struct AddModelReport {
     pub already_stored: bool,
 }
 
-/// Whether a shareable copy (a packed snapshot, a ZIP backup) carries the store's models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum ModelCopy {
-    /// The copy carries every model with its card and licence files (the default): whoever
-    /// receives it can use the models, and passing it on redistributes them.
-    #[default]
-    Include,
-    /// The copy leaves the models out: the receiver adds them again by the identities the
-    /// schema records (`graphersal embed-model download <repo> --into <store>`).
-    Exclude,
-}
+/// The 0.4 name of [`BlobCopy`](crate::blob::BlobCopy): whether a shareable copy carries the
+/// store's models (and, since 0.5, its blobs).
+pub type ModelCopy = super::blobs::BlobCopy;
 
 /// A model to add to a store ([`Store::add_model`](super::Store::add_model)): its files (read
 /// as streams) and what is known about its origin and licence.

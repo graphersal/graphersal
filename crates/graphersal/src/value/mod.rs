@@ -9,6 +9,8 @@ use crate::{By, Traverser, TraverserContext};
 
 /// [`Barrier`], the `Barrier.normSack` consumer token of `barrier(Consumer)`.
 pub mod barrier;
+/// [`BlobRef`], a reference to a content-addressed blob of a Store.
+pub mod blob;
 /// [`Cardinality`], the `Cardinality.single/list/set` property-cardinality token.
 pub mod cardinality;
 /// The `as_string`/`as_bool`/`as_number` coercions ([`CastPolicy`]).
@@ -72,6 +74,7 @@ pub mod vector;
 pub mod with_options;
 
 pub use barrier::Barrier;
+pub use blob::{BlobHashAlgo, BlobRef};
 pub use cardinality::Cardinality;
 pub use cast::CastPolicy;
 pub use column::Column;
@@ -136,6 +139,10 @@ pub enum ElementProperty {
     /// A vector (an embedding: [`Vector`], book page "Vectors"): f32, f16, i8 or bit components
     /// behind an `Arc` (a clone shares them).
     Vector(Vector),
+    /// A reference to a blob of a Store ([`BlobRef`], format spec 3 tag 21): in this version
+    /// only inside catalog definition payloads; a graph refuses it as an element property
+    /// value. Boxed so `ElementProperty` stays 32 bytes.
+    Blob(Box<BlobRef>),
     /// A nested property map.
     Object(Box<PropertyMap>),
     /// A list of values.
@@ -191,6 +198,7 @@ impl Clone for ElementProperty {
             ElementProperty::Uuid(bits) => ElementProperty::Uuid(*bits),
             ElementProperty::Temporal(value) => ElementProperty::Temporal(*value),
             ElementProperty::Vector(value) => ElementProperty::Vector(value.clone()),
+            ElementProperty::Blob(value) => ElementProperty::Blob(value.clone()),
             ElementProperty::Object(map) => ElementProperty::Object(map.clone()),
             ElementProperty::Array(items) => ElementProperty::Array(items.clone()),
             ElementProperty::Vertex(map) => ElementProperty::Vertex(map.clone()),
@@ -227,6 +235,7 @@ impl PartialEq for ElementProperty {
             (E::Uuid(a), E::Uuid(b)) => a == b,
             (E::Temporal(a), E::Temporal(b)) => a == b,
             (E::Vector(a), E::Vector(b)) => a == b,
+            (E::Blob(a), E::Blob(b)) => a == b,
             (E::Object(a), E::Object(b)) => a == b,
             (E::Array(a), E::Array(b)) => a == b,
             (E::Vertex(a), E::Vertex(b)) => a == b,
@@ -240,6 +249,7 @@ impl PartialEq for ElementProperty {
                 | E::Uuid(_)
                 | E::Temporal(_)
                 | E::Vector(_)
+                | E::Blob(_)
                 | E::Object(_)
                 | E::Array(_)
                 | E::Vertex(_)
@@ -364,7 +374,8 @@ impl ElementProperty {
             | ElementProperty::Boolean(_)
             | ElementProperty::Uuid(_)
             | ElementProperty::Temporal(_)
-            | ElementProperty::Vector(_)) => plain,
+            | ElementProperty::Vector(_)
+            | ElementProperty::Blob(_)) => plain,
         }
     }
 
@@ -414,7 +425,8 @@ impl ElementProperty {
             | ElementProperty::Boolean(_)
             | ElementProperty::Uuid(_)
             | ElementProperty::Temporal(_)
-            | ElementProperty::Vector(_) => false,
+            | ElementProperty::Vector(_)
+            | ElementProperty::Blob(_) => false,
         }
     }
 
@@ -442,7 +454,8 @@ impl ElementProperty {
                 | ElementProperty::Boolean(_)
                 | ElementProperty::Uuid(_)
                 | ElementProperty::Temporal(_)
-                | ElementProperty::Vector(_) => {}
+                | ElementProperty::Vector(_)
+                | ElementProperty::Blob(_) => {}
             }
             match stack.pop() {
                 Some(next) => current = next,
@@ -493,6 +506,8 @@ impl ElementProperty {
             ElementProperty::Vertex(_) => Some("vertex"),
             ElementProperty::Edge(_) => Some("edge"),
             ElementProperty::Map(_) => Some("map with a non-string key"),
+            // Reserved for catalog payloads (model definitions) in this version.
+            ElementProperty::Blob(_) => Some("blob reference"),
             ElementProperty::Array(items) => items.iter().find_map(Self::element_ref_kind),
             ElementProperty::Object(map) => map.values().find_map(Self::element_ref_kind),
             ElementProperty::Null
@@ -661,6 +676,7 @@ impl ElementProperty {
             | ElementProperty::Temporal(_) => 0,
             // The components exactly, plus the `Arc` allocation's header.
             ElementProperty::Vector(vector) => vector.heap_bytes(),
+            ElementProperty::Blob(blob) => std::mem::size_of::<BlobRef>() as u64 + blob.heap_bytes(),
             ElementProperty::String(value) => compact_string_heap_bytes(value),
             // The stored (compressed) size; the dictionary is shared and counted per rule.
             ElementProperty::Compressed(text) => text.heap_bytes(),
@@ -745,6 +761,8 @@ fn type_rank(value: &ElementProperty) -> u8 {
         ElementProperty::Map(_) => 9,
         ElementProperty::Vertex(_) => 10,
         ElementProperty::Edge(_) => 11,
+        // Blob references (catalog payloads only) last, among themselves by algorithm and hash.
+        ElementProperty::Blob(_) => 12,
     }
 }
 
@@ -840,6 +858,7 @@ pub(crate) fn compare_element_property(
         (ElementProperty::Temporal(a), ElementProperty::Temporal(b)) => a.cmp(b),
         // By kind, dimension, then the components.
         (ElementProperty::Vector(a), ElementProperty::Vector(b)) => a.cmp(b),
+        (ElementProperty::Blob(a), ElementProperty::Blob(b)) => a.cmp(b),
         (ElementProperty::Array(a), ElementProperty::Array(b)) => {
             let mut left = a.iter();
             let mut right = b.iter();
@@ -953,6 +972,7 @@ impl fmt::Debug for ElementProperty {
             ElementProperty::Uuid(value) => write!(f, "{}", uuid::format_canonical(*value)),
             ElementProperty::Temporal(value) => write!(f, "{value}"),
             ElementProperty::Vector(value) => write!(f, "{value}"),
+            ElementProperty::Blob(value) => write!(f, "{value}"),
             ElementProperty::Compressed(text) => write!(f, "{text:?}"),
             ElementProperty::Deduped(text) => write!(f, "{text:?}"),
         }
@@ -1176,6 +1196,10 @@ impl std::hash::Hash for ElementProperty {
             // `Vector`'s own hash agrees with its equality (`-0.0` hashes as `0.0`).
             ElementProperty::Vector(val) => {
                 state.write_u8(11);
+                val.hash(state);
+            }
+            ElementProperty::Blob(val) => {
+                state.write_u8(12);
                 val.hash(state);
             }
         }
@@ -1494,7 +1518,9 @@ impl<S: GraphStorage> From<&ElementProperty> for TraverserValue<S> {
             ElementProperty::Boolean(_) => TraverserValue::Computed(value.clone(), None),
             ElementProperty::Uuid(_) => TraverserValue::Computed(value.clone(), None),
             ElementProperty::Temporal(_) => TraverserValue::Computed(value.clone(), None),
-            ElementProperty::Vector(_) => TraverserValue::Computed(value.clone(), None),
+            ElementProperty::Vector(_) | ElementProperty::Blob(_) => {
+                TraverserValue::Computed(value.clone(), None)
+            }
             // Boundary (D5): a stream value is always plain.
             ElementProperty::Compressed(text) => {
                 TraverserValue::Computed(ElementProperty::String(text.text()), None)
@@ -1534,7 +1560,8 @@ impl<S: GraphStorage> From<ElementProperty> for TraverserValue<S> {
             | ElementProperty::Boolean(_)
             | ElementProperty::Uuid(_)
             | ElementProperty::Temporal(_)
-            | ElementProperty::Vector(_) => TraverserValue::Computed(value, None),
+            | ElementProperty::Vector(_)
+            | ElementProperty::Blob(_) => TraverserValue::Computed(value, None),
             // Boundary (D5): a stream value is always plain.
             ElementProperty::Compressed(text) => {
                 TraverserValue::Computed(ElementProperty::String(text.text()), None)
@@ -2117,6 +2144,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                 | ElementProperty::Uuid(_)
                 | ElementProperty::Temporal(_)
                 | ElementProperty::Vector(_)
+                | ElementProperty::Blob(_)
                 | ElementProperty::Vertex(_)
                 | ElementProperty::Edge(_)
                 | ElementProperty::Array(_) => None,
@@ -2260,7 +2288,8 @@ impl<S: GraphStorage> TraverserValue<S> {
                 ElementProperty::Boolean(_) => None,
                 ElementProperty::Uuid(_)
                 | ElementProperty::Temporal(_)
-                | ElementProperty::Vector(_) => None,
+                | ElementProperty::Vector(_)
+                | ElementProperty::Blob(_) => None,
             }),
             // An `id()`/`label()`/`labels()` handle stands for a string or a list: no named
             // property.
@@ -2297,7 +2326,8 @@ impl<S: GraphStorage> TraverserValue<S> {
                         ElementProperty::Boolean(_) => None,
                         ElementProperty::Uuid(_)
                         | ElementProperty::Temporal(_)
-                        | ElementProperty::Vector(_) => None,
+                        | ElementProperty::Vector(_)
+                        | ElementProperty::Blob(_) => None,
                     }),
                     None => Ok(None),
                 }
@@ -2344,7 +2374,8 @@ impl<S: GraphStorage> TraverserValue<S> {
                         ElementProperty::Boolean(_) => None,
                         ElementProperty::Uuid(_)
                         | ElementProperty::Temporal(_)
-                        | ElementProperty::Vector(_) => None,
+                        | ElementProperty::Vector(_)
+                        | ElementProperty::Blob(_) => None,
                     }),
                     None => Ok(None),
                 }
@@ -2659,7 +2690,7 @@ impl From<ElementProperty> for ArgStrings {
             ElementProperty::Uuid(u) => ArgStrings::String(uuid::format_canonical(u).into_string()),
             ElementProperty::Temporal(t) => ArgStrings::String(t.to_string()),
             // A vector names nothing.
-            ElementProperty::Vector(_) => ArgStrings::List(Vec::new()),
+            ElementProperty::Vector(_) | ElementProperty::Blob(_) => ArgStrings::List(Vec::new()),
         }
     }
 }
@@ -2690,7 +2721,7 @@ impl From<&ElementProperty> for ArgStrings {
             }
             ElementProperty::Temporal(t) => ArgStrings::String(t.to_string()),
             // A vector names nothing.
-            ElementProperty::Vector(_) => ArgStrings::List(Vec::new()),
+            ElementProperty::Vector(_) | ElementProperty::Blob(_) => ArgStrings::List(Vec::new()),
         }
     }
 }

@@ -201,6 +201,10 @@ pub(crate) struct Manifest {
     /// The definitions table (format spec 6.3), payloads not decoded.
     pub(crate) definitions: Vec<DefinitionRecord>,
     pub(crate) chunks: Vec<ChunkRow>,
+    /// The blob table (format spec 6.2 item 5, file format version 4): every blob the state
+    /// references with its reference count, sorted by `(algorithm, hash)`; empty in a manifest
+    /// of an older version.
+    pub(crate) blobs: Vec<(crate::value::BlobRef, u64)>,
 }
 
 /// Whether a segment kind is one this version reads (1 vertex, 2 edge).
@@ -255,6 +259,7 @@ impl Manifest {
             put_str(&mut variable, &row.chunk.last_id);
             put_u32(&mut variable, row.chunk.crc);
         }
+        super::store::blobs::put_table(&mut variable, &self.blobs);
         self.fixed.segment_count = self.segments.len() as u32;
         self.fixed.variable_offset = FIXED_BYTES as u64;
         self.fixed.variable_len = variable.len() as u64;
@@ -385,6 +390,17 @@ impl Manifest {
                 },
             });
         }
+        let blobs = if fixed.version.0 >= super::codec::BLOB_FORMAT_VERSION {
+            let mut table = Reader::new(&variable[r.offset() as usize..])
+                .with_version(fixed.version.0);
+            let at = r.offset();
+            let rows = super::store::blobs::read_table(&mut table)
+                .map_err(|e| DecodeError::new(base + at + e.offset, e.reason))?;
+            r.bytes(table.offset() as usize).map_err(shift)?;
+            rows
+        } else {
+            Vec::new()
+        };
         if !r.is_empty() {
             return Err(DecodeError::new(
                 base + r.offset(),
@@ -397,6 +413,7 @@ impl Manifest {
             segments,
             definitions,
             chunks,
+            blobs,
         })
     }
 }
@@ -434,6 +451,7 @@ mod tests {
                     crc: 2,
                 },
             }],
+            blobs: Vec::new(),
         }
     }
 
