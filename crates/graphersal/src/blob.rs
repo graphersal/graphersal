@@ -1,7 +1,7 @@
 //! Blobs: immutable, content-addressed files of a Store, referenced by a [`BlobRef`].
 //!
 //! For hosts that keep large binary content (model files, later user BLOB values) beside a
-//! graph. A blob is written once into a Store ([`Store::write_blob`](crate::persist::Store),
+//! graph. A blob is written once into a Store (`Store::write_blob`,
 //! feature `persist`), named by the SHA-256 of its content (`blobs/<2 hex>/<hash>`, format spec
 //! 4.6), and referenced from a catalog definition's payload by its [`BlobRef`] (hash, length,
 //! CRC-32C). The Store keeps a blob exactly as long as some retained history references it
