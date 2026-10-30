@@ -26,7 +26,8 @@
 //! # Limits (the runner executes thousands of untrusted queries)
 //!
 //! Every traversal (setup, query, control query) gets [`LIMITS`] and an `evaluationTimeout` of
-//! [`EVALUATION_TIMEOUT_MS`], set per execution with `with()`. A limit that fires is
+//! [`EVALUATION_TIMEOUT_MS`], set per execution with `with()`, and runs under a memory ceiling of
+//! [`MEMORY_LIMIT_BYTES`]. A limit that fires is
 //! [`ErrorRoot::ResourceLimit`] / [`ErrorRoot::Timeout`] (class `timeout`).
 //!
 //! # Guards
@@ -65,15 +66,19 @@ pub const WALL_CLOCK_LIMIT: Duration = Duration::from_secs(30);
 
 /// Traversal options set on every traversal of a case (tighter than the defaults: the TCK
 /// graphs have at most a few dozen elements).
-pub const LIMITS: [(&str, i64); 6] = [
+pub const LIMITS: [(&str, i64); 5] = [
     ("traversal.max_traversers", 4_000_000),
     ("traversal.max_materialized_bytes", 64 * 1024 * 1024),
     ("traversal.max_string_bytes", 1024 * 1024),
     ("bulk.max_expansion", 4_000_000),
     ("repeat.max_loops", 1_000),
-    // Without a tracking allocator in this binary the engine's estimate is compared.
-    ("memory.limit", 512 * 1024 * 1024),
 ];
+
+/// The memory ceiling of every traversal of a case, in bytes: the process ceiling lowered for the
+/// worker thread (`graphersal::exec::memory_limit_scope`; the ceiling is a process setting, not
+/// an execution option). Without a tracking allocator in this binary the engine's estimate is
+/// compared.
+pub const MEMORY_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Maximum length of a recorded message.
 const MESSAGE_MAX: usize = 300;
@@ -415,10 +420,12 @@ fn run_query<S: GraphStorage>(
     for (key, value) in LIMITS {
         source = source.with(key, value);
     }
-    let rows = source
-        .with("evaluationTimeout", EVALUATION_TIMEOUT_MS)
-        .gql_with(query, params.iter().cloned())
-        .to_list();
+    let rows = graphersal::exec::memory_limit_scope(MEMORY_LIMIT_BYTES, || {
+        source
+            .with("evaluationTimeout", EVALUATION_TIMEOUT_MS)
+            .gql_with(query, params.iter().cloned())
+            .to_list()
+    });
     match rows {
         Ok(rows) => QueryOutcome::Rows(compare::materialize(&*graph, &rows)),
         Err(e) => QueryOutcome::Error(describe(&e)),

@@ -5,8 +5,12 @@
 //! here; run it with `cargo test --test all <name>::`. The only separate targets are
 //! `tinkerpop_features.rs` (the TinkerPop conformance suite) and `opencypher_tck.rs` (the
 //! openCypher TCK against GQL), both for the same reason: own process for parallel lanes, a panic
-//! hook, per-scenario timeouts and a report. Per-file feature gates (`#![cfg(feature = ..)]`) stay
-//! at the top of the module files themselves.
+//! hook, per-scenario timeouts and a report; and `memory_ceiling.rs`, because it sets the process
+//! memory ceiling (`graphersal::exec::set_memory_limit`, process-global state that would change
+//! the ceiling of every test running here in parallel) and, with the feature `alloc-tracking`,
+//! installs the tracking allocator as its `#[global_allocator]`. A test here that needs a lower
+//! ceiling uses the thread-scoped `graphersal::exec::memory_limit_scope`. Per-file feature gates
+//! (`#![cfg(feature = ..)]`) stay at the top of the module files themselves.
 
 mod add_edge_endpoint_tests;
 mod add_element_parameters_tests;

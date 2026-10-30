@@ -1047,26 +1047,27 @@ fn blow_ups_are_refused_by_the_materialization_limit_and_the_memory_budget() {
     // Under a memory budget (the engine's estimate in this test binary: the graph's footprint
     // plus what the query holds and is about to build) with the default materialization limit.
     let footprint = graph.read().memory_usage().unwrap().unwrap().total_bytes();
-    let budget = [("memory.limit", (footprint + 1_000_000) as i64)];
+    let budget = footprint + 1_000_000;
     for query in [
         "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 10000000)) AS x",
         "MATCH (n:person {name: 'marko'}) RETURN size(replace($s, 'x', 'yyyyyyyyyyyyyyyyyyyy')) AS x",
         "MATCH (n:person {name: 'marko'}) RETURN size(split($s, '')) AS x",
     ] {
-        assert_eq!(limit_of(&graph, &budget, query), "memory.limit", "{query}");
+        let limit = graphersal::exec::memory_limit_scope(budget, || limit_of(&graph, &[], query));
+        assert_eq!(limit, "memory.limit", "{query}");
     }
     // The same queries with a small enough input run under the same limits.
     let lock = graph.read();
-    let rows = lock
-        .traversal()
-        .with(materialized, 100_000)
-        .with("memory.limit", (footprint + 1_000_000) as i64)
-        .gql(
-            "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 100)) AS r, \
-             size(split(n.name, '')) AS s, replace(n.name, '', '-') AS t",
-        )
-        .to_list()
-        .unwrap();
+    let rows = graphersal::exec::memory_limit_scope(budget, || {
+        lock.traversal()
+            .with(materialized, 100_000)
+            .gql(
+                "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 100)) AS r, \
+                 size(split(n.name, '')) AS s, replace(n.name, '', '-') AS t",
+            )
+            .to_list()
+    })
+    .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(column(&rows[0], "r"), &ElementProperty::from(100));
     assert_eq!(column(&rows[0], "s"), &ElementProperty::from(5));

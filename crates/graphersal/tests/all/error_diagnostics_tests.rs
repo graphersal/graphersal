@@ -5806,18 +5806,15 @@ fn materialized_bytes_help_names_the_option_and_the_alternatives() {
     }
 }
 
-/// `memory.limit`: the help says what is measured, names the alternatives that hold less, the
-/// recovery when the graph alone is over the budget, every front end's setting and the option
-/// request; an invalid value names both accepted shapes.
+/// `memory.limit`: the help says what is measured (estimated here: no tracking allocator in this
+/// binary), names the alternatives that hold less, the recovery when the graph alone is over the
+/// ceiling and every front end's setting; setting it as an execution option is refused with
+/// advice pointing to the process setting.
 #[test]
 fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
     let graph = GraphSource::tinkerpop_modern();
     let lock = graph.read();
-    let err = lock
-        .traversal()
-        .with("memory.limit", 1_000)
-        .v(None)
-        .to_list()
+    let err = graphersal::exec::memory_limit_scope(1_000, || lock.traversal().v(None).to_list())
         .expect_err("Modern alone is larger than 1000 bytes");
     let cause = err.root_cause().to_string();
     assert!(
@@ -5826,18 +5823,19 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
     );
     let help = err.help().expect("help");
     for needle in [
-        "memory budget 'memory.limit' (1000 bytes); it reached",
+        "process memory ceiling 'memory.limit' (1000 bytes); it reached",
         "everything it changed was rolled back",
-        "live heap when the host installs the tracking allocator",
+        "The figure is estimated (no tracking allocator in this process)",
         "g.memory_usage()",
         "g.v().repeat(__.both()).times(8).count()",
         "g.v().out().dedup().fold()",
-        "g.with(\"memory.limit\", 2000).v().has_label(\"tmp\").drop()",
-        "--memory-limit <bytes|auto>",
+        "g.v().has_label(\"tmp\").drop()",
+        "ONE setting of the whole process, on by default",
+        "--memory-limit <bytes|auto|none>",
+        "graphersal.set_memory_limit(...)",
         "Graph(memory_limit=...)",
-        "ExecutionPolicy::with_default(\"memory.limit\", bytes)",
+        "graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))",
         "'memory.headroom'",
-        "needs Update on that Option",
     ] {
         assert!(help.contains(needle), "{needle} missing in: {help}");
     }
@@ -5846,13 +5844,30 @@ fn memory_limit_help_names_the_measure_the_alternatives_and_the_front_ends() {
         .with("memory.limit", "plenty")
         .v(None)
         .to_list()
-        .expect_err("not a byte count");
+        .expect_err("not an execution option");
     let help = err.help().expect("help");
+    assert!(help.contains("is not an execution option"), "{help}");
     assert!(
-        help.contains("g.with(\"memory.limit\", \"auto\")"),
+        help.contains(
+            "g.v().out().fold() instead of g.with(\"memory.limit\", 4294967296).v().out().fold()"
+        ),
         "{help}"
     );
-    assert!(help.contains("no memory budget (the default)"), "{help}");
+    assert!(
+        help.contains("g.with(\"traversal.max_materialized_bytes\", 268435456).v().out().fold()"),
+        "{help}"
+    );
+    let err = lock
+        .traversal()
+        .with("memory.headroom", 0)
+        .v(None)
+        .to_list()
+        .expect_err("not an execution option");
+    let help = err.help().expect("help");
+    assert!(
+        help.contains("graphersal::exec::set_memory_headroom(Some(268435456))"),
+        "{help}"
+    );
 }
 
 /// `traversal.max_string_bytes`: the help names the amplifying steps, the script-side
