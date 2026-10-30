@@ -8,7 +8,9 @@
 // - Workload: the workload statistics per list (queries, properties, locks, jobs) in a window
 //   (hour, 2 days, 90 days) for a channel, a sparkline per row; a row opens a detail chart
 //   (runs per bucket with the failed part, mean and max time) with the tier switch.
-// - Memory: the memory report: totals, properties and labels, the most bytes first.
+// - Memory: the process memory bar (the shared MemoryBar over `statistics()`, as in the Profile
+//   panel's Statistics tab), then the memory report: totals, properties and labels, the most
+//   bytes first.
 
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
@@ -17,6 +19,7 @@ import {
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
+import { MemoryBar } from './memory-bar.js';
 
 const message = (err) => (err && err.message ? err.message : String(err));
 
@@ -26,6 +29,7 @@ const CHART_W = 640;
 const CHART_H = 160;
 
 export const OptimizePanel = {
+  components: { MemoryBar },
   setup() {
     const dlg = ref(null);
     const tab = ref('advice');
@@ -34,7 +38,8 @@ export const OptimizePanel = {
       report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total', desc: true,
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
     });
-    const memory = reactive({ report: null, loading: false, error: null });
+    // `stats`: the `statistics()` answer for the process memory bar (MemoryBar).
+    const memory = reactive({ report: null, stats: null, loading: false, error: null });
 
     const engine = () => state.engine;
     const spec = () => (advice.everything ? { everything: true } : {});
@@ -76,6 +81,15 @@ export const OptimizePanel = {
       memory.loading = true;
       memory.error = null;
       try {
+        // The process bar (statistics) and the graph's report, one after the other: the engine
+        // serves one request at a time anyway. A failing statistics read leaves the bar out.
+        if (typeof engine().statistics === 'function') {
+          try {
+            memory.stats = await engine().statistics();
+          } catch {
+            memory.stats = null;
+          }
+        }
         const answer = await engine().memoryReport({});
         if (answer && answer.ok) memory.report = answer.report;
         else memory.error = (answer && answer.error) || 'The memory report failed.';
@@ -362,6 +376,7 @@ export const OptimizePanel = {
         <div v-if="memory.error" class="field-error">{{ memory.error }}</div>
         <p v-else-if="memory.loading && !memory.report" class="muted">Measuring…</p>
         <template v-else-if="memory.report">
+          <memory-bar :stats="memory.stats"></memory-bar>
           <div class="op-totals">
             <div v-for="t in memTotals" :key="t.label" class="op-total"><span class="muted">{{ t.label }}</span><strong>{{ formatBytes(t.bytes) }}</strong></div>
           </div>

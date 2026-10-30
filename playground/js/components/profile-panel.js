@@ -17,6 +17,7 @@ import { formatDuration, formatBytes, toMarkdownTable } from '../util.js';
 import { PanelFrame, PanelTabs, CopyButton } from './panel-frame.js';
 import { StatisticsView } from './statistics-view.js';
 import { profileText } from '../profile-text.js';
+import { queryPeakModel } from '../memory-bar.js';
 
 const TABS = [
   { id: 'tree', label: 'Steps' },
@@ -134,6 +135,9 @@ export const ProfilePanel = {
       if (t.profileScript) run(t.profileScript, t.id, { selection: t.profile && t.profile.selection });
     }
 
+    // The run's peak against the per-query limit (`query_memory`), never the process ceiling.
+    const peak = computed(() => queryPeakModel(profile.value));
+
     const text = computed(() => {
       const p = profile.value;
       if (!p) return '';
@@ -165,7 +169,7 @@ export const ProfilePanel = {
     }
 
     return {
-      state, TABS, tab, entry, profile, memory, memorySource, showRetained, failedStep, failedId, failedPath, isLatest, rows, text,
+      state, TABS, tab, entry, profile, peak, memory, memorySource, showRetained, failedStep, failedId, failedPath, isLatest, rows, text,
       toggle, collapsed, tryExample, refresh, copyProfile, oneLine, stats,
       refreshTitle: computed(() => (tab.value === 'stats' ? 'Reload the statistics' : 'Run the profiled query again')),
       copyLabel: computed(() => (tab.value === 'text' ? 'Copy as text' : 'Copy as Markdown table')),
@@ -236,6 +240,8 @@ export const ProfilePanel = {
             <span v-if="memory">memory <span class="badge" :class="memorySource === 'tracked' ? 'accent' : 'warn'">{{ memorySource }}</span></span>
             <span v-if="memory" class="faint">{{ MEMORY_SOURCE_TEXT[memorySource] || '' }}</span>
           </div>
+          <div v-if="peak" :class="['profile-totals', 'profile-peak', 'mem-' + peak.level]"
+            title="The most memory this run held at once, against the per-query limit traversal.max_materialized_bytes (not the process ceiling)"><b>{{ peak.text }}</b></div>
           <div class="rules">
             <b>Optimizer rules applied:</b>
             <template v-if="profile.optimizer_rules_applied.length">

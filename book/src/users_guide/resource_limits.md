@@ -320,6 +320,36 @@ println!("{:?} bytes left", room.available());
 `check_memory_for` compares the live heap plus the bytes with a tracking allocator, else only
 the bytes (the rest of the process is not seen).
 
+### Seeing how full the process is
+
+Every front end shows the process against its ceiling with the same figures (computed once, in
+the session layer):
+
+- **Playground**: the process memory bar in the Profile panel's Statistics tab and in
+  Optimize -> Memory ([The Web Playground](web_playground.md)): used of the ceiling, its
+  source, the percentage, and the segments structure, properties, compressed, indexes, models and
+  other (the heap the graph's estimate does not explain).
+- **REPL**: `/memory` prints the bar as text before the memory report:
+
+  ```text
+  Memory   1.6 GiB of 3.4 GiB (cgroup)                                        47 %
+           [################################....................................]
+           structure 180.0 MiB  properties 420.0 MiB  compressed 95.0 MiB
+           indexes 60.0 MiB  models 506.0 MiB  other 340.0 MiB
+           compression saves 285.0 MiB (plain 380.0 MiB -> 95.0 MiB, -75 %)
+  ```
+
+- **Dev server**: `GET /api/statistics` (and the MCP `statistics` tool) carries
+  `process.memory.usedBytes`, `usedTracked`, `limitBytes`, `limitSource`, `usedPercent`,
+  `segments` and `compression`; the start banner's memory row ends with
+  `process 47 % of 3.4 GiB (cgroup)`.
+
+Without a tracking allocator (a host that did not install it) the used figure is the sum of the
+known segments, marked "process total not tracked"; with the ceiling turned off
+(`memory.limit none`) there is no percentage. This is the process ceiling only: a query's own
+peak against the per-query limit `traversal.max_materialized_bytes` is the PROFILE's
+`query_memory` ("Peak memory" in the playground's Profile panel).
+
 ## Strings built by steps
 
 `script.max_string_size` bounds the strings a *script* builds; **`traversal.max_string_bytes`**

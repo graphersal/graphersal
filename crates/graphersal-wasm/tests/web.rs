@@ -46,6 +46,19 @@ fn the_statistics_report_the_wasm_memory() {
     assert!(memory.get("rssBytes").is_none(), "{stats}");
 }
 
+/// The process memory bar in the browser: the 3.5 GiB `wasm` ceiling, a percentage and the
+/// graph's segments.
+#[wasm_bindgen_test]
+fn statistics_have_a_wasm_limit_source() {
+    let stats = json(&modern().statistics().unwrap());
+    let memory = &stats["process"]["memory"];
+    assert_eq!(memory["limitSource"], "wasm", "{stats}");
+    assert_eq!(memory["limitBytes"], 3584u64 << 20, "{stats}");
+    assert!(memory["usedPercent"].as_f64().is_some(), "{stats}");
+    assert!(memory["usedBytes"].as_u64().unwrap() > 0, "{stats}");
+    assert_eq!(memory["segments"][0]["name"], "structure", "{stats}");
+}
+
 #[wasm_bindgen_test]
 fn the_large_generator_builds() {
     let mut p = Playground::new();

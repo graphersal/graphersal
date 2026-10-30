@@ -1,9 +1,12 @@
 // The text visualizer of TraversalMetrics for the Profile panel's Text tab, rendered client-side
 // from the pure metrics data in the layout of the CLI's "Traversal Metrics" table (the engine's
 // own rendering is the Raw tab of a `profile()` result). Optional sections are rendered only when
-// present: `path_recording` as the ` [path: ..]` suffix, `loops` as an indented line.
+// present: `path_recording` as the ` [path: ..]` suffix, `loops` as an indented line, the run's
+// `query_memory` as the "Peak memory ... per query" line under TOTAL (the per-execution limit,
+// never the process ceiling).
 
 import { formatDuration, formatBytes } from './util.js';
+import { queryPeakModel } from './memory-bar.js';
 
 function anyMemory(list) {
   return list.some((m) => m.memory || anyMemory(m.nested || []));
@@ -45,6 +48,8 @@ export function profileText(p, error = null) {
     }
   }
   out.push(`${'TOTAL: duration:'.padStart(width + 24)}${formatDuration(p.duration_ns).padStart(11)}`);
+  const peak = queryPeakModel(p);
+  if (peak) out.push(peak.text);
   out.push(sep);
   if (p.optimizer_rules_applied && p.optimizer_rules_applied.length) {
     out.push(`Optimizer rules applied: ${p.optimizer_rules_applied.join(', ')}`);
