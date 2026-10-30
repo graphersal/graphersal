@@ -127,7 +127,8 @@ fn ceiling_text(memory: &Value) -> Option<String> {
         ""
     };
     Some(format!(
-        "process {percent:.0} % of {} ({source}){known}",
+        "process {} of {} ({source}){known}",
+        graphersal_session::process::percent_text(percent),
         bytes_text(limit)
     ))
 }

@@ -249,6 +249,18 @@ pub fn memory_bar(graph_memory: &Value, models_bytes: u64) -> Result<MemoryBar, 
     ))
 }
 
+/// `47.06` -> `47 %`; below 1 one decimal (`0.4 %`), below 0.1 `< 0.1 %` (a small process never
+/// reads `0 %`). The playground's `js/memory-bar.js` `percentText` writes the same.
+pub fn percent_text(percent: f64) -> String {
+    if percent < 0.1 {
+        "< 0.1 %".to_string()
+    } else if percent < 1.0 {
+        format!("{percent:.1} %")
+    } else {
+        format!("{percent:.0} %")
+    }
+}
+
 /// [`memory_bar`] from given figures (the formulas of [`MemoryBar`]).
 fn bar_from(
     graph_memory: &Value,
@@ -395,7 +407,7 @@ impl MemoryBar {
                     bytes_text(limit),
                     self.limit_source
                 );
-                let right = format!("{percent:.0} %");
+                let right = percent_text(percent);
                 let gap = width.saturating_sub(left.len() + right.len()).max(1);
                 lines.push(format!("{left}{}{right}", " ".repeat(gap)));
                 let inner = width - indent.len() - 2;
@@ -609,6 +621,21 @@ mod tests {
         let unknown = bar_from(&Value::Null, 0, None, "unknown", None);
         assert!(unknown.segments.is_empty());
         assert!(unknown.text(80).contains("memory size is unknown"));
+    }
+
+    #[test]
+    fn a_small_process_never_reads_zero_percent() {
+        assert_eq!(percent_text(0.0), "< 0.1 %");
+        assert_eq!(percent_text(0.4), "0.4 %");
+        assert_eq!(percent_text(47.06), "47 %");
+        let bar = bar_from(
+            &graph_memory(),
+            0,
+            Some(1 << 40),
+            "physical",
+            Some(10 * MIB),
+        );
+        assert!(bar.text(80).lines().next().unwrap().ends_with(" < 0.1 %"));
     }
 
     #[test]

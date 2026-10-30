@@ -84,6 +84,7 @@ test('70 and 90 % are the colour thresholds', () => {
   assert.equal(memoryBarModel(tracked({ usedPercent: 95 })).level, 'red');
   assert.equal(percentText(0.42), '0.4 %');
   assert.equal(percentText(47.06), '47 %');
+  assert.equal(percentText(0), '< 0.1 %');
 });
 
 test('a tiny segment keeps its legend entry and size', () => {

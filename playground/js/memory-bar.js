@@ -51,10 +51,14 @@ export function memoryLevel(percent) {
   return 'normal';
 }
 
-/** `47.06` -> `47 %`; below 1 one decimal (`0.4 %`), so a small process does not read `0 %`. */
+/**
+ * `47.06` -> `47 %`; below 1 one decimal (`0.4 %`) and below 0.1 `< 0.1 %` (the engine sends one
+ * decimal), so a small process does not read `0 %`.
+ */
 export function percentText(percent) {
   if (typeof percent !== 'number' || !Number.isFinite(percent)) return '';
-  if (percent > 0 && percent < 1) return `${percent.toFixed(1)} %`;
+  if (percent < 0.1) return '< 0.1 %';
+  if (percent < 1) return `${percent.toFixed(1)} %`;
   return `${Math.round(percent)} %`;
 }
 
