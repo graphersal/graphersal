@@ -110,6 +110,7 @@ for any mode, `--default-embedder NAME` makes it the default:
 
 ```bash
 graphersal embed-model download minishlab/potion-base-8M     # into ~/.cache/graphersal/embed-models
+graphersal embed-model download minishlab/potion-multilingual-128M   # 101 languages (about 510 MB)
 graphersal embed-model list                                  # repository, size, model identity
 graphersal --embedder potion=minishlab/potion-base-8M \
   -e 'g.set_schema(g.infer_schema(), SchemaMode.open);

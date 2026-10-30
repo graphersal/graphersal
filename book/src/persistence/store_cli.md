@@ -389,7 +389,7 @@ model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard
 `remove` deletes one model, by its identity or its id `model2vec-<12 hex>` (refused while a writer
 has the store open, and on a backup; an unknown model exits 1). It is the only way a model leaves a
 store. Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
-`graphersal embed-model import <MODEL_DIR> --into <DIR>` (see
+`graphersal embed-model import <REPO|MODEL_DIR> --into <DIR>` (see
 [Embedding Models in a Store](store_models.md)).
 
 ### prune

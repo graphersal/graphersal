@@ -387,7 +387,8 @@ model, and much faster.
 **1. Download a model once.** This is the only step that uses the network:
 
 ```bash
-graphersal embed-model download minishlab/potion-base-8M
+graphersal embed-model download minishlab/potion-base-8M               # English, small
+graphersal embed-model download minishlab/potion-multilingual-128M     # 101 languages
 ```
 
 It fetches `config.json`, `tokenizer.json` and `model.safetensors` from Hugging Face into the
@@ -403,6 +404,23 @@ repositories. `graphersal embed-model list` shows what is there:
 REPO                           SIZE  LICENCE  IDENTITY
 minishlab/potion-base-8M   29.5 MiB  mit      model2vec/minishlab/potion-base-8M@fac4fa854e68
 ```
+
+**Which model.** All three below are MIT licensed Model2Vec models of 256 dimensions from
+[MinishLab](https://huggingface.co/minishlab); copy the repository name into the command above.
+
+| Repository | Size | Trained for | Use it when |
+|---|---:|---|---|
+| `minishlab/potion-base-8M` | about 30 MB | English text | texts and questions are in English, and size or start time matters |
+| `minishlab/potion-multilingual-128M` | about 510 MB | 101 languages (distilled from BAAI/bge-m3) | texts or questions come in several languages, for example English documentation searched with questions in Russian or German |
+| `minishlab/potion-code-16M-v2` | about 32 MB | English questions against source code (Python, Java, JavaScript, Go, PHP, Ruby) | questions are English and the texts are code itself, not prose about it |
+
+For a knowledge base about software (documentation, decisions, descriptions of code) queried in
+more than one language, take `potion-multilingual-128M`: a model trained on English only places a
+question in another language far from every document, so it finds nothing useful, while a
+multilingual model maps the same meaning in different languages close together. A static model
+is less precise across languages than within one; combining the vector search with a word match
+on names (`has` with `TextP.containing`) covers exact identifiers. The larger model costs memory
+for as long as it is loaded (about its file size).
 
 **2. Register it under a name.** `--embedder NAME=REPO` (a downloaded repository) or
 `--embedder NAME=PATH` (any directory holding a Model2Vec model) works with every mode: a

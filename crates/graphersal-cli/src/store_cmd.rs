@@ -89,7 +89,7 @@ A damaged store opens read-only in maintenance mode; `verify` lists the damage a
 A backup directory is read-only (info, list, marks, verify, export, fork, prune work on it;
 --graph opens it read-only) until `store restore <BACKUP_DIR>` makes it the live store.
 Embedding models (models/ in the store) enter it only by `graphersal embed-model download
-<REPO> --into <DIR>` or `embed-model import <MODEL_DIR> --into <DIR>`; every copy (backup,
+<REPO> --into <DIR>` or `embed-model import <REPO|MODEL_DIR> --into <DIR>`; every copy (backup,
 fork, convert, repair, export) carries them with their licences: a store handed on
 redistributes its models. The store's models are loaded when the store is opened.
 
@@ -305,7 +305,7 @@ pub fn command_help(command: &str) -> Option<String> {
              it. `remove` deletes one (by identity or by its id model2vec-<12 hex>): the only\n\
              way a model leaves a store; refused while a writer has the store open. A model\n\
              enters a store by `graphersal embed-model download <REPO> --into <DIR>` or\n\
-             `embed-model import <MODEL_DIR> --into <DIR>`.",
+             `embed-model import <REPO|MODEL_DIR> --into <DIR>`.",
             false,
         ),
         "rollback" => (

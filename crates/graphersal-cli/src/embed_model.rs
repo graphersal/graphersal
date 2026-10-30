@@ -52,8 +52,8 @@ pub const EMBED_MODEL_HELP: &str = r#"graphersal embed-model - download and list
 USAGE:
     graphersal embed-model download <REPO> [--revision <REV>] [--dir <MODELS-DIR>]
                                            [--into <STORE>]
-    graphersal embed-model import <MODEL-DIR> --into <STORE> [--repo <REPO>]
-                                           [--license <SPDX>]
+    graphersal embed-model import <REPO|MODEL-DIR> --into <STORE> [--dir <MODELS-DIR>]
+                                           [--repo <REPO>] [--license <SPDX>]
     graphersal embed-model list [--dir <MODELS-DIR>]
 
 COMMANDS:
@@ -67,9 +67,11 @@ COMMANDS:
                --into STORE: put the model into that Store (a closed store directory or
                .gstore file) instead of the models directory; the store's models are loaded
                whenever the store is opened, and every copy of the store carries them.
-    import     Put the Model2Vec model in MODEL-DIR (a download, or any directory with
-               config.json, tokenizer.json and model.safetensors) into the Store STORE, with
-               its README.md and LICENSE*/NOTICE* files. --repo names its Hugging Face
+    import     Put a Model2Vec model into the Store STORE, with its README.md and
+               LICENSE*/NOTICE* files: REPO, a repository downloaded into the models directory
+               (for example minishlab/potion-base-8M, no network), else MODEL-DIR, any
+               directory with config.json, tokenizer.json and model.safetensors (write ./REPO
+               for a directory that looks like a repository name). --repo names its Hugging Face
                repository (part of the model identity) when MODEL-DIR has no manifest;
                --license its SPDX licence id when the manifest does not say.
     list       The downloaded models: repository, size, licence and model identity.
@@ -143,23 +145,24 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "import" => {
-            let [dir] = parsed.positional.as_slice() else {
-                return usage("embed-model import takes one model directory");
+            let [model] = parsed.positional.as_slice() else {
+                return usage(
+                    "embed-model import takes one model: a downloaded repository or a directory",
+                );
             };
             let Some(store) = parsed.flag("into") else {
                 return usage(
                     "embed-model import needs --into <STORE>: the Store the model goes into",
                 );
             };
-            if parsed.flag("revision").is_some() || parsed.flag("dir").is_some() {
-                return usage("--revision and --dir belong to `embed-model download`");
+            if parsed.flag("revision").is_some() {
+                return usage("--revision belongs to `embed-model download`");
             }
-            match import(
-                Path::new(dir),
-                store,
-                parsed.flag("repo"),
-                parsed.flag("license"),
-            ) {
+            let dir = match import_source(model, parsed.flag("dir")) {
+                Ok(dir) => dir,
+                Err(message) => return usage(&message),
+            };
+            match import(&dir, store, parsed.flag("repo"), parsed.flag("license")) {
                 Ok(()) => EXIT_OK,
                 Err(DownloadError::Usage(message)) => usage(&message),
                 Err(DownloadError::Failed(message)) => {
@@ -808,6 +811,36 @@ fn add_to_store(store: &str, model: NewModel) -> Result<StoredModel, DownloadErr
         }
         Err(err) => Err(failed(graphersal::error::format_diagnostic(&err))),
     }
+}
+
+/// The model directory `embed-model import MODEL` reads: a repository downloaded into the
+/// models directory (`models_dir`, so `--dir` too) first, else MODEL as a directory.
+fn import_source(model: &str, models: Option<&str>) -> Result<PathBuf, String> {
+    let mut looked = None;
+    if is_repo_name(model) {
+        let downloaded = models_dir(models)?.join(model);
+        if downloaded.is_dir() {
+            return Ok(downloaded);
+        }
+        looked = Some(downloaded);
+    }
+    let path = Path::new(model);
+    if path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    Err(match looked {
+        Some(downloaded) => format!(
+            "'{model}' is neither a downloaded model (looked in {}) nor a directory\nHelp: run \
+             `graphersal embed-model download {model}` first, or pass the directory of a \
+             Model2Vec model",
+            downloaded.display()
+        ),
+        None => format!(
+            "no such directory '{model}', and it is not a Hugging Face repository name \
+             (owner/name)\nHelp: pass a repository downloaded with `graphersal embed-model \
+             download <owner/name>`, or the directory of a Model2Vec model"
+        ),
+    })
 }
 
 /// `graphersal embed-model import <dir> --into <store>`.

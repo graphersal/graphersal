@@ -4911,6 +4911,63 @@ mod embed_models {
     }
 
     #[test]
+    fn import_takes_a_downloaded_repository_by_its_name() {
+        let base = fresh_dir("m2v_import_cached");
+        let models = base.join("models");
+        write_model(&models.join("acme").join("tiny"));
+        let models_text = models.display().to_string();
+        let import = |store: &str, extra: &[&str], envs: &[(&str, &str)]| {
+            let mut args = vec!["embed-model", "import", "acme/tiny", "--into", store];
+            args.extend_from_slice(extra);
+            run_env(&args, envs)
+        };
+
+        // The models directory named by --dir, and by $GRAPHERSAL_EMBED_MODELS.
+        let store = base.join("store");
+        create_store(&store);
+        let store_text = store.display().to_string();
+        let res = import(
+            &store_text,
+            &["--dir", &models_text, "--repo", "acme/tiny"],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("acme/tiny"), "{}", res.stdout);
+        let other = base.join("other");
+        create_store(&other);
+        let other_text = other.display().to_string();
+        let res = import(
+            &other_text,
+            &["--repo", "acme/tiny"],
+            &[("GRAPHERSAL_EMBED_MODELS", models_text.as_str())],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+
+        // A repository that was not downloaded: exit 2, naming where it looked and the fix.
+        let empty = base.join("empty").display().to_string();
+        let res = import(&store_text, &["--dir", &empty], &[]);
+        assert_eq!(res.code, 2, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("neither a downloaded model"),
+            "{}",
+            res.stderr
+        );
+        assert!(
+            res.stderr.contains("embed-model download acme/tiny"),
+            "{}",
+            res.stderr
+        );
+        // --revision still belongs to download.
+        let res = import(
+            &store_text,
+            &["--dir", &models_text, "--revision", "x"],
+            &[],
+        );
+        assert_eq!(res.code, 2, "{}", res.stderr);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_model_the_store_keeps_can_be_the_default_embedder() {
         let base = fresh_dir("m2v_stored_default");
         let model = base.join("model");

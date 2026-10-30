@@ -50,9 +50,11 @@ download is the only network access, a model runs locally):
 
 ```bash
 graphersal embed-model download minishlab/potion-base-8M          # into $GRAPHERSAL_EMBED_MODELS or ~/.cache/graphersal/embed-models
+graphersal embed-model download minishlab/potion-multilingual-128M   # 101 languages: questions in another language than the texts
 graphersal embed-model download minishlab/potion-base-8M --revision v1.0 --dir ./models   # a pinned revision, another directory
 graphersal embed-model list                                        # repository, size, licence, model identity
 graphersal embed-model download minishlab/potion-base-8M --into data/   # into the Store data/ (loaded whenever it opens)
+graphersal embed-model import minishlab/potion-base-8M --into data/   # a downloaded model into a Store (no network)
 graphersal embed-model import ./my-model --into data/ --repo acme/my-model   # a local model directory into a Store
 graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion -e 'embed("graph databases")'
 graphersal --embedder mine=./models/my-model -e 'g.v().embed("name", #{embedder: "mine"}).to_list()'   # a model directory

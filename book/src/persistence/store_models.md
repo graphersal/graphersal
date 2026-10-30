@@ -14,13 +14,18 @@ A model enters a store only by an explicit command, never on its own:
 ```bash
 graphersal store create data/
 graphersal embed-model download minishlab/potion-base-8M --into data/
+graphersal embed-model download minishlab/potion-multilingual-128M --into data/   # 101 languages
+graphersal embed-model import minishlab/potion-base-8M --into other/   # downloaded before: no network
 graphersal embed-model import ./my-model --into data/ --repo acme/my-model --license mit
 ```
 
 `download --into` fetches the model from Hugging Face (as `embed-model download` does, plus its
 model card, its licence files and its metadata) and puts it into the store instead of the models
-directory. `import` puts a local Model2Vec directory (a download, or any directory with
-`config.json`, `tokenizer.json` and `model.safetensors`) into the store; `--repo` names its
+directory. `import` puts a model downloaded before (`embed-model download <REPO>` without
+`--into`) into the store by its repository name, looked up in the models directory (`--dir`,
+else the default one) without the network; anything else is taken as a local Model2Vec directory
+(any directory with `config.json`, `tokenizer.json` and `model.safetensors`; write `./owner/name`
+for a directory that looks like a repository name); `--repo` names its
 repository when the directory has no manifest (the repository is part of the model identity),
 `--license` its licence. Both load the model once as a check. The store must be closed (a
 server holding it open keeps its writer lock).
