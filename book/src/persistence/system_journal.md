@@ -72,8 +72,9 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   So the journal never writes in the middle of another operation of the store; a crash loses
   at most the records since the last batch.
 - A store opened read-only (a backup, maintenance mode, a store holding something critical of
-  a newer version) reads its stored journal; its new records stay in memory. A store frozen by
-  damage found while it is open writes nothing more, the journal included.
+  a newer version) reads its stored journal; its new records stay in memory. Once damage is
+  found while a store is open (either damage policy), its journal writes nothing more to the
+  store's files: the records stay in memory and in the `tracing` mirror.
 - The instance identity lives in the instance-local file `INSTANCE` at the store root (a random
   id and a name: `StoreOptions::with_instance_name`, else the host name). No copy carries it: a
   restored backup or a converted store opened elsewhere is another instance, which writes into

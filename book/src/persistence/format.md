@@ -438,8 +438,8 @@ payload = origin 16 (big-endian) | origin_seq u64 | time i64 (µs) | source | ki
   newer value tag makes only that record's fields unreadable (shown as `fields_unreadable`).
 - Writing: `error` records are written and synced at once; the others are written in batches
   (before a checkpoint, by the instance's periodic flush, at close). A read-only open (a backup,
-  maintenance mode, 16 rule 3) and a store frozen by damage write nothing; their new records stay
-  in memory.
+  maintenance mode, 16 rule 3) and a store in which damage was found while it is open (13.3,
+  either policy) write no journal records; their new records stay in memory.
 - Copies: 12.6 to 12.8 and 12.11 carry the journal; a fork, an attic fork and a repair do not (a
   new store: its first record `store.created` names the source); a packed snapshot (8) does not.
 

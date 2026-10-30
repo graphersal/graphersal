@@ -3476,11 +3476,10 @@ impl Shared {
             }
         );
         let count = problems.len();
-        if policy == DamagePolicy::Maintenance {
-            // A frozen store writes nothing more to its files, the journal included: its
-            // records from now on stay in memory (and in the `tracing` mirror).
-            self.system_journal.drop_writer();
-        }
+        // With damage found the journal writes nothing more to the store's files (a frozen
+        // store writes nothing at all; one that continues keeps only its WAL going): its
+        // records from now on stay in memory (and in the `tracing` mirror).
+        self.system_journal.drop_writer();
         self.system_journal.emit(
             &catalogue::DAMAGE_FOUND,
             Event::new(format!(
