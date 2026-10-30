@@ -9,11 +9,11 @@
 
 use compact_str::CompactString;
 
+use crate::value::blob::MAX_BLOB_HASH_BYTES;
 use crate::value::number::{N, Number};
 use crate::value::temporal::zone::ZoneId;
 use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
-use crate::value::blob::MAX_BLOB_HASH_BYTES;
 use crate::value::{BlobHashAlgo, BlobRef, ElementProperty, PropertyMap, Vector, VectorElement};
 
 /// The file format version every file of this build writes (format spec 15).
@@ -414,8 +414,8 @@ pub(crate) fn read_blob_ref(reader: &mut Reader<'_>, start: u64) -> DecodeResult
     }
     let invalid = |why: String| DecodeError::new(start, format!("invalid blob reference: {why}"));
     let code = reader.u8()?;
-    let algo = BlobHashAlgo::from_code(code)
-        .ok_or_else(|| invalid(format!("hash algorithm {code}")))?;
+    let algo =
+        BlobHashAlgo::from_code(code).ok_or_else(|| invalid(format!("hash algorithm {code}")))?;
     let len = reader.uvar()?;
     if len == 0 || len > MAX_BLOB_HASH_BYTES as u64 {
         return Err(invalid(format!("hash length {len}")));

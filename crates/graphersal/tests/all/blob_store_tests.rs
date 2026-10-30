@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 use graphersal::blob::{BlobHashAlgo, BlobRef, PendingBlob, blob_hash_count};
 use graphersal::catalog::{Definition, DefinitionFlags, DefinitionKind, encode_payload};
-use graphersal::persist::{
-    MemDir, PersistError, Store, StoreDir, StoreFailure, StoreOptions,
-};
+use graphersal::persist::{MemDir, PersistError, Store, StoreDir, StoreFailure, StoreOptions};
 use graphersal::prelude::*;
 
 /// The host kind the tests keep blob-referencing definitions under.
@@ -176,13 +174,12 @@ fn a_blob_reference_travels_in_a_catalog_payload_and_a_change_set() {
     define(&store, "m", &[&blob]);
     let graph = store.graph().read();
     let stored = graph.definition(host_kind(), "m").unwrap().unwrap().clone();
-    let payload =
-        graphersal::catalog::decode_payload(stored.opaque_payload().unwrap()).unwrap();
+    let payload = graphersal::catalog::decode_payload(stored.opaque_payload().unwrap()).unwrap();
     assert_eq!(
         payload.get("blobs"),
-        Some(&ElementProperty::Array(vec![ElementProperty::Blob(Box::new(
-            blob.clone()
-        ))]))
+        Some(&ElementProperty::Array(vec![ElementProperty::Blob(
+            Box::new(blob.clone())
+        )]))
     );
 }
 
@@ -194,21 +191,37 @@ fn reads_check_length_and_crc_and_name_the_missing_blob() {
     dir.write_atomic(&name_of(&blob), b"012345678X").unwrap();
     let err = store.read_blob(&blob).unwrap_err();
     assert!(
-        matches!(&err, PersistError::Store { cause: StoreFailure::BlobDamaged, .. }),
+        matches!(
+            &err,
+            PersistError::Store {
+                cause: StoreFailure::BlobDamaged,
+                ..
+            }
+        ),
         "{err:?}"
     );
-    assert!(err.help().unwrap_or_default().contains("graphersal store verify"));
+    assert!(
+        err.help()
+            .unwrap_or_default()
+            .contains("graphersal store verify")
+    );
     // Another length.
     dir.write_atomic(&name_of(&blob), b"0123").unwrap();
     assert!(matches!(
         store.read_blob(&blob).unwrap_err(),
-        PersistError::Store { cause: StoreFailure::BlobDamaged, .. }
+        PersistError::Store {
+            cause: StoreFailure::BlobDamaged,
+            ..
+        }
     ));
     // Gone.
     dir.remove_file(&name_of(&blob)).unwrap();
     assert!(matches!(
         store.read_blob(&blob).unwrap_err(),
-        PersistError::Store { cause: StoreFailure::BlobUnavailable, .. }
+        PersistError::Store {
+            cause: StoreFailure::BlobUnavailable,
+            ..
+        }
     ));
     // The store keeps working: blob damage is never store damage.
     touch(&store, "after");

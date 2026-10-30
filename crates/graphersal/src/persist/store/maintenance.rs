@@ -439,16 +439,14 @@ pub(super) fn prune(
 ) -> Result<PruneReport, PersistError> {
     let mut report = prune_files(dir, up_to)?;
     let chain = super::files::read_graph_file(dir)?.file.chain();
-    if dir.join(super::blobs::LEDGER_FILE).exists() || dir.join(super::blobs::BLOBS_DIR).exists()
-    {
+    if dir.join(super::blobs::LEDGER_FILE).exists() || dir.join(super::blobs::BLOBS_DIR).exists() {
         let _ledger = live.map(|(_, wal)| {
             wal.ledger_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
-        let stale = live.is_some_and(|(_, wal)| {
-            wal.ledger_stale.load(std::sync::atomic::Ordering::Acquire)
-        });
+        let stale = live
+            .is_some_and(|(_, wal)| wal.ledger_stale.load(std::sync::atomic::Ordering::Acquire));
         let gate = live.map(|(gate, _)| gate);
         if !stale {
             super::blobs::rewrite_after_prune(dir, &chain, report.kept_from)?;
@@ -1755,7 +1753,11 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Result<Findings, Persi
             return expect(read_all(data), &plan.marks);
         }
         if name.starts_with(&format!("{}/", super::blobs::BLOBS_DIR)) {
-            let Some(blob) = plan.blobs.iter().find(|b| super::blobs::blob_name(b) == name) else {
+            let Some(blob) = plan
+                .blobs
+                .iter()
+                .find(|b| super::blobs::blob_name(b) == name)
+            else {
                 return vec!["a blob the backup did not copy".into()];
             };
             return super::blobs::check_stream(blob, data);

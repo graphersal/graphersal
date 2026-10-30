@@ -450,7 +450,10 @@ pub(crate) static BLOB_DAMAGED: EventKind = event(
         f("length", "its length in bytes"),
         f("failure", "what failed: missing, length, crc or hash"),
         f("found_by", "the operation that found it"),
-        opt("referrers", "the catalog definitions that reference it, as kind:name"),
+        opt(
+            "referrers",
+            "the catalog definitions that reference it, as kind:name",
+        ),
         f("recommendation", "how to get the bytes back"),
     ],
     Collapse::By(&["hash", "failure"]),

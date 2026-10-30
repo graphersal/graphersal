@@ -391,8 +391,8 @@ impl Manifest {
             });
         }
         let blobs = if fixed.version.0 >= super::codec::BLOB_FORMAT_VERSION {
-            let mut table = Reader::new(&variable[r.offset() as usize..])
-                .with_version(fixed.version.0);
+            let mut table =
+                Reader::new(&variable[r.offset() as usize..]).with_version(fixed.version.0);
             let at = r.offset();
             let rows = super::store::blobs::read_table(&mut table)
                 .map_err(|e| DecodeError::new(base + at + e.offset, e.reason))?;

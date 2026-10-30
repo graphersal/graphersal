@@ -20,8 +20,8 @@
 //! assert_eq!(blob.hash_hex().len(), 64);
 //! ```
 
-pub use crate::value::blob::{BlobHashAlgo, BlobRef, BlobRefError, MAX_BLOB_HASH_BYTES};
 /// Feature `persist`: a written blob not yet referenced by a durable commit, and a store's
 /// blob usage.
 #[cfg(feature = "persist")]
 pub use crate::persist::store::blobs::{BlobCopy, BlobUsage, PendingBlob, blob_hash_count};
+pub use crate::value::blob::{BlobHashAlgo, BlobRef, BlobRefError, MAX_BLOB_HASH_BYTES};

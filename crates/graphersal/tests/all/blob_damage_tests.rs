@@ -26,7 +26,10 @@ fn a_damaged_blob_is_a_verify_problem_and_a_journal_error_never_store_damage() {
     assert!(paths.contains(&name_of(&blob).as_str()), "{paths:?}");
     assert!(paths.contains(&"blobs/README"), "{paths:?}");
     assert!(
-        report.notes.iter().any(|n| n.contains("no retained history references")),
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("no retained history references")),
         "{:?}",
         report.notes
     );

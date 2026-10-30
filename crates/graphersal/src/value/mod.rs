@@ -676,7 +676,9 @@ impl ElementProperty {
             | ElementProperty::Temporal(_) => 0,
             // The components exactly, plus the `Arc` allocation's header.
             ElementProperty::Vector(vector) => vector.heap_bytes(),
-            ElementProperty::Blob(blob) => std::mem::size_of::<BlobRef>() as u64 + blob.heap_bytes(),
+            ElementProperty::Blob(blob) => {
+                std::mem::size_of::<BlobRef>() as u64 + blob.heap_bytes()
+            }
             ElementProperty::String(value) => compact_string_heap_bytes(value),
             // The stored (compressed) size; the dictionary is shared and counted per rule.
             ElementProperty::Compressed(text) => text.heap_bytes(),

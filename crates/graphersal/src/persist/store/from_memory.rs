@@ -108,7 +108,10 @@ pub(super) fn copy_state_blobs(
             warnings.push(format!("the blobs were not copied: {err}"));
             (
                 Vec::new(),
-                table.iter().map(|(blob, _)| super::blobs::blob_name(blob)).collect(),
+                table
+                    .iter()
+                    .map(|(blob, _)| super::blobs::blob_name(blob))
+                    .collect(),
             )
         }
     }

@@ -103,7 +103,10 @@ impl fmt::Display for BlobRefError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BlobRefError::HashLength { len } => {
-                write!(f, "a blob hash has 1 to {MAX_BLOB_HASH_BYTES} bytes, not {len}")
+                write!(
+                    f,
+                    "a blob hash has 1 to {MAX_BLOB_HASH_BYTES} bytes, not {len}"
+                )
             }
             BlobRefError::AlgoLength { algo, len } => write!(
                 f,
@@ -137,9 +140,17 @@ impl BlobRef {
         if let Some(expected) = algo.hash_len()
             && expected != hash.len()
         {
-            return Err(BlobRefError::AlgoLength { algo, len: hash.len() });
+            return Err(BlobRefError::AlgoLength {
+                algo,
+                len: hash.len(),
+            });
         }
-        Ok(BlobRef { algo, hash: hash.into(), length, crc32c })
+        Ok(BlobRef {
+            algo,
+            hash: hash.into(),
+            length,
+            crc32c,
+        })
     }
 
     /// The hash algorithm.
@@ -211,18 +222,33 @@ pub(crate) const BLOB_TAG: &str = "graphersal:BlobRef";
 /// "crc32c": n}`; an unknown algorithm is named `algo-<code>`.
 pub(crate) fn payload(blob: &BlobRef) -> PhysicalValue<'static> {
     PhysicalValue::Object(vec![
-        (Cow::Borrowed("algo"), PhysicalValue::String(Cow::Owned(blob.algo.name()))),
-        (Cow::Borrowed("hash"), PhysicalValue::String(Cow::Owned(blob.hash_hex()))),
+        (
+            Cow::Borrowed("algo"),
+            PhysicalValue::String(Cow::Owned(blob.algo.name())),
+        ),
+        (
+            Cow::Borrowed("hash"),
+            PhysicalValue::String(Cow::Owned(blob.hash_hex())),
+        ),
         // A length beyond i64 cannot be written by this version; saturate (never reached).
-        (Cow::Borrowed("length"), PhysicalValue::Int(i64::try_from(blob.length).unwrap_or(i64::MAX))),
-        (Cow::Borrowed("crc32c"), PhysicalValue::Int(i64::from(blob.crc32c))),
+        (
+            Cow::Borrowed("length"),
+            PhysicalValue::Int(i64::try_from(blob.length).unwrap_or(i64::MAX)),
+        ),
+        (
+            Cow::Borrowed("crc32c"),
+            PhysicalValue::Int(i64::from(blob.crc32c)),
+        ),
     ])
 }
 
 /// The physical (untyped JSON) form of a blob reference: the tagged form, output only.
 pub(crate) fn lower(blob: &BlobRef) -> PhysicalValue<'static> {
     PhysicalValue::Object(vec![
-        (Cow::Borrowed("@type"), PhysicalValue::String(Cow::Borrowed(BLOB_TAG))),
+        (
+            Cow::Borrowed("@type"),
+            PhysicalValue::String(Cow::Borrowed(BLOB_TAG)),
+        ),
         (Cow::Borrowed("@value"), payload(blob)),
     ])
 }
@@ -256,14 +282,20 @@ pub(crate) fn from_payload(value: &PhysicalValue<'_>) -> Result<BlobRef, String>
             ("crc32c", PhysicalValue::Int(n)) if crc.is_none() => {
                 crc = Some(u32::try_from(*n).map_err(|_| format!("{BLOB_TAG}: crc32c {n}"))?);
             }
-            (other, _) => return Err(format!("{BLOB_TAG}: unexpected or malformed key \"{other}\"")),
+            (other, _) => {
+                return Err(format!(
+                    "{BLOB_TAG}: unexpected or malformed key \"{other}\""
+                ));
+            }
         }
     }
     match (algo, hash, length, crc) {
         (Some(algo), Some(hash), Some(length), Some(crc)) => {
             BlobRef::new(algo, &hash, length, crc).map_err(|err| format!("{BLOB_TAG}: {err}"))
         }
-        _ => Err(format!("{BLOB_TAG} needs the keys algo, hash, length and crc32c")),
+        _ => Err(format!(
+            "{BLOB_TAG} needs the keys algo, hash, length and crc32c"
+        )),
     }
 }
 
@@ -304,7 +336,13 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 impl fmt::Display for BlobRef {
     /// `blob(sha256:<hex>, <length> bytes)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "blob({}:{}, {} bytes)", self.algo.name(), self.hash_hex(), self.length)
+        write!(
+            f,
+            "blob({}:{}, {} bytes)",
+            self.algo.name(),
+            self.hash_hex(),
+            self.length
+        )
     }
 }
 
@@ -317,7 +355,10 @@ mod tests {
         assert!(BlobRef::new(BlobHashAlgo::Sha256, &[1; 32], 3, 4).is_ok());
         assert_eq!(
             BlobRef::new(BlobHashAlgo::Sha256, &[1; 31], 3, 4),
-            Err(BlobRefError::AlgoLength { algo: BlobHashAlgo::Sha256, len: 31 })
+            Err(BlobRefError::AlgoLength {
+                algo: BlobHashAlgo::Sha256,
+                len: 31
+            })
         );
         assert!(BlobRef::new(BlobHashAlgo::Unknown(9), &[1; 5], 3, 4).is_ok());
         assert!(BlobRef::new(BlobHashAlgo::Unknown(9), &[], 3, 4).is_err());
@@ -329,7 +370,10 @@ mod tests {
     fn names_and_hex_round_trip() {
         let blob = BlobRef::new(BlobHashAlgo::Sha256, &[0xab; 32], 3, 4).unwrap();
         assert_eq!(blob.relative_path(), format!("ab/{}", "ab".repeat(32)));
-        assert_eq!(BlobRef::parse_hex(&blob.hash_hex()).unwrap(), vec![0xab; 32]);
+        assert_eq!(
+            BlobRef::parse_hex(&blob.hash_hex()).unwrap(),
+            vec![0xab; 32]
+        );
         let other = BlobRef::new(BlobHashAlgo::Unknown(7), &[0x01, 0x02], 3, 4).unwrap();
         assert_eq!(other.relative_path(), "algo-7/01/0102");
         assert!(BlobRef::parse_hex("0g").is_err());

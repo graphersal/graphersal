@@ -93,7 +93,10 @@ fn every_copy_path_carries_the_blobs() {
         &graphersal::persist::ReadOptions::new(),
     )
     .unwrap();
-    assert_eq!(loaded.last_commit_seq(), store.graph().read().last_commit_seq());
+    assert_eq!(
+        loaded.last_commit_seq(),
+        store.graph().read().last_commit_seq()
+    );
 
     // Convert (name by name).
     let converted = MemDir::new();

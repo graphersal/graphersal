@@ -6,9 +6,7 @@
 
 use graphersal::persist::{RecoveryTarget, RollbackMode, Store, StoreDir, StoreOptions};
 
-use crate::blob_store_tests::{
-    blob_files, define, name_of, new_store, touch, undefine, write,
-};
+use crate::blob_store_tests::{blob_files, define, name_of, new_store, touch, undefine, write};
 
 fn position(store: &Store) -> u64 {
     store.graph().read().last_commit_seq()

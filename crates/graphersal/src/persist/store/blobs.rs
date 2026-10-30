@@ -17,15 +17,14 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use super::super::codec::{
-    DecodeResult, Reader, crc, crc_append, put_blob_ref, put_svar, put_u32, put_u64,
-    read_blob_ref,
+    DecodeResult, Reader, crc, crc_append, put_blob_ref, put_svar, put_u32, put_u64, read_blob_ref,
 };
 use super::super::error::{PersistError, StoreFailure};
 use super::super::wal::{JournalReader, JournalRecord};
 use super::files::{self, DirPath, EntryKind};
+use crate::graph::Definition;
 use crate::graph::change::{ChangeSet, Mutation};
 use crate::value::vector::embed::sha256::Sha256;
-use crate::graph::Definition;
 use crate::value::{BlobHashAlgo, BlobRef};
 
 /// The directory of a store's blobs (format spec 4.6).
@@ -250,14 +249,15 @@ pub(crate) fn write_blob(
 ) -> Result<Written, PersistError> {
     let io = |what: &'static str| move |err: std::io::Error| PersistError::io(what, err);
     let blobs = root.join(BLOBS_DIR);
-    blobs.create_dir_all().map_err(io("creating the blobs directory"))?;
+    blobs
+        .create_dir_all()
+        .map_err(io("creating the blobs directory"))?;
     let mut tmp = TmpBlob {
         path: blobs.join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7())),
         done: false,
     };
     let mut out = tmp.path.create(true).map_err(io("writing a blob"))?;
-    let (len, check, hash) =
-        copy_measured(reader, &mut out).map_err(io("writing a blob"))?;
+    let (len, check, hash) = copy_measured(reader, &mut out).map_err(io("writing a blob"))?;
     out.sync().map_err(io("writing a blob"))?;
     drop(out);
     let blob = BlobRef::new(BlobHashAlgo::Sha256, &hash, len, check)
@@ -283,7 +283,9 @@ pub(crate) fn write_blob(
     if repaired {
         let _ = target.remove_file();
     }
-    tmp.path.rename_to(&target).map_err(io("moving a blob into place"))?;
+    tmp.path
+        .rename_to(&target)
+        .map_err(io("moving a blob into place"))?;
     tmp.done = true;
     files::sync_dir(&parent)?;
     files::sync_dir(&blobs)?;
@@ -572,7 +574,10 @@ pub(crate) fn commit_deltas(changes: &ChangeSet) -> Vec<(BlobRef, i64)> {
             }
         }
     }
-    deltas.into_values().filter(|(_, delta)| *delta != 0).collect()
+    deltas
+        .into_values()
+        .filter(|(_, delta)| *delta != 0)
+        .collect()
 }
 
 /// Encodes a blob table (format spec 6.2 item 5): `uvar count | (blobref | refs uvar)*`.
@@ -891,7 +896,9 @@ pub(crate) struct Referenced {
 
 impl Referenced {
     fn add(&mut self, blob: &BlobRef) {
-        self.blobs.entry(key_of(blob)).or_insert_with(|| blob.clone());
+        self.blobs
+            .entry(key_of(blob))
+            .or_insert_with(|| blob.clone());
     }
 
     pub(crate) fn contains(&self, key: &BlobKey) -> bool {
@@ -1011,7 +1018,12 @@ pub(crate) fn check_foreign_dir(root: &DirPath) -> Result<(), (String, String)> 
         let path = root.join(&file.name);
         match measure(&path, true) {
             Ok((_, _, Some(sha))) if sha.as_slice() == file.key.1.as_slice() => {}
-            Ok(_) => return Err((file.name.clone(), "its content does not match its hash".into())),
+            Ok(_) => {
+                return Err((
+                    file.name.clone(),
+                    "its content does not match its hash".into(),
+                ));
+            }
             Err(_) => return Err((file.name.clone(), "unreadable".into())),
         }
     }
@@ -1119,7 +1131,8 @@ pub(crate) fn packed_files(
             // A newer version's algorithm: not carried (never read).
             continue;
         }
-        check_blob(root, blob, false).map_err(|err| err.into_persist("export the snapshot", blob))?;
+        check_blob(root, blob, false)
+            .map_err(|err| err.into_persist("export the snapshot", blob))?;
         out.push(super::models::PackedModelFile {
             kind: PACKED_BLOB_KIND,
             name: blob.hash_hex(),
@@ -1139,7 +1152,13 @@ pub(crate) fn packed_blob_ref(
     entry: &super::super::manifest::SegmentEntry,
     table: &[(BlobRef, u64)],
 ) -> Result<BlobRef, PersistError> {
-    let bad = |reason: &str| PersistError::corrupt("packed snapshot", 0, format!("blob row {:?}: {reason}", entry.path));
+    let bad = |reason: &str| {
+        PersistError::corrupt(
+            "packed snapshot",
+            0,
+            format!("blob row {:?}: {reason}", entry.path),
+        )
+    };
     if entry.first_id != "sha256" || !entry.last_id.is_empty() || entry.count != 0 {
         return Err(bad("not a SHA-256 blob row"));
     }
@@ -1176,8 +1195,12 @@ pub(crate) fn install_staged(
         path: staged.clone(),
         done: false,
     };
-    let (len, check, sha) = measure(staged, true).map_err(|err| err.into_persist("import a blob", blob))?;
-    if len != blob.length() || check != blob.crc32c() || sha.as_ref().map(|s| s.as_slice()) != Some(blob.hash()) {
+    let (len, check, sha) =
+        measure(staged, true).map_err(|err| err.into_persist("import a blob", blob))?;
+    if len != blob.length()
+        || check != blob.crc32c()
+        || sha.as_ref().map(|s| s.as_slice()) != Some(blob.hash())
+    {
         return Err(PersistError::corrupt(
             "packed snapshot",
             0,
@@ -1343,7 +1366,13 @@ mod tests {
     use crate::value::{ElementProperty, PropertyMap};
 
     fn blob(n: u8) -> BlobRef {
-        BlobRef::new(BlobHashAlgo::Sha256, &[n; 32], u64::from(n) * 100, u32::from(n)).unwrap()
+        BlobRef::new(
+            BlobHashAlgo::Sha256,
+            &[n; 32],
+            u64::from(n) * 100,
+            u32::from(n),
+        )
+        .unwrap()
     }
 
     fn host(name: &str, blobs: &[BlobRef]) -> Definition {
@@ -1453,6 +1482,61 @@ mod tests {
         assert_eq!(commit_deltas(&changes), vec![(blob(1), -1), (blob(3), 2)]);
     }
 
+    /// Hostile bytes never panic, never allocate beyond the input: tag 21 payloads, ledger
+    /// frames and blob table rows, random and mutated from valid ones.
+    #[test]
+    fn hostile_blob_bytes_are_refused_without_a_panic() {
+        let mut state = 0x5eed_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let mut valid_value = Vec::new();
+        put_value(
+            &mut valid_value,
+            &ElementProperty::Blob(Box::new(blob(3))),
+            &mut InlineKeys,
+        )
+        .unwrap();
+        let valid_ledger = ledger_bytes(&[LedgerFrame {
+            commit_seq: 1,
+            graph_id: 2,
+            blob: blob(3),
+            delta: -4,
+        }]);
+        let mut valid_table = Vec::new();
+        put_table(&mut valid_table, &[(blob(1), 2), (blob(5), 1)]);
+        for case in 0..20_000 {
+            let base: &[u8] = match case % 3 {
+                0 => &valid_value,
+                1 => &valid_ledger,
+                _ => &valid_table,
+            };
+            let mut bytes = if case % 7 == 0 {
+                (0..(next() % 80))
+                    .map(|_| next() as u8)
+                    .collect::<Vec<u8>>()
+            } else {
+                base.to_vec()
+            };
+            for _ in 0..(1 + next() % 4) {
+                if bytes.is_empty() {
+                    break;
+                }
+                let at = next() as usize % bytes.len();
+                bytes[at] = next() as u8;
+            }
+            if next() % 5 == 0 {
+                bytes.truncate(next() as usize % (bytes.len() + 1));
+            }
+            let _ = read_value(&mut Reader::new(&bytes), &InlineKeys, 8);
+            let _ = decode_ledger(&bytes);
+            let _ = read_table(&mut Reader::new(&bytes));
+        }
+    }
+
     /// The merged checkpoint computes the blob table from its whole catalog: the same table a
     /// full encode of the live graph writes.
     #[test]
@@ -1467,8 +1551,7 @@ mod tests {
             )
             .unwrap();
             let set = |d: Definition| {
-                crate::graph::GraphStorage::set_definition(&mut *store.graph().write(), d)
-                    .unwrap();
+                crate::graph::GraphStorage::set_definition(&mut *store.graph().write(), d).unwrap();
             };
             set(host("a", &[blob(1), blob(2)]));
             store.checkpoint(None).unwrap();
@@ -1477,10 +1560,7 @@ mod tests {
             let info = store.checkpoint(None).unwrap();
             let root = DirPath::root(std::sync::Arc::new(dir));
             let (_, newest) = files::list_snapshots(&root).unwrap().pop().unwrap();
-            assert_eq!(
-                newest.file_name(),
-                files::snapshot_name(info.commit_seq)
-            );
+            assert_eq!(newest.file_name(), files::snapshot_name(info.commit_seq));
             super::super::snapshot_dir::read_manifest(&newest)
                 .unwrap()
                 .1

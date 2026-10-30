@@ -1448,7 +1448,7 @@ impl<S: PersistentStorage + Default> Store<S> {
                     blobs::blob_name(&written.blob)
                 ))
                 .field("hash", written.blob.hash_hex())
-                    .field("how", "rewritten"),
+                .field("how", "rewritten"),
             );
         }
         Ok(PendingBlob::new(written.blob, gate, written.new))
@@ -2359,9 +2359,9 @@ impl StoreCore {
         // is damaged); a missing or damaged one is reported, never fails the repair.
         let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
         let mut verified = maintenance::verify(new_dir, None)?;
-        verified.problems.retain(|p| {
-            !(p.path.starts_with("blobs/") && blobs_not_carried.contains(&p.path))
-        });
+        verified
+            .problems
+            .retain(|p| !(p.path.starts_with("blobs/") && blobs_not_carried.contains(&p.path)));
         if !verified.is_ok() {
             return Err(PersistError::store(
                 "repair the store",
@@ -2674,7 +2674,8 @@ impl StoreCore {
             Some((&self.shared.blob_gate, &self.shared.wal)),
         )?;
         self.shared.journal_pruned(&report, bytes);
-        self.shared.journal_collected(report.blobs_removed, report.blob_bytes_removed, "prune");
+        self.shared
+            .journal_collected(report.blobs_removed, report.blob_bytes_removed, "prune");
         if self.shared.options.auto_compact
             && compaction::advise(&self.shared.dir, self.shared.options.compaction, None)?
                 .recommended
@@ -2706,7 +2707,8 @@ impl StoreCore {
             Some((&self.shared.blob_gate, &self.shared.wal)),
         )?;
         self.shared.journal_pruned(&prune, bytes);
-        self.shared.journal_collected(prune.blobs_removed, prune.blob_bytes_removed, "prune");
+        self.shared
+            .journal_collected(prune.blobs_removed, prune.blob_bytes_removed, "prune");
         let compaction = self
             .shared
             .dir
@@ -3568,7 +3570,12 @@ impl Shared {
     /// not count here.
     /// Reports a missing or damaged blob to the system journal (`blob.damaged`, collapsed per
     /// hash and failure): never store damage, nothing freezes.
-    fn report_blob_damage(&self, blob: &crate::value::BlobRef, fault: blobs::BlobFault, found_by: &str) {
+    fn report_blob_damage(
+        &self,
+        blob: &crate::value::BlobRef,
+        fault: blobs::BlobFault,
+        found_by: &str,
+    ) {
         report_blob_damage_to(&self.system_journal, blob, fault, found_by, &[]);
     }
 
@@ -4626,10 +4633,12 @@ impl Shared {
         }
         self.system_journal.emit(
             &catalogue::BLOB_COLLECTED,
-            Event::new(format!("{count} unreferenced blob(s) removed ({bytes} bytes) by {by}"))
-                .count("count", count)
-                .count("bytes", bytes)
-                .field("by", by),
+            Event::new(format!(
+                "{count} unreferenced blob(s) removed ({bytes} bytes) by {by}"
+            ))
+            .count("count", count)
+            .count("bytes", bytes)
+            .field("by", by),
         );
     }
 
@@ -4654,7 +4663,9 @@ impl Shared {
         let stale = self.wal.ledger_stale.load(Ordering::Acquire);
         match blobs::collect(&self.dir, &chain, stale, Some(&self.blob_gate)) {
             Ok(collected) => self.journal_collected(collected.count, collected.bytes, by),
-            Err(err) => tracing::warn!("blob collection after {by} failed (the next prune collects): {err}"),
+            Err(err) => {
+                tracing::warn!("blob collection after {by} failed (the next prune collects): {err}")
+            }
         }
     }
 

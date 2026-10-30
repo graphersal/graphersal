@@ -90,7 +90,6 @@ pub use store::{
 };
 pub use store::{NotScheduledJob, UserJobs};
 
-
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 pub use store::StoredEmbedders;
 
