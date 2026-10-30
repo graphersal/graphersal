@@ -9,6 +9,14 @@ the process memory ceiling checks (queries, loads, store opens, checkpoints, ...
 asks whether an allocation fits (`exec::check_memory_for`, `exec::memory_room`) is described in
 [What the ceiling covers](resource_limits.md#what-the-ceiling-covers).
 
+Three different figures, two limits, never mixed:
+
+| Figure | What it is | Against |
+|---|---|---|
+| the graph's footprint (`g.memory_usage()`, below) | an estimate of the graph's own data | nothing: no percentage |
+| the process memory bar (playground Statistics tab and Optimize -> Memory, REPL `/memory`, `/api/statistics`) | the whole process (tracked live heap), split into structure, properties, compressed, indexes, models and other | the process ceiling `memory.limit` ([Seeing how full the process is](resource_limits.md#seeing-how-full-the-process-is)) |
+| a query's peak (`query_memory` of a profile, "Peak memory" in the playground's Profile panel) | the most one execution held at once | the per-query limit `traversal.max_materialized_bytes` |
+
 ## `graph.memory_usage()`
 
 ```rhai,graph=modern

@@ -74,6 +74,7 @@ catalogue as the [playground](web_playground.md)'s query editor: the engine's ow
 | `/set max-rows <n>`, `/set max-items <n>`, `/set no-limit` | the [display limits](displaying_results.md) |
 | `/set spelling <snake\|camel>` | the spelling of completion, help, `.profile()` and errors |
 | `/set max-operations <n>`, ..., `/set safe-limits` | the [script limits](resource_limits.md) (`/help set` lists them) |
+| `/memory [max_elements]` | the [process memory bar](resource_limits.md#seeing-how-full-the-process-is) (used of the ceiling, its source, the percentage, the segments), then the graph's memory report per label and property (with a number: sampled) |
 | `/exit` (or Ctrl-D) | close the graph and leave |
 
 `--graph` takes:

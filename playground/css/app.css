@@ -37,6 +37,13 @@
   --graph-selected: #e0791f;
   --ai-accent: #7a4fd6; /* the AI Chat tabs */
   --ai-soft: #f1ebfd;
+  /* The process memory bar's segments (components/memory-bar.js). */
+  --mem-structure: #3b6fd4;
+  --mem-properties: #2a9d8f;
+  --mem-compressed: #8a5cc7;
+  --mem-indexes: #c98a12;
+  --mem-models: #c94f7c;
+  --mem-other: #9aa3b2;
   --radius: 6px;
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -82,6 +89,12 @@
     --graph-selected: #ffab70;
     --ai-accent: #b69cff;
     --ai-soft: #2a2244;
+    --mem-structure: #6c9eff;
+    --mem-properties: #4fc1b3;
+    --mem-compressed: #b69cff;
+    --mem-indexes: #e3b341;
+    --mem-models: #f08fb5;
+    --mem-other: #5d6879;
     color-scheme: dark;
   }
 }
@@ -122,6 +135,12 @@
   --graph-selected: #ffab70;
   --ai-accent: #b69cff;
   --ai-soft: #2a2244;
+  --mem-structure: #6c9eff;
+  --mem-properties: #4fc1b3;
+  --mem-compressed: #b69cff;
+  --mem-indexes: #e3b341;
+  --mem-models: #f08fb5;
+  --mem-other: #5d6879;
   color-scheme: dark;
 }
 
@@ -1827,3 +1846,20 @@ input.ve-null { color: var(--text-muted); }
 .op-applied { background: var(--ok-soft); }
 .op-dismissed { margin-top: 10px; }
 .op-dismissed summary { cursor: pointer; color: var(--text-muted); }
+
+/* The process memory bar (components/memory-bar.js): Statistics tab and Optimize -> Memory. */
+.mem-bar { margin: 6px 0 10px; max-width: 720px; min-width: 0; }
+.mem-bar-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.mem-bar-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+.mem-bar-pct.mem-normal { color: var(--ok); }
+.mem-bar-pct.mem-amber { color: var(--warn); }
+.mem-bar-pct.mem-red { color: var(--danger); }
+.mem-bar-track { display: flex; height: 12px; margin: 4px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.mem-bar-seg { display: block; height: 100%; flex: none; }
+.mem-bar-seg + .mem-bar-seg { box-shadow: inset 1px 0 0 var(--surface); }
+.mem-bar-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; }
+.mem-bar-legend li { white-space: nowrap; }
+.mem-bar-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.mem-bar-note { margin: 2px 0; font-size: 12px; }
+.profile-peak.mem-amber b { color: var(--warn); }
+.profile-peak.mem-red b { color: var(--danger); }

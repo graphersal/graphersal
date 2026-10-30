@@ -3249,6 +3249,41 @@ mod tests {
         assert!(memory["rssBytes"].as_u64().unwrap() > 0, "{stats}");
     }
 
+    /// `add_to_statistics` adds the ceiling bar to `process.memory`: used, limit, source,
+    /// percentage and the segments of the graph's own footprint.
+    #[test]
+    fn statistics_carry_the_ceiling_and_segments() {
+        let mut stats = modern().statistics().unwrap();
+        graphersal::exec::memory_limit_scope(1 << 30, || {
+            crate::process::add_to_statistics(&mut stats)
+        });
+        let memory = &stats["process"]["memory"];
+        assert!(memory["source"].is_string(), "old keys kept: {memory}");
+        assert_eq!(memory["limitBytes"], json!(1u64 << 30), "{memory}");
+        assert!(memory["limitSource"].is_string(), "{memory}");
+        let used = memory["usedBytes"].as_u64().unwrap();
+        let percent = memory["usedPercent"].as_f64().unwrap();
+        assert!(
+            (percent - used as f64 / (1u64 << 30) as f64 * 100.0).abs() < 0.1,
+            "{memory}"
+        );
+        let segments = memory["segments"].as_array().unwrap();
+        let names: Vec<&str> = segments
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(&names[..2], ["structure", "properties"], "{memory}");
+        let graph = &stats["memory"];
+        assert_eq!(
+            segments[0]["bytes"].as_u64().unwrap(),
+            graph["structure_bytes"].as_u64().unwrap() + graph["index_bytes"].as_u64().unwrap()
+        );
+        // Without a tracking allocator (this test binary) the used figure is the known part.
+        if memory["usedTracked"] == json!(false) {
+            assert_eq!(used, graph["total_bytes"].as_u64().unwrap(), "{memory}");
+        }
+    }
+
     /// The host's embedders reach every run: the `embed` step (also inside the MCP read-only
     /// authorizer), `embed(text)` and `g.embedders()`; the default session has `hash-ngram/1`.
     #[test]
