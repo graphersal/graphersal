@@ -6585,3 +6585,36 @@ fn a_read_only_server_refuses_every_write_and_writes_nothing() {
     assert!(std::fs::read(&data).unwrap() == bytes, "the store changed");
     let _ = std::fs::remove_file(&data);
 }
+
+#[test]
+fn max_materialized_bytes_is_a_session_preset() {
+    let ui = ui_dir("max-materialized-bytes");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--max-materialized-bytes",
+        "1024",
+    ]);
+    let port = server.port;
+    let presets = get(port, "/api/info").json()["presets"].clone();
+    assert_eq!(
+        presets["options"]["traversal.max_materialized_bytes"], 1024,
+        "{presets}"
+    );
+    let message = diagnostic(&execute(
+        port,
+        "g.v().both().both().both().fold().next().len()",
+    ));
+    assert!(
+        message.contains("traversal.max_materialized_bytes"),
+        "{message}"
+    );
+    // A query's own value overrides the preset.
+    let own = execute(
+        port,
+        r#"g.with("traversal.max_materialized_bytes", 1 << 30).v().both().both().both().fold().next().len()"#,
+    );
+    assert_eq!(own["ok"], true, "{own}");
+}

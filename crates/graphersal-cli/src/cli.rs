@@ -474,6 +474,11 @@ OPTIONS:
         --max-traversers <N>   Default traversal.max_traversers: traversers one step may leave
                            alive (the library default is 10M; this tool defaults to unlimited).
                            For the four --max-* script limits and this one, 0 means unlimited.
+        --max-materialized-bytes <N>
+                           Default traversal.max_materialized_bytes: the per-query memory
+                           limit, the estimated size of one value or buffer a query
+                           materializes (the library default, 1 GiB, applies without it; 0
+                           means unlimited). A query's own g.with(...) overrides it.
         --max-value-depth <N>  Deepest nesting of arrays and maps in one value, for script
                            values (script.max_value_depth) and engine-built values
                            (traversal.max_value_depth); default 128, 0 means the default.
@@ -501,7 +506,8 @@ OPTIONS:
                            the graph lives in memory and "Save to file" writes it back to a
                            --graph file on request. The limit options
                            above (--timeout, --memory-limit, --memory-headroom, --safe-limits,
-                           --max-operations, --max-traversers, ...) apply to every query it
+                           --max-operations, --max-traversers, --max-materialized-bytes, ...)
+                           apply to every query it
                            runs; the display options (--format, --max-rows, --max-items,
                            --no-limit, --spelling) are refused (the UI sets them per query).
                            Store warnings (a failed automatic checkpoint, damage found) go
@@ -1184,6 +1190,9 @@ pub struct Cli {
     pub max_map_size: Option<usize>,
     /// `--max-traversers`: the `traversal.max_traversers` default of the session.
     pub max_traversers: Option<u64>,
+    /// `--max-materialized-bytes`: the `traversal.max_materialized_bytes` default of the
+    /// session; `0` means unlimited.
+    pub max_materialized_bytes: Option<u64>,
     /// `--max-value-depth`: `ScriptLimits::max_value_depth` and the `traversal.max_value_depth`
     /// default of the session; `0` means the default.
     pub max_value_depth: Option<usize>,
@@ -1274,6 +1283,7 @@ impl Default for Cli {
             max_array_size: None,
             max_map_size: None,
             max_traversers: None,
+            max_materialized_bytes: None,
             max_value_depth: None,
             spelling: Spelling::default(),
             memory_limit: None,
@@ -1488,6 +1498,10 @@ impl Cli {
                 }
                 "--max-traversers" => {
                     cli.max_traversers = Some(parse_count("--max-traversers", &value(&mut args)?)?)
+                }
+                "--max-materialized-bytes" => {
+                    cli.max_materialized_bytes =
+                        Some(parse_count("--max-materialized-bytes", &value(&mut args)?)?)
                 }
                 "--max-value-depth" => {
                     cli.max_value_depth =
@@ -1743,11 +1757,12 @@ impl Cli {
         limits
     }
 
-    /// The traversal budget of the session: `--timeout`, `--max-traversers` and
-    /// `--max-value-depth`.
+    /// The traversal budget of the session: `--timeout`, `--max-traversers`,
+    /// `--max-materialized-bytes` and `--max-value-depth`.
     pub fn budget(&self) -> ScriptBudget {
         ScriptBudget::new(self.timeout_ms)
             .with_max_traversers(self.traversal_max_traversers())
+            .with_max_materialized_bytes(self.traversal_max_materialized_bytes())
             .with_max_value_depth(self.max_value_depth)
             .with_max_string_bytes(self.traversal_max_string_bytes())
     }
@@ -1775,6 +1790,16 @@ impl Cli {
             Some(n) => Some(i64::try_from(n).unwrap_or(i64::MAX)),
             None if self.safe_limits => None,
             None => Some(i64::MAX),
+        }
+    }
+
+    /// The `traversal.max_materialized_bytes` default of the session from
+    /// `--max-materialized-bytes` (`0` is unlimited); `None` (not given) keeps the engine
+    /// default.
+    pub fn traversal_max_materialized_bytes(&self) -> Option<i64> {
+        match self.max_materialized_bytes? {
+            0 => Some(i64::MAX),
+            n => Some(i64::try_from(n).unwrap_or(i64::MAX)),
         }
     }
 
@@ -1828,6 +1853,7 @@ pub struct ScriptBudget {
     limit: Option<Duration>,
     started: Arc<Mutex<Option<Instant>>>,
     max_traversers: Option<i64>,
+    max_materialized_bytes: Option<i64>,
     max_value_depth: Option<i64>,
     max_string_bytes: Option<i64>,
 }
@@ -1839,6 +1865,7 @@ impl ScriptBudget {
             limit: limit_ms.map(Duration::from_millis),
             started: Arc::new(Mutex::new(None)),
             max_traversers: None,
+            max_materialized_bytes: None,
             max_value_depth: None,
             max_string_bytes: None,
         }
@@ -1847,6 +1874,13 @@ impl ScriptBudget {
     /// Sets the session default of `traversal.max_traversers` (`None` keeps the engine default).
     pub fn with_max_traversers(mut self, max: Option<i64>) -> Self {
         self.max_traversers = max;
+        self
+    }
+
+    /// Sets the session default of `traversal.max_materialized_bytes` (`None` keeps the engine
+    /// default).
+    pub fn with_max_materialized_bytes(mut self, max: Option<i64>) -> Self {
+        self.max_materialized_bytes = max;
         self
     }
 
@@ -1878,6 +1912,12 @@ impl ScriptBudget {
         }
         if let Some(max) = self.max_traversers {
             options.push(("traversal.max_traversers", ElementProperty::from(max)));
+        }
+        if let Some(max) = self.max_materialized_bytes {
+            options.push((
+                "traversal.max_materialized_bytes",
+                ElementProperty::from(max),
+            ));
         }
         if let Some(max) = self.max_value_depth {
             options.push(("traversal.max_value_depth", ElementProperty::from(max)));

@@ -678,6 +678,7 @@ pub fn session_presets(cli: &Cli) -> SessionPresets {
     if cli.max_traversers.is_some() || cli.safe_limits {
         budget = budget.with_max_traversers(cli.traversal_max_traversers());
     }
+    budget = budget.with_max_materialized_bytes(cli.traversal_max_materialized_bytes());
     if cli.max_string_size.is_some() || cli.safe_limits {
         budget = budget.with_max_string_bytes(cli.traversal_max_string_bytes());
     }

@@ -133,7 +133,7 @@ graphersal --memory-limit 2000000000 -e 'g.v().count().next()'  # process memory
 graphersal --memory-limit none -e 'g.v().count().next()'        # no process memory ceiling
 graphersal --safe-limits -e 'g.v().count().next()'               # the library's SAFE script limits
 graphersal --max-operations 1000 -e 'let n = 0; loop { n += 1; }' # stops with "Resource limit 'script.max_operations'"
-graphersal --max-traversers 1000000 --max-value-depth 64 -e 'g.v().count().next()'  # also --max-string-size, --max-array-size, --max-map-size
+graphersal --max-traversers 1000000 --max-value-depth 64 -e 'g.v().count().next()'  # also --max-string-size, --max-array-size, --max-map-size, --max-materialized-bytes
 ```
 
 Exit codes: `0` ok, `1` the script failed (diagnostic on stderr), the `--graph` data violates
