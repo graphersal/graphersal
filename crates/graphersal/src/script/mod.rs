@@ -87,7 +87,7 @@ pub use eval::{
     eval, eval_value, eval_value_atomic, eval_value_dry_run, eval_value_with_limits,
     eval_value_with_params, eval_value_with_positional_params, eval_with_params,
     eval_with_positional_params, graph_scope, graph_scope_with_options, map_eval_error,
-    materialize_traversals,
+    materialize_traversals, with_traversal_presets,
 };
 pub use execution::{ScriptExecution, metrics_to_map};
 #[cfg(feature = "persist")]
