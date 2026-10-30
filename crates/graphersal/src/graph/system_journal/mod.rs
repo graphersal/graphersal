@@ -521,6 +521,13 @@ pub enum JournalError {
         /// What is wrong.
         reason: String,
     },
+    /// The process memory ceiling refused reading a segment whole.
+    #[error("the system journal could not be read under the memory ceiling: {reason}")]
+    #[non_exhaustive]
+    MemoryLimit {
+        /// The refusal.
+        reason: String,
+    },
     /// The operation is not supported here.
     #[error("the system journal does not support {operation}")]
     #[non_exhaustive]
@@ -545,6 +552,10 @@ impl JournalError {
             JournalError::Damaged { .. } => {
                 "Damaged journal records are skipped; `graphersal store verify` lists them as \
                  notes. The store's data is not affected."
+            }
+            JournalError::MemoryLimit { .. } => {
+                "The process memory ceiling refused reading a journal segment whole: free memory \
+                 or raise the ceiling (book page \"Resource Limits\"), then ask again."
             }
             JournalError::Unsupported { .. } => {
                 "This journal cannot do that here (an in-memory journal has no files)."

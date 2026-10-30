@@ -323,6 +323,10 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
             reached_end: true,
             clock_floor: snapshot_time,
         };
+        // The growth check of the replay: a WAL can grow the graph past the ceiling during an
+        // open (every 4096 replayed mutations and at the end).
+        let operation = options.operation.unwrap_or(RECOVERY_OPERATION);
+        let mut budget = crate::traversal::memory_budget::UnitBudget::start(&*graph, operation)?;
         let mut stopped = matches!(target, RecoveryTarget::CommitSeq(seq) if seq == snapshot_seq);
         let mut mark_found = false;
         let journal_count = journals.len();
@@ -332,7 +336,8 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 break;
             }
             let mut reader = JournalReader::open(source, index, depth)?
-                .with_newer_schema(options.newer_schema.clone());
+                .with_newer_schema(options.newer_schema.clone())
+                .with_operation(operation);
             let lineage = if based {
                 graph.graph_id()
             } else {
@@ -424,6 +429,11 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                             };
                             PersistError::corrupt(format!("journal {index}"), offset, reason)
                         })?;
+                        crate::traversal::memory_budget::tick_n(
+                            &mut budget,
+                            &*graph,
+                            changes.mutations().len(),
+                        )?;
                         report.commit_seq = seq;
                         report.committed_at = changes.committed_at();
                         report.commits_replayed += 1;
@@ -478,6 +488,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 report.torn_tail = Some(torn);
             }
         }
+        crate::traversal::memory_budget::check(&budget, &*graph)?;
         report.reached_end = !stopped;
         match &target {
             RecoveryTarget::CommitSeq(seq) if report.commit_seq < *seq => {
@@ -504,6 +515,10 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
         Ok(report)
     }
 }
+
+/// What the memory checks of a replay name (`GraphError::ResourceLimitExceeded`) unless the
+/// options name another operation (a Store open, a checkpoint).
+pub(crate) const RECOVERY_OPERATION: &str = "recovery";
 
 /// Recovers a graph from a packed snapshot and the journals written after it, up to `target`
 /// (see [`Recovery`] for the rules and for a recovery without a snapshot).

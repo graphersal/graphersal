@@ -53,6 +53,26 @@ def test_load_refuses_a_damaged_file_and_a_too_small_memory_limit(tmp_path):
     assert err.value.help
 
 
+def test_store_open_refuses_a_graph_over_the_ceiling(tmp_path):
+    path = str(tmp_path / "s")
+    store = graphersal.Store.create(path)
+    store.graph.execute(
+        'for i in 0..500 { g.addV("person").property("name", `p${i}`).iterate(); }'
+    )
+    store.checkpoint()
+    store.close()
+    # A graph that does not fit refuses the open (nothing opened, never maintenance mode).
+    try:
+        graphersal.set_memory_limit(1)
+        with pytest.raises(graphersal.GraphersalError) as err:
+            graphersal.Store.open(path)
+        assert "store open" in str(err.value)
+    finally:
+        graphersal.set_memory_limit("auto")
+    with graphersal.Store.open(path) as store:
+        assert store.graph.query("g.V().count().next()") == 500
+
+
 def test_journal_marks_and_recovery_to_each_target(tmp_path):
     snapshot = str(tmp_path / "base.gsnap")
     journal = str(tmp_path / "g.wal")

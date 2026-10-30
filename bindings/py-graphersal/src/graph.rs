@@ -367,15 +367,9 @@ impl Graph {
         default_embedder: Option<&str>,
     ) -> PyResult<Self> {
         let registry = registry_of(embedders, default_embedder)?;
-        let mut options = persist::ReadOptions::new();
-        // The process memory ceiling also refuses a snapshot whose size estimate exceeds it,
-        // before any element is read.
-        if let Some(bytes) = graphersal::exec::memory_limit()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            .bytes()
-        {
-            options = options.with_memory_limit(bytes);
-        }
+        // The engine checks the process memory ceiling itself: a snapshot whose size estimate
+        // exceeds it is refused before any element is read.
+        let options = persist::ReadOptions::new();
         let source = path.to_string();
         let graph = py
             .detach(move || -> Result<_, String> {

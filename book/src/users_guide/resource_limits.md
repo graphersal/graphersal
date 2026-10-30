@@ -20,7 +20,7 @@ all of them with two kinds of limit, both reported as one error,
 | | `evaluationTimeout` | none | wall-clock budget, see [Query Limits](query_limits.md) |
 | | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) on an edge or a path pattern |
 | | `bulk.max_expansion` | 10 000 000 | values one bulk expansion may materialize |
-| Process (`exec::set_memory_limit`) | `memory.limit` | on: cgroup limit minus headroom, else 80 % of RAM (3.5 GiB on wasm32) | memory in use by the whole process (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set and at every outermost commit; NOT a `g.with()` option, see [the process memory ceiling](#the-process-memory-ceiling) |
+| Process (`exec::set_memory_limit`) | `memory.limit` | on: cgroup limit minus headroom, else 80 % of RAM (3.5 GiB on wasm32) | memory in use by the whole process (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set, at every outermost commit, and before every allocation proportional to data (loads, store opens, recovery, checkpoints, backup verifies; see [what the ceiling covers](#what-the-ceiling-covers)); NOT a `g.with()` option, see [the process memory ceiling](#the-process-memory-ceiling) |
 
 A `0` for any of the four script counters means *unlimited*; the call depth and the value depth
 are never unlimited because they protect the native stack of the thread (`0` reads as the
@@ -246,9 +246,53 @@ host advice as a traversal's. The measure is the one above: the live heap with a
 allocator, else the footprint when the unit started plus the elements it added. Only a unit that
 **grew** that measure is stopped, so a unit that only removes or rewrites data commits even on a
 graph that is already over the ceiling. With the ceiling turned off (`none`) nothing is paid: no
-footprint, no check. Loading a graph nobody sees yet (`GraphSource::from_graphml`,
-`from_graphson`, `GraphSONImport::load`, a snapshot or store load) is not checked yet; the next
-traversal is.
+footprint, no check.
+
+### What the ceiling covers
+
+Every allocation whose size is proportional to data checks the ceiling, BEFORE it allocates when
+the size is known up front, otherwise every 4096 elements and at the end. Nothing is half-written:
+a refused open changes nothing on disk, a refused load drops the half-built graph, a refused
+checkpoint leaves the store as it was.
+
+| Operation (the error's `operation`) | Check |
+|---|---|
+| traversals | step boundaries, bulk expansions, materializing steps (above) |
+| `product()` | its estimated size against `traversal.max_materialized_bytes` and the ceiling before the pairs are built; the `evaluationTimeout` is checked while they are |
+| imports, `apply_change_set`, commits | every 4096 elements and at the end, rolled back (above) |
+| `snapshot load` (`read_snapshot*`, Python `Graph.load`) | the snapshot header's estimate of the graph (plus the live heap when tracked) BEFORE anything is read: `PersistError::MemoryBudget`; while the graph is built every 4096 elements, each segment and its decoded chunks before they are read |
+| `store open` (`Store::open`, CLI `--graph <store>`, dev server, Python `Store.open`) | the same, plus the replay of the WAL after the snapshot: a graph that does not fit refuses the open, naming the minimum to raise to. Never maintenance mode, never read-only instead |
+| `recovery` (`Recovery`, past states, read-only views) | every WAL record before it is read, the replay every 4096 mutations |
+| `store read` | a whole store file or range read into memory (an `io::Error` of kind `OutOfMemory` inside `PersistError::Io`) |
+| `checkpoint`, `snapshot write` | the encoder's id index (24 bytes per element) and one chunk before they are allocated; a merged checkpoint's chunks and its delta graph |
+| `maintenance copy` | the copy of a salvaged graph (twice the graph) |
+| `backup verify` | every metadata entry of a ZIP backup read back whole |
+| `GraphSON load`, `GraphML load` (`GraphSource::from_graphson*`, `from_graphml*`, `GraphSONImport::load`) | every 4096 elements and at the end; without a tracking allocator the size is estimated by the bytes of text read so far |
+| `embed_property` | the id collection before it starts |
+
+Two errors tell when a persisted graph was refused: `PersistError::MemoryBudget` (the estimate
+did not fit: refused before reading; its `setting` is `memory.limit`, or
+`ReadOptions::with_memory_limit` when that stricter per-read bound was lower) and
+`PersistError::Graph(GraphError::ResourceLimitExceeded { .. })` (the estimate passed, but the
+data grew past the ceiling while it was read). Both name the operation and the setting to raise;
+`ResourceLimitExceeded` carries `needed` (the bytes a check before an allocation asked for) and
+`observed` (what was in use plus that: the smallest ceiling that would have passed). The
+manifest's estimate is the graph's footprint when it was written, so a graph just at the ceiling
+can be refused (or pass and then stop while loading).
+
+A host that allocates data-proportional memory itself (a model it loads, a buffer it fills) asks
+first:
+
+```rust
+use graphersal::exec;
+
+exec::check_memory_for("model load", 64 << 20).unwrap(); // 64 MiB more: fits?
+let room = exec::memory_room().unwrap();                  // ceiling, source, live heap, room left
+println!("{:?} bytes left", room.available());
+```
+
+`check_memory_for` compares the live heap plus the bytes with a tracking allocator, else only
+the bytes (the rest of the process is not seen).
 
 ## Strings built by steps
 

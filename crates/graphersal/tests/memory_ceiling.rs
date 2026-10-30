@@ -183,3 +183,65 @@ fn a_thread_scope_lowers_the_process_ceiling() {
         "{err:?}"
     );
 }
+
+/// A Store whose graph does not fit under the PROCESS ceiling refuses the open before any
+/// element is read, and its help names the minimum to raise the ceiling to (tracked: the live
+/// heap plus the graph's estimate). The same store opens once the ceiling is raised.
+#[test]
+#[cfg(feature = "persist")]
+fn a_store_open_over_the_process_ceiling_names_the_minimum_needed() {
+    use graphersal::error::DiagnosticError;
+    use graphersal::persist::{MemDir, PersistError, Store, StoreDir, StoreOptions};
+    let _guard = exclusive();
+    let dir: std::sync::Arc<dyn StoreDir> = std::sync::Arc::new(MemDir::named("ceiling-open"));
+    let mut graph = TraversalGraph::new();
+    for i in 0..2000 {
+        graph
+            .traversal_mut()
+            .add_v("person")
+            .property("name", format!("person {i}"))
+            .iterate()
+            .unwrap();
+    }
+    let options = || StoreOptions::new().with_checkpoint_after_bytes(0);
+    Store::create_with(&dir, graph, options())
+        .unwrap()
+        .close()
+        .unwrap();
+    let live = graphersal::exec::memory_room().unwrap().live_bytes();
+    assert_eq!(live.is_some(), tracked());
+    // A ceiling just above what the process holds now: the graph does not fit.
+    let ceiling = live.unwrap_or(0) + 10_000;
+    exec::set_memory_limit(MemoryLimit::Bytes(ceiling)).unwrap();
+    let err = match Store::open(&dir, options()) {
+        Err(err) => err,
+        Ok(_) => panic!("the open was not refused"),
+    };
+    let PersistError::MemoryBudget {
+        needed,
+        limit,
+        operation,
+        in_use,
+        setting,
+        ..
+    } = &err
+    else {
+        panic!("expected MemoryBudget, got {err:?}");
+    };
+    assert_eq!(
+        (*operation, *setting, *limit),
+        ("store open", "memory.limit", ceiling)
+    );
+    assert_eq!(in_use.is_some(), tracked());
+    let minimum = in_use.unwrap_or(0) + needed;
+    let help = err.help().unwrap();
+    assert!(
+        help.contains(&format!("at least {minimum} bytes")),
+        "{help}"
+    );
+    assert!(help.contains("--memory-limit"), "{help}");
+    exec::set_memory_limit(MemoryLimit::Bytes(minimum.max(ceiling) * 4 + (64 << 20))).unwrap();
+    let store = Store::open(&dir, options()).unwrap();
+    assert_eq!(store.graph().read().vertex_count(), 2000);
+    store.close().unwrap();
+}

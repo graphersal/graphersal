@@ -3769,8 +3769,13 @@ fn checkpoint_loop(shared: &Shared) {
     }
 }
 
+/// What the memory checks of a Store open name.
+const STORE_OPEN_OPERATION: &str = "store open";
+
 /// Whether a load failure is damage (maintenance mode) rather than a refusal (a version, a
-/// memory limit, a lock).
+/// memory limit, a lock). A graph that does not fit under the process memory ceiling
+/// (`MemoryBudget` before reading, `Graph(ResourceLimitExceeded)` while reading, an `Io` of
+/// kind `OutOfMemory` from a store read) is a refusal: never maintenance mode.
 fn is_damage(err: &PersistError) -> bool {
     match err {
         PersistError::Corrupt { .. }
@@ -3783,6 +3788,7 @@ fn is_damage(err: &PersistError) -> bool {
                 | std::io::ErrorKind::UnexpectedEof
         ),
         PersistError::NotAStore { reason, .. } => reason.contains("no snapshot"),
+        PersistError::Graph(crate::error::GraphError::ResourceLimitExceeded { .. }) => false,
         PersistError::Graph(_) => true,
         _ => false,
     }
@@ -4020,6 +4026,9 @@ fn load_latest(
     let newer = super::snapshot::NewerContent::default();
     let mut read = options.read.clone();
     read.newer_schema = Some(newer.clone());
+    // A graph that does not fit refuses the open (nothing opened, nothing written; never
+    // maintenance mode: `is_damage`).
+    read.operation = Some(STORE_OPEN_OPERATION);
     let plan = LoadPlan {
         snapshot: snapshot_path.clone(),
         journals: replay

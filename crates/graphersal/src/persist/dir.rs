@@ -328,6 +328,12 @@ impl DirCheck {
     }
 }
 
+/// The operation a whole read of a store file (or a range of it) names when the process memory
+/// ceiling refuses it: an `io::Error` of kind `OutOfMemory` carrying a
+/// `GraphError::ResourceLimitExceeded`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const STORE_READ: &str = "store read";
+
 /// Checks a store name (see the module documentation): relative, `/`-separated, no empty,
 /// `.` or `..` part, no `\`, `:` or NUL. The empty name is the root. Used by the native
 /// backends only (`FsDir`, `SingleFileDir`).
@@ -522,6 +528,20 @@ mod fs_dir {
 
         fn read_range(&self, name: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
             let mut file = File::open(self.at(name)?)?;
+            // The range must lie in the file before anything is allocated for it (a length
+            // from damaged metadata never allocates), and the bytes must fit under the memory
+            // ceiling.
+            let file_len = file.metadata()?.len();
+            if offset
+                .checked_add(len as u64)
+                .is_none_or(|end| end > file_len)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("{name} is shorter than {offset} + {len} bytes"),
+                ));
+            }
+            crate::traversal::memory_budget::ensure_room_io(STORE_READ, len as u64)?;
             file.seek(SeekFrom::Start(offset))?;
             let mut bytes = vec![0u8; len];
             file.read_exact(&mut bytes)?;
@@ -799,6 +819,41 @@ mod fs_dir {
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             path
+        }
+
+        /// A range past the end of the file fails before anything is allocated for it (a
+        /// length from damaged metadata, even `usize::MAX`), and a range in the file that does
+        /// not fit under the memory ceiling is refused with `OutOfMemory` naming the operation.
+        #[test]
+        fn read_range_past_the_end_never_allocates() {
+            let root = temp("range");
+            let dir = FsDir::new(&root);
+            dir.write_atomic("file", b"0123456789").unwrap();
+            assert_eq!(dir.read_range("file", 2, 3).unwrap(), b"234");
+            for (offset, len) in [(0, 11), (8, 3), (u64::MAX, 1), (0, usize::MAX)] {
+                let err = dir.read_range("file", offset, len).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{offset} + {len}");
+            }
+            let err = crate::traversal::memory_limit::memory_limit_scope(4, || {
+                dir.read_range("file", 0, 10)
+            })
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
+            let inner = err
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<crate::error::GraphError>());
+            assert!(
+                matches!(
+                    inner,
+                    Some(crate::error::GraphError::ResourceLimitExceeded {
+                        operation: "store read",
+                        needed: Some(10),
+                        ..
+                    })
+                ),
+                "{err}"
+            );
+            let _ = fs::remove_dir_all(&root);
         }
 
         /// The copy fallback of a cross-device move (exercised on one device here), and its

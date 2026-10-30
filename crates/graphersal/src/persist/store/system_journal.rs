@@ -436,7 +436,20 @@ fn resync(bytes: &[u8], from: usize) -> Option<usize> {
     None
 }
 
+/// What the memory check of a whole journal segment read names.
+const JOURNAL_READ: &str = "system journal read";
+
+/// A whole segment: refused when larger than [`MAX_SEGMENT_READ`], and checked against the
+/// process memory ceiling before it is read (an `OutOfMemory` I/O error carrying the refusal).
 fn read_segment(path: &DirPath) -> std::io::Result<Vec<u8>> {
+    let len = path.len()?;
+    if len > MAX_SEGMENT_READ {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("a journal segment of {len} bytes (larger than {MAX_SEGMENT_READ})"),
+        ));
+    }
+    crate::traversal::memory_budget::ensure_room_io(JOURNAL_READ, len)?;
     files::read_bounded(path, MAX_SEGMENT_READ)
 }
 
@@ -648,6 +661,12 @@ impl PersistedReader for StoredReader {
             }
             let bytes = match read_segment(path) {
                 Ok(bytes) => bytes,
+                // The memory ceiling refuses the read: the query fails (no partial answer).
+                Err(err) if err.kind() == std::io::ErrorKind::OutOfMemory => {
+                    return Err(JournalError::MemoryLimit {
+                        reason: format!("{}: {err}", path.relative_to(&self.root)),
+                    });
+                }
                 Err(err) => {
                     notes.push(format!("{}: {err}", path.relative_to(&self.root)));
                     continue;
@@ -728,7 +747,9 @@ pub(crate) fn open_journal(options: OpenJournal<'_>) -> Arc<SystemJournal> {
             }
             Err(err) => {
                 tracing::warn!(%err, "the newest system journal segment is not readable");
-                next_seq = next_seq.max(first.saturating_add(1));
+                // Never reuse a seq: past the most frames the segment can hold.
+                let frames = path.len().unwrap_or(0) / JOURNAL_FRAME_BYTES as u64;
+                next_seq = next_seq.max(first.saturating_add(frames).saturating_add(1));
             }
         }
     }

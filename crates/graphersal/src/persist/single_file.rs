@@ -1069,7 +1069,7 @@ impl Open {
         headers.sort_by_key(|h| std::cmp::Reverse(h.generation));
         let mut base = None;
         for header in &headers {
-            match read_table(&file, phys_len, header) {
+            match read_table(&file, phys_len, header)? {
                 Ok(tree) => {
                     base = Some((*header, tree));
                     break;
@@ -1255,22 +1255,34 @@ impl Open {
     }
 }
 
-/// Reads and decodes the table a header points at.
-fn read_table(file: &File, limit: u64, header: &Header) -> Result<Tree, String> {
-    let head = match read_head(file, header.table_at, limit).map_err(|e| e.to_string())? {
-        Head::Frame(frame) => frame,
-        _ => return Err("no valid record where the header points".into()),
+/// Reads and decodes the table a header points at. The outer `Err` is a refusal by the process
+/// memory ceiling (the table does not fit; never damage: the open fails with it), the inner one
+/// a damaged table.
+fn read_table(file: &File, limit: u64, header: &Header) -> io::Result<Result<Tree, String>> {
+    let head = match read_head(file, header.table_at, limit) {
+        Ok(Head::Frame(frame)) => frame,
+        Ok(_) => return Ok(Err("no valid record where the header points".into())),
+        Err(err) => return Ok(Err(err.to_string())),
     };
     if head.kind != KIND_TABLE || head.seq != header.table_seq || head.total != header.table_len {
-        return Err("the record the header points at is not its table".into());
+        return Ok(Err(
+            "the record the header points at is not its table".into()
+        ));
     }
-    let len = usize::try_from(head.payload_len).map_err(|_| "a table too large".to_string())?;
+    let Ok(len) = usize::try_from(head.payload_len) else {
+        return Ok(Err("a table too large".to_string()));
+    };
+    // The frame lies inside the file (`read_head`), so `len` is at most the file length; it
+    // must fit under the memory ceiling too.
+    crate::traversal::memory_budget::ensure_room_io(super::dir::STORE_READ, len as u64)?;
     let mut payload = vec![0u8; len];
-    read_at(file, &mut payload, header.table_at + head.head_len).map_err(|e| e.to_string())?;
-    if crc(&payload) != head.payload_crc {
-        return Err("checksum mismatch".into());
+    if let Err(err) = read_at(file, &mut payload, header.table_at + head.head_len) {
+        return Ok(Err(err.to_string()));
     }
-    Tree::decode(&payload, header.table_at)
+    if crc(&payload) != head.payload_crc {
+        return Ok(Err("checksum mismatch".into()));
+    }
+    Ok(Tree::decode(&payload, header.table_at))
 }
 
 /// Replays records from `start` (sequence `expected`) up to `limit` into `tree` (format spec
@@ -2257,6 +2269,7 @@ impl StoreDir for SingleFileDir {
                 open.end,
             ))
         })?;
+        crate::traversal::memory_budget::ensure_room_io(super::dir::STORE_READ, len)?;
         let mut out = vec![0u8; usize::try_from(len).map_err(|_| invalid("file too large"))?];
         ExtentReader::new(file, extents, len, limit).read_exact(&mut out)?;
         Ok(out)
@@ -2276,6 +2289,7 @@ impl StoreDir for SingleFileDir {
             }
             Ok((open.file.clone(), entry.slice(offset, len as u64), open.end))
         })?;
+        crate::traversal::memory_budget::ensure_room_io(super::dir::STORE_READ, len as u64)?;
         let mut out = vec![0u8; len];
         let rebased: Vec<Extent> = extents
             .iter()

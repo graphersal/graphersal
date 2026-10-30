@@ -720,7 +720,10 @@ graphersal.set_memory_limit("auto", headroom=512 << 20)
 graphersal.memory_limit()   # {'bytes': ..., 'source': 'configured', 'setting': ..., 'headroom': ...}
 ```
 
-`Graph.load` also refuses a snapshot whose size estimate exceeds the ceiling, before reading it.
+`Graph.load` and every `Store` open also refuse a graph whose size estimate exceeds the ceiling,
+before reading it (nothing is opened or changed; the error names the minimum to raise the ceiling
+to), and stop a load or recovery that grows past it while reading. GraphSON/GraphML loads into a
+new graph and checkpoints are checked too.
 
 The extension installs Graphersal's tracking allocator as its own global allocator, so the ceiling
 compares the exact live heap of the extension's Rust code (every graph and query of the process,

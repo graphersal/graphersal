@@ -166,7 +166,7 @@ page explains each limit).
 | Option | What every query gets |
 |---|---|
 | `--timeout <MS>` | `evaluationTimeout` on every traversal, and the budget of a query as a whole (a `loop {}` between traversals stops too, with "Script exceeded evaluationTimeout of N ms") |
-| `--memory-limit <BYTES\|auto\|none>`, `--memory-headroom <BYTES>` | the process memory ceiling (`memory.limit`, on by default: the cgroup limit minus the headroom, else 80 % of RAM): a query, import or write that would take the server's live heap over it fails with "Resource limit 'memory.limit'" and rolls back, instead of the process being killed. One setting for the whole server process, not a session preset |
+| `--memory-limit <BYTES\|auto\|none>`, `--memory-headroom <BYTES>` | the process memory ceiling (`memory.limit`, on by default: the cgroup limit minus the headroom, else 80 % of RAM): a query, import or write that would take the server's live heap over it fails with "Resource limit 'memory.limit'" and rolls back, instead of the process being killed; a `--graph` store or file whose graph does not fit refuses to load (exit 1, the error names the minimum). One setting for the whole server process, not a session preset |
 | `--max-traversers <N>` | `traversal.max_traversers` |
 | `--max-materialized-bytes <N>` | `traversal.max_materialized_bytes`, the per-query memory limit (`0` is unlimited) |
 | `--max-string-size <N>` | the script's string limit and `traversal.max_string_bytes` |

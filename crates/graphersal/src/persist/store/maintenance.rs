@@ -1472,7 +1472,7 @@ where
     archive
         .seek(std::io::SeekFrom::Start(start))
         .map_err(|err| PersistError::io("reading the backup archive back", err))?;
-    let copy = check_archive(&mut *archive, &plan);
+    let copy = check_archive(&mut *archive, &plan)?;
     if !copy.is_ok() {
         return Err(copy_damage(
             dir,
@@ -1491,7 +1491,7 @@ where
 /// file against its manifest (every chunk), every WAL segment with the end and the commits
 /// the source's check found, and that nothing is missing.
 #[cfg(feature = "persist-zip")]
-fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
+fn check_archive(reader: impl Read, plan: &BackupPlan) -> Result<Findings, PersistError> {
     use super::super::manifest::Manifest;
     let mut findings = Findings::default();
     let graph_file = GraphFile::decode(&plan.graph).ok();
@@ -1500,9 +1500,21 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
     let mut seen = BTreeSet::new();
     let mut segments = Vec::new();
     let mut journal_warnings = Vec::new();
-    let problems = super::zip::check_entries(reader, &mut |name, data| {
+    // The first refusal of the memory ceiling: the verify stops with it (not a damage finding).
+    let mut refused: Option<crate::error::GraphError> = None;
+    let problems = super::zip::check_entries(reader, &mut |name, size, data| {
         seen.insert(name.to_string());
+        if refused.is_some() {
+            return Vec::new();
+        }
+        // A journal segment is read whole: it must fit under the memory ceiling (its size from
+        // the ZIP header, checked before the read); a refusal stops the verify, anything else
+        // is a warning (the journal decides nothing).
         if super::system_journal::is_segment_entry(name) {
+            if let Err(err) = crate::traversal::memory_budget::ensure_room(BACKUP_VERIFY, size, 0) {
+                refused = Some(err);
+                return Vec::new();
+            }
             let mut bytes = Vec::new();
             match data.read_to_end(&mut bytes) {
                 Ok(_) => {
@@ -1516,7 +1528,14 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
             }
             return Vec::new();
         }
-        let read_all = |data: &mut dyn Read| {
+        // An entry read whole (the metadata files) must fit under the memory ceiling; its size
+        // comes from the ZIP header, checked before the read.
+        let mut read_all = |data: &mut dyn Read| {
+            if let Err(err) = crate::traversal::memory_budget::ensure_room(BACKUP_VERIFY, size, 0) {
+                let text = err.to_string();
+                refused = Some(err);
+                return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, text));
+            }
             let mut bytes = Vec::new();
             data.read_to_end(&mut bytes).map(|_| bytes)
         };
@@ -1598,6 +1617,9 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
             Err(err) => vec![err.to_string()],
         }
     });
+    if let Some(err) = refused {
+        return Err(PersistError::Graph(err));
+    }
     for (path, reason) in problems {
         findings.problem(path, None, reason);
     }
@@ -1620,8 +1642,12 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
         }
     }
     findings.warnings.extend(journal_warnings);
-    findings
+    Ok(findings)
 }
+
+/// What the memory check of a backup's read-back names.
+#[cfg(feature = "persist-zip")]
+const BACKUP_VERIFY: &str = "backup verify";
 
 /// The committed change sets after a position ([`Store::changes_since`](super::Store::changes_since)).
 pub struct ChangesSince {

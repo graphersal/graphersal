@@ -3,8 +3,8 @@
 //! process ("memory allocation of N bytes failed") before any limit can report an error. Every
 //! reservation fed by query data goes through this module instead:
 //!
-//! - [`capped`] / [`vec_capped`]: a hint only. The up-front capacity is at most
-//!   [`MAX_UPFRONT_CAPACITY`] elements; the vector still grows normally past it, so a real
+//! - `capped` / `vec_capped` (GQL steps): a hint only. The up-front capacity is at most
+//!   `MAX_UPFRONT_CAPACITY` elements; the vector still grows normally past it, so a real
 //!   stream of that size pays a few doublings and nothing else.
 //! - [`try_reserve_exact`]: an exact reservation a caller genuinely needs (it checked the size
 //!   against its limits first). A failed reservation is a
@@ -14,6 +14,7 @@
 use crate::*;
 
 /// The largest capacity reserved up front from an untrusted count, in elements.
+#[cfg(any(feature = "gql", test))]
 pub(crate) const MAX_UPFRONT_CAPACITY: usize = 4096;
 
 /// The `limit` of the [`TraverserError::ResourceLimitExceeded`] a failed exact reservation
@@ -22,6 +23,7 @@ pub(crate) const ALLOCATION_LIMIT: &str = "memory.allocation";
 
 /// `n` as an up-front capacity: at most [`MAX_UPFRONT_CAPACITY`].
 #[inline]
+#[cfg(any(feature = "gql", test))]
 pub(crate) fn capped(n: usize) -> usize {
     n.min(MAX_UPFRONT_CAPACITY)
 }
@@ -35,6 +37,7 @@ pub(crate) fn capped_u64(n: u64) -> usize {
 
 /// An empty vector with room for `n` elements, at most [`MAX_UPFRONT_CAPACITY`] of them.
 #[inline]
+#[cfg(any(feature = "gql", test))]
 pub(crate) fn vec_capped<T>(n: usize) -> Vec<T> {
     Vec::with_capacity(capped(n))
 }

@@ -1900,21 +1900,35 @@ pub enum GraphError {
     /// the process memory ceiling `memory.limit`: the whole unit was rolled back. The same limit as
     /// [`TraverserError::ResourceLimitExceeded`] of a traversal, with the same `help()`
     /// advice for the host setting, naming the operation.
+    ///
+    /// The same error stops an operation that checks the ceiling BEFORE it allocates memory
+    /// proportional to data (a load into a new graph, a snapshot or store read, a recovery, a
+    /// checkpoint, a backup verify, [`check_memory_for`](crate::exec::check_memory_for)): then
+    /// `needed` holds the bytes it asked for, and nothing was changed.
     #[error(
-        "Resource limit '{limit}' exceeded by the {operation}{}",
-        limit_detail(*.max, *.observed)
+        "Resource limit '{limit}' exceeded by the {operation}{}{}",
+        limit_detail(*.max, *.observed),
+        needed_detail(*.needed)
     )]
     #[non_exhaustive]
     ResourceLimitExceeded {
-        /// What was stopped: `"GraphML import"`, `"GraphSON import"`, `"change set apply"` or
-        /// `"commit"` (an outermost unit at its commit).
+        /// What was stopped: `"GraphML import"`, `"GraphSON import"`, `"change set apply"`,
+        /// `"commit"` (an outermost unit at its commit), or an operation checked while it
+        /// builds or before it allocates: `"snapshot load"`, `"store open"`, `"recovery"`,
+        /// `"store read"`, `"checkpoint"`, `"snapshot write"`, `"backup verify"`,
+        /// `"maintenance copy"`, `"GraphSON load"`, `"GraphML load"`, `"embed_property"`, or
+        /// the name a host passed to [`check_memory_for`](crate::exec::check_memory_for).
         operation: &'static str,
         /// The limit that was hit: `memory.limit`.
         limit: String,
         /// The configured maximum in bytes.
         max: Option<u64>,
-        /// The bytes in use (or estimated) that crossed it.
+        /// The bytes in use (or estimated) that crossed it; for a check before an allocation,
+        /// what is in use plus `needed`.
         observed: Option<u64>,
+        /// The bytes the operation asked for when it was checked before allocating them;
+        /// `None` when it was stopped while it grew.
+        needed: Option<u64>,
     },
 }
 
@@ -2414,7 +2428,10 @@ impl DiagnosticError for GraphError {
                 limit,
                 max,
                 observed,
-            } => Some(unit_resource_limit_help(operation, limit, *max, *observed)),
+                needed,
+            } => Some(unit_resource_limit_help(
+                operation, limit, *max, *observed, *needed,
+            )),
         }
     }
 }
@@ -6021,26 +6038,92 @@ fn memory_measure(unit: bool) -> &'static str {
     }
 }
 
-/// Help for [`GraphError::ResourceLimitExceeded`]: a unit that is not a traversal (an import,
-/// an applied change set, an outermost commit) grew the memory in use over `memory.limit`.
-/// Names the operation and closes with the same host advice as a traversal's memory ceiling.
+/// What a check BEFORE an allocation compared ([`crate::exec::check_memory_for`] and the load,
+/// read and checkpoint checks): the live heap plus what is needed (tracked), else only what the
+/// operation holds and needs.
+fn precheck_measure() -> &'static str {
+    if crate::traversal::memory_budget::tracked_live_bytes().is_some() {
+        "The figure is tracked: the process's exact live heap plus what the operation needs."
+    } else {
+        "The figure is estimated (no tracking allocator in this process): only what the \
+         operation itself holds and needs; the rest of the process is not seen."
+    }
+}
+
+/// The `; it needs N more bytes` tail of a [`GraphError::ResourceLimitExceeded`] message checked
+/// before an allocation; empty otherwise.
+fn needed_detail(needed: Option<u64>) -> String {
+    needed
+        .map(|needed| format!("; it needs {needed} more bytes"))
+        .unwrap_or_default()
+}
+
+/// The operations of [`GraphError::ResourceLimitExceeded`] that build a graph nobody sees yet
+/// (a load, an open, a recovery): a failure drops the half-built graph.
+const LOAD_OPERATIONS: &[&str] = &[
+    "snapshot load",
+    "store open",
+    "recovery",
+    "GraphSON load",
+    "GraphML load",
+];
+
+/// Help for [`GraphError::ResourceLimitExceeded`], one text per kind: a LOAD (a graph that does
+/// not fit: [`LOAD_OPERATIONS`]), a PRE-CHECK (`needed` set: refused before it allocated) and a
+/// GROWTH (a unit that is not a traversal, such as an import, an applied change set or an
+/// outermost commit, grew the memory in use over `memory.limit` and was rolled back). Names the
+/// operation and closes with the same host advice as a traversal's memory ceiling.
 fn unit_resource_limit_help(
     operation: &str,
     limit: &str,
     max: Option<u64>,
     observed: Option<u64>,
+    needed: Option<u64>,
 ) -> String {
+    let ceiling = max.map(|max| format!(" ({max} bytes)")).unwrap_or_default();
+    let reached = observed
+        .map(|observed| format!("; it reached {observed} bytes"))
+        .unwrap_or_default();
+    // The smallest ceiling the operation would have passed at this point: what was in use plus
+    // what it needed (the `observed` figure).
+    let minimum = observed
+        .map(|observed| format!(" to at least {observed} bytes"))
+        .unwrap_or_default();
+    if LOAD_OPERATIONS.contains(&operation) {
+        let needs = needed
+            .map(|needed| format!(", needing about {needed} more bytes"))
+            .unwrap_or_default();
+        let measure = if needed.is_some() {
+            precheck_measure()
+        } else {
+            memory_measure(true)
+        };
+        return format!(
+            "The graph does not fit: the {operation} would take the memory in use over the \
+             process memory ceiling '{limit}'{ceiling}{reached}{needs}, so it was stopped before \
+             the process ran out of memory. Nothing was opened or changed: the half-built graph \
+             was dropped and the files are as they were. Raise '{limit}'{minimum} (more for what \
+             the graph still has to load), or load the graph on a machine with more memory. \
+             {measure} {MEMORY_CEILING_SETTING}"
+        );
+    }
+    if let Some(needed) = needed {
+        return format!(
+            "The {operation} needs about {needed} more bytes in memory, and the process memory \
+             ceiling '{limit}'{ceiling} does not leave that much{reached}, so it was refused \
+             before it allocated them; nothing was changed. Make room first (drop data you do \
+             not need, for example g.v().has_label(\"tmp\").drop()), or raise '{limit}'{minimum}. \
+             {} {MEMORY_CEILING_SETTING}",
+            precheck_measure(),
+        );
+    }
     format!(
         "The {operation} would take the memory in use over the process memory ceiling \
-         '{limit}'{}{}, so it was stopped and everything it changed was rolled back, instead of \
-         the process running out of memory. {} A unit that only removes or rewrites data is \
-         never stopped, so make room first: drop data you do not need, for example \
-         g.v().has_label(\"tmp\").drop(), then import or apply again; or give the host more \
-         memory. {MEMORY_CEILING_SETTING}",
-        max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
-        observed
-            .map(|observed| format!("; it reached {observed} bytes"))
-            .unwrap_or_default(),
+         '{limit}'{ceiling}{reached}, so it was stopped and everything it changed was rolled \
+         back, instead of the process running out of memory. {} A unit that only removes or \
+         rewrites data is never stopped, so make room first: drop data you do not need, for \
+         example g.v().has_label(\"tmp\").drop(), then import or apply again; or give the host \
+         more memory. {MEMORY_CEILING_SETTING}",
         memory_measure(true),
     )
 }

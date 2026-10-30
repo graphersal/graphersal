@@ -68,17 +68,32 @@ pub enum PersistError {
         reason: String,
     },
 
-    /// The snapshot does not fit into the memory budget: its header's estimate of the loaded
-    /// graph is larger than the limit given to the load.
+    /// The graph does not fit, refused BEFORE anything was read: the snapshot header's estimate
+    /// of the loaded graph (plus, with a tracking allocator, the live heap) is larger than the
+    /// process memory ceiling `memory.limit` or a stricter
+    /// [`ReadOptions::with_memory_limit`](super::ReadOptions::with_memory_limit). Nothing was
+    /// loaded or changed. A graph that grows past the ceiling WHILE it is read (the estimate
+    /// passed) stops with [`PersistError::Graph`] holding a
+    /// `GraphError::ResourceLimitExceeded` instead.
     #[error(
-        "The snapshot needs about {needed} bytes in memory, more than the memory limit of {limit} bytes"
+        "The {operation} needs about {needed} bytes in memory; the {setting} allows {limit} bytes{}",
+        in_use_detail(*.in_use)
     )]
     #[non_exhaustive]
     MemoryBudget {
         /// The estimate from the snapshot header.
         needed: u64,
-        /// The configured limit.
+        /// The bound that refused it, in bytes.
         limit: u64,
+        /// What was refused: `"snapshot load"`, `"store open"`, `"recovery"` or
+        /// `"checkpoint"`.
+        operation: &'static str,
+        /// The process's live heap at the check when a tracking allocator counts it; the
+        /// smallest bound that passes is `in_use + needed`.
+        in_use: Option<u64>,
+        /// The bound that refused it: `"memory.limit"` (the process ceiling) or
+        /// `"ReadOptions::with_memory_limit"`, whichever was lower.
+        setting: &'static str,
     },
 
     /// A journal belongs to another graph lineage than the snapshot (or the first journal).
@@ -700,9 +715,18 @@ impl PersistError {
                 offset: *offset,
                 reason: reason.clone(),
             },
-            PersistError::MemoryBudget { needed, limit } => PersistError::MemoryBudget {
+            PersistError::MemoryBudget {
+                needed,
+                limit,
+                operation,
+                in_use,
+                setting,
+            } => PersistError::MemoryBudget {
                 needed: *needed,
                 limit: *limit,
+                operation,
+                in_use: *in_use,
+                setting,
             },
             PersistError::LineageMismatch {
                 journal,
@@ -852,9 +876,19 @@ impl PersistError {
 impl DiagnosticError for PersistError {
     fn help(&self) -> Option<String> {
         Some(match self {
-            PersistError::Io { .. } => "Check that the file or stream is readable and writable, \
-                 and that the disk is not full; then repeat the operation."
-                .to_string(),
+            PersistError::Io { source, .. } => {
+                // A read refused by the memory ceiling carries its GraphError inside.
+                if let Some(help) = source
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<GraphError>())
+                    .and_then(|inner| inner.help())
+                {
+                    return Some(help);
+                }
+                "Check that the file or stream is readable and writable, and that the disk is \
+                 not full; then repeat the operation."
+                    .to_string()
+            }
             PersistError::Corrupt { .. } => "The bytes were damaged or are not a Graphersal \
                  snapshot or journal. Load an older copy (another snapshot, a backup); a damaged \
                  journal record is never skipped silently, because the commits after it depend \
@@ -873,10 +907,13 @@ impl DiagnosticError for PersistError {
                  nothing, and it never repairs it (a repair by this build would drop what it \
                  cannot read). Do not run graphersal store repair on it with this version."
                 .to_string(),
-            PersistError::MemoryBudget { .. } => "Raise the memory limit of the load \
-                 (ReadOptions::with_memory_limit, in Python the process ceiling graphersal.set_memory_limit(...)) or load the graph on \
-                 a machine with more memory."
-                .to_string(),
+            PersistError::MemoryBudget {
+                needed,
+                limit,
+                operation,
+                in_use,
+                setting,
+            } => memory_budget_help(operation, *needed, *limit, *in_use, setting),
             PersistError::LineageMismatch { .. } => "Recover each graph from its own snapshot \
                  and journals: a journal is replayed only onto a snapshot of the same graph \
                  lineage (graph_id)."
@@ -1030,6 +1067,63 @@ impl DiagnosticError for PersistError {
             PersistError::Journal(err) => err.help().to_string(),
         })
     }
+}
+
+/// The setting name of [`PersistError::MemoryBudget`] when the process ceiling refused.
+pub(crate) const MEMORY_LIMIT_SETTING: &str = "memory.limit";
+/// The setting name of [`PersistError::MemoryBudget`] when a stricter
+/// `ReadOptions::with_memory_limit` refused.
+pub(crate) const READ_OPTIONS_SETTING: &str = "ReadOptions::with_memory_limit";
+
+/// The ` (N in use)` tail of a [`PersistError::MemoryBudget`] message.
+fn in_use_detail(in_use: Option<u64>) -> String {
+    in_use
+        .map(|in_use| format!(" ({in_use} in use)"))
+        .unwrap_or_default()
+}
+
+/// Help for [`PersistError::MemoryBudget`]: names the operation, the minimum the bound must be
+/// raised to (`in_use + needed`), the three host settings of the process ceiling, and
+/// `ReadOptions::with_memory_limit` only when it was the bound.
+fn memory_budget_help(
+    operation: &str,
+    needed: u64,
+    limit: u64,
+    in_use: Option<u64>,
+    setting: &str,
+) -> String {
+    let minimum = in_use.unwrap_or(0).saturating_add(needed);
+    let measure = match in_use {
+        Some(in_use) => format!(
+            "The process holds {in_use} bytes already (the tracked live heap), so the bound \
+             must be at least {minimum} bytes."
+        ),
+        None => format!(
+            "Without a tracking allocator only the graph's own estimate is compared, so the \
+             bound must be at least {minimum} bytes, and the rest of the process needs room \
+             on top."
+        ),
+    };
+    let raise = if setting == READ_OPTIONS_SETTING {
+        format!(
+            "The bound was the stricter limit of this read: pass a larger \
+             ReadOptions::with_memory_limit (at least {minimum}), or none; the process memory \
+             ceiling 'memory.limit' still applies."
+        )
+    } else {
+        format!(
+            "Raise the process memory ceiling 'memory.limit' to at least {minimum} bytes: the \
+             graphersal command line takes --memory-limit <bytes|auto|none>, the Python binding \
+             graphersal.set_memory_limit(...), a Rust host \
+             graphersal::exec::set_memory_limit(MemoryLimit::Bytes(n))."
+        )
+    };
+    format!(
+        "The graph does not fit: the {operation} was refused before any element was read \
+         (it needs about {needed} bytes, the bound '{setting}' allows {limit}), and nothing \
+         was opened or changed. {measure} {raise} Or load the graph on a machine with more \
+         memory."
+    )
 }
 
 #[cfg(test)]

@@ -57,7 +57,7 @@ use indexmap::IndexMap;
 use crate::error::IOError;
 use crate::graph::shape::{MapBuilder, ShapeTable};
 use crate::graph::{Graph, GraphStorage, TraversalGraph};
-use crate::traversal::memory_budget::UnitBudget;
+use crate::traversal::memory_budget::{CountingReader, InputCounter, UnitBudget};
 use crate::value::depth::{DEFAULT_MAX_VALUE_DEPTH, property_exceeds_depth};
 use crate::value::physical::{
     PhysicalError, PhysicalValue, read_json, write_float, write_json, write_json_string,
@@ -775,6 +775,9 @@ struct PendingEdge {
 /// The operation `GraphError::ResourceLimitExceeded` names for a GraphSON import.
 pub(crate) const GRAPHSON_IMPORT: &str = "GraphSON import";
 
+/// The operation `GraphError::ResourceLimitExceeded` names for a GraphSON load into a new graph.
+pub(crate) const GRAPHSON_LOAD: &str = "GraphSON load";
+
 /// The state of one import.
 struct Importer<'g, S: GraphStorage> {
     g: &'g mut S,
@@ -867,10 +870,23 @@ impl GraphSONImport {
     /// Loads a new graph from GraphSON read from `reader`, outside units (nobody sees the graph
     /// yet), and returns it with the report. [`GraphSource::from_graphson_reader`](crate::GraphSource::from_graphson_reader)
     /// is this without the report.
+    ///
+    /// Under the process memory ceiling (`memory.limit`, on by default) the load checks it every
+    /// 4096 elements and at its end: a graph that does not fit stops the load with
+    /// [`IOError::Graph`] holding a `GraphError::ResourceLimitExceeded` (operation
+    /// `"GraphSON load"`) and the half-built graph is dropped. Without a tracking allocator the
+    /// graph's size is estimated by the bytes of text read so far.
     pub fn load<R: BufRead>(&self, reader: R) -> Result<(Graph, ImportReport), IOError> {
         let mut graph = TraversalGraph::new();
-        let report = graph
-            .load_outside_units(|graph| self.import_outside_units(graph, reader, &mut None))?;
+        let counter = InputCounter::default();
+        let mut budget = UnitBudget::start(&graph, GRAPHSON_LOAD)?
+            .map(|budget| budget.with_input(counter.clone()));
+        let reader = CountingReader::new(reader, counter);
+        let report = graph.load_outside_units(|graph| {
+            let report = self.import_outside_units(graph, reader, &mut budget)?;
+            crate::traversal::memory_budget::check(&budget, &*graph).map_err(IOError::Graph)?;
+            Ok::<_, IOError>(report)
+        })?;
         Ok((Graph::new(graph), report))
     }
 

@@ -463,7 +463,7 @@ impl<R: Read> Read for EntryData<'_, R> {
 /// found (a structural fault of the archive ends the read).
 pub(crate) fn check_entries(
     mut reader: impl Read,
-    check: &mut dyn FnMut(&str, &mut dyn Read) -> Vec<String>,
+    check: &mut dyn FnMut(&str, u64, &mut dyn Read) -> Vec<String>,
 ) -> Vec<(String, String)> {
     let mut problems = Vec::new();
     let mut offset = 0u64;
@@ -482,7 +482,7 @@ pub(crate) fn check_entries(
             left: header.size,
             crc: Crc32::new(),
         };
-        for reason in check(&header.name, &mut data) {
+        for reason in check(&header.name, header.size, &mut data) {
             problems.push((header.name.clone(), reason));
         }
         if let Err(err) = std::io::copy(&mut data, &mut std::io::sink()) {

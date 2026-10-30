@@ -274,13 +274,16 @@ pub(crate) const UNIT_CHECK_INTERVAL: u32 = 4096;
 /// The memory ceiling of a unit that is not a traversal: a GraphML or GraphSON import into a
 /// live graph, an applied change set. Built only when there is a ceiling ([`Self::start`]);
 /// without one nothing is paid, neither a walk nor a check.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct UnitBudget {
     budget: MemoryBudget,
     /// What the error names: `"GraphML import"`, `"change set apply"`, ...
     operation: &'static str,
     /// Elements left until the next check.
     countdown: u32,
+    /// The input bytes a load has read so far ([`Self::with_input`]), the estimate of what it
+    /// added in estimated mode.
+    input: Option<InputCounter>,
 }
 
 impl UnitBudget {
@@ -299,7 +302,34 @@ impl UnitBudget {
             budget: MemoryBudget::new(limit).start(storage)?,
             operation,
             countdown: UNIT_CHECK_INTERVAL,
+            input: None,
         }))
+    }
+
+    /// [`Self::start`] with the estimated size of one element the unit adds set to
+    /// `element_bytes` (at least the 128-byte floor) instead of the graph's average: a load into
+    /// an empty graph has no average, but knows one (a snapshot's manifest estimate divided by
+    /// its element count). Tracked mode ignores it.
+    #[cfg(any(feature = "persist", test))]
+    pub(crate) fn start_with_element_bytes<S: GraphStorage + ?Sized>(
+        storage: &S,
+        operation: &'static str,
+        element_bytes: u64,
+    ) -> Result<Option<Self>, GraphError> {
+        Ok(Self::start(storage, operation)?.map(|mut unit| {
+            unit.budget.element_bytes = element_bytes.max(MIN_ELEMENT_BYTES);
+            unit
+        }))
+    }
+
+    /// Estimates what the unit added by `input` instead of the element count (estimated mode
+    /// only): the bytes of text a load into a new graph has read so far (`CountingReader`;
+    /// GraphSON or GraphML text is the same order of size as the graph it builds). The larger
+    /// of both estimates counts.
+    #[cfg(any(feature = "io", test))]
+    pub(crate) fn with_input(mut self, input: InputCounter) -> Self {
+        self.input = Some(input);
+        self
     }
 
     /// Counts one handled element; every [`UNIT_CHECK_INTERVAL`]-th one checks the budget
@@ -314,10 +344,95 @@ impl UnitBudget {
         self.check(storage)
     }
 
+    /// Counts `n` handled elements at once (the mutations of one replayed commit, the records
+    /// of one decoded chunk); checks the budget when the countdown runs out.
+    #[inline]
+    #[cfg(any(feature = "persist", test))]
+    pub(crate) fn tick_n<S: GraphStorage + ?Sized>(
+        &mut self,
+        storage: &S,
+        n: usize,
+    ) -> Result<(), GraphError> {
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        if n < self.countdown {
+            self.countdown -= n;
+            return Ok(());
+        }
+        self.countdown = UNIT_CHECK_INTERVAL;
+        self.check(storage)
+    }
+
     /// Checks the budget now ([`MemoryBudget::unit_check`]): the end of the unit, before its
-    /// commit.
+    /// commit. With an input counter (estimated mode) the bytes read count as what the unit
+    /// added when they are more than the element estimate.
     pub(crate) fn check<S: GraphStorage + ?Sized>(&self, storage: &S) -> Result<(), GraphError> {
+        if let Some(input) = &self.input
+            && !self.budget.tracked
+        {
+            let read = input.get();
+            let grown = self.budget.grown_bytes(storage)?.max(read);
+            let total = self.budget.base.saturating_add(grown);
+            if grown > 0 && total > self.budget.limit {
+                return Err(unit_limit_error(self.operation, self.budget.limit, total));
+            }
+            return Ok(());
+        }
         self.budget.unit_check(storage, self.operation)
+    }
+}
+
+/// The bytes a load has read from its input so far, shared between the `CountingReader` that
+/// counts them and the [`UnitBudget`] that compares them (estimated mode).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InputCounter(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl InputCounter {
+    /// The bytes counted so far.
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(any(feature = "io", test))]
+    fn add(&self, bytes: usize) {
+        self.0
+            .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A reader that counts the bytes consumed from `inner` into an [`InputCounter`] (one relaxed
+/// add per read or `consume`, never per element).
+#[cfg(any(feature = "io", test))]
+pub(crate) struct CountingReader<R> {
+    inner: R,
+    counter: InputCounter,
+}
+
+#[cfg(any(feature = "io", test))]
+impl<R> CountingReader<R> {
+    /// Counts what is read from `inner` into `counter`.
+    pub(crate) fn new(inner: R, counter: InputCounter) -> Self {
+        Self { inner, counter }
+    }
+}
+
+#[cfg(any(feature = "io", test))]
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.counter.add(read);
+        Ok(read)
+    }
+}
+
+#[cfg(any(feature = "io", test))]
+impl<R: std::io::BufRead> std::io::BufRead for CountingReader<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.counter.add(amount);
+        self.inner.consume(amount);
     }
 }
 
@@ -329,6 +444,20 @@ pub(crate) fn tick<S: GraphStorage + ?Sized>(
 ) -> Result<(), GraphError> {
     match budget {
         Some(budget) => budget.tick(storage),
+        None => Ok(()),
+    }
+}
+
+/// `UnitBudget::tick_n` when there is a budget; nothing otherwise.
+#[inline]
+#[cfg(feature = "persist")]
+pub(crate) fn tick_n<S: GraphStorage + ?Sized>(
+    budget: &mut Option<UnitBudget>,
+    storage: &S,
+    n: usize,
+) -> Result<(), GraphError> {
+    match budget {
+        Some(budget) => budget.tick_n(storage, n),
         None => Ok(()),
     }
 }
@@ -354,7 +483,56 @@ pub(crate) fn unit_limit_error(operation: &'static str, limit: u64, observed: u6
         limit: MEMORY_LIMIT.to_string(),
         max: Some(limit),
         observed: Some(observed),
+        needed: None,
     }
+}
+
+/// Fails when `needed` more bytes would take the process over its memory ceiling (no ceiling:
+/// `Ok`), BEFORE the caller allocates them. Tracked: the live heap plus `needed`; estimated:
+/// `resident` (what the caller knows is held for the operation, such as the graph a load has
+/// built so far) plus `needed`. `operation` names the caller (`"snapshot load"`, ...). One
+/// relaxed load and one comparison; the error path is cold.
+#[inline]
+pub(crate) fn ensure_room(
+    operation: &'static str,
+    needed: u64,
+    resident: u64,
+) -> Result<(), GraphError> {
+    let Some(limit) = crate::traversal::memory_limit::effective_limit() else {
+        return Ok(());
+    };
+    let in_use = tracked_live_bytes().unwrap_or(resident);
+    let total = in_use.saturating_add(needed);
+    if total > limit {
+        return Err(room_error(operation, limit, total, needed));
+    }
+    Ok(())
+}
+
+/// The error of [`ensure_room`]: `observed` = in use + `needed` against `limit`.
+#[cold]
+pub(crate) fn room_error(
+    operation: &'static str,
+    limit: u64,
+    observed: u64,
+    needed: u64,
+) -> GraphError {
+    GraphError::ResourceLimitExceeded {
+        operation,
+        limit: MEMORY_LIMIT.to_string(),
+        max: Some(limit),
+        observed: Some(observed),
+        needed: Some(needed),
+    }
+}
+
+/// [`ensure_room`] as an `io::Error` of kind `OutOfMemory` that carries the
+/// [`GraphError::ResourceLimitExceeded`] as its inner error (for the byte reads of a store
+/// directory, whose callers take `io::Result`).
+#[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+pub(crate) fn ensure_room_io(operation: &'static str, needed: u64) -> std::io::Result<()> {
+    ensure_room(operation, needed, 0)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::OutOfMemory, err))
 }
 
 /// The error of a run over its memory budget: `observed` bytes in use (or about to be) against
@@ -583,6 +761,95 @@ mod tests {
         let grown = graph.memory_usage().unwrap().unwrap().total_bytes();
         assert!(grown > exact + 300_000, "{grown} vs {exact}");
         assert_eq!(crate::graph::memory::footprint_hint(&graph), Some(grown));
+    }
+
+    #[test]
+    fn ensure_room_compares_resident_plus_needed_against_the_scoped_ceiling() {
+        crate::traversal::memory_limit::memory_limit_scope(1000, || {
+            assert!(ensure_room("snapshot load", 600, 400).is_ok());
+            let err = ensure_room("snapshot load", 601, 400).unwrap_err();
+            assert!(matches!(
+                err,
+                GraphError::ResourceLimitExceeded {
+                    operation: "snapshot load",
+                    max: Some(1000),
+                    observed: Some(1001),
+                    needed: Some(601),
+                    ..
+                }
+            ));
+            assert!(err.to_string().contains("it needs 601 more bytes"), "{err}");
+        });
+        // Far below the process ceiling (no scope) a small allocation always fits.
+        assert!(ensure_room("snapshot load", 1, 0).is_ok());
+    }
+
+    #[test]
+    fn a_unit_with_known_element_bytes_counts_them_and_ticks_in_batches() {
+        let mut graph = crate::TraversalGraph::new();
+        crate::traversal::memory_limit::memory_limit_scope(1 << 30, || {
+            let unit = UnitBudget::start_with_element_bytes(&graph, "snapshot load", 10_000)
+                .unwrap()
+                .unwrap();
+            assert_eq!(unit.budget.element_bytes, 10_000);
+            let floor = UnitBudget::start_with_element_bytes(&graph, "snapshot load", 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(floor.budget.element_bytes, MIN_ELEMENT_BYTES);
+        });
+        let base = graph.memory_usage().unwrap().unwrap().total_bytes();
+        crate::traversal::memory_limit::memory_limit_scope(base + 50_000, || {
+            let mut unit = UnitBudget::start_with_element_bytes(&graph, "snapshot load", 10_000)
+                .unwrap()
+                .unwrap();
+            for i in 0..6 {
+                graph
+                    .insert_vertex(
+                        Some(format!("v{i}").into()),
+                        vec!["x".into()],
+                        Default::default(),
+                    )
+                    .unwrap();
+            }
+            // Below the countdown: no check yet.
+            assert!(unit.tick_n(&graph, 6).is_ok());
+            // The end check sees 6 x 10 000 bytes over the room of 50 000.
+            let err = unit.check(&graph).unwrap_err();
+            assert!(matches!(
+                err,
+                GraphError::ResourceLimitExceeded {
+                    operation: "snapshot load",
+                    needed: None,
+                    ..
+                }
+            ));
+            // A batch that reaches the countdown checks at once.
+            assert!(unit.tick_n(&graph, UNIT_CHECK_INTERVAL as usize).is_err());
+        });
+    }
+
+    #[test]
+    fn a_load_with_an_input_counter_counts_the_bytes_read() {
+        use std::io::Read;
+        let graph = crate::TraversalGraph::new();
+        let base = crate::graph::memory::compute(&graph).total_bytes();
+        crate::traversal::memory_limit::memory_limit_scope(base + 1000, || {
+            let counter = InputCounter::default();
+            let unit = UnitBudget::start(&graph, "GraphSON load")
+                .unwrap()
+                .unwrap()
+                .with_input(counter.clone());
+            let text = vec![b'x'; 2000];
+            let mut reader = CountingReader::new(text.as_slice(), counter.clone());
+            let mut buf = [0u8; 500];
+            reader.read_exact(&mut buf).unwrap();
+            assert_eq!(counter.get(), 500);
+            assert!(unit.check(&graph).is_ok(), "500 bytes read fit");
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).unwrap();
+            assert_eq!(counter.get(), 2000);
+            assert!(unit.check(&graph).is_err(), "2000 bytes read do not");
+        });
     }
 
     #[test]

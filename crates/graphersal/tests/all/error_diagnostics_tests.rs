@@ -12302,3 +12302,90 @@ fn graph_view_held_help_names_the_guard_and_the_commit_hook() {
     assert!(help.contains("ChangeSet"), "{help}");
     graph.commit_unit(mark).unwrap();
 }
+
+/// The help of a snapshot load refused before reading (rule 6): the operation, what it needs,
+/// the minimum to raise to, the three host settings; `ReadOptions::with_memory_limit` only when
+/// it was the bound.
+#[test]
+#[cfg(feature = "persist")]
+fn memory_budget_help_names_the_operation_and_minimum() {
+    use graphersal::persist::{self, ReadOptions, WriteOptions};
+    let mut bytes = Vec::new();
+    persist::write_snapshot(
+        &TraversalGraph::tinkerpop_modern(),
+        &mut bytes,
+        &WriteOptions::new(),
+    )
+    .unwrap();
+    let needed = persist::read_snapshot_info(bytes.as_slice())
+        .unwrap()
+        .memory_bytes;
+    let err = graphersal::exec::memory_limit_scope(needed / 2, || {
+        persist::read_snapshot(bytes.as_slice(), &ReadOptions::new())
+            .err()
+            .unwrap()
+    });
+    let help = err.help().unwrap();
+    assert!(
+        help.contains("The graph does not fit: the snapshot load"),
+        "{help}"
+    );
+    assert!(
+        help.contains(&format!("it needs about {needed} bytes")),
+        "{help}"
+    );
+    assert!(help.contains(&format!("at least {needed} bytes")), "{help}");
+    assert!(help.contains("--memory-limit"), "{help}");
+    assert!(help.contains("graphersal.set_memory_limit"), "{help}");
+    assert!(help.contains("exec::set_memory_limit"), "{help}");
+    assert!(help.contains("a machine with more memory"), "{help}");
+    assert!(!help.contains("ReadOptions::with_memory_limit"), "{help}");
+    let err = persist::read_snapshot(
+        bytes.as_slice(),
+        &ReadOptions::new().with_memory_limit(needed / 2),
+    )
+    .err()
+    .unwrap();
+    let help = err.help().unwrap();
+    assert!(help.contains("ReadOptions::with_memory_limit"), "{help}");
+    assert!(help.contains("'memory.limit' still applies"), "{help}");
+}
+
+/// The help of a load that does not fit while it is read, and of a pre-check (rule 6).
+#[test]
+#[cfg(feature = "io")]
+fn unit_limit_help_names_what_a_load_needs() {
+    let mut text = Vec::new();
+    {
+        let mut graph = TraversalGraph::new();
+        for i in 0..3000 {
+            graph
+                .traversal_mut()
+                .add_v("person")
+                .property("name", format!("person {i}"))
+                .iterate()
+                .unwrap();
+        }
+        graphersal::io::GraphExport::export_graphson_writer(&graph, &mut text).unwrap();
+    }
+    let err = graphersal::exec::memory_limit_scope(50_000, || {
+        GraphSource::from_graphson_reader(text.as_slice()).unwrap_err()
+    });
+    let help = err.help().unwrap();
+    assert!(
+        help.contains("The graph does not fit: the GraphSON load"),
+        "{help}"
+    );
+    assert!(help.contains("the half-built graph was dropped"), "{help}");
+    assert!(help.contains("Raise 'memory.limit' to at least"), "{help}");
+    assert!(help.contains("--memory-limit"), "{help}");
+    let err = graphersal::exec::memory_limit_scope(1000, || {
+        graphersal::exec::check_memory_for("model load", 5000).unwrap_err()
+    });
+    let help = err.help().unwrap();
+    assert!(
+        help.contains("The model load needs about 5000 more bytes"),
+        "{help}"
+    );
+    assert!(help.contains("refused before it allocated them"), "{help}");
+}
