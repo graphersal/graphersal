@@ -132,6 +132,10 @@ pub(crate) trait JournalFiles<W>: Send + Sync {
     /// After a mark record is durable.
     fn mark_written(&mut self, mark: &Mark);
 
+    /// After the commit record of `changes` was written (and synced per the durability): the
+    /// Store appends the commit's blob ledger frames (format spec 10.1).
+    fn commit_written(&mut self, _changes: &ChangeSet) {}
+
     /// A record at `offset` of segment `segment` was refused (its write or sync failed): cut
     /// the segment back to `offset` and make that durable, so the refused record is never
     /// replayed. When even that fails, record the cut elsewhere (the Store's `GRAPH` file)
@@ -592,6 +596,9 @@ impl<W: Write + Send + Sync + 'static> CommitHook for Journal<W> {
             .map_err(|err| Box::new(err) as HookError)?;
             journal.append(changes.commit_seq(), changes.commit_seq())?;
             journal.last_seq = changes.commit_seq();
+            if let Some(files) = &mut journal.files {
+                files.commit_written(changes);
+            }
             Ok(())
         })
     }

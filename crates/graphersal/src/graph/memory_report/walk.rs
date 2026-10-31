@@ -90,7 +90,9 @@ fn type_index(value: &ElementProperty) -> usize {
         },
         ElementProperty::Vector(_) => 12,
         ElementProperty::Array(_) => 13,
-        ElementProperty::Object(_) | ElementProperty::Map(_) => 14,
+        // A blob reference is never element data (refused by the write checks): counted with
+        // the objects should a storage hold one anyway.
+        ElementProperty::Object(_) | ElementProperty::Map(_) | ElementProperty::Blob(_) => 14,
         ElementProperty::Vertex(_) => 15,
         ElementProperty::Edge(_) => 16,
     }

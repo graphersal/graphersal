@@ -56,7 +56,7 @@ mod segment;
 #[cfg(not(target_arch = "wasm32"))]
 mod single_file;
 mod snapshot;
-mod store;
+pub(crate) mod store;
 mod wal;
 
 pub use codec::Codec;

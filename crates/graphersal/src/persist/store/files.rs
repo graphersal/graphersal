@@ -726,6 +726,11 @@ fn refuse_newer_files(root: &DirPath, at: &DirPath, depth: usize) -> Result<(), 
         if depth == 0 && name == super::models::MODELS_DIR {
             continue;
         }
+        // Nor do the blobs (a blob may hold any bytes, those of a store file too) and the
+        // blob ledger, which has no header (format spec 4.6, 10.1).
+        if depth == 0 && (name == super::blobs::BLOBS_DIR || name == super::blobs::LEDGER_FILE) {
+            continue;
+        }
         match kind {
             EntryKind::Dir => refuse_newer_files(root, &path, depth + 1)?,
             EntryKind::File => match newer_file_version(&path) {

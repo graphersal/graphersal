@@ -423,6 +423,7 @@ impl ExtremumAccumulator {
             }
             // A vector has no min/max (it orders in `order()`, but is not a scalar).
             ElementProperty::Vector(_)
+            | ElementProperty::Blob(_)
             | ElementProperty::Object(_)
             | ElementProperty::Array(_)
             | ElementProperty::Vertex(_)
@@ -452,6 +453,7 @@ fn kind_name(value: &ElementProperty) -> &'static str {
         ElementProperty::Temporal(value) => value.kind().name(),
         ElementProperty::Number(_) => "number",
         ElementProperty::Vector(_) => "vector",
+        ElementProperty::Blob(_) => "blob",
         ElementProperty::Null
         | ElementProperty::Object(_)
         | ElementProperty::Array(_)

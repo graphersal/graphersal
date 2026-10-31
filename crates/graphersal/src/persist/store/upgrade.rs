@@ -101,11 +101,13 @@ pub(crate) const UPGRADES: &[UpgradeRow] = &[
 ];
 
 /// The (store format, file format) versions [`UPGRADES`] was last reviewed for. File format
-/// version 3 (temporal v2) needs no row: a store of store format version 3 holds files of
-/// version 1, 2 or 3, every one of which this build reads as it is, and Graphersal 0.2.x
-/// refuses a version 3 file as newer (`refuse_newer_version`, format spec 15), never as damage.
+/// version 3 (temporal v2) and 4 (blob references, the manifest's blob table, the system
+/// journal's segments) need no row: a store of store format version 3 holds files of version
+/// 1 to 4, every one of which this build reads as it is, and an older Graphersal refuses a
+/// newer file as newer (`refuse_newer_version`, format spec 15), never as damage. The store
+/// format version 4 (P10, the migration of `models/` into blobs) adds its row.
 #[cfg(test)]
-pub(crate) const UPGRADES_REVIEWED_FOR: (u32, u32) = (3, 3);
+pub(crate) const UPGRADES_REVIEWED_FOR: (u32, u32) = (3, 4);
 
 /// The method [`UPGRADES`] gives for a store of store format version `from` (to the current
 /// version); [`UpgradeMethod::Unsupported`] without a row.

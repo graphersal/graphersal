@@ -27,6 +27,7 @@
 
 mod backup;
 mod backup_check;
+pub(crate) mod blobs;
 mod compaction;
 mod damage;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
@@ -65,6 +66,7 @@ use crate::graph::{Graph, TraversalGraph};
 use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalGraphs};
 
 pub use backup::BackupMode;
+use blobs::PendingBlob;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
 pub use damage::{Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairReport};
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
@@ -414,6 +416,8 @@ pub struct StoreInfo {
     /// the files for [`Store::inspect`]): a stored model whose identity is among them is in
     /// use; one named here but not stored nor registered is missing.
     pub schema_models: Vec<String>,
+    /// The blobs the store holds (format spec 4.6): by names and lengths, no hashing.
+    pub blobs: blobs::BlobUsage,
 }
 
 /// Damage found ON DISK while the store was open (by a backup, a checkpoint, a verification):
@@ -460,6 +464,9 @@ struct Shared {
     /// The system journal (`system_journal.rs`): written to `journal/` by a writable store,
     /// read-only with an in-memory overlay otherwise.
     system_journal: Arc<crate::graph::system_journal::SystemJournal>,
+    /// The blobs written but not yet referenced by a durable commit (format spec 12.4): no
+    /// collection removes them.
+    blob_gate: Arc<blobs::BlobGate>,
 }
 
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
@@ -984,6 +991,16 @@ impl Store {
             files::undo_new_dir(&dir, existed);
             return Err(err);
         }
+        // The blobs are foreign input (format spec 12.8): every one against its hash, length
+        // and CRC-32C.
+        if let Err((path, reason)) = blobs::check_foreign_dir(&dir) {
+            files::undo_new_dir(&dir, existed);
+            return Err(PersistError::corrupt(
+                format!("backup archive entry {path}"),
+                0,
+                reason,
+            ));
+        }
         let mut file = match read_graph_file(&dir) {
             Ok(read) => read.file,
             // A backup of a released older store format is upgraded through the converter
@@ -1399,6 +1416,59 @@ impl<S: PersistentStorage + Default> Store<S> {
         read_model_file_at(&self.core.shared.dir, key, name)
     }
 
+    /// Writes the content `reader` yields as a blob of this open store (format spec 4.6):
+    /// streamed into a temporary file with its SHA-256, CRC-32C and length (constant memory),
+    /// synced and renamed to `blobs/<2 hex>/<hash>`; a blob of the same content stored already
+    /// is kept (deduplicated). The returned [`PendingBlob`] protects the blob from every
+    /// collection (prune, attic removal, rollback `delete`) while it lives: reference its
+    /// [`BlobRef`](crate::blob::BlobRef) in a catalog definition, commit, then drop it (a blob
+    /// no commit references is an orphan the next prune removes). Refused on a read-only store.
+    pub fn write_blob(&self, reader: &mut dyn std::io::Read) -> Result<PendingBlob, PersistError> {
+        self.core.writable("write a blob")?;
+        let gate = self.core.shared.blob_gate.clone();
+        let mut held: Option<crate::value::BlobRef> = None;
+        let written = blobs::write_blob(&self.core.shared.dir, reader, &mut |blob| {
+            gate.hold(blob);
+            held = Some(blob.clone());
+        });
+        let written = match written {
+            Ok(written) => written,
+            Err(err) => {
+                if let Some(blob) = &held {
+                    gate.release(blob);
+                }
+                return Err(err);
+            }
+        };
+        if written.repaired {
+            self.core.shared.system_journal.emit(
+                &catalogue::BLOB_REPAIRED,
+                Event::new(format!(
+                    "the damaged blob {} was replaced by intact bytes",
+                    blobs::blob_name(&written.blob)
+                ))
+                .field("hash", written.blob.hash_hex())
+                .field("how", "rewritten"),
+            );
+        }
+        Ok(PendingBlob::new(written.blob, gate, written.new))
+    }
+
+    /// The content of `blob`, read whole from this store (format spec 4.6): its length checked
+    /// first, the process memory ceiling checked before allocating (a blob that does not fit
+    /// is [`PersistError::Graph`] with `ResourceLimitExceeded`, operation `"blob read"`), its
+    /// CRC-32C after reading. A missing blob is [`StoreFailure::BlobUnavailable`], a damaged
+    /// one [`StoreFailure::BlobDamaged`]; either is reported to the system journal
+    /// (`blob.damaged`) and never makes the store read-only.
+    pub fn read_blob(&self, blob: &crate::value::BlobRef) -> Result<Vec<u8>, PersistError> {
+        blobs::read_blob(&self.core.shared.dir, blob).map_err(|err| {
+            if let Some(fault) = err.fault() {
+                self.core.shared.report_blob_damage(blob, fault, "read");
+            }
+            err.into_persist("read a blob", blob)
+        })
+    }
+
     /// Branches the state at `target` into a NEW store in `new_dir` (format spec 12.5): a new
     /// lineage id with this store's as parent, its first snapshot at the target. This store is
     /// not changed. Marks are not carried (the new lineage starts without any):
@@ -1757,6 +1827,7 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            blob_gate: Arc::default(),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -1969,6 +2040,13 @@ impl StoreCore {
             );
         }
         let marks = sync_marks(&dir, &loaded, &options, &mut report)?;
+        sync_ledger(
+            &dir,
+            &loaded,
+            (graph_file.graph_id, report.commit_seq),
+            report.clean_close,
+            &mut report,
+        )?;
         let segments = loaded.segments;
         let replay = loaded.replay;
 
@@ -2030,6 +2108,7 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            blob_gate: Arc::default(),
             system_journal,
         });
         let thread = if shared.options.checkpoint_after_bytes > 0 {
@@ -2098,6 +2177,7 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            blob_gate: Arc::default(),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -2187,6 +2267,7 @@ impl StoreCore {
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
+            blob_gate: Arc::default(),
             system_journal,
         });
         shared.journal_opened(&report, web_time::Instant::now(), true);
@@ -2274,7 +2355,13 @@ impl StoreCore {
         };
         // The intact models are carried; a damaged one is reported (format spec 4.5).
         let (models, models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
-        let verified = maintenance::verify(new_dir, None)?;
+        // The blobs the repaired state references, each checked by its hash too (the source
+        // is damaged); a missing or damaged one is reported, never fails the repair.
+        let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
+        let mut verified = maintenance::verify(new_dir, None)?;
+        verified
+            .problems
+            .retain(|p| !(p.path.starts_with("blobs/") && blobs_not_carried.contains(&p.path)));
         if !verified.is_ok() {
             return Err(PersistError::store(
                 "repair the store",
@@ -2299,6 +2386,8 @@ impl StoreCore {
             marks_not_carried,
             models,
             models_not_carried,
+            blobs: blobs_carried,
+            blobs_not_carried,
             marks_unreadable,
         })
     }
@@ -2550,6 +2639,8 @@ impl StoreCore {
             ("fork", Some((parent.store_id, branched_at))),
         )?;
         let models = models::carry_into_new(dir, new_dir, existed)?;
+        let (blobs, blobs_not_carried) = blobs::carry_state(dir, new_dir, false)
+            .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
         let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
             PersistError::store(
                 "fork the store",
@@ -2561,6 +2652,8 @@ impl StoreCore {
             snapshot: read_listing(&path)?,
             marks_not_carried,
             models,
+            blobs,
+            blobs_not_carried,
         })
     }
 
@@ -2575,8 +2668,14 @@ impl StoreCore {
         })?;
         let bytes =
             maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
-        let report = maintenance::prune(&self.shared.dir, up_to)?;
+        let report = maintenance::prune(
+            &self.shared.dir,
+            up_to,
+            Some((&self.shared.blob_gate, &self.shared.wal)),
+        )?;
         self.shared.journal_pruned(&report, bytes);
+        self.shared
+            .journal_collected(report.blobs_removed, report.blob_bytes_removed, "prune");
         if self.shared.options.auto_compact
             && compaction::advise(&self.shared.dir, self.shared.options.compaction, None)?
                 .recommended
@@ -2602,8 +2701,14 @@ impl StoreCore {
         })?;
         let bytes =
             maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
-        let prune = maintenance::prune(&self.shared.dir, up_to)?;
+        let prune = maintenance::prune(
+            &self.shared.dir,
+            up_to,
+            Some((&self.shared.blob_gate, &self.shared.wal)),
+        )?;
         self.shared.journal_pruned(&prune, bytes);
+        self.shared
+            .journal_collected(prune.blobs_removed, prune.blob_bytes_removed, "prune");
         let compaction = self
             .shared
             .dir
@@ -2643,6 +2748,9 @@ impl StoreCore {
         };
         if !report.is_ok() && self.tracks_damage() {
             self.shared.report_damage("verify", report.problems.clone());
+        }
+        for (blob, fault) in &report.blob_faults {
+            self.shared.report_blob_damage(blob, *fault, "verify");
         }
         let level = if report.is_ok() && report.without_donor.is_empty() {
             crate::graph::system_journal::Level::Info
@@ -2937,6 +3045,10 @@ impl StoreCore {
         self.shared
             .system_journal
             .emit(&catalogue::ROLLED_BACK, event);
+        if mode == RollbackMode::Delete {
+            drop(graph);
+            self.shared.collect_blobs("rollback_delete");
+        }
         Ok(RollbackReport {
             target,
             previous_commit_seq: current,
@@ -3024,6 +3136,7 @@ impl StoreCore {
             )
         })?;
         rollback::attic_remove(&self.shared.dir, id)?;
+        self.shared.collect_blobs("attic_remove");
         self.shared.system_journal.emit(
             &catalogue::ATTIC_REMOVED,
             Event::new(format!("the attic entry {id} was removed")).field("entry", id),
@@ -3157,6 +3270,15 @@ impl StoreCore {
             return Ok(graph_id);
         }
         let marks = sync_marks(dir, &loaded, &self.shared.options, &mut report)?;
+        let stale = self.shared.wal.ledger_stale.load(Ordering::Acquire);
+        sync_ledger(
+            dir,
+            &loaded,
+            (graph_file.graph_id, report.commit_seq),
+            !stale,
+            &mut report,
+        )?;
+        self.shared.wal.ledger_stale.store(false, Ordering::Release);
         if let Ok(mut file) = self.shared.graph_file.lock() {
             let clean = file.clean;
             *file = graph_file;
@@ -3446,6 +3568,17 @@ impl Shared {
     /// read-only (every later commit, mark and checkpoint is refused). Problems of attic
     /// entries only (history moved aside, not the store's own) are reported by `verify` but do
     /// not count here.
+    /// Reports a missing or damaged blob to the system journal (`blob.damaged`, collapsed per
+    /// hash and failure): never store damage, nothing freezes.
+    fn report_blob_damage(
+        &self,
+        blob: &crate::value::BlobRef,
+        fault: blobs::BlobFault,
+        found_by: &str,
+    ) {
+        report_blob_damage_to(&self.system_journal, blob, fault, found_by, &[]);
+    }
+
     fn report_damage(&self, found_by: &str, problems: Vec<VerifyProblem>) {
         let problems: Vec<VerifyProblem> = problems
             .into_iter()
@@ -3457,6 +3590,13 @@ impl Shared {
                 p.path != system_journal::JOURNAL_DIR
                     && !p.path.starts_with("journal/")
                     && p.path != system_journal::INSTANCE_FILE
+            })
+            // Nor a blob or the derived ledger (format spec 4.6, 13): blob damage is reported
+            // per blob (`blob.damaged`) and never freezes the store.
+            .filter(|p| {
+                p.path != blobs::BLOBS_DIR
+                    && !p.path.starts_with("blobs/")
+                    && p.path != blobs::LEDGER_FILE
             })
             .collect();
         if problems.is_empty() {
@@ -4158,6 +4298,102 @@ fn sync_marks(
     Ok(marks)
 }
 
+/// Writes `blob.damaged` for `blob` into `journal` with its referrers and the recommendation.
+fn report_blob_damage_to(
+    journal: &crate::graph::system_journal::SystemJournal,
+    blob: &crate::value::BlobRef,
+    fault: blobs::BlobFault,
+    found_by: &str,
+    referrers: &[String],
+) {
+    let name = blobs::blob_name(blob);
+    let mut event = Event::new(format!(
+        "the blob {name} is {} ({found_by})",
+        match fault {
+            blobs::BlobFault::Missing => "missing",
+            _ => "damaged",
+        }
+    ))
+    .field("hash", blob.hash_hex())
+    .count("length", blob.length())
+    .field("failure", fault.name())
+    .field("found_by", found_by);
+    if !referrers.is_empty() {
+        event = event.field(
+            "referrers",
+            crate::value::ElementProperty::Array(
+                referrers
+                    .iter()
+                    .map(|r| crate::value::ElementProperty::from(r.as_str()))
+                    .collect(),
+            ),
+        );
+    }
+    journal.emit(
+        &catalogue::BLOB_DAMAGED,
+        event.field(
+            "recommendation",
+            format!(
+                "copy {name} from a backup or another copy of the store (the same hash is the \
+                 same bytes), or write the content again; graphersal store verify lists every \
+                 blob problem"
+            ),
+        ),
+    );
+}
+
+/// The derived blob ledger (format spec 10.1) made consistent with the WAL at an open: rebuilt
+/// from the WAL when it is damaged, or missing while the store holds blobs (a store without
+/// blobs needs none); after a crash (`clean` false) completed with the frames of the replayed
+/// commits whose append was interrupted, and without frames of the current lineage beyond the
+/// recovered end (commits lost with a torn tail). A rebuild is a warning, never damage.
+fn sync_ledger(
+    dir: &DirPath,
+    loaded: &LoadedFiles,
+    (graph_id, end): (u128, u64),
+    clean: bool,
+    report: &mut OpenReport,
+) -> Result<(), PersistError> {
+    let rebuild = |reason: &str, report: &mut OpenReport| -> Result<(), PersistError> {
+        let frames = blobs::scan_frames(&loaded.segments);
+        blobs::write_ledger(dir, &frames)?;
+        // A store that never had a ledger (made before 0.5, or from a packed snapshot) and
+        // whose WAL references no blob gets an empty one without a word.
+        if reason == "damaged" || !frames.is_empty() {
+            report.warnings.push(format!(
+                "the blob ledger was {reason} and was rebuilt from the WAL ({} frames)",
+                frames.len()
+            ));
+        }
+        Ok(())
+    };
+    match blobs::read_ledger(dir)? {
+        None if dir.join(blobs::LEDGER_FILE).exists() => rebuild("damaged", report),
+        None => {
+            let no_blobs = blobs::list_blobs(dir)
+                .map_err(|err| PersistError::io("listing the blobs", err))?
+                .blobs
+                .is_empty();
+            if no_blobs {
+                Ok(())
+            } else {
+                rebuild("missing", report)
+            }
+        }
+        Some(_) if clean => Ok(()),
+        Some(mut frames) => {
+            let before = frames.len();
+            frames.retain(|f| f.graph_id != graph_id || f.commit_seq <= end);
+            let dropped = frames.len() != before;
+            let added = blobs::merge_frames(&mut frames, blobs::scan_frames(&loaded.replay));
+            if dropped || added {
+                blobs::write_ledger(dir, &frames)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Puts a new journal for `graph` into the Store's journal cell (the old one, if any, is
 /// dropped): it continues the last WAL segment of the graph's lineage, or starts one, and
 /// publishes its durable end through `durable`. The graph's journal slot is attached once, at
@@ -4357,6 +4593,10 @@ fn copy_tree(
                 _ => {}
             }
         }
+        // A blob being written (format spec 4.6) is never copied.
+        if relative == blobs::BLOBS_DIR && name.starts_with(TMP_PREFIX) {
+            continue;
+        }
         let len = source.len().map_err(io)?;
         let mut out = to.join(&path).create(true).map_err(io)?;
         maintenance::copy_exact(&source, len, &mut out)?;
@@ -4386,6 +4626,49 @@ fn open_system_journal(
 
 impl Shared {
     /// Writes `store.prune_done`.
+    /// Writes `blob.collected` when a collection removed blobs.
+    fn journal_collected(&self, count: u64, bytes: u64, by: &str) {
+        if count == 0 {
+            return;
+        }
+        self.system_journal.emit(
+            &catalogue::BLOB_COLLECTED,
+            Event::new(format!(
+                "{count} unreferenced blob(s) removed ({bytes} bytes) by {by}"
+            ))
+            .count("count", count)
+            .count("bytes", bytes)
+            .field("by", by),
+        );
+    }
+
+    /// Removes the blobs no retained history references after an attic removal or a rollback
+    /// `delete` (format spec 12.5); a failure is logged (the next prune collects them).
+    fn collect_blobs(&self, by: &str) {
+        if !self.dir.join(blobs::BLOBS_DIR).exists() {
+            return;
+        }
+        let chain = match read_graph_file(&self.dir) {
+            Ok(read) => read.file.chain(),
+            Err(err) => {
+                tracing::warn!("blob collection after {by} skipped: {err}");
+                return;
+            }
+        };
+        let _ledger = self
+            .wal
+            .ledger_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stale = self.wal.ledger_stale.load(Ordering::Acquire);
+        match blobs::collect(&self.dir, &chain, stale, Some(&self.blob_gate)) {
+            Ok(collected) => self.journal_collected(collected.count, collected.bytes, by),
+            Err(err) => {
+                tracing::warn!("blob collection after {by} failed (the next prune collects): {err}")
+            }
+        }
+    }
+
     fn journal_pruned(&self, report: &PruneReport, bytes: u64) {
         self.system_journal.emit(
             &catalogue::PRUNE_DONE,
@@ -4406,6 +4689,22 @@ impl Shared {
     /// Writes `store.opened` (and `store.recovered` when the open repaired traces of a crash or
     /// of an interrupted operation).
     fn journal_opened(&self, report: &OpenReport, started: web_time::Instant, read_only: bool) {
+        for warning in &report.warnings {
+            if let Some(rest) = warning.strip_prefix("the blob ledger was ") {
+                let reason = rest.split_whitespace().next().unwrap_or("missing");
+                let frames = rest
+                    .rsplit_once('(')
+                    .and_then(|(_, n)| n.split_whitespace().next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                self.system_journal.emit(
+                    &catalogue::LEDGER_REBUILT,
+                    Event::new(warning.clone())
+                        .count("frames", frames)
+                        .field("reason", reason),
+                );
+            }
+        }
         let torn = report.torn_tail.map_or(0, |cut| cut.bytes);
         if torn > 0
             || report.intent_completed.is_some()
@@ -4518,6 +4817,7 @@ fn remove_tmp(dir: &DirPath) -> Result<usize, PersistError> {
     }
     removed += rollback::remove_interrupted(dir);
     removed += models::remove_tmp(dir);
+    removed += blobs::remove_tmp(dir);
     // `journal/tmp-*` (format spec 4.7).
     let journal = dir.join(system_journal::JOURNAL_DIR);
     if let Ok(entries) = journal.list() {
@@ -4633,6 +4933,7 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         stopped: None,
         models: models::list(dir)?,
         schema_models: Vec::new(),
+        blobs: blobs::usage(dir, &file.chain())?,
     })
 }
 
@@ -4658,7 +4959,11 @@ fn export_packed_from(
         ));
     };
     let model_files = match models {
-        ModelCopy::Include => models::packed_files(dir)?.0,
+        ModelCopy::Include => {
+            let mut files = models::packed_files(dir)?.0;
+            files.extend(blobs::packed_files(dir, path)?);
+            files
+        }
         ModelCopy::Exclude => Vec::new(),
     };
     let mut reader = DirSnapshotReader::open_with_models(path, model_files)?;

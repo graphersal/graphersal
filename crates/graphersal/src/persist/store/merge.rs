@@ -1273,6 +1273,7 @@ fn write_merged(
         },
         meta: write.meta.clone(),
         segments,
+        blobs: super::blobs::blob_table(delta.definitions.iter()),
         definitions,
         chunks,
     };

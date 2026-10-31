@@ -20,6 +20,7 @@ use core::fmt;
 #[cfg(feature = "alloc-tracking")]
 pub mod alloc_tracking;
 pub mod auth;
+pub mod blob;
 pub mod catalog;
 pub mod changes;
 /// Error types and their diagnostic (`help()`) text.

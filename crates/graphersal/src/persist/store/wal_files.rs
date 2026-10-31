@@ -32,6 +32,13 @@ pub(crate) struct WalShared {
     pub(crate) since_checkpoint: AtomicU64,
     /// The auto checkpoint threshold in bytes (`0`: off).
     pub(crate) checkpoint_after: AtomicU64,
+    /// The blob ledger lacks frames (an append failed and the file was removed): every user of
+    /// the ledger rebuilds its frames from the WAL until the next open rewrites the file.
+    pub(crate) ledger_stale: AtomicBool,
+    /// Serializes the ledger's appends (commits) with its rewrite and the blob collection of a
+    /// prune, an attic removal or a rollback `delete`: a frame is either in the file the
+    /// collection reads or its commit's blob is still pending.
+    pub(crate) ledger_lock: Mutex<()>,
     /// The checkpoint thread's wake-up: `true` = a checkpoint is due or the store closes.
     pub(crate) wake: Mutex<bool>,
     pub(crate) wake_signal: Condvar,
@@ -252,6 +259,27 @@ impl JournalFiles<WalWriter> for StoreWalFiles {
             );
         }
         Err(err)
+    }
+
+    fn commit_written(&mut self, changes: &crate::graph::change::ChangeSet) {
+        if self.shared.ledger_stale.load(Ordering::Acquire) {
+            return;
+        }
+        let frames = super::blobs::commit_frames(changes, self.graph_id);
+        if frames.is_empty() {
+            return;
+        }
+        let _ledger = self
+            .shared
+            .ledger_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The ledger is derived (rebuilt from the WAL at the next open): a failed append
+        // removes it and marks it stale, so no collection trusts an incomplete file.
+        if super::blobs::append_frames(&self.dir, &frames).is_err() {
+            self.shared.ledger_stale.store(true, Ordering::Release);
+            let _ = self.dir.join(super::blobs::LEDGER_FILE).remove_file();
+        }
     }
 
     fn mark_written(&mut self, mark: &Mark) {

@@ -651,6 +651,30 @@ impl Definition {
         ElementProperty::Object(Box::new(map))
     }
 
+    /// Every blob reference the definition's payload holds, one entry per occurrence (format
+    /// spec 4.6: what keeps a blob alive). An opaque payload is decoded as the property map it
+    /// is (format spec 6.3); one that does not decode holds none (it is damage elsewhere).
+    #[cfg(feature = "persist")]
+    pub(crate) fn blob_refs(&self, out: &mut Vec<crate::value::BlobRef>) {
+        match &self.body {
+            DefinitionBody::Opaque(payload) => {
+                if let Ok(map) = crate::persist::decode_payload(
+                    payload,
+                    crate::value::depth::DEFAULT_MAX_VALUE_DEPTH,
+                ) {
+                    map.values()
+                        .for_each(|value| crate::value::blob::collect_blobs(value, out));
+                }
+            }
+            DefinitionBody::Query(_)
+            | DefinitionBody::Compression(_)
+            | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Job(_) => {
+                crate::value::blob::collect_blobs(&self.to_value(), out);
+            }
+        }
+    }
+
     /// Reads the exchange form of [`Self::to_value`]. A `payload` key makes the definition
     /// opaque; otherwise `kind` must be `"query"` (or `1`). Unknown keys of a saved query are
     /// kept ([`QueryDefinition::extra`]); a known key of the wrong type is an error. Nothing is
@@ -1451,7 +1475,8 @@ fn storable(value: &ElementProperty) -> bool {
         | ElementProperty::Boolean(_)
         | ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
-        | ElementProperty::Vector(_) => true,
+        | ElementProperty::Vector(_)
+        | ElementProperty::Blob(_) => true,
     }
 }
 

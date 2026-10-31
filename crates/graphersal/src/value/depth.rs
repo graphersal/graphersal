@@ -47,7 +47,7 @@ pub(crate) fn property_exceeds_depth(value: &ElementProperty, max: usize) -> boo
         let child = depth + 1;
         match current {
             // A vector is one value (its components are not nested values).
-            ElementProperty::Vector(_) => {}
+            ElementProperty::Vector(_) | ElementProperty::Blob(_) => {}
             ElementProperty::Array(items) => {
                 stack.extend(items.iter().filter(|c| is_container(c)).map(|c| (c, child)));
             }

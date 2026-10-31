@@ -206,10 +206,10 @@ mod binary {
     fn a_packed_snapshot_keeps_every_temporal_value_exactly() {
         let graph = temporal_graph();
         let bytes = packed(&graph);
-        // Every file this build writes is of file format version 3.
+        // Every file this build writes is of file format version 4 (P4: blob references).
         assert_eq!(&bytes[..8], b"GRSLPACK");
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
-        assert_eq!(persist::FORMAT_VERSION, 3);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
+        assert_eq!(persist::FORMAT_VERSION, 4);
         let loaded = persist::read_snapshot(bytes.as_slice(), &ReadOptions::new()).unwrap();
         assert_holds_edge_values(&loaded);
     }
@@ -304,7 +304,7 @@ mod binary {
     #[test]
     fn a_temporal_tag_in_a_version_1_journal_is_damage() {
         let bytes = journal_with(dt("2023-08-02T14:00:00+02:00"));
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
         let records = read_all(&bytes).unwrap();
         assert_eq!(records.len(), 1);
         let v1 = with_header_version(bytes.clone(), 1);
@@ -318,7 +318,7 @@ mod binary {
         let plain = with_header_version(journal_with("text".into()), 1);
         assert_eq!(read_all(&plain).unwrap().len(), 1);
         // A newer version is refused, never guessed at.
-        assert!(read_all(&with_header_version(bytes, 4)).is_err());
+        assert!(read_all(&with_header_version(bytes, 5)).is_err());
     }
 
     /// The record of [`journal_with`] with its payload replaced (frame length and checksums

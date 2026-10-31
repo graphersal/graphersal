@@ -76,6 +76,8 @@ it with a `match`; `StoreFailure::name()` is the stable name, which the Python e
 | `DamagedSource` (`damaged_source`) | the store to upgrade does not verify (the message lists the first problems); nothing was written | `graphersal store repair <dir> --to <new_dir>` reads the older store and writes a repaired one in the current format; or upgrade a backup instead |
 | `UpgradeNeedsCopy` (`upgrade_needs_copy`) | `store upgrade <dir> --in-place` of a store whose version the [upgrade table](store_versions.md#the-upgrade-table) upgrades only into a copy; nothing was written | `graphersal store upgrade <dir> <new_dir>` (the older store stays as it is) |
 | `UnknownModel` (`unknown_model`) | `store models remove`, `Store::remove_model` or `read_model_file` of an embedding model the store does not keep | `graphersal store models <dir>` lists the identities and ids |
+| `BlobUnavailable` (`blob_unavailable`) | `Store::read_blob` (or an export that carries it) of a blob that is missing from `blobs/`, or named by a newer version's hash algorithm; never store damage, the store keeps working | `graphersal store verify <dir>` lists every missing blob; copy `blobs/<2 hex>/<hash>` from a backup or another copy of the store (the same hash is the same bytes), or write the content again |
+| `BlobDamaged` (`blob_damaged`) | a blob whose length, CRC-32C or hash is not its reference's; never store damage | as for `BlobUnavailable`: replace the file from any copy with the same hash, or write the content again (`Store::write_blob` replaces a damaged blob) |
 | `InvalidModel` (`invalid_model`) | an embedding model to add lacks its config, tokenizer or weights file, has a file name that is not allowed, a file over 8 GiB, or a repository or licence that is not a valid name; nothing was added | check the model directory (`--embedder name=<dir>` loads it) and `graphersal embed-model import <dir> --into <store>` again |
 | `AutoCheckpointFailed` (`auto_checkpoint_failed`) | read from `Store::last_auto_checkpoint_error` after an automatic checkpoint run by `Store::run_due_checkpoint` (the browser) failed with a graph error; the caller of `run_due_checkpoint` got the error itself | nothing is lost: the commits are in the journal and the checkpoint is tried again at the next commit; `graphersal store checkpoint <dir>` reports a manual one with its own help |
 
@@ -136,7 +138,7 @@ that). There is no disk: download a `.gsnap` to keep a state.
 treats records after the writer's durable end as possibly not final. In Rust,
 `store.changes_since(commit)` yields the `ChangeSet`s.
 
-**Is the format stable?** Store format version 3 (with file format version 3) is specified on the
+**Is the format stable?** Store format version 3 (with file format version 4) is specified on the
 [specification](format.md) page; a newer version is refused, never guessed at, and a store of an
 older released version is upgraded by `graphersal store upgrade` without the older build (every
 build keeps the readers of every released format; [Format Versions](store_versions.md)).

@@ -172,18 +172,9 @@ pub struct AddModelReport {
     pub already_stored: bool,
 }
 
-/// Whether a shareable copy (a packed snapshot, a ZIP backup) carries the store's models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum ModelCopy {
-    /// The copy carries every model with its card and licence files (the default): whoever
-    /// receives it can use the models, and passing it on redistributes them.
-    #[default]
-    Include,
-    /// The copy leaves the models out: the receiver adds them again by the identities the
-    /// schema records (`graphersal embed-model download <repo> --into <store>`).
-    Exclude,
-}
+/// The 0.4 name of [`BlobCopy`](crate::blob::BlobCopy): whether a shareable copy carries the
+/// store's models (and, since 0.5, its blobs).
+pub type ModelCopy = super::blobs::BlobCopy;
 
 /// A model to add to a store ([`Store::add_model`](super::Store::add_model)): its files (read
 /// as streams) and what is known about its origin and licence.
@@ -1291,7 +1282,10 @@ pub(crate) enum PackedSource {
 /// One model file a packed export carries as a segment-table row of kind
 /// [`PACKED_MODEL_KIND`] (format spec 4.5, 8).
 pub(crate) struct PackedModelFile {
-    /// The row's path: [`packed_name`].
+    /// The row's segment kind: [`PACKED_MODEL_KIND`], or
+    /// [`PACKED_BLOB_KIND`](super::blobs::PACKED_BLOB_KIND) for a blob.
+    pub(crate) kind: u8,
+    /// The row's path: [`packed_name`] (a blob: its hash hex).
     pub(crate) name: String,
     /// The model id.
     pub(crate) id: String,
@@ -1350,6 +1344,7 @@ pub(crate) fn packed_files(
                 ));
             }
             out.push(PackedModelFile {
+                kind: PACKED_MODEL_KIND,
                 name: packed_name(&id, &file.name),
                 id: id.clone(),
                 file: file.name.clone(),
@@ -1359,6 +1354,7 @@ pub(crate) fn packed_files(
             });
         }
         out.push(PackedModelFile {
+            kind: PACKED_MODEL_KIND,
             name: packed_name(&id, MODEL_MANIFEST),
             id: id.clone(),
             file: MODEL_MANIFEST.to_string(),

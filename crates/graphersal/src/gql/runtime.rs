@@ -1418,6 +1418,7 @@ mod rank {
             | ElementProperty::Array(_)
             | ElementProperty::Vertex(_)
             | ElementProperty::Edge(_)
+            | ElementProperty::Blob(_)
             | ElementProperty::Map(_) => 11,
         }
     }

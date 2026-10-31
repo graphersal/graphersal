@@ -134,7 +134,7 @@ impl Observed {
                     .get_or_insert_with(ObservedObject::default)
                     .count += 1;
             }
-            ElementProperty::Vertex(_) | ElementProperty::Edge(_) => {}
+            ElementProperty::Vertex(_) | ElementProperty::Edge(_) | ElementProperty::Blob(_) => {}
         }
     }
 
