@@ -497,12 +497,9 @@ pub(crate) fn vector_notes(
                         crate::graph::schema::ElementKind::Vertex => "",
                         crate::graph::schema::ElementKind::Edge => "edge ",
                     };
-                    let count = if !v.exact() {
-                        format!(
-                            "{} in the newest snapshot, {} later commit(s) not counted",
-                            v.elements, v.not_counted
-                        )
-                    } else if v.elements == 0 {
+                    // The WAL after the newest snapshot is the same for every property: its
+                    // "not counted" is said once, after the total, not per property.
+                    let count = if v.elements == 0 && v.exact() {
                         "no element holds one yet".to_string()
                     } else {
                         v.elements.to_string()
@@ -512,6 +509,15 @@ pub(crate) fn vector_notes(
                 .collect::<Vec<_>>()
                 .join(", ");
             let total: u64 = group.iter().map(|v| v.elements).sum();
+            let not_counted = group.iter().map(|v| v.not_counted).max().unwrap_or(0);
+            let total = if not_counted > 0 {
+                format!(
+                    "{total} vector(s) in the newest snapshot, {not_counted} later commit(s) not \
+                     counted"
+                )
+            } else {
+                format!("{total} vector(s) in all")
+            };
             let mut properties: Vec<&str> = Vec::new();
             for v in &group {
                 if !properties.contains(&v.property.as_str()) {
@@ -519,8 +525,8 @@ pub(crate) fn vector_notes(
                 }
             }
             format!(
-                "{} vector properties are declared with vectors of {model} ({total} vector(s) in \
-                 all) but have no source property: {places}; to keep them current add \"from\": \
+                "{} vector properties are declared with vectors of {model} ({total}) but have no \
+                 source property: {places}; to keep them current add \"from\": \
                  \"<source property>\" to each declaration, all in one change ({}); the first \
                  fill re-embeds every element of these labels (the whole database is locked \
                  while it runs), and from then on {} itself is not written directly (write the \
@@ -1397,6 +1403,49 @@ impl StoreDir for UpgradeView {
 mod tests {
     use super::*;
     use crate::persist::{MemDir, StoreOptions};
+
+    fn without_rule(label: &str, elements: u64, not_counted: u64) -> VectorWithoutRule {
+        VectorWithoutRule {
+            kind: crate::graph::schema::ElementKind::Vertex,
+            label: label.to_string(),
+            property: "emb".to_string(),
+            embedder: "m".to_string(),
+            model: "m".to_string(),
+            elements,
+            not_counted,
+        }
+    }
+
+    /// Found dogfooding the knowledge-graph store (14 properties of one model): the commits
+    /// after the newest snapshot are the same for every property, so the one note per model
+    /// says "not counted" once, after the total, instead of once per property.
+    #[test]
+    fn a_grouped_vector_note_names_the_commits_not_counted_once() {
+        let vectors = [
+            without_rule("a", 4, 7),
+            without_rule("b", 2, 7),
+            without_rule("c", 0, 7),
+        ];
+        let notes = vector_notes(&vectors, |patch| patch.to_string());
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        let note = &notes[0];
+        assert!(
+            note.contains(
+                "3 vector properties are declared with vectors of m (6 vector(s) in the newest \
+                 snapshot, 7 later commit(s) not counted) but have no source property: a.emb (4), \
+                 b.emb (2), c.emb (0);"
+            ),
+            "{note}"
+        );
+        assert_eq!(note.matches("not counted").count(), 1, "{note}");
+
+        let exact = [without_rule("a", 4, 0), without_rule("b", 0, 0)];
+        let note = &vector_notes(&exact, |patch| patch.to_string())[0];
+        assert!(
+            note.contains("(4 vector(s) in all) but have no source property: a.emb (4), b.emb (no element holds one yet);"),
+            "{note}"
+        );
+    }
 
     /// The book pages that hold the generated copy of [`UPGRADES`], between
     /// `<!-- upgrades:begin -->` and `<!-- upgrades:end -->`.

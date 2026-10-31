@@ -2139,8 +2139,9 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
     }
     for missing in &report.models_missing {
         errln!(
-            "warning: the schema needs the model {} ({}), which the store does not keep (0.4.0 \
-             served it through a command-line embedder); the store does not open until it is imported: {}",
+            "warning: the schema needs the model {} ({}), which the store does not keep (Graphersal \
+             0.4 and earlier served it through a command-line embedder); the store does not open \
+             until it is imported: {}",
             missing.identity(),
             missing.needed_by().join(", "),
             missing.commands(target).join(" then ")

@@ -113,7 +113,7 @@ saved query calling a removed function:
 ```text
 $ graphersal store create data/ --from old.gsnap
 Created the store data/: graph 01a11a54-9f3c-7b21-8e0d-5a2c9e41d7b3, commit 3120, 1 snapshot(s); damage policy maintenance (fixed for its life).
-warning: the schema needs the model model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (doc.emb), which the store does not keep (0.4.0 served it through a command-line embedder); the store does not open until it is imported: graphersal embed-model download minishlab/potion-multilingual-128M then graphersal embed-model import minishlab/potion-multilingual-128M --into data/
+warning: the schema needs the model model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (doc.emb), which the store does not keep (Graphersal 0.4 and earlier served it through a command-line embedder); the store does not open until it is imported: graphersal embed-model download minishlab/potion-multilingual-128M then graphersal embed-model import minishlab/potion-multilingual-128M --into data/
 note: doc.emb has vectors of model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (250 element(s)) but no source property; ...
 Use it: graphersal --graph data/ (or --server)
 ```
