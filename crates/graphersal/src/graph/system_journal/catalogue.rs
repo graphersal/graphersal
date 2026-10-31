@@ -563,7 +563,10 @@ pub(crate) static MODEL_MIGRATED: EventKind = event(
     "An embedding model a Graphersal 0.4.0 store kept under models/ became a blob with a \
      catalog definition (store upgrade to store format version 4; the migration commit).",
     &[
-        f("repo", "its repository (local/<12 hex> when 0.4.0 kept none)"),
+        f(
+            "repo",
+            "its repository (local/<12 hex> when 0.4.0 kept none)",
+        ),
         f("identity", "its identity now"),
         f("former_identity", "its identity in the 0.4.0 store"),
         f("bytes", "the bytes of its blob"),

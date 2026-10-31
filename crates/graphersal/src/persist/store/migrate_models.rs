@@ -131,7 +131,8 @@ pub(crate) fn legacy_of(dir: &DirPath, model: StoredModel) -> Result<LegacyModel
         ));
     }
     for file in &model.files {
-        if !model_tar::is_model_file_name(&file.name) || file.bytes > model_tar::MAX_MODEL_FILE_BYTES
+        if !model_tar::is_model_file_name(&file.name)
+            || file.bytes > model_tar::MAX_MODEL_FILE_BYTES
         {
             return Err(damaged(
                 dir,
@@ -488,10 +489,7 @@ pub(crate) fn remove_models_dir(dir: &DirPath) -> Result<(), PersistError> {
         let doomed = if name.starts_with(TMP_PREFIX) {
             entry
         } else {
-            let tmp = models_dir.join(format!(
-                "{TMP_PREFIX}{:032x}",
-                crate::value::uuid::new_v7()
-            ));
+            let tmp = models_dir.join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7()));
             entry.rename_to(&tmp).map_err(io)?;
             tmp
         };

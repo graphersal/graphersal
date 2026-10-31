@@ -1092,7 +1092,10 @@ mod v040 {
     /// (the one without a repository as `local/<12 hex>`), one commit, `models/` gone, the
     /// vectors and the schema's other declarations as they were.
     fn assert_store_migrated(report: &UpgradeReport, dir: &Path) {
-        assert_eq!((report.from_version, report.to_version), (3, persist_version()));
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (3, persist_version())
+        );
         assert_eq!(report.to_version, 4);
         let converted: Vec<(&str, &str, &str, bool)> = report
             .models_converted
@@ -1108,12 +1111,22 @@ mod v040 {
         );
         assert!(report.models_converted.iter().all(|m| m.bytes() > 0));
         assert_eq!(report.migration_commit, Some(12));
-        assert!(report.models_missing.is_empty(), "{:?}", report.models_missing);
+        assert!(
+            report.models_missing.is_empty(),
+            "{:?}",
+            report.models_missing
+        );
         // The vector properties without a rule, counted exactly (the fixture's last commit is
         // in its newest snapshot).
         let doc = vector(report, "doc");
         assert_eq!(
-            (doc.element_kind(), doc.property(), doc.model(), doc.elements(), doc.exact()),
+            (
+                doc.element_kind(),
+                doc.property(),
+                doc.model(),
+                doc.elements(),
+                doc.exact()
+            ),
             (ElementKind::Vertex, "emb", "acme/tiny", 3, true)
         );
         assert_eq!(doc.embedder(), TINY);
@@ -1127,8 +1140,16 @@ mod v040 {
             "g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: \"<source property>\"}}}}}})"
         );
         let text = doc.note("st");
-        assert!(text.starts_with("doc.emb has vectors of acme/tiny (3 element(s)) but no source property"), "{text}");
-        assert!(text.contains("graphersal --graph st -e 'g.patch_schema("), "{text}");
+        assert!(
+            text.starts_with(
+                "doc.emb has vectors of acme/tiny (3 element(s)) but no source property"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("graphersal --graph st -e 'g.patch_schema("),
+            "{text}"
+        );
         assert!(text.contains("re-embeds every doc"), "{text}");
 
         let store = Store::open(dir, StoreOptions::new()).unwrap();
@@ -1136,7 +1157,10 @@ mod v040 {
         let mut identities: Vec<&str> = models.iter().map(|m| m.identity.as_str()).collect();
         identities.sort();
         assert_eq!(identities, [TINY, OTHER]);
-        assert!(models.iter().all(|m| !m.default), "no default model after a migration");
+        assert!(
+            models.iter().all(|m| !m.default),
+            "no default model after a migration"
+        );
         let tiny = models.iter().find(|m| m.identity == TINY).unwrap();
         assert_eq!((tiny.dimension, tiny.license.as_str()), (3, "mit"));
         {
@@ -1150,7 +1174,10 @@ mod v040 {
             // The schema: the renamed model's embedder follows it, nothing else changed (no
             // `from` anywhere: the upgrade never guesses a source).
             let json = graph.get_schema().unwrap().unwrap().to_json();
-            assert!(json.contains(&format!("\"embedder\":\"{OTHER}\"")), "{json}");
+            assert!(
+                json.contains(&format!("\"embedder\":\"{OTHER}\"")),
+                "{json}"
+            );
             assert!(json.contains(&format!("\"embedder\":\"{TINY}\"")), "{json}");
             assert!(!json.contains("\"from\""), "{json}");
             // The vectors are the data 0.4.0 wrote.
@@ -1178,13 +1205,14 @@ mod v040 {
             segments.last().unwrap().file_name().unwrap(),
             "00000000000000000012.wal"
         );
-        let commits: Vec<_> = graphersal::persist::read_journal(fs::File::open(segments.last().unwrap()).unwrap())
-            .unwrap()
-            .filter_map(|r| match r.unwrap() {
-                graphersal::persist::JournalRecord::Commit(c) => Some(c),
-                _ => None,
-            })
-            .collect();
+        let commits: Vec<_> =
+            graphersal::persist::read_journal(fs::File::open(segments.last().unwrap()).unwrap())
+                .unwrap()
+                .filter_map(|r| match r.unwrap() {
+                    graphersal::persist::JournalRecord::Commit(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].commit_seq(), 12);
         let metadata = commits[0].metadata();
@@ -1229,14 +1257,22 @@ mod v040 {
         // Into a copy (another single file), then in place.
         let copy = temp.join("copy.gstore");
         let report = Store::upgrade(&file, &copy).unwrap();
-        assert_eq!(fs::read(&file).unwrap(), before, "the source is not changed");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            before,
+            "the source is not changed"
+        );
         assert_eq!(report.models_converted.len(), 1);
         assert_eq!(report.models_converted[0].identity(), TINY);
         // The vectors are all in the WAL after the newest snapshot: the count says so.
         let doc = vector(&report, "doc");
         assert!(!doc.exact());
         assert!(doc.commits_not_counted() > 0);
-        assert!(doc.note("x").contains("later commit(s) not counted"), "{}", doc.note("x"));
+        assert!(
+            doc.note("x").contains("later commit(s) not counted"),
+            "{}",
+            doc.note("x")
+        );
         let report = Store::upgrade_in_place(&file).unwrap();
         assert_eq!(report.migration_commit, Some(11));
         for path in [&file, &copy] {
@@ -1291,25 +1327,41 @@ mod v040 {
                     if store.open_report().intent_completed.as_deref() == Some("upgrade_models") {
                         completed_at_open += 1;
                     }
-                    let mut models: Vec<String> =
-                        store.models().unwrap().into_iter().map(|m| m.identity).collect();
+                    let mut models: Vec<String> = store
+                        .models()
+                        .unwrap()
+                        .into_iter()
+                        .map(|m| m.identity)
+                        .collect();
                     models.sort();
                     assert_eq!(models, [TINY, OTHER], "step {step}");
                     assert_eq!(store.graph().read().last_commit_seq(), 12, "step {step}");
                     store.close().unwrap();
-                    assert!(opened.entry_kind("models").unwrap().is_none(), "step {step}");
-                    assert!(opened.entry_kind("INTENT").unwrap().is_none(), "step {step}");
+                    assert!(
+                        opened.entry_kind("models").unwrap().is_none(),
+                        "step {step}"
+                    );
+                    assert!(
+                        opened.entry_kind("INTENT").unwrap().is_none(),
+                        "step {step}"
+                    );
                 }
                 Err(other) => panic!("crash after {step} writes: {other}"),
             }
             // Repeating the upgrade completes it, with one migration commit.
             let again = image.deep_copy();
-            let report = Store::upgrade_in_place(&again)
-                .unwrap_or_else(|e| panic!("step {step}: {e}"));
+            let report =
+                Store::upgrade_in_place(&again).unwrap_or_else(|e| panic!("step {step}: {e}"));
             // It lists the models still under models/ (a crash during their removal leaves
             // fewer); their definitions exist once, whatever the step.
-            assert!(report.models_converted.len() <= 2, "step {step}: {report:?}");
-            assert!(report.migration_commit.is_none_or(|c| c == 12), "step {step}");
+            assert!(
+                report.models_converted.len() <= 2,
+                "step {step}: {report:?}"
+            );
+            assert!(
+                report.migration_commit.is_none_or(|c| c == 12),
+                "step {step}"
+            );
             let store = Store::open(&again, StoreOptions::new()).unwrap();
             assert_eq!(store.graph().read().last_commit_seq(), 12, "step {step}");
             assert_eq!(store.models().unwrap().len(), 2, "step {step}");
@@ -1439,7 +1491,10 @@ mod v040 {
                 },
             ) => {
                 let text = err.to_string();
-                assert!(text.contains("not in the database at this position"), "{text}");
+                assert!(
+                    text.contains("not in the database at this position"),
+                    "{text}"
+                );
             }
             other => panic!("{:?}", other.map(|r| r.report.commit_seq)),
         }
@@ -1456,8 +1511,12 @@ mod v040 {
         assert!(!restored.join("models").exists());
         assert!(Store::backup_marker_dir(&restored).unwrap().is_none());
         let store = Store::open(&restored, StoreOptions::new()).unwrap();
-        let mut models: Vec<String> =
-            store.models().unwrap().into_iter().map(|m| m.identity).collect();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
         models.sort();
         assert_eq!(models, [TINY, OTHER]);
         store.close().unwrap();
@@ -1473,9 +1532,14 @@ mod v040 {
         let temp = Temp::new("v040-gsnap");
         let packed = fs::read(fixtures().join("snapshot.gsnap")).unwrap();
         let dir = temp.join("store");
-        let store = Store::create_from_packed(&dir, packed.as_slice(), StoreOptions::new()).unwrap();
-        let mut models: Vec<String> =
-            store.models().unwrap().into_iter().map(|m| m.identity).collect();
+        let store =
+            Store::create_from_packed(&dir, packed.as_slice(), StoreOptions::new()).unwrap();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
         models.sort();
         assert_eq!(models, [TINY, OTHER]);
         // The snapshot's commit 11, then the new store's first commit defining the models.
@@ -1487,8 +1551,12 @@ mod v040 {
         let mem = MemDir::new();
         let store = Store::create(&mem, StoreOptions::new()).unwrap();
         store.import_models_from_packed(packed.as_slice()).unwrap();
-        let mut models: Vec<String> =
-            store.models().unwrap().into_iter().map(|m| m.identity).collect();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
         models.sort();
         assert_eq!(models, [TINY, OTHER]);
         store.close().unwrap();

@@ -727,7 +727,10 @@ pub(super) fn count_vectors(
             &location,
             &mut |_, chunk| {
                 let holds = |props: &crate::value::PropertyMap, key: &str| {
-                    matches!(props.get(key), Some(crate::value::ElementProperty::Vector(_)))
+                    matches!(
+                        props.get(key),
+                        Some(crate::value::ElementProperty::Vector(_))
+                    )
                 };
                 if edge {
                     let records =

@@ -83,8 +83,8 @@ pub use model_catalog::{
 pub(crate) use models::StoredModel;
 pub use models::{ModelCopy, ModelRole, NewModel};
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
-pub use upgrade::{ConvertedModel, MissingModel, UpgradeReport, VectorWithoutRule};
 pub(crate) use upgrade::upgradable_from;
+pub use upgrade::{ConvertedModel, MissingModel, UpgradeReport, VectorWithoutRule};
 pub use workload::{NotScheduledJob, UserJobs};
 
 pub(crate) use files::STORE_VERSION;

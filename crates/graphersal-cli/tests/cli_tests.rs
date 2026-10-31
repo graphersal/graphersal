@@ -3982,17 +3982,17 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     assert!(res.stdout.contains("acme/tiny"), "{}", res.stdout);
     assert!(!res.stdout.contains("missing"), "{}", res.stdout);
     let res = run(
-        &[
-            "--graph",
-            &old,
-            "-e",
-            "g.v().has(\"emb\").count().next()",
-        ],
+        &["--graph", &old, "-e", "g.v().has(\"emb\").count().next()"],
         "",
     );
     assert_eq!(res.stdout.trim(), "6", "{}", res.stderr);
     let res = run(
-        &["--graph", &old, "-e", "g.get_schema().to_json().contains(\"from\")"],
+        &[
+            "--graph",
+            &old,
+            "-e",
+            "g.get_schema().to_json().contains(\"from\")",
+        ],
         "",
     );
     assert_eq!(res.stdout.trim(), "false", "{}", res.stderr);
@@ -4073,7 +4073,8 @@ fn store_commands_refuse_files_of_a_newer_graphersal() {
     for name in ["GRAPH", "GRAPH.copy"] {
         let path = dir.join(name);
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
+        bytes[8..12]
+            .copy_from_slice(&(graphersal::persist::STORE_FORMAT_VERSION + 1).to_le_bytes());
         let crc = crc32c(&bytes[..252]);
         bytes[252..256].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&path, bytes).unwrap();

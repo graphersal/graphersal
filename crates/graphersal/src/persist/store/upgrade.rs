@@ -676,7 +676,12 @@ fn finish(
             .vertices
             .iter()
             .map(|(label, v)| (false, label, &v.schema))
-            .chain(schema.edges.iter().map(|(label, e)| (true, label, &e.schema)));
+            .chain(
+                schema
+                    .edges
+                    .iter()
+                    .map(|(label, e)| (true, label, &e.schema)),
+            );
         for (edge, label, root) in roots {
             for (key, node) in &root.properties {
                 let Some(vector) = node.vector.as_ref() else {
@@ -773,8 +778,9 @@ fn upgrade_copy_by(
         match method_in(table, from_version) {
             // Every supported row converts by the version word (and the model migration,
             // run on the copy); a `CopyOnly` row needs its conversion here when one is added.
-            UpgradeMethod::InPlaceVersionWord | UpgradeMethod::Migrate | UpgradeMethod::CopyOnly => {
-            }
+            UpgradeMethod::InPlaceVersionWord
+            | UpgradeMethod::Migrate
+            | UpgradeMethod::CopyOnly => {}
             UpgradeMethod::Nothing | UpgradeMethod::Unsupported => {
                 return Err(not_upgradable(from, from_version));
             }

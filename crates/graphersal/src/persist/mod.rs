@@ -82,14 +82,14 @@ pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 
 pub use store::{
     AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BlobSource, ChangesSince,
-    CheckpointReport, ClosedCommitOptions, ConvertedModel, MissingModel, VectorWithoutRule, CompactReport, CompactionAdvice, CompactionPolicy,
-    CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES,
+    CheckpointReport, ClosedCommitOptions, CompactReport, CompactionAdvice, CompactionPolicy,
+    ConvertedModel, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES,
     DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage, DamageKind, DamagePolicy,
     DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange, ImportModelOptions,
-    ImportModelReport, LineageEntry, ModelChangeReport, ModelCopy, ModelInfo, ModelRole,
-    ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions, RepairReport,
-    RestoreBlobsReport, RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions,
-    UpgradeReport, VerifyProblem, VerifyReport,
+    ImportModelReport, LineageEntry, MissingModel, ModelChangeReport, ModelCopy, ModelInfo,
+    ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions,
+    RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions,
+    UpgradeReport, VectorWithoutRule, VerifyProblem, VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
 

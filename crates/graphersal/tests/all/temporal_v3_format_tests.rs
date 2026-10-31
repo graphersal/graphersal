@@ -403,7 +403,7 @@ fn every_file_this_build_writes_is_of_file_format_version_3() {
     );
     assert!(versions.iter().all(|(_, v)| *v == 4), "{versions:?}");
     let graph = dir.read("GRAPH", u64::MAX).unwrap();
-    assert_eq!(version_word(&graph), 3, "the store format version");
+    assert_eq!(version_word(&graph), 4, "the store format version");
 }
 
 #[test]
@@ -694,10 +694,11 @@ fn the_store_of_0_2_3_reads_exactly_and_continues_in_version_3() {
     let before = file_versions(&dir);
     assert!(before.iter().all(|(_, v)| *v == 2), "{before:?}");
     let old_wal = dir.read("wal/00000000000000000001.wal", u64::MAX).unwrap();
-    assert!(Store::verify_dir(&shared).unwrap().is_ok());
-    // Store format version 3 -> 4 (P10): the version word only (no models/), every file kept.
+    // Store format version 3 -> 4 (P10): the version word only (no models/), every file kept;
+    // the store is verified as it is upgraded and again afterwards.
     Store::upgrade_in_place(&shared).unwrap();
     assert_eq!(file_versions(&dir), before);
+    assert!(Store::verify_dir(&shared).unwrap().is_ok());
 
     let store = Store::open(&shared, StoreOptions::new()).unwrap();
     assert_eq!(store.graph().read().last_commit_seq(), 4);
