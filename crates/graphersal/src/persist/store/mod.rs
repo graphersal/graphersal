@@ -27,6 +27,7 @@
 
 mod backup;
 mod backup_check;
+mod blob_restore;
 pub(crate) mod blobs;
 mod closed_commit;
 mod compaction;
@@ -66,10 +67,13 @@ use crate::graph::{Graph, TraversalGraph};
 use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalGraphs};
 
 pub use backup::BackupMode;
+pub use blob_restore::{BlobSource, RestoreBlobsReport};
 use blobs::PendingBlob;
 pub use closed_commit::ClosedCommitOptions;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
-pub use damage::{Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairReport};
+pub use damage::{
+    Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairOptions, RepairReport,
+};
 pub use files::{BackupMarker, DamagePolicy, LineageEntry};
 pub use maintenance::{BackupReport, ChangesSince, PruneReport, VerifyProblem, VerifyReport};
 pub use model_catalog::{
@@ -723,9 +727,20 @@ impl Store {
         dir: impl IntoStoreDir,
         new_dir: impl IntoStoreDir,
     ) -> Result<RepairReport, PersistError> {
+        Self::repair_dir_with(dir, new_dir, RepairOptions::new())
+    }
+
+    /// [`Store::repair_dir`] with options (leaving out the definitions whose blobs are missing
+    /// or damaged: [`RepairOptions::with_drop_damaged_blobs`]).
+    pub fn repair_dir_with(
+        dir: impl IntoStoreDir,
+        new_dir: impl IntoStoreDir,
+        options: RepairOptions,
+    ) -> Result<RepairReport, PersistError> {
         StoreCore::repair_at(
             &DirPath::root(dir.into_store_dir()),
             &DirPath::root(new_dir.into_store_dir()),
+            &options,
         )
     }
 
@@ -1245,7 +1260,16 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// of its own whatever this store's storage type; the files it writes are
     /// storage-independent, so a host opens the new store with [`Store::open_in`].
     pub fn repair_to(&self, new_dir: impl IntoStoreDir) -> Result<RepairReport, PersistError> {
-        self.core.repair_to(new_dir)
+        self.core.repair_to(new_dir, &RepairOptions::new())
+    }
+
+    /// [`Store::repair_to`] with options ([`RepairOptions::with_drop_damaged_blobs`]).
+    pub fn repair_to_with(
+        &self,
+        new_dir: impl IntoStoreDir,
+        options: RepairOptions,
+    ) -> Result<RepairReport, PersistError> {
+        self.core.repair_to(new_dir, &options)
     }
 
     /// [`Store::open_read_only`] of this store's directory into a new `S::default()` (no lock
@@ -2283,8 +2307,16 @@ impl StoreCore {
         self.maintenance.as_ref()
     }
 
-    pub fn repair_to(&self, new_dir: impl IntoStoreDir) -> Result<RepairReport, PersistError> {
-        let report = Self::repair_at(&self.shared.dir, &DirPath::root(new_dir.into_store_dir()))?;
+    pub fn repair_to(
+        &self,
+        new_dir: impl IntoStoreDir,
+        options: &RepairOptions,
+    ) -> Result<RepairReport, PersistError> {
+        let report = Self::repair_at(
+            &self.shared.dir,
+            &DirPath::root(new_dir.into_store_dir()),
+            options,
+        )?;
         self.shared.system_journal.emit(
             &catalogue::REPAIRED,
             Event::new(format!(
@@ -2299,7 +2331,11 @@ impl StoreCore {
         Ok(report)
     }
 
-    fn repair_at(dir: &DirPath, new_dir: &DirPath) -> Result<RepairReport, PersistError> {
+    fn repair_at(
+        dir: &DirPath,
+        new_dir: &DirPath,
+        options: &RepairOptions,
+    ) -> Result<RepairReport, PersistError> {
         // Never a lossy repair of files a newer Graphersal wrote (format spec 15).
         files::refuse_newer_version(dir)?;
         // A store of a released older format is read as upgraded (format spec 15.1): the
@@ -2319,7 +2355,12 @@ impl StoreCore {
                 reason: "it has no GRAPH file and no snapshots".into(),
             });
         }
-        let salvage = damage::salvage(dir, &ReadOptions::new().with_max_value_depth(4096))?;
+        let mut salvage = damage::salvage(dir, &ReadOptions::new().with_max_value_depth(4096))?;
+        let (blobs_dropped, definitions_dropped) = if options.drop_damaged_blobs() {
+            drop_damaged_blobs(&models_from, &mut salvage.graph)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let options = StoreOptions::new()
             .with_chunk_bytes(salvage.graph_file.chunk_bytes)
             .with_damage_policy(salvage.graph_file.damage_policy);
@@ -2382,7 +2423,19 @@ impl StoreCore {
                 ),
             ));
         }
+        if !blobs_dropped.is_empty() {
+            journal_dropped(new_dir, &blobs_dropped);
+        }
+        let (blobs_dropped, definitions_dropped): (Vec<String>, Vec<String>) = (
+            blobs_dropped
+                .iter()
+                .map(|(blob, _)| blobs::blob_name(blob))
+                .collect(),
+            definitions_dropped,
+        );
         Ok(RepairReport {
+            blobs_dropped,
+            definitions_dropped,
             location: new_dir.display(),
             graph_id,
             commit_seq,
@@ -5160,4 +5213,113 @@ pub(crate) fn count_by_kind(
         *counts.entry(kind.to_string()).or_insert(0) += 1;
     }
     counts
+}
+
+/// Leaves out of the salvaged `graph` every catalog definition that references a blob missing
+/// or damaged in the store at `from` (a repair with
+/// [`RepairOptions::with_drop_damaged_blobs`]): the dropped blobs with their referrers
+/// (`kind:name`), and every dropped definition. Refused (nothing written yet) while the schema
+/// needs a dropped definition.
+#[allow(clippy::type_complexity)]
+fn drop_damaged_blobs(
+    from: &DirPath,
+    graph: &mut TraversalGraph,
+) -> Result<(Vec<(crate::value::BlobRef, Vec<String>)>, Vec<String>), PersistError> {
+    let mut bad: Vec<(crate::value::BlobRef, Vec<String>)> = Vec::new();
+    let mut dropped: Vec<(crate::graph::DefinitionKind, String)> = Vec::new();
+    for definition in graph.definitions.iter() {
+        let mut refs = Vec::new();
+        definition.blob_refs(&mut refs);
+        let mut faulty = false;
+        for blob in refs {
+            let fault = match blobs::check_blob(from, &blob, true) {
+                Ok(()) => false,
+                Err(blobs::BlobError::Fault(_)) => true,
+                Err(blobs::BlobError::Io(err)) => {
+                    return Err(PersistError::io("checking a blob", err));
+                }
+                Err(blobs::BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
+                Err(blobs::BlobError::Unsupported) => false,
+            };
+            if !fault {
+                continue;
+            }
+            faulty = true;
+            let referrer = format!("{}:{}", definition.kind(), definition.name());
+            match bad.iter_mut().find(|(b, _)| *b == blob) {
+                Some((_, referrers)) => referrers.push(referrer),
+                None => bad.push((blob, vec![referrer])),
+            }
+        }
+        if faulty {
+            dropped.push((definition.kind(), definition.name().to_string()));
+        }
+    }
+    let schema = crate::graph::GraphStorage::get_schema(&*graph).map_err(PersistError::Graph)?;
+    let mut needed = Vec::new();
+    for (identity, places) in model_catalog::needed_models(schema.as_ref()) {
+        let base = model_catalog::base_identity(&identity);
+        if dropped
+            .iter()
+            .any(|(kind, name)| *kind == crate::graph::DefinitionKind::MODEL && name == base)
+        {
+            needed.extend(places.into_iter().map(|p| format!("{p} ({base})")));
+        }
+    }
+    if !needed.is_empty() {
+        return Err(PersistError::store(
+            "repair the store",
+            StoreFailure::BlobUnavailable,
+            format!(
+                "--drop-damaged-blobs would leave out models the schema needs: the vector \
+                 properties {} name them. Restore their blobs first (graphersal store \
+                 restore-blobs <dir> --from <backup>), or change the schema so no property \
+                 names them; nothing was written",
+                needed.join(", ")
+            ),
+        ));
+    }
+    for (kind, name) in &dropped {
+        graph.definitions.remove(*kind, name);
+    }
+    Ok((
+        bad,
+        dropped
+            .into_iter()
+            .map(|(kind, name)| format!("{kind}:{name}"))
+            .collect(),
+    ))
+}
+
+/// Writes `blob.dropped` for every blob a repair left out into the repaired store's journal.
+fn journal_dropped(dir: &DirPath, dropped: &[(crate::value::BlobRef, Vec<String>)]) {
+    let clock = crate::graph::CommitClock::new();
+    let journal = system_journal::open_journal(system_journal::OpenJournal {
+        dir,
+        clock: &clock,
+        writable: true,
+        instance_name: None,
+        segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
+    });
+    for (blob, referrers) in dropped {
+        journal.emit(
+            &catalogue::BLOB_DROPPED,
+            Event::new(format!(
+                "the repair left out the missing or damaged blob {} and {}",
+                blobs::blob_name(blob),
+                referrers.join(", ")
+            ))
+            .field("hash", blob.hash_hex())
+            .field(
+                "referrers",
+                crate::value::ElementProperty::Array(
+                    referrers
+                        .iter()
+                        .map(|r| crate::value::ElementProperty::from(r.as_str()))
+                        .collect(),
+                ),
+            ),
+        );
+    }
+    journal.detach_writer();
 }

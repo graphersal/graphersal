@@ -10,9 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use graphersal::persist::{
-    BackupMode, BackupReport, ClosedCommitOptions, CompactionAdvice, CompactionPolicy,
-    DamagePolicy, ModelCopy, ModelInfo, PersistError, RecoveryTarget, RollbackMode, SingleFileDir,
-    Store, StoreDir, StoreOptions, store_dir_at,
+    BackupMode, BackupReport, BlobSource, ClosedCommitOptions, CompactionAdvice, CompactionPolicy,
+    DamagePolicy, ModelCopy, ModelInfo, PersistError, RecoveryTarget, RepairOptions,
+    RestoreBlobsReport, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions, store_dir_at,
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
@@ -69,8 +69,12 @@ USAGE:
                                      the latest (or the given) stored snapshot as a packed file,
                                      with the store's embedding models unless --without-models
     graphersal store models <DIR>    the embedding models the store keeps, with their licences
-    graphersal store models remove <DIR> <IDENTITY>
-                                     remove a model (by identity or id) from the store
+    graphersal store models remove <DIR> <REPO>
+                                     remove a model from the store's current state: one commit
+                                     appended without loading the graph
+    graphersal store restore-blobs <DIR> --from <SOURCE> [--json]
+                                     copy missing or damaged blobs (models) back from a backup
+                                     (directory or .zip), a .gsnap or another store
     graphersal store rollback <DIR> TARGET [--delete]
                                      roll the store back IN PLACE: everything after TARGET moves
                                      to the attic (--delete: deleted); a new lineage continues
@@ -80,8 +84,10 @@ USAGE:
                                      committed since)
     graphersal store attic <DIR> fork <ID> <NEW_DIR>  a new store from the end of the entry
     graphersal store attic <DIR> remove <ID>        delete an attic entry for good
-    graphersal store repair <DIR> --to <NEW_DIR>    build a repaired copy of a damaged store
-                                     in a NEW directory (the damaged files are never changed)
+    graphersal store repair <DIR> --to <NEW_DIR> [--drop-damaged-blobs]
+                                     build a repaired copy of a damaged store in a NEW directory
+                                     (the damaged files are never changed); --drop-damaged-blobs
+                                     leaves out definitions whose blobs are missing or damaged
 
 TARGET: --at-commit <N> | --at-time <TIME> | --at-mark <NAME> (fork: default the latest).
 TIME: an RFC 3339 / ISO 8601 date-time with a zone (2026-10-08T02:43:00Z, 2026-10-08T02:43Z,
@@ -93,8 +99,9 @@ DIR: a store directory, or a single-file store (an existing file, or a new path 
 A damaged store opens read-only in maintenance mode; `verify` lists the damage and its donors.
 A backup directory is read-only (info, list, marks, verify, export, fork, prune work on it;
 --graph opens it read-only) until `store restore <BACKUP_DIR>` makes it the live store.
-Embedding models (models/ in the store) enter it only by `graphersal embed-model download
-<REPO> --into <DIR>` or `embed-model import <REPO|MODEL_DIR> --into <DIR>`; every copy (backup,
+Embedding models (blobs in the store, defined in its catalog) enter it only by `graphersal
+embed-model download <REPO> --into <DIR>` or `embed-model import <REPO|MODEL_DIR> --into <DIR>`
+(a closed store: one commit appended without loading the graph); every copy (backup,
 fork, convert, repair, export) carries them with their licences: a store handed on
 redistributes its models. The store's models are loaded when the store is opened.
 
@@ -313,16 +320,30 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "models" => (
-            "graphersal store models <DIR>\n    graphersal store models remove <DIR> <IDENTITY>",
-            "Lists the embedding models the store keeps (models/<id>/, format spec 4.5): the\n\
-             identity a schema's `embedder` records (model2vec/<repo>@<12 hex>), the size, the\n\
-             licence and where its text comes from (file: a licence file of the repository;\n\
-             template: the standard text of the licence the model card names, written by\n\
-             Graphersal; none), whether the repository is gated, and whether the schema uses\n\
-             it. `remove` deletes one (by identity or by its id model2vec-<12 hex>): the only\n\
-             way a model leaves a store; refused while a writer has the store open. A model\n\
-             enters a store by `graphersal embed-model download <REPO> --into <DIR>` or\n\
+            "graphersal store models <DIR>\n    graphersal store models remove <DIR> <REPO>",
+            "Lists the embedding models of the store's current state (catalog definitions, each\n\
+             with its files as one blob; format spec 4.5): the identity a schema's `embedder`\n\
+             records (model2vec/<repo>@<12 hex>), the size, the licence and where its text comes\n\
+             from (file: a licence file of the repository; template: the standard text of the\n\
+             licence the model card names, written by Graphersal; none), whether the repository\n\
+             is gated, and whether the schema uses it. `remove` drops the model of REPO from the\n\
+             current state: ONE commit appended to the WAL without loading the graph (format\n\
+             spec 12.12; earlier positions keep it, a prune removes its blob later); refused\n\
+             while the schema needs it, and with \"in use\" while a writer has the store open.\n\
+             A model enters a store by `graphersal embed-model download <REPO> --into <DIR>` or\n\
              `embed-model import <REPO|MODEL_DIR> --into <DIR>`.",
+            false,
+        ),
+        "restore-blobs" => (
+            "graphersal store restore-blobs <DIR> --from <SOURCE> [--json]",
+            "Copies the blobs (embedding models) the store references that are missing or\n\
+             damaged back from SOURCE: a backup directory (full or incremental), a ZIP backup\n\
+             (.zip), a packed snapshot (.gsnap) or another store (a directory or .gstore). A blob\n\
+             is named by its hash, so any copy of it is the right bytes; each is checked (length,\n\
+             CRC-32C, hash) before it is moved into place, and a healthy blob is never touched.\n\
+             The store must be closed (\"in use\" otherwise). Prints what was restored, what\n\
+             SOURCE lacks and what SOURCE holds damaged too; exit 1 unless every blob the store\n\
+             references is intact afterwards. --json prints the report as one JSON object.",
             false,
         ),
         "rollback" => (
@@ -347,10 +368,13 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "repair" => (
-            "graphersal store repair <DIR> --to <NEW_DIR>",
+            "graphersal store repair <DIR> --to <NEW_DIR> [--drop-damaged-blobs]",
             "Builds a repaired copy of a damaged store in NEW_DIR (never in place; the damaged\n\
              files are not changed) and reports what was repaired, lost and diverged. Exit 1 when\n\
-             data is lost.",
+             data is lost. A blob (an embedding model) missing or damaged in DIR is not carried\n\
+             and reported; restore it first with `store restore-blobs`, or give\n\
+             --drop-damaged-blobs: the copy then leaves out the definitions referencing such a\n\
+             blob (refused, nothing written, while the schema needs one of them).",
             false,
         ),
         "help" => (
@@ -792,7 +816,8 @@ pub fn run(args: &[String]) -> i32 {
         "prune" => &["up-to", "drop-marks"],
         "compact" => &["drop-marks"],
         "fork" | "rollback" => &["at-commit", "at-time", "at-mark", "delete"],
-        "repair" => &["to"],
+        "repair" => &["to", "drop-damaged-blobs"],
+        "restore-blobs" => &["from", "json"],
         "backup" => &["zip", "full", "from-memory", "without-models"],
         "export" => &["commit", "without-models"],
         _ => &[],
@@ -1742,10 +1767,21 @@ pub fn run(args: &[String]) -> i32 {
                     "`store repair` needs --to <NEW_DIR> (a store is never repaired in place)",
                 );
             };
-            match Store::repair_dir(&positional[0], &to) {
+            let options =
+                RepairOptions::new().with_drop_damaged_blobs(flag("drop-damaged-blobs").is_some());
+            match Store::repair_dir_with(&positional[0], &to, options) {
                 Ok(report) => {
                     out!("{}", report.damage);
                     out!("{report}");
+                    for blob in &report.blobs_dropped {
+                        errln!("note: left out the missing or damaged blob {blob}");
+                    }
+                    if !report.definitions_dropped.is_empty() {
+                        errln!(
+                            "note: left out the definitions referencing them: {}",
+                            report.definitions_dropped.join(", ")
+                        );
+                    }
                     if report.is_lossless() {
                         outln!("ok: nothing lost. Use it: graphersal --graph {to}");
                         EXIT_OK
@@ -1762,8 +1798,97 @@ pub fn run(args: &[String]) -> i32 {
                 Err(err) => fail(err),
             }
         }
+        "restore-blobs" => {
+            try_code!(need(1));
+            let Some(from) = flag("from").filter(|f| !f.is_empty()) else {
+                return usage("`store restore-blobs` needs --from <SOURCE>");
+            };
+            let source = match blob_source(&from) {
+                Ok(source) => source,
+                Err(message) => {
+                    errln!("Error: {message}");
+                    return EXIT_USAGE_ERROR;
+                }
+            };
+            match Store::restore_blobs_from(positional[0].as_str(), source) {
+                Ok(report) => {
+                    if flag("json").is_some() {
+                        outln!("{}", restore_json(&report));
+                    } else {
+                        outln!(
+                            "{} blob(s) referenced, {} missing or damaged, {} restored from {} \
+                             ({} bytes).",
+                            report.referenced,
+                            report.wanted.len(),
+                            report.restored.len(),
+                            report.source,
+                            report.bytes_restored
+                        );
+                        for blob in &report.restored {
+                            outln!("restored            {blob}");
+                        }
+                        for blob in &report.not_found {
+                            outln!("not in the source   {blob}");
+                        }
+                        for blob in &report.damaged_in_source {
+                            outln!("damaged there too   {blob}");
+                        }
+                    }
+                    if report.is_complete() {
+                        EXIT_OK
+                    } else {
+                        errln!(
+                            "Error: {} blob(s) are still missing or damaged. Help: restore them \
+                             from another backup or copy of the store, or build a copy without \
+                             them: graphersal store repair {} --to <NEW_DIR> --drop-damaged-blobs",
+                            report.not_found.len() + report.damaged_in_source.len(),
+                            positional[0]
+                        );
+                        EXIT_QUERY_ERROR
+                    }
+                }
+                Err(err) => fail(err),
+            }
+        }
         other => usage(&format!("Unknown store command: {other}")),
     }
+}
+
+/// The blob source `store restore-blobs --from` names: a ZIP backup (`.zip`), a packed snapshot
+/// (`.gsnap`), else a store or backup (a directory or a single file).
+fn blob_source(from: &str) -> Result<BlobSource, String> {
+    let lower = from.to_ascii_lowercase();
+    let open = || {
+        std::fs::File::open(from)
+            .map(std::io::BufReader::new)
+            .map_err(|err| format!("cannot open '{from}': {err}"))
+    };
+    if lower.ends_with(".zip") {
+        return Ok(BlobSource::zip(open()?, from));
+    }
+    if lower.ends_with(".gsnap") {
+        return Ok(BlobSource::packed(open()?, from));
+    }
+    if !Path::new(from).exists() {
+        return Err(format!("'{from}' does not exist"));
+    }
+    Ok(BlobSource::store(store_dir_at(from)))
+}
+
+/// The report of `store restore-blobs --json`.
+fn restore_json(report: &RestoreBlobsReport) -> String {
+    let list = |items: &[String]| serde_json::Value::from(items.to_vec());
+    serde_json::json!({
+        "source": report.source,
+        "referenced": report.referenced,
+        "wanted": list(&report.wanted),
+        "restored": list(&report.restored),
+        "bytesRestored": report.bytes_restored,
+        "notFound": list(&report.not_found),
+        "damagedInSource": list(&report.damaged_in_source),
+        "complete": report.is_complete(),
+    })
+    .to_string()
 }
 
 /// `graphersal store upgrade`: into a copy (`<DIR> <NEW>`) or `--in-place`.
@@ -2065,6 +2190,7 @@ mod tests {
             "rollback",
             "attic",
             "repair",
+            "restore-blobs",
             "convert",
             "upgrade",
             "compact",

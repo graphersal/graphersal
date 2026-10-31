@@ -25,6 +25,7 @@ mod blob_collection_tests;
 mod blob_copy_paths_tests;
 mod blob_damage_tests;
 mod blob_fuzz_tests;
+mod blob_recovery_tests;
 mod blob_store_tests;
 mod bounded_rendering_tests;
 mod branch_batch_tests;
