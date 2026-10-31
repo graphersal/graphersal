@@ -131,7 +131,7 @@ fixed at creation (never changed):
   created       2026-10-08T07:05:08Z
   chunk size    1048576 bytes
   on damage     maintenance (damage found while open makes the store read-only)
-  backend       directory (format version 3)
+  backend       directory (format version 4)
 ```
 
 Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back store), `backup
@@ -519,8 +519,8 @@ graphersal store upgrade <DIR> <NEW> [--single-file]
 graphersal store upgrade <DIR> --in-place
 ```
 
-Converts a store written by an older Graphersal (store format version 2: Graphersal 0.1.x) to the
-current format, **without the older binary**. `DIR` is a store directory, a single-file store or a
+Converts a store written by an older Graphersal (store format version 2: Graphersal 0.1.x; 3:
+Graphersal 0.2.x to 0.4.x) to the current format, **without the older binary**. `DIR` is a store directory, a single-file store or a
 backup directory (it stays a backup). With `NEW`: a new store in `NEW` (a new or empty directory,
 or a single file: `NEW` ending in `.gstore`, or `--single-file`); `DIR` is not changed. With
 `--in-place`: `DIR` itself; back it up first (a copy of the closed directory or file will do):
@@ -537,6 +537,24 @@ upgrade in place of a current store prints `nothing to do` (exit 0). An interrup
 no store in `NEW` (run it again: it clears what was left), and in place leaves the store either
 older or upgraded (run it again). A ZIP backup of an older store is upgraded by
 `store restore FILE.zip DIR`. See [Format Versions](store_versions.md).
+
+The embedding models of a Graphersal 0.4.0 store (`models/`) become blobs defined by one commit
+([0.4.0 -> 0.5.0](store_versions.md#040---050-models-become-blobs)); a damaged one refuses the
+upgrade before anything is written (exit **1**, `StoreFailure::UpgradeModelDamaged`). What still
+needs your decision is printed, the exit code stays **0**: a `warning:` for every model the
+schema needs that the store does not keep (with the commands that import it: the store opens
+once it is there), and a `note:` for every vector property with a model but no source property
+`from`, with the ready schema patch:
+
+```text
+$ graphersal store upgrade store/ --in-place
+Verified the store store/ (store format version 3): 2 snapshot(s), 1 WAL segment(s), 12 record(s).
+Upgraded store/ in place to store format version 4: GRAPH rewritten, the models/ directory migrated (below), every other file kept. The older Graphersal no longer opens it.
+Converted the embedding model model2vec/acme/tiny@70c61d0ed332 into a blob with its catalog definition: model2vec/acme/tiny@70c61d0ed332 (8.5 KiB).
+The models were defined by commit 12; the history before it has no models. Take a full backup now (graphersal store backup store/ <new_dir>): a backup taken before the upgrade does not take increments of the upgraded store.
+note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs)
+Use it: graphersal --graph store/
+```
 
 Which versions are upgraded, and how, is decided by one table (the same in
 [Format Versions](store_versions.md#the-upgrade-table) and the
@@ -557,11 +575,11 @@ every other command does (below):
 ```text
 $ graphersal store upgrade old/ new/
 Verified the store old/ (store format version 2): 2 snapshot(s), 2 WAL segment(s), 10 record(s).
-Upgraded into new/ (store format version 3): 15 file(s), 21.2 KiB; verified. old/ is unchanged (keep using new/: it is the same store, with the same identity).
+Upgraded into new/ (store format version 4): 15 file(s), 21.2 KiB; verified. old/ is unchanged (keep using new/: it is the same store, with the same identity).
 Use it: graphersal --graph new/
 $ graphersal store upgrade old/ --in-place
 Verified the store old/ (store format version 2): 2 snapshot(s), 2 WAL segment(s), 10 record(s).
-Upgraded old/ in place to store format version 3: GRAPH rewritten, every other file kept. The older Graphersal no longer opens it.
+Upgraded old/ in place to store format version 4: GRAPH rewritten, every other file kept. The older Graphersal no longer opens it.
 Use it: graphersal --graph old/
 ```
 

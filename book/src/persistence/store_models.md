@@ -128,6 +128,12 @@ keep the blobs the retained history references.
 
 ## Older Graphersal versions
 
-Graphersal 0.4.0 kept models as `models/<model2vec-12hex>/` directories outside the history.
-This version carries such directories through its copies; the migration into blobs and
-definitions comes with the store upgrade of the 0.5.0 release.
+Graphersal 0.4.0 kept models as `models/<model2vec-12hex>/` directories outside the history,
+in stores of store format version 3. This version opens such a store only after `graphersal
+store upgrade` (in place or into a copy), which turns each model into a blob and defines all of
+them in ONE commit (principal `upgrade`); the history before that commit has no models. No
+default model is set. A model kept without a repository name becomes `local/<12 hex>` (import it
+again with `--repo` to give it its name). A ZIP backup of 0.4.0 is migrated as it is restored, a
+`.gsnap` with model rows when a store is created from it. The upgrade also lists the models the
+schema needs that the store lacks, and every vector property with a model but no source property
+(`from`): see [0.4.0 -> 0.5.0](store_versions.md#040---050-models-become-blobs).

@@ -100,3 +100,48 @@ def test_an_explicit_embedder_wins_and_a_missing_model_refuses_the_open(tmp_path
     with pytest.raises(graphersal.GraphersalError) as raised:
         graphersal.Store.open(str(path))
     assert "embed-model download acme/tiny" in str(raised.value)
+
+
+def test_upgrade_converts_models(tmp_path):
+    """A store of the released 0.4.0 (golden fixture): its models/ become blobs with
+    definitions; the report lists the vector properties without a rule and the models the
+    schema lacks; the schema gets no source property (nothing is recomputed)."""
+    import pathlib
+    import shutil
+
+    fixtures = pathlib.Path(__file__).resolve().parents[3] / "crates/graphersal/tests/data/v0.4.0"
+    path = tmp_path / "store"
+    shutil.copytree(fixtures / "store", path)
+    report = graphersal.Store.upgrade(str(path), in_place=True)
+    assert (report["from_version"], report["to_version"]) == (3, 4)
+    assert report["migration_commit"] == 12
+    converted = {m["identity"]: m for m in report["models_converted"]}
+    assert set(converted) == {
+        "model2vec/acme/tiny@70c61d0ed332",
+        "model2vec/local/b6b362e7a651@b6b362e7a651",
+    }
+    renamed = converted["model2vec/local/b6b362e7a651@b6b362e7a651"]
+    assert renamed["former_identity"] == "model2vec@b6b362e7a651"
+    assert renamed["repo"] == "local/b6b362e7a651"
+    assert report["models_missing"] == []
+    vectors = {v["label"]: v for v in report["vectors_without_rule"]}
+    assert set(vectors) == {"doc", "person", "note"}
+    doc = vectors["doc"]
+    assert (doc["element"], doc["property"], doc["model"], doc["elements"], doc["exact"]) == (
+        "vertex", "emb", "acme/tiny", 3, True)
+    assert '#{from: "<source property>"}' in doc["schema_patch"]
+    assert "re-embeds every doc" in doc["note"]
+    assert not (path / "models").exists()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with graphersal.Store.open(str(path)) as store:
+            assert len(store.models()) == 2
+            assert "\"from\"" not in str(store.graph.query("g.get_schema().to_json()"))
+
+    missing = tmp_path / "missing"
+    shutil.copytree(fixtures / "missing", missing)
+    report = graphersal.Store.upgrade(str(missing), in_place=True)
+    [needed] = report["models_missing"]
+    assert needed["identity"] == "model2vec/acme/gone@0123456789ab"
+    assert needed["needed_by"] == ["doc.emb"]
+    assert needed["commands"][1] == f"graphersal embed-model import acme/gone --into {missing}"

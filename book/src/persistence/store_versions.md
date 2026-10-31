@@ -26,8 +26,8 @@ single-file container has its own container version):
 embedding models as files under `models/`, which become blobs ("0.4.0 -> 0.5.0" below). Its
 older files stay as they are; everything written from then on is of file format version 4.
 
-**File format version 3 needs no upgrade.** The store format version stays 3, so a store
-written by 0.2.x opens as it is: its version 2 snapshots and WAL segments stay and are read
+**File format version 3 (0.3.0) needed no upgrade.** The store format version stayed 3, so a
+store written by 0.2.x opened in 0.3.x as it was: its version 2 snapshots and WAL segments stay and are read
 as they are, and everything written from then on (a new WAL segment, new snapshots, backups,
 `.gsnap` exports) is of file format version 3. From the first such file on, Graphersal 0.2.x
 refuses the store, its backups and those packed snapshots as written by a newer version
@@ -150,6 +150,11 @@ deterministic tar) referenced by a model definition of the catalog
    view of a position before it whose schema names a model is refused ("not in the database at
    this position").
 4. `models/` and the `INTENT` are removed.
+
+### After the upgrade
+
+The upgrade prints (and `UpgradeReport` holds) what still needs your decision; the exit code is
+0 in every case.
 
 - **No default model** is set: `hash-ngram/1` stays the default until you choose one
   (`graphersal store models` lists them; `Store::set_default_model`).
