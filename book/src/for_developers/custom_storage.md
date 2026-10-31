@@ -40,6 +40,13 @@ a parameter means `Graph<TraversalGraph>`.
    `add_vertex`/`add_edge` (`add_vertex_with`/`add_edge_with` with a pinned time), which fill the
    defaults in from `get_schema()` and then call your `insert_vertex`/`insert_edge` (override
    `add_vertex_with`/`add_edge_with` only to avoid that schema copy).
+
+   A storage with schemas (`set_schema`/`get_schema`) must reject, or never store, every write
+   that violates the schema in force in mode `open` or `closed`: the stored data always
+   satisfies the stored schema. The engine relies on it: a schema change that keeps the mode
+   checks only the elements of the labels whose declaration changed (`validate_schema` and
+   `TraversalGraph`'s `set_schema` do), never the rest of the graph; only a change of the mode
+   checks every element. See `GraphStorage::set_schema`.
 2. **`Default`** (required by the DSL and the session). The session builds every new graph (a
    sample, a file load) by reading it into a `TraversalGraph` and copying it into an
    `S::default()` (through the load sink of a `PersistentStorage`, through the write methods

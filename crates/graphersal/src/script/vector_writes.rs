@@ -63,6 +63,9 @@ pub(crate) fn vector_targets(schema: Option<&GraphSchema>) -> Vec<VectorTarget> 
 /// (rule targets, and properties with a model but no rule yet) by its literal name, on a label
 /// their effects may write: one entry per query, element kind and property, in the order of
 /// `definitions`. Nothing is changed: a saved query is never rewritten.
+///
+/// Only a literal key of a `property(..)` call is found (`property("emb", ..)`, also after a
+/// cardinality); a computed key and the maps of `merge_v`/`merge_e` are not.
 pub fn saved_queries_writing_vectors<'a>(
     definitions: impl IntoIterator<Item = &'a Definition>,
     schema: Option<&GraphSchema>,

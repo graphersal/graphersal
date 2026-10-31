@@ -205,7 +205,10 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   "load_docs" writes emb directly (doc.emb): once the vector rule exists, direct writes of it
   are refused: remove that write (the rule computes emb from its source property); the query
   is not rewritten`; the preview of the patch names them too (`fill[..].direct_writes`, and a
-  line of `fill_warning`). A property declared with a model but holding no vector yet is listed
+  line of `fill_warning`). Only a literal key in `property(..)` is found (`property("emb", ..)`,
+  also after a cardinality, in a Rhai body); a computed key, the maps of `merge_v`/`merge_e` and GQL
+  bodies are not, so check
+  such queries yourself. A property declared with a model but holding no vector yet is listed
   too ("no element holds one yet").
 - **Saved queries calling a removed function.** A saved query of 0.4.0 that calls
   `g.embed_property(..)` (removed in 0.5.0) is kept as it is, and a call of it fails with a

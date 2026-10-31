@@ -118,7 +118,9 @@ Run it at a quiet time. If it fails, nothing is written.
 
 and, when saved queries write a filled property directly, a line per property such as
 `Saved queries writing doc.emb directly fail once the rule exists (remove that write; they are
-not rewritten): load_docs.`
+not rewritten): load_docs.` Only a Rhai body with a literal key in `property(..)` is found
+(`property("emb", ..)`, also after a cardinality); a computed key, the maps of `merge_v`/`merge_e`
+and GQL bodies are not, so check such queries yourself.
 
 The schema check of a change that keeps the mode (`open` or `closed`) reads only the elements of
 the labels whose declaration changed: adding a rule to three labels of a graph of millions of
