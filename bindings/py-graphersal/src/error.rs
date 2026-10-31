@@ -48,6 +48,17 @@ pyo3::create_exception!(
 
 pyo3::create_exception!(
     graphersal,
+    VectorFillWarning,
+    pyo3::exceptions::PyUserWarning,
+    "Issued by `Graph.set_schema` / `Graph.patch_schema` BEFORE a schema change that fills\n\
+     vectors (a vector rule added or changed, book page \"Vector Rules\"): the text names the\n\
+     elements, the model and the time, and that the whole database is locked while it runs.\n\
+     Turned into an error (`warnings.simplefilter(\"error\", VectorFillWarning)`) it stops the\n\
+     change before anything is applied."
+);
+
+pyo3::create_exception!(
+    graphersal,
     EmbedPropertyError,
     GraphersalError,
     "Raised when `Graph.embed_property` fails (an embedder error, a schema refusal, a write\n\

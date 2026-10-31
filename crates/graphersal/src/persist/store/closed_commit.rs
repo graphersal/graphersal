@@ -513,7 +513,11 @@ impl Store {
     /// needs a missing model takes the import (it is how the model comes back). Refused on a
     /// backup, on damage (open the store, it opens in maintenance mode, and repair it), on a
     /// store this version may only read (a critical definition or a schema of a newer
-    /// version).
+    /// version). A replace whose old revision's vectors have vector rules re-embeds them in
+    /// the same commit, which needs the data: then (only then) the store is OPENED, its graph
+    /// loaded and [`Store::import_model`] run; [`ImportModelReport::reembedded`](super::ImportModelReport::reembedded)
+    /// names the properties and the first warning says so. Vectors of the old revision without
+    /// a rule refuse the replace ([`StoreFailure::ModelInUse`]) on both paths.
     pub fn import_model_dir(
         dir: impl IntoStoreDir,
         source: super::ModelSource,
@@ -532,6 +536,8 @@ impl Store {
         let mut prepared = Some(prepared);
         let mut outcome: Option<(bool, Option<crate::graph::definition::Definition>)> = None;
         let mut check_warnings = Vec::new();
+        // K1: a replace whose old revision's vector rules re-embed data needs the graph.
+        let mut needs_open = false;
         let closed = ClosedCommitOptions {
             principal: options.principal().map(str::to_string),
             ..ClosedCommitOptions::default()
@@ -568,7 +574,20 @@ impl Store {
                     };
                     Ok(CatalogPlan { mutations, events })
                 }
-                ImportPlan::New { old } => {
+                ImportPlan::New {
+                    replaces_rules: true,
+                    ..
+                } => {
+                    needs_open = true;
+                    Ok(CatalogPlan {
+                        mutations: Vec::new(),
+                        events: Vec::new(),
+                    })
+                }
+                ImportPlan::New {
+                    old,
+                    replaces_rules: false,
+                } => {
                     let default = options.default_model()
                         || old.as_ref().is_some_and(|o| {
                             o.as_model().is_some_and(
@@ -599,6 +618,27 @@ impl Store {
                 }
             }
         })?;
+        if needs_open {
+            // K1 (format spec 12.12): the replace re-embeds the properties its vector rules
+            // name in the replacing unit, which needs the elements: the store is opened (its
+            // graph loaded) and the open store's import runs that unit.
+            let Some(prepared) = prepared.take() else {
+                return Err(unknown(OP, &repo));
+            };
+            let store = Store::open_at(dir, StoreOptions::new().with_checkpoint_after_bytes(0))?;
+            let report = store.import_prepared(prepared, &options);
+            store.close()?;
+            let mut report = report?;
+            report.warnings.insert(
+                0,
+                format!(
+                    "the store was opened (its graph loaded) to re-embed {} with the new \
+                     revision in the replacing commit (their vector rules named the old one)",
+                    report.reembedded.join(", ")
+                ),
+            );
+            return Ok(report);
+        }
         warnings.extend(check_warnings);
         let (already_present, old) = outcome.unwrap_or((true, None));
         let state = &committed.state;
@@ -634,6 +674,7 @@ impl Store {
             already_present,
             commit_seq: committed.commit_seq,
             replaced,
+            reembedded: Vec::new(),
             warnings,
         })
     }

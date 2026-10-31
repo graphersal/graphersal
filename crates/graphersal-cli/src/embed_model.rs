@@ -805,6 +805,13 @@ fn add_to_store(store: &str, model: NewModel) -> Result<ModelInfo, DownloadError
             if report.already_present {
                 errln!("note: the store {store} holds this model already");
             }
+            if !report.reembedded.is_empty() {
+                errln!(
+                    "note: the store was opened (its graph loaded) to re-embed {} with the new \
+                     revision in the replacing commit",
+                    report.reembedded.join(", ")
+                );
+            }
             for warning in &report.warnings {
                 if warning.contains("template") {
                     errln!("note: {warning}");

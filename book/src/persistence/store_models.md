@@ -60,9 +60,14 @@ The needed-model check of an open does not apply, so an import is also how a mis
 comes back. `ClosedCommitOptions::with_principal` records who made the change (the CLI records
 `cli`).
 
-A replace of a revision whose vectors are in the data (a schema property's `embedder` names
-it) is refused on a closed store as on an open one until vector rules exist; it needs the
-data (re-embedding), so the CLI will then open the store and run that unit instead, saying so.
+A replace (`ImportModelOptions::with_replace`) stays such a closed commit when no schema
+property uses the old revision. When [vector rules](../users_guide/vector_rules.md) name it, the replace re-embeds
+their properties in the same commit, which needs the data: then, and only then,
+`Store::import_model_dir` OPENS the store (its graph is loaded, the store is write-locked for
+the time) and runs the open store's import; `ImportModelReport::reembedded` names the
+re-embedded properties and the first warning says that the store was opened (the CLI prints it
+as a `note:`). Vectors of the old revision without a rule (no `"from"`) refuse the replace with
+`ModelInUse` on both paths.
 
 A damaged store refuses the change: open it (it opens in maintenance mode) and
 [repair](store_damage.md) it first. The commit reads the WAL after the newest snapshot; on a

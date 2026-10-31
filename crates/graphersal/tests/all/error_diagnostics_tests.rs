@@ -12467,3 +12467,81 @@ fn unit_limit_help_names_what_a_load_needs() {
     );
     assert!(help.contains("refused before it allocated them"), "{help}");
 }
+
+/// The vector rule errors (book page "Vector Rules") carry their help: a direct write of a
+/// rule's property names the source to write instead, a rule naming a model the graph does not
+/// hold names the import command, and a text query on a rule-less property names the rule as
+/// the way to declare and fill a model.
+#[test]
+fn vector_rule_errors_carry_their_help() {
+    let rule = GraphSchema::from_json(
+        r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+            "text": {"type": "string"},
+            "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}}"#,
+    )
+    .unwrap();
+    let mut graph = TraversalGraph::new();
+    graph.traversal_mut().set_schema(rule).unwrap();
+    let err = graph
+        .traversal_mut()
+        .add_v("doc")
+        .property(
+            "emb",
+            ElementProperty::Vector(Vector::from_f32(vec![1.0]).unwrap()),
+        )
+        .to_list()
+        .expect_err("a rule's property is not written directly");
+    let report = format_diagnostic(&*err);
+    assert!(
+        report.contains("is computed by a vector rule from 'text'"),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "write text instead; the engine fills emb at the end of the unit: \
+             g.v(id).property(\"text\", \"...\")"
+        ),
+        "{report}"
+    );
+
+    let missing = GraphSchema::from_json(
+        r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+            "emb": {"type": "array", "format": "vector", "embedder": "acme/minilm", "from": "text"}}}}}}"#,
+    )
+    .unwrap();
+    let err = TraversalGraph::new()
+        .traversal_mut()
+        .set_schema(missing)
+        .expect_err("no such model");
+    let report = format_diagnostic(&*err);
+    assert!(
+        report.contains("graphersal embed-model import <repo> --into <store>"),
+        "{report}"
+    );
+
+    // A text query on a rule-less property names the rule.
+    let mut graph = TraversalGraph::new();
+    graph
+        .traversal_mut()
+        .add_v("doc")
+        .property("text", "graph")
+        .to_list()
+        .unwrap();
+    let schema = graph
+        .traversal()
+        .infer_schema()
+        .unwrap()
+        .with_mode(SchemaMode::Open);
+    graph.traversal_mut().set_schema(schema).unwrap();
+    let err = graph
+        .traversal()
+        .v(None)
+        .nearest("emb", "graph indexes", 2, None)
+        .to_list()
+        .expect_err("no model declared");
+    let report = format_diagnostic(&*err);
+    assert!(
+        report.contains("embedder: \"hash-ngram/1\", from: \"text\""),
+        "{report}"
+    );
+}

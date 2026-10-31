@@ -3918,3 +3918,47 @@ mod merge_reads {
         assert_eq!(graph.read().edge_count(), 7);
     }
 }
+
+/// A vector rule (book page "Vector Rules") is a schema change: `Update` on the schema. Its
+/// derived writes need no request of their own (like create-time defaults): a principal that
+/// may not run embedders (`Execute` on `Embedder`) still gets the vector of the `doc` it writes.
+#[test]
+fn a_vector_rule_needs_update_schema_and_its_derived_write_no_request() {
+    use graphersal::auth::{ActionKind, ResourceKind};
+    let schema = GraphSchema::from_json(
+        r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+            "text": {"type": "string"},
+            "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}}"#,
+    )
+    .unwrap();
+    let mut graph = TraversalGraph::new();
+    let err = graph
+        .traversal_mut()
+        .with_authorizer(Arc::new(AccessPolicy::read_only()))
+        .set_schema(schema.clone())
+        .unwrap_err();
+    assert!(
+        matches!(err.root_cause(), TraverserError::PermissionDenied { .. }),
+        "{err:?}"
+    );
+    let policy = AccessPolicy::allow_all().deny(ActionKind::Execute, ResourceKind::Embedder);
+    graph
+        .traversal_mut()
+        .with_authorizer(Arc::new(policy.clone()))
+        .set_schema(schema)
+        .unwrap();
+    graph
+        .traversal_mut()
+        .with_authorizer(Arc::new(policy))
+        .add_v("doc")
+        .property("text", "graph databases")
+        .to_list()
+        .unwrap();
+    let vectors = graph
+        .traversal()
+        .v(None::<()>)
+        .values("emb")
+        .to_list()
+        .unwrap();
+    assert_eq!(vectors.len(), 1);
+}

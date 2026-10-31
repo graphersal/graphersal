@@ -675,6 +675,7 @@ fn base_state(base: &Base, depth: usize) -> Result<TraversalGraph, PersistError>
     // merge (or catalog commit) is refused, never damage.
     *state.schema.write() = super::super::snapshot::parse_stored_schema(&base.schema, 0, None)
         .map_err(|err| err.at(schema_location, 0))?;
+    state.refresh_vector_rules();
     restore_definitions(&mut state, &base.manifest, depth)?;
     Ok(state)
 }

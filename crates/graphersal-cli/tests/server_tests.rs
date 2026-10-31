@@ -6750,3 +6750,49 @@ fn the_journal_endpoint_pages_by_cursor() {
     drop(server);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// MCP schema tools and vector rules (book page "Vector Rules"): a fill below the
+/// confirmation threshold is applied with the session's warning text as a note; the tool
+/// descriptions name the lock and `confirm_lock` (the refusal above the threshold is a unit
+/// test of `server/mcp.rs`: a fill of a second needs 200,000 hash-ngram texts).
+#[test]
+fn mcp_set_schema_with_a_vector_rule_notes_the_fill() {
+    let ui = ui_dir("vector-rule");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let listed = mcp.rpc("tools/list", serde_json::json!({}));
+    let set = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "set_schema")
+        .unwrap()
+        .clone();
+    assert!(
+        set["description"].as_str().unwrap().contains("LOCKED"),
+        "{set}"
+    );
+    assert!(
+        set["inputSchema"]["properties"]["confirm_lock"].is_object(),
+        "{set}"
+    );
+    let rule = serde_json::json!({"vertices": {"person": {"schema": {"type": "object", "properties": {"name": {"type": "string"}, "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}}}}}});
+    let (error, text) = mcp.call("set_schema", serde_json::json!({"schema": rule}));
+    assert!(
+        !error && text.starts_with("Applying this schema fills vectors: 4 elements of person.emb"),
+        "{text}"
+    );
+    assert!(text.contains("Schema stored."), "{text}");
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.v().has_label(\"person\").values(\"emb\").count()"}),
+    );
+    assert!(!error && text.contains('4'), "{text}");
+}

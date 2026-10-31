@@ -47,6 +47,15 @@ pub enum SchemaChangeKind {
     /// embedded by the new model are not comparable), and removing it is not either (a text
     /// query on the property no longer finds its embedder).
     EmbedderChanged,
+    /// A vector rule (`from` on a vector property, book page "Vector Rules") was added:
+    /// compatible on a new property, incompatible when the property was declared before (its
+    /// direct writes are refused from then on). Applying it fills every element of the label.
+    VectorRuleAdded,
+    /// A vector rule's `from`, `embedder`, `element` or `dimension` changed: incompatible (the
+    /// property is refilled). Replaces [`Self::EmbedderChanged`] for a property with a rule.
+    VectorRuleChanged,
+    /// A vector rule was removed: compatible (the vectors stay as plain data).
+    VectorRuleRemoved,
 }
 
 impl SchemaChangeKind {
@@ -69,6 +78,9 @@ impl SchemaChangeKind {
             SchemaChangeKind::AnnotationChanged => "annotation_changed",
             SchemaChangeKind::DefaultChanged => "default_changed",
             SchemaChangeKind::EmbedderChanged => "embedder_changed",
+            SchemaChangeKind::VectorRuleAdded => "vector_rule_added",
+            SchemaChangeKind::VectorRuleChanged => "vector_rule_changed",
+            SchemaChangeKind::VectorRuleRemoved => "vector_rule_removed",
         }
     }
 }
@@ -103,8 +115,14 @@ pub struct SchemaChange {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct SchemaDiff {
-    /// Every change, envelope first, then the labels in the new schema's order.
+    /// Every change, envelope first, then the labels in the new schema's order, then the
+    /// vector rules.
     pub changes: Vec<SchemaChange>,
+    /// The vector fills applying the new schema starts (book page "Vector Rules"); filled by
+    /// [`diff_schema`](crate::GraphTraversalSource::diff_schema) from the label statistics
+    /// ([`PlannedFill::approximate`](crate::schema::PlannedFill::approximate)), empty from
+    /// [`Self::between`] (which reads no data).
+    pub fill: Vec<crate::graph::vector_rules::PlannedFill>,
 }
 
 impl SchemaDiff {
@@ -125,8 +143,10 @@ impl SchemaDiff {
                 change.compatible = true;
             }
         }
+        rule_changes(before, after, &mut differ.changes);
         SchemaDiff {
             changes: differ.changes,
+            fill: Vec::new(),
         }
     }
 
@@ -170,11 +190,16 @@ impl SchemaDiff {
         )
     }
 
-    /// The diff as data: `{changes: [..], compatible}`.
+    /// The diff as data: `{changes: [..], compatible, fill: [..], fill_warning}`
+    /// (`fill_warning` only when something is filled).
     pub fn to_value(&self) -> ElementProperty {
         let mut map = PropertyMap::default();
         map.insert("changes", self.changes_value());
         map.insert("compatible", ElementProperty::Boolean(self.compatible()));
+        map.insert("fill", crate::graph::vector_rules::fills_value(&self.fill));
+        if let Some(warning) = crate::graph::vector_rules::fill_warning(&self.fill) {
+            map.insert("fill_warning", ElementProperty::from(warning));
+        }
         ElementProperty::Object(Box::new(map))
     }
 }
@@ -192,6 +217,9 @@ pub struct SchemaValidation {
     pub violations: crate::graph::schema::SchemaViolationReport,
     /// The changes from the stored schema to the proposed one.
     pub diff: SchemaDiff,
+    /// The vector fills applying it starts, counted on the data (book page "Vector Rules"):
+    /// [`crate::schema::fill_warning`] makes the one warning text of them.
+    pub fill: Vec<crate::graph::vector_rules::PlannedFill>,
 }
 
 impl SchemaValidation {
@@ -205,13 +233,117 @@ impl SchemaValidation {
         self.violations.is_empty()
     }
 
-    /// The result as data: `{violations: {..report..}, diff: [..changes..], compatible}`.
+    /// The one warning text of the fills ([`crate::schema::fill_warning`]), `None` without
+    /// any.
+    pub fn fill_warning(&self) -> Option<String> {
+        crate::graph::vector_rules::fill_warning(&self.fill)
+    }
+
+    /// The result as data: `{violations: {..report..}, diff: [..changes..], compatible, fill:
+    /// [..], fill_warning}` (`fill_warning` only when something is filled).
     pub fn to_value(&self) -> ElementProperty {
         let mut map = PropertyMap::default();
         map.insert("violations", self.violations.to_value());
         map.insert("diff", self.diff.changes_value());
         map.insert("compatible", ElementProperty::Boolean(self.compatible()));
+        map.insert("fill", crate::graph::vector_rules::fills_value(&self.fill));
+        if let Some(warning) = self.fill_warning() {
+            map.insert("fill_warning", ElementProperty::from(warning));
+        }
         ElementProperty::Object(Box::new(map))
+    }
+}
+
+/// The vector rule changes from `before` to `after` (top-level vector properties with `from`).
+fn rule_changes(before: &GraphSchema, after: &GraphSchema, changes: &mut Vec<SchemaChange>) {
+    let roots = |schema: &GraphSchema| -> Vec<(ElementKind, String, PropertySchema)> {
+        let mut out = Vec::new();
+        for (label, v) in &schema.vertices {
+            out.push((ElementKind::Vertex, label.clone(), v.schema.clone()));
+        }
+        for (label, e) in &schema.edges {
+            out.push((ElementKind::Edge, label.clone(), e.schema.clone()));
+        }
+        out
+    };
+    let rule = |node: &PropertySchema| {
+        node.vector.as_ref().and_then(|v| {
+            v.from.as_ref().map(|from| {
+                format!(
+                    "{from} -> {} ({}{})",
+                    v.embedder.as_deref().unwrap_or("?"),
+                    v.element,
+                    v.dimension.map(|d| format!(", {d}")).unwrap_or_default()
+                )
+            })
+        })
+    };
+    // The same vectors: the same source, model (a repository name matches its identity) and
+    // element; a dimension left out matches any (it is declared from the model).
+    let same = |a: &PropertySchema, b: &PropertySchema| match (&a.vector, &b.vector) {
+        (Some(a), Some(b)) => {
+            a.from == b.from
+                && a.element == b.element
+                && (a.dimension == b.dimension || a.dimension.is_none() || b.dimension.is_none())
+                && match (&a.embedder, &b.embedder) {
+                    (Some(x), Some(y)) => crate::graph::vector_rules::same_model(x, y),
+                    (x, y) => x == y,
+                }
+        }
+        _ => false,
+    };
+    let old_roots = roots(before);
+    let new_roots = roots(after);
+    let find = |list: &[(ElementKind, String, PropertySchema)], kind: ElementKind, label: &str| {
+        list.iter()
+            .find(|(k, l, _)| *k == kind && l == label)
+            .map(|(_, _, root)| root.clone())
+    };
+    for (kind, label, root) in &new_roots {
+        let old_root = find(&old_roots, *kind, label);
+        for (key, node) in &root.properties {
+            let old_node = old_root.as_ref().and_then(|r| r.properties.get(key));
+            let (a, b) = (old_node.and_then(rule), rule(node));
+            let declared_before = old_node.is_some();
+            let (change, compatible) = match (&a, &b) {
+                (None, Some(_)) => (SchemaChangeKind::VectorRuleAdded, !declared_before),
+                (Some(_), Some(_)) if !old_node.is_some_and(|old| same(old, node)) => {
+                    (SchemaChangeKind::VectorRuleChanged, false)
+                }
+                (Some(_), None) => (SchemaChangeKind::VectorRuleRemoved, true),
+                _ => continue,
+            };
+            changes.push(SchemaChange {
+                kind: change,
+                element: Some(*kind),
+                label: Some(label.clone()),
+                path: Some(format!("$.{key}")),
+                before: a,
+                after: b,
+                compatible,
+            });
+        }
+    }
+    for (kind, label, root) in &old_roots {
+        let new_root = find(&new_roots, *kind, label);
+        for (key, node) in &root.properties {
+            let Some(a) = rule(node) else { continue };
+            if new_root
+                .as_ref()
+                .is_some_and(|r| r.properties.contains_key(key))
+            {
+                continue;
+            }
+            changes.push(SchemaChange {
+                kind: SchemaChangeKind::VectorRuleRemoved,
+                element: Some(*kind),
+                label: Some(label.clone()),
+                path: Some(format!("$.{key}")),
+                before: Some(a),
+                after: None,
+                compatible: true,
+            });
+        }
     }
 }
 
@@ -421,7 +553,8 @@ impl Differ {
         let embedder =
             |node: &PropertySchema| node.vector.as_ref().and_then(|v| v.embedder.clone());
         let (a, b) = (embedder(old), embedder(new));
-        if a != b && old.vector.is_some() && new.vector.is_some() {
+        let ruled = |node: &PropertySchema| node.vector.as_ref().is_some_and(|v| v.from.is_some());
+        if a != b && old.vector.is_some() && new.vector.is_some() && !ruled(old) && !ruled(new) {
             let ok = a.is_none();
             self.push(
                 SchemaChangeKind::EmbedderChanged,

@@ -373,14 +373,15 @@ fn remove_refused_while_the_schema_needs_it() {
         )),
         StoreFailure::UnknownModel
     );
-    // Another revision while the schema uses this one: a replace needs vector rules.
-    let err = Store::import_model_dir(
-        &path,
-        ModelSource::Files(tiny_model(2, "acme/tiny")),
-        ImportModelOptions::new().with_replace(true),
-    )
-    .unwrap_err();
-    assert!(matches!(err, PersistError::Graph(_)), "{err}");
+    // Another revision while the schema's vectors without a rule use this one (K3).
+    assert_eq!(
+        cause_of(Store::import_model_dir(
+            &path,
+            ModelSource::Files(tiny_model(2, "acme/tiny")),
+            ImportModelOptions::new().with_replace(true),
+        )),
+        StoreFailure::ModelInUse
+    );
     assert_eq!(
         cause_of(Store::import_model_dir(
             &path,
@@ -544,10 +545,29 @@ fn a_critical_opaque_definition_refuses() {
 // ---------------------------------------------------------------------------------------------
 
 /// A [`MemDir`] that "crashes" after a number of writes: from then on every write fails.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Crashing {
     inner: MemDir,
     budget: Arc<AtomicI64>,
+    /// Runs once at the first write into a WAL segment, after half of that write's bytes are
+    /// in the file (a reader then sees an unfinished last record).
+    spy: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>>,
+}
+
+impl std::fmt::Debug for Crashing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Crashing").finish_non_exhaustive()
+    }
+}
+
+impl Crashing {
+    fn new(inner: MemDir, budget: i64) -> Self {
+        Self {
+            inner,
+            budget: Arc::new(AtomicI64::new(budget)),
+            spy: None,
+        }
+    }
 }
 
 impl Crashing {
@@ -562,11 +582,21 @@ impl Crashing {
 struct CrashingFile {
     inner: Box<dyn StoreFile>,
     dir: Crashing,
+    wal: bool,
 }
 
 impl io::Write for CrashingFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.dir.tick()?;
+        if self.wal
+            && buf.len() > 1
+            && let Some(spy) = &self.dir.spy
+            && let Some(run) = spy.lock().unwrap().take()
+        {
+            let written = self.inner.write(&buf[..buf.len() / 2])?;
+            run();
+            return Ok(written);
+        }
         self.inner.write(buf)
     }
 
@@ -618,6 +648,7 @@ impl StoreDir for Crashing {
         Ok(Box::new(CrashingFile {
             inner: self.inner.create(name, exclusive)?,
             dir: self.clone(),
+            wal: name.starts_with("wal/"),
         }))
     }
     fn open_write(&self, name: &str, offset: u64) -> io::Result<Box<dyn StoreFile>> {
@@ -625,6 +656,7 @@ impl StoreDir for Crashing {
         Ok(Box::new(CrashingFile {
             inner: self.inner.open_write(name, offset)?,
             dir: self.clone(),
+            wal: name.starts_with("wal/"),
         }))
     }
     fn append(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
@@ -687,10 +719,7 @@ fn a_crash_after_every_write_step_opens_consistently() {
     let mut completed = false;
     for budget in 0..400 {
         let image = base.deep_copy();
-        let dir = Crashing {
-            inner: image.clone(),
-            budget: Arc::new(AtomicI64::new(budget)),
-        };
+        let dir = Crashing::new(image.clone(), budget);
         let result = Store::import_model_dir(
             Arc::new(dir.clone()) as Arc<dyn StoreDir>,
             ModelSource::Files(tiny_model(1, "acme/tiny")),
@@ -750,4 +779,326 @@ fn a_closed_commit_works_on_every_backend() {
         assert_eq!(store.graph().read().vertex_count(), 1, "{name}");
         store.close().unwrap();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// What an open does first, and readers meanwhile
+// ---------------------------------------------------------------------------------------------
+
+/// Rewrites both `GRAPH` copies of the store in `dir` with `change` applied to the fixed part
+/// (its CRC recomputed; format spec 5.1).
+fn patch_graph(dir: &MemDir, change: &dyn Fn(&mut Vec<u8>)) {
+    for name in ["GRAPH", "GRAPH.copy"] {
+        let mut bytes = dir.file(name).unwrap();
+        change(&mut bytes);
+        let crc = crate::store_tests::crc32c(&bytes[..252]);
+        bytes[252..256].copy_from_slice(&crc.to_le_bytes());
+        dir.put_file(name, bytes);
+    }
+}
+
+/// The name and bytes of the newest WAL segment of the store in `dir`.
+fn last_segment(dir: &MemDir) -> (String, Vec<u8>) {
+    let name = dir
+        .file_names()
+        .into_iter()
+        .filter(|n| n.starts_with("wal/"))
+        .max()
+        .unwrap();
+    let bytes = dir.file(&name).unwrap();
+    (name, bytes)
+}
+
+fn closed_mem_store() -> (MemDir, u64) {
+    let dir = MemDir::new();
+    let store = Store::create(&dir, options()).unwrap();
+    add_person(&store, "ann");
+    add_person(&store, "bob");
+    let seq = store.graph().read().last_commit_seq();
+    store.close().unwrap();
+    (dir, seq)
+}
+
+#[test]
+fn a_recorded_wal_cut_is_honoured() {
+    let (dir, last) = closed_mem_store();
+    // A refused record that could not be cut off (format spec 9.7): its bytes are still in the
+    // segment, GRAPH records where the valid WAL ends.
+    let (name, bytes) = last_segment(&dir);
+    let first: u64 = name["wal/".len()..name.len() - 4].parse().unwrap();
+    let valid = bytes.len() as u64;
+    let mut refused = bytes.clone();
+    refused.extend_from_slice(&bytes[64..bytes.len().min(64 + 90)]);
+    dir.put_file(&name, refused);
+    patch_graph(&dir, &|graph| {
+        let flags = u32::from_le_bytes(graph[48..52].try_into().unwrap()) | 0b10;
+        graph[48..52].copy_from_slice(&flags.to_le_bytes());
+        graph[52..60].copy_from_slice(&first.to_le_bytes());
+        graph[60..68].copy_from_slice(&valid.to_le_bytes());
+    });
+    let report = import_closed_mem(&dir);
+    assert_eq!(report.commit_seq, Some(last + 1));
+    // The cut was applied (and no longer recorded) before the commit was appended.
+    let graph = dir.file("GRAPH").unwrap();
+    assert_eq!(
+        u32::from_le_bytes(graph[48..52].try_into().unwrap()) & 0b10,
+        0
+    );
+    let store = Store::open(&dir, options()).unwrap();
+    assert!(store.open_report().refused_cut.is_none());
+    assert_eq!(store.graph().read().last_commit_seq(), last + 1);
+    assert_eq!(store.graph().read().vertex_count(), 2);
+    assert_eq!(store.models().unwrap().len(), 1);
+    store.close().unwrap();
+}
+
+#[test]
+fn an_interrupted_intent_is_completed_first() {
+    let mut tried = 0;
+    for budget in 1..200 {
+        let (base, last) = closed_mem_store();
+        let crashing = Crashing::new(base.clone(), i64::MAX);
+        let store =
+            Store::open(Arc::new(crashing.clone()) as Arc<dyn StoreDir>, options()).unwrap();
+        // A rollback interrupted part-way: its INTENT is on disk, its steps half done.
+        crashing.budget.store(budget, Ordering::SeqCst);
+        let rolled = store.rollback_to(
+            graphersal::persist::RecoveryTarget::CommitSeq(last - 1),
+            graphersal::persist::RollbackMode::Move,
+        );
+        drop(store);
+        if rolled.is_ok() {
+            break;
+        }
+        let image = base.deep_copy();
+        if image.file("INTENT").is_none() {
+            continue;
+        }
+        tried += 1;
+        let report = import_closed_mem(&image);
+        assert!(image.file("INTENT").is_none(), "budget {budget}");
+        // The rollback was completed first: the commit continues the rolled-back position.
+        assert_eq!(report.commit_seq, Some(last), "budget {budget}");
+        let (seq, models) = state_of(&image);
+        assert_eq!(seq, last, "budget {budget}");
+        assert_eq!(models.len(), 1, "budget {budget}");
+    }
+    assert!(tried > 0, "no crash image held an INTENT");
+}
+
+#[test]
+fn a_read_only_reader_during_the_append_sees_the_old_state() {
+    let (base, last) = closed_mem_store();
+    let mut crashing = Crashing::new(base.clone(), i64::MAX);
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let reader_dir = base.clone();
+    let reader_seen = seen.clone();
+    crashing.spy = Some(Arc::new(std::sync::Mutex::new(Some(Box::new(move || {
+        let view = Store::open_read_only(
+            reader_dir.clone(),
+            graphersal::persist::RecoveryTarget::Latest,
+        )
+        .map(|r| {
+            (
+                r.graph.last_commit_seq(),
+                r.graph.definitions().unwrap().count(),
+            )
+        });
+        *reader_seen.lock().unwrap() = Some(view.map_err(|e| e.to_string()));
+    })
+        as Box<dyn FnOnce() + Send>))));
+    let report = Store::import_model_dir(
+        Arc::new(crashing) as Arc<dyn StoreDir>,
+        ModelSource::Files(tiny_model(1, "acme/tiny")),
+        ImportModelOptions::new(),
+    )
+    .unwrap();
+    assert_eq!(report.commit_seq, Some(last + 1));
+    // Half of the record was in the file: the reader ignored it and saw the old state.
+    let seen = seen.lock().unwrap().clone().expect("the reader ran");
+    assert_eq!(seen, Ok((last, 0)));
+    let (seq, models) = state_of(&base);
+    assert_eq!((seq, models.len()), (last + 1, 1));
+}
+
+#[test]
+fn an_older_version_segment_gets_a_new_segment() {
+    let (dir, last) = closed_mem_store();
+    // The newest segment is of file format version 3 (a store upgraded from 0.4: format spec
+    // 15.1): its records hold nothing version 3 lacks, its header says 3.
+    let (name, mut bytes) = last_segment(&dir);
+    bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+    let crc = crate::store_tests::crc32c(&bytes[..60]);
+    bytes[60..64].copy_from_slice(&crc.to_le_bytes());
+    dir.put_file(&name, bytes.clone());
+    let report = import_closed_mem(&dir);
+    assert_eq!(report.commit_seq, Some(last + 1));
+    // Never continued: unchanged, and the commit went into a new segment of the current version.
+    assert_eq!(dir.file(&name).unwrap(), bytes);
+    let (new_name, new_bytes) = last_segment(&dir);
+    assert_eq!(new_name, format!("wal/{:020}.wal", last + 1));
+    assert_eq!(
+        u32::from_le_bytes(new_bytes[8..12].try_into().unwrap()),
+        graphersal::persist::FORMAT_VERSION
+    );
+    let (seq, models) = state_of(&dir);
+    assert_eq!((seq, models.len()), (last + 1, 1));
+}
+
+// ---------------------------------------------------------------------------------------------
+// K1: a closed replace (format spec 12.12, book "Changing the models of a closed store")
+// ---------------------------------------------------------------------------------------------
+
+/// A schema whose `doc.emb` vectors are made by `model` from `doc.text` (a vector rule).
+fn rule_naming(model: &str) -> GraphSchema {
+    GraphSchema::from_json(&format!(
+        r#"{{"vertices": {{"doc": {{"schema": {{"type": "object", "properties": {{
+            "text": {{"type": "string"}},
+            "emb": {{"type": "array", "format": "vector", "embedder": "{model}", "from": "text"}}}}}}}}}}}}"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_closed_replace_nothing_uses_is_a_catalog_only_commit() {
+    let temp = Temp::new("closed-replace-free");
+    let path = temp.join("s");
+    let last = closed_store_with_data(&path);
+    let old = import_closed(&path, 1, "acme/tiny");
+    Store::set_default_model_dir(&path, Some("acme/tiny"), ClosedCommitOptions::new()).unwrap();
+    // A damaged element segment proves the graph is not loaded.
+    let snapshot = fs::read_dir(path.join("snapshots"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .max()
+        .unwrap();
+    let segment = fs::read_dir(&snapshot)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "seg"))
+        .unwrap();
+    let saved = fs::read(&segment).unwrap();
+    flip_byte(&segment);
+    let report = Store::import_model_dir(
+        &path,
+        ModelSource::Files(tiny_model(2, "acme/tiny")),
+        ImportModelOptions::new().with_replace(true),
+    )
+    .unwrap();
+    fs::write(&segment, saved).unwrap();
+    assert_eq!(report.commit_seq, Some(last + 3));
+    assert!(report.reembedded.is_empty());
+    assert_eq!(report.replaced.unwrap().identity, old.model.identity);
+    assert!(
+        report.model.default,
+        "the replaced revision was the default"
+    );
+    let store = Store::open(&path, options()).unwrap();
+    let models = store.models().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].identity, report.model.identity);
+    store.close().unwrap();
+}
+
+#[test]
+fn a_closed_replace_of_vectors_without_a_rule_is_refused_on_both_paths() {
+    let temp = Temp::new("closed-replace-k3");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let model = import(&store, 1, "acme/tiny").model;
+    set_schema(&store, &model.identity);
+    let open = store
+        .import_model(
+            ModelSource::Files(tiny_model(2, "acme/tiny")),
+            ImportModelOptions::new().with_replace(true),
+        )
+        .unwrap_err();
+    store.close().unwrap();
+    let before = files_of(&path);
+    let closed = Store::import_model_dir(
+        &path,
+        ModelSource::Files(tiny_model(2, "acme/tiny")),
+        ImportModelOptions::new().with_replace(true),
+    )
+    .unwrap_err();
+    for err in [&open, &closed] {
+        match err {
+            PersistError::Store { cause, reason, .. } => {
+                assert_eq!(*cause, StoreFailure::ModelInUse);
+                assert!(reason.contains("doc.emb") && reason.contains("no vector rule"));
+            }
+            other => panic!("{other}"),
+        }
+    }
+    assert_eq!(files_of(&path), before);
+}
+
+#[cfg(feature = "model2vec")]
+#[test]
+fn a_closed_replace_whose_rules_re_embed_opens_the_store() {
+    let temp = Temp::new("closed-replace-rules");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let old = import(&store, 1, "acme/tiny").model.identity;
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .set_schema(rule_naming("acme/tiny"))
+        .unwrap();
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .add_v("doc")
+        .property("text", "graph vector")
+        .iterate()
+        .unwrap();
+    let before = store
+        .graph()
+        .read()
+        .traversal()
+        .v(None)
+        .values("emb")
+        .to_list()
+        .unwrap();
+    let last = store.graph().read().last_commit_seq();
+    store.close().unwrap();
+    let report = Store::import_model_dir(
+        &path,
+        ModelSource::Files(tiny_model(2, "acme/tiny")),
+        ImportModelOptions::new().with_replace(true),
+    )
+    .unwrap();
+    assert_eq!(report.commit_seq, Some(last + 1));
+    assert_eq!(report.reembedded, vec!["doc.emb".to_string()]);
+    assert!(
+        report.warnings[0].contains("opened"),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(report.replaced.unwrap().identity, old);
+    let store = Store::open(&path, options()).unwrap();
+    let after = store
+        .graph()
+        .read()
+        .traversal()
+        .v(None)
+        .values("emb")
+        .to_list()
+        .unwrap();
+    assert_ne!(before, after, "re-embedded by the new revision");
+    let schema = store.graph().read().get_schema().unwrap().unwrap();
+    assert_eq!(
+        schema.vertices["doc"].schema.properties["emb"]
+            .vector
+            .as_ref()
+            .unwrap()
+            .embedder
+            .as_deref(),
+        Some(report.model.identity.as_str())
+    );
+    store.close().unwrap();
 }

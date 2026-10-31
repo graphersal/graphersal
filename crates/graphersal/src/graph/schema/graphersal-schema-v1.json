@@ -75,7 +75,7 @@
     "local_ref": { "type": "string", "pattern": "^#/\\$defs/" },
     "count": { "type": "integer", "minimum": 0 },
     "node": {
-      "description": "One property schema node. integer = int64, number = float64, string + format uuid = uuid, string + format date-time / date / local-date-time / time / duration = datetime / date / localdatetime / time / duration (time and local-date-time have no UTC offset). formatMinimum, formatMaximum, formatExclusiveMinimum and formatExclusiveMaximum (text of the format's type) need one of these temporal formats. array + format vector = a vector (an embedding) with element (f32, f16, i8, bit; default f32), dimension (optional) and metric (an annotation) and, on a top-level property, embedder (the model identity of the embedder that produced the vectors); items is not allowed next to it.",
+      "description": "One property schema node. integer = int64, number = float64, string + format uuid = uuid, string + format date-time / date / local-date-time / time / duration = datetime / date / localdatetime / time / duration (time and local-date-time have no UTC offset). formatMinimum, formatMaximum, formatExclusiveMinimum and formatExclusiveMaximum (text of the format's type) need one of these temporal formats. array + format vector = a vector (an embedding) with element (f32, f16, i8, bit; default f32), dimension (optional) and metric (an annotation) and, on a top-level property, embedder (the model identity of the embedder that produced the vectors) and from (the vector rule: the source property the engine embeds); items is not allowed next to it.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -90,6 +90,7 @@
         "dimension": { "type": "integer", "minimum": 1, "maximum": 65536, "description": "With format vector: the number of components." },
         "metric": { "enum": ["cosine", "dot", "l2", "hamming"], "description": "With format vector: an annotation, the metric the vectors are compared with." },
         "embedder": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._/:@?=-]+$", "description": "With format vector, on a label's top-level property only: the model identity of the embedder that produced the vectors (hash-ngram/1). embed_property records and checks it; a text query of nearest() or similarity() embeds its text with the registered embedder of that model." },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128, "description": "With format vector and embedder, on a label's top-level property only: the vector rule. The name of the top-level property of the same label whose text the engine embeds into this property at the end of every unit that writes it; a text-less source removes the vector." },
         "items": { "$ref": "#/$defs/node" },
         "properties": { "type": "object", "additionalProperties": { "$ref": "#/$defs/node" } },
         "required": { "$ref": "#/$defs/key_list" },

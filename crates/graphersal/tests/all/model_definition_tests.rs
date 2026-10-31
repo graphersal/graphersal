@@ -147,9 +147,12 @@ fn a_replace_while_vectors_use_the_old_revision_needs_vector_rules() {
         ModelSource::Files(tiny_model(2, "acme/tiny")),
         ImportModelOptions::new().with_replace(true),
     );
+    // P7 (K3): vectors without a vector rule cannot be re-embedded: the replace is refused
+    // naming them (with a rule it re-embeds, `vector_rule_tests`).
     match refused {
-        Err(PersistError::Graph(err)) => {
-            assert!(err.to_string().contains("vector rules"), "{err}")
+        Err(err @ PersistError::Store { .. }) => {
+            assert!(err.to_string().contains("no vector rule"), "{err}");
+            assert!(err.to_string().contains("doc.emb"), "{err}");
         }
         other => panic!("{other:?}"),
     }

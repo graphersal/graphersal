@@ -58,6 +58,7 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | `infer_schema()`, `g.get_schema()`, `g.infer_schema()`, `g.diff_schema(..)`, `g.validate_schema(..)`, `g.validate_schema_patch(..)` | `Read` on `Schema` |
 | `g.statistics()`, `g.memory_usage()` | `Read` on `Data` |
 | `embed(..)` (the step) and `embed(text)` (the function) | `Execute` on `Embedder("name")`, the embedder that runs (the default resolved to its name), for every embedder including the built-in `hash-ngram/1` |
+| a [vector rule](vector_rules.md) | setting the schema asks `Update` on the schema; the vectors it writes at the end of a unit ask nothing of their own (like create-time defaults), and its model runs without `Execute` on the embedder |
 | `g.embedders()` | nothing (it lists what the host registered and runs none of them) |
 | `g.embed_property(..)` | `Read` and `Update` on `Data(element "label")`, `Execute` on `Embedder("name")`, and `Update` on `Schema` when it declares the property (or its `embedder`) in the schema; never in a saved query (refused when the query is saved, denied in a read-only one) |
 | `nearest(key, "text", k)`, `similarity(key, "text")` (a text query) | `Execute` on the embedder of the model the schema declares for the property (on each one when labels declare different models) |

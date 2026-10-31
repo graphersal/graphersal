@@ -66,8 +66,11 @@ pub use crate::graph::schema::{
     SchemaValidation, SchemaViolationReport, ValueType, VectorSchema, VertexSchema, ViolationGroup,
     ViolationKind, VisualizeFormat, type_of,
 };
-/// The bounds of an aggregated `SchemaError::ExistingDataViolatesSchema` report (groups kept and
-/// printed, sample ids per group and their length) and the group key of elements without a label.
 pub use crate::graph::schema::{
     MAX_GROUPS, PRINTED_GROUPS, SAMPLE_ID_CHARS, SAMPLE_IDS, UNLABELED,
 };
+/// The bounds of an aggregated `SchemaError::ExistingDataViolatesSchema` report (groups kept and
+/// printed, sample ids per group and their length) and the group key of elements without a label.
+/// Vector rules (book page "Vector Rules"): the fills a schema change starts and the one
+/// warning text every front end shows before applying it.
+pub use crate::graph::vector_rules::{FillReason, PlannedFill, fill_warning};

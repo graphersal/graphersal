@@ -1671,6 +1671,7 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
         };
         if let Some(schema) = schema {
             *graph.schema.write() = schema;
+            graph.refresh_vector_rules();
         }
         let definitions = match &scan.definitions {
             Some(definitions) => Some(definitions.clone()),
