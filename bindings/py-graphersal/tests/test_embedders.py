@@ -275,9 +275,10 @@ def test_embed_property_was_removed():
     assert not hasattr(graphersal, "EmbedPropertyError")
     g = docs_graph()
     attach_schema(g)
-    with pytest.raises(graphersal.GraphersalError, match="embed_property was removed") as info:
+    with pytest.raises(graphersal.GraphersalError, match="Function not found: embed_property") as info:
         g.execute('g.embed_property(#{label: "doc", from: "text", to: "emb"})')
-    assert "Vector Rules" in str(info.value) + str(info.value.help)
+    assert "embed_property was removed in 0.5.0" in info.value.help
+    assert "Vector Rules" in info.value.help
 
 
 # ---------------------------------------------------------------------------------------------
