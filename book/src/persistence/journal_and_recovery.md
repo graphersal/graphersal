@@ -74,10 +74,12 @@ graph.traversal_mut().add_v("person").to_list().unwrap(); // written and synced,
 - **One journal per graph.** `attach` writes the stream header (the lineage id and the next
   commit number) and fails when the graph already has one or a unit is open.
 - Large records (from 4 KiB) are LZ4-compressed (`with_codec`).
-- **One commit is at most 1 GiB** of uncompressed record body (every change with its before and
-  after values). A larger unit is vetoed with `PersistError::CommitTooLarge` (inside
-  `GraphError::CommitRejected` from the hook `journal`): it rolls back, nothing is written, and
-  the journal stays usable. Split the work into smaller units
+- **A large commit is written in parts.** A commit of more than 64 MiB of uncompressed record
+  body (every change with its before and after values) is written as several records of 64 MiB,
+  one after the other in the same segment, synced once after the last one (format spec 9.3.1);
+  readers see one commit. Beyond 2^20 parts (64 TiB) the unit is vetoed with
+  `PersistError::CommitTooLarge` (inside `GraphError::CommitRejected` from the hook `journal`):
+  it rolls back, nothing is written, and the journal stays usable
   ([Resource Limits](../users_guide/resource_limits.md#the-size-of-one-commit-journal)).
 - **A user hook that panics** in `before_commit` rolls the unit back before the journal runs, so
   the journal never holds it ([Transactions](../users_guide/transactions.md#panics)).
@@ -99,7 +101,8 @@ neither.** What you see, and what a reopen (a recovery, `Store::open`) gives:
 | The journal's write or sync **fails** (`Err`: a full disk, an I/O error) | rolled back | the refused record is cut off again and synced; the journal is **poisoned** | `CommitRejected` from the hook `journal`, its source `PersistError::Poisoned` ("... (the refused record was cut off again)") | the state before the unit |
 | The journal's write or sync fails and **the cut fails too** | rolled back | poisoned; a Store records the valid end of the WAL in `GRAPH` (`wal_cut`), a bare `Journal` cannot (the record may stay) | as above, the reason says the position was recorded | a Store: the state before the unit (the next open cuts the record off, `OpenReport::refused_cut`; every reader stops there meanwhile) |
 | The journal **panics** in its write path (after part of the record, or after all of it, e.g. in the sync) | rolled back on the way out; every hook gets `after_rollback` | treated like a failed write: the record is cut off again (or, when that cut fails or panics too, its position recorded as above); the journal is **poisoned** with the reason `a panic while writing a commit record: <message>` | the panic continues | the state before the unit |
-| The record is too large (`CommitTooLarge`) | rolled back | nothing written; usable | `CommitRejected` from the hook `journal` | the state before the unit |
+| The write or sync of a **commit in parts** fails at any of its parts | rolled back | every part written is cut off again (the cut starts at the first part) and synced; the journal is **poisoned** | as for a failed write | the state before the unit |
+| The commit needs more than 2^20 parts (`CommitTooLarge`), or encoding it does not fit under the process memory ceiling (`ResourceLimitExceeded`, operation `commit encoding`) | rolled back | nothing written; usable | `CommitRejected` from the hook `journal` | the state before the unit |
 | A hook's `after_commit` panics | stays committed (it is final and durable) | holds the unit | the panic continues | the state with the unit |
 
 A **poisoned** journal refuses every later commit and mark with `PersistError::Poisoned` (inside

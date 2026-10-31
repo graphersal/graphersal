@@ -1730,3 +1730,33 @@ fn row06_a_checkpoint_right_after_a_rollback() {
         assert!(reopened.verify().unwrap().is_ok());
     }
 }
+
+/// A merge checkpoint over a WAL of commits in parts (format spec 9.3.1), closed and live: the
+/// merged snapshot is the oracle.
+#[test]
+fn a_merge_checkpoint_over_a_commit_in_parts() {
+    for codec in [Codec::None, Codec::Lz4] {
+        for live in [false, true] {
+            let (options, write) = small(codec);
+            let options = options.with_commit_part_bytes(64);
+            let dir = MemDir::new();
+            let store = Store::create(&dir, options.clone()).unwrap();
+            fake_data(store.graph(), 5, 20);
+            store.checkpoint(None).unwrap();
+            history(store.graph(), &mut Rng(5), 8, 0);
+            // One unit touching every person: a commit of many parts.
+            run(
+                store.graph(),
+                r#"g.v().has_label("person").property("note", "a note on every person").to_list()"#,
+            );
+            let label = format!("{codec:?} (live {live})");
+            if live {
+                checkpoint_live(&store, &label);
+            } else {
+                store.close().unwrap();
+                let report = checkpoint_closed(&shared(&dir), &options, &write, &label);
+                assert!(report.merged, "{label}");
+            }
+        }
+    }
+}

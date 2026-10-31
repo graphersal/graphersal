@@ -279,3 +279,69 @@ fn mutated_system_journal_segments_never_crash_the_store() {
     }
     assert!(fatal.is_empty(), "{fatal:#?}");
 }
+
+/// [`mutated_journals_never_crash_recovery`] over commits in parts (format spec 9.3.1): parts of
+/// 48 bytes, so nearly every commit is several records.
+#[test]
+fn mutated_journals_in_parts_never_crash_recovery() {
+    let mut graph = sample_graph();
+    let mut base_snapshot = Vec::new();
+    graph.write_snapshot(&mut base_snapshot).unwrap();
+    let wal = SharedBuffer::new();
+    Journal::new(wal.clone(), Durability::Os)
+        .with_commit_part_bytes(48)
+        .attach(&mut graph)
+        .unwrap();
+    graph
+        .traversal_mut()
+        .add_v("person")
+        .property("name", "ann, a person whose commit takes several parts")
+        .to_list()
+        .unwrap();
+    graph.mark("m").unwrap();
+    graph.traversal_mut().v("2").drop().to_list().unwrap();
+    graph
+        .transaction(|g| -> Result<(), GraphError> {
+            for i in 0..40i64 {
+                g.add_vertex(None, vec!["bulk".into()], {
+                    let mut p = graphersal::prelude::PropertyMap::default();
+                    p.insert("i", i.into());
+                    p
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let journal = wal.contents();
+    assert!(
+        persist::recover(
+            base_snapshot.as_slice(),
+            [journal.as_slice()],
+            RecoveryTarget::Latest
+        )
+        .is_ok()
+    );
+    let mut rng = Rng::new(0x0BAD_9A27);
+    let mut fatal = Vec::new();
+    for case in 0..budget(300) {
+        let input = mutate(&mut rng, &journal);
+        let snapshot = base_snapshot.clone();
+        let result = guarded(WATCHDOG, move || {
+            for record in persist::read_journal(input.as_slice())
+                .into_iter()
+                .flatten()
+            {
+                let _ = record;
+            }
+            let _ = persist::recover(
+                snapshot.as_slice(),
+                [input.as_slice()],
+                RecoveryTarget::Latest,
+            );
+        });
+        if let Err(outcome) = result {
+            fatal.push(format!("case {case}: {outcome:?}"));
+        }
+    }
+    assert!(fatal.is_empty(), "{fatal:#?}");
+}

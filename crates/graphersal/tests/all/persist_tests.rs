@@ -1328,3 +1328,430 @@ fn a_hook_panicking_before_commit_leaves_nothing_in_the_journal() {
     assert_eq!(names(&recovered.graph), ["ann", "bob"]);
     assert_eq!(recovered.graph.last_commit_seq(), 2);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Commits in parts (format spec 9.3.1)
+// ---------------------------------------------------------------------------------------------
+
+/// The part size of these tests: a few hundred bytes of commit body are several parts.
+const PART: usize = 64;
+
+/// The frames of a journal stream: `(start, total length, type, commit_seq)`.
+pub(crate) fn frames(journal: &[u8]) -> Vec<(usize, usize, u8, u64)> {
+    let mut frames = Vec::new();
+    let mut at = 64;
+    while at + 25 <= journal.len() {
+        let length = u32::from_le_bytes(journal[at + 4..at + 8].try_into().unwrap()) as usize;
+        let seq = u64::from_le_bytes(journal[at + 8..at + 16].try_into().unwrap());
+        frames.push((at, 25 + length, journal[at + 16], seq));
+        at += 25 + length;
+    }
+    frames
+}
+
+/// A graph with a base snapshot and a journal writing parts of [`PART`] bytes.
+fn journaled_in_parts(codec: Codec) -> (TraversalGraph, Vec<u8>, SharedBuffer) {
+    let mut graph = TraversalGraph::new();
+    let snapshot = snapshot_bytes(&graph, &WriteOptions::new());
+    let wal = SharedBuffer::new();
+    Journal::new(wal.clone(), Durability::EveryCommit)
+        .with_codec(codec)
+        .with_commit_part_bytes(PART)
+        .attach(&mut graph)
+        .unwrap();
+    (graph, snapshot, wal)
+}
+
+/// One unit of several mutations whose body is a few hundred bytes: a commit in parts.
+fn add_people(graph: &mut TraversalGraph, prefix: &str, count: usize) {
+    graph
+        .transaction(|g| {
+            for i in 0..count {
+                g.traversal_mut()
+                    .add_v("person")
+                    .property("name", format!("{prefix}{i:02}").as_str())
+                    .property("about", "a text that makes the commit body long enough")
+                    .to_list()?;
+            }
+            Ok::<_, Box<TraverserError>>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_commit_in_parts_round_trips() {
+    for codec in [Codec::None, Codec::Lz4] {
+        let (mut graph, snapshot, wal) = journaled_in_parts(codec);
+        add_person(&mut graph, "ann");
+        add_people(&mut graph, "p", 12);
+        add_person(&mut graph, "zed");
+        graph
+            .traversal_mut()
+            .v(None::<()>)
+            .has("name", "p03")
+            .drop()
+            .iterate()
+            .unwrap();
+        let journal = wal.contents();
+        let types: Vec<u8> = frames(&journal).iter().map(|f| f.2).collect();
+        assert!(types.iter().filter(|&&t| t == 4).count() > 4, "{types:?}");
+        // The change sets read back are those the hooks saw.
+        let commits: Vec<ChangeSet> = persist::read_journal(journal.as_slice())
+            .unwrap()
+            .map(|r| match r.unwrap() {
+                JournalRecord::Commit(c) => c,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(commits.len(), 4);
+        assert_eq!(commits[1].mutations().len(), 12);
+        let recovered = persist::recover(
+            snapshot.as_slice(),
+            [journal.as_slice()],
+            RecoveryTarget::Latest,
+        )
+        .unwrap();
+        assert_eq!(dump(&recovered.graph), dump(&graph), "{codec:?}");
+        assert_eq!(recovered.graph.last_commit_seq(), 4);
+        // Every target reaches across a commit in parts.
+        let at_two = persist::recover(
+            snapshot.as_slice(),
+            [journal.as_slice()],
+            RecoveryTarget::CommitSeq(2),
+        )
+        .unwrap();
+        assert_eq!(names(&at_two.graph).len(), 13);
+    }
+}
+
+#[test]
+fn small_commits_keep_the_single_record_form() {
+    // A commit whose body fits one part is one Commit record (type 1), byte for byte the same
+    // whatever the part size above it.
+    let records = |part_bytes: Option<usize>| {
+        let mut graph = TraversalGraph::new();
+        let wal = SharedBuffer::new();
+        let mut journal = Journal::new(wal.clone(), Durability::EveryCommit);
+        if let Some(bytes) = part_bytes {
+            journal = journal.with_commit_part_bytes(bytes);
+        }
+        journal.attach(&mut graph).unwrap();
+        add_people(&mut graph, "p", 3);
+        // The header carries its creation time and the commit its commit time: compared
+        // without them and the checksums over them.
+        let mut records = wal.contents()[64..].to_vec();
+        records[17..25].fill(0);
+        records[25 + 8..25 + 16].fill(0);
+        records
+    };
+    let default = records(None);
+    let (_, length, kind, _) = frames(&[vec![0; 64], default.clone()].concat())[0];
+    assert_eq!(kind, 1);
+    // The body: the payload less the stamp (32 bytes) and the codec byte (uncompressed).
+    let body = length - 25 - 33;
+    assert_eq!(records(Some(body)), default);
+    assert_eq!(records(Some(1 << 30)), default);
+    let split = [vec![0; 64], records(Some(body - 1))].concat();
+    let kinds: Vec<u8> = frames(&split).iter().map(|f| f.2).collect();
+    assert_eq!(kinds, [4, 4]);
+}
+
+#[test]
+fn every_cut_through_a_commit_in_parts_is_a_torn_tail_cut_at_part_zero() {
+    let (mut graph, snapshot, wal) = journaled_in_parts(Codec::None);
+    add_person(&mut graph, "ann");
+    let complete = wal.len();
+    add_people(&mut graph, "p", 6);
+    let journal = wal.contents();
+    assert!(frames(&journal).len() > 4);
+    for cut in complete + 1..journal.len() {
+        let recovered = persist::recover(
+            snapshot.as_slice(),
+            [&journal[..cut]],
+            RecoveryTarget::Latest,
+        )
+        .unwrap_or_else(|err| panic!("cut at {cut}: {err}"));
+        assert_eq!(names(&recovered.graph), ["ann"], "cut at {cut}");
+        let torn = recovered.report.torn_tail.expect("a torn tail");
+        assert_eq!(torn.offset, complete as u64, "cut at {cut}");
+        assert_eq!(torn.bytes, (cut - complete) as u64, "cut at {cut}");
+    }
+}
+
+#[test]
+fn every_flipped_bit_in_a_commit_in_parts_is_damage() {
+    let (mut graph, snapshot, wal) = journaled_in_parts(Codec::None);
+    add_people(&mut graph, "p", 3);
+    add_person(&mut graph, "zed");
+    let journal = wal.contents();
+    for at in 64..journal.len() {
+        let mut damaged = journal.clone();
+        damaged[at] ^= 1 << (at % 8);
+        let result = persist::recover(
+            snapshot.as_slice(),
+            [damaged.as_slice()],
+            RecoveryTarget::Latest,
+        );
+        assert!(
+            matches!(result, Err(PersistError::Corrupt { .. })),
+            "flip at {at}: {:?}",
+            result.map(|r| r.report)
+        );
+    }
+}
+
+#[test]
+fn a_missing_middle_part_is_damage() {
+    let (mut graph, snapshot, wal) = journaled_in_parts(Codec::None);
+    add_people(&mut graph, "p", 6);
+    add_person(&mut graph, "zed");
+    let journal = wal.contents();
+    let parts = frames(&journal);
+    let middle = parts.iter().enumerate().take(parts.len() - 2).skip(1);
+    for (missing, &(start, length, kind, _)) in middle {
+        assert_eq!(kind, 4);
+        let mut damaged = journal[..start].to_vec();
+        damaged.extend_from_slice(&journal[start + length..]);
+        let result = persist::recover(
+            snapshot.as_slice(),
+            [damaged.as_slice()],
+            RecoveryTarget::Latest,
+        );
+        match result {
+            Err(PersistError::Corrupt { reason, offset, .. }) => {
+                // The payload of the part found where part `missing` must be.
+                assert_eq!(offset, (start + 25) as u64, "part {missing}");
+                assert!(reason.contains("must follow"), "part {missing}: {reason}");
+            }
+            other => panic!("part {missing}: {:?}", other.map(|r| r.report)),
+        }
+    }
+}
+
+#[test]
+fn a_record_between_parts_is_damage() {
+    let (mut graph, snapshot, wal) = journaled_in_parts(Codec::None);
+    add_person(&mut graph, "ann");
+    graph.mark("m").unwrap();
+    let marked = wal.contents();
+    let (mark_at, mark_len, mark_kind, _) = *frames(&marked).last().unwrap();
+    assert_eq!(mark_kind, 2);
+    let mark = marked[mark_at..mark_at + mark_len].to_vec();
+    add_people(&mut graph, "p", 6);
+    let journal = wal.contents();
+    let parts: Vec<_> = frames(&journal).into_iter().filter(|f| f.2 == 4).collect();
+    // A Mark record, a single Commit record and a part of another commit between two parts.
+    let commit = {
+        let (at, length, kind, _) = frames(&journal)[0];
+        assert_eq!(kind, 1);
+        journal[at..at + length].to_vec()
+    };
+    for insert in [
+        mark,
+        commit,
+        journal[parts[0].0..parts[0].0 + parts[0].1].to_vec(),
+    ] {
+        let split = parts[2].0;
+        let mut damaged = journal[..split].to_vec();
+        damaged.extend_from_slice(&insert);
+        damaged.extend_from_slice(&journal[split..]);
+        let result = persist::recover(
+            snapshot.as_slice(),
+            [damaged.as_slice()],
+            RecoveryTarget::Latest,
+        );
+        assert!(
+            matches!(result, Err(PersistError::Corrupt { .. })),
+            "{:?}",
+            result.map(|r| r.report)
+        );
+    }
+}
+
+#[test]
+fn parts_in_a_non_last_segment_must_be_complete() {
+    let (mut graph, snapshot, wal) = journaled_in_parts(Codec::None);
+    add_people(&mut graph, "p", 6);
+    let journal = wal.contents();
+    let parts = frames(&journal);
+    // Cut after the second part: in the last journal a torn tail, before another one damage.
+    let cut = parts[2].0;
+    let recovered = Recovery::new()
+        .snapshot(snapshot.as_slice())
+        .journal(&journal[..cut])
+        .run()
+        .unwrap();
+    assert_eq!(recovered.report.torn_tail.unwrap().offset, 64);
+    let result = Recovery::new()
+        .snapshot(snapshot.as_slice())
+        .journal(&journal[..cut])
+        .journal(&journal[..64])
+        .run();
+    match result {
+        Err(PersistError::Corrupt { offset, reason, .. }) => {
+            assert_eq!(offset, 64);
+            assert!(reason.contains("not the last one"), "{reason}");
+        }
+        other => panic!("{:?}", other.map(|r| r.report)),
+    }
+}
+
+/// A journal target that fails a write once its byte budget is used up, and can be cut back.
+#[derive(Clone)]
+struct Limited {
+    out: Arc<parking_lot::Mutex<Vec<u8>>>,
+    budget: Arc<AtomicUsize>,
+    /// The durable end, once attached, and every offset it showed during a write.
+    durable: Arc<parking_lot::Mutex<Option<persist::DurableEnd>>>,
+    seen: Arc<parking_lot::Mutex<Vec<u64>>>,
+}
+
+impl Limited {
+    fn new() -> Self {
+        Self {
+            out: Arc::default(),
+            budget: Arc::new(AtomicUsize::new(usize::MAX)),
+            durable: Arc::default(),
+            seen: Arc::default(),
+        }
+    }
+}
+
+impl Write for Limited {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(durable) = &*self.durable.lock() {
+            self.seen.lock().push(durable.offset());
+        }
+        let left = self.budget.load(Ordering::SeqCst);
+        if left < buf.len() {
+            return Err(std::io::Error::other("disk full"));
+        }
+        if left != usize::MAX {
+            self.budget.fetch_sub(buf.len(), Ordering::SeqCst);
+        }
+        self.out.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn limited_journal(durability: Durability) -> (TraversalGraph, Limited, persist::DurableEnd) {
+    let target = Limited::new();
+    let mut graph = TraversalGraph::new();
+    let end = Journal::new(target.clone(), durability)
+        .with_commit_part_bytes(PART)
+        .with_truncate(|target: &mut Limited, len| {
+            target.out.lock().truncate(len as usize);
+            Ok(())
+        })
+        .attach(&mut graph)
+        .unwrap();
+    *target.durable.lock() = Some(end.clone());
+    (graph, target, end)
+}
+
+#[test]
+fn a_failed_write_of_a_later_part_cuts_the_whole_commit() {
+    // Learn where the parts of the commit lie.
+    let (mut probe, target, _) = limited_journal(Durability::EveryCommit);
+    add_person(&mut probe, "ann");
+    let before = target.out.lock().len();
+    add_people(&mut probe, "p", 6);
+    let parts = frames(&target.out.lock());
+    assert!(parts.len() > 4);
+    // Every part fails once, the first one (frame 1, after the commit of "ann") included.
+    for (failing, part) in parts.iter().enumerate().skip(1) {
+        let (mut graph, target, end) = limited_journal(Durability::EveryCommit);
+        add_person(&mut graph, "ann");
+        // Room for every part before `failing`, and some bytes of it.
+        target.budget.store(part.0 - before + 3, Ordering::SeqCst);
+        let err = graph
+            .transaction(|g| {
+                for i in 0..6 {
+                    g.traversal_mut()
+                        .add_v("person")
+                        .property("name", format!("p{i:02}").as_str())
+                        .property("about", "a text that makes the commit body long enough")
+                        .to_list()?;
+                }
+                Ok::<_, Box<TraverserError>>(())
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("rejected"), "{err}");
+        assert_eq!(names(&graph), ["ann"]);
+        // Every part written was cut off again: the journal ends after the first commit.
+        assert_eq!(target.out.lock().len(), before, "part {failing}");
+        assert_eq!(end.offset(), before as u64);
+        target.budget.store(usize::MAX, Ordering::SeqCst);
+        assert!(graph.traversal_mut().add_v("x").to_list().is_err());
+        let bytes = target.out.lock().clone();
+        let recovered = Recovery::new().journal(bytes.as_slice()).run().unwrap();
+        assert_eq!(names(&recovered.graph), ["ann"], "part {failing}");
+        assert!(recovered.report.torn_tail.is_none());
+    }
+}
+
+#[test]
+fn the_durable_end_moves_after_the_last_part() {
+    for durability in [Durability::EveryCommit, Durability::Os] {
+        let (mut graph, target, end) = limited_journal(durability);
+        add_person(&mut graph, "ann");
+        let before = end.offset();
+        assert_eq!(before, target.out.lock().len() as u64);
+        target.seen.lock().clear();
+        add_people(&mut graph, "p", 6);
+        let seen = target.seen.lock().clone();
+        assert!(seen.len() > 4, "{seen:?}");
+        // While the parts were written the durable end stayed before the commit.
+        assert!(seen.iter().all(|&offset| offset == before), "{seen:?}");
+        assert_eq!(end.offset(), target.out.lock().len() as u64);
+        assert_eq!(end.commit_seq(), 2);
+    }
+}
+
+/// Release gate (`--release -- --ignored`): a unit whose commit body is above 1 GiB, the bound
+/// of one record, commits in parts of the default 64 MiB and recovers (format spec 9.3.1).
+/// Memory: about 3.5 GiB at its peak (the graph, the change set and the encoded body; then
+/// the recovered graph, the change set and the assembled body); the journal is a file.
+#[test]
+#[ignore = "release gate: writes and reads a commit of more than 1 GiB"]
+fn a_unit_over_one_gib_commits() {
+    const VALUE: usize = 1 << 20;
+    const VERTICES: usize = 1100;
+    let path = std::env::temp_dir().join(format!("graphersal-one-gib-{}.wal", std::process::id()));
+    let mut graph = TraversalGraph::new();
+    let base = snapshot_bytes(&graph, &WriteOptions::new());
+    let file = std::fs::File::create(&path).unwrap();
+    Journal::for_file(file, Durability::EveryCommit)
+        .with_codec(Codec::None)
+        .attach(&mut graph)
+        .unwrap();
+    graph
+        .transaction(|g| -> Result<(), GraphError> {
+            for i in 0..VERTICES {
+                let mut text = format!("{i:08}");
+                text.extend(std::iter::repeat_n('x', VALUE - text.len()));
+                let mut properties = PropertyMap::default();
+                properties.insert("text", text.as_str().into());
+                g.add_vertex(None, vec!["blob".into()], properties)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(graph.last_commit_seq(), 1);
+    drop(graph);
+    let bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(bytes > (VERTICES * VALUE) as u64, "{bytes}");
+    let file = std::fs::File::open(&path).unwrap();
+    let recovered = Recovery::new()
+        .snapshot(base.as_slice())
+        .journal(std::io::BufReader::new(file))
+        .run();
+    let _ = std::fs::remove_file(&path);
+    let recovered = recovered.unwrap();
+    assert_eq!(recovered.graph.vertex_count(), VERTICES);
+    assert_eq!(recovered.graph.last_commit_seq(), 1);
+    assert!(recovered.report.torn_tail.is_none());
+}

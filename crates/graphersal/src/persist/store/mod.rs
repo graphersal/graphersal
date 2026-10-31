@@ -145,6 +145,8 @@ pub struct StoreOptions {
     workload_level: crate::graph::workload::WorkloadLevel,
     journal_segment_bytes: u64,
     instance_name: Option<String>,
+    /// The uncompressed body bytes per WAL Commit part (format spec 9.3.1; a test knob).
+    commit_part_bytes: usize,
     /// Injected WAL failures (crate tests only).
     faults: Option<Arc<Faults>>,
 }
@@ -167,6 +169,7 @@ impl Default for StoreOptions {
             workload_level: crate::graph::workload::WorkloadLevel::Persisted,
             journal_segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
             instance_name: None,
+            commit_part_bytes: crate::persist::wal::PART_BODY_BYTES,
             faults: None,
         }
     }
@@ -204,13 +207,23 @@ impl StoreOptions {
         self
     }
 
+    /// The uncompressed body bytes per WAL Commit part (default 64 MiB): a larger commit is
+    /// written in parts (format spec 9.3.1). Per open, not a creation parameter: a reader
+    /// accepts any part size. A test knob (small parts without gigabytes of data).
+    #[doc(hidden)]
+    pub fn with_commit_part_bytes(mut self, bytes: usize) -> Self {
+        self.commit_part_bytes = bytes.clamp(1, crate::persist::codec::MAX_BLOCK_BYTES);
+        self
+    }
+
     /// When a commit is durable ([`Durability::EveryCommit`] by default).
     pub fn with_durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
         self
     }
 
-    /// The size after which a WAL segment closes (a record is never split).
+    /// The size after which a WAL segment closes (a record, and a commit written in parts, is
+    /// never split).
     pub fn with_wal_segment_bytes(mut self, bytes: u64) -> Self {
         self.wal_segment_bytes = bytes.max(1);
         self
@@ -4504,6 +4517,7 @@ fn attach_journal(
             writer.file.sync()
         })
         .with_codec(options.codec)
+        .with_commit_part_bytes(options.commit_part_bytes)
         .with_known_marks(marks.iter().map(|m| m.name().to_string()))
         .with_files(Box::new(files))
         .with_durable_end(durable)

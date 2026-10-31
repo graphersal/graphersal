@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use compact_str::CompactString;
 
-use super::super::codec::{crc, crc_append};
+use super::super::codec::{COMMIT_PARTS_FORMAT_VERSION, crc, crc_append};
 use super::super::error::PersistError;
 use super::super::manifest::{ChunkRow, FIXED_BYTES, Manifest, ManifestFixed, is_element_kind};
 use super::super::segment::{
@@ -24,8 +24,9 @@ use super::super::segment::{
 };
 use super::super::snapshot::ReadOptions;
 use super::super::wal::{
-    FRAME_BYTES, RECORD_CHECKPOINT, RECORD_COMMIT, RECORD_MARK, SYNC_MARKER, WAL_HEADER_BYTES,
-    WalHeader, decode_commit_in, decode_frame_header,
+    COMMIT_READING_OPERATION, CommitParts, FRAME_BYTES, RECORD_CHECKPOINT, RECORD_COMMIT,
+    RECORD_COMMIT_PART, RECORD_MARK, SYNC_MARKER, WAL_HEADER_BYTES, WalHeader, decode_commit_in,
+    decode_frame_header, part_index,
 };
 use super::files::{
     DamagePolicy, DirPath, GraphFile, LineageEntry, STORE_VERSION, list_snapshots, list_wal,
@@ -757,8 +758,13 @@ fn in_range(id: &str, first: &str, last: &str) -> bool {
 struct CommitPos {
     seq: u64,
     segment: usize,
+    /// The record's start (of part 0 for a commit in parts).
     offset: usize,
+    /// The payload length of a single Commit record; the whole span of every part of a
+    /// commit in parts (format spec 9.3.1).
     len: usize,
+    /// A commit in parts.
+    parts: bool,
 }
 
 /// One event of the WAL in order: a commit, or a damaged region.
@@ -804,10 +810,26 @@ impl WalScan {
             let Some((_, bytes)) = &current else {
                 continue;
             };
+            let version = WalHeader::records_version(bytes);
+            if commit.parts {
+                let span = bytes
+                    .get(..commit.offset + commit.len)
+                    .ok_or("a WAL segment shrank while it was read")?;
+                match assemble_parts(span, commit.offset) {
+                    PartsWalk::Done { parts, .. } => f(parts
+                        .finish(max_depth, version, None)
+                        .map_err(|e| e.reason)?),
+                    PartsWalk::Refused(err) => return Err(err.to_string()),
+                    PartsWalk::Torn { .. } | PartsWalk::Broken { .. } => {
+                        return Err("a WAL segment changed while it was read".into());
+                    }
+                }
+                last = commit.seq;
+                continue;
+            }
             let payload = bytes
                 .get(commit.offset + FRAME_BYTES..commit.offset + FRAME_BYTES + commit.len)
                 .ok_or("a WAL segment shrank while it was read")?;
-            let version = WalHeader::records_version(bytes);
             f(decode_commit_in(payload, max_depth, version, None).map_err(|e| e.reason)?);
             last = commit.seq;
         }
@@ -852,6 +874,103 @@ fn frame_at(bytes: &[u8], at: usize) -> Frame {
         len,
         seq: header.commit_seq,
         kind: header.record_type,
+    }
+}
+
+/// What [`assemble_parts`] found for a commit in parts (format spec 9.3.1).
+enum PartsWalk {
+    /// Every part, checksums held and indexes consistent; `end` after the last part.
+    Done { parts: CommitParts, end: usize },
+    /// Fewer parts than declared, the bytes from `at` being an interrupted write.
+    Torn { at: usize },
+    /// A part missing or inconsistent at `at`: damage.
+    Broken { at: usize, reason: String },
+    /// The memory ceiling refused the assembly (never damage).
+    Refused(PersistError),
+}
+
+/// Walks the parts of the commit whose part 0 starts at `at` (its frame already checked).
+fn assemble_parts(bytes: &[u8], at: usize) -> PartsWalk {
+    let Frame::Record { len, seq, .. } = frame_at(bytes, at) else {
+        return PartsWalk::Broken {
+            at,
+            reason: "part 0 of a commit in parts is not a valid record".into(),
+        };
+    };
+    let payload = &bytes[at + FRAME_BYTES..at + FRAME_BYTES + len];
+    let mut parts = match CommitParts::start(payload, COMMIT_READING_OPERATION) {
+        Ok(Ok(parts)) => parts,
+        Ok(Err(refused)) => return PartsWalk::Refused(refused),
+        Err(err) => {
+            return PartsWalk::Broken {
+                at,
+                reason: format!("part 0 of commit {seq}: {}", err.reason),
+            };
+        }
+    };
+    if parts.commit_seq() != seq {
+        return PartsWalk::Broken {
+            at,
+            reason: "frame and payload commit_seq differ".into(),
+        };
+    }
+    let mut next = at + FRAME_BYTES + len;
+    while !parts.is_complete() {
+        if next >= bytes.len() || is_torn_tail(bytes, next) {
+            return PartsWalk::Torn { at: next };
+        }
+        let count = parts.parts();
+        let missing = |reason: &str| PartsWalk::Broken {
+            at: next,
+            reason: format!(
+                "commit {seq} in {} parts: {reason} where its next part must follow",
+                count
+            ),
+        };
+        let Frame::Record {
+            len,
+            seq: part_seq,
+            kind,
+        } = frame_at(bytes, next)
+        else {
+            return missing("a damaged record");
+        };
+        if kind != RECORD_COMMIT_PART || part_seq != seq {
+            return missing(&format!("a record of type {kind} for commit {part_seq}"));
+        }
+        match parts.push(&bytes[next + FRAME_BYTES..next + FRAME_BYTES + len]) {
+            Ok(Ok(())) => {}
+            Ok(Err(refused)) => return PartsWalk::Refused(refused),
+            Err(err) => return missing(&err.reason),
+        }
+        next += FRAME_BYTES + len;
+    }
+    PartsWalk::Done { parts, end: next }
+}
+
+/// The first position from `at` on that is not a Commit part other than a part 0: a resync
+/// never starts inside a commit in parts (format spec 9.6).
+fn skip_later_parts(bytes: &[u8], mut at: usize) -> usize {
+    while let Frame::Record { len, kind, .. } = frame_at(bytes, at) {
+        let payload = &bytes[at + FRAME_BYTES..at + FRAME_BYTES + len];
+        if kind != RECORD_COMMIT_PART || matches!(part_index(payload), Ok((0, _))) {
+            break;
+        }
+        at += FRAME_BYTES + len;
+    }
+    at
+}
+
+/// The next position after `at` that holds a valid record which does not continue a commit in
+/// parts (the resynchronisation of format spec 9.6), or the end.
+fn resync(bytes: &[u8], at: usize, parts: bool) -> usize {
+    let marker = SYNC_MARKER.to_le_bytes();
+    let next = (at + 1..bytes.len().saturating_sub(3))
+        .find(|&q| bytes[q..q + 4] == marker && matches!(frame_at(bytes, q), Frame::Record { .. }));
+    match next {
+        Some(q) if parts => skip_later_parts(bytes, q),
+        Some(q) => q,
+        None => bytes.len(),
     }
 }
 
@@ -946,7 +1065,104 @@ fn scan_wal(
         scan.segments.push((first, path));
         let mut at = WAL_HEADER_BYTES;
         while at < bytes.len() {
+            let parts_valid = version >= COMMIT_PARTS_FORMAT_VERSION;
             match frame_at(&bytes, at) {
+                Frame::Record { len, seq, kind } if kind == RECORD_COMMIT_PART && parts_valid => {
+                    let payload = &bytes[at + FRAME_BYTES..at + FRAME_BYTES + len];
+                    if !matches!(part_index(payload), Ok((0, _))) {
+                        // A part without its part 0: one damaged region up to the next record
+                        // that starts something (format spec 9.6).
+                        let end = skip_later_parts(&bytes, at);
+                        let mut item = Damage::new(
+                            DamageKind::WalRecord,
+                            &rel,
+                            format!("a part of commit {seq} without the parts before it"),
+                        );
+                        item.offset = Some(at as u64);
+                        damage.push(item);
+                        scan.events.push(WalEvent::Damaged(damage.len() - 1));
+                        at = end;
+                        continue;
+                    }
+                    match assemble_parts(&bytes, at) {
+                        PartsWalk::Done { parts, end } => {
+                            match parts.finish(max_depth, version, None) {
+                                Err(err) if err.unsupported => {
+                                    return Err(PersistError::unsupported_content(
+                                        rel,
+                                        at as u64,
+                                        format!(
+                                            "the record of commit {seq} in parts: {}",
+                                            err.reason
+                                        ),
+                                    ));
+                                }
+                                Ok(changes) if changes.commit_seq() == seq => {
+                                    scan.events.push(WalEvent::Commit(CommitPos {
+                                        seq,
+                                        segment,
+                                        offset: at,
+                                        len: end - at,
+                                        parts: true,
+                                    }));
+                                }
+                                _ => {
+                                    let mut item = Damage::new(
+                                        DamageKind::WalRecord,
+                                        &rel,
+                                        "a commit in parts whose body does not decode",
+                                    );
+                                    item.offset = Some(at as u64);
+                                    damage.push(item);
+                                    scan.events.push(WalEvent::Damaged(damage.len() - 1));
+                                }
+                            }
+                            at = end;
+                        }
+                        PartsWalk::Torn { .. } if last_segment => {
+                            notes.push(format!(
+                                "{rel}: an interrupted last write of commit {seq} in parts at \
+                                 byte {at} ({} bytes) is ignored",
+                                bytes.len() - at
+                            ));
+                            break;
+                        }
+                        PartsWalk::Torn { at: missing } => {
+                            let mut item = Damage::new(
+                                DamageKind::WalRecord,
+                                &rel,
+                                format!(
+                                    "commit {seq} in parts ends before its last part in a \
+                                     segment that is not the last one"
+                                ),
+                            );
+                            item.offset = Some(at as u64);
+                            damage.push(item);
+                            scan.events.push(WalEvent::Damaged(damage.len() - 1));
+                            at = resync(&bytes, missing, true);
+                        }
+                        PartsWalk::Broken { at: broken, reason } => {
+                            // One damaged event for the whole commit, its later parts included.
+                            let end = if matches!(frame_at(&bytes, broken), Frame::Record { .. })
+                                && broken > at
+                            {
+                                skip_later_parts(&bytes, broken)
+                            } else {
+                                resync(&bytes, broken, true)
+                            };
+                            let mut item = Damage::new(
+                                DamageKind::WalRecord,
+                                &rel,
+                                format!("{reason}; {} bytes up to the next valid record", end - at),
+                            );
+                            item.offset = Some(at as u64);
+                            damage.push(item);
+                            scan.events.push(WalEvent::Damaged(damage.len() - 1));
+                            at = end;
+                        }
+                        PartsWalk::Refused(err) => return Err(err),
+                    }
+                }
                 Frame::Record { len, seq, kind } => {
                     if kind == RECORD_COMMIT {
                         let payload = &bytes[at + FRAME_BYTES..at + FRAME_BYTES + len];
@@ -967,6 +1183,7 @@ fn scan_wal(
                                     segment,
                                     offset: at,
                                     len,
+                                    parts: false,
                                 }));
                             }
                             _ => {
@@ -1000,13 +1217,9 @@ fn scan_wal(
                         ));
                         break;
                     }
-                    // Resynchronise: the next sync marker that starts a valid record.
-                    let marker = SYNC_MARKER.to_le_bytes();
-                    let next = (at + 1..bytes.len().saturating_sub(3)).find(|&q| {
-                        bytes[q..q + 4] == marker
-                            && matches!(frame_at(&bytes, q), Frame::Record { .. })
-                    });
-                    let end = next.unwrap_or(bytes.len());
+                    // Resynchronise: the next sync marker that starts a valid record, never
+                    // inside a commit in parts.
+                    let end = resync(&bytes, at, parts_valid);
                     let mut item = Damage::new(
                         DamageKind::WalRecord,
                         &rel,

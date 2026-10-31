@@ -69,16 +69,18 @@ Large records (from 4 KiB) are compressed (`StoreOptions::with_codec`).
 
 ## The size of one commit
 
-Every commit is one WAL record, and its body is at most **1 GiB before compression** (format
-spec 9.3). The body holds every change of the unit with its before and after values, a dropped
-element with its full properties included, so a unit that drops and re-creates a few hundred
-thousand elements with long texts can reach it. Such a commit is refused
-(`GraphError::CommitRejected` from the hook `journal`, its source
-`PersistError::CommitTooLarge`): the unit rolls back, nothing is written, the store keeps
-working. Split the work into smaller units: in the playground and the dev server a whole script
-is one unit, so drop in a run of its own and create the data over several runs; in the CLI,
-Python and Rust every traversal is its own unit already. See
-[Resource Limits](../users_guide/resource_limits.md#the-size-of-one-commit-journal).
+A commit whose body (every change of the unit with its before and after values, a dropped
+element with its full properties included) is at most **64 MiB before compression** is one WAL
+record; a larger one is written as several records, *parts* of 64 MiB each, of the same commit
+(format spec 9.3.1). The parts always lie in one WAL segment, the commit is synced once after
+its last part, and every reader (recovery, checkpoints, backups, `changes_since`, rollback)
+sees one commit. A crash in the middle of a commit in parts leaves a torn tail that the next
+open cuts at its first part: the commit is lost as a whole, never half. There is no practical
+size limit (2^20 parts, 64 TiB); a unit beyond it is refused with
+`PersistError::CommitTooLarge` (inside `GraphError::CommitRejected` from the hook `journal`).
+What bounds a large unit is memory: its change set and its encoded body are held while it
+commits, checked against the [process memory ceiling](../users_guide/resource_limits.md#the-process-memory-ceiling).
+See [Resource Limits](../users_guide/resource_limits.md#the-size-of-one-commit-journal).
 
 ## Reading the committed changes (CDC)
 

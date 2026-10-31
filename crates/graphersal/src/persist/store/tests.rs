@@ -1509,3 +1509,55 @@ fn a_duplicated_persist_error_keeps_its_variant_and_text() {
         "{copy}"
     );
 }
+
+/// One unit adding `count` people: a commit in parts with small Commit parts.
+fn add_people(store: &Store, prefix: &str, count: usize) {
+    store
+        .graph()
+        .write()
+        .transaction(|g| {
+            for i in 0..count {
+                g.traversal_mut()
+                    .add_v("person")
+                    .property("name", format!("{prefix}{i}").as_str())
+                    .property("about", "a text that makes the commit body long enough")
+                    .to_list()?;
+            }
+            Ok::<_, Box<crate::error::TraverserError>>(())
+        })
+        .unwrap();
+}
+
+/// A rollback splits the WAL segment at the first commit after the target: before part 0 of a
+/// commit in parts (format spec 9.3.1, 11), which moves whole into the attic and comes back
+/// with a restore.
+#[test]
+fn rollback_splits_before_a_commit_in_parts() {
+    let dir = MemDir::new();
+    let options = StoreOptions::new().with_commit_part_bytes(100);
+    let store = Store::create(&dir, options.clone()).unwrap();
+    add_person(&store, "ann").unwrap();
+    add_people(&store, "p", 5);
+    add_people(&store, "q", 5);
+    add_person(&store, "zed").unwrap();
+    let full = names_of(&store.graph().read());
+    // Back to commit 2: the parts of commit 3 move, commit 2's stay.
+    let id = store
+        .rollback_to(RecoveryTarget::CommitSeq(2), RollbackMode::Move)
+        .unwrap()
+        .attic
+        .unwrap();
+    let at_two = names_of(&store.graph().read());
+    assert_eq!(at_two.len(), 6);
+    assert!(store.verify().unwrap().is_ok());
+    store.close().unwrap();
+    let store = Store::open(&dir, options.clone()).unwrap();
+    assert_eq!(names_of(&store.graph().read()), at_two);
+    // The attic entry holds whole commits: its history reads back to the full state.
+    let changes = store.attic_changes(&id).unwrap();
+    let moved: Vec<u64> = changes.map(|c| c.unwrap().commit_seq()).collect();
+    assert_eq!(moved, [3, 4]);
+    store.attic_restore(&id).unwrap();
+    assert_eq!(names_of(&store.graph().read()), full);
+    assert!(store.verify().unwrap().is_ok());
+}
