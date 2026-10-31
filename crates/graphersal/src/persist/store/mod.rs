@@ -1385,8 +1385,8 @@ impl<S: PersistentStorage + Default> Store<S> {
 
     /// [`Store::info`] for a front end that shows it often (the playground's Store menu): the
     /// same answer, except that [`StoreInfo::blobs`] is a listing by names and lengths
-    /// ([`BlobUsage::unreferenced`](blobs::BlobUsage::unreferenced) is `0`: not counted). It reads only names, lengths and the
-    /// small metadata files (`GRAPH`, `marks`, the head of every snapshot manifest, every attic
+    /// ([`BlobUsage::unreferenced`](blobs::BlobUsage::unreferenced) is `0`: not counted). It
+    /// reads only names, lengths and the small metadata files (`GRAPH`, `marks`, the head of every snapshot manifest, every attic
     /// entry's `ATTIC` file), never the WAL, the attic entries' WAL or a blob, so its cost does
     /// not grow with the length of the history. ([`Store::info`] counts the unreferenced blobs
     /// from the snapshots' blob tables and the ledger, and reads the attic entries' WAL only for
