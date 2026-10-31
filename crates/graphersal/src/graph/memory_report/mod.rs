@@ -111,16 +111,24 @@ pub struct MemoryReportProgress {
 /// A progress callback of a [`MemoryReportRequest`].
 type ProgressFn = Arc<dyn Fn(MemoryReportProgress) + Send + Sync>;
 
-/// How to compute a [`MemoryReport`]: full or sampled, the path depth, the row cap, a
+/// How to compute a [`MemoryReport`]: full or sampled, the path depth, the row caps, a
 /// cancellation token and a progress callback. Built with [`Self::new`] and the `with_*`
-/// methods; the default is a full walk.
+/// methods; the default is a full walk that keeps the [`Self::DEFAULT_LIMIT`] property rows and
+/// label rows with the most bytes (a graph with a hundred thousand labels must not answer a
+/// hundred thousand rows; the totals always count everything, the omitted rows are counted in
+/// [`MemoryReport::rows_omitted`] and [`MemoryReport::labels_omitted`] with their bytes).
 ///
 /// ```
 /// use graphersal::storage::MemoryReportRequest;
 ///
 /// let request = MemoryReportRequest::new().with_max_elements(50_000).with_max_rows(20);
 /// assert_eq!(request.max_elements(), Some(50_000));
+/// assert_eq!(request.max_rows(), Some(20));
+/// assert_eq!(request.max_labels(), Some(MemoryReportRequest::DEFAULT_LIMIT));
 /// assert_eq!(request.path_depth(), 1);
+/// // Every row: no cap.
+/// let all = MemoryReportRequest::new().with_limit(usize::MAX);
+/// assert_eq!(all.max_rows(), Some(usize::MAX));
 /// ```
 #[derive(Clone)]
 pub struct MemoryReportRequest {
@@ -139,8 +147,8 @@ impl Default for MemoryReportRequest {
             sample_every: 1,
             max_elements: None,
             path_depth: 1,
-            max_rows: None,
-            max_labels: None,
+            max_rows: Some(Self::DEFAULT_LIMIT),
+            max_labels: Some(Self::DEFAULT_LIMIT),
             cancel: None,
             progress: None,
         }
@@ -162,9 +170,22 @@ impl std::fmt::Debug for MemoryReportRequest {
 }
 
 impl MemoryReportRequest {
-    /// A full report (every element visited), top-level keys, every row.
+    /// The number of property rows and of label rows a report keeps unless the request says
+    /// otherwise ([`Self::with_limit`], [`Self::with_max_rows`], [`Self::with_max_labels`]).
+    pub const DEFAULT_LIMIT: usize = 500;
+
+    /// A full report (every element visited), top-level keys, the [`Self::DEFAULT_LIMIT`]
+    /// property rows and label rows with the most bytes.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keeps the `n` property rows and the `n` label rows with the most bytes (both caps at once;
+    /// default [`Self::DEFAULT_LIMIT`]; `usize::MAX` keeps every row).
+    pub fn with_limit(mut self, n: usize) -> Self {
+        self.max_rows = Some(n);
+        self.max_labels = Some(n);
+        self
     }
 
     /// Reads the properties of every `k`-th element of each label only (`1`: all, the default;
@@ -193,15 +214,16 @@ impl MemoryReportRequest {
         self
     }
 
-    /// Keeps the `n` property rows with the most bytes (the rest counted in
-    /// [`MemoryReport::rows_omitted`]).
+    /// Keeps the `n` property rows with the most bytes (default [`Self::DEFAULT_LIMIT`]; the rest
+    /// counted in [`MemoryReport::rows_omitted`] and [`MemoryReport::rows_omitted_bytes`]).
     pub fn with_max_rows(mut self, n: usize) -> Self {
         self.max_rows = Some(n);
         self
     }
 
-    /// Keeps the `n` label rows with the most bytes (property bytes plus slots; the rest counted
-    /// in [`MemoryReport::labels_omitted`]).
+    /// Keeps the `n` label rows with the most bytes (property bytes plus slots; default
+    /// [`Self::DEFAULT_LIMIT`]; the rest counted in [`MemoryReport::labels_omitted`] with their
+    /// elements and bytes).
     pub fn with_max_labels(mut self, n: usize) -> Self {
         self.max_labels = Some(n);
         self
@@ -239,12 +261,12 @@ impl MemoryReportRequest {
         self.path_depth
     }
 
-    /// The row cap, if any.
+    /// The property row cap (`Some(DEFAULT_LIMIT)` unless set).
     pub fn max_rows(&self) -> Option<usize> {
         self.max_rows
     }
 
-    /// The label row cap, if any.
+    /// The label row cap (`Some(DEFAULT_LIMIT)` unless set).
     pub fn max_labels(&self) -> Option<usize> {
         self.max_labels
     }
@@ -302,14 +324,24 @@ impl MemoryReportRequest {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct MemoryReport {
-    /// One row per `(kind, label, path)`, most bytes first.
+    /// One row per `(kind, label, path)`, most bytes first (at most
+    /// [`MemoryReportRequest::max_rows`]).
     pub properties: Vec<PropertyMemory>,
     /// Rows left out by [`MemoryReportRequest::with_max_rows`].
     pub rows_omitted: u64,
-    /// One row per `(kind, label)`, vertices first, most bytes first.
+    /// The [`PropertyMemory::bytes`] of those rows summed.
+    pub rows_omitted_bytes: u64,
+    /// One row per `(kind, label)`, vertices first, most bytes first (at most
+    /// [`MemoryReportRequest::max_labels`]; the kept ones are the rows with the most bytes over
+    /// both kinds).
     pub labels: Vec<LabelMemory>,
     /// Label rows left out by [`MemoryReportRequest::with_max_labels`].
     pub labels_omitted: u64,
+    /// The [`LabelMemory::elements`] of those rows summed.
+    pub labels_omitted_elements: u64,
+    /// The bytes of those rows summed: [`LabelMemory::property_bytes`] plus
+    /// [`LabelMemory::slot_bytes`] (the figure the rows are ordered by).
+    pub labels_omitted_bytes: u64,
     /// The [`LabelMemory::property_bytes`] of those rows summed (so that
     /// [`Self::property_bytes`] stays complete).
     pub labels_omitted_property_bytes: u64,

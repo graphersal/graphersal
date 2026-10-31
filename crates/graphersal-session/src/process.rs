@@ -201,10 +201,10 @@ pub struct MemorySegment {
 ///
 /// | Segment | Bytes |
 /// |---|---|
-/// | `structure` | `structure_bytes + index_bytes` |
+/// | `structure` | `structure_bytes` (the Memory row's Structure) |
 /// | `properties` | `property_bytes - compressed_stored_bytes - dedup_table_bytes` |
 /// | `compressed` | `compressed_stored_bytes + compression_dictionary_bytes + dedup_table_bytes` (left out at 0) |
-/// | `indexes` | `property_index_bytes` (left out at 0) |
+/// | `indexes` | `index_bytes + property_index_bytes`: the id and label indexes plus the property indexes (left out at 0) |
 /// | `models` | `model_bytes` when the graph reports it, else the loaded embedders (left out at 0) |
 /// | `other` | tracked only: the live heap minus the known segments (0 when the estimate is above the heap) |
 ///
@@ -277,7 +277,7 @@ fn bar_from(
         let dedup = field("dedup_table_bytes");
         segments.push(MemorySegment {
             name: "structure",
-            bytes: field("structure_bytes").saturating_add(field("index_bytes")),
+            bytes: field("structure_bytes"),
         });
         segments.push(MemorySegment {
             name: "properties",
@@ -299,7 +299,7 @@ fn bar_from(
                 field("compressed_plain_bytes").saturating_add(field("deduped_plain_bytes"));
             compression = Some((plain, compressed));
         }
-        let indexes = field("property_index_bytes");
+        let indexes = field("index_bytes").saturating_add(field("property_index_bytes"));
         if indexes > 0 {
             segments.push(MemorySegment {
                 name: "indexes",
@@ -389,8 +389,8 @@ impl MemoryBar {
     /// ```text
     /// Memory   1.6 GiB of 3.4 GiB (cgroup)                                        47 %
     ///          [###############################....................................]
-    ///          structure 180.0 MiB  properties 420.0 MiB  compressed 95.0 MiB
-    ///          indexes 60.0 MiB  models 506.0 MiB  other 340.0 MiB
+    ///          structure 150.0 MiB  properties 420.0 MiB  compressed 95.0 MiB
+    ///          indexes 90.0 MiB  models 506.0 MiB  other 340.0 MiB
     ///          compression saves 285.0 MiB (plain 380.0 MiB -> 95.0 MiB, -75 %)
     /// ```
     pub fn text(&self, width: usize) -> String {
@@ -544,10 +544,11 @@ mod tests {
             "cgroup",
             Some(1600 * MIB),
         );
-        assert_eq!(segment(&bar, "structure"), Some(180 * MIB));
+        assert_eq!(segment(&bar, "structure"), Some(150 * MIB));
         assert_eq!(segment(&bar, "properties"), Some(420 * MIB));
         assert_eq!(segment(&bar, "compressed"), Some(95 * MIB));
-        assert_eq!(segment(&bar, "indexes"), Some(60 * MIB));
+        // The id and label indexes (index_bytes) plus the property indexes.
+        assert_eq!(segment(&bar, "indexes"), Some(90 * MIB));
         assert_eq!(segment(&bar, "models"), Some(506 * MIB));
         // Known = total_bytes + models.
         let known: u64 = bar.segments[..5].iter().map(|s| s.bytes).sum();
@@ -566,7 +567,7 @@ mod tests {
         assert_eq!(value["usedTracked"], json!(true));
         assert_eq!(
             value["segments"][0],
-            json!({"name": "structure", "bytes": 180 * MIB})
+            json!({"name": "structure", "bytes": 150 * MIB})
         );
         assert_eq!(
             value["compression"],
@@ -578,9 +579,16 @@ mod tests {
         assert_eq!(segment(&bar, "other"), Some(0));
         assert!(bar.estimate_above_heap);
         assert_eq!(bar.to_value()["estimateAboveHeap"], json!(true));
-        // Nothing compressed, no index: those segments and the saving are left out.
+        // Nothing compressed, no property index: compressed and the saving are left out, the
+        // indexes segment holds the id and label indexes alone.
         let plain = json!({"structure_bytes": 10, "index_bytes": 5, "property_bytes": 20});
         let bar = bar_from(&plain, 0, Some(1000), "configured", None);
+        let names: Vec<&str> = bar.segments.iter().map(|s| s.name).collect();
+        assert_eq!(names, ["structure", "properties", "indexes"]);
+        assert_eq!(segment(&bar, "indexes"), Some(5));
+        // No index at all: the indexes segment is left out.
+        let bare = json!({"structure_bytes": 10, "property_bytes": 20});
+        let bar = bar_from(&bare, 0, Some(1000), "configured", None);
         let names: Vec<&str> = bar.segments.iter().map(|s| s.name).collect();
         assert_eq!(names, ["structure", "properties"]);
         assert_eq!(bar.compression, None);
@@ -682,7 +690,7 @@ mod tests {
         assert_eq!(lines[1].len(), 80);
         let hashes = lines[1].matches('#').count();
         assert_eq!(hashes, (0.471 * 69.0f64).round() as usize, "{text}");
-        assert!(lines[2].starts_with("         structure 180.0 MiB  properties 420.0 MiB"));
+        assert!(lines[2].starts_with("         structure 150.0 MiB  properties 420.0 MiB"));
         assert!(text.contains("models 506.0 MiB"), "{text}");
         assert!(text.contains("other "), "{text}");
         assert_eq!(

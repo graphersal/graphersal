@@ -88,9 +88,10 @@ answers questions by querying the served graph. In the WebAssembly playground th
   [memory ceiling](resource_limits.md#seeing-how-full-the-process-is): used of the ceiling, where
   the ceiling comes from (configured, cgroup limit, 80 % of RAM, WebAssembly default), and the
   percentage (normal below 70 %, amber from 70 to 90 %, red above). One coloured segment per
-  place the memory goes: **structure** (vertex and edge slots, ids, the id and label indexes),
-  **properties** (plain values), **compressed** (compressed and deduplicated values with their
-  dictionaries), **indexes** (property indexes), **models** (embedding models in memory) and
+  place the memory goes: **structure** (vertex and edge slots, ids and labels: the Memory row's
+  Structure), **properties** (plain values), **compressed** (compressed and deduplicated values
+  with their dictionaries), **indexes** (the id and label indexes plus the property indexes: the
+  Memory row's Indexes and Property indexes), **models** (embedding models in memory) and
   **other** (the rest of the heap: query buffers, caches, the session). The legend lists every
   segment with its size, also a tiny one, and a line says what compression saves. Without a
   tracking allocator only the known segments are shown, marked "process total not tracked";

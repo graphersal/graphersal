@@ -286,7 +286,20 @@ export function bucketLabel(start, tier) {
   return time;
 }
 
-/** The property rows of a memory report, the most bytes first. */
+/**
+ * The most rows the Memory tab shows per list (properties, labels), the engine's default limit
+ * (`MemoryReportRequest::DEFAULT_LIMIT`). The engine already answers at most this many; the cut
+ * here also guards a longer answer (an older server), so a graph with a hundred thousand labels
+ * never renders a hundred thousand rows.
+ */
+export const MEMORY_LIST_LIMIT = 500;
+
+/** The memory report spec the Memory tab asks for. */
+export function memoryReportSpec() {
+  return { limit: MEMORY_LIST_LIMIT };
+}
+
+/** The property rows of a memory report, the most bytes first, at most `MEMORY_LIST_LIMIT`. */
 export function memoryRows(report) {
   const rows = ((report && report.properties) || []).map((p) => {
     const path = String(p.path || '').replace(/^\$\./, '');
@@ -309,10 +322,10 @@ export function memoryRows(report) {
     };
   });
   rows.sort((a, b) => b.bytes - a.bytes || a.target.localeCompare(b.target));
-  return rows;
+  return rows.slice(0, MEMORY_LIST_LIMIT);
 }
 
-/** The label rows of a memory report, the most property bytes first. */
+/** The label rows of a memory report, the most bytes first, at most `MEMORY_LIST_LIMIT`. */
 export function labelRows(report) {
   const rows = ((report && report.labels) || []).map((l) => ({
     key: `${l.element}|${l.label}`,
@@ -325,7 +338,42 @@ export function labelRows(report) {
     maxDegree: l.degree ? l.degree.max : null,
   }));
   rows.sort((a, b) => b.properties + b.slots - (a.properties + a.slots) || a.label.localeCompare(b.label));
-  return rows;
+  return rows.slice(0, MEMORY_LIST_LIMIT);
+}
+
+/**
+ * What a list of the Memory tab leaves out (`kind` `properties` or `labels`): the rows the engine
+ * left out (`rows_omitted`/`labels_omitted` with their bytes) plus any the tab cut itself.
+ * `{count, bytes, elements, text}`, `null` when nothing is left out; `text` is
+ * `"39,500 more properties not shown (10.2 MiB)"`.
+ */
+export function memoryOmitted(report, kind, format = (n) => `${n} B`) {
+  if (!report) return null;
+  const labels = kind === 'labels';
+  const list = (labels ? report.labels : report.properties) || [];
+  const cut = list.length > MEMORY_LIST_LIMIT ? list.slice(MEMORY_LIST_LIMIT) : [];
+  const rowBytes = labels ? (l) => (l.property_bytes || 0) + (l.slot_bytes || 0) : (p) => p.bytes || 0;
+  let count = (labels ? report.labels_omitted : report.rows_omitted) || 0;
+  let bytes = (labels ? report.labels_omitted_bytes : report.rows_omitted_bytes) || 0;
+  let elements = labels ? report.labels_omitted_elements || 0 : 0;
+  if (cut.length) {
+    // The tab's own cut takes the smallest rows after its sort.
+    const sorted = [...list].sort((a, b) => rowBytes(b) - rowBytes(a));
+    for (const row of sorted.slice(MEMORY_LIST_LIMIT)) {
+      count += 1;
+      bytes += rowBytes(row);
+      if (labels) elements += row.elements || 0;
+    }
+  }
+  if (!count) return null;
+  const noun = labels ? (count === 1 ? 'label' : 'labels') : (count === 1 ? 'property' : 'properties');
+  const what = labels && elements ? `${elements.toLocaleString('en-US')} element${elements === 1 ? '' : 's'}, ` : '';
+  return {
+    count,
+    bytes,
+    elements,
+    text: `${count.toLocaleString('en-US')} more ${noun} not shown (${what}${format(bytes)})`,
+  };
 }
 
 /** The memory totals of a report: `[{label, bytes}]` (structure, indexes, properties, ...). */

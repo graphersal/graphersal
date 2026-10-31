@@ -135,7 +135,9 @@ g.memory_report().properties.filter(|p| p.path == "$.name").map(|p| [p.label, p.
 
 The answer is a map:
 
-- `properties`: one row per `(element, label, path)`, most bytes first. `elements` have the key
+- `properties`: one row per `(element, label, path)`, most bytes first, at most 500 (see the
+  options below; `rows_omitted` counts the rows left out and `rows_omitted_bytes` their bytes).
+  `elements` have the key
   out of `label_elements` (sparsity); `value_types` counts the values per logical type (`string`,
   `int64`, `date`, `vector`, `object`, `null`, ...); `bytes` = `slot_bytes` (one 32-byte slot per
   value) + `heap_bytes` (what the values own: strings above 24 bytes, compressed blocks, vectors,
@@ -147,7 +149,11 @@ The answer is a map:
   kind and dimension; `compressed_*` and `deduped_*` values with the `rules` and `indexes` on the
   key. `leaf` is `false` when some value is an object: the row then aggregates the nested keys
   (`nested_values` counts them). `path` is a jpath (`$.name`); rows are top-level keys today.
-- `labels`: per `(element, label)` the `elements`, `id_heap_bytes` (ids above 24 bytes),
+- `labels`: per `(element, label)`, at most 500, the largest (`property_bytes` plus
+  `slot_bytes`) of both kinds, vertices listed first; `labels_omitted` counts the label rows left
+  out, `labels_omitted_elements` their elements, `labels_omitted_bytes` their property and slot
+  bytes and `labels_omitted_property_bytes` their property bytes alone. Each row has the
+  `elements`, `id_heap_bytes` (ids above 24 bytes),
   `label_bytes` (a vertex's label list), `slot_bytes` (for edges this is the adjacency),
   `property_bytes` (its rows plus `map_overhead_bytes`: value slots kept for reuse after a key was
   dropped) and, for vertices, `degree` (`max_out`, `max_in`, `max`, `p95`: supernodes).
@@ -167,9 +173,12 @@ The answer is a map:
 
 A vertex with several labels counts once, under its **first** (primary) label.
 
-Options, all optional: `#{max_elements: n}` or `#{sample_every: k}` sample a large graph,
-`#{max_rows: n}` and `#{max_labels: n}` keep the rows with the most bytes (`rows_omitted`,
-`labels_omitted` count the rest; the totals stay complete). A sample is stratified by label: the
+Options, all optional: `#{max_elements: n}` or `#{sample_every: k}` sample a large graph;
+`#{limit: n}` keeps the `n` property rows and the `n` label rows with the most bytes (default
+500, so a graph that gives each of a hundred thousand vertices its own label still answers a
+small report), `#{max_rows: n}` and `#{max_labels: n}` set one list each and win over `limit`.
+The rows left out are counted with their bytes (`rows_omitted`, `labels_omitted` and the fields
+above); the totals (`property_bytes`, `structure`, `shapes`) always cover everything. A sample is stratified by label: the
 walk still passes every element and counts it under its label, but reads the properties of only
 every k-th element of each label (always the first), and scales each label by its exact count. So
 a small label is never missed; distinct counts from a sample are flagged `distinct_reliable:
@@ -180,13 +189,18 @@ g.memory_report(#{sample_every: 2, max_rows: 3, max_labels: 2}).sampled   // tru
 ```
 
 The walk runs under a read lock: writers wait while it runs. A full report of about 1 million
-elements took about 0.9 s in a release build, a sample of 20 000 elements about 50 ms.
+elements took about 0.9 s in a release build, a sample of 20 000 elements about 50 ms. The
+generated `large` graph (111 111 vertices, each with its own label: 333 330 property rows)
+reports in about 0.15 s (release) with the default limit; only the rows kept are built.
 
 Elsewhere: Rust `g.memory_report(&MemoryReportRequest::new())` (a `MemoryReport` with typed
 rows, `Display` as a terminal summary, `to_property()`/`to_json()` as this map; a
-`CancelToken` stops it); the REPL's `/memory [max_elements]` prints the summary; the dev server
-`POST /api/memory/report` and the MCP tool `memory_report` (at most 50 property and label rows
-unless `max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=..)`.
+`CancelToken` stops it; `MemoryReportRequest::DEFAULT_LIMIT` is 500, `with_limit(usize::MAX)`
+keeps every row); the REPL's `/memory [max_elements]` prints the summary (the 20 largest labels
+and properties, then how many more there are); the dev server `POST /api/memory/report` (the
+playground's Optimize -> Memory, at most 500 rows per list with a "N more not shown" line) and
+the MCP tool `memory_report` (at most 50 property and label rows unless `limit` or
+`max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=.., limit=..)`.
 
 ```rust
 use graphersal::prelude::*;

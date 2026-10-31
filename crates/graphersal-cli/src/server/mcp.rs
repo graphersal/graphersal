@@ -47,7 +47,9 @@
 //! carries a `note` saying so, and every tool error carries it too (a write is refused).
 //!
 //! `memory_report` (reading, also in read-only mode) answers the session's memory report
-//! (`Session::memory_report`), at most 50 property rows unless `max_rows` says otherwise.
+//! (`Session::memory_report`), at most 50 property rows and 50 label rows unless `limit`
+//! (both lists) or `max_rows`/`max_labels` (one list each) say otherwise; the rows left out are
+//! counted with their bytes (`rows_omitted`, `labels_omitted`, ...), the totals cover everything.
 //! `workload_statistics` (reading) answers the workload statistics of a store's graph
 //! (`Session::workload_report`): the queries, properties, lock times and jobs counted, at most
 //! 50 rows per list (most total time first) unless `max_rows` says otherwise. `list_jobs`
@@ -1224,13 +1226,17 @@ fn all_tools() -> Vec<Tool> {
              property bytes, degree max/p95 for vertices); shapes; each property index and \
              compression rule with its bytes; the structure (slots live/tombstoned/spare, id \
              and label index bytes, totals). Facts, not advice. max_elements samples a large \
-             graph (figures extrapolated per label, distinct counts then unreliable); max_rows \
-             and max_labels keep the rows with the most bytes (default 50 each).",
+             graph (figures extrapolated per label, distinct counts then unreliable); limit \
+             keeps the property rows and the label rows with the most bytes (default 50), \
+             max_rows and max_labels set one list each; the rows left out are counted with \
+             their bytes (rows_omitted, rows_omitted_bytes, labels_omitted, \
+             labels_omitted_elements, labels_omitted_bytes), the totals cover everything.",
             json!({
                 "type": "object",
                 "properties": {
-                    "max_rows": {"type": "integer", "minimum": 1, "description": "Keep the property rows with the most bytes (default 50); rows_omitted counts the rest."},
-                    "max_labels": {"type": "integer", "minimum": 1, "description": "Keep the label rows with the most bytes (default 50); labels_omitted counts the rest."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "Keep the property rows and the label rows with the most bytes (default 50 each)."},
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Keep the property rows with the most bytes (default: limit); rows_omitted counts the rest."},
+                    "max_labels": {"type": "integer", "minimum": 1, "description": "Keep the label rows with the most bytes (default: limit); labels_omitted counts the rest."},
                     "max_elements": {"type": "integer", "minimum": 1, "description": "Sample so that about this many elements are read, at least one per label (default: all)."},
                     "sample_every": {"type": "integer", "minimum": 1, "description": "Read every k-th element only (default 1)."},
                 },
@@ -1828,10 +1834,10 @@ fn run_tool(
                 Value::Object(map) => Value::Object(map.clone()),
                 _ => json!({}),
             };
-            // A bounded answer by default: the 50 property and label rows with the most bytes.
+            // A bounded answer by default: the 50 property and label rows with the most bytes
+            // (`max_rows`/`max_labels` still win over the limit).
             if let Some(map) = spec.as_object_mut() {
-                map.entry("max_rows").or_insert(json!(50));
-                map.entry("max_labels").or_insert(json!(50));
+                map.entry("limit").or_insert(json!(50));
             }
             let answer = context
                 .call(move |s| s.memory_report(&spec))

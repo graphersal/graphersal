@@ -249,6 +249,10 @@
                   "max_elements": {
                     "type": "integer"
                   },
+                  "limit": {
+                    "type": "integer",
+                    "description": "The property rows and label rows kept, the largest (default 500 each)."
+                  },
                   "max_rows": {
                     "type": "integer"
                   },
@@ -262,7 +266,7 @@
               }
             }
           },
-          "description": "A spec; `{}` for a full report."
+          "description": "A spec; `{}` for a full walk with at most 500 rows per list (the rest counted in `rows_omitted`/`labels_omitted` with their bytes)."
         },
         "responses": {
           "200": {

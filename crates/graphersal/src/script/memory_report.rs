@@ -9,26 +9,28 @@ use crate::error::ScriptError;
 use crate::graph::{AccessRequest, Action, MemoryReportRequest, Resource};
 
 /// The keys an options map may have.
-const REPORT_KEYS: [&str; 5] = [
+const REPORT_KEYS: [&str; 6] = [
     "sample_every",
     "max_elements",
+    "limit",
     "max_rows",
     "max_labels",
     "path_depth",
 ];
 
 impl ScriptGraphTraversalSource {
-    /// `g.memory_report()`: a full report.
+    /// `g.memory_report()`: a full walk, the 500 largest property rows and label rows.
     pub fn memory_report(&mut self) -> Result<Dynamic, Box<EvalAltResult>> {
         self.memory_report_with(Dynamic::from_map(rhai::Map::new()))
     }
 
-    /// `g.memory_report(#{sample_every?, max_elements?, max_rows?, max_labels?, path_depth?})` /
-    /// `g.memory_report(..)`: where the graph's memory goes, per label and per top-level
-    /// property (a map, see [`crate::graph::MemoryReport::to_property`]), or `()` when the source
-    /// has no graph. `sample_every`/`max_elements` sample (figures extrapolated), `max_rows`/`max_labels`
-    /// keep the rows with the most bytes, `path_depth` is `1`. Read-only; asks for `Read` on
-    /// `Data`.
+    /// `g.memory_report(#{sample_every?, max_elements?, limit?, max_rows?, max_labels?,
+    /// path_depth?})` / `g.memory_report(..)`: where the graph's memory goes, per label and per
+    /// top-level property (a map, see [`crate::graph::MemoryReport::to_property`]), or `()` when
+    /// the source has no graph. `sample_every`/`max_elements` sample (figures extrapolated),
+    /// `limit` keeps the property rows and the label rows with the most bytes (default 500;
+    /// `max_rows`/`max_labels` set one list each and win over it), `path_depth` is `1`.
+    /// Read-only; asks for `Read` on `Data`.
     pub fn memory_report_with(&mut self, options: Dynamic) -> Result<Dynamic, Box<EvalAltResult>> {
         let operation = "memory_report";
         let actual = type_name_of(&options);
@@ -41,7 +43,8 @@ impl ScriptGraphTraversalSource {
         };
         let Some(mut options) = options.try_cast::<rhai::Map>() else {
             return Err(mismatch(
-                "a map #{sample_every?, max_elements?, max_rows?, max_labels?, path_depth?}".into(),
+                "a map #{sample_every?, max_elements?, limit?, max_rows?, max_labels?, path_depth?}"
+                    .into(),
                 actual,
             ));
         };
@@ -75,6 +78,9 @@ impl ScriptGraphTraversalSource {
         }
         if let Some(n) = positive("max_elements")? {
             request = request.with_max_elements(n);
+        }
+        if let Some(n) = positive("limit")? {
+            request = request.with_limit(usize::try_from(n).unwrap_or(usize::MAX));
         }
         if let Some(n) = positive("max_rows")? {
             request = request.with_max_rows(usize::try_from(n).unwrap_or(usize::MAX));

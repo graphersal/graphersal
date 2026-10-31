@@ -60,7 +60,8 @@ The top bar's **Optimize** opens one panel with three tabs:
   opens its chart: runs per minute, hour or day with the failed part, and the mean and the
   longest time.
 - **Memory**: the memory report: the totals, then the properties and the labels, the most bytes
-  first, with what is compressed, indexed or a vector.
+  first, with what is compressed, indexed or a vector; at most 500 rows per list, then a line
+  saying how many more properties or labels are not shown and their bytes.
 
 ## Other front ends
 
