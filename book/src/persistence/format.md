@@ -135,11 +135,11 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   preserved. A repeated key in one object or property map is invalid.
 - **Temporal values** use the proleptic Gregorian calendar. Tags 9 to 13 (file format version
   2) have a resolution of one microsecond; tags 15 to 20 (version 3) one nanosecond. A writer
-  of version 3 writes ONE form per kind: a `date` as tag 9, a `localdatetime` as tag 15, a
+  of version 3 or later writes ONE form per kind: a `date` as tag 9, a `localdatetime` as tag 15, a
   `datetime` as tag 16 (tag 17 when it keeps a zone name), a `time` as tag 18, an `offsettime`
   as tag 19, a `duration` as tag 20; every engine value has an encoding, so nothing is refused.
-  A reader of version 3 reads tags 9 to 13 as well (a version 2 segment's chunks copied into
-  a version 3 snapshot keep them). The `svar seconds` + `uvar nanos` pairs hold nanoseconds
+  A reader of version 3 or later reads tags 9 to 13 as well (a version 2 segment's chunks
+  copied into a newer snapshot keep them). The `svar seconds` + `uvar nanos` pairs hold nanoseconds
   over the years -9999 to 9999 (about ±3.2 * 10^20 ns, more than an `i64`) and a duration's
   whole time part. Their ranges are normative; a value outside its range is invalid:
 
