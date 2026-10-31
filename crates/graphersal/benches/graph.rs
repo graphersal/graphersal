@@ -1707,6 +1707,56 @@ mod mutations {
             });
     }
 
+    /// [`graph`] with the vector rule `emb` of `item` from `name` (`hash-ngram/1`, book page
+    /// "Vector Rules"); the first fill embeds every name while the schema is set.
+    fn ruled(n: usize) -> TraversalGraph {
+        let mut graph = graph(n);
+        let schema = GraphSchema::from_json(
+            r#"{"vertices": {"item": {"schema": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1",
+                        "from": "name"}}}}}}"#,
+        )
+        .unwrap();
+        graph.traversal_mut().set_schema(schema).unwrap();
+        graph
+    }
+
+    /// A vector rule's cost on a single write: one unit writing the source of ONE element
+    /// (its vector embedded and written at the commit).
+    #[divan::bench(sample_count = 50)]
+    fn property_write_with_vector_rule(bencher: divan::Bencher) {
+        let mut graph = ruled(N);
+        let mut i = 0u64;
+        bencher.bench_local(|| {
+            i += 1;
+            graph
+                .traversal_mut()
+                .v(vec!["v1"])
+                .property("name", format!("graph database number {i}"))
+                .iterate()
+                .unwrap();
+        });
+    }
+
+    /// A vector rule's cost on a bulk write: one unit writing the source of every `item`
+    /// (10k texts in one batch per model at the commit).
+    #[divan::bench(sample_count = 10)]
+    fn bulk_write_with_vector_rule(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| ruled(N))
+            .bench_local_values(|mut graph| {
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("item")
+                    .property("name", "graph databases keep vertices and edges")
+                    .iterate()
+                    .unwrap();
+                graph
+            });
+    }
+
     /// `property()` overwrite of an existing key and a new key on every `item`.
     #[divan::bench(sample_count = 20)]
     fn property_update_all(bencher: divan::Bencher) {

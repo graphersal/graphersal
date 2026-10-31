@@ -178,6 +178,12 @@ schema (drop `dict[str, T]` fields first: there is no map-of-T type; the `date-t
 `time` and `duration` formats are supported, and a stored `date-time` needs a UTC offset). The
 full reference is the book page "Schemas".
 
+A vector property with `"from": "<text property>"` beside its `"embedder"` is a vector rule
+(book page "Vector Rules"): every write of the text embeds it into the vector in the same unit.
+`set_schema`/`patch_schema` issue `graphersal.VectorFillWarning` (a `UserWarning`) with the
+preview's text before a change that fills existing elements, because the whole graph is locked
+while that runs; `validate_schema(..)["fill"]` lists the planned fills.
+
 ```python
 graph = graphersal.Graph.tinkerpop_modern()
 graph.set_schema(graph.infer_schema(), mode="closed")  # freeze the structure the graph has

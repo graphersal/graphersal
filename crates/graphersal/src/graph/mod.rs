@@ -61,6 +61,7 @@ pub mod system_journal;
 pub(crate) mod topology;
 mod transaction;
 pub(crate) mod undo;
+pub(crate) mod vector_rules;
 /// Workload statistics: time-bucketed series of what an instance did.
 pub mod workload;
 pub mod write_checks;
@@ -176,6 +177,12 @@ pub struct TraversalGraph {
     pub(crate) shapes: shape::ShapeTable,
     /// The interned edge labels and vertex label sets the element slots refer to.
     pub(crate) labels: labels::Labels,
+    /// The vector rules of the schema (see [`vector_rules`]), `None` without one: compiled at
+    /// every change of `schema`.
+    pub(crate) vector_rules: Option<Arc<vector_rules::VectorRules>>,
+    /// Above 0 while the rules are off: `apply_change_set` (the replication form carries its
+    /// vectors) and the rule pass's own writes.
+    pub(crate) rules_off: u32,
 }
 
 /// Whether an element is a vertex or an edge.
@@ -217,6 +224,8 @@ impl TraversalGraph {
             footprint: memory::FootprintCache::default(),
             shapes: shape::ShapeTable::new(),
             labels: labels::Labels::default(),
+            vector_rules: None,
+            rules_off: 0,
         }
     }
 

@@ -237,6 +237,7 @@ impl PersistentStorage for TraversalGraph {
 
     fn load_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
         *self.schema.write() = schema;
+        self.refresh_vector_rules();
         Ok(())
     }
 

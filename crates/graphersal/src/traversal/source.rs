@@ -1309,6 +1309,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     pub fn set_schema(&mut self, schema: GraphSchema) -> TraverserResult<()> {
         self.authorize_schema("set_schema", crate::graph::Action::Update)?;
         crate::graph::schema::defaults::check_defaults(&schema)?;
+        self.check_rules_supported(&schema)?;
         self.atomically(|this| {
             this.storage.set_schema(schema)?;
             Ok(())
@@ -1322,6 +1323,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         self.authorize_schema("patch_schema", crate::graph::Action::Update)?;
         let schema = patch.apply(self.storage.get_schema()?.as_ref())?;
         crate::graph::schema::defaults::check_defaults(&schema)?;
+        self.check_rules_supported(&schema)?;
         let stored = schema.clone();
         self.atomically(|this| {
             this.storage.set_schema(stored)?;
@@ -1351,12 +1353,31 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
 
     fn validation(&self, schema: GraphSchema) -> TraverserResult<SchemaValidation> {
         let violations = crate::graph::schema::apply::scan_storage(&self.storage, &schema)?;
-        let diff = SchemaDiff::between(self.storage.get_schema()?.as_ref(), &schema);
+        let stored = self.storage.get_schema()?;
+        let diff = SchemaDiff::between(stored.as_ref(), &schema);
+        let fill =
+            crate::graph::vector_rules::plan_fills(&self.storage, stored.as_ref(), &schema, true)?;
         Ok(SchemaValidation {
             schema,
             violations,
             diff,
+            fill,
         })
+    }
+
+    /// A schema with vector rules needs a storage with change capture (the rule pass walks
+    /// the unit's undo log): [`GraphError::Unsupported`](crate::error::GraphError::Unsupported)
+    /// `"vector rules"` otherwise.
+    fn check_rules_supported(&self, schema: &GraphSchema) -> TraverserResult<()> {
+        if crate::graph::vector_rules::has_rules(schema)
+            && !self.storage.capabilities()?.change_capture
+        {
+            return Err(crate::error::GraphError::Unsupported {
+                operation: crate::graph::vector_rules::UNSUPPORTED_OPERATION,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// The schema the graph's data satisfies (see
@@ -1374,10 +1395,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// schema.
     pub fn diff_schema(&self, schema: &GraphSchema) -> TraverserResult<SchemaDiff> {
         self.authorize_schema("diff_schema", crate::graph::Action::Read)?;
-        Ok(SchemaDiff::between(
-            self.storage.get_schema()?.as_ref(),
-            schema,
-        ))
+        let stored = self.storage.get_schema()?;
+        let mut diff = SchemaDiff::between(stored.as_ref(), schema);
+        diff.fill =
+            crate::graph::vector_rules::plan_fills(&self.storage, stored.as_ref(), schema, false)?;
+        Ok(diff)
     }
 
     /// Asks the attached authorizer (if any) for `action` on a catalog definition.

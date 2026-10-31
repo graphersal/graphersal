@@ -122,6 +122,7 @@
   - [Removing Properties](users_guide/removing_properties.md)
   - [Compressed Properties](users_guide/compressed_properties.md)
 - [Vectors](users_guide/vectors.md)
+  - [Vector Rules](users_guide/vector_rules.md)
 - [Dates and Times](dates/index.md)
   - [Comparing and Sorting](dates/comparing.md)
   - [Text Formats](dates/text_formats.md)

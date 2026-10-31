@@ -10,6 +10,11 @@ The rule behind enforcement: **the storage owns consistency.** Every operation t
 graph passes the schema inside one storage call, never in a step, and every traversal is one unit
 of work: it is applied completely or not at all.
 
+> **Warning:** a [vector rule](vector_rules.md) (`"from"` on a vector property) added or changed
+> fills every element of its label in the schema-changing unit, and the WHOLE database is
+> locked while it runs: every write and every read waits until it ends. The schema preview
+> (`validate_schema`, `diff_schema`) reports how many elements and how long first.
+
 ## A first schema
 
 ```rhai

@@ -744,7 +744,8 @@ impl Graph {
     /// ``"closed"``) replaces the schema's own mode: ``graph.set_schema(graph.infer_schema(),
     /// mode="closed")`` freezes the structure the graph has. Existing data is validated first;
     /// on violations nothing changes and ``GraphersalError`` carries the grouped report. An empty
-    /// schema (``{}``) removes the schema.
+    /// schema (``{}``) removes the schema. A schema that fills vectors (a vector rule added or
+    /// changed) issues ``VectorFillWarning`` with the preview's text first.
     #[pyo3(signature = (schema, mode=None, *, policy=None))]
     fn set_schema(
         &self,
@@ -755,6 +756,24 @@ impl Graph {
     ) -> PyResult<()> {
         let text = json_text(py, schema)?;
         let authorizer = effective_authorizer(policy.as_deref());
+        if text.contains("\"from\"") {
+            let graph = Arc::clone(&self.inner);
+            let (proposed, mode) = (text.clone(), mode.clone());
+            let preview = Arc::clone(&authorizer);
+            let warning = py
+                .detach(move || {
+                    let schema = schema_with_mode(&proposed, mode.as_deref())?;
+                    graph
+                        .read()
+                        .traversal()
+                        .with_authorizer(preview)
+                        .validate_schema(&schema)
+                        .map(|validation| validation.fill_warning())
+                        .map_err(|err| format_diagnostic(&*err))
+                })
+                .map_err(|text| map_diagnostic(py, &text))?;
+            warn_vector_fill(py, warning)?;
+        }
         let graph = Arc::clone(&self.inner);
         py.detach(move || {
             let schema = schema_with_mode(&text, mode.as_deref())?;
@@ -780,6 +799,25 @@ impl Graph {
     ) -> PyResult<Py<PyAny>> {
         let text = json_text(py, patch)?;
         let authorizer = effective_authorizer(policy.as_deref());
+        if text.contains("\"from\"") || text.contains("\"embedder\"") {
+            let graph = Arc::clone(&self.inner);
+            let proposed = text.clone();
+            let preview = Arc::clone(&authorizer);
+            let warning = py
+                .detach(move || {
+                    let patch =
+                        SchemaPatch::from_json(&proposed).map_err(|err| format_diagnostic(&err))?;
+                    graph
+                        .read()
+                        .traversal()
+                        .with_authorizer(preview)
+                        .validate_schema_patch(&patch)
+                        .map(|validation| validation.fill_warning())
+                        .map_err(|err| format_diagnostic(&*err))
+                })
+                .map_err(|text| map_diagnostic(py, &text))?;
+            warn_vector_fill(py, warning)?;
+        }
         let graph = Arc::clone(&self.inner);
         let json = py
             .detach(move || {
@@ -1696,6 +1734,21 @@ fn new_graph_with_schema(text: &str, mode: Option<&str>) -> Result<EngineGraph, 
         .set_schema(schema)
         .map_err(|err| format_diagnostic(&err))?;
     Ok(graph)
+}
+
+/// Issues the ``VectorFillWarning`` of a schema change that fills vectors (the preview's one
+/// text, book page "Vector Rules"); an error when the warnings filter turns it into one.
+fn warn_vector_fill(py: Python<'_>, warning: Option<String>) -> PyResult<()> {
+    if let Some(warning) = warning {
+        let text = std::ffi::CString::new(warning).unwrap_or_default();
+        PyErr::warn(
+            py,
+            &py.get_type::<crate::error::VectorFillWarning>(),
+            &text,
+            1,
+        )?;
+    }
+    Ok(())
 }
 
 /// Reports what a GraphSON import of `path` skipped as one ``UserWarning`` (nothing when it

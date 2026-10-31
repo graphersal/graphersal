@@ -180,6 +180,23 @@ one thread per CPU core on the first batch it encodes. `TOKENIZERS_PARALLELISM=f
 environment (set before the first embedding) keeps it on the calling thread, for example in a
 program that forks worker processes after embedding or that limits its CPU use.
 
+## Vector rules
+
+A [vector rule](../users_guide/vector_rules.md) in the schema keeps a vector property embedded
+from a text property. `graph.set_schema(..)` and `graph.patch_schema(..)` issue
+`graphersal.VectorFillWarning` (a `UserWarning`) with the preview's text BEFORE a change that
+fills vectors, because the whole graph is locked while the fill runs; `graph.validate_schema(..)
+["fill"]` lists the planned fills. Turn the warning into an error to stop such a change:
+
+```python
+import warnings
+import graphersal
+
+with warnings.catch_warnings():
+    warnings.simplefilter("error", graphersal.VectorFillWarning)
+    graph.set_schema(schema)   # raises before anything is applied when it would fill vectors
+```
+
 ## Where to go from here
 
 - `bindings/py-graphersal/README.md`: every method, schemas, access policies, limits;
