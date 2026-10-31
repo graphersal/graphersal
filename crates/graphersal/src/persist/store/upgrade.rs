@@ -1129,7 +1129,7 @@ fn upgrade_copy_by(
         files::write_atomic(to, UPGRADE_MARKER, from.display().as_bytes())?;
         let mut copied = (0usize, 0u64);
         let mut graph_files = Vec::new();
-        super::copy_tree(from, to, from, &mut copied, &mut graph_files)?;
+        super::copy_tree(from, to, from, true, &mut copied, &mut graph_files)?;
         // The copy is checked before it becomes a store: a view of it with the new GRAPH
         // copies in memory. Until they are written it has no GRAPH, so an interrupted upgrade
         // never leaves something that opens as a store.

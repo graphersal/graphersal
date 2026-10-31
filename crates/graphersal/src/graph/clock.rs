@@ -6,7 +6,7 @@
 //! The clock reads the system clock through `web_time` (never `std::time`, which panics on
 //! wasm32) and never goes back: every reading is `max(system clock, floor)` and raises the
 //! floor to itself. The floor is not stored: after a restart a Store raises it again from the
-//! latest time in its files (format spec 2, "Conventions").
+//! latest time in its files (format spec 2, "Conventions", and 18).
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};

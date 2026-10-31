@@ -122,10 +122,12 @@ permissions as Gremlin.
 - **Safe by construction.** Every traversal is atomic: it commits completely or leaves nothing
   behind. Schemas (a subset of JSON Schema) are enforced on write and fill create-time defaults
   (`default`, `uuidv7`, `now`). Limits, timeouts and permissions make it safe to run queries you
-  did not write.
+  did not write, and a process memory ceiling, on by default, makes a query or load that would
+  exhaust the memory fail and roll back instead of the process being killed.
 - **Durable when you need it.** A graph lives in memory, and the Store keeps it on disk: every
   commit goes to a write-ahead log, and you can go back to any point in time, fork, roll back, back
-  up and repair. The file format is a public specification.
+  up and repair. The embedding models live in the store's history beside the data, and a
+  system journal records what each instance did. The file format is a public specification.
 - **Fast and observable.** A rule-based optimizer rewrites each query and answers `has()` filters
   from declared property indexes (`g.create_index(..)`); `profile()` shows the optimized plan with
   timings, traverser counts and memory per step.
