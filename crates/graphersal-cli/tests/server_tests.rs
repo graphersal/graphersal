@@ -6893,6 +6893,58 @@ fn mcp_set_schema_with_a_vector_rule_notes_the_fill() {
     assert!(!error && text.contains('4'), "{text}");
 }
 
+/// The Store menu's two calls over HTTP: `GET /api/store/summary` (everything but the sizes and
+/// the compaction advice, `detailsPending`) and `GET /api/store/details` (those figures), which
+/// together answer what `GET /api/store` answers.
+#[test]
+fn the_store_menu_loads_its_summary_then_its_details() {
+    let ui = ui_dir("store-summary");
+    let data = ui.parent().unwrap().join("data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&["--graph", &data_arg, "--ui-dir", &ui_arg, "--create-store"]);
+    let port = server.port;
+    let r = execute(
+        port,
+        r#"g.add_v("person").property("name", "ann").to_list()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let summary = get(port, "/api/store/summary").json()["store"].clone();
+    assert_eq!(summary["detailsPending"], true, "{summary}");
+    assert_eq!(summary["commitSeq"], 1, "{summary}");
+    assert_eq!(summary["compaction"], Value::Null, "{summary}");
+    assert_eq!(summary["storeBytes"], Value::Null, "{summary}");
+    assert_eq!(summary["graphBytes"], Value::Null, "{summary}");
+    let details = get(port, "/api/store/details").json()["details"].clone();
+    assert_eq!(details["commitSeq"], 1, "{details}");
+    let store = get(port, "/api/store").json()["store"].clone();
+    for key in [
+        "compaction",
+        "compactionError",
+        "storeBytes",
+        "storeBytesText",
+        "graphBytes",
+        "graphBytesText",
+    ] {
+        assert_eq!(details[key], store[key], "{key}: {details} / {store}");
+    }
+    assert!(details["storeBytes"].as_u64().unwrap() > 0, "{details}");
+    assert!(details["graphBytes"].as_u64().unwrap() > 0, "{details}");
+    assert_eq!(summary["dir"], store["dir"]);
+    assert_eq!(summary["snapshots"], store["snapshots"]);
+    assert_eq!(post(port, "/api/store/summary", "{}").status, 405);
+    drop(server);
+
+    // Without a store: a null summary, no details.
+    let server = start(&["--graph", "modern", "--ui-dir", &ui_arg]);
+    assert_eq!(
+        get(server.port, "/api/store/summary").json()["store"],
+        Value::Null
+    );
+    assert_eq!(get(server.port, "/api/store/details").status, 409);
+}
+
 /// `GET /api/journal?newest_first=true` (the playground's journal panel opens on it): the
 /// newest records first, `next_before` pages backwards, `next_after` follows; MCP too.
 #[test]

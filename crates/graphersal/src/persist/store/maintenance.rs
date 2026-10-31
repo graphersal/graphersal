@@ -257,6 +257,7 @@ pub(super) fn plan_prune(
 pub(super) fn prune_estimate(
     dir: &DirPath,
     up_to: u64,
+    attic: Option<&super::blobs::AtticBlobs>,
 ) -> Result<(PruneReport, u64), PersistError> {
     let bases = super::rollback::attic_bases_by_name(dir)?;
     let PrunePlan {
@@ -283,7 +284,7 @@ pub(super) fn prune_estimate(
         .iter()
         .map(|path| super::rollback::tree_bytes(&dir.join(path)))
         .sum();
-    let (blobs, blob_bytes) = super::blobs::estimate_unreferenced(dir, report.kept_from);
+    let (blobs, blob_bytes) = super::blobs::estimate_unreferenced(dir, report.kept_from, attic);
     report.blobs_removed = blobs;
     report.blob_bytes_removed = blob_bytes;
     Ok((report, bytes + blob_bytes))

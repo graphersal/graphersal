@@ -185,8 +185,9 @@ pub(super) fn advise(
     dir: &DirPath,
     policy: CompactionPolicy,
     blocked: Option<String>,
+    attic: Option<&super::blobs::AtticBlobs>,
 ) -> Result<CompactionAdvice, PersistError> {
-    let (prune, prune_bytes) = prune_estimate(dir, u64::MAX)?;
+    let (prune, prune_bytes) = prune_estimate(dir, u64::MAX, attic)?;
     let backend = dir.store_dir();
     let usage = backend
         .space_usage()

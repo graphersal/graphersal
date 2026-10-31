@@ -351,3 +351,18 @@ test('the snapshot download URL leaves the models out on request', async () => {
   assert.equal(engine.snapshotUrl(2), 'http://127.0.0.1:1/api/store/snapshot?commit=2');
   assert.equal(engine.snapshotUrl(2, false), 'http://127.0.0.1:1/api/store/snapshot?commit=2&models=without');
 });
+
+test('the Store menu loads in two calls: the summary at once, the sizes and the advice after', async () => {
+  const store = { dir: '/tmp/data', commitSeq: 4, compaction: null, storeBytes: null, detailsPending: true };
+  const details = { commitSeq: 4, compaction: { recommended: false }, storeBytes: 10, storeBytesText: '10 B' };
+  const { fetch, calls } = fakeFetch({
+    'GET /api/store/summary': [200, { store }],
+    'GET /api/store/details': [200, { details }],
+  });
+  const engine = new HttpEngine({ ...INFO, store: '/tmp/data' }, { base: BASE, fetch });
+  assert.deepEqual(await engine.storeSummary(), store);
+  assert.deepEqual(await engine.storeDetails(), details);
+  assert.deepEqual(calls.map((c) => c.path), ['/api/store/summary', '/api/store/details']);
+  const plain = new HttpEngine(INFO, { base: BASE, fetch: fakeFetch({ 'GET /api/store/summary': [200, { store: null }] }).fetch });
+  assert.equal(await plain.storeSummary(), null);
+});

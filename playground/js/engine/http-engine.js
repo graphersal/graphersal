@@ -199,6 +199,22 @@ export class HttpEngine extends Engine {
     return res ? res.store : null;
   }
 
+  /**
+   * The Store menu's first call: `storeInfo()` without the figures that weigh the store or walk
+   * the graph (`compaction`, `storeBytes`, `graphBytes` null, `detailsPending: true`), or null
+   * without a store.
+   */
+  async storeSummary() {
+    const res = await this.request('GET', 'store/summary');
+    return res ? res.store : null;
+  }
+
+  /** Its second call: `{commitSeq, compaction, compactionError, storeBytes, graphBytes, ...}`. */
+  async storeDetails() {
+    const res = await this.request('GET', 'store/details');
+    return res ? res.details : null;
+  }
+
   /** Writes a snapshot of the current state (optionally named); resolves to its listing. */
   async checkpoint(name = '') {
     const res = await this.request('POST', 'store/checkpoint', JSON.stringify({ name }));

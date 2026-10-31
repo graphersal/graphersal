@@ -172,6 +172,21 @@ export class WasmEngine extends Engine {
     return this.call('storeInfo');
   }
 
+  /**
+   * The Store menu's first and second call (see http-engine.js `storeSummary`); a cached, older
+   * worker.js without them answers the whole `storeInfo()` (no `detailsPending`: no second call).
+   */
+  async storeSummary() {
+    if (!this.worker) this.spawn();
+    const meta = await this.startup;
+    const split = Array.isArray(meta.methods) && meta.methods.includes('storeSummary');
+    return this.call(split ? 'storeSummary' : 'storeInfo');
+  }
+
+  async storeDetails() {
+    return this.call('storeDetails');
+  }
+
   /** Writes a snapshot of the current state (optionally named); resolves to its listing. */
   async checkpoint(name = '') {
     return (await this.call('checkpoint', name)).snapshot;
