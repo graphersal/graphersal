@@ -471,7 +471,7 @@ impl VectorWithoutRule {
 /// `command(patch)`.
 pub(crate) fn vector_notes(
     vectors: &[VectorWithoutRule],
-    command: impl Fn(&str) -> String,
+    command: impl Fn(&str, &str) -> String,
 ) -> Vec<String> {
     let mut models: Vec<&str> = Vec::new();
     for vector in vectors {
@@ -488,7 +488,7 @@ pub(crate) fn vector_notes(
                 .cloned()
                 .collect();
             if let [single] = group.as_slice() {
-                return single.note_with(&command(&single.schema_patch()));
+                return single.note_with(&command(model, &single.schema_patch()));
             }
             let places = group
                 .iter()
@@ -532,7 +532,7 @@ pub(crate) fn vector_notes(
                  while it runs), and from then on {} itself is not written directly (write the \
                  source property)",
                 group.len(),
-                command(&VectorWithoutRule::combined_schema_patch(&group)),
+                command(model, &VectorWithoutRule::combined_schema_patch(&group)),
                 properties.join(", ")
             )
         })
@@ -542,11 +542,20 @@ pub(crate) fn vector_notes(
 impl UpgradeReport {
     /// The notes of [`Self::vectors_without_rule`], ONE per model (a model with several
     /// properties lists them with one combined schema patch), with the ready command for the
-    /// store at `store`; then one note per saved query writing a vector property directly
+    /// store at `store` (for a model of [`Self::models_missing`] the command says it runs
+    /// after the model's import, since the store does not open before); then one note per
+    /// saved query writing a vector property directly
     /// ([`Self::saved_queries_writing_vectors`]). The CLI prints each as a `note:`.
     pub fn vector_notes(&self, store: &str) -> Vec<String> {
-        let mut notes = vector_notes(&self.vectors_without_rule, |patch| {
-            format!("graphersal --graph {store} -e '{patch}'")
+        let mut notes = vector_notes(&self.vectors_without_rule, |model, patch| {
+            let run = format!("graphersal --graph {store} -e '{patch}'");
+            match self.models_missing.iter().find(|m| m.identity == model) {
+                Some(missing) => format!(
+                    "after `graphersal embed-model import {} --into {store}`: {run}",
+                    missing.repo.as_deref().unwrap_or("<repo>")
+                ),
+                None => run,
+            }
         });
         notes.extend(
             self.saved_queries_writing_vectors
@@ -1426,7 +1435,7 @@ mod tests {
             without_rule("b", 2, 7),
             without_rule("c", 0, 7),
         ];
-        let notes = vector_notes(&vectors, |patch| patch.to_string());
+        let notes = vector_notes(&vectors, |_, patch| patch.to_string());
         assert_eq!(notes.len(), 1, "{notes:#?}");
         let note = &notes[0];
         assert!(
@@ -1440,10 +1449,39 @@ mod tests {
         assert_eq!(note.matches("not counted").count(), 1, "{note}");
 
         let exact = [without_rule("a", 4, 0), without_rule("b", 0, 0)];
-        let note = &vector_notes(&exact, |patch| patch.to_string())[0];
+        let note = &vector_notes(&exact, |_, patch| patch.to_string())[0];
         assert!(
             note.contains("(4 vector(s) in all) but have no source property: a.emb (4), b.emb (no element holds one yet);"),
             "{note}"
+        );
+    }
+
+    /// Found while upgrading the knowledge-graph store: the printed schema patch runs only once
+    /// the store opens, i.e. after the missing model's import, so its command says so; a model
+    /// the store keeps gets the plain command.
+    #[test]
+    fn the_patch_command_of_a_missing_model_runs_after_its_import() {
+        let mut report = UpgradeReport {
+            vectors_without_rule: vec![without_rule("doc", 3, 0)],
+            ..UpgradeReport::default()
+        };
+        let plain = &report.vector_notes("kb.gstore")[0];
+        assert!(
+            plain.contains("(graphersal --graph kb.gstore -e 'g.patch_schema("),
+            "{plain}"
+        );
+        report.models_missing = vec![MissingModel {
+            identity: "m".to_string(),
+            repo: Some("acme/tiny".to_string()),
+            needed_by: vec!["doc.emb".to_string()],
+        }];
+        let after = &report.vector_notes("kb.gstore")[0];
+        assert!(
+            after.contains(
+                "(after `graphersal embed-model import acme/tiny --into kb.gstore`: graphersal \
+                 --graph kb.gstore -e 'g.patch_schema("
+            ),
+            "{after}"
         );
     }
 

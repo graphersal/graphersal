@@ -236,6 +236,7 @@ mod string_length_chars_tests;
 mod string_step_tests;
 mod subgraph_tests;
 mod system_journal_copy_tests;
+mod system_journal_flush_tests;
 mod system_journal_store_tests;
 mod t_token_tests;
 mod table_visualization_tests;

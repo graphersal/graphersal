@@ -130,10 +130,11 @@ const RAW_METHODS = {
   saveCatalog: () => playground.saveCatalog(),
 };
 
-// Every few seconds the worker ticks the scheduled jobs of the active store (book page
+// Every second the worker ticks the scheduled jobs of the active store (book page
 // "Scheduled Jobs": the host drives the clock), in the browser's time zone. A tick runs between
-// two requests (the worker is single-threaded), never inside one.
-const JOB_TICK_MS = 5000;
+// two requests (the worker is single-threaded), never inside one. The tick also writes the store's
+// batched system journal records (the browser has no thread of the engine to do it).
+const JOB_TICK_MS = 1000;
 let jobTicker = null;
 
 function startJobTicker() {

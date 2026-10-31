@@ -6847,6 +6847,86 @@ fn the_journal_endpoint_pages_by_cursor() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// Records caused by dev-server requests name who caused them (`principal`: the request's
+/// channel, `playground` for the page, `mcp` for an agent) and the instance by the host name,
+/// never `unknown` (macOS exports no `HOSTNAME`).
+#[test]
+fn journal_records_of_requests_name_the_channel_and_the_host() {
+    let ui = ui_dir("journal-origin");
+    let data = ui.parent().unwrap().join("journal-origin-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    ok_json(post(port, "/api/store/checkpoint", "{}"));
+    let page = get(port, "/api/journal?kind=store.checkpoint_done").json();
+    let record = &page["records"][0];
+    assert_eq!(record["principal"], "playground", "{page}");
+    let name = record["origin"]["name"].as_str().unwrap_or_default();
+    assert!(!name.is_empty() && name != "unknown", "{page}");
+
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.add_v(\"doc\").property(\"text\", \"graph\").iterate()"}),
+    );
+    assert!(!error, "{text}");
+    let rule = serde_json::json!({"vertices": {"doc": {"schema": {"type": "object", "properties": {"text": {"type": "string"}, "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}});
+    let (error, text) = mcp.call("set_schema", serde_json::json!({"schema": rule}));
+    assert!(!error, "{text}");
+    let page = get(port, "/api/journal?kind=vector_fill.started").json();
+    assert_eq!(page["records"][0]["principal"], "mcp", "{page}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A vector fill above the confirmation threshold through MCP `set_schema` without
+/// `confirm_lock` is a tool error (`isError: true`) that applies nothing; with it, it is
+/// applied. 70,000 texts at the built-in model's speed (x3) estimate more than a second.
+#[test]
+fn mcp_set_schema_refused_for_confirm_lock_is_a_tool_error() {
+    let ui = ui_dir("confirm-lock");
+    let server = start(&[
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "let xs = []; for i in 0..70000 { xs.push(i); } g.inject(xs).unfold().add_v(\"doc\").property(\"text\", \"graph\").iterate();"}),
+    );
+    assert!(!error, "{text}");
+    let rule = serde_json::json!({"vertices": {"doc": {"schema": {"type": "object", "properties": {"text": {"type": "string"}, "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}});
+    let (error, text) = mcp.call("set_schema", serde_json::json!({"schema": rule.clone()}));
+    assert!(error, "a refusal is a tool error: {text}");
+    assert!(text.starts_with("Nothing was applied.\n"), "{text}");
+    assert!(text.ends_with("Repeat with confirm_lock: true."), "{text}");
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.v().has(\"emb\").count().next()"}),
+    );
+    assert!(
+        !error && text.trim_end().ends_with('0'),
+        "nothing applied: {text}"
+    );
+    let (error, text) = mcp.call(
+        "set_schema",
+        serde_json::json!({"schema": rule, "confirm_lock": true}),
+    );
+    assert!(!error && text.contains("Schema stored."), "{text}");
+}
+
 /// MCP schema tools and vector rules (book page "Vector Rules"): a fill below the
 /// confirmation threshold is applied with the session's warning text as a note; the tool
 /// descriptions name the lock and `confirm_lock` (the refusal above the threshold is a unit

@@ -496,6 +496,12 @@ struct Shared {
     /// What each attic entry's WAL references (the blob counts of the info and the compaction
     /// advice read an entry's WAL once, not on every call).
     attic_blobs: blobs::AtticBlobs,
+    /// Held (shared) by every operation that writes or copies the store's files (checkpoint,
+    /// prune, compact, rollback, attic, verify, backup, fork, export, close); the journal
+    /// flusher writes the system journal's batched records only when it gets it exclusively
+    /// (`try_write`, never waiting), so the journal never writes in the middle of another
+    /// operation. Commits do not take it: the WAL and the journal are other files.
+    operations: parking_lot::RwLock<()>,
 }
 
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
@@ -547,6 +553,9 @@ struct StoreCore {
     backup: Option<BackupMarker>,
     lock: Mutex<Option<DirLock>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The journal flusher ([`spawn_journal_flusher`]): writes the system journal's batched
+    /// records within about a second.
+    flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
     closed: AtomicBool,
 }
 
@@ -1828,6 +1837,20 @@ impl<S: PersistentStorage + Default> Store<S> {
     pub fn wal_bytes_since_checkpoint(&self) -> u64 {
         self.core.wal_bytes_since_checkpoint()
     }
+
+    /// Writes the system journal's batched records (those below `error`) to the store's files
+    /// now, unless another operation of the store runs (book page "System Journal", "When
+    /// records appear"). A store on a file system does this by itself within about a second
+    /// (a thread of its own); a host without threads (wasm32) or with its own
+    /// [`StoreDir`](crate::persist::StoreDir) calls it periodically. Returns `false` when an
+    /// operation ran (nothing written; call again later) or the store is closed, `true`
+    /// otherwise (also when there was nothing to write). Never closes a group of repeats
+    /// (unlike [`SystemJournal::flush`](crate::system_journal::SystemJournal::flush)); a failed
+    /// write is counted by [`SystemJournal::lost_records`](crate::system_journal::SystemJournal::lost_records),
+    /// never an error of the store.
+    pub fn flush_journal(&self) -> Result<bool, PersistError> {
+        self.core.flush_journal()
+    }
 }
 
 impl StoreCore {
@@ -1903,6 +1926,7 @@ impl StoreCore {
             workload: workload_stats,
             blob_gate: Arc::default(),
             attic_blobs: Default::default(),
+            operations: parking_lot::RwLock::new(()),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -1913,6 +1937,7 @@ impl StoreCore {
             backup: Some(marker),
             lock: Mutex::new(None),
             thread: Mutex::new(None),
+            flusher: Mutex::new(None),
             closed: AtomicBool::new(false),
         })
     }
@@ -2207,6 +2232,7 @@ impl StoreCore {
             workload: workload_stats,
             blob_gate: Arc::default(),
             attic_blobs: Default::default(),
+            operations: parking_lot::RwLock::new(()),
             system_journal,
         });
         let thread = if shared.options.checkpoint_after_bytes > 0 {
@@ -2223,6 +2249,7 @@ impl StoreCore {
             shared.wal.wake();
         }
         shared.journal_opened(&report, started, false);
+        let flusher = spawn_journal_flusher(&shared);
         Ok(StoreCore {
             shared,
             report,
@@ -2230,6 +2257,7 @@ impl StoreCore {
             backup: None,
             lock: Mutex::new(Some(lock)),
             thread: Mutex::new(thread),
+            flusher: Mutex::new(flusher),
             closed: AtomicBool::new(false),
         })
     }
@@ -2279,6 +2307,7 @@ impl StoreCore {
             workload: workload_stats,
             blob_gate: Arc::default(),
             attic_blobs: Default::default(),
+            operations: parking_lot::RwLock::new(()),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -2289,6 +2318,7 @@ impl StoreCore {
             backup: None,
             lock: Mutex::new(Some(lock)),
             thread: Mutex::new(None),
+            flusher: Mutex::new(None),
             closed: AtomicBool::new(false),
         })
     }
@@ -2370,6 +2400,7 @@ impl StoreCore {
             workload: workload_stats,
             blob_gate: Arc::default(),
             attic_blobs: Default::default(),
+            operations: parking_lot::RwLock::new(()),
             system_journal,
         });
         shared.journal_opened(&report, web_time::Instant::now(), true);
@@ -2380,6 +2411,7 @@ impl StoreCore {
             backup: None,
             lock: Mutex::new(Some(lock)),
             thread: Mutex::new(None),
+            flusher: Mutex::new(None),
             closed: AtomicBool::new(false),
         })
     }
@@ -2756,6 +2788,7 @@ impl StoreCore {
         writer: impl std::io::Write,
         models: ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
+        let _quiet = self.shared.operations.read();
         export_packed_from(&self.shared.dir, commit_seq, writer, models)
     }
 
@@ -2764,6 +2797,7 @@ impl StoreCore {
         target: RecoveryTarget,
         new_dir: impl IntoStoreDir,
     ) -> Result<ForkReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         Self::fork_at(
             &self.shared.dir,
             target,
@@ -2823,6 +2857,7 @@ impl StoreCore {
     }
 
     pub fn prune(&self, up_to: u64) -> Result<PruneReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         self.writable("prune the store")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
             PersistError::store(
@@ -2861,6 +2896,7 @@ impl StoreCore {
     }
 
     pub fn compact(&self) -> Result<CompactReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         self.writable("compact the store")?;
         let up_to = self.shared.graph.read().last_commit_seq()?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
@@ -2911,6 +2947,7 @@ impl StoreCore {
     }
 
     pub fn verify(&self) -> Result<VerifyReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         let report = match maintenance::verify(&self.shared.dir, self.durable_position()) {
             Ok(report) => report,
             // Both GRAPH copies unusable: damage of the open store's files too.
@@ -2984,6 +3021,7 @@ impl StoreCore {
         target_dir: impl IntoStoreDir,
         mode: BackupMode,
     ) -> Result<BackupReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         let target = DirPath::root(target_dir.into_store_dir());
         let full = !files::has_entries(&target);
         let result = backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode)
@@ -3000,6 +3038,7 @@ impl StoreCore {
         target_dir: impl IntoStoreDir,
         mode: BackupMode,
     ) -> Result<BackupReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         let refused = |reason: String| PersistError::BackupRefused { reason };
         if let Some(marker) = &self.backup {
             return Err(PersistError::IsBackup {
@@ -3065,7 +3104,8 @@ impl StoreCore {
             Ok(report) => self.shared.system_journal.emit(
                 &catalogue::BACKUP_DONE,
                 Event::new(format!(
-                    "a {mode} backup to {target} holds commit {}",
+                    "{} to {target} holds commit {}",
+                    backup_phrase(mode),
                     report.commit_seq
                 ))
                 .commit(report.commit_seq)
@@ -3128,6 +3168,7 @@ impl StoreCore {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
+        let _quiet = self.shared.operations.read();
         let result = maintenance::backup_to_zip(
             &self.shared.dir,
             self.durable_position(),
@@ -3162,6 +3203,7 @@ impl StoreCore {
         target: RecoveryTarget,
         mode: RollbackMode,
     ) -> Result<RollbackReport, PersistError> {
+        let _quiet = self.shared.operations.read();
         self.writable("roll the store back")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
             PersistError::store(
@@ -3269,6 +3311,7 @@ impl StoreCore {
     }
 
     pub fn attic_restore(&self, id: &str) -> Result<u64, PersistError> {
+        let _quiet = self.shared.operations.read();
         self.writable("restore the attic entry")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
             PersistError::store(
@@ -3319,6 +3362,7 @@ impl StoreCore {
     }
 
     pub fn attic_remove(&self, id: &str) -> Result<(), PersistError> {
+        let _quiet = self.shared.operations.read();
         self.writable("remove the attic entry")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
             PersistError::store(
@@ -3653,6 +3697,18 @@ impl StoreCore {
         if let Some(thread) = thread {
             let _ = thread.join();
         }
+        self.shared.system_journal.wake();
+        let flusher = self.flusher.lock().ok().and_then(|mut t| t.take());
+        if let Some(flusher) = flusher {
+            let _ = flusher.join();
+        }
+    }
+
+    pub fn flush_journal(&self) -> Result<bool, PersistError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        Ok(self.shared.write_journal_batch())
     }
 }
 
@@ -3941,6 +3997,7 @@ impl Shared {
         name: Option<&str>,
         sync: bool,
     ) -> Result<CheckpointReport, PersistError> {
+        let _quiet = self.operations.read();
         let _guard = self.maintenance.lock().map_err(|_| {
             PersistError::store(
                 "write a checkpoint",
@@ -4077,6 +4134,102 @@ impl Shared {
         let (_, mut info) = snapshot.finish()?;
         info.meta.clear();
         Ok(CheckpointReport::encoded(info))
+    }
+}
+
+impl Shared {
+    /// Writes the system journal's batched records when no other operation of the store runs
+    /// (the `operations` gate taken exclusively, never waited for): `true` when it ran (also
+    /// with nothing to write), `false` when an operation runs (the flusher retries).
+    fn write_journal_batch(&self) -> bool {
+        let Some(_alone) = self.operations.try_write() else {
+            return false;
+        };
+        if self.system_journal.batched_since().is_some() {
+            self.system_journal.sync();
+        }
+        true
+    }
+}
+
+/// Starts the journal flusher of a writable store (`None` on wasm32, without threads, where
+/// the host calls [`Store::flush_journal`], and for a directory that is no file system path:
+/// a [`MemDir`](crate::persist::MemDir) journal is gone with the process anyway, its records are
+/// read from memory, and a custom directory's host calls [`Store::flush_journal`] itself).
+///
+/// The thread sleeps until a record is batched, then writes the batch once the oldest record is
+/// [`system_journal::JOURNAL_FLUSH_AFTER`] old, so a record is durable and visible to other
+/// processes within about a second, independent of the system job `stats_flush`. It writes only
+/// while no other operation of the store runs (`Shared::operations`), retrying every 50 ms,
+/// and ends when the store closes or its journal stops writing.
+fn spawn_journal_flusher(shared: &Arc<Shared>) -> Option<std::thread::JoinHandle<()>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = shared;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if shared.dir.store_dir().local_path().is_none() || !shared.system_journal.has_writer() {
+            return None;
+        }
+        let weak = Arc::downgrade(shared);
+        let journal = Arc::clone(&shared.system_journal);
+        std::thread::Builder::new()
+            .name("graphersal-journal".into())
+            .spawn(move || journal_flush_loop(&weak, &journal))
+            .ok()
+    }
+}
+
+/// The journal flusher's loop ([`spawn_journal_flusher`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn journal_flush_loop(
+    shared: &std::sync::Weak<Shared>,
+    journal: &crate::graph::system_journal::SystemJournal,
+) {
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+    const RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+    let stopped = || {
+        shared
+            .upgrade()
+            .is_none_or(|shared| shared.shutdown.load(Ordering::Acquire))
+            || !journal.has_writer()
+    };
+    loop {
+        if stopped() {
+            return;
+        }
+        let Some(since) = journal.wait_batched(IDLE) else {
+            continue;
+        };
+        let due = since + system_journal::JOURNAL_FLUSH_AFTER;
+        let now = web_time::Instant::now();
+        if now < due {
+            journal.wait_changed(due - now);
+            continue;
+        }
+        if stopped() {
+            return;
+        }
+        let ran = shared
+            .upgrade()
+            .is_some_and(|shared| shared.write_journal_batch());
+        if !ran {
+            journal.wait_changed(RETRY);
+        }
+    }
+}
+
+/// The backup a `store.backup_done` record names, by its `mode` field: "a full backup", "an
+/// incremental backup", "a backup from memory", "a backup" (its target says "a ZIP archive").
+fn backup_phrase(mode: &str) -> String {
+    match mode {
+        "full" => "a full backup".to_string(),
+        "increment" => "an incremental backup".to_string(),
+        "memory" => "a backup from memory".to_string(),
+        "zip" => "a backup".to_string(),
+        other => format!("a backup ({other})"),
     }
 }
 

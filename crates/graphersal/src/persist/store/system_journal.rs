@@ -521,9 +521,24 @@ pub(crate) fn instance_of(dir: &DirPath, name: Option<&str>, writable: bool) -> 
 // ---------------------------------------------------------------------------------------------
 
 /// Appends records to the newest segment of a store's journal. Records below `error` are
-/// kept in memory and written in batches (at the next `error` record, a checkpoint, the system
-/// job `stats_flush`, an explicit flush and at close), so the journal never writes in the middle
-/// of another operation of the store; an `error` record is written and synced at once.
+/// kept in memory and written in batches, so the journal never writes in the middle of another
+/// operation of the store; an `error` record is written and synced at once.
+///
+/// # When batched records are written
+///
+/// A batch is written (and synced) by:
+/// - the store's journal flusher ([`JOURNAL_FLUSH_AFTER`] after the first batched record, so
+///   within about a second; native stores on a file system only, see `persist/store/mod.rs`
+///   `spawn_journal_flusher`), which writes only while no other operation of the store runs
+///   (`Shared::operations`), and [`Store::flush_journal`](crate::persist::Store::flush_journal)
+///   (the same, called by hosts without threads: the session's tick on wasm32);
+/// - the system job `stats_flush`, [`SystemJournal::flush`], the store's close;
+/// - the next `error` record, [`MAX_PENDING_BYTES`] or [`MAX_PENDING_RECORDS`] batched.
+///
+/// Readers in the process never wait for that: [`SystemJournal::query`] answers from the
+/// records in memory (written or not) and reads only older ones from the segments, so a page
+/// has no gap and no duplicate before or after a write. Another process (`graphersal store
+/// journal` on the store a server holds open) sees a record once it is written.
 struct SegmentWriter {
     root: DirPath,
     instance: u128,
@@ -536,10 +551,21 @@ struct SegmentWriter {
     /// Frames not written yet, with their seqs.
     pending: Vec<(u64, Vec<u8>)>,
     pending_bytes: usize,
+    /// When the oldest pending frame was appended.
+    pending_since: Option<web_time::Instant>,
 }
 
 /// The pending bytes that force a write.
 const MAX_PENDING_BYTES: usize = 1 << 20;
+
+/// The pending records that force a write: far below the records a journal keeps in memory
+/// ([`crate::graph::system_journal::MEMORY_CAPACITY`]), so a record leaves the memory only
+/// after it was written (a reader finds every record in memory or in a segment).
+const MAX_PENDING_RECORDS: usize = 1000;
+
+/// The age of the oldest batched record at which the store's journal flusher writes the
+/// batch: records are durable, and visible to other processes, within about a second.
+pub(crate) const JOURNAL_FLUSH_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl SegmentWriter {
     /// Starts a new segment whose first record is `seq`.
@@ -573,6 +599,7 @@ impl SegmentWriter {
         }
         let frames = std::mem::take(&mut self.pending);
         self.pending_bytes = 0;
+        self.pending_since = None;
         let total = frames.len() as u64;
         let mut written = 0u64;
         let result = (|| -> std::io::Result<()> {
@@ -620,7 +647,13 @@ impl JournalWriter for SegmentWriter {
         let frame = encode_frame(record).map_err(|reason| WriteFailure { reason, lost: 1 })?;
         self.pending_bytes += frame.len();
         self.pending.push((record.seq, frame));
-        if urgent || self.pending_bytes >= MAX_PENDING_BYTES {
+        if self.pending_since.is_none() {
+            self.pending_since = Some(web_time::Instant::now());
+        }
+        if urgent
+            || self.pending_bytes >= MAX_PENDING_BYTES
+            || self.pending.len() >= MAX_PENDING_RECORDS
+        {
             return self.write_out();
         }
         Ok(())
@@ -628,6 +661,10 @@ impl JournalWriter for SegmentWriter {
 
     fn sync(&mut self) -> Result<(), WriteFailure> {
         self.write_out()
+    }
+
+    fn pending_since(&self) -> Option<web_time::Instant> {
+        self.pending_since
     }
 }
 
@@ -822,6 +859,7 @@ pub(crate) fn open_journal(options: OpenJournal<'_>) -> Arc<SystemJournal> {
             len: 0,
             pending: Vec::new(),
             pending_bytes: 0,
+            pending_since: None,
         }) as Box<dyn JournalWriter>
     });
     let reader: Arc<dyn PersistedReader> = Arc::new(StoredReader { root: dir.clone() });

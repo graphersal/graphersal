@@ -154,8 +154,26 @@ pub(crate) fn default_instance_name() -> String {
                     .ok()
                     .filter(|name| !name.trim().is_empty())
             })
+            .or_else(os_host_name)
             .map(|name| name.trim().chars().take(255).collect())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// The operating system's host name (`uname`'s node name) when the environment exports none:
+/// macOS shells and launchd services have no `HOSTNAME`, so a store's records named their
+/// instance `unknown` there.
+#[cfg(not(target_arch = "wasm32"))]
+fn os_host_name() -> Option<String> {
+    #[cfg(all(unix, feature = "persist"))]
+    {
+        let uname = rustix::system::uname();
+        let name = uname.nodename().to_string_lossy().trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+    #[cfg(not(all(unix, feature = "persist")))]
+    {
+        None
     }
 }
 
@@ -787,7 +805,12 @@ impl Event {
             op: self.op,
             parent: self.parent,
             commit: self.commit,
-            principal: self.principal,
+            // Who: the channel the work came through when the event names nobody (the dev
+            // server's requests run as `playground` or `mcp`, the CLI as `cli`, Python as
+            // `python`, anything else as `host`).
+            principal: self
+                .principal
+                .or_else(|| Some(crate::graph::workload::current_channel().name().to_string())),
             fields: self
                 .fields
                 .into_iter()
@@ -813,6 +836,12 @@ pub(crate) trait JournalWriter: Send {
 
     /// Writes and makes durable everything appended.
     fn sync(&mut self) -> Result<(), WriteFailure>;
+
+    /// When the oldest record appended but not written yet was appended (`None`: nothing is
+    /// waiting): the age the Store's journal flusher writes the batch at.
+    fn pending_since(&self) -> Option<web_time::Instant> {
+        None
+    }
 }
 
 /// Reads a stored journal's records older than the memory holds.
@@ -1145,6 +1174,66 @@ impl SystemJournal {
     /// the records not written yet stay in memory only.
     pub(crate) fn drop_writer(&self) {
         self.state.lock().writer = None;
+        self.changed.notify_all();
+    }
+
+    #[cfg_attr(
+        any(not(feature = "persist"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    /// Whether records are written to a store's files (the journal flusher stops without).
+    pub(crate) fn has_writer(&self) -> bool {
+        self.state.lock().writer.is_some()
+    }
+
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    /// When the oldest batched record (appended, not written yet) was appended; `None` when
+    /// nothing waits.
+    pub(crate) fn batched_since(&self) -> Option<web_time::Instant> {
+        self.state
+            .lock()
+            .writer
+            .as_ref()
+            .and_then(|writer| writer.pending_since())
+    }
+
+    #[cfg_attr(
+        any(not(feature = "persist"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    /// Waits up to `timeout` for a change (a record, a flush, the writer dropped), returning at
+    /// once when a record is batched already; then [`Self::batched_since`].
+    pub(crate) fn wait_batched(&self, timeout: std::time::Duration) -> Option<web_time::Instant> {
+        let mut state = self.state.lock();
+        let waiting = |state: &State| {
+            state
+                .writer
+                .as_ref()
+                .and_then(|writer| writer.pending_since())
+        };
+        if waiting(&state).is_none() && state.writer.is_some() {
+            let _ = self.changed.wait_for(&mut state, timeout);
+        }
+        waiting(&state)
+    }
+
+    #[cfg_attr(
+        any(not(feature = "persist"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    /// Waits up to `timeout` for any change of the journal.
+    pub(crate) fn wait_changed(&self, timeout: std::time::Duration) {
+        let mut state = self.state.lock();
+        let _ = self.changed.wait_for(&mut state, timeout);
+    }
+
+    #[cfg_attr(
+        any(not(feature = "persist"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    /// Wakes every waiter (the journal flusher at a store's close).
+    pub(crate) fn wake(&self) {
+        self.changed.notify_all();
     }
 
     /// Counts the records a failed write lost (reported by the next `journal.records_lost`).
@@ -1166,6 +1255,7 @@ impl SystemJournal {
             tracing::warn!(%err, "the system journal was not synced at close");
         }
         self.state.lock().writer = None;
+        self.changed.notify_all();
     }
 
     /// Writes an event of `kind`, timed by the instance clock (collapsed per its declaration;
