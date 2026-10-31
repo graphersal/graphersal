@@ -4980,6 +4980,9 @@ fn all_marks(dir: &DirPath) -> Result<Vec<Mark>, PersistError> {
 }
 
 fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
+    // The 0.4.0 model directories (`models/`, migrated by the upgrade) must be readable: an
+    // unreadable one fails the info, never an empty answer.
+    models::model_ids(dir)?;
     let segments = list_wal(dir)?;
     let wal_bytes = segments
         .iter()
