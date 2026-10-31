@@ -321,8 +321,8 @@ Changed:
 - `Store::import_model` with replace re-embeds the vectors of rules naming the old revision;
   vectors of it without a rule refuse the replace with `StoreFailure::ModelInUse`.
 - `set_schema` may write data: the first fill of a vector rule.
-- `Graph` and `Recovered` are no longer `UnwindSafe`/`RefUnwindSafe` (they hold the model
-  registry and the instance clock).
+- `Graph` is no longer `UnwindSafe`, `Recovered` no longer `UnwindSafe` nor `RefUnwindSafe`
+  (they hold the model registry and the instance clock).
 - The implicit discriminants of `Resource::Custom` and `StoreFailure::AutoCheckpointFailed`
   changed (new variants before them); only an `as` cast sees it.
 - `MemoryReportRequest::new()` is bounded (above).
