@@ -231,12 +231,13 @@ fn count_vectors(
 /// ```rust
 /// use graphersal::persist::{ReadOptions, read_snapshot_file};
 /// use graphersal::prelude::*;
+/// use graphersal::storage::AnyGraph;
 ///
 /// let path = std::env::temp_dir().join(format!("doc-read-snapshot-file-{}.gsnap", std::process::id()));
 /// let graph = GraphSource::tinkerpop_modern();
 /// graph.write_snapshot(&mut std::fs::File::create(&path).unwrap()).unwrap();
 /// let (loaded, report) = read_snapshot_file(&path, &ReadOptions::new()).unwrap();
-/// assert_eq!(loaded.read().vertex_count().unwrap(), 6);
+/// assert_eq!(loaded.read().vertex_count(), 6);
 /// assert!(report.models.is_empty() && report.notes("modern.gsnap").is_empty());
 /// # std::fs::remove_file(&path).unwrap();
 /// ```

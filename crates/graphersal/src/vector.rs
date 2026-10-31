@@ -34,7 +34,7 @@
 //! (`nearest("emb", "text", 5)`) compute vectors with the built-in `hash-ngram/1` (hashed words
 //! and character n-grams, no model file, the same bits on every target) or with an embedding
 //! model kept in the graph's database (book page "Embedding Models in a Store": a model enters
-//! a database only by an import, [`Store::import_model`](crate::persist::Store::import_model),
+//! a database only by an import, `persist::Store::import_model` (feature `persist`),
 //! CLI `graphersal embed-model import`). `g.embedders()` lists them. A computed vector is
 //! stored as a plain value: replay, recovery and loads never call an embedder. Their failures
 //! are [`EmbedError`].

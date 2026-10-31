@@ -93,8 +93,9 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
                process 47 % of 3.4 GiB (cgroup)
 
   ── Embedding models ──────────────────────────────────────────────────────────
-    model:     minishlab/potion-multilingual-128M, licence MIT, default
-               stored in data
+    model:     minishlab/potion-multilingual-128M (the default), licence MIT
+               stored in data; loaded at its first use
+               model2vec/minishlab/potion-multilingual-128M@<12 hex>
 
   ── Server ────────────────────────────────────────────────────────────────────
     limits:    none (start with --timeout, --safe-limits, --max-* to bound
