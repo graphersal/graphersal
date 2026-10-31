@@ -1,8 +1,9 @@
 //! The workload statistics of a Store (book page "Workload Statistics") and its system jobs
 //! (book page "Scheduled Jobs"): persisted in the sidecar `WORKLOAD` (written by the job
 //! `stats_flush` and at close, read back at open), never written at level `memory`/`off` or by
-//! a store that writes nothing (a backup), never copied into a backup, a damaged sidecar starts
-//! anew without harming the store, verify and prune ignore it, `compact` releases spare slots.
+//! a store that writes nothing (a backup), never copied into a backup or a conversion, a
+//! damaged sidecar starts anew without harming the store, verify and prune ignore it, `compact`
+//! releases spare slots.
 #![cfg(feature = "persist")]
 
 use graphersal::jobs::Scheduler;
@@ -114,6 +115,22 @@ fn verify_prune_and_backups_leave_the_sidecar_alone() {
     assert!(!opened.flush_workload_stats().unwrap());
     opened.close().unwrap();
     assert!(!has_sidecar(&backup));
+}
+
+#[test]
+fn a_conversion_carries_no_sidecar() {
+    // A conversion makes another store (a new store id): the statistics are instance data of
+    // the original and stay behind (format spec 4.4).
+    let dir = MemDir::named("memory:convert");
+    let store = new_store(&dir, WorkloadLevel::Persisted);
+    store.workload_stats().record(key(), T0, Sample::new(1, 1));
+    store.close().unwrap();
+    assert!(has_sidecar(&dir));
+    let converted = MemDir::named("memory:converted");
+    Store::convert(&dir, &converted).unwrap();
+    assert!(!has_sidecar(&converted), "a conversion holds no statistics");
+    let opened = open(&converted, WorkloadLevel::Persisted);
+    assert!(opened.workload_stats().report(T0).series.is_empty());
 }
 
 #[test]

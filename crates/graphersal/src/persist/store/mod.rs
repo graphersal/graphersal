@@ -713,7 +713,7 @@ impl Store {
         let result = (|| {
             let mut copied = (0usize, 0u64);
             let mut graph_files = Vec::new();
-            copy_tree(&from, &to, &from, &mut copied, &mut graph_files)?;
+            copy_tree(&from, &to, &from, false, &mut copied, &mut graph_files)?;
             // GRAPH last, with a NEW store identity (format spec 5.1): the copy is another
             // store, so it cannot continue the original's backups (12.7).
             if !graph_files.is_empty() {
@@ -4776,13 +4776,16 @@ fn apply_wal_cut(
     Ok(cut)
 }
 
-/// Copies the tree below `at` (a name of `from`) into `to` ([`Store::convert`]): directories
-/// first, files with their bytes (synced); `GRAPH` and `GRAPH.copy` are collected for last,
-/// the locks and temporary files are left out.
+/// Copies the tree below `at` (a name of `from`) into `to` ([`Store::convert`], an upgrade into
+/// a copy): directories first, files with their bytes (synced); `GRAPH` and `GRAPH.copy` are
+/// collected for last, the locks and temporary files are left out. `same_store`: the copy is
+/// the same store (an upgrade), so it keeps the workload statistics `WORKLOAD`; a conversion
+/// (another store) leaves them out (format spec 4.4: instance data).
 fn copy_tree(
     from: &DirPath,
     to: &DirPath,
     at: &DirPath,
+    same_store: bool,
     copied: &mut (usize, u64),
     graph_files: &mut Vec<String>,
 ) -> Result<(), PersistError> {
@@ -4796,7 +4799,7 @@ fn copy_tree(
         let path = source.relative_to(from);
         if kind == files::EntryKind::Dir {
             if !name.starts_with(TMP_PREFIX) {
-                copy_tree(from, to, &source, copied, graph_files)?;
+                copy_tree(from, to, &source, same_store, copied, graph_files)?;
             }
             continue;
         }
@@ -4808,6 +4811,7 @@ fn copy_tree(
                 }
                 // Instance-local (format spec 4.7): never copied.
                 "LOCK" | "BACKUP" | system_journal::INSTANCE_FILE => continue,
+                workload::WORKLOAD_FILE if !same_store => continue,
                 _ if name.ends_with(".tmp") => continue,
                 _ => {}
             }

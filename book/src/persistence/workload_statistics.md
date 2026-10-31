@@ -116,7 +116,8 @@ A writable store writes `WORKLOAD` once a minute (the system job `stats_flush`, 
 [Scheduled Jobs](scheduled_jobs.md)) and when it closes. After an orderly stop nothing is lost;
 after a crash at most the last minute. The file is best effort: a missing or damaged file means
 the statistics start anew, never damage, and the store opens as usual. It is never copied into a
-backup, a fork or a repaired store: a restored store starts without statistics. Its byte layout
+backup, a fork, a repaired or a converted store: a restored store starts without statistics (an
+upgrade into a copy keeps them, the copy being the same store). Its byte layout
 is section 4.4 of the [format specification](format.md).
 
 A backup opened read-only, a read-only or maintenance-mode store keeps statistics in memory only.
