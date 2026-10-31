@@ -81,9 +81,12 @@ cargo llvm-cov --package graphersal --features script,io,display,serde,persist,g
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=7 \
   cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_fuzz_tests::fuzz_long -- --ignored
 ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_input_tests::
-# release gates too (fast budgets run in every `cargo test`); a failing case prints MERGE_FUZZ_REPLAY=<seed> / BACKUP_FUZZ_REPLAY=<seed>:
+ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all persist_robustness_tests::
+# release gates too (fast budgets run in every `cargo test`); a failing case prints MERGE_FUZZ_REPLAY=<seed> / BACKUP_FUZZ_REPLAY=<seed> / CLOSED_FUZZ_REPLAY=<seed>:
 MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,gql,persist-zip --test all merge_checkpoint_fuzz_tests::
 BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,gql,persist-zip --test all backup_fuzz_tests::
+CLOSED_FUZZ_CASES=60000 CLOSED_FUZZ_SEED=1 CLOSED_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,gql,persist-zip --test all closed_commit_fuzz_tests::
+cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all persist_tests::a_unit_over_one_gib_commits -- --ignored --exact   # peaks at 4.4-5.7 GB
 # regenerated files (review the diff like code)
 GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,display,serde,persist,gql --lib surface   # tests/snapshots/script_surface.txt
 GRAPHERSAL_UPDATE_BOOK=1 cargo test -p graphersal-session --test book_step_reference                           # generated step reference

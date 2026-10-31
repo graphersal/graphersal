@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | yes (the latest 0.1 release) |
+| 0.5.x | yes (the latest 0.5 release) |
 
 Before 1.0 only the latest minor version receives fixes.
 

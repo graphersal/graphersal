@@ -10,7 +10,7 @@ To include Graphersal as a dependency in your Rust project's ```Cargo.toml``` fi
 
 ```toml
 [dependencies]
-graphersal = "0.4"
+graphersal = "0.5"
 ```
 
 ### Supported Features

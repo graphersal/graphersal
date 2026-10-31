@@ -105,7 +105,9 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   locked time includes the schema check
   (`PlannedFill::scan_elements`/`scan_ms`; `validate_schema` measures it), and the preview names
   the saved queries writing the filled property directly (`PlannedFill::direct_writes`, a line
-  of the warning). A direct write of a rule's vector is refused
+  of the warning). A cancelled fill (`CancelToken`) rolls the unit back as
+  `GraphError::VectorRuleFailed` with the cause `EmbedError::Cancelled`; the execution timeout
+  is not checked while the fill runs inside the commit. A direct write of a rule's vector is refused
   (`GraphError::DerivedProperty`); replay and recovery never call a model.
 - **Blobs** ([Blobs](../persistence/store_blobs.md)): immutable files of a store named by their
   SHA-256, referenced by `BlobRef` values (`graphersal::blob`), kept as long as retained history
@@ -166,6 +168,9 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   labels, X bytes" count; the totals cover everything. The MCP tool `memory_report` defaults to
   50 per list. On a graph with 111 000 labels the dev server's answer went from 207 MB in 4.2 s
   to 386 KB in 0.15 s.
+- **`Store::quick_info`**: the store's `info()` without the blob count (`blobs.unreferenced` is 0,
+  not counted); it reads no WAL, no attic and no blob. The dev server adds
+  `GET /api/store/summary` and `GET /api/store/details` (`GET /api/store` is unchanged).
 - **CLI**: `--max-materialized-bytes` (the per-query limit), `--memory-limit <bytes|auto|none>`
   for the process, `store journal`, `store restore-blobs`, `store repair --drop-damaged-blobs`,
   `store models default`, `embed-model import --replace/--default`; `store info` shows
@@ -197,15 +202,37 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
 - A text query on a property whose model the database does not keep now says "no model of this
   database has the identity ..." (`EmbedError::ModelNotRegistered`; there is no registry since
   0.5.0); its help names `g.embedders()` and `graphersal embed-model import`.
+- **Playground**: the Graph panel no longer flickers between showing and hiding its scrollbars
+  with classic scrollbars (Windows): a canvas half a pixel taller than its panel made them
+  appear and disappear about ten times a second.
 
 ## Performance
 
+- **The Divan bench of 0.5.0 against 0.4.0** (119 comparable cases, alternating runs on one
+  machine): reads and traversals that take 10 µs or more are unchanged (68 cases, geometric
+  mean +0.6 %; the depth-first `repeat()` walks +3 to +4.5 %, a sack-merging `barrier()` loop
+  -10 %); imports, change sets, vector search and property-level writes within noise. A query
+  of a microsecond or two pays about 0.1 µs more per run for setting up the memory checks
+  (15 cases, +8 % on average). Writes on a FRESH graph measure slower (query mutations +11 %,
+  GQL writes +6 %): without a tracking allocator, the memory ceiling walks the whole graph once
+  at its first unit to learn its size (about 12 ns per element, 0.1 ms for 10 000 vertices).
+  A graph walks again only after its element count has doubled or halved, or when its estimate
+  reaches half of the ceiling, and a host with the
+  tracking allocator (the CLI, Python, the playground) never walks. Vector rules: a unit
+  writing one source text costs 2.3 µs including its embedding, a unit rewriting 10 000 texts
+  15 ms (`hash-ngram/1`).
 - The short-circuiting child runs of `filter()`, `where()` and `not()` reuse their output
   buffers: `g.e().filter(__.out_v()...)` on the `large` graph makes 1 allocation instead of
   111 100 and runs 12 % faster (`filter(__.both().has(..))`: 28 %).
 - A snapshot load passes under a ceiling of 1.00x its manifest estimate (the graph is no longer
   counted twice; it needed about 1.4x).
 - The memory report picks its largest rows in one selection pass before building any row.
+- **The playground's Store menu opens without reading the history**: it shows a summary at once
+  and the sizes when they are weighed. `Store::info` reads the snapshot blob tables and the
+  ledger before an attic's WAL and stops once every blob is found, and an open store remembers
+  what each attic entry references. On a 4.9 GB store with a model and four attic entries the
+  menu's call went from 180-190 ms and 464 MB read to 6 ms and 43 KB (the dev server's
+  `GET /api/store` from about 300 ms to 12-15 ms).
 - **A schema change checks only the labels it changes** when the mode stays `open` or `closed`
   (the apply and the `validate_schema` preview); a change of the mode checks everything. Adding
   vector rules to labels of 9,000 to 30,500 elements in a graph of 2.5 million elements: the
@@ -233,6 +260,13 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   size is a writer's choice ([Creation Parameters](../persistence/creation_parameters.md)).
 - `WORKLOAD` (the workload statistics) is no longer copied by a conversion (`store convert`),
   as the specification already said; an upgrade into a copy keeps it.
+
+## Project
+
+- **No prebuilt binary or wheel for macOS on Intel** from 0.5.0 on (its CI runner made every
+  release much slower): build the CLI from source with Cargo; the Python package installs there
+  from the sdist, which needs a Rust toolchain
+  ([Installation](../getting_started/installation.md)).
 
 ## Breaking changes in detail
 
@@ -287,8 +321,8 @@ Changed:
 - `Store::import_model` with replace re-embeds the vectors of rules naming the old revision;
   vectors of it without a rule refuse the replace with `StoreFailure::ModelInUse`.
 - `set_schema` may write data: the first fill of a vector rule.
-- `Graph` and `Recovered` are no longer `UnwindSafe`/`RefUnwindSafe` (they hold the model
-  registry and the instance clock).
+- `Graph` is no longer `UnwindSafe`, `Recovered` no longer `UnwindSafe` nor `RefUnwindSafe`
+  (they hold the model registry and the instance clock).
 - The implicit discriminants of `Resource::Custom` and `StoreFailure::AutoCheckpointFailed`
   changed (new variants before them); only an `as` cast sees it.
 - `MemoryReportRequest::new()` is bounded (above).

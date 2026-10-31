@@ -66,7 +66,9 @@ embed (`hash-ngram/1`: separators only).
 
 A failing model, a cancelled execution or the memory ceiling (`memory.limit`, operation
 `"vector rule fill"`) rolls the whole unit back: nothing is written
-(`GraphError::VectorRuleFailed`, `ResourceLimitExceeded`).
+(`GraphError::VectorRuleFailed`, `ResourceLimitExceeded`). A cancellation (`CancelToken`) stops
+a fill with the cause `EmbedError::Cancelled`; the execution timeout is not checked while the
+fill runs inside the commit.
 
 ## Direct writes are refused
 
