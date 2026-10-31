@@ -373,8 +373,8 @@ fn mutated_model_blobs_and_definitions_never_crash_the_store() {
         .find(|name| name.starts_with("blobs/") && !name.contains("tmp-"))
         .unwrap();
     let tar = base.file(&blob_name).unwrap();
-    let payload = graphersal::catalog::encode_payload(&definition.as_model().unwrap().to_payload())
-        .unwrap();
+    let payload =
+        graphersal::catalog::encode_payload(&definition.as_model().unwrap().to_payload()).unwrap();
     let mut rng = Rng::new(0x0000_A0DE);
     let mut fatal = Vec::new();
     for case in 0..budget(200) {

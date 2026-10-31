@@ -22,7 +22,6 @@
 // Without `persist` no Store builds a registry: the types stay, unused.
 #![cfg_attr(not(feature = "persist"), allow(dead_code))]
 
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
