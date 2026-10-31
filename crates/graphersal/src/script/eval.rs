@@ -291,6 +291,12 @@ pub fn map_eval_error(
     Box::new(match *err {
         EvalAltResult::ErrorFunctionNotFound(signature, position) => {
             let signature = names(&signature);
+            if let Some(help) = removed_function_help(&signature) {
+                return Box::new(EvalAltResult::ErrorRuntime(
+                    Dynamic::from(format!("Function not found: {signature}\nHelp: {help}")),
+                    position,
+                ));
+            }
             match snake_case_twin(&signature) {
                 Some(snake) => EvalAltResult::ErrorRuntime(
                     Dynamic::from(format!(
@@ -322,6 +328,23 @@ pub fn map_eval_error(
         }
         other => other,
     })
+}
+
+/// The replacement of a DSL function a release removed, for a script written before it.
+fn removed_function_help(signature: &str) -> Option<&'static str> {
+    let name = signature.split([' ', '(']).next()?.trim();
+    match name {
+        "embed_property" | "embedProperty" => Some(
+            "embed_property was removed in 0.5.0. Declare a vector rule instead: the keyword \
+             \"from\" on the vector property names its text property, and the engine fills \
+             and refreshes the vectors at every write: g.patch_schema(#{vertices: #{doc: \
+             #{schema: #{properties: #{emb: #{type: \"array\", format: \"vector\", embedder: \
+             \"hash-ngram/1\", from: \"text\"}}}}}}) (book page \"Vector Rules\"). With an \
+             embedder of the host, write the vectors in your own query: \
+             g.v().has_label(\"doc\").property(\"emb\", __.embed(\"text\")).iterate().",
+        ),
+        _ => None,
+    }
 }
 
 /// The registered snake_case name of a camelCase call the engine did not find (`createIndex`

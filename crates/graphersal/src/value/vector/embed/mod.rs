@@ -9,7 +9,6 @@
 //! loads never call an embedder.
 
 mod hash_ngram;
-mod job;
 pub(crate) mod provenance;
 pub(crate) mod registry;
 
@@ -19,7 +18,6 @@ mod model2vec;
 pub(crate) mod sha256;
 
 pub use hash_ngram::HashNgram;
-pub use job::{EmbedJob, EmbedJobError, EmbedReport};
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 pub use model2vec::{Model2Vec, Model2VecOptions};
 
@@ -419,13 +417,12 @@ pub enum EmbedError {
         /// The rule and the offending value.
         reason: String,
     },
-    /// `embed_property` or a text query (`nearest("emb", "text", 5)`) needs a schema attached
-    /// to the graph (mode `open` or `closed`): it records and reads which model produced a
-    /// property's vectors there.
+    /// A text query (`nearest("emb", "text", 5)`) needs a schema attached to the graph (mode
+    /// `open` or `closed`): it reads which model produced a property's vectors there.
     #[error("{operation} needs a schema attached to the graph (mode open or closed); {found}")]
     #[non_exhaustive]
     SchemaNotAttached {
-        /// The operation (`embed_property`, `nearest`, `similarity`).
+        /// The operation (`nearest`, `similarity`).
         operation: String,
         /// What the graph has (`it has no schema`, `its schema has mode none`).
         found: String,
@@ -464,18 +461,6 @@ pub enum EmbedError {
         model: String,
         /// The property key (quoted).
         key: String,
-    },
-    /// `embed_property` would write vectors of one model into a property the schema declares
-    /// for another.
-    #[error("the schema declares {property} as vectors of the model {declared}; {embedder}")]
-    #[non_exhaustive]
-    EmbedderMismatch {
-        /// The label and the property key (`"doc"."emb"`).
-        property: String,
-        /// The declared model (quoted).
-        declared: String,
-        /// The embedder asked for and its model (`the embedder "x" has the model "y"`).
-        embedder: String,
     },
     /// A text query needs the key form with a top-level property name
     /// (`similarity("emb", "text")`): only a declared property says which model to embed with.
@@ -569,7 +554,7 @@ impl EmbedError {
                  one text per call."
                 .to_string(),
             EmbedError::SchemaNotAttached { .. } => "The schema records which embedder model \
-                 produced a vector property, so embed_property and a text query need one \
+                 produced a vector property, so a text query needs one \
                  attached (mode open or closed). Attach the structure the graph has: \
                  g.set_schema(g.infer_schema(), SchemaMode.open). Or search with a vector \
                  instead of a text: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). A \
@@ -579,10 +564,8 @@ impl EmbedError {
                 .to_string(),
             EmbedError::NoDeclaredEmbedder { .. } => "A text query embeds its text with the \
                  embedder model the schema declares for the property (its \"embedder\"). \
-                 embed_property declares it when it fills the property: \
-                 g.embed_property(#{label: \"doc\", from: \"text\", to: \"emb\"}). Or pass a \
-                 vector: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). The vector \
-                 rule declares it and fills the property from its text at every write: \
+                 Or pass a vector: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). The \
+                 vector rule declares it and fills the property from its text at every write: \
                  g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: \
                  \"array\", format: \"vector\", embedder: \"hash-ngram/1\", from: \
                  \"text\"}}}}}})."
@@ -601,13 +584,6 @@ impl EmbedError {
                  vector rule (\"from\") embeds only with the store's models and \
                  hash-ngram/1: graphersal embed-model import <repo> --into <store> brings a \
                  model into the store."
-                .to_string(),
-            EmbedError::EmbedderMismatch { .. } => "Vectors of different models cannot be \
-                 compared, so a property holds vectors of one model. Embed into another \
-                 property: g.embed_property(#{label: \"doc\", from: \"text\", to: \"emb2\", \
-                 embedder: \"acme/minilm\"}), or change the property's \"embedder\" in the \
-                 schema deliberately (g.patch_schema(..)) and re-embed every element with \
-                 only_missing: false."
                 .to_string(),
             EmbedError::TextQueryKey { .. } => "Name the vector property, so the schema says \
                  which model embeds the text: g.v().similarity(\"emb\", \"graph indexes\"). \

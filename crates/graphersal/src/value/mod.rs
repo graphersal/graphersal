@@ -105,8 +105,7 @@ pub use stream_map::StreamMap;
 pub use temporal::Temporal;
 pub use value_map::ValueMap;
 pub use vector::embed::{
-    EmbedContext, EmbedError, EmbedJob, EmbedJobError, EmbedReport, Embedder, EmbedderInfo,
-    Embedders, EmbeddersBuilder, HashNgram,
+    EmbedContext, EmbedError, Embedder, EmbedderInfo, Embedders, EmbeddersBuilder, HashNgram,
 };
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 pub use vector::embed::{Model2Vec, Model2VecOptions};

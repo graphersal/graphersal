@@ -42,8 +42,8 @@ pub enum SchemaChangeKind {
     /// for an absent property. Always compatible: no existing data or valid write is affected.
     DefaultChanged,
     /// A vector's `embedder` (the model identity of the embedder that produced its vectors)
-    /// changed. Declaring it where there was none is compatible (no value or write is affected;
-    /// `embed_property` does it); changing it is not (the stored vectors and a text query
+    /// changed. Declaring it where there was none is compatible (no value or write is
+    /// affected); changing it is not (the stored vectors and a text query
     /// embedded by the new model are not comparable), and removing it is not either (a text
     /// query on the property no longer finds its embedder).
     EmbedderChanged,

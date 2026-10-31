@@ -5289,9 +5289,9 @@ mod embed_models {
                 "-e",
                 r#"g.add_v("doc").property("text", "graph vector").iterate()"#,
                 "-e",
-                r#"g.embed_property(#{label: "doc", from: "text", to: "emb"})"#,
+                r#"g.v().has_label("doc").property("emb", __.embed("text")).iterate()"#,
                 "-e",
-                r#"g.get_schema().vertices.doc.schema.properties.emb.embedder"#,
+                r#"g.embedders()[0].model"#,
             ],
             &[],
         );
@@ -5375,7 +5375,8 @@ mod embed_models {
         let res = run_env(&["embed-model", "import", &model_text], &[]);
         assert_eq!(res.code, 2, "{}", res.stderr);
 
-        // Vectors made with the model through --embedder record its identity in the schema.
+        // A vector rule naming the model's identity fills the vectors and records it in the
+        // schema.
         let spec = format!("t={model_text}");
         let res = run_env(
             &[
@@ -5388,7 +5389,7 @@ mod embed_models {
                 "-e",
                 r#"g.add_v("doc").property("text", "graph vector").to_list()"#,
                 "-e",
-                r#"g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "t"})"#,
+                r#"let m = g.embedders().filter(|e| e.name == "t")[0].model; g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: m, from: "text"}}}}}})"#,
             ],
             &[],
         );

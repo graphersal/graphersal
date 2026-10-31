@@ -43,8 +43,7 @@
 pub use crate::value::vector::MAX_VECTOR_DIMENSION;
 pub use crate::value::vector::embed::{DEFAULT_MAX_BATCH, MAX_EMBEDDER_NAME_BYTES};
 pub use crate::value::{
-    EmbedContext, EmbedError, EmbedJob, EmbedJobError, EmbedReport, Embedder, EmbedderInfo,
-    Embedders, EmbeddersBuilder, HashNgram,
+    EmbedContext, EmbedError, Embedder, EmbedderInfo, Embedders, EmbeddersBuilder, HashNgram,
 };
 /// Feature `model2vec` (native targets only): a Model2Vec static embedding model loaded from a
 /// local directory.

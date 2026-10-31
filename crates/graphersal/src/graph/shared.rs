@@ -1103,11 +1103,6 @@ impl<S: GraphStorage> Graph<S> {
         owner != NO_OWNER && thread_token() == Some(owner)
     }
 
-    /// Whether any thread holds a unit of this graph ([`Self::begin_unit`]) right now.
-    pub(crate) fn unit_held(&self) -> bool {
-        self.unit.thread.load(Ordering::Acquire) != NO_OWNER
-    }
-
     /// Opens a unit that the current thread holds across locks, until it closes it with
     /// [`Self::commit_unit`], [`Self::commit_unit_with`], [`Self::rollback_unit`] or
     /// [`Self::discard_unit`] on the same thread (the type docs, "Units across locks"). The mark

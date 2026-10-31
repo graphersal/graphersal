@@ -1,17 +1,17 @@
 //! Vector provenance: the schema keyword `embedder` of a vector property records the model
-//! identity ([`EmbedderInfo::model`]) of the embedder that produced its vectors, per (label,
-//! property). `embed_property` declares and checks it ([`plan`]); a text query of
-//! `nearest`/`similarity` embeds its text with the registered embedder of the declared model
-//! ([`text_query_candidates`]). Book page "Vectors", section "Which model produced a property".
+//! identity ([`EmbedderInfo::model`](super::EmbedderInfo::model)) of the embedder that
+//! produced its vectors, per (label, property). A vector rule (keyword `from`,
+//! `graph/vector_rules.rs`) fills such a property; a text query of `nearest`/`similarity`
+//! embeds its text with the registered embedder of the declared model
+//! ([`text_query_candidates`]). Book page "Vectors", section "Which model produced a
+//! property".
 
 use std::sync::Arc;
 
 use compact_str::CompactString;
 
-use super::{EmbedError, Embedder, EmbedderInfo, Embedders, quoted};
-use crate::error::{SchemaError, TraverserError};
-use crate::graph::GraphNodeType;
-use crate::graph::schema::{GraphSchema, PropertySchema, SchemaMode, VectorSchema};
+use super::{EmbedError, Embedder, Embedders, quoted};
+use crate::graph::schema::{GraphSchema, SchemaMode};
 
 /// The schema of `schema` when it is attached (mode `open` or `closed`), else
 /// [`EmbedError::SchemaNotAttached`] naming `operation`.
@@ -29,128 +29,6 @@ pub(crate) fn attached<'s>(
             found: "its schema has mode none".to_string(),
         }),
         Some(schema) => Ok(schema),
-    }
-}
-
-/// What `embed_property` has to do to the schema before it writes.
-#[derive(Debug)]
-pub(crate) enum Provenance {
-    /// The property is declared for the embedder's model already.
-    Declared,
-    /// Store this schema (in the unit of the first page): the property declared as vectors of
-    /// the embedder, or its `embedder` added.
-    Change(GraphSchema),
-}
-
-fn element_name(kind: GraphNodeType) -> &'static str {
-    match kind {
-        GraphNodeType::Vertex => "vertex",
-        GraphNodeType::Edge => "edge",
-    }
-}
-
-/// The vector declaration `embed_property` writes for `info`'s vectors.
-fn declaration(info: &EmbedderInfo) -> PropertySchema {
-    let mut node = PropertySchema::vector(info.element, u32::try_from(info.dimension).ok());
-    if let Some(vector) = node.vector.as_mut() {
-        vector.metric = Some(info.metric);
-        vector.embedder = Some(info.model.to_string());
-    }
-    node
-}
-
-/// The type the embedder writes, for a type mismatch: `vector<f32, 256> from "hash-ngram/1"`.
-fn written_type(info: &EmbedderInfo) -> String {
-    format!(
-        "{} from the embedder {}",
-        VectorSchema::new(info.element)
-            .with_dimension(u32::try_from(info.dimension).unwrap_or(u32::MAX))
-            .type_name(),
-        quoted(&info.name)
-    )
-}
-
-/// What `embed_property` writing `info`'s vectors into the top-level property `key` of the
-/// elements of (`kind`, `label`) needs from the stored `schema`: refused without an attached
-/// schema ([`EmbedError::SchemaNotAttached`]), for a declaration that is not a vector of the
-/// embedder's dimension (another element kind is fine: the write quantizes to it) (the schema's [`SchemaError::TypeMismatch`]) and for a
-/// declaration of another model ([`EmbedError::EmbedderMismatch`]); otherwise nothing, or the
-/// schema with the declaration added (the whole vector node when the property is undeclared,
-/// the label too when it is; only `embedder` on a matching vector declaration without one).
-pub(crate) fn plan(
-    schema: Option<&GraphSchema>,
-    kind: GraphNodeType,
-    label: &str,
-    key: &str,
-    info: &EmbedderInfo,
-) -> Result<Provenance, Box<TraverserError>> {
-    let schema =
-        attached(schema, "embed_property").map_err(|err| Box::new(TraverserError::Embed(err)))?;
-    let Some(node) = schema
-        .label_root(kind, label)
-        .and_then(|root| root.properties.get(key))
-    else {
-        let mut changed = schema.clone();
-        let root = match kind {
-            GraphNodeType::Vertex => {
-                &mut changed
-                    .vertices
-                    .entry(label.to_string())
-                    .or_default()
-                    .schema
-            }
-            GraphNodeType::Edge => &mut changed.edges.entry(label.to_string()).or_default().schema,
-        };
-        root.properties.insert(key.to_string(), declaration(info));
-        return Ok(Provenance::Change(changed));
-    };
-    let mismatch = || {
-        Box::new(TraverserError::Schema(SchemaError::TypeMismatch {
-            element_type: element_name(kind),
-            label: label.to_string(),
-            property_name: key.to_string(),
-            expected_type: node.type_name(),
-            actual_type: written_type(info),
-        }))
-    };
-    let Some(vector) = node.vector.as_ref() else {
-        return Err(mismatch());
-    };
-    // Another element kind is fine: the write quantizes to the declared one (the schema's own
-    // coercion); another dimension is not.
-    if vector
-        .dimension
-        .is_some_and(|dimension| dimension as usize != info.dimension)
-    {
-        return Err(mismatch());
-    }
-    match &vector.embedder {
-        Some(declared) if declared.as_str() == info.model.as_str() => Ok(Provenance::Declared),
-        Some(declared) => Err(Box::new(TraverserError::Embed(
-            EmbedError::EmbedderMismatch {
-                property: format!("{}.{}", quoted(label), quoted(key)),
-                declared: quoted(declared),
-                embedder: format!(
-                    "the embedder {} has the model {}",
-                    quoted(&info.name),
-                    quoted(&info.model)
-                ),
-            },
-        ))),
-        None => {
-            let mut changed = schema.clone();
-            let root = match kind {
-                GraphNodeType::Vertex => changed.vertices.get_mut(label).map(|v| &mut v.schema),
-                GraphNodeType::Edge => changed.edges.get_mut(label).map(|e| &mut e.schema),
-            };
-            if let Some(vector) = root
-                .and_then(|root| root.properties.get_mut(key))
-                .and_then(|node| node.vector.as_mut())
-            {
-                vector.embedder = Some(info.model.to_string());
-            }
-            Ok(Provenance::Change(changed))
-        }
     }
 }
 

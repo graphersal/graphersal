@@ -174,10 +174,7 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
         (&["query"], Query),
         (&["with_side_effect", "withSideEffect"], SideEffectTarget),
         (&["Fn", "call", "curry", "eval"], Dynamic),
-        (
-            &["set_schema", "patch_schema", "embed_property"],
-            Refused(SCHEMA),
-        ),
+        (&["set_schema", "patch_schema"], Refused(SCHEMA)),
         (
             &[
                 "define_query",

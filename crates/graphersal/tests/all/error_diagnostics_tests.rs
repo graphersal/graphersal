@@ -6978,21 +6978,13 @@ fn embed_errors_carry_their_help() {
     );
 }
 
-/// The provenance errors of `embed_property` and of the text queries of `nearest` /
-/// `similarity` (book page "Vectors") carry the help of their cause; the text-query ones are
-/// located at their step.
+/// The provenance errors of the text queries of `nearest` / `similarity` (book page
+/// "Vectors") carry the help of their cause, name the vector rule as the way to declare and
+/// fill a property, and are located at their step.
 #[test]
-fn embed_property_and_text_query_errors_carry_their_help() {
-    use graphersal::exec::CancelToken;
-    use graphersal::vector::{EmbedJob, Embedders};
+fn text_query_errors_name_the_vector_rule() {
+    use graphersal::vector::VectorElement;
 
-    let embedders = Embedders::default();
-    let run_job = |graph: &Graph, job: &EmbedJob| {
-        let failed = graph
-            .embed_property(job, &embedders, &CancelToken::new(), &mut |_| {})
-            .expect_err("the job fails");
-        format_diagnostic(&*failed.error)
-    };
     let text_query = |graph: &Graph| {
         let lock = graph.read();
         lock.traversal()
@@ -7004,21 +6996,18 @@ fn embed_property_and_text_query_errors_carry_their_help() {
 
     // No schema attached.
     let graph = GraphSource::tinkerpop_modern();
-    let report = run_job(&graph, &EmbedJob::new("person", "name", "emb"));
-    assert!(
-        report.contains("embed_property needs a schema attached"),
-        "{report}"
-    );
-    assert!(
-        report.contains("g.set_schema(g.infer_schema(), SchemaMode.open)"),
-        "{report}"
-    );
     let err = text_query(&graph);
     let report = format_diagnostic(&err);
     assert!(
         report.contains("nearest needs a schema attached"),
         "{report}"
     );
+    assert!(
+        report.contains("g.set_schema(g.infer_schema(), SchemaMode.open)"),
+        "{report}"
+    );
+    assert!(report.contains("\"from\": \"text\""), "{report}");
+    assert!(!report.contains("embed_property"), "{report}");
     assert!(
         report.contains("g.v().nearest(\"emb\", embed(\"graph indexes\"), 5)"),
         "{report}"
@@ -7035,38 +7024,35 @@ fn embed_property_and_text_query_errors_carry_their_help() {
     let report = format_diagnostic(&text_query(&graph));
     assert!(report.contains("declares no embedder"), "{report}");
     assert!(
-        report.contains("g.embed_property(#{label: \"doc\", from: \"text\", to: \"emb\"})"),
+        report.contains("embedder: \"hash-ngram/1\", from: \"text\""),
         "{report}"
     );
+    assert!(!report.contains("embed_property"), "{report}");
 
-    // Declared for one model per label: another embedder, a text query over both.
-    graph
-        .embed_property(
-            &EmbedJob::new("person", "name", "emb"),
-            &embedders,
-            &CancelToken::new(),
-            &mut |_| {},
-        )
-        .unwrap();
+    // Declared for one model per label: a vector rule fills "person", "software" declares
+    // another model; a text query over both.
     {
         let mut lock = graph.write();
         let mut schema = lock.get_schema().unwrap().unwrap();
-        let mut other = schema.vertices["person"].schema.properties["emb"].clone();
+        let mut rule = PropertySchema::vector(VectorElement::F32, None);
+        if let Some(vector) = rule.vector.as_mut() {
+            vector.embedder = Some("hash-ngram/1".to_string());
+            vector.from = Some("name".to_string());
+        }
+        let mut other = PropertySchema::vector(VectorElement::F32, Some(256));
         if let Some(vector) = other.vector.as_mut() {
             vector.embedder = Some("acme/other@2".to_string());
         }
+        schema.vertices["person"]
+            .schema
+            .properties
+            .insert("emb".to_string(), rule);
         schema.vertices["software"]
             .schema
             .properties
             .insert("emb".to_string(), other);
         lock.traversal_mut().set_schema(schema).unwrap();
     }
-    let report = run_job(&graph, &EmbedJob::new("software", "name", "emb"));
-    assert!(
-        report.contains("vectors of the model \"acme/other@2\""),
-        "{report}"
-    );
-    assert!(report.contains("Embed into another property"), "{report}");
     {
         let mut lock = graph.write();
         lock.traversal_mut()

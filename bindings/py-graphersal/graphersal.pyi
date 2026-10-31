@@ -21,7 +21,6 @@ __all__ = [
     "GraphersalError",
     "PermissionDeniedError",
     "CommitRejectedError",
-    "EmbedPropertyError",
     "ReturnedClosureError",
     "VectorFillWarning",
     "set_memory_limit",
@@ -122,9 +121,9 @@ class Vector:
 _EmbedOutput = Any
 
 class Embedder:
-    """An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``,
-    ``Graph.embed_property`` and text queries (``nearest("emb", "a question", 5)``). Register it
-    with ``Graph(embedders=[..])`` or ``graph.register_embedder``. Immutable."""
+    """An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``
+    and text queries (``nearest("emb", "a question", 5)``). Register it with
+    ``Graph(embedders=[..])`` or ``graph.register_embedder``. Immutable."""
 
     def __init__(
         self,
@@ -322,13 +321,6 @@ class VectorFillWarning(UserWarning):
     whole database is locked while it runs. ``warnings.simplefilter("error",
     VectorFillWarning)`` stops such a change before anything is applied."""
 
-class EmbedPropertyError(GraphersalError):
-    """``Graph.embed_property`` failed. The pages before the failure stay committed, the
-    failing one was rolled back; a second run continues where it stopped."""
-
-    #: The job's report up to the failure (the dict ``embed_property`` returns).
-    report: dict[str, Any]
-
 class ReturnedClosureError(GraphersalError):
     """A script run as one unit (``atomic=True``, ``Graph.dry_run``) returned a closure or
     function pointer. Everything the script changed was rolled back."""
@@ -388,9 +380,9 @@ class Graph:
     ) -> None:
         """A new, empty graph.
 
-        ``embedders``: the ``Embedder``s (also ``Model2Vec``) its scripts and
-        ``embed_property`` call, beside the built-in ``"hash-ngram/1"``; ``default_embedder``
-        names the one used when a call names none (default ``"hash-ngram/1"``). A duplicate or
+        ``embedders``: the ``Embedder``s (also ``Model2Vec``) its scripts call,
+        beside the built-in ``"hash-ngram/1"``; ``default_embedder`` names the one used when a
+        call names none (default ``"hash-ngram/1"``). A duplicate or
         reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
 
         The process memory ceiling is not a keyword of a graph: it is one setting of the whole
@@ -649,25 +641,6 @@ class Graph:
     def embedders(self) -> list[dict[str, Any]]:
         """This graph's embedders, the default first: ``name``, ``model``, ``dimension``,
         ``element``, ``metric``, ``max_batch``, ``deterministic``, ``local``, ``default``."""
-    def embed_property(
-        self,
-        *,
-        label: str,
-        source: str,
-        target: str,
-        element: Literal["vertex", "edge"] = "vertex",
-        embedder: Optional[str] = None,
-        only_missing: bool = True,
-        batch: Optional[int] = None,
-    ) -> dict[str, Any]:
-        """Embeds the text property ``source`` of every ``element`` labelled ``label`` into its
-        vector property ``target``, page by page (the embedder runs without the graph's lock;
-        each page is one unit). Needs an attached schema (mode ``open``/``closed``), where the
-        job records the embedder's model for ``target``. Returns the report (``embedded``,
-        ``skipped_no_text``, ``not_text``, ``skipped_changed``, ``skipped_removed``, ``units``,
-        ``schema_changed``, ``elapsed_ms``, ``embedder``, ``model``); a failure raises
-        ``EmbedPropertyError`` with ``report``. Releases the GIL; Ctrl+C cancels between pages
-        (the ``KeyboardInterrupt`` carries ``report`` too)."""
     def call_query(
         self,
         name: str,

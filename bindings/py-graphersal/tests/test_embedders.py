@@ -1,7 +1,8 @@
 """Embedders from Python (book page "Vectors", section "Embeddings"): `graphersal.Embedder` over a
 Python callable (rows as lists, 1-D buffers or one 2-D numpy array; wrong answers; exceptions),
 the per-graph registry (`Graph(embedders=..)`, `register_embedder`, `embedders()`, a Store's
-graph), `embed_property` with its schema provenance and report, text queries, the GIL rule (no
+graph), vectors written by a query and declared in the schema, text queries, the removed job
+`embed_property`, the GIL rule (no
 deadlock between a sleeping embedder and a writer thread), and `graphersal.Model2Vec` on a tiny
 synthetic model written by the test (its identity equal to the command line's for the same files
 with `model=`)."""
@@ -246,71 +247,37 @@ def test_a_store_graph_keeps_its_registry(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# embed_property and text queries
+# Declared vectors and text queries
 # ---------------------------------------------------------------------------------------------
 
 
-def test_embed_property_needs_an_attached_schema():
-    g = docs_graph(embedders=[toy()], default_embedder="toy")
-    with pytest.raises(graphersal.EmbedPropertyError, match="schema") as info:
-        g.embed_property(label="doc", source="text", target="emb")
-    assert isinstance(info.value, graphersal.GraphersalError)
-    assert info.value.report["embedded"] == 0
-    assert info.value.help and "set_schema" in info.value.help
-
-
-def test_embed_property_records_the_provenance_and_answers_text_queries():
-    g = docs_graph(embedders=[toy(model="acme/letters@1")], default_embedder="toy")
+def embed_and_declare(g, model):
+    """Writes `emb` of every doc with the default embedder and declares its `model`."""
+    g.execute('g.v().has_label("doc").property("emb", __.embed("text")).iterate()')
     attach_schema(g)
-    report = g.embed_property(label="doc", source="text", target="emb", batch=3)
-    assert report["embedded"] == 4 and report["units"] >= 2
-    assert report["schema_changed"] is True
-    assert (report["embedder"], report["model"]) == ("toy", "acme/letters@1")
-    assert set(report) >= {"skipped_no_text", "not_text", "skipped_changed", "skipped_removed", "elapsed_ms"}
+    g.patch_schema({"vertices": {"doc": {"schema": {"properties": {"emb": {"embedder": model}}}}}})
+
+
+def test_declared_vectors_answer_text_queries():
+    g = docs_graph(embedders=[toy(model="acme/letters@1")], default_embedder="toy")
+    embed_and_declare(g, "acme/letters@1")
     emb = g.get_schema()["vertices"]["doc"]["schema"]["properties"]["emb"]
     assert emb["embedder"] == "acme/letters@1"
-    # Only the missing ones next time.
-    assert g.embed_property(label="doc", source="text", target="emb")["embedded"] == 0
-    again = g.embed_property(label="doc", source="text", target="emb", only_missing=False)
-    assert again["embedded"] == 4 and again["schema_changed"] is False
     # A text query embeds with the declared model.
     top = g.query('g.v().nearest("emb", "banana", 1).values("text").to_list()')
     assert top == ["banana"]
     scores = g.query('g.v().has("text", "banana").similarity("emb", "banana").to_list()')
     assert scores == [pytest.approx(1.0)]
-    # Another embedder into the same property is refused (another model).
-    g.register_embedder(toy("other"))
-    with pytest.raises(graphersal.EmbedPropertyError, match="model"):
-        g.embed_property(label="doc", source="text", target="emb", embedder="other", only_missing=False)
 
 
-def test_embed_property_reports_an_unknown_embedder_and_a_bad_element():
+def test_embed_property_was_removed():
+    assert not hasattr(Graph, "embed_property")
+    assert not hasattr(graphersal, "EmbedPropertyError")
     g = docs_graph()
     attach_schema(g)
-    with pytest.raises(graphersal.EmbedPropertyError, match="no embedder") as info:
-        g.embed_property(label="doc", source="text", target="emb", embedder="missing")
-    assert info.value.report["embedder"] is None
-    with pytest.raises(ValueError, match="element"):
-        g.embed_property(label="doc", source="text", target="emb", element="node")
-
-
-def test_a_failed_page_keeps_the_earlier_ones():
-    calls = []
-
-    def flaky(texts):
-        calls.append(len(texts))
-        if len(calls) == 2:
-            raise RuntimeError("quota")
-        return letters(texts)
-
-    g = docs_graph(embedders=[Embedder("flaky", flaky, dimension=3)], default_embedder="flaky")
-    attach_schema(g)
-    with pytest.raises(graphersal.EmbedPropertyError, match="quota") as info:
-        g.embed_property(label="doc", source="text", target="emb", batch=2)
-    assert info.value.report["embedded"] == 2
-    assert g.query('g.v().has("emb").count().next()') == 2
-    # A second run continues.
-    assert g.embed_property(label="doc", source="text", target="emb", batch=2)["embedded"] == 2
+    with pytest.raises(graphersal.GraphersalError, match="embed_property was removed") as info:
+        g.execute('g.embed_property(#{label: "doc", from: "text", to: "emb"})')
+    assert "Vector Rules" in str(info.value) + str(info.value.help)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -374,18 +341,14 @@ def reader():
 def query():
     results["query"] = len(g.query('g.v().has_label("doc").embed("text").to_list()'))
 
-def job():
-    results["job"] = g.embed_property(label="doc", source="text", target="emb")["embedded"]
-
-for work in (query, job):
-    started.clear()
-    threads = [threading.Thread(target=t) for t in (work, writer, reader)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-assert results == {"query": 4, "job": 4}, results
-assert g.query('g.v().has_label("note").count().next()') == 10
+started.clear()
+threads = [threading.Thread(target=t) for t in (query, writer, reader)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+assert results == {"query": 4}, results
+assert g.query('g.v().has_label("note").count().next()') == 5
 print("ok")
 """
 
@@ -394,8 +357,7 @@ def test_a_sleeping_embedder_and_a_writer_thread_do_not_deadlock(tmp_path):
     """A traversal holds the graph's lock while its Python embedder runs (and needs the GIL); a
     writer thread queues for the write lock, and a third thread reads (exports, saves, schema
     methods): a read queued behind the writer must not hold the GIL, or the embedder could never
-    finish. The same with `embed_property`, whose embedder runs without the lock. (Before the
-    exports released the GIL this scenario hung.)"""
+    finish. (Before the exports released the GIL this scenario hung.)"""
     try:
         done = subprocess.run(
             [sys.executable, "-c", DEADLOCK_SCENARIO, str(tmp_path)],
@@ -406,31 +368,6 @@ def test_a_sleeping_embedder_and_a_writer_thread_do_not_deadlock(tmp_path):
     except subprocess.TimeoutExpired:
         pytest.fail("deadlock: the scenario did not finish within 120 s")
     assert done.returncode == 0 and done.stdout.strip() == "ok", done.stderr
-
-
-def test_ctrl_c_cancels_embed_property_between_pages():
-    """A SIGINT (here `_thread.interrupt_main`) while the job runs cancels it at the next page:
-    `KeyboardInterrupt` is raised with the job's `report`; the pages before stay."""
-    import _thread
-
-    first = threading.Event()
-
-    def slow(texts):
-        first.set()
-        time.sleep(0.2)
-        return letters(texts)
-
-    g = docs_graph(embedders=[Embedder("slow", slow, dimension=3, max_batch=1)], default_embedder="slow")
-    attach_schema(g)
-    timer = threading.Thread(target=lambda: first.wait(10) and _thread.interrupt_main())
-    timer.start()
-    with pytest.raises(KeyboardInterrupt) as info:
-        g.embed_property(label="doc", source="text", target="emb")
-    timer.join()
-    embedded = info.value.report["embedded"]
-    assert embedded < 4
-    assert g.query('g.v().has("emb").count().next()') == embedded
-    assert g.embed_property(label="doc", source="text", target="emb")["embedded"] == 4 - embedded
 
 
 def test_register_embedder_during_a_running_execution():
@@ -541,13 +478,17 @@ def test_model2vec_failures(tmp_path):
         Model2Vec("hash-ngram", str(write_model(tmp_path / "m")))
 
 
-def test_model2vec_embed_property_and_text_query(tmp_path):
+def test_model2vec_vectors_and_text_query(tmp_path):
     m = Model2Vec("tiny", str(write_model(tmp_path / "m")), model="acme/tiny-model")
     g = Graph.tinkerpop_modern(embedders=[m])
+    # vadas and peter are not in the tiny vocabulary: only marko and josh are embedded.
+    g.execute(
+        'g.v().has("name", within("marko", "josh"))'
+        '.property("emb", __.embed("name", #{embedder: "tiny"})).iterate()'
+    )
     attach_schema(g)
-    report = g.embed_property(label="person", source="name", target="emb", embedder="tiny")
-    # vadas and peter are not in the tiny vocabulary: nothing to embed.
-    assert report["model"] == m.model and report["embedded"] == 2 and report["skipped_no_text"] == 2
+    g.patch_schema({"vertices": {"person": {"schema": {"properties": {"emb": {"embedder": m.model}}}}}})
+    assert g.query('g.v().has("emb").count().next()') == 2
     assert g.get_schema()["vertices"]["person"]["schema"]["properties"]["emb"]["embedder"] == m.model
     # The text query finds the model by the schema's identity, not by the registry name or default.
     assert g.query('g.v().has_label("person").nearest("emb", "marko", 1).values("name").to_list()') == ["marko"]
