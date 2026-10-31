@@ -964,12 +964,12 @@ impl Store {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        maintenance::backup_to_zip(
-            &DirPath::root(dir.into_store_dir()),
-            None,
-            &mut archive,
-            models,
-        )
+        let dir = DirPath::root(dir.into_store_dir());
+        let mut report = maintenance::backup_to_zip(&dir, None, &mut archive, models)?;
+        if models == ModelCopy::Include {
+            report.models = model_catalog::infos_in_files(&dir)?;
+        }
+        Ok(report)
     }
 
     /// Unpacks a backup ZIP ([`Store::backup_zip`]) into `dir` (which must not exist or be

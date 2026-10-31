@@ -801,8 +801,8 @@ mod tests {
         for (what, tar) in cases {
             assert!(read_tar(&tar).is_err(), "{what}");
         }
-        // 65 files besides the manifest.
-        let names: Vec<String> = (0..65).map(|i| format!("f{i:03}")).collect();
+        // 66 entries: more than 64 files and a manifest.
+        let names: Vec<String> = (0..66).map(|i| format!("f{i:03}")).collect();
         let entries: Vec<(&str, u8, &[u8])> = names
             .iter()
             .map(|n| (n.as_str(), b'0', &b"x"[..]))

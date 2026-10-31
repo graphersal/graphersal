@@ -4864,30 +4864,44 @@ mod embed_models {
             "{}",
             listed.stdout
         );
-        let models_dir = std::fs::read_dir(store.join("models"))
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path();
-        for file in ["README.md", "NOTICE", "LICENSE", "model.safetensors"] {
-            assert!(models_dir.join(file).is_file(), "{file}");
+        // The model is ONE blob of the store (a tar of its files with the manifest, format
+        // spec 4.5) referenced by a catalog definition.
+        let mut blobs = Vec::new();
+        for dir in std::fs::read_dir(store.join("blobs")).unwrap().flatten() {
+            if dir.path().is_dir() {
+                for file in std::fs::read_dir(dir.path()).unwrap().flatten() {
+                    blobs.push(std::fs::read(file.path()).unwrap());
+                }
+            }
         }
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(models_dir.join("graphersal-embed-model.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(manifest["license"], "mit");
-        assert_eq!(manifest["license_text"], "template");
-        assert_eq!(manifest["base_models"][0]["repo"], "acme/teacher");
-        assert_eq!(manifest["base_models"][0]["license"], "apache-2.0");
-        assert_eq!(manifest["gated"], false);
+        assert_eq!(blobs.len(), 1);
+        let tar = String::from_utf8_lossy(&blobs[0]).to_string();
+        for file in [
+            "README.md",
+            "NOTICE",
+            "LICENSE",
+            "model.safetensors",
+            "graphersal-model.json",
+        ] {
+            assert!(tar.contains(file), "{file}");
+        }
+        for needle in [
+            r#""license":"mit""#,
+            r#""license_text":"template""#,
+            r#""base_models":[{"repo":"acme/teacher","license":"apache-2.0"}]"#,
+            r#""gated":false"#,
+        ] {
+            assert!(tar.contains(needle), "{needle}");
+        }
 
         let info = run_env(&["store", "info", &store_text], &[]);
         assert!(info.stdout.contains("models      1"), "{}", info.stdout);
         assert!(info.stdout.contains("licence mit"), "{}", info.stdout);
 
-        // The shareable copies name the models they carry, or leave them out.
+        // The shareable copies name the models they carry, or leave them out (an export is of
+        // a stored snapshot: one after the import holds the model).
+        let res = run_env(&["store", "checkpoint", &store_text], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
         let gsnap = base.join("x.gsnap").display().to_string();
         let res = run_env(&["store", "export", &store_text, &gsnap], &[]);
         assert_eq!(res.code, 0, "{}", res.stderr);
@@ -4940,16 +4954,10 @@ mod embed_models {
             listed.stdout
         );
 
-        // Removing it.
-        let identity = listed
-            .stdout
-            .split_whitespace()
-            .find(|word| word.starts_with("model2vec/"))
-            .unwrap()
-            .to_string();
-        let res = run_env(&["store", "models", "remove", &copy, &identity], &[]);
+        // Removing it (by its repository: one commit).
+        let res = run_env(&["store", "models", "remove", &copy, "acme/tiny"], &[]);
         assert_eq!(res.code, 0, "{}", res.stderr);
-        let res = run_env(&["store", "models", "remove", &copy, &identity], &[]);
+        let res = run_env(&["store", "models", "remove", &copy, "acme/tiny"], &[]);
         assert_eq!(res.code, 1, "{}", res.stderr);
         assert!(res.stderr.contains("store models"), "{}", res.stderr);
         let _ = std::fs::remove_dir_all(&base);
@@ -5294,21 +5302,25 @@ mod embed_models {
             res.stderr
         );
 
-        // Without the model in the store: a note naming the command that adds it.
-        let listed = run_env(&["store", "models", &store_text], &[]);
-        let identity = listed
-            .stdout
-            .split_whitespace()
-            .find(|word| word.starts_with("model2vec/"))
-            .unwrap()
-            .to_string();
-        let res = run_env(&["store", "models", "remove", &store_text, &identity], &[]);
-        assert_eq!(res.code, 0, "{}", res.stderr);
+        // A model the schema needs is not removed (its properties are named).
+        let res = run_env(
+            &["store", "models", "remove", &store_text, "acme/tiny"],
+            &[],
+        );
+        assert_eq!(res.code, 1, "{}", res.stderr);
+        assert!(res.stderr.contains("doc.emb"), "{}", res.stderr);
+        // Without its blob the store does not open, naming the commands that bring it back.
+        for dir in std::fs::read_dir(store.join("blobs")).unwrap().flatten() {
+            if dir.path().is_dir() {
+                for file in std::fs::read_dir(dir.path()).unwrap().flatten() {
+                    std::fs::remove_file(file.path()).unwrap();
+                }
+            }
+        }
         let res = run_env(&["--graph", &store_text, "-e", "1"], &[]);
-        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_ne!(res.code, 0, "{}", res.stderr);
         assert!(
-            res.stderr
-                .contains("graphersal embed-model download acme/tiny --into"),
+            res.stderr.contains("embed-model download acme/tiny"),
             "{}",
             res.stderr
         );

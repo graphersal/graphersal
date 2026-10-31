@@ -297,16 +297,23 @@ fn register_found_models(
             }
             _ => false,
         };
-        if registered
-            && model.state == ModelState::Loaded
-            && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            errln!(
-                "note: loaded the embedding model {} from the store {path} as {} (licence {})",
-                model.identity,
-                model.repo,
-                license_text(&model.license)
-            );
+        if registered && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+            if model.state == ModelState::Loaded {
+                errln!(
+                    "note: loaded the embedding model {} from the store {path} as {} (licence {})",
+                    model.identity,
+                    model.repo,
+                    license_text(&model.license)
+                );
+            } else {
+                errln!(
+                    "note: the embedding model {} of the store {path} is served as {}, loaded at \
+                     its first use (licence {})",
+                    model.identity,
+                    model.repo,
+                    license_text(&model.license)
+                );
+            }
         }
         serve_model(ServedModel {
             name: if registered {

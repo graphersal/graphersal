@@ -240,7 +240,7 @@ graphersal store backup data/ data.zip --zip --without-models   # ... without th
 graphersal store export data/ data.gsnap             # the latest snapshot as a .gsnap (--commit N: another)
 graphersal store export data/ data.gsnap --without-models   # ... without the store's embedding models
 graphersal store models data/                        # the embedding models the store keeps, with licences
-graphersal store models remove data/ <identity>      # remove one
+graphersal store models remove data/ <repo>          # remove one (a commit)
 graphersal store rollback data/ --at-mark before-import   # back IN PLACE; the rest goes to the attic
 graphersal store attic data/                         # the attic entries (rolled-back history), with their <ID>
 graphersal store attic data/ changes <ID>            # the commits of an entry
