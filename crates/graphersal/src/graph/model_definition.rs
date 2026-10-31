@@ -580,6 +580,42 @@ pub(crate) fn check_conflict(
     Ok(())
 }
 
+/// `schema` with every vector property's `embedder` that names a model of `catalog` by its
+/// repository replaced by that model's identity (the schema records the concrete model; an
+/// identity, `hash-ngram/1` or a host embedder's name stay as they are).
+pub(crate) fn resolve_model_names(
+    catalog: &crate::graph::definition::Catalog,
+    mut schema: crate::graph::schema::GraphSchema,
+) -> crate::graph::schema::GraphSchema {
+    let models: Vec<(String, String)> = catalog
+        .iter()
+        .filter_map(|d| {
+            d.as_model()
+                .filter(|m| m.served())
+                .map(|m| (m.repo().to_string(), d.name().to_string()))
+        })
+        .collect();
+    if models.is_empty() {
+        return schema;
+    }
+    let roots = schema
+        .vertices
+        .values_mut()
+        .map(|v| &mut v.schema)
+        .chain(schema.edges.values_mut().map(|e| &mut e.schema));
+    for root in roots {
+        for node in root.properties.values_mut() {
+            if let Some(vector) = node.vector.as_mut()
+                && let Some(named) = vector.embedder.as_mut()
+                && let Some((_, identity)) = models.iter().find(|(repo, _)| repo == named)
+            {
+                *named = identity.clone();
+            }
+        }
+    }
+    schema
+}
+
 impl Definition {
     /// An embedding model named by its identity `name` (kind [`DefinitionKind::MODEL`], not
     /// critical: a reader that does not know the kind keeps it and serves no model).

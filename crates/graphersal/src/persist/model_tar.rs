@@ -736,6 +736,82 @@ mod tests {
         }
     }
 
+    /// A raw tar of `entries` (name, type flag, data) with valid checksums and end blocks.
+    fn raw_tar(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, flag, data) in entries {
+            let mut block = header(name, data.len() as u64);
+            block[156] = *flag;
+            block[148..156].copy_from_slice(b"        ");
+            let sum = format!("{:06o}\0 ", checksum(&block));
+            block[148..156].copy_from_slice(sum.as_bytes());
+            out.extend_from_slice(&block);
+            out.extend_from_slice(data);
+            out.extend(std::iter::repeat_n(0u8, padding(data.len() as u64)));
+        }
+        out.extend_from_slice(&[0u8; 2 * BLOCK]);
+        out
+    }
+
+    #[test]
+    fn hostile_tars_are_refused() {
+        let manifest = manifest(&FILES[..1]).to_bytes();
+        let ok = raw_tar(&[
+            (FILES[0].0, b'0', FILES[0].2),
+            (MODEL_MANIFEST, b'0', &manifest),
+        ]);
+        // The tar sorted wrongly: the manifest before the config would be unsorted.
+        assert!(read_tar(&ok).is_err(), "a manifest that lists another order");
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("duplicate", raw_tar(&[("a.txt", b'0', b"1"), ("a.txt", b'0', b"2")])),
+            ("unsorted", raw_tar(&[("b.txt", b'0', b"1"), ("a.txt", b'0', b"2")])),
+            ("link", raw_tar(&[("a.txt", b'2', b"")])),
+            ("directory", raw_tar(&[("a", b'5', b"")])),
+            ("pax", raw_tar(&[("a.txt", b'x', b"")])),
+            ("long name", raw_tar(&[(&"a".repeat(41), b'0', b"1")])),
+            ("path", raw_tar(&[("a/b", b'0', b"1")])),
+            ("no manifest", raw_tar(&[("a.txt", b'0', b"1")])),
+            ("no end", raw_tar(&[("a.txt", b'0', b"1")])[..BLOCK * 2].to_vec()),
+            ("junk after the end", {
+                let mut t = raw_tar(&[("a.txt", b'0', b"1")]);
+                t.push(1);
+                t
+            }),
+        ];
+        for (what, tar) in cases {
+            assert!(read_tar(&tar).is_err(), "{what}");
+        }
+        // 65 files besides the manifest.
+        let names: Vec<String> = (0..65).map(|i| format!("f{i:03}")).collect();
+        let entries: Vec<(&str, u8, &[u8])> =
+            names.iter().map(|n| (n.as_str(), b'0', &b"x"[..])).collect();
+        let err = read_tar(&raw_tar(&entries)).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+        // A size beyond the archive.
+        let mut big = raw_tar(&[("a.txt", b'0', b"1")]);
+        let mut block: [u8; BLOCK] = big[..BLOCK].try_into().unwrap();
+        block[124..136].copy_from_slice(b"77777777777\0");
+        block[148..156].copy_from_slice(b"        ");
+        let sum = format!("{:06o}\0 ", checksum(&block));
+        block[148..156].copy_from_slice(sum.as_bytes());
+        big[..BLOCK].copy_from_slice(&block);
+        assert!(read_tar(&big).unwrap_err().contains("past the end"));
+    }
+
+    #[test]
+    fn every_header_field_is_fixed() {
+        let block = header("config.json", 5);
+        assert_eq!(&block[100..108], b"0000644\0");
+        assert_eq!(&block[108..124], b"0000000\00000000\0");
+        assert_eq!(&block[124..136], b"00000000005\0");
+        assert_eq!(&block[136..148], b"00000000000\0");
+        assert_eq!(block[156], b'0');
+        assert_eq!(&block[257..265], b"ustar\000");
+        assert!(block[265..329].iter().all(|b| *b == 0), "uname/gname empty");
+        assert!(block[345..].iter().all(|b| *b == 0), "prefix empty");
+        assert_eq!(octal(&block[148..156]), Some(checksum(&block)));
+    }
+
     #[test]
     fn a_header_field_change_is_caught_by_the_checksum() {
         let mut bad = tar_of(&FILES);

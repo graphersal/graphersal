@@ -133,13 +133,14 @@ pub(crate) struct LoadedModel {
     bytes: u64,
     repo: String,
     identity: String,
-    journal: Option<Weak<SystemJournal>>,
+    /// Where it was loaded from: its journal gets `model.unloaded`.
+    source: Weak<dyn ModelBytes>,
 }
 
 impl Drop for LoadedModel {
     fn drop(&mut self) {
         LOADED_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
-        if let Some(journal) = self.journal.as_ref().and_then(Weak::upgrade) {
+        if let Some(journal) = self.source.upgrade().and_then(|source| source.journal()) {
             journal.emit(
                 &catalogue::MODEL_UNLOADED,
                 Event::new(format!("the model {} was unloaded", self.repo))
@@ -170,7 +171,7 @@ pub(crate) fn loaded_model_bytes() -> u64 {
 fn load(
     identity: &str,
     model: &ModelDefinition,
-    source: &dyn ModelBytes,
+    source: &Arc<dyn ModelBytes>,
 ) -> Result<Arc<LoadedModel>, LoadFailure> {
     if let Some(reason) = model.unserved_reason() {
         return Err(LoadFailure::Unsupported(reason));
@@ -206,7 +207,7 @@ pub(crate) fn check_room(model: &ModelDefinition) -> Result<(), GraphError> {
 fn load_uncached(
     identity: &str,
     model: &ModelDefinition,
-    source: &dyn ModelBytes,
+    source: &Arc<dyn ModelBytes>,
 ) -> Result<LoadedModel, LoadFailure> {
     check_room(model).map_err(LoadFailure::does_not_fit)?;
     let started = web_time::Instant::now();
@@ -252,7 +253,7 @@ fn load_uncached(
         bytes: memory,
         repo: model.repo().to_string(),
         identity: identity.to_string(),
-        journal: journal.as_ref().map(Arc::downgrade),
+        source: Arc::downgrade(source),
     })
 }
 
@@ -260,7 +261,7 @@ fn load_uncached(
 fn load_uncached(
     _identity: &str,
     model: &ModelDefinition,
-    _source: &dyn ModelBytes,
+    _source: &Arc<dyn ModelBytes>,
 ) -> Result<LoadedModel, LoadFailure> {
     Err(LoadFailure::Unsupported(unsupported_build(model.repo())))
 }
@@ -289,7 +290,7 @@ pub(crate) enum CheckLoad {
 }
 
 /// Loads the model of `definition` once as a check (an import).
-pub(crate) fn check_load(source: &dyn ModelBytes, definition: &Definition) -> CheckLoad {
+pub(crate) fn check_load(source: &Arc<dyn ModelBytes>, definition: &Definition) -> CheckLoad {
     let Some(model) = definition.as_model() else {
         return CheckLoad::Failed("it is not a model definition".into());
     };
@@ -353,7 +354,7 @@ impl StoredModelEmbedder {
         if let Some(model) = loaded.as_ref() {
             return Ok(model.clone());
         }
-        match load(&self.identity, &self.model, &*self.source) {
+        match load(&self.identity, &self.model, &self.source) {
             Ok(model) => {
                 *loaded = Some(model.clone());
                 *self.failed.lock() = None;
@@ -496,11 +497,6 @@ impl ModelRegistry {
     /// The embedders the graph's traversals use.
     pub(crate) fn embedders(&self) -> Arc<Embedders> {
         self.state.read().embedders.clone()
-    }
-
-    /// Whether the catalog holds models.
-    pub(crate) fn has_models(&self) -> bool {
-        !self.state.read().definitions.is_empty()
     }
 
     /// Rebuilds the registry for the model definitions `definitions`; an embedder of an

@@ -963,12 +963,12 @@ pub trait SessionStore: Send + Sync {
         models: graphersal::persist::ModelCopy,
     ) -> Result<SnapshotInfo, PersistError>;
     /// [`Store::models`].
-    fn models(&self) -> Result<Vec<graphersal::persist::StoredModel>, PersistError>;
+    fn models(&self) -> Result<Vec<graphersal::persist::ModelInfo>, PersistError>;
     /// [`Store::import_models_from_packed`].
     fn import_models_from_packed(
         &self,
         packed: &mut dyn Read,
-    ) -> Result<Vec<graphersal::persist::StoredModel>, PersistError>;
+    ) -> Result<Vec<graphersal::blob::BlobRef>, PersistError>;
     /// [`Store::read_only_at`], served as a view (the session registers its refusal hook).
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError>;
     /// [`Store::fork`].
@@ -1090,13 +1090,13 @@ where
     ) -> Result<SnapshotInfo, PersistError> {
         Store::<S>::export_packed_with(self, commit_seq, writer, models)
     }
-    fn models(&self) -> Result<Vec<graphersal::persist::StoredModel>, PersistError> {
+    fn models(&self) -> Result<Vec<graphersal::persist::ModelInfo>, PersistError> {
         Store::<S>::models(self)
     }
     fn import_models_from_packed(
         &self,
         packed: &mut dyn Read,
-    ) -> Result<Vec<graphersal::persist::StoredModel>, PersistError> {
+    ) -> Result<Vec<graphersal::blob::BlobRef>, PersistError> {
         Store::<S>::import_models_from_packed(self, packed)
     }
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError> {

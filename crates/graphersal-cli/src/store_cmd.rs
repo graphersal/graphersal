@@ -12,7 +12,7 @@ use std::sync::Arc;
 use graphersal::persist::{
     BackupMode, BackupReport, CompactionAdvice, CompactionPolicy, DamagePolicy, ModelCopy,
     PersistError, RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions,
-    StoredModel, store_dir_at,
+    ModelInfo, store_dir_at,
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
@@ -426,7 +426,7 @@ pub fn backup_summary(report: &BackupReport, target: &str) -> String {
 
 /// The lines naming the embedding models a copy carries, with their licences (empty without
 /// models): who hands the copy on redistributes them.
-pub fn models_carried(models: &[StoredModel]) -> String {
+pub fn models_carried(models: &[ModelInfo]) -> String {
     if models.is_empty() {
         return String::new();
     }
@@ -442,26 +442,26 @@ pub fn models_carried(models: &[StoredModel]) -> String {
 }
 
 /// Whether the schema's identity `named` (`model2vec/<repo>@<12 hex>`, possibly with a
-/// `?normalize=` suffix) names the stored model `model` (its id `model2vec-<12 hex>`: the same
-/// files, whatever repository name the schema recorded).
-pub fn same_model(named: &str, model: &StoredModel) -> bool {
-    let hex = named
-        .split('?')
-        .next()
-        .and_then(|base| base.rsplit_once('@'))
-        .map(|(_, hex)| hex);
-    hex.is_some_and(|hex| model.id.strip_prefix("model2vec-") == Some(hex))
+/// `?normalize=` suffix) names the stored model `model` (the same files: the same 12 hex
+/// digits, whatever repository name the schema recorded).
+pub fn same_model(named: &str, model: &ModelInfo) -> bool {
+    let hex = |identity: &str| {
+        identity
+            .split('?')
+            .next()
+            .and_then(|base| base.rsplit_once('@'))
+            .map(|(_, hex)| hex.to_string())
+    };
+    hex(named).is_some() && hex(named) == hex(&model.identity)
 }
 
-/// One model as the store commands show it: identity, size, licence and its text's source.
-pub fn model_line(model: &StoredModel) -> String {
-    let name = if model.identity.is_empty() {
-        model.id.as_str()
-    } else {
-        model.identity.as_str()
-    };
+/// One model as the store commands show it: repository, identity, size, licence and its
+/// text's source, default, state.
+pub fn model_line(model: &ModelInfo) -> String {
     let mut line = format!(
-        "{name}  {}  licence {} ({})",
+        "{}  {}  {}  licence {} ({})",
+        model.repo,
+        model.identity,
         bytes_text(model.bytes),
         model.license,
         match model.license_text.as_str() {
@@ -473,8 +473,16 @@ pub fn model_line(model: &StoredModel) -> String {
     if model.gated {
         line.push_str(", gated repository");
     }
-    if let Some(problem) = &model.problem {
-        line.push_str(&format!(" [{problem}]"));
+    if model.default {
+        line.push_str(", the default");
+    }
+    match &model.state {
+        graphersal::persist::ModelState::Missing => line.push_str(" [its blob is missing]"),
+        state => {
+            if let Some(reason) = state.reason() {
+                line.push_str(&format!(" [{reason}]"));
+            }
+        }
     }
     line
 }
@@ -1074,11 +1082,13 @@ pub fn run(args: &[String]) -> i32 {
         "models" => {
             if positional.first().map(String::as_str) == Some("remove") {
                 if positional.len() != 3 {
-                    return usage("`store models remove` takes the store and the model's identity");
+                    return usage("`store models remove` takes the store and the model's repository");
                 }
                 return match Store::remove_model_dir(positional[1].as_str(), &positional[2]) {
-                    Ok(model) => {
-                        outln!("Removed {} ({}).", model_line(&model), model.id);
+                    Ok(report) => {
+                        if let Some(model) = &report.model {
+                            outln!("Removed {}.", model_line(model));
+                        }
                         EXIT_OK
                     }
                     Err(err) => fail(err),

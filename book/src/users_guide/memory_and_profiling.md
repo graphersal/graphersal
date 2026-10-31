@@ -44,6 +44,11 @@ A graph in a store also reports `workload_bytes`: the memory of its
 of `total_bytes` (which is the graph's own data); `0` for a graph without statistics. The
 playground's Profile ▸ Statistics tab shows it as **Workload statistics** below the total.
 
+A graph whose catalog holds [embedding models](../persistence/store_models.md) reports
+`model_bytes`: the memory of the models it holds loaded (a model shared by several positions
+counted once per graph), also NOT part of `total_bytes`; `0` when none is loaded. The process
+memory ceiling counts it.
+
 ### How property memory works
 
 Element properties share their key names. Every distinct sequence of keys (a "shape", say

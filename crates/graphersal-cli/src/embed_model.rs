@@ -25,7 +25,10 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use graphersal::persist::{BaseModel, ModelRole, NewModel, Store, StoredModel};
+use graphersal::catalog::BaseModel;
+use graphersal::persist::{
+    ImportModelOptions, ModelInfo, ModelRole, ModelSource, NewModel, Store,
+};
 use graphersal::vector::{Embedder, Model2Vec};
 use serde_json::{Value, json};
 
@@ -692,7 +695,7 @@ fn download(
             new = new.with_file(file.name.as_str(), role, reader);
         }
         let stored = add_to_store(store, new)?;
-        outln!("{repo} -> the store {store} ({})", stored.id);
+        outln!("{repo} -> the store {store} ({})", stored.identity);
         outln!(
             "identity {}, dimension {}",
             stored.identity,
@@ -792,22 +795,20 @@ fn licence_warnings(repo: &str, license: &str, gated: bool) {
     }
 }
 
-/// Adds `model` to the closed store at `store`.
-fn add_to_store(store: &str, model: NewModel) -> Result<StoredModel, DownloadError> {
-    match Store::add_model_dir(store, model) {
+/// Imports `model` into the closed store at `store` (one commit; the store is opened and
+/// closed again).
+fn add_to_store(store: &str, model: NewModel) -> Result<ModelInfo, DownloadError> {
+    match Store::import_model_dir(store, ModelSource::Files(model), ImportModelOptions::new()) {
         Ok(report) => {
-            if report.already_stored {
+            if report.already_present {
                 errln!("note: the store {store} holds this model already");
             }
-            let model = report.model;
-            if model.license_text == "template" {
-                errln!(
-                    "note: the repository has no licence file; the standard {} text was \
-                     written beside the model (LICENSE, marked as a template)",
-                    model.license
-                );
+            for warning in &report.warnings {
+                if warning.contains("template") {
+                    errln!("note: {warning}");
+                }
             }
-            Ok(model)
+            Ok(report.model)
         }
         Err(err) => Err(failed(graphersal::error::format_diagnostic(&err))),
     }
@@ -964,7 +965,11 @@ fn import(
         gated,
     );
     let stored = add_to_store(store, new)?;
-    outln!("{} -> the store {store} ({})", dir.display(), stored.id);
+    outln!(
+        "{} -> the store {store} ({})",
+        dir.display(),
+        stored.identity
+    );
     outln!(
         "identity {}, dimension {}, licence {}",
         stored.identity,

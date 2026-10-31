@@ -955,6 +955,19 @@ impl<S: PersistentStorage + Default> Store<S> {
         }))
     }
 
+    /// The embedders the store's traversals use when the host passes none (book page
+    /// "Embedding Models in a Store"): the built-in `hash-ngram/1` plus every model of the
+    /// current position, each under its repository name (found by its identity too), the
+    /// default model as the default (else `hash-ngram/1`). The graph's lock guards make them the
+    /// thread's, so a host needs this only to merge them with embedders of its own (the
+    /// answer is a snapshot: a later import or rollback changes the graph's, not this one).
+    pub fn embedders(&self) -> Result<Arc<crate::value::Embedders>, PersistError> {
+        Ok(self
+            .graph
+            .model_registry()
+            .map_or_else(|| Arc::new(crate::value::Embedders::default()), |r| r.embedders()))
+    }
+
     /// Imports an embedding model into this open store (the explicit command a model enters a
     /// store by; book page "Embedding Models in a Store"): its files are written as ONE blob (a
     /// deterministic tar with a manifest, format spec 4.5), then one commit defines it (catalog
@@ -1068,6 +1081,7 @@ impl<S: PersistentStorage + Default> Store<S> {
         let _ = check_source
             .journal
             .set(Arc::downgrade(&self.core.shared.system_journal));
+        let check_source: Arc<dyn registry::ModelBytes> = Arc::new(check_source);
         match registry::check_load(&check_source, &definition) {
             registry::CheckLoad::Loaded | registry::CheckLoad::NotAvailable => {}
             registry::CheckLoad::Skipped(reason) => warnings.push(reason),
@@ -1472,7 +1486,29 @@ pub(crate) fn check_at_open(
     if !needed.is_empty() {
         let mut reasons = Vec::new();
         if registry::CAN_LOAD {
-            for failure in registry.load_needed(&needed) {
+            let failures = registry.load_needed(&needed);
+            // The loaded ones are journalled once the store's journal exists.
+            for (identity, _) in &needed {
+                let base = base_identity(identity);
+                if failures.iter().any(|f| f.identity == base) {
+                    continue;
+                }
+                if let Some(model) = definitions
+                    .iter()
+                    .find(|d| d.name() == base)
+                    .and_then(Definition::as_model)
+                {
+                    out.events.push((
+                        &catalogue::MODEL_LOADED,
+                        Event::new(format!("the model {} was loaded", model.repo()))
+                            .field("repo", model.repo())
+                            .field("identity", base)
+                            .count("load_bytes", model.load_bytes())
+                            .count("ms", 0),
+                    ));
+                }
+            }
+            for failure in failures {
                 match &failure.failure {
                     // A newer family or algorithm: read-only, never damage (16 rule 9).
                     registry::LoadFailure::Unsupported(reason) => reasons.push(format!(

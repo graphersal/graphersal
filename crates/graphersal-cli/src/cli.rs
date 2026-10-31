@@ -138,13 +138,6 @@ fn model_note(note: String) {
     }
 }
 
-/// The `@<12 hex>` part of a model identity (`model2vec/<repo>@<hex>`): the same files give the
-/// same hash whatever repository name an identity records.
-#[cfg(feature = "model2vec")]
-fn identity_hash(identity: &str) -> &str {
-    identity.rsplit_once('@').map_or(identity, |(_, hash)| hash)
-}
-
 /// Loads the models of `--embedder NAME=PATH|REPO` (once, at start) and registers them with
 /// `--default-embedder` as the default; [`embedders`] answers this registry from then on. A
 /// model that does not load is the error (with its help); the process then exits with
@@ -232,125 +225,122 @@ fn apply_deferred_default(path: &str) -> Result<(), StartError> {
     }
 }
 
-/// Registers the embedding models the opened `store` keeps and its schema names (format spec
-/// 4.5) beside the `--embedder` ones, which win; prints what it loaded and every model the
-/// schema names that neither provides as a note on stderr.
-#[cfg(feature = "model2vec")]
+/// Registers the embedding models of the opened `store`'s catalog (format spec 4.5, catalog
+/// kind 5) beside the `--embedder` ones, which win; prints what it loaded and a note when the
+/// store holds models but none is the default.
 fn register_stored_models(
     path: &str,
     store: &graphersal::persist::Store,
 ) -> Result<(), graphersal::persist::PersistError> {
-    register_found_models(path, store.stored_embedders(&embedders())?, store.models()?);
+    let stored = store.embedders()?;
+    register_found_models(path, &stored, store.models()?);
     Ok(())
 }
 
-/// [`register_stored_models`] of a Store loaded read-only (`--read-only`): the models are read
-/// from `path` without opening the store, under the schema of `graph`.
-#[cfg(feature = "model2vec")]
-fn register_stored_models_read_only(path: &str, graph: &Graph) -> Result<(), String> {
-    use graphersal::persist::Store;
-    use graphersal::prelude::GraphStorage;
-    let format =
-        |err: graphersal::persist::PersistError| graphersal::error::format_diagnostic(&err);
-    let schema = graph
-        .read_checked()
-        .and_then(|graph| graph.get_schema())
+/// [`register_stored_models`] of a Store loaded read-only (`--read-only`): the models of the
+/// recovered position (`embedders`, those its schema needs loaded) and their list from the
+/// files.
+fn register_stored_models_read_only(
+    path: &str,
+    embedders: Option<Arc<graphersal::vector::Embedders>>,
+) -> Result<(), String> {
+    let models = graphersal::persist::Store::models_dir(path)
         .map_err(|err| graphersal::error::format_diagnostic(&err))?;
-    let found = Store::stored_embedders_dir(path, schema.as_ref(), &embedders()).map_err(format)?;
-    register_found_models(path, found, Store::models_dir(path).map_err(format)?);
+    let embedders = embedders.unwrap_or_default();
+    register_found_models(path, &embedders, models);
     Ok(())
 }
 
-/// Without the `model2vec` feature no stored model can be loaded (a read-only open names none).
-#[cfg(not(feature = "model2vec"))]
-fn register_stored_models_read_only(_path: &str, _graph: &Graph) -> Result<(), String> {
-    Ok(())
-}
-
-/// Registers what [`graphersal::persist::Store::stored_embedders`] found in the store at
-/// `path` (`stored`: the models it keeps) and lists them for the start banner.
-#[cfg(feature = "model2vec")]
+/// Merges the store's model embedders `stored` into the CLI registry ([`embedders`]): an
+/// embedder of the same model or name given with `--embedder` wins; the store's default model
+/// is the default unless `--default-embedder` names one. Lists the models for the banners.
 fn register_found_models(
     path: &str,
-    found: graphersal::persist::StoredEmbedders,
-    stored: Vec<graphersal::persist::StoredModel>,
+    stored: &graphersal::vector::Embedders,
+    models: Vec<graphersal::persist::ModelInfo>,
 ) {
-    for (name, identity) in &found.loaded {
-        let model = stored
-            .iter()
-            .find(|model| identity_hash(&model.identity) == identity_hash(identity));
-        let license = model.map_or("unknown", |model| model.license.as_str());
-        if !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+    use graphersal::persist::ModelState;
+    let host = embedders();
+    let mut builder = host.to_builder();
+    let mut added = false;
+    for model in &models {
+        let label = model.repo.clone();
+        if host.by_model(&model.identity).is_some() {
+            if let Ok(mut served) = SERVED_MODELS.lock()
+                && let Some(served) = served
+                    .iter_mut()
+                    .find(|served| served.identity == model.identity)
+            {
+                served.source = format!("{}; also stored in {path}", served.source);
+            }
+            continue;
+        }
+        let embedder = stored.by_model(&model.identity).cloned();
+        let registered = match embedder {
+            Some(embedder) if host.get(&embedder.info().name).is_none() => {
+                match builder.with(embedder) {
+                    Ok(next) => {
+                        builder = next;
+                        added = true;
+                        true
+                    }
+                    Err(err) => {
+                        model_note(format!(
+                            "the stored model {} could not be registered: {err}",
+                            model.identity
+                        ));
+                        builder = host.to_builder();
+                        added = false;
+                        false
+                    }
+                }
+            }
+            _ => false,
+        };
+        if registered && model.state == ModelState::Loaded && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
             errln!(
-                "note: loaded the embedding model {identity} from the store {path} as {name} \
-                 (licence {})",
-                license_text(license)
+                "note: loaded the embedding model {} from the store {path} as {} (licence {})",
+                model.identity,
+                model.repo,
+                license_text(&model.license)
             );
         }
         serve_model(ServedModel {
-            name: name.clone(),
-            identity: identity.clone(),
-            label: model
-                .and_then(|model| model.repo.clone())
-                .unwrap_or_else(|| identity.clone()),
-            license: license.to_string(),
-            source: format!("stored in {path}"),
+            name: if registered {
+                model.repo.clone()
+            } else {
+                "(unused)".to_string()
+            },
+            identity: model.identity.clone(),
+            label,
+            license: model.license.clone(),
+            source: match &model.state {
+                ModelState::Damaged { reason } | ModelState::Unsupported { reason } => {
+                    format!("stored in {path}; not loaded: {reason}")
+                }
+                ModelState::Missing => format!("stored in {path}; not loaded: its blob is missing"),
+                _ => format!("stored in {path}"),
+            },
         });
     }
-    // A stored model another embedder serves (an `--embedder` of the same files) is named on
-    // that embedder's row; one that could not be used gets a row of its own.
-    for model in &stored {
-        let hash = identity_hash(&model.identity);
-        if found.loaded.iter().any(|(_, id)| identity_hash(id) == hash) {
-            continue;
-        }
-        let also = format!("also stored in {path}");
-        let covered = SERVED_MODELS.lock().ok().is_some_and(|mut served| {
-            served
-                .iter_mut()
-                .find(|served| identity_hash(&served.identity) == hash)
-                .map(|served| served.source = format!("{}; {also}", served.source))
-                .is_some()
-        });
-        if !covered {
-            serve_model(ServedModel {
-                name: "(unused)".to_string(),
-                identity: model.identity.clone(),
-                label: model.repo.clone().unwrap_or_else(|| model.identity.clone()),
-                license: model.license.clone(),
-                source: format!(
-                    "stored in {path}; not loaded: {}",
-                    model.problem.as_deref().unwrap_or("it does not load")
-                ),
-            });
+    let host_default = host.default_embedder().info().name.to_string();
+    let stored_default = stored.default_embedder().info().name.to_string();
+    if added && host_default.starts_with("hash-ngram") && !stored_default.starts_with("hash-ngram")
+    {
+        if let Ok(next) = builder.default_name(&stored_default) {
+            builder = next;
+        } else {
+            builder = host.to_builder();
         }
     }
-    for note in &found.notes {
-        model_note(note.clone());
+    if !models.is_empty() && !models.iter().any(|m| m.default) && host_default.starts_with("hash-ngram") {
+        model_note(format!(
+            "the store {path} holds embedding models but none is the default: `embed` without a              model name uses hash-ngram/1 (name the model, or make one the default with              Store::set_default_model)"
+        ));
     }
-    if !found.loaded.is_empty() {
-        set_embedders(found.embedders);
+    if added {
+        set_embedders(Arc::new(builder.build()));
     }
-}
-
-/// Without the `model2vec` feature no stored model can be loaded: the schema's models are
-/// named in a note.
-#[cfg(not(feature = "model2vec"))]
-fn register_stored_models(
-    path: &str,
-    store: &graphersal::persist::Store,
-) -> Result<(), graphersal::persist::PersistError> {
-    let registered = embedders();
-    for identity in store.info()?.schema_models {
-        if registered.by_model(&identity).is_none() {
-            model_note(format!(
-                "the schema names the embedding model {identity}; this graphersal was built \
-                 without the `model2vec` feature and cannot load it (from {path} or \
-                 elsewhere)"
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
@@ -825,8 +815,9 @@ fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
         )));
     }
     let recovered = Store::open_read_only(path, RecoveryTarget::Latest).map_err(format)?;
+    let embedders = recovered.embedders.clone();
     let graph = Graph::new(recovered.graph);
-    register_stored_models_read_only(path, &graph).map_err(StartError::failed)?;
+    register_stored_models_read_only(path, embedders).map_err(StartError::failed)?;
     refuse_writes(&graph)?;
     Ok(Opened {
         graph: Arc::new(graph),
