@@ -6,6 +6,7 @@ import { ref, reactive } from 'vue';
 import { state, saveSettings, DEFAULT_SETTINGS } from '../store.js';
 import { TIER_CHOICES, TIER_TUNING } from '../graph/tiers.js';
 import { VALUE_MAX_CHARS, VALUE_VIEW_TUNING, maxCharsError } from '../value-view.js';
+import { TOAST_MIN_LEVELS } from '../journal-toasts.js';
 
 export const SettingsDialog = {
   setup(props, { expose }) {
@@ -49,7 +50,7 @@ export const SettingsDialog = {
     }
     expose({ open, close });
     const fmt = (n) => n.toLocaleString('en-US');
-    return { dlg, form, error, close, apply, reset, TIER_CHOICES, TIER_TUNING, DEFAULT_SETTINGS, VALUE_MAX_CHARS, VALUE_VIEW_TUNING, fmt };
+    return { dlg, form, error, close, apply, reset, TIER_CHOICES, TIER_TUNING, DEFAULT_SETTINGS, VALUE_MAX_CHARS, VALUE_VIEW_TUNING, TOAST_MIN_LEVELS, fmt };
   },
   template: `
   <dialog ref="dlg" aria-labelledby="settings-title" @click.self="close">
@@ -105,6 +106,16 @@ export const SettingsDialog = {
             edge labels, curved edges, every layout) and larger drawings in the Fast tier (WebGL: smooth at
             {{ fmt(TIER_TUNING.fastMax) }} elements, vertex labels as you zoom in, edge labels on hover). Forcing Detailed above
             {{ fmt(TIER_TUNING.detailedConfirm) }} elements asks before drawing. The Graph panel has the same switch.</span>
+        </div>
+        <h3>Notifications</h3>
+        <div class="form-grid">
+          <label for="s-journal-toasts">Journal records</label>
+          <select id="s-journal-toasts" v-model="form.journalToasts" aria-describedby="s-journal-toasts-hint">
+            <option v-for="l in TOAST_MIN_LEVELS" :key="l.id" :value="l.id">{{ l.label }}</option>
+          </select>
+          <span class="hint" id="s-journal-toasts-hint">A new record of the system journal at this level or above pops up in the
+            top-right corner (default notice and above). warn and error stay until closed, the others close after 30 seconds.
+            A click opens Catalog ▸ System journal… at the record.</span>
         </div>
         <p class="muted" style="margin-top:12px;font-size:12px">If the playground freezes, open <a href="reset/">reset/</a>: it clears these
         settings, the layout and the query tabs (not the history) and starts again with the Modern sample graph.</p>

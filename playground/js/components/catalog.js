@@ -902,7 +902,11 @@ export const CatalogDialogs = {
       if (id === 'compression' && compression.value) await compression.value.open();
       if (id === 'indexes' && indexes.value) await indexes.value.open();
       if (id === 'jobs' && jobs.value) await jobs.value.open();
-      if (id === 'journal' && journal.value) await journal.value.open();
+      if (id === 'journal' && journal.value) {
+        const target = state.catalogDialogJournal;
+        state.catalogDialogJournal = null;
+        await journal.value.open(target);
+      }
     });
     return { queries, compression, indexes, jobs, journal };
   },

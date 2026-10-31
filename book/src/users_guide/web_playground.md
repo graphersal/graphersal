@@ -504,12 +504,27 @@ the source, the kind, the message with its fields, and the record's sequence num
   sources seen so far are suggested).
 - It opens on the newest 300 records: a long journal on disk is read from its end, never from
   its start.
-- While the dialog is open it reads the records written since its last read every five seconds
-  (switch it off with *refresh every 5 s*, or press **Refresh**); it never reads the whole journal
-  again. It keeps the newest 2000 records it follows.
+- While the dialog is open it shows the records written since its last read as they come (every
+  five seconds on the dev server, every two in the WebAssembly playground; switch it off with
+  *follow new records*, or press **Refresh**); it never reads the whole journal again. It keeps
+  the newest 2000 records it follows.
 - **Show more** shows 300 more rows, reading the next older page from the journal when all held
   rows are shown; the line under the table says how many loaded rows are not shown and whether
   older records exist.
+
+**Notifications.** A new journal record also pops up as a small notification in the top-right
+corner, without blocking anything: red for `error`, amber for `warn`, blue for `notice`, grey for
+`info`. `warn` and `error` stay until you close them; the others close after 30 seconds, and
+not while the pointer is on them. The close button (×) shows when the pointer is on a
+notification or it has keyboard focus (always on touch screens). At most three are shown; more
+become one *+N more journal records* notification, and repeats of the same kind and message
+merge into one with a counter (×3). A click opens the System journal at that record,
+highlighted. Only records written while the page is open pop up, never older ones. **Settings ▸
+Notifications ▸ Journal records** sets the least severe level shown: *notice and above* (the
+default), *warn and above*, *error only* or *Off*; it is kept in the browser with the other
+settings. The playground reads the journal for them every five seconds on the dev server and
+every two in the WebAssembly playground, only while the page is visible; the open System journal
+dialog shares these reads.
 
 In the WebAssembly playground the journal is the one of the graph's [store in
 memory](#the-store-in-memory), gone with a page reload like the store. On the dev server it is
