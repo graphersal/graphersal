@@ -180,6 +180,58 @@ mod tests {
         assert!(allowed.is_ok());
     }
 
+    /// The playground's System journal panel reads forward from its cursor with small pages
+    /// (`js/journal.js` `readJournal`): every record exactly once, `more` until the end, the
+    /// level and source filters applied on every page.
+    #[test]
+    fn the_journal_view_pages_by_cursor_with_filters() {
+        let mut session = Session::default();
+        // Distinct denials (a different action each) are distinct records.
+        for script in [
+            r#"g.add_v("a").next()"#,
+            r#"g.v().drop().iterate()"#,
+            r#"g.v().property("x", 1).iterate()"#,
+        ] {
+            let answer: Value = serde_json::from_str(&session.execute_with_authorizer(
+                script,
+                &crate::RunOptions::default(),
+                crate::read_only_authorizer(),
+            ))
+            .unwrap();
+            assert_eq!(answer["ok"], false, "{answer}");
+        }
+        let all = session.journal(&json!({})).unwrap();
+        let all = all["records"].as_array().unwrap().clone();
+        assert!(all.len() >= 3, "{all:?}");
+        let mut seen = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = session
+                .journal(&json!({"after": after, "limit": 1, "level": "warn", "source": "auth"}))
+                .unwrap();
+            seen.extend(page["records"].as_array().unwrap().iter().cloned());
+            after = page["next_after"].as_u64().unwrap();
+            if page["more"] != json!(true) {
+                break;
+            }
+        }
+        let expected: Vec<Value> = all
+            .iter()
+            .filter(|r| {
+                r["source"] == "auth" && ["warn", "error"].contains(&r["level"].as_str().unwrap())
+            })
+            .cloned()
+            .collect();
+        assert_eq!(seen, expected);
+        let newer = session.journal(&json!({"after": after})).unwrap();
+        assert_eq!(newer["records"], json!([]), "{newer}");
+        // The dev server passes every key as text (query parameters).
+        let as_text = session
+            .journal(&json!({"after": "0", "limit": "1000", "level": "warn"}))
+            .unwrap();
+        assert_eq!(as_text["records"].as_array().unwrap().len(), expected.len());
+    }
+
     #[test]
     fn a_denied_query_is_recorded_without_its_text_and_repeats_collapse() {
         let mut session = Session::default();

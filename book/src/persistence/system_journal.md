@@ -112,6 +112,17 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   [--after SEQ] [--limit N] [--follow] [--json]` ([The graphersal store Command](store_cli.md)).
 - **Dev server**: `GET /api/journal?after=N&level=..&source=..&kind=..&limit=..`, and the
   read-only MCP tool `journal` ([Dev Server and MCP](dev_server.md)).
+- **Python**: `graph.journal(...)` (every graph; without a store its in-memory journal),
+  `store.journal(...)` and `Store.journal_dir(path, ...)` (a closed store, or one open
+  elsewhere), with the keyword filters `after`, `since`, `until`, `level`, `source`, `kind`,
+  `op`, `origin`, `limit` and `policy`. A page is a dict `{"records", "next_after",
+  "truncated", "more", "notes"}`; each record has the keys of `store journal --json`
+  ([Python](python.md#the-system-journal)).
+- **Playground**: **Catalog ▸ System journal…** shows the served graph's journal, newest first,
+  with a level and a source filter, in the WebAssembly playground (the graph's store in memory)
+  and over the dev server. While open it reads only the records written since its last read,
+  every five seconds; it keeps the newest 2000 records and shows 300 rows at a time ("Show
+  more") ([Web Playground](../users_guide/web_playground.md#system-journal)).
 - **Permissions**: reading is the resource `Journal` (`Resource::Journal`, `Read`); the session,
   the dev server and MCP ask the authorizer before they answer. `AccessPolicy::read_only()`
   allows it. The Rust API itself asks nothing (it is the host's).

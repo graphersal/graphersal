@@ -19,6 +19,7 @@ mod convert;
 mod element;
 mod error;
 mod graph;
+mod journal;
 mod policy;
 mod script_thread;
 mod store;

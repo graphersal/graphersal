@@ -114,8 +114,11 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   graph and in a store's `journal/`. It never decides anything and is never damage. Read it with
   `graphersal store journal <dir> [--level] [--since] [--kind] [--follow] [--json]`,
   `GET /api/journal`, the MCP tool `journal`, `Store::journal`/`Store::journal_dir`,
-  `Graph::system_journal`; reading needs `Read` on the new `Resource::Journal`
-  (`AccessPolicy::read_only()` allows it).
+  `Graph::system_journal`, in Python with `graph.journal(...)`, `store.journal(...)` and
+  `Store.journal_dir(path, ...)` (pages of dicts with the keys of `--json`), and in the
+  playground under **Catalog ▸ System journal…** (newest first, level and source filters,
+  incremental refresh; WebAssembly and dev server); reading needs `Read` on the new
+  `Resource::Journal` (`AccessPolicy::read_only()` allows it; Python `policy=`).
 - **One clock per instance** (format spec 18): commit, mark and checkpoint times and journal
   times never go backwards, also when the system clock steps back; the floor is restored from
   the files at open (`storage::CommitClock`, `GraphStorage::commit_clock`).
