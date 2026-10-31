@@ -502,7 +502,7 @@ pub(crate) fn compute<S: GraphStorage>(
     request.report_progress(passed, total);
 
     let structure = storage.memory_structure()?;
-    let mut report = fold(storage, walk, structure.as_ref())?;
+    let mut report = fold(storage, walk, structure.as_ref(), request)?;
     report.structure = structure;
     report.sample_every = step;
     report.sampled = visited < passed;
@@ -510,27 +510,6 @@ pub(crate) fn compute<S: GraphStorage>(
     report.path_depth = request.path_depth();
     report.commit_seq = storage.last_commit_seq()?;
     report.tracked_live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
-    if let Some(cap) = request.max_rows()
-        && report.properties.len() > cap
-    {
-        report.rows_omitted = (report.properties.len() - cap) as u64;
-        report.properties.truncate(cap);
-    }
-    if let Some(cap) = request.max_labels()
-        && report.labels.len() > cap
-    {
-        // The labels with the most bytes, of both kinds.
-        report
-            .labels
-            .sort_by_key(|label| std::cmp::Reverse(label_bytes(label)));
-        report.labels_omitted = (report.labels.len() - cap) as u64;
-        report.labels_omitted_property_bytes = report.labels[cap..]
-            .iter()
-            .map(|label| label.property_bytes)
-            .sum();
-        report.labels.truncate(cap);
-        report.labels.sort_by(label_order);
-    }
     report.elapsed_micros = started.elapsed().as_micros() as u64;
     Ok((report, cancelled))
 }
@@ -548,12 +527,42 @@ fn label_order(a: &LabelMemory, b: &LabelMemory) -> std::cmp::Ordering {
         .then_with(|| a.label.cmp(&b.label))
 }
 
+/// The indices `0..bytes.len()` of the `cap` largest entries (by `bytes`, ties by `tie`), in
+/// that order, and the indices left out. One selection pass plus a sort of the kept ones, so a
+/// graph with a hundred thousand labels sorts only what it shows.
+fn largest(
+    bytes: &[u64],
+    cap: usize,
+    tie: impl Fn(usize, usize) -> std::cmp::Ordering,
+) -> (Vec<usize>, Vec<usize>) {
+    let order = |a: &usize, b: &usize| {
+        let (x, y) = (
+            bytes.get(*a).copied().unwrap_or(0),
+            bytes.get(*b).copied().unwrap_or(0),
+        );
+        y.cmp(&x).then_with(|| tie(*a, *b))
+    };
+    let mut indices: Vec<usize> = (0..bytes.len()).collect();
+    let rest = if cap < indices.len() {
+        if cap > 0 {
+            indices.select_nth_unstable_by(cap - 1, order);
+        }
+        indices.split_off(cap)
+    } else {
+        Vec::new()
+    };
+    indices.sort_unstable_by(order);
+    (indices, rest)
+}
+
 /// Turns the accumulators into the report: scales sampled figures per label, folds shapes into
-/// rows, attaches rule and index names, sorts by bytes.
+/// rows, attaches rule and index names, keeps the largest rows (the request's caps; the others
+/// only counted with their bytes), sorts by bytes.
 fn fold<S: GraphStorage>(
     storage: &S,
     walk: Walk,
     structure: Option<&super::StructureMemory>,
+    request: &MemoryReportRequest,
 ) -> Result<MemoryReport, crate::error::GraphError> {
     let indexes = storage.property_indexes()?;
     let mut rules: Vec<RuleMemory> = Vec::new();
@@ -592,9 +601,48 @@ fn fold<S: GraphStorage>(
         }
     };
 
-    let mut properties: Vec<PropertyMemory> = Vec::with_capacity(walk.rows.len());
+    // Every row's bytes (slots plus heap, as `PropertyMemory::bytes`) count in its label; only
+    // the largest rows are built.
     let mut label_property_bytes = vec![0u64; walk.labels.len()];
-    for (label, row) in &walk.rows {
+    let row_bytes: Vec<u64> = walk
+        .rows
+        .iter()
+        .map(|(label, row)| {
+            let bytes = scale(*label, row.elements * SLOT) + scale(*label, row.heap);
+            if let Some(sum) = label_property_bytes.get_mut(*label) {
+                *sum += bytes;
+            }
+            bytes
+        })
+        .collect();
+    let row_tie = |a: usize, b: usize| {
+        let key = |index: usize| {
+            walk.rows.get(index).and_then(|(label, row)| {
+                walk.labels.get(*label).map(|acc| {
+                    (
+                        kind_slot(acc.element),
+                        acc.label.as_deref(),
+                        row.key.as_str(),
+                    )
+                })
+            })
+        };
+        key(a).cmp(&key(b))
+    };
+    let (kept_rows, omitted_rows) = largest(
+        &row_bytes,
+        request.max_rows().unwrap_or(usize::MAX),
+        row_tie,
+    );
+    let rows_omitted_bytes: u64 = omitted_rows
+        .iter()
+        .filter_map(|&index| row_bytes.get(index))
+        .sum();
+    let mut properties: Vec<PropertyMemory> = Vec::with_capacity(kept_rows.len());
+    for &index in &kept_rows {
+        let Some((label, row)) = walk.rows.get(index) else {
+            continue;
+        };
         let Some(acc) = walk.labels.get(*label) else {
             continue;
         };
@@ -682,16 +730,8 @@ fn fold<S: GraphStorage>(
             rules: row_rules,
             indexes: row_indexes,
         };
-        if let Some(sum) = label_property_bytes.get_mut(*label) {
-            *sum += memory.bytes();
-        }
         properties.push(memory);
     }
-    properties.sort_by(|a, b| {
-        b.bytes()
-            .cmp(&a.bytes())
-            .then_with(|| a.target.to_string().cmp(&b.target.to_string()))
-    });
 
     // Shapes: elements per distinct shape over every label.
     let mut per_shape: HashMap<usize, u64> = HashMap::new();
@@ -734,7 +774,7 @@ fn fold<S: GraphStorage>(
             ElementKind::Edge => structure.edge_slots.slot_bytes,
         })
     };
-    let mut labels: Vec<LabelMemory> = walk
+    let labels: Vec<LabelMemory> = walk
         .labels
         .into_iter()
         .enumerate()
@@ -773,11 +813,46 @@ fn fold<S: GraphStorage>(
             }
         })
         .collect();
+    // The labels with the most bytes, of both kinds; then vertices first.
+    let label_sizes: Vec<u64> = labels.iter().map(label_bytes).collect();
+    let (kept_labels, omitted_labels) = largest(
+        &label_sizes,
+        request.max_labels().unwrap_or(usize::MAX),
+        |a, b| {
+            let key = |index: usize| {
+                labels
+                    .get(index)
+                    .map(|label| (kind_slot(label.element), label.label.as_deref()))
+            };
+            key(a).cmp(&key(b))
+        },
+    );
+    let mut labels_omitted_elements = 0u64;
+    let mut labels_omitted_bytes = 0u64;
+    let mut labels_omitted_property_bytes = 0u64;
+    for &index in &omitted_labels {
+        if let Some(label) = labels.get(index) {
+            labels_omitted_elements += label.elements;
+            labels_omitted_bytes += label_bytes(label);
+            labels_omitted_property_bytes += label.property_bytes;
+        }
+    }
+    let mut slots: Vec<Option<LabelMemory>> = labels.into_iter().map(Some).collect();
+    let mut labels: Vec<LabelMemory> = kept_labels
+        .iter()
+        .filter_map(|&index| slots.get_mut(index).and_then(Option::take))
+        .collect();
     labels.sort_by(label_order);
 
     Ok(MemoryReport {
         properties,
+        rows_omitted: omitted_rows.len() as u64,
+        rows_omitted_bytes,
         labels,
+        labels_omitted: omitted_labels.len() as u64,
+        labels_omitted_elements,
+        labels_omitted_bytes,
+        labels_omitted_property_bytes,
         shapes: ShapeSummary {
             shapes: per_shape.len() as u64,
             shaped_elements,

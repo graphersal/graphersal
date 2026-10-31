@@ -16,7 +16,7 @@ import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
   WINDOWS, TIERS, LISTS, MIN_TIMES, SNOOZE_DAYS, sortsDescending, recommendationRows, dismissedRows, appliedRows, adviceSummary, channels, workloadRows, sparkPath,
-  chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals,
+  chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, memoryOmitted, memoryReportSpec,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
 import { MemoryBar } from './memory-bar.js';
@@ -90,7 +90,8 @@ export const OptimizePanel = {
             memory.stats = null;
           }
         }
-        const answer = await engine().memoryReport({});
+        // Bounded: at most MEMORY_LIST_LIMIT rows per list (largest first), the rest counted.
+        const answer = await engine().memoryReport(memoryReportSpec());
         if (answer && answer.ok) memory.report = answer.report;
         else memory.error = (answer && answer.error) || 'The memory report failed.';
       } catch (err) {
@@ -221,12 +222,14 @@ export const OptimizePanel = {
     const memRows = computed(() => memoryRows(memory.report));
     const memLabels = computed(() => labelRows(memory.report));
     const memTotals = computed(() => memoryTotals(memory.report));
+    const memRowsOmitted = computed(() => memoryOmitted(memory.report, 'properties', formatBytes));
+    const memLabelsOmitted = computed(() => memoryOmitted(memory.report, 'labels', formatBytes));
 
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
-      memRows, memLabels, memTotals,
+      memRows, memLabels, memTotals, memRowsOmitted, memLabelsOmitted,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
     };
   },
@@ -395,7 +398,7 @@ export const OptimizePanel = {
               </tbody>
             </table>
           </div>
-          <p v-if="memory.report.rows_omitted" class="muted">{{ memory.report.rows_omitted }} smaller rows not shown.</p>
+          <p v-if="memRowsOmitted" class="muted">{{ memRowsOmitted.text }}</p>
           <h3>Labels</h3>
           <div class="catalog-table-wrap">
             <table class="data-table catalog-table">
@@ -409,6 +412,7 @@ export const OptimizePanel = {
               </tbody>
             </table>
           </div>
+          <p v-if="memLabelsOmitted" class="muted">{{ memLabelsOmitted.text }}</p>
         </template>
       </template>
     </div>

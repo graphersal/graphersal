@@ -369,13 +369,16 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
     })
 }
 
-/// The request of a memory report spec `{sample_every?, max_elements?, max_rows?,
-/// path_depth?}` (`null`: a full report; [`crate::Session::memory_report`]), or what is wrong
-/// with it.
+/// The request of a memory report spec `{sample_every?, max_elements?, limit?, max_rows?,
+/// max_labels?, path_depth?}` (`null`: a full walk; `limit` keeps the property rows and the
+/// label rows with the most bytes, default [`MemoryReportRequest::DEFAULT_LIMIT`] (500),
+/// `max_rows`/`max_labels` set one list each; [`crate::Session::memory_report`]), or what is
+/// wrong with it.
 pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, SessionError> {
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 6] = [
         "sample_every",
         "max_elements",
+        "limit",
         "max_rows",
         "max_labels",
         "path_depth",
@@ -387,7 +390,7 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
         _ => {
             return Err(
                 "the memory report spec is a JSON object {sample_every?, max_elements?, \
-                 max_rows?, max_labels?, path_depth?}"
+                 limit?, max_rows?, max_labels?, path_depth?}"
                     .into(),
             );
         }
@@ -413,6 +416,9 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
     }
     if let Some(n) = positive("max_elements")? {
         request = request.with_max_elements(n);
+    }
+    if let Some(n) = positive("limit")? {
+        request = request.with_limit(usize::try_from(n).unwrap_or(usize::MAX));
     }
     if let Some(n) = positive("max_rows")? {
         request = request.with_max_rows(usize::try_from(n).unwrap_or(usize::MAX));

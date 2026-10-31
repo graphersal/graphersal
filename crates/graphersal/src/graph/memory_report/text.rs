@@ -46,7 +46,9 @@ impl fmt::Display for MemoryReport {
     /// A terminal summary: totals, the 20 largest labels and properties, indexes, compression
     /// rules and the structure.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let elements: u64 = self.labels.iter().map(|l| l.elements).sum();
+        // The omitted label rows count too.
+        let elements: u64 =
+            self.labels.iter().map(|l| l.elements).sum::<u64>() + self.labels_omitted_elements;
         write!(f, "Memory report at commit {}: ", self.commit_seq)?;
         match self.estimated_total_bytes() {
             Some(total) => write!(f, "{} estimated", human(total))?,
@@ -72,7 +74,12 @@ impl fmt::Display for MemoryReport {
             "\nLabels ({}{}): elements, slots, properties",
             self.labels.len(),
             if self.labels_omitted > 0 {
-                format!(" shown, {} more", self.labels_omitted)
+                format!(
+                    " shown, {} more with {} elements and {}",
+                    self.labels_omitted,
+                    self.labels_omitted_elements,
+                    human(self.labels_omitted_bytes)
+                )
             } else {
                 String::new()
             }
@@ -105,7 +112,11 @@ impl fmt::Display for MemoryReport {
             "\nProperties ({}{}): elements/label, bytes, max value, types, distinct",
             self.properties.len(),
             if self.rows_omitted > 0 {
-                format!(" shown, {} more", self.rows_omitted)
+                format!(
+                    " shown, {} more with {}",
+                    self.rows_omitted,
+                    human(self.rows_omitted_bytes)
+                )
             } else {
                 String::new()
             }

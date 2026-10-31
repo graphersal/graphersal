@@ -569,6 +569,21 @@ def test_the_memory_report_shows_where_the_memory_goes():
     assert small["sampled"] is True
 
 
+def test_the_memory_report_keeps_the_largest_rows_and_counts_the_rest():
+    graph = graphersal.Graph()
+    graph.execute('for i in 0..40 { g.add_v("L" + i).property("name", "n" + i).to_list(); }')
+    full = graph.memory_report(limit=1000)
+    assert len(full["labels"]) == 40 and full["labels_omitted"] == 0
+    capped = graph.memory_report(limit=5)
+    assert len(capped["properties"]) == 5 and capped["rows_omitted"] == 35
+    assert len(capped["labels"]) == 5 and capped["labels_omitted"] == 35
+    assert capped["labels_omitted_elements"] == 35
+    shown = sum(r["bytes"] for r in capped["properties"])
+    assert shown + capped["rows_omitted_bytes"] == sum(r["bytes"] for r in full["properties"])
+    assert capped["property_bytes"] == full["property_bytes"]
+    assert len(graph.memory_report(limit=5, max_rows=7)["properties"]) == 7
+
+
 def test_a_dedup_rule_shares_repeated_values_and_the_estimate_matches():
     graph = graphersal.Graph()
     for i in range(12):

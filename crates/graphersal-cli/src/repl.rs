@@ -120,7 +120,8 @@ const COMMANDS: &[(&str, &str, &str)] = &[
         "memory",
         "[max_elements]",
         "the process memory bar against its ceiling (memory.limit), then where the graph's \
-         memory goes per label and property (g.memory_report()); with a number: sampled",
+         memory goes per label and property (g.memory_report(): the 500 largest rows per list, \
+         the rest counted); with a number: sampled",
     ),
     (
         "workload",
@@ -1185,6 +1186,28 @@ mod tests {
         assert!(sampled.contains("Sampled:"), "{sampled}");
         assert!(memory_report(&graph, "lots").starts_with("Usage: /memory"));
         assert!(memory_report(&graph, "0").starts_with("Usage: /memory"));
+    }
+
+    #[test]
+    fn memory_of_many_labels_counts_the_labels_left_out() {
+        let mut inner = graphersal::TraversalGraph::new();
+        for i in 0..600 {
+            let mut map = graphersal::prelude::PropertyMap::default();
+            map.insert("name", format!("n{i}").as_str().into());
+            inner
+                .insert_vertex(None, vec![format!("L{i}").into()], map)
+                .unwrap();
+        }
+        let graph = graphersal::storage::Graph::new(inner);
+        let text = memory_report(&graph, "");
+        assert!(
+            text.contains("Labels (500 shown, 100 more with 100 elements and "),
+            "{text}"
+        );
+        assert!(
+            text.contains("Properties (500 shown, 100 more with "),
+            "{text}"
+        );
     }
 
     #[test]
