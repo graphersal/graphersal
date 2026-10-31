@@ -965,12 +965,12 @@ impl Store {
         target_dir: impl IntoStoreDir,
         mode: BackupMode,
     ) -> Result<BackupReport, PersistError> {
-        backup::backup_into(
-            &DirPath::root(dir.into_store_dir()),
-            None,
-            &DirPath::root(target_dir.into_store_dir()),
-            mode,
-        )
+        let target = DirPath::root(target_dir.into_store_dir());
+        let mut report =
+            backup::backup_into(&DirPath::root(dir.into_store_dir()), None, &target, mode)?;
+        // The models the backup holds, as the live store's backup reports them.
+        report.models = model_catalog::infos_in_files(&target)?;
+        Ok(report)
     }
 
     /// [`Store::backup_zip`] of the store in `dir` by another process.
@@ -982,12 +982,7 @@ impl Store {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        maintenance::backup_to_zip(
-            &DirPath::root(dir.into_store_dir()),
-            None,
-            &mut archive,
-            ModelCopy::Include,
-        )
+        Self::backup_zip_dir_with(dir, &mut archive, ModelCopy::Include)
     }
 
     /// [`Store::backup_zip_with`] of the store in `dir` by another process.

@@ -115,6 +115,33 @@ fn every_copy_path_carries_the_model_and_the_copy_opens_with_it() {
     }
 }
 
+/// A backup of a closed store (`Store::backup_dir`, its increment, `Store::backup_zip_dir`)
+/// reports the models it carries in `BackupReport::models`, as the open store's backups do.
+#[test]
+fn a_closed_store_backup_reports_its_models() {
+    let temp = Temp::new("closed-backup-models");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    add_person(&store, "ann");
+    let model = import(&store, 1, "acme/tiny").model;
+    set_schema(&store, &model.identity);
+    store.close().unwrap();
+
+    let full = Store::backup_dir(&path, temp.join("backup")).unwrap();
+    assert!(!full.incremental);
+    assert_eq!(full.models.len(), 1, "{:?}", full.models);
+    assert_eq!(full.models[0].repo, "acme/tiny");
+    let increment = Store::backup_dir(&path, temp.join("backup")).unwrap();
+    assert!(increment.incremental);
+    assert_eq!(increment.models.len(), 1, "{:?}", increment.models);
+    #[cfg(feature = "persist-zip")]
+    {
+        let mut archive = std::io::Cursor::new(Vec::new());
+        let zip = Store::backup_zip_dir(&path, &mut archive).unwrap();
+        assert_eq!(zip.models.len(), 1, "{:?}", zip.models);
+    }
+}
+
 /// Copies a directory tree.
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
