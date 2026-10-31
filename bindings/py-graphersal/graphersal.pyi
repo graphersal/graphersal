@@ -588,11 +588,14 @@ class Graph:
         max_elements: Optional[int] = None,
         max_rows: Optional[int] = None,
         max_labels: Optional[int] = None,
+        limit: Optional[int] = None,
         policy: Optional[AccessPolicy] = None,
     ) -> dict[str, Any]:
         """Where the graph's memory goes per label and top-level property (rows, labels,
         shapes, indexes, compression rules, structure); changes nothing. ``max_elements`` /
-        ``sample_every`` sample, ``max_rows`` / ``max_labels`` keep the largest rows."""
+        ``sample_every`` sample; ``limit`` keeps the property rows and the label rows with the
+        most bytes (default 500), ``max_rows`` / ``max_labels`` one list each; the rows left
+        out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...)."""
     def estimate_compression(
         self,
         label: str,

@@ -113,6 +113,44 @@ test('memory rows: the most bytes first, with their badges', () => {
   assert.deepEqual(memoryTotals(report), [{ label: 'Properties', bytes: 300 }]);
 });
 
+test('memory lists: bounded, the rest counted with its bytes', async () => {
+  const { MEMORY_LIST_LIMIT, memoryOmitted, memoryReportSpec } = await import('../js/optimize.js');
+  assert.equal(MEMORY_LIST_LIMIT, 500);
+  assert.deepEqual(memoryReportSpec(), { limit: 500 });
+  // The engine's bounded answer: 500 rows shown, the rest counted by the engine.
+  const prop = (i) => ({ element: 'vertex', label: `L${i}`, path: '$.name', elements: 1, bytes: 1000 - i });
+  const label = (i) => ({ element: 'vertex', label: `L${i}`, elements: 1, slot_bytes: 96, property_bytes: 1000 - i, values: 1 });
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  const bounded = {
+    properties: range(500).map(prop),
+    rows_omitted: 110611, rows_omitted_bytes: 2048,
+    labels: range(500).map(label),
+    labels_omitted: 110611, labels_omitted_elements: 110611, labels_omitted_bytes: 4096,
+  };
+  assert.equal(memoryRows(bounded).length, 500);
+  assert.equal(labelRows(bounded).length, 500);
+  const fmt = (n) => `${n} B`;
+  assert.deepEqual(memoryOmitted(bounded, 'properties', fmt),
+    { count: 110611, bytes: 2048, elements: 0, text: '110,611 more properties not shown (2048 B)' });
+  assert.equal(memoryOmitted(bounded, 'labels', fmt).text,
+    '110,611 more labels not shown (110,611 elements, 4096 B)');
+  // An unbounded answer (an older server) is cut by the tab: the smallest rows go, counted.
+  const unbounded = { properties: range(800).map(prop), labels: range(501).map(label) };
+  const rows = memoryRows(unbounded);
+  assert.equal(rows.length, 500);
+  assert.equal(rows[0].bytes, 1000);
+  assert.equal(rows[499].bytes, 501);
+  const cut = memoryOmitted(unbounded, 'properties', fmt);
+  assert.equal(cut.count, 300);
+  assert.equal(cut.bytes, range(300).reduce((sum, i) => sum + (1000 - (500 + i)), 0));
+  assert.equal(labelRows(unbounded).length, 500);
+  assert.equal(memoryOmitted(unbounded, 'labels', fmt).text, '1 more label not shown (1 element, 596 B)');
+  // Nothing left out: no line.
+  assert.equal(memoryOmitted({ properties: [prop(1)], labels: [label(1)] }, 'properties'), null);
+  assert.equal(memoryOmitted({ properties: [], labels: [] }, 'labels'), null);
+  assert.equal(memoryOmitted(null, 'labels'), null);
+});
+
 test('workload rows: only the slow ones, sorted by a column', () => {
   const slow = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { minMicros: 1000 });
   assert.deepEqual(slow.map((r) => r.name), ['v(labels: [?]).values(?)']);

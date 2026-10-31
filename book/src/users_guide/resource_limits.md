@@ -341,14 +341,16 @@ the session layer):
 - **Playground**: the process memory bar in the Profile panel's Statistics tab and in
   Optimize -> Memory ([The Web Playground](web_playground.md)): used of the ceiling, its
   source, the percentage, and the segments structure, properties, compressed, indexes, models and
-  other (the heap the graph's estimate does not explain).
+  other (the heap the graph's estimate does not explain). The segments use the figures of
+  `g.memory_usage()`: structure is `structure_bytes`, indexes is `index_bytes` (the id and label
+  indexes) plus `property_index_bytes`.
 - **REPL**: `/memory` prints the bar as text before the memory report:
 
   ```text
   Memory   1.6 GiB of 3.4 GiB (cgroup)                                        47 %
            [################################....................................]
-           structure 180.0 MiB  properties 420.0 MiB  compressed 95.0 MiB
-           indexes 60.0 MiB  models 506.0 MiB  other 340.0 MiB
+           structure 150.0 MiB  properties 420.0 MiB  compressed 95.0 MiB
+           indexes 90.0 MiB  models 506.0 MiB  other 340.0 MiB
            compression saves 285.0 MiB (plain 380.0 MiB -> 95.0 MiB, -75 %)
   ```
 

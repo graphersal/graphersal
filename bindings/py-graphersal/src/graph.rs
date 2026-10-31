@@ -1170,8 +1170,11 @@ impl Graph {
     /// ``indexes``, ``compression_rules``, ``structure``, ``property_bytes``,
     /// ``estimated_total_bytes``, ``tracked_live_bytes``, ``sampled``, ... (book page "Memory
     /// Usage"). ``max_elements``/``sample_every`` sample a large graph (figures extrapolated per
-    /// label), ``max_rows``/``max_labels`` keep the rows with the most bytes.
-    #[pyo3(signature = (*, sample_every=None, max_elements=None, max_rows=None, max_labels=None, policy=None))]
+    /// label); ``limit`` keeps the property rows and the label rows with the most bytes (default
+    /// 500), ``max_rows``/``max_labels`` one list each; the rows left out are counted with their
+    /// bytes (``rows_omitted``, ``rows_omitted_bytes``, ``labels_omitted``, ...).
+    #[pyo3(signature = (*, sample_every=None, max_elements=None, max_rows=None, max_labels=None, limit=None, policy=None))]
+    #[allow(clippy::too_many_arguments)]
     fn memory_report(
         &self,
         py: Python<'_>,
@@ -1179,6 +1182,7 @@ impl Graph {
         max_elements: Option<i64>,
         max_rows: Option<i64>,
         max_labels: Option<i64>,
+        limit: Option<i64>,
         policy: Option<PyRef<'_, AccessPolicy>>,
     ) -> PyResult<Py<PyAny>> {
         let params = PyDict::new(py);
@@ -1188,6 +1192,7 @@ impl Graph {
             ("max_elements", max_elements),
             ("max_rows", max_rows),
             ("max_labels", max_labels),
+            ("limit", limit),
         ] {
             if let Some(value) = value {
                 let name = format!("mr_{key}");

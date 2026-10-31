@@ -691,3 +691,137 @@ fn the_dsl_answers_the_report_map() {
         assert!(err.contains(needle), "{script}: {err}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Many labels: the default limit
+// ---------------------------------------------------------------------------------------------
+
+/// `n` vertices, each with its own label, a name of a varying length and a number, in a chain of
+/// edges with one edge label per ten vertices.
+fn many_labels(n: usize) -> TraversalGraph {
+    let mut graph = TraversalGraph::new();
+    let mut previous = None;
+    for i in 0..n {
+        let name = format!("n{i}-{}", "x".repeat(i % 50));
+        let v = graph
+            .insert_vertex(
+                None,
+                vec![format!("L{i}").into()],
+                props(vec![
+                    ("name", name.as_str().into()),
+                    ("i", (i as i64).into()),
+                ]),
+            )
+            .unwrap();
+        if let Some(p) = previous {
+            graph
+                .insert_edge(
+                    None,
+                    Some(format!("E{}", i / 10).into()),
+                    p,
+                    v,
+                    PropertyMap::default(),
+                )
+                .unwrap();
+        }
+        previous = Some(v);
+    }
+    graph
+}
+
+#[test]
+fn many_labels_get_a_bounded_report_with_the_rest_counted() {
+    let graph = many_labels(20_000);
+    let started = std::time::Instant::now();
+    let report = full(&graph);
+    let took = started.elapsed();
+    assert_eq!(MemoryReportRequest::DEFAULT_LIMIT, 500);
+    assert_eq!(report.properties.len(), 500);
+    assert_eq!(report.labels.len(), 500);
+    // 20 000 vertex labels x 2 keys; 2 000 edge labels without properties.
+    assert_eq!(report.rows_omitted, 40_000 - 500);
+    assert_eq!(report.labels_omitted, 22_000 - 500);
+    assert_reconciles(&graph, &report);
+    // Generous: a walk of 40k elements must not take tens of seconds (debug build).
+    assert!(took.as_secs() < 20, "the report took {took:?}");
+
+    // The kept rows are the first rows of the complete report; the omitted figures are the rest.
+    let all = report_of(&graph, &MemoryReportRequest::new().with_limit(usize::MAX));
+    assert_eq!(all.properties.len(), 40_000);
+    assert_eq!(all.labels.len(), 22_000);
+    assert_eq!((all.rows_omitted, all.labels_omitted), (0, 0));
+    assert_eq!(report.properties[..], all.properties[..500]);
+    let rest: u64 = all.properties[500..].iter().map(|r| r.bytes()).sum();
+    assert_eq!(report.rows_omitted_bytes, rest);
+    let kept: std::collections::HashSet<_> = report
+        .labels
+        .iter()
+        .map(|l| (l.element, l.label.clone()))
+        .collect();
+    let omitted: Vec<_> = all
+        .labels
+        .iter()
+        .filter(|l| !kept.contains(&(l.element, l.label.clone())))
+        .collect();
+    assert_eq!(omitted.len() as u64, report.labels_omitted);
+    assert_eq!(
+        report.labels_omitted_elements,
+        omitted.iter().map(|l| l.elements).sum::<u64>()
+    );
+    assert_eq!(
+        report.labels_omitted_property_bytes,
+        omitted.iter().map(|l| l.property_bytes).sum::<u64>()
+    );
+    let size = |l: &graphersal::storage::LabelMemory| l.property_bytes + l.slot_bytes.unwrap_or(0);
+    assert_eq!(
+        report.labels_omitted_bytes,
+        omitted.iter().map(|l| size(l)).sum::<u64>()
+    );
+    // Every kept label is at least as large as every omitted one.
+    let smallest_kept = report.labels.iter().map(size).min().unwrap();
+    assert!(omitted.iter().all(|l| size(l) <= smallest_kept));
+    // The elements of the shown and the omitted labels add up to the graph.
+    let shown: u64 = report.labels.iter().map(|l| l.elements).sum();
+    assert_eq!(shown + report.labels_omitted_elements, 20_000 + 19_999);
+    assert_eq!(report.property_bytes(), all.property_bytes());
+
+    // The value form and the text name what is left out.
+    let value = report.to_json();
+    for key in [
+        r#""rows_omitted":39500"#,
+        r#""rows_omitted_bytes":"#,
+        r#""labels_omitted":21500"#,
+        r#""labels_omitted_elements":"#,
+        r#""labels_omitted_bytes":"#,
+        r#""labels_omitted_property_bytes":"#,
+    ] {
+        assert!(value.contains(key), "{key}");
+    }
+    let text = report.to_string();
+    assert!(text.contains("(500 shown, 21500 more with "), "{text}");
+    assert!(text.contains("(500 shown, 39500 more with "), "{text}");
+}
+
+#[test]
+fn the_limit_sets_both_lists_and_the_single_caps_win() {
+    let graph = many_labels(50);
+    let report = report_of(&graph, &MemoryReportRequest::new().with_limit(3));
+    assert_eq!((report.properties.len(), report.labels.len()), (3, 3));
+    let report = report_of(
+        &graph,
+        &MemoryReportRequest::new().with_limit(3).with_max_rows(7),
+    );
+    assert_eq!((report.properties.len(), report.labels.len()), (7, 3));
+    let shared = Arc::new(Graph::new(many_labels(50)));
+    let rows = eval_value(
+        shared.clone(),
+        "let r = g.memory_report(#{limit: 4}); [r.properties.len(), r.labels.len(), r.labels_omitted]",
+    )
+    .unwrap();
+    // 50 vertex labels and 5 edge labels.
+    assert_eq!(rows.to_string(), "[4, 4, 51]");
+    let err = eval_value(shared, "g.memory_report(#{limit: 0})")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("limit as a positive integer"), "{err}");
+}

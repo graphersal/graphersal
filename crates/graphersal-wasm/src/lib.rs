@@ -496,8 +496,9 @@ impl Playground {
         Ok(to_text(&statistics))
     }
 
-    /// The memory report from a spec (JSON text, `{sample_every?, max_elements?, max_rows?, max_labels?}`;
-    /// `{}`: a full report): `{ok: true, report}` or `{ok: false, error}` (see
+    /// The memory report from a spec (JSON text, `{sample_every?, max_elements?, limit?, max_rows?,
+    /// max_labels?}`; `{}`: a full walk, the 500 largest rows per list): `{ok: true, report}` or
+    /// `{ok: false, error}` (see
     /// [`Session::memory_report`]).
     #[wasm_bindgen(js_name = memoryReport)]
     pub fn memory_report(&self, spec: &str) -> Result<String, JsError> {

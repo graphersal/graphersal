@@ -702,8 +702,10 @@ impl<S: GraphStorage> Graph<S> {
             .map(|stats| stats.report_with_history(now, crate::graph::workload::HistoryTier::Days));
         let guard = self.read_checked()?;
         let source = crate::GraphTraversalSource::new(&*guard);
-        let memory =
-            source.memory_report(&crate::graph::memory_report::MemoryReportRequest::new())?;
+        // Every row: the advice looks at every property, not only the largest ones.
+        let memory = source.memory_report(
+            &crate::graph::memory_report::MemoryReportRequest::new().with_limit(usize::MAX),
+        )?;
         let mut failure = None;
         let mut estimate =
             |request: &crate::graph::compression_estimate::CompressionEstimateRequest| {

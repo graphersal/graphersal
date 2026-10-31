@@ -20,10 +20,10 @@ export const RED_ABOVE = 90;
 
 /** What each segment holds (the legend's tooltips). */
 export const SEGMENT_HINTS = {
-  structure: 'vertex and edge slots, ids, labels and the id and label indexes',
+  structure: 'vertex and edge slots, ids and labels (the Memory row\'s Structure)',
   properties: 'property values and their key lists, stored plain',
   compressed: 'compressed and deduplicated values with their dictionaries and shared tables',
-  indexes: 'property indexes',
+  indexes: 'the id and label indexes plus the property indexes (the Memory row\'s Indexes and Property indexes)',
   models: 'embedding models held in memory',
   other: 'the rest of the process heap: query buffers, caches, the session, allocator overhead',
 };

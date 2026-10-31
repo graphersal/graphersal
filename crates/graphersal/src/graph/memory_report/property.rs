@@ -210,8 +210,9 @@ fn structure(structure: &StructureMemory) -> ElementProperty {
 }
 
 impl MemoryReport {
-    /// The report as a value: an object with `properties`, `rows_omitted`, `labels`,
-    /// `labels_omitted`, `shapes`,
+    /// The report as a value: an object with `properties`, `rows_omitted`,
+    /// `rows_omitted_bytes`, `labels`, `labels_omitted`, `labels_omitted_elements`,
+    /// `labels_omitted_bytes`, `labels_omitted_property_bytes`, `shapes`,
     /// `indexes`, `compression_rules`, `structure` (`null` when the storage does not report
     /// one), `property_bytes`, `estimated_total_bytes`, `tracked_live_bytes`,
     /// `unattributed_bytes`, `sampled`, `sample_every`, `visited_elements`, `path_depth`,
@@ -233,8 +234,15 @@ impl MemoryReport {
         let mut map = PropertyMap::default();
         map.insert("properties", list(&self.properties, property));
         map.insert("rows_omitted", int(self.rows_omitted));
+        map.insert("rows_omitted_bytes", int(self.rows_omitted_bytes));
         map.insert("labels", list(&self.labels, label));
         map.insert("labels_omitted", int(self.labels_omitted));
+        map.insert("labels_omitted_elements", int(self.labels_omitted_elements));
+        map.insert("labels_omitted_bytes", int(self.labels_omitted_bytes));
+        map.insert(
+            "labels_omitted_property_bytes",
+            int(self.labels_omitted_property_bytes),
+        );
         let mut shapes = PropertyMap::default();
         shapes.insert("shapes", int(self.shapes.shapes));
         shapes.insert("shaped_elements", int(self.shapes.shaped_elements));

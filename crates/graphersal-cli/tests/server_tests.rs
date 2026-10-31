@@ -3206,6 +3206,65 @@ fn saved_queries_written_in_gql_over_http_and_mcp() {
     );
 }
 
+/// The memory report of a graph with many labels is bounded on every path: the playground's
+/// `POST /api/memory/report` keeps 500 rows per list by default, MCP 50 (`limit` changes both),
+/// and both count the rows left out with their bytes.
+#[test]
+fn the_memory_report_of_many_labels_is_bounded_over_http_and_mcp() {
+    let ui = ui_dir("memory-report-limit");
+    let server = start(&[
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": r#"for i in 0..1200 { g.add_v("L" + i).property("name", "n" + i).to_list(); } g.v().count()"#}),
+    );
+    assert!(!error, "{text}");
+
+    let answer = post(port, "/api/memory/report", "{}").json();
+    assert_eq!(answer["ok"], true, "{answer}");
+    let report = &answer["report"];
+    assert_eq!(report["properties"].as_array().unwrap().len(), 500);
+    assert_eq!(report["labels"].as_array().unwrap().len(), 500);
+    assert_eq!(report["rows_omitted"], 700);
+    assert_eq!(report["labels_omitted"], 700);
+    assert_eq!(report["labels_omitted_elements"], 700);
+    assert!(
+        report["rows_omitted_bytes"].as_u64().unwrap() > 0,
+        "{report}"
+    );
+    assert!(
+        report["labels_omitted_bytes"].as_u64().unwrap() > 0,
+        "{report}"
+    );
+    assert_eq!(
+        report["property_bytes"],
+        report["structure"]["totals"]["property_bytes"]
+    );
+
+    let mcp_report = |mcp: &mut McpClient, arguments: Value| -> Value {
+        let (error, text) = mcp.call("memory_report", arguments);
+        assert!(!error, "{text}");
+        let json = text.split_once('\n').map(|(_, json)| json).unwrap_or("");
+        serde_json::from_str(json).unwrap_or_else(|err| panic!("{err}: {text}"))
+    };
+    let report = mcp_report(&mut mcp, serde_json::json!({}));
+    assert_eq!(report["properties"].as_array().unwrap().len(), 50);
+    assert_eq!(report["labels"].as_array().unwrap().len(), 50);
+    assert_eq!(report["rows_omitted"], 1150);
+    assert_eq!(report["labels_omitted"], 1150);
+    let report = mcp_report(&mut mcp, serde_json::json!({"limit": 10, "max_labels": 20}));
+    assert_eq!(report["properties"].as_array().unwrap().len(), 10);
+    assert_eq!(report["labels"].as_array().unwrap().len(), 20);
+    assert_eq!(report["labels_omitted"], 1180);
+}
+
 /// MCP works with the graph only, also on a Store: exactly the graph tools, the persistence
 /// tools are unknown; a read-only view the browser opens is server-wide: `graph_info` and a
 /// refused write say so, the change feed carries it.
