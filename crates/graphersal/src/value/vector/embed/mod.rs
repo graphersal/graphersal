@@ -409,7 +409,7 @@ pub enum EmbedError {
     },
     /// The schema declares a model for the property, and no embedder of the graph has it: its
     /// database does not keep that model (an imported model is found by its identity).
-    #[error("no registered embedder has the model {model} the schema declares for {key}")]
+    #[error("no model of this database has the identity {model} the schema declares for {key}")]
     #[non_exhaustive]
     ModelNotRegistered {
         /// The declared model identity (quoted).

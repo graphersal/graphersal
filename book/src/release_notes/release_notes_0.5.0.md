@@ -28,9 +28,13 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   `local/<12 hex>`), models the schema needs but the store does not keep (0.4.0 served them
   through `--embedder`; import them, or the store does not open), vector properties without a
   rule with a ready schema patch adding `"from"`, and saved queries calling the removed
-  `embed_property` (never rewritten). The vector notes come as one note per model listing its
-  properties with their counts and one combined patch, and saved queries that write a vector
-  property directly are listed too (they fail once the rule exists).
+  `embed_property` (never rewritten). The vector notes come as ONE note per model listing its
+  properties with their counts and one combined patch (`UpgradeReport::vector_notes`,
+  `VectorWithoutRule::combined_schema_patch`; a real 0.4.0 file went from 18 notes to one), and
+  the saved queries that write a vector property directly (`property("emb", ..)` with a literal
+  key) are listed too, one note each (`UpgradeReport::saved_queries_writing_vectors`): such a
+  write fails once the rule exists, so remove it (queries are never rewritten; a computed key
+  and `merge_v`/`merge_e` maps are not found). The `.gsnap` notes say the same.
 - **Take a full backup after the upgrade.** An upgraded backup directory stays a backup, but it
   no longer takes increments of the upgraded store (`BackupRefused`): back the upgraded store up
   into a new directory.
@@ -95,8 +99,10 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   label while the database is locked. Previews (`validate_schema`, `validate_schema_patch`,
   `diff_schema`) report the planned fill and one warning text; MCP `set_schema`/`patch_schema`
   take `confirm_lock` above the threshold; the playground asks "Apply and lock"; Python issues
-  `graphersal.VectorFillWarning`. The estimate of the locked time includes the schema scan,
-  which reads only the patched labels. A direct write of a rule's vector is refused
+  `graphersal.VectorFillWarning`. The estimate of the locked time includes the schema check
+  (`PlannedFill::scan_elements`/`scan_ms`; `validate_schema` measures it), and the preview names
+  the saved queries writing the filled property directly (`PlannedFill::direct_writes`, a line
+  of the warning). A direct write of a rule's vector is refused
   (`GraphError::DerivedProperty`); replay and recovery never call a model.
 - **Blobs** ([Blobs](../persistence/store_blobs.md)): immutable files of a store named by their
   SHA-256, referenced by `BlobRef` values (`graphersal::blob`), kept as long as retained history
@@ -142,8 +148,9 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   label indexes plus the property indexes). The playground shows the bar in Profile ->
   Statistics and in Optimize -> Memory, the REPL before `/memory`, the dev server in its
   banner. PROFILE adds a "Peak memory X of Y" line (`profile::QueryMemory`,
-  `TraversalMetrics::memory()`, JSON key `query_memory`). `g.memory_usage()` (and
-  `MemoryStats::model_bytes`) counts the loaded models.
+  `TraversalMetrics::memory()`, JSON key `query_memory`). `g.memory_usage()` reports the loaded
+  models as `model_bytes` (`MemoryStats::model_bytes`, the session's memory JSON, a row of the
+  playground's statistics), beside `total_bytes`, not in it.
 - **Bounded memory report**: `g.memory_report()` and `MemoryReportRequest` return the 500
   largest rows per list (a `limit` parameter; `usize::MAX` keeps every row) plus a "remaining N
   labels, X bytes" count; the totals cover everything. The MCP tool `memory_report` defaults to
@@ -167,6 +174,12 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
 - **`--license`** of `embed-model import` now applies only when the model's manifest states no
   licence (the library's rule); before, it overrode the manifest.
 - A ceiling `help()` no longer names a Rust crate path to a script user.
+- **A closure using `g` inside a chain on `g`** (`g.queries().map(|q| g.get_query(q.name))`)
+  failed with Rhai's bare "Data race detected": the error now explains it and its help names the
+  forms that work (`let qs = g.queries(); qs.map(..)`, or a `for` loop).
+- A text query on a property whose model the database does not keep now says "no model of this
+  database has the identity ..." (`EmbedError::ModelNotRegistered`; there is no registry since
+  0.5.0); its help names `g.embedders()` and `graphersal embed-model import`.
 
 ## Performance
 
@@ -176,6 +189,13 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
 - A snapshot load passes under a ceiling of 1.00x its manifest estimate (the graph is no longer
   counted twice; it needed about 1.4x).
 - The memory report picks its largest rows in one selection pass before building any row.
+- **A schema change checks only the labels it changes** when the mode stays `open` or `closed`
+  (the apply and the `validate_schema` preview); a change of the mode checks everything. Adding
+  vector rules to labels of 9,000 to 30,500 elements in a graph of 2.5 million elements: the
+  preview went from 587-668 ms to 6-15 ms, the apply from 616-679 ms to 39-99 ms (a store:
+  709-824 ms to 82-183 ms). This relies on the data satisfying the stored schema, which every
+  write checks: a storage of a host must reject writes that violate the schema in force
+  (`GraphStorage::set_schema`, [Custom storage](../for_developers/custom_storage.md)).
 - Blobs are written at about 276 MB/s (SHA-256, CRC-32C and the disk together); SHA-256 is the
   engine's own scalar code.
 
@@ -265,7 +285,10 @@ VectorRuleModelMissing}`, the field `needed` of `GraphError::ResourceLimitExceed
 VectorRuleChanged, VectorRuleRemoved}`, `VectorSchema::from`, `schema::{PlannedFill, FillReason,
 fill_warning}`, `exec::FillProgress`, `Graph::vector_fill_progress`,
 `UpgradeReport::{models_converted, migration_commit, models_missing, vectors_without_rule,
-saved_queries_using_removed}`, `catalog::RemovedFunctionUse`, `script::saved_queries_using_removed`,
+saved_queries_using_removed, saved_queries_writing_vectors, vector_notes}`,
+`SnapshotLoadReport::saved_queries_writing_vectors`, `VectorWithoutRule::combined_schema_patch`,
+`PlannedFill::{scan_elements, scan_ms, direct_writes}`, `catalog::{RemovedFunctionUse,
+VectorPropertyWrite}`, `script::{saved_queries_using_removed, saved_queries_writing_vectors}`,
 `persist::{ModelSource, ImportModelOptions, ModelInfo, ModelState, ImportModelReport,
 ModelChangeReport, ClosedCommitOptions, BlobSource, RestoreBlobsReport, RepairOptions, ModelCache,
 ConvertedModel, MissingModel, VectorWithoutRule, SnapshotLoadReport, read_snapshot_file}`,
@@ -274,5 +297,6 @@ fields for blobs, models and journal files.
 
 `graphersal-session` and `graphersal-wasm` (internal): the session JSON carries `modelsNote`,
 the models' `state`, `loadBytes`, `neededBy` and `default`, `fill`/`fill_warning` in schema
-previews, `process.memory` with the bar keys, `query_memory` in profiles, and a `limit` for the
+previews (each fill with `scan_elements`, `scan_ms`, `direct_writes`), `model_bytes` in the
+memory JSON (`views::memory_stats_view`), `process.memory` with the bar keys, `query_memory` in profiles, and a `limit` for the
 memory report; `Session::journal` and wasm `journal(spec)` read the system journal.

@@ -470,13 +470,18 @@ impl TraversalGraph {
     /// Validates `schema` against the stored data and stores it: the body of
     /// [`GraphStorage::set_schema`], which records the old schema around it.
     ///
-    /// In mode `Open` or `Closed` ALL existing vertices and edges are validated first, and on a
-    /// violation the graph and its schema stay unchanged
+    /// In mode `Open` or `Closed` the existing vertices and edges are validated first (all of
+    /// them, or only those of the labels whose declaration changed when the stored schema has
+    /// the same mode: `schema::apply::changed_labels`), and on a violation the graph and its
+    /// schema stay unchanged
     /// ([`SchemaError::ExistingDataViolatesSchema`]). Outside any unit the change is a unit of
     /// its own (recorded, captured as a [`Mutation::SetSchema`], seen by the commit hooks, which
     /// may veto it with [`GraphError::CommitRejected`]).
     pub(crate) fn store_schema(&self, schema: GraphSchema) -> Result<(), crate::error::GraphError> {
-        let report = crate::graph::schema::apply::scan_storage(self, &schema)?;
+        // Only the labels whose declaration changed, when the mode stays `Open`/`Closed`.
+        let stored = self.schema.read().clone();
+        let report =
+            crate::graph::schema::apply::scan_storage_change(self, Some(&stored), &schema)?;
         if !report.is_empty() {
             return Err(SchemaError::ExistingDataViolatesSchema {
                 report: Box::new(report),

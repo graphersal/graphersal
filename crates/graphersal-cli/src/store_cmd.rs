@@ -2146,8 +2146,10 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
             missing.commands(target).join(" then ")
         );
     }
-    for vector in &report.vectors_without_rule {
-        errln!("note: {}", vector.note(target));
+    // One note per model (its properties with one combined patch), then the saved queries
+    // writing a vector property directly.
+    for note in report.vector_notes(target) {
+        errln!("note: {note}");
     }
     print_removed_function_uses(&report.saved_queries_using_removed, target);
 }

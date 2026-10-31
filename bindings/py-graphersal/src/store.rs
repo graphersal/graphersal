@@ -289,7 +289,8 @@ impl Store {
     /// one commit (``err.cause == "upgrade_model_damaged"`` for a damaged one, nothing
     /// written). Returns ``{"from_version", "to_version", "already_current", "in_place",
     /// "backup", "files", "bytes", "models_converted", "migration_commit", "models_missing",
-    /// "vectors_without_rule", "saved_queries_using_removed"}``: ``models_converted`` lists ``{"repo", "identity",
+    /// "vectors_without_rule", "saved_queries_using_removed", "saved_queries_writing_vectors",
+    /// "vector_notes"}``: ``models_converted`` lists ``{"repo", "identity",
     /// "former_identity", "bytes"}``, ``models_missing`` ``{"identity", "repo", "needed_by",
     /// "commands"}`` (the store opens once they are imported), ``vectors_without_rule``
     /// ``{"element", "label", "property", "embedder", "model", "elements", "exact",
@@ -297,7 +298,12 @@ impl Store {
     /// source property ``from``: the note says how to add one), ``saved_queries_using_removed``
     /// ``{"query", "function", "removed_in", "replacement", "schema_patch", "note"}`` (saved
     /// queries calling a function this version removed, such as 0.4.0's ``embed_property``;
-    /// ``schema_patch`` is the vector rule replacing the call, or ``None``; never rewritten).
+    /// ``schema_patch`` is the vector rule replacing the call, or ``None``; never rewritten),
+    /// ``saved_queries_writing_vectors`` ``{"query", "element", "property", "labels",
+    /// "rule_exists", "note"}`` (saved queries writing a vector property directly, which a
+    /// vector rule refuses: remove that write; never rewritten) and ``vector_notes`` (the
+    /// notes to show: ONE per model, its properties with one combined schema patch, then one
+    /// per saved query writing a vector property).
     #[staticmethod]
     #[pyo3(signature = (source, target=None, *, in_place=false, single_file=false))]
     fn upgrade(
@@ -398,6 +404,19 @@ impl Store {
             removed.append(item)?;
         }
         dict.set_item("saved_queries_using_removed", removed)?;
+        let writing = PyList::empty(py);
+        for write in &report.saved_queries_writing_vectors {
+            let item = PyDict::new(py);
+            item.set_item("query", &write.query)?;
+            item.set_item("element", write.element.as_str())?;
+            item.set_item("property", &write.property)?;
+            item.set_item("labels", write.labels.clone())?;
+            item.set_item("rule_exists", write.rule_exists)?;
+            item.set_item("note", write.note())?;
+            writing.append(item)?;
+        }
+        dict.set_item("saved_queries_writing_vectors", writing)?;
+        dict.set_item("vector_notes", report.vector_notes(store_path))?;
         Ok(dict.into_any().unbind())
     }
 

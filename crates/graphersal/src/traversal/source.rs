@@ -1342,11 +1342,35 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     }
 
     fn validation(&self, schema: GraphSchema) -> TraverserResult<SchemaValidation> {
-        let violations = crate::graph::schema::apply::scan_storage(&self.storage, &schema)?;
         let stored = self.storage.get_schema()?;
+        // The same elements the apply checks (only the changed labels' when the mode stays),
+        // timed: the apply's check takes as long, under the lock of its fills.
+        let started = Instant::now();
+        let violations = crate::graph::schema::apply::scan_storage_change(
+            &self.storage,
+            stored.as_ref(),
+            &schema,
+        )?;
+        let scan = crate::graph::vector_rules::SchemaScan {
+            elements: crate::graph::schema::apply::scan_size(
+                &self.storage,
+                stored.as_ref(),
+                &schema,
+            )?,
+            measured_ms: Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+        };
         let diff = SchemaDiff::between(stored.as_ref(), &schema);
-        let fill =
-            crate::graph::vector_rules::plan_fills(&self.storage, stored.as_ref(), &schema, true)?;
+        #[cfg_attr(not(feature = "script"), allow(unused_mut))]
+        let mut fill = crate::graph::vector_rules::plan_fills(
+            &self.storage,
+            stored.as_ref(),
+            &schema,
+            true,
+            scan,
+        )?;
+        // The saved queries writing a filled property directly (a rule refuses that write).
+        #[cfg(feature = "script")]
+        crate::script::attach_direct_writes(&self.storage, &mut fill)?;
         Ok(SchemaValidation {
             schema,
             violations,
@@ -1387,8 +1411,24 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         self.authorize_schema("diff_schema", crate::graph::Action::Read)?;
         let stored = self.storage.get_schema()?;
         let mut diff = SchemaDiff::between(stored.as_ref(), schema);
-        diff.fill =
-            crate::graph::vector_rules::plan_fills(&self.storage, stored.as_ref(), schema, false)?;
+        // The apply's schema check, estimated from the label statistics.
+        let scan = crate::graph::vector_rules::SchemaScan {
+            elements: crate::graph::schema::apply::scan_size(
+                &self.storage,
+                stored.as_ref(),
+                schema,
+            )?,
+            measured_ms: None,
+        };
+        diff.fill = crate::graph::vector_rules::plan_fills(
+            &self.storage,
+            stored.as_ref(),
+            schema,
+            false,
+            scan,
+        )?;
+        #[cfg(feature = "script")]
+        crate::script::attach_direct_writes(&self.storage, &mut diff.fill)?;
         Ok(diff)
     }
 

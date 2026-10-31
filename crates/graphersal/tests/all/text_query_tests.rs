@@ -180,7 +180,7 @@ fn text_query_refusals() {
         r#"g.v().has_label("software").nearest("emb", "lop", 1).to_list()"#,
     );
     assert!(
-        err.contains(r#"no registered embedder has the model "acme/other@2""#),
+        err.contains(r#"no model of this database has the identity "acme/other@2""#),
         "{err}"
     );
     // Two models met.
@@ -207,7 +207,7 @@ fn text_query_refusals() {
         r#"g.v().has_label("nothing").nearest("emb", "lop", 1).to_list()"#,
     );
     assert!(
-        err.contains(r#"no registered embedder has the model "x/1""#),
+        err.contains(r#"no model of this database has the identity "x/1""#),
         "{err}"
     );
 }

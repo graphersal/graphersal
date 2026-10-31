@@ -105,7 +105,9 @@ the file brought that still needs your decision is printed as `store upgrade` pr
 code **0**): the converted models of a Graphersal 0.4.0 file, a `warning:` for every model the
 schema needs that the file does not carry (a 0.4.0 file whose model came from `--embedder`, or an
 export `--without-models`; the store is created and opens once the model is imported, with the
-commands named), a `note:` for every vector property without a source property and for every
+commands named), a `note:` per model for the vector properties without a source property (one
+note listing them with one combined patch), a `note:` for every saved query writing such a
+property directly and for every
 saved query calling a removed function:
 
 ```text
@@ -568,8 +570,9 @@ The embedding models of a Graphersal 0.4.0 store (`models/`) become blobs define
 upgrade before anything is written (exit **1**, `StoreFailure::UpgradeModelDamaged`). What still
 needs your decision is printed, the exit code stays **0**: a `warning:` for every model the
 schema needs that the store does not keep (with the commands that import it: the store opens
-once it is there), and a `note:` for every vector property with a model but no source property
-`from`, with the ready schema patch:
+once it is there), a `note:` per model for the vector properties with a model but no source property
+`from` (one combined schema patch for all properties of the model), and a `note:` for every
+saved query writing such a property directly (a vector rule refuses that write):
 
 ```text
 $ graphersal store upgrade store/ --in-place

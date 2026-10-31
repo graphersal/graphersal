@@ -614,6 +614,122 @@ pub(crate) fn scan_storage<S: GraphStorage>(
     Ok(scanner.finish())
 }
 
+/// The labels a change from `before` (the stored schema) to `after` can make data violate, when
+/// the check of `after` may be limited to them: `None` when every element must be checked.
+///
+/// The data satisfies the stored schema in mode `Open`/`Closed` (every write was checked since
+/// it was set), so with the same mode only the elements of a label whose declaration was added,
+/// changed or removed can be affected: a property check reads the declarations of the
+/// element's own labels, an edge's topology only its own label's connections, an unknown label
+/// (`Closed`) only whether its own label is declared. A changed mode, or a stored schema of
+/// mode `None` (never enforced), checks everything.
+pub(crate) fn changed_labels(
+    before: Option<&GraphSchema>,
+    after: &GraphSchema,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let before = before?;
+    if before.mode != after.mode || matches!(after.mode, SchemaMode::None) {
+        return None;
+    }
+    fn differing<T: PartialEq>(
+        before: &indexmap::IndexMap<String, T>,
+        after: &indexmap::IndexMap<String, T>,
+    ) -> Vec<String> {
+        let mut labels: Vec<String> = after
+            .iter()
+            .filter(|(label, schema)| before.get(label.as_str()) != Some(*schema))
+            .map(|(label, _)| label.clone())
+            .collect();
+        labels.extend(
+            before
+                .keys()
+                .filter(|label| !after.contains_key(label.as_str()))
+                .cloned(),
+        );
+        labels
+    }
+    Some((
+        differing(&before.vertices, &after.vertices),
+        differing(&before.edges, &after.edges),
+    ))
+}
+
+/// [`scan_storage`] of a schema change from the stored `before` to `after`: only the elements
+/// of the labels [`changed_labels`] names (each element once), else every element. A change of
+/// a few labels' declarations (a vector rule added to some labels) reads only their elements.
+pub(crate) fn scan_storage_change<S: GraphStorage>(
+    storage: &S,
+    before: Option<&GraphSchema>,
+    after: &GraphSchema,
+) -> Result<SchemaViolationReport, crate::error::GraphError> {
+    let Some((vertex_labels, edge_labels)) = changed_labels(before, after) else {
+        return scan_storage(storage, after);
+    };
+    let mut scanner = SchemaViolationScanner::new(after);
+    let empty = PropertyMap::default();
+    for (position, label) in vertex_labels.iter().enumerate() {
+        let earlier = &vertex_labels[..position];
+        for vertex in storage.vertices_by_label(label)? {
+            let labels = storage.vertex_labels(vertex)?;
+            // A vertex with several changed labels is checked once, under the first.
+            if labels
+                .iter()
+                .any(|l| earlier.iter().any(|e| e == l.as_str()))
+            {
+                continue;
+            }
+            scanner.scan_vertex(
+                storage.vertex_id(vertex)?.unwrap_or(""),
+                labels,
+                storage.vertex_properties(vertex)?.unwrap_or(&empty),
+            );
+        }
+    }
+    for label in &edge_labels {
+        for edge in storage.edges_by_label(label)? {
+            let Some((from, to)) = storage.edge_endpoints(edge)? else {
+                continue;
+            };
+            scanner.scan_edge(
+                storage.edge_id(edge)?.unwrap_or(""),
+                storage.edge_label(edge)?,
+                storage.vertex_labels(from)?,
+                storage.vertex_labels(to)?,
+                storage.edge_properties(edge)?.unwrap_or(&empty),
+            );
+        }
+    }
+    Ok(scanner.finish())
+}
+
+/// How many elements [`scan_storage_change`] reads for the change from `before` to `after`
+/// (from the label statistics; `0` in mode `None`, which checks nothing): the schema check's
+/// share of the time a schema change holds the lock. A vertex with several changed labels is
+/// counted under each.
+pub(crate) fn scan_size<S: GraphStorage + ?Sized>(
+    storage: &S,
+    before: Option<&GraphSchema>,
+    after: &GraphSchema,
+) -> Result<u64, crate::error::GraphError> {
+    if matches!(after.mode, SchemaMode::None) {
+        return Ok(0);
+    }
+    let Some(statistics) = storage.statistics()? else {
+        return Ok(0);
+    };
+    Ok(match changed_labels(before, after) {
+        None => (statistics.vertex_count() + statistics.edge_count()) as u64,
+        Some((vertices, edges)) => {
+            let vertices: usize = vertices
+                .iter()
+                .map(|l| statistics.vertex_label_count(l))
+                .sum();
+            let edges: usize = edges.iter().map(|l| statistics.edge_label_count(l)).sum();
+            (vertices + edges) as u64
+        }
+    })
+}
+
 impl ViolationKind {
     /// The kind's name in the data shape: `unknown_label`, `missing_required`,
     /// `type_mismatch`, `constraint_violation`, `undeclared_property`, `invalid_topology`,

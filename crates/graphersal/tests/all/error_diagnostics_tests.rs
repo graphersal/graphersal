@@ -7073,7 +7073,7 @@ fn text_query_errors_name_the_vector_rule() {
             .expect_err("no embedder of the model");
         let report = format_diagnostic(&err);
         assert!(
-            report.contains("no registered embedder has the model \"acme/other@2\""),
+            report.contains("no model of this database has the identity \"acme/other@2\""),
             "{report}"
         );
         assert!(

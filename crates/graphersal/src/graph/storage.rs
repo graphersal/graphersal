@@ -506,6 +506,15 @@ pub trait GraphStorage: Send + Sync {
     /// [`GraphError::Schema`]); mode `None` applies without validation. Storing the empty schema
     /// ([`GraphSchema::is_empty`]) removes the schema.
     ///
+    /// **Contract: the stored data always satisfies a stored schema of mode `Open`/`Closed`.** A
+    /// storage with schemas rejects (or never stores) every write that violates the schema in
+    /// force: `insert_*`, property, label and removal writes check it as `TraversalGraph`'s do
+    /// (`SchemaValidator`, through the public write-check helpers). The engine relies on it: a
+    /// schema change that keeps the mode `Open`/`Closed` checks only the elements of the labels
+    /// whose declaration was added, changed or removed (`TraversalGraph`'s implementation, and
+    /// the preview of [`validate_schema`](crate::GraphTraversalSource::validate_schema) on any
+    /// storage), never the other labels; a change of the mode checks everything.
+    ///
     /// Default: [`GraphError::Unsupported`]; a backend with schemas overrides this together with
     /// [`Self::get_schema`].
     fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
