@@ -31,7 +31,6 @@ use crate::value::vector::embed::identity::{
     FAMILY, IDENTITY_ROLES, identity_digest, identity_text, is_repo_name, parse_identity,
 };
 use crate::value::vector::embed::registry::{self, ModelLoadState};
-use crate::value::vector::embed::sha256::{Sha256, hex};
 
 /// Where an imported model's files come from ([`Store::import_model`]).
 #[derive(Debug)]
@@ -424,6 +423,7 @@ fn read_in_memory(name: &str, reader: &mut dyn Read) -> Result<Vec<u8>, PersistE
 /// Hashes a file of the local file system (first pass of a directory import).
 #[cfg(not(target_arch = "wasm32"))]
 fn hash_path(path: &std::path::Path) -> Result<(u64, String, Vec<u8>), PersistError> {
+    use crate::value::vector::embed::sha256::{Sha256, hex};
     let mut file = std::fs::File::open(path)
         .map_err(|err| invalid(format!("cannot read '{}': {err}", path.display())))?;
     let mut hash = Sha256::new();

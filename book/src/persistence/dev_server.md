@@ -323,9 +323,10 @@ with `-e`, `--in` or the REPL); an open that rewrote a damaged `GRAPH` copy note
 before the start banner. `GRAPHERSAL_LOG` sets the
 level (`off`, `error`, `warn` = the default, `info`, `debug`, `trace`; `info` also notes a
 checkpoint that encodes the loaded graph because the WAL since the last snapshot exceeds the
-merge bound). A whole script is ONE commit here, and one commit is at most 1 GiB of
-uncompressed WAL record: a script that drops and re-creates a large graph can be refused as a
-whole; run the drop on its own and load in several runs
+merge bound). A whole script is ONE commit here: a large one is written to the WAL in parts
+of 64 MiB, and the process memory ceiling bounds it (the unit's changes are held while it
+commits); a script that drops and re-creates a huge graph can still be refused as a whole: run
+the drop on its own and load in several runs
 ([The size of one commit](../users_guide/resource_limits.md#the-size-of-one-commit-journal)).
 
 The UI shows a **Store** menu in the top bar (its **↻** button in the top right corner reloads

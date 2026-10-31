@@ -36,6 +36,11 @@ pub(crate) const NANOS_FORMAT_VERSION: u32 = 3;
 /// (format spec 6.2 item 5) and the system journal's segments.
 pub(crate) const BLOB_FORMAT_VERSION: u32 = 4;
 
+/// The first file format version whose WAL segments may hold a commit in parts (record type 4,
+/// format spec 9.3.1). File format 4 (Graphersal 0.5.0) introduces it together with the blob
+/// value tag.
+pub(crate) const COMMIT_PARTS_FORMAT_VERSION: u32 = 4;
+
 /// Nanoseconds per second, for the `svar seconds` + `uvar nanos` pairs of tags 15 to 20.
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 

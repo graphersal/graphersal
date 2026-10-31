@@ -48,7 +48,7 @@ const MAX_BASE_MODELS: usize = 16;
 /// The streaming buffer.
 const BUFFER: usize = 1 << 20;
 
-/// What a model file is for ([`NewModel::with_file`]; [`ModelFile::role`] as text).
+/// What a model file is for ([`NewModel::with_file`]; its name in the model's tar manifest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ModelRole {

@@ -19,6 +19,10 @@
 //! feature on a native target; any other build registers the models but refuses to embed with
 //! them (the reason names the build).
 
+// Without `persist` no Store builds a registry: the types stay, unused.
+#![cfg_attr(not(feature = "persist"), allow(dead_code))]
+
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};

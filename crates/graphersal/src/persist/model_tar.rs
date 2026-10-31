@@ -492,6 +492,10 @@ pub(crate) struct ModelTar<'a> {
 
 impl<'a> ModelTar<'a> {
     /// The bytes of the file `name`.
+    #[cfg_attr(
+        not(all(feature = "model2vec", not(target_arch = "wasm32"))),
+        allow(dead_code)
+    )]
     pub(crate) fn file(&self, name: &str) -> Option<&'a [u8]> {
         self.files
             .iter()
@@ -500,6 +504,10 @@ impl<'a> ModelTar<'a> {
     }
 
     /// The bytes of the file of `role` (exactly one in the manifest).
+    #[cfg_attr(
+        not(all(feature = "model2vec", not(target_arch = "wasm32"))),
+        allow(dead_code)
+    )]
     pub(crate) fn file_of(&self, role: &str) -> Option<&'a [u8]> {
         self.manifest
             .file_of(role)

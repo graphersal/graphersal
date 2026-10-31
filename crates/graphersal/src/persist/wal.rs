@@ -6,9 +6,9 @@
 use std::io::Read;
 
 use super::codec::{
-    self, Codec, DecodeError, DecodeResult, FORMAT_VERSION, InlineKeys, MAX_BLOCK_BYTES, Reader,
-    crc, put_i64, put_opt_str, put_properties, put_str, put_u8, put_u32, put_u64, put_uvar,
-    put_value, read_properties, read_value, tag,
+    self, COMMIT_PARTS_FORMAT_VERSION, Codec, DecodeError, DecodeResult, FORMAT_VERSION,
+    InlineKeys, MAX_BLOCK_BYTES, Reader, crc, put_i64, put_opt_str, put_properties, put_str,
+    put_u8, put_u32, put_u64, put_uvar, put_value, read_properties, read_value, tag,
 };
 use super::definitions::DefinitionRecord;
 use super::error::PersistError;
@@ -33,6 +33,8 @@ pub(crate) const FRAME_BYTES: usize = 25;
 pub(crate) const RECORD_COMMIT: u8 = 1;
 pub(crate) const RECORD_MARK: u8 = 2;
 pub(crate) const RECORD_CHECKPOINT: u8 = 3;
+/// A part of a commit written in parts (format spec 9.3.1; file format 4).
+pub(crate) const RECORD_COMMIT_PART: u8 = 4;
 
 /// The header of a journal segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +194,23 @@ fn put_labels(out: &mut Vec<u8>, labels: &[String]) {
     }
 }
 
-/// Encodes the commit payload of `changes` (format spec 9.3).
+/// The commit payload of `changes` in its single-record form (format spec 9.3), whatever its
+/// size (tests build records with it).
+#[cfg(test)]
 pub(crate) fn encode_commit(changes: &ChangeSet, codec: Codec) -> Result<Vec<u8>, PersistError> {
+    Ok(encode_commit_body(changes, codec)?.single_payload())
+}
+
+/// The uncompressed body bytes from which the encoder checks the memory ceiling, doubling
+/// each time (format spec 9.3.1: the body is built in memory once).
+const ENCODE_CHECK_FROM: usize = 1 << 20;
+
+/// Encodes the commit body of `changes` (format spec 9.3) once; the journal writes it as one
+/// Commit record or as Commit parts ([`EncodedCommit::parts`]).
+pub(crate) fn encode_commit_body(
+    changes: &ChangeSet,
+    codec: Codec,
+) -> Result<EncodedCommit, PersistError> {
     let fail = |reason: String| {
         PersistError::encode(
             format!("the change set of commit {}", changes.commit_seq()),
@@ -201,6 +218,7 @@ pub(crate) fn encode_commit(changes: &ChangeSet, codec: Codec) -> Result<Vec<u8>
         )
     };
     let mut body = Vec::new();
+    let mut next_check = ENCODE_CHECK_FROM;
     put_opt_str(&mut body, changes.metadata().principal());
     put_properties(
         &mut body,
@@ -210,6 +228,13 @@ pub(crate) fn encode_commit(changes: &ChangeSet, codec: Codec) -> Result<Vec<u8>
     .map_err(fail)?;
     put_uvar(&mut body, changes.mutations().len() as u64);
     for mutation in changes.mutations() {
+        if body.len() >= next_check {
+            // The body grows by doubling: room for the next growth is checked against the
+            // process memory ceiling (check point "commit encoding").
+            let len = body.len() as u64;
+            crate::traversal::memory_budget::ensure_room(COMMIT_ENCODING_OPERATION, len, len)?;
+            next_check = body.len().saturating_mul(2);
+        }
         match mutation {
             Mutation::AddVertex {
                 id,
@@ -338,30 +363,107 @@ pub(crate) fn encode_commit(changes: &ChangeSet, codec: Codec) -> Result<Vec<u8>
             }
         }
     }
-    if body.len() > MAX_BLOCK_BYTES {
-        // Format spec 9.3: one commit is one record; the journal's veto rolls the unit back.
-        return Err(PersistError::CommitTooLarge {
-            commit_seq: changes.commit_seq(),
-            bytes: body.len(),
-            limit: MAX_BLOCK_BYTES,
-        });
+    let mut stamp = Vec::with_capacity(STAMP_BYTES);
+    put_u64(&mut stamp, changes.commit_seq());
+    put_i64(&mut stamp, changes.committed_at());
+    put_u64(&mut stamp, changes.node_sequence());
+    put_u64(&mut stamp, changes.edge_sequence());
+    Ok(EncodedCommit {
+        commit_seq: changes.commit_seq(),
+        stamp,
+        body,
+        codec,
+    })
+}
+
+/// Size of the commit stamp: `commit_seq u64 | time i64 | node_sequence u64 | edge_sequence u64`.
+const STAMP_BYTES: usize = 32;
+
+/// What the memory ceiling names when encoding a commit body does not fit.
+pub(crate) const COMMIT_ENCODING_OPERATION: &str = "commit encoding";
+
+/// What the memory ceiling names when assembling a commit in parts does not fit.
+pub(crate) const COMMIT_READING_OPERATION: &str = "reading a commit in parts";
+
+/// A commit's encoded body (format spec 9.3), built once and written either as one Commit
+/// record ([`Self::single_payload`]) or as Commit parts ([`Self::put_part`], 9.3.1).
+pub(crate) struct EncodedCommit {
+    commit_seq: u64,
+    stamp: Vec<u8>,
+    body: Vec<u8>,
+    codec: Codec,
+}
+
+impl EncodedCommit {
+    /// How many parts of at most `part_bytes` uncompressed body bytes the commit needs: `1`
+    /// is the single-record form (format spec 9.3), more are Commit parts (9.3.1). Refuses
+    /// more than [`MAX_COMMIT_PARTS`] parts with [`PersistError::CommitTooLarge`].
+    pub(crate) fn parts(&self, part_bytes: usize) -> Result<u32, PersistError> {
+        let part_bytes = part_bytes.clamp(1, MAX_BLOCK_BYTES);
+        let parts = self.body.len().div_ceil(part_bytes).max(1);
+        match u32::try_from(parts) {
+            Ok(parts) if parts <= MAX_COMMIT_PARTS => Ok(parts),
+            _ => Err(PersistError::CommitTooLarge {
+                commit_seq: self.commit_seq,
+                bytes: self.body.len(),
+                limit: part_bytes.saturating_mul(MAX_COMMIT_PARTS as usize),
+            }),
+        }
     }
-    let mut out = Vec::with_capacity(body.len() / 2 + 40);
-    put_u64(&mut out, changes.commit_seq());
-    put_i64(&mut out, changes.committed_at());
-    put_u64(&mut out, changes.node_sequence());
-    put_u64(&mut out, changes.edge_sequence());
-    let (codec_byte, compressed) = codec::compress(&body, codec);
-    put_u8(&mut out, codec_byte);
+
+    /// The payload of the single Commit record (format spec 9.3). The body must be at most
+    /// [`MAX_BLOCK_BYTES`] ([`Self::parts`] = 1 for a part size within that bound).
+    pub(crate) fn single_payload(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.body.len() / 2 + 40);
+        out.extend_from_slice(&self.stamp);
+        put_slice(&mut out, &self.body, self.codec);
+        out
+    }
+
+    /// Writes the payload of part `part` of `parts` (format spec 9.3.1) into `out` (cleared
+    /// first): `part u32 | parts u32`, the stamp and body length in part 0, then the
+    /// part's slice of at most `part_bytes` body bytes, compressed on its own.
+    pub(crate) fn put_part(&self, part: u32, parts: u32, part_bytes: usize, out: &mut Vec<u8>) {
+        let part_bytes = part_bytes.clamp(1, MAX_BLOCK_BYTES);
+        out.clear();
+        put_u32(out, part);
+        put_u32(out, parts);
+        if part == 0 {
+            out.extend_from_slice(&self.stamp);
+            put_u64(out, self.body.len() as u64);
+        }
+        let from = (part as usize)
+            .saturating_mul(part_bytes)
+            .min(self.body.len());
+        let to = from.saturating_add(part_bytes).min(self.body.len());
+        put_slice(out, &self.body[from..to], self.codec);
+    }
+}
+
+/// `codec u8 | data` (codec 0) or `codec u8 | uncompressed u32 | stored` (format spec 9.3,
+/// 9.3.1); the slice is the rest of the payload either way.
+fn put_slice(out: &mut Vec<u8>, raw: &[u8], codec: Codec) {
+    let (codec_byte, compressed) = codec::compress(raw, codec);
+    put_u8(out, codec_byte);
     match compressed {
-        None => out.extend_from_slice(&body),
+        None => out.extend_from_slice(raw),
         Some(stored) => {
-            put_u32(&mut out, body.len() as u32);
+            // At most MAX_BLOCK_BYTES (1 GiB), so it fits a u32.
+            put_u32(out, raw.len() as u32);
             out.extend_from_slice(&stored);
         }
     }
-    Ok(out)
 }
+
+/// The largest number of parts of one commit (format spec 9.3.1): 64 TiB at the default part
+/// size, i.e. no practical limit. Beyond it the journal vetoes the commit
+/// ([`PersistError::CommitTooLarge`]).
+pub(crate) const MAX_COMMIT_PARTS: u32 = 1 << 20;
+
+/// The uncompressed body bytes per Commit part the journal writes (format spec 9.3.1; 64 MiB):
+/// a commit body up to it stays one Commit record. A reader accepts any part size up to
+/// [`MAX_BLOCK_BYTES`].
+pub(crate) const PART_BODY_BYTES: usize = 64 << 20;
 
 fn read_kind(r: &mut Reader<'_>) -> DecodeResult<ElementKind> {
     let at = r.offset();
@@ -470,6 +572,190 @@ pub(crate) fn decode_commit_in(
         shifted
     };
     decode_body(&body, stamp, max_depth, version, newer).map_err(shift)
+}
+
+/// Assembles the body of a commit written in parts (format spec 9.3.1) from the payloads of its
+/// Commit-part records in order. The body grows per part (never allocated from the declared
+/// length: hostile input), each growth checked against the process memory ceiling first.
+pub(crate) struct CommitParts {
+    stamp: CommitStamp,
+    parts: u32,
+    next: u32,
+    body_length: u64,
+    body: Vec<u8>,
+    operation: &'static str,
+}
+
+/// The `part u32 | parts u32` prefix of a Commit-part payload.
+pub(crate) fn part_index(payload: &[u8]) -> DecodeResult<(u32, u32)> {
+    let mut r = Reader::new(payload);
+    Ok((r.u32()?, r.u32()?))
+}
+
+/// The outcome of adding a part: `Err` is damage (offsets within the payload), `Ok(Err(..))`
+/// a refusal of the memory ceiling (never damage).
+pub(crate) type PartResult<T> = DecodeResult<Result<T, PersistError>>;
+
+impl CommitParts {
+    /// Starts with the payload of part 0.
+    pub(crate) fn start(payload: &[u8], operation: &'static str) -> PartResult<Self> {
+        let mut r = Reader::new(payload);
+        let part = r.u32()?;
+        if part != 0 {
+            return Err(DecodeError::new(
+                0,
+                format!("part {part} of a commit in parts without the parts before it"),
+            ));
+        }
+        let parts_at = r.offset();
+        let parts = r.u32()?;
+        if !(2..=MAX_COMMIT_PARTS).contains(&parts) {
+            return Err(DecodeError::new(
+                parts_at,
+                format!("a commit in {parts} parts (2 to {MAX_COMMIT_PARTS} are valid)"),
+            ));
+        }
+        let stamp = CommitStamp {
+            commit_seq: r.u64()?,
+            committed_at: r.i64()?,
+            node_sequence: r.u64()?,
+            edge_sequence: r.u64()?,
+        };
+        let body_length = r.u64()?;
+        let mut assembled = Self {
+            stamp,
+            parts,
+            next: 0,
+            body_length,
+            body: Vec::new(),
+            operation,
+        };
+        let slice_at = r.offset();
+        let slice = r.bytes(r.remaining())?;
+        if let Err(err) = assembled.add_slice(slice, slice_at)? {
+            return Ok(Err(err));
+        }
+        Ok(Ok(assembled))
+    }
+
+    /// The commit sequence number of part 0.
+    pub(crate) fn commit_seq(&self) -> u64 {
+        self.stamp.commit_seq
+    }
+
+    /// The number of parts part 0 declares.
+    pub(crate) fn parts(&self) -> u32 {
+        self.parts
+    }
+
+    /// Whether every part was added.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.next == self.parts
+    }
+
+    /// Adds the payload of the next part.
+    pub(crate) fn push(&mut self, payload: &[u8]) -> PartResult<()> {
+        let mut r = Reader::new(payload);
+        let part = r.u32()?;
+        let parts = r.u32()?;
+        if parts != self.parts {
+            return Err(DecodeError::new(
+                4,
+                format!(
+                    "a part of a commit in {parts} parts where part 0 says {}",
+                    self.parts
+                ),
+            ));
+        }
+        if part != self.next {
+            return Err(DecodeError::new(
+                0,
+                format!("part {part} where part {} must follow", self.next),
+            ));
+        }
+        let slice_at = r.offset();
+        let slice = r.bytes(r.remaining())?;
+        self.add_slice(slice, slice_at)
+    }
+
+    /// Decodes and appends one slice (`codec u8 | data` or `codec u8 | uncompressed u32 |
+    /// stored`); `at` is the slice's offset in its payload.
+    fn add_slice(&mut self, slice: &[u8], at: u64) -> PartResult<()> {
+        let mut r = Reader::new(slice);
+        let codec_byte = r.u8()?;
+        let raw = if codec_byte == 0 {
+            std::borrow::Cow::Borrowed(r.bytes(r.remaining())?)
+        } else {
+            let uncompressed = r.u32()? as usize;
+            let stored = r.bytes(r.remaining())?;
+            codec::decompress(codec_byte, stored, uncompressed)
+                .map_err(|reason| codec::decompress_error(codec_byte, at, reason))?
+        };
+        if raw.is_empty() || raw.len() > MAX_BLOCK_BYTES {
+            return Err(DecodeError::new(
+                at,
+                format!(
+                    "a part of {} body bytes (1 to {MAX_BLOCK_BYTES} are valid)",
+                    raw.len()
+                ),
+            ));
+        }
+        let total = self.body.len() as u64 + raw.len() as u64;
+        if total > self.body_length {
+            return Err(DecodeError::new(
+                at,
+                format!(
+                    "the parts hold more than the {} body bytes part 0 declares",
+                    self.body_length
+                ),
+            ));
+        }
+        if self.body.capacity() - self.body.len() < raw.len() {
+            // A growth allocates up to twice the capacity: room for it is checked first.
+            let grow = (self.body.capacity() as u64).saturating_mul(2).max(total);
+            let resident = self.body.len() as u64;
+            if let Err(err) =
+                crate::traversal::memory_budget::ensure_room(self.operation, grow, resident)
+            {
+                return Ok(Err(err.into()));
+            }
+            self.body.reserve(raw.len());
+        }
+        self.body.extend_from_slice(&raw);
+        self.next += 1;
+        Ok(Ok(()))
+    }
+
+    /// Decodes the assembled commit; every part must have been added. `Err` offsets are body
+    /// offsets (named "body byte N" in the reason).
+    pub(crate) fn finish(
+        self,
+        max_depth: usize,
+        version: u32,
+        newer: Option<&NewerContent>,
+    ) -> DecodeResult<ChangeSet> {
+        if !self.is_complete() {
+            return Err(DecodeError::new(
+                0,
+                format!("{} of {} parts", self.next, self.parts),
+            ));
+        }
+        if self.body.len() as u64 != self.body_length {
+            return Err(DecodeError::new(
+                0,
+                format!(
+                    "the parts hold {} body bytes, part 0 declares {}",
+                    self.body.len(),
+                    self.body_length
+                ),
+            ));
+        }
+        decode_body(&self.body, self.stamp, max_depth, version, newer).map_err(|e| {
+            let mut shifted = DecodeError::new(0, format!("{} (body byte {})", e.reason, e.offset));
+            shifted.unsupported = e.unsupported;
+            shifted
+        })
+    }
 }
 
 fn decode_body(
@@ -672,6 +958,16 @@ pub struct JournalReader<R: Read> {
     unsupported_seq: Option<(u64, u64)>,
 }
 
+/// What [`JournalReader`] found at a record boundary.
+enum RawFrame {
+    /// The end of the stream.
+    End,
+    /// An interrupted last write of `bytes` bytes (format spec 9.6).
+    Torn { bytes: u64 },
+    /// A record whose checksums hold.
+    Record { header: FrameHeader, body: Vec<u8> },
+}
+
 /// Opens a journal stream: reads and checks its header ([`JournalReader`]).
 pub fn read_journal<R: Read>(reader: R) -> Result<JournalReader<R>, PersistError> {
     JournalReader::open(reader, 0, crate::value::depth::DEFAULT_MAX_VALUE_DEPTH)
@@ -813,20 +1109,15 @@ impl<R: Read> JournalReader<R> {
         )
     }
 
-    /// The next record with its byte offset and frame commit_seq.
-    pub(crate) fn next_record(
-        &mut self,
-    ) -> Result<Option<(u64, u64, JournalRecord)>, PersistError> {
-        if self.done {
-            return Ok(None);
-        }
-        let start = self.offset;
+    /// Reads the record frame at `start` (the current position of the source): the end of the
+    /// stream, a torn tail of `bytes` bytes (format spec 9.6), or a record whose checksums
+    /// hold. Damage is an error (and ends the reader).
+    fn read_frame(&mut self, start: u64) -> Result<RawFrame, PersistError> {
         let mut frame = [0u8; FRAME_BYTES];
         let got = read_full(&mut self.source, &mut frame)
             .map_err(|err| PersistError::io("reading a journal", err))?;
         if got == 0 {
-            self.done = true;
-            return Ok(None);
+            return Ok(RawFrame::End);
         }
         if got < FRAME_BYTES {
             // An incomplete frame header: an interrupted write of the last record, when its
@@ -838,13 +1129,7 @@ impl<R: Read> JournalReader<R> {
             if frame[..prefix] != marker[..prefix] && !zeros {
                 return Err(self.corrupt(start, "bytes at the end that are not a record"));
             }
-            self.torn = Some(TornTail {
-                journal: self.index,
-                offset: start,
-                bytes: got as u64,
-            });
-            self.done = true;
-            return Ok(None);
+            return Ok(RawFrame::Torn { bytes: got as u64 });
         }
         let header = match decode_frame_header(&frame) {
             Ok(header) => header,
@@ -854,13 +1139,9 @@ impl<R: Read> JournalReader<R> {
                     let rest = zeros_to_end(&mut self.source)
                         .map_err(|err| PersistError::io("reading a journal", err))?;
                     if let Some(rest) = rest {
-                        self.torn = Some(TornTail {
-                            journal: self.index,
-                            offset: start,
+                        return Ok(RawFrame::Torn {
                             bytes: FRAME_BYTES as u64 + rest,
                         });
-                        self.done = true;
-                        return Ok(None);
                     }
                 }
                 let reason = match fault {
@@ -875,7 +1156,12 @@ impl<R: Read> JournalReader<R> {
         let (length, commit_seq) = (header.length, header.commit_seq);
         // The body is read whole (its header's checksum holds, so the length is the writer's):
         // room for it is checked first.
-        crate::traversal::memory_budget::ensure_room(self.operation, u64::from(length), 0)?;
+        if let Err(err) =
+            crate::traversal::memory_budget::ensure_room(self.operation, u64::from(length), 0)
+        {
+            self.done = true;
+            return Err(err.into());
+        }
         let mut body = Vec::with_capacity((length as usize).min(1 << 20));
         (&mut self.source)
             .take(u64::from(length))
@@ -883,13 +1169,9 @@ impl<R: Read> JournalReader<R> {
             .map_err(|err| PersistError::io("reading a journal", err))?;
         if body.len() < length as usize {
             // The header's checksum holds, so the length is right: the write was cut.
-            self.torn = Some(TornTail {
-                journal: self.index,
-                offset: start,
+            return Ok(RawFrame::Torn {
                 bytes: (FRAME_BYTES + body.len()) as u64,
             });
-            self.done = true;
-            return Ok(None);
         }
         if crc(&body) != header.body_crc {
             return Err(self.corrupt(
@@ -897,7 +1179,116 @@ impl<R: Read> JournalReader<R> {
                 format!("record of commit {commit_seq}: checksum mismatch"),
             ));
         }
+        Ok(RawFrame::Record { header, body })
+    }
+
+    /// Ends the reader at a torn tail starting at `offset` with `bytes` bytes.
+    fn torn_at(&mut self, offset: u64, bytes: u64) {
+        self.torn = Some(TornTail {
+            journal: self.index,
+            offset,
+            bytes,
+        });
+        self.done = true;
+    }
+
+    /// Reads the remaining parts of a commit in parts whose part 0 (`payload`, frame
+    /// `commit_seq`) starts at `start` (format spec 9.3.1) and decodes the assembled commit.
+    /// Fewer parts before the end of the stream are a torn tail cut at part 0 (9.6).
+    fn read_commit_parts(
+        &mut self,
+        start: u64,
+        commit_seq: u64,
+        payload: Vec<u8>,
+    ) -> Result<Option<(u64, u64, JournalRecord)>, PersistError> {
+        let payload_at = start + FRAME_BYTES as u64;
+        let mut parts = match CommitParts::start(&payload, COMMIT_READING_OPERATION) {
+            Ok(Ok(parts)) => parts,
+            Ok(Err(refused)) => {
+                self.done = true;
+                return Err(refused);
+            }
+            Err(err) => return Err(self.corrupt(payload_at + err.offset, err.reason)),
+        };
+        drop(payload);
+        if parts.commit_seq() != commit_seq {
+            return Err(self.corrupt(start, "frame and payload commit_seq differ"));
+        }
+        while !parts.is_complete() {
+            let at = self.offset;
+            let (header, body) = match self.read_frame(at)? {
+                RawFrame::End => {
+                    self.torn_at(start, at - start);
+                    return Ok(None);
+                }
+                RawFrame::Torn { bytes } => {
+                    self.torn_at(start, at - start + bytes);
+                    return Ok(None);
+                }
+                RawFrame::Record { header, body } => (header, body),
+            };
+            if header.record_type != RECORD_COMMIT_PART || header.commit_seq != commit_seq {
+                return Err(self.corrupt(
+                    at,
+                    format!(
+                        "a record of type {} for commit {} between the parts of commit \
+                         {commit_seq} ({} parts)",
+                        header.record_type,
+                        header.commit_seq,
+                        parts.parts()
+                    ),
+                ));
+            }
+            match parts.push(&body) {
+                Ok(Ok(())) => {}
+                Ok(Err(refused)) => {
+                    self.done = true;
+                    return Err(refused);
+                }
+                Err(err) => {
+                    return Err(self.corrupt(at + FRAME_BYTES as u64 + err.offset, err.reason));
+                }
+            }
+            self.offset = at + FRAME_BYTES as u64 + body.len() as u64;
+        }
+        let changes = parts
+            .finish(self.max_depth, self.version, self.newer.as_ref())
+            .map_err(|err| {
+                let reason = format!("commit {commit_seq} in parts: {}", err.reason);
+                if err.unsupported {
+                    self.unsupported(start, start, commit_seq, reason)
+                } else {
+                    self.corrupt(start, reason)
+                }
+            })?;
+        Ok(Some((start, commit_seq, JournalRecord::Commit(changes))))
+    }
+
+    /// The next record with its byte offset and frame commit_seq. A commit in parts (format
+    /// spec 9.3.1) is one record at the offset of its part 0.
+    pub(crate) fn next_record(
+        &mut self,
+    ) -> Result<Option<(u64, u64, JournalRecord)>, PersistError> {
+        if self.done {
+            return Ok(None);
+        }
+        let start = self.offset;
+        let (header, body) = match self.read_frame(start)? {
+            RawFrame::End => {
+                self.done = true;
+                return Ok(None);
+            }
+            RawFrame::Torn { bytes } => {
+                self.torn_at(start, bytes);
+                return Ok(None);
+            }
+            RawFrame::Record { header, body } => (header, body),
+        };
+        let (length, commit_seq) = (header.length, header.commit_seq);
         self.offset = start + FRAME_BYTES as u64 + u64::from(length);
+        if header.record_type == RECORD_COMMIT_PART && self.version >= COMMIT_PARTS_FORMAT_VERSION {
+            return self.read_commit_parts(start, commit_seq, body);
+        }
         let payload = &body[..];
         let payload_at = start + FRAME_BYTES as u64;
         let record = match header.record_type {
@@ -963,5 +1354,307 @@ impl<R: Read> Iterator for JournalReader<R> {
                 Some(Err(err))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changes(count: usize, label_len: usize) -> ChangeSet {
+        let mutations = (0..count)
+            .map(|i| Mutation::AddLabel {
+                id: format!("v{i}"),
+                label: format!("{i:0label_len$}"),
+            })
+            .collect();
+        ChangeSet::new(
+            CommitStamp {
+                commit_seq: 5,
+                committed_at: 1_700_000_000_000_000,
+                node_sequence: 9,
+                edge_sequence: 3,
+            },
+            CommitMetadata::new().with_principal("ann"),
+            mutations,
+        )
+    }
+
+    fn header() -> Vec<u8> {
+        WalHeader {
+            graph_id: 7,
+            first_commit_seq: 5,
+            created_at: 0,
+        }
+        .encode()
+    }
+
+    /// A journal stream (header, then the commit as written with `part_bytes`).
+    fn stream(changes: &ChangeSet, codec: Codec, part_bytes: usize) -> (Vec<u8>, u32) {
+        let mut out = header();
+        let encoded = encode_commit_body(changes, codec).unwrap();
+        let parts = encoded.parts(part_bytes).unwrap();
+        if parts == 1 {
+            let payload = encoded.single_payload();
+            frame_record(&mut out, RECORD_COMMIT, changes.commit_seq(), &payload).unwrap();
+        } else {
+            let mut payload = Vec::new();
+            for part in 0..parts {
+                encoded.put_part(part, parts, part_bytes, &mut payload);
+                frame_record(&mut out, RECORD_COMMIT_PART, changes.commit_seq(), &payload).unwrap();
+            }
+        }
+        (out, parts)
+    }
+
+    type Read = (Vec<(u64, JournalRecord)>, Option<TornTail>);
+
+    fn read_all(bytes: &[u8]) -> Result<Read, PersistError> {
+        let mut reader = JournalReader::open(bytes, 0, 64)?;
+        let mut records = Vec::new();
+        while let Some((start, _, record)) = reader.next_record()? {
+            records.push((start, record));
+        }
+        Ok((records, reader.torn_tail()))
+    }
+
+    fn damage(bytes: &[u8], what: &str) -> String {
+        match read_all(bytes) {
+            Err(PersistError::Corrupt { reason, .. }) => reason,
+            other => panic!("{what}: {:?}", other.map(|r| r.0.len())),
+        }
+    }
+
+    fn body_len(changes: &ChangeSet) -> usize {
+        encode_commit_body(changes, Codec::None).unwrap().body.len()
+    }
+
+    #[test]
+    fn a_commit_in_parts_round_trips_with_every_codec_and_part_size() {
+        // Long, compressible labels: LZ4 compresses the slices of 4096 bytes and more.
+        let original = changes(400, 40);
+        for codec in [Codec::None, Codec::Lz4] {
+            for part_bytes in [1, 7, 64, 100, 999, 4096, 5000, 1 << 20] {
+                let (bytes, parts) = stream(&original, codec, part_bytes);
+                let expected = body_len(&original).div_ceil(part_bytes).max(1) as u32;
+                assert_eq!(parts, expected, "{part_bytes}");
+                let (records, torn) = read_all(&bytes).unwrap();
+                assert!(torn.is_none());
+                assert_eq!(
+                    records,
+                    vec![(
+                        WAL_HEADER_BYTES as u64,
+                        JournalRecord::Commit(original.clone())
+                    )],
+                    "{codec:?} {part_bytes}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_part_size_boundary_keeps_the_single_record_form() {
+        let original = changes(10, 20);
+        let len = body_len(&original);
+        // Exactly the part size: one Commit record, byte-identical to the single form.
+        let (exact, parts) = stream(&original, Codec::None, len);
+        assert_eq!(parts, 1);
+        assert_eq!(exact[WAL_HEADER_BYTES + 16], RECORD_COMMIT);
+        let (big, _) = stream(&original, Codec::None, PART_BODY_BYTES);
+        assert_eq!(exact, big);
+        // One byte less: two parts, the second holding one byte.
+        let (split, parts) = stream(&original, Codec::None, len - 1);
+        assert_eq!(parts, 2);
+        assert_eq!(split[WAL_HEADER_BYTES + 16], RECORD_COMMIT_PART);
+        assert_eq!(read_all(&split).unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn too_many_parts_are_refused_as_too_large() {
+        let original = changes(2, 4);
+        let encoded = encode_commit_body(&original, Codec::None).unwrap();
+        let fake = EncodedCommit {
+            body: vec![0; MAX_COMMIT_PARTS as usize + 1],
+            ..encoded
+        };
+        assert_eq!(fake.parts(1 << 20).unwrap(), 2);
+        match fake.parts(1) {
+            Err(PersistError::CommitTooLarge {
+                commit_seq, limit, ..
+            }) => {
+                assert_eq!(commit_seq, 5);
+                assert_eq!(limit, MAX_COMMIT_PARTS as usize);
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn inconsistent_parts_are_damage() {
+        let original = changes(20, 10);
+        let encoded = encode_commit_body(&original, Codec::None).unwrap();
+        let parts = encoded.parts(64).unwrap();
+        assert!(parts >= 4);
+        let payloads: Vec<Vec<u8>> = (0..parts)
+            .map(|part| {
+                let mut payload = Vec::new();
+                encoded.put_part(part, parts, 64, &mut payload);
+                payload
+            })
+            .collect();
+        let build = |order: &[usize], edit: &dyn Fn(usize, &mut Vec<u8>)| {
+            let mut out = header();
+            for &index in order {
+                let mut payload = payloads[index].clone();
+                edit(index, &mut payload);
+                frame_record(&mut out, RECORD_COMMIT_PART, 5, &payload).unwrap();
+            }
+            out
+        };
+        let all: Vec<usize> = (0..parts as usize).collect();
+        // A missing middle part, swapped parts, a part without part 0.
+        let mut missing = all.clone();
+        missing.remove(1);
+        damage(&build(&missing, &|_, _| {}), "missing");
+        let mut swapped = all.clone();
+        swapped.swap(1, 2);
+        damage(&build(&swapped, &|_, _| {}), "swapped");
+        damage(&build(&all[1..], &|_, _| {}), "no part 0");
+        // `parts` differing between parts, a commit of one part.
+        let reason = damage(
+            &build(&all, &|i, p| {
+                if i == 2 {
+                    p[4] ^= 1;
+                }
+            }),
+            "parts differ",
+        );
+        assert!(reason.contains("part 0 says"), "{reason}");
+        let one = |p: &mut Vec<u8>| p[4..8].copy_from_slice(&1u32.to_le_bytes());
+        damage(
+            &build(&all, &|i, p| {
+                if i == 0 {
+                    one(p)
+                }
+            }),
+            "one part",
+        );
+        // The body length differing from the sum of the slices.
+        for flip in [1u8, 0x80] {
+            let reason = damage(
+                &build(&all, &|i, p| {
+                    if i == 0 {
+                        p[40] ^= flip;
+                    }
+                }),
+                "body length",
+            );
+            assert!(reason.contains("body bytes"), "{reason}");
+        }
+        // Another commit's part or a record of another type between the parts.
+        let mut other = header();
+        frame_record(&mut other, RECORD_COMMIT_PART, 5, &payloads[0]).unwrap();
+        frame_record(
+            &mut other,
+            RECORD_MARK,
+            5,
+            &encode_mark(&Mark::new("m", 5, 0)),
+        )
+        .unwrap();
+        for part in &payloads[1..] {
+            frame_record(&mut other, RECORD_COMMIT_PART, 5, part).unwrap();
+        }
+        let reason = damage(&other, "a mark between parts");
+        assert!(reason.contains("between the parts"), "{reason}");
+        let mut other = header();
+        frame_record(&mut other, RECORD_COMMIT_PART, 5, &payloads[0]).unwrap();
+        frame_record(&mut other, RECORD_COMMIT_PART, 6, &payloads[1]).unwrap();
+        damage(&other, "a part of another commit");
+    }
+
+    #[test]
+    fn a_commit_in_parts_cut_anywhere_is_a_torn_tail_at_part_zero() {
+        let original = changes(20, 10);
+        let (bytes, parts) = stream(&original, Codec::None, 50);
+        assert!(parts > 3);
+        for cut in WAL_HEADER_BYTES + 1..bytes.len() {
+            let (records, torn) = read_all(&bytes[..cut]).unwrap();
+            assert!(records.is_empty(), "{cut}");
+            let torn = torn.unwrap_or_else(|| panic!("{cut}"));
+            assert_eq!(torn.offset, WAL_HEADER_BYTES as u64, "{cut}");
+            assert_eq!(torn.bytes, (cut - WAL_HEADER_BYTES) as u64, "{cut}");
+        }
+        // Zeros after a complete part 0 (space allocated, never written).
+        let length = u32::from_le_bytes(bytes[68..72].try_into().unwrap()) as usize;
+        let mut zeroed = bytes[..WAL_HEADER_BYTES + FRAME_BYTES + length].to_vec();
+        let half = zeroed.len();
+        zeroed.extend(std::iter::repeat_n(0, 300));
+        let (_, torn) = read_all(&zeroed).unwrap();
+        assert_eq!(torn.unwrap().bytes, (half + 300 - WAL_HEADER_BYTES) as u64);
+    }
+
+    #[test]
+    fn every_flipped_bit_of_a_commit_in_parts_is_damage() {
+        let original = changes(12, 10);
+        let (bytes, parts) = stream(&original, Codec::None, 40);
+        assert!(parts > 3);
+        for at in WAL_HEADER_BYTES..bytes.len() {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 1 << (at % 8);
+            damage(&flipped, &format!("flip at {at}"));
+        }
+    }
+
+    #[test]
+    fn a_hostile_body_length_allocates_nothing_up_front() {
+        let original = changes(20, 10);
+        let encoded = encode_commit_body(&original, Codec::None).unwrap();
+        let mut payload = Vec::new();
+        encoded.put_part(0, 2, 64, &mut payload);
+        payload[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        let parts = CommitParts::start(&payload, COMMIT_READING_OPERATION)
+            .unwrap()
+            .unwrap();
+        assert!(parts.body.capacity() < 1 << 20);
+    }
+
+    #[test]
+    fn the_memory_ceiling_refuses_assembling_a_commit_in_parts() {
+        let original = changes(4000, 40);
+        let (bytes, parts) = stream(&original, Codec::None, 4096);
+        assert!(parts > 10);
+        crate::traversal::memory_limit::memory_limit_scope(1, || match read_all(&bytes) {
+            Err(PersistError::Graph(crate::error::GraphError::ResourceLimitExceeded {
+                ..
+            })) => {}
+            other => panic!("{:?}", other.map(|r| r.0.len())),
+        });
+    }
+
+    #[test]
+    fn the_memory_ceiling_refuses_encoding_a_large_commit_body() {
+        let original = changes(40_000, 40);
+        crate::traversal::memory_limit::memory_limit_scope(1, || {
+            match encode_commit_body(&original, Codec::None) {
+                Err(PersistError::Graph(crate::error::GraphError::ResourceLimitExceeded {
+                    operation,
+                    ..
+                })) => assert_eq!(operation, COMMIT_ENCODING_OPERATION),
+                other => panic!("{:?}", other.map(|_| ())),
+            }
+        });
+    }
+
+    #[test]
+    fn commit_parts_are_unknown_in_a_segment_of_an_older_version() {
+        let original = changes(20, 10);
+        let (mut bytes, _) = stream(&original, Codec::None, 64);
+        let mut old = header();
+        old[8..12].copy_from_slice(&(COMMIT_PARTS_FORMAT_VERSION - 1).to_le_bytes());
+        let checksum = crc(&old[..60]);
+        old[60..64].copy_from_slice(&checksum.to_le_bytes());
+        bytes[..WAL_HEADER_BYTES].copy_from_slice(&old);
+        let reason = damage(&bytes, "older version");
+        assert!(reason.contains("unknown record type 4"), "{reason}");
     }
 }
