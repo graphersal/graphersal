@@ -4023,6 +4023,83 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A 0.4.0 store (and `.gsnap`) whose saved queries call `g.embed_property`, removed in 0.5.0
+/// (`tests/data/v0.4.0/saved_queries`, `make_saved_queries.sh`): `store upgrade` and `store
+/// create --from` name each such query in a `note:` with the ready vector-rule command, the exit
+/// code stays 0, and the query is not rewritten.
+#[test]
+fn store_upgrade_names_saved_queries_calling_a_removed_function() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("store-upgrade-040-queries");
+    let _ = std::fs::remove_dir_all(&root);
+    let old = root.join("store");
+    copy_tree(&fixtures.join("saved_queries"), &old);
+    let old = old.to_string_lossy().to_string();
+    let patch = "g.patch_schema(#{vertices: #{doc: #{schema: #{type: \"object\", properties: \
+                 #{emb: #{type: \"array\", format: \"vector\", embedder: \"hash-ngram/1\", from: \
+                 \"text\"}}}}}})";
+
+    let res = run(&["store", "upgrade", &old, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    for needle in [
+        "note: saved query \"fill\" calls embed_property, removed in 0.5.0",
+        &format!("graphersal --graph {old} -e '{patch}'"),
+        "note: saved query \"fill_any\" calls embed_property",
+    ] {
+        assert!(res.stderr.contains(needle), "{needle}: {}", res.stderr);
+    }
+    // The note's command runs and declares the rule; the query is kept as it was.
+    let res = run(&["--graph", &old, "-e", patch], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let res = run(
+        &[
+            "--graph",
+            &old,
+            "-e",
+            "g.v().has_label(\"doc\").has(\"emb\").count().next()",
+        ],
+        "",
+    );
+    assert_eq!(res.stdout.trim(), "2", "{}", res.stderr);
+    let res = run(
+        &[
+            "--graph",
+            &old,
+            "-e",
+            "g.get_query(\"fill\").body.contains(\"embed_property\")",
+        ],
+        "",
+    );
+    assert_eq!(res.stdout.trim(), "true", "{}", res.stderr);
+
+    // A 0.4.0 `.gsnap` loaded into a new store: the same notes.
+    let created = root.join("created");
+    let created = created.to_string_lossy().to_string();
+    let gsnap = fixtures.join("saved_queries.gsnap");
+    let res = run(
+        &[
+            "store",
+            "create",
+            &created,
+            "--from",
+            &gsnap.to_string_lossy(),
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "note: saved query \"fill\" calls embed_property, removed in 0.5.0: a call of the \
+             query fails now, and it is not rewritten; replace the call by the vector rule \
+             (graphersal --graph {created} -e '{patch}')"
+        )),
+        "{}",
+        res.stderr
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// CRC-32C (Castagnoli), bitwise: the newer-version test recomputes header checksums.
 fn crc32c(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;

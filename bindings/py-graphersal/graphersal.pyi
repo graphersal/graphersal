@@ -768,13 +768,18 @@ class Store:
         defined by one commit (a damaged one raises with ``err.cause ==
         "upgrade_model_damaged"``, nothing written). ``{"from_version", "to_version",
         "already_current", "in_place", "backup", "files", "bytes", "models_converted",
-        "migration_commit", "models_missing", "vectors_without_rule"}``: ``models_converted``
+        "migration_commit", "models_missing", "vectors_without_rule",
+        "saved_queries_using_removed"}``: ``models_converted``
         lists ``{"repo", "identity", "former_identity", "bytes"}``, ``models_missing``
         ``{"identity", "repo", "needed_by", "commands"}`` (models the schema needs that the store
         lacks: it opens once they are imported), ``vectors_without_rule`` ``{"element",
         "label", "property", "embedder", "model", "elements", "exact", "commits_not_counted",
         "schema_patch", "note"}`` (vector properties with a model but no source property
-        ``from``: the note says how to add one; nothing is recomputed)."""
+        ``from``: the note says how to add one; nothing is recomputed),
+        ``saved_queries_using_removed`` ``{"query", "function", "removed_in", "replacement",
+        "schema_patch", "note"}`` (saved queries calling a function this version removed, such
+        as 0.4.0's ``embed_property``; ``schema_patch`` is the vector rule replacing the call, or
+        ``None``; a saved query is never rewritten)."""
     def prune(self, up_to: int) -> dict[str, Any]:
         """Removes snapshots and WAL only needed for targets before ``up_to`` (the last two
         snapshots stay): ``{"kept_from", "snapshots_removed", "segments_removed",

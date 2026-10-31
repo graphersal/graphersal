@@ -626,30 +626,39 @@ fn the_scan_lists_saved_queries_calling_a_removed_function_with_the_rule_to_decl
     assert_eq!(
         uses[0].schema_patch.as_deref(),
         Some(
-            r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {"emb": {"type": "array", "format": "vector", "embedder": "minishlab/potion-base-8M", "from": "text"}}}}}}"#
+            r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "minishlab/potion-base-8M", from: "text"}}}}}})"#
         )
     );
     assert_eq!(
         uses[1].schema_patch.as_deref(),
         Some(
-            r#"{"edges": {"cites": {"schema": {"type": "object", "properties": {"note_emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "note"}}}}}}"#
+            r#"g.patch_schema(#{edges: #{cites: #{schema: #{type: "object", properties: #{note_emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "note"}}}}}})"#
         )
     );
     assert_eq!(uses[2].schema_patch, None);
     assert!(uses[2].replacement.contains("vector rule"), "{uses:?}");
-    let note = uses[0].note();
+    let note = uses[0].note("data");
     assert!(
-        note.starts_with(r#"saved query "fill" calls embed_property (removed in 0.5.0)"#),
+        note.starts_with(r#"saved query "fill" calls embed_property, removed in 0.5.0"#),
+        "{note}"
+    );
+    assert!(
+        note.contains(&format!(
+            "graphersal --graph data -e '{}'",
+            uses[0].schema_patch.as_deref().unwrap()
+        )),
         "{note}"
     );
 
-    // A patch of the scan is a valid schema patch that declares the rule.
+    // The patch of the scan runs and declares the rule, which fills the vectors.
     let graph = docs(2);
-    let patch = r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {"emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}}"#;
-    graph
-        .write()
-        .traversal_mut()
-        .patch_schema(&graphersal::schema::SchemaPatch::from_json(patch).unwrap())
-        .unwrap();
+    let patch = uses[1]
+        .schema_patch
+        .as_deref()
+        .unwrap()
+        .replace("edges: #{cites", "vertices: #{doc")
+        .replace("note_emb", "emb")
+        .replace(r#"from: "note""#, r#"from: "text""#);
+    let _ = script(&graph, &Arc::new(Embedders::default()), &patch).unwrap();
     assert_eq!(stored_elements(&graph).len(), 2);
 }

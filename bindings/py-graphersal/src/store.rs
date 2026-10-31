@@ -333,12 +333,15 @@ impl Store {
     /// one commit (``err.cause == "upgrade_model_damaged"`` for a damaged one, nothing
     /// written). Returns ``{"from_version", "to_version", "already_current", "in_place",
     /// "backup", "files", "bytes", "models_converted", "migration_commit", "models_missing",
-    /// "vectors_without_rule"}``: ``models_converted`` lists ``{"repo", "identity",
+    /// "vectors_without_rule", "saved_queries_using_removed"}``: ``models_converted`` lists ``{"repo", "identity",
     /// "former_identity", "bytes"}``, ``models_missing`` ``{"identity", "repo", "needed_by",
     /// "commands"}`` (the store opens once they are imported), ``vectors_without_rule``
     /// ``{"element", "label", "property", "embedder", "model", "elements", "exact",
     /// "commits_not_counted", "schema_patch", "note"}`` (a vector property with a model but no
-    /// source property ``from``: the note says how to add one).
+    /// source property ``from``: the note says how to add one), ``saved_queries_using_removed``
+    /// ``{"query", "function", "removed_in", "replacement", "schema_patch", "note"}`` (saved
+    /// queries calling a function this version removed, such as 0.4.0's ``embed_property``;
+    /// ``schema_patch`` is the vector rule replacing the call, or ``None``; never rewritten).
     #[staticmethod]
     #[pyo3(signature = (source, target=None, *, in_place=false, single_file=false))]
     fn upgrade(
@@ -427,6 +430,18 @@ impl Store {
             vectors.append(item)?;
         }
         dict.set_item("vectors_without_rule", vectors)?;
+        let removed = PyList::empty(py);
+        for call in &report.saved_queries_using_removed {
+            let item = PyDict::new(py);
+            item.set_item("query", &call.query)?;
+            item.set_item("function", &call.function)?;
+            item.set_item("removed_in", &call.removed_in)?;
+            item.set_item("replacement", &call.replacement)?;
+            item.set_item("schema_patch", call.schema_patch.as_deref())?;
+            item.set_item("note", call.note(store_path))?;
+            removed.append(item)?;
+        }
+        dict.set_item("saved_queries_using_removed", removed)?;
         Ok(dict.into_any().unbind())
     }
 

@@ -201,6 +201,15 @@ pub struct UpgradeReport {
     /// vectors current. The upgrade never guesses a source and never recomputes a vector;
     /// each entry says how to add one ([`VectorWithoutRule::note`]).
     pub vectors_without_rule: Vec<VectorWithoutRule>,
+    /// The saved queries of the catalog whose body calls a DSL function this version removed
+    /// (0.4.0's `g.embed_property`, removed in 0.5.0): such a call now fails. Each entry names
+    /// the replacement and, when the call names its label and properties literally, the schema
+    /// patch of the vector rule that replaces it ([`RemovedFunctionUse::note`]). The upgrade
+    /// never rewrites a saved query. Filled with the feature `script` only (it parses the
+    /// bodies); empty without it.
+    ///
+    /// [`RemovedFunctionUse::note`]: crate::catalog::RemovedFunctionUse::note
+    pub saved_queries_using_removed: Vec<crate::graph::definition::RemovedFunctionUse>,
 }
 
 /// An embedding model a Graphersal 0.4.0 store kept under `models/`, converted by the upgrade
@@ -727,6 +736,7 @@ fn finish(
         }
     }
     report.vectors_without_rule = found;
+    report.saved_queries_using_removed = saved_queries_using_removed(&state)?;
     // The journal record only when the models were migrated (the migration commit wrote the
     // journal already): an upgrade by the version word writes nothing but `GRAPH`.
     if report.models_converted.is_empty() {
@@ -745,6 +755,28 @@ fn finish(
     }
     super::system_journal::append_closed(dir, None, &catalogue::UPGRADED, event);
     Ok(report)
+}
+
+/// The saved queries of `state`'s catalog calling a removed DSL function
+/// ([`UpgradeReport::saved_queries_using_removed`]); empty without the feature `script`.
+pub(super) fn saved_queries_using_removed<G: crate::graph::GraphStorage + ?Sized>(
+    state: &G,
+) -> Result<Vec<crate::graph::definition::RemovedFunctionUse>, PersistError> {
+    #[cfg(feature = "script")]
+    {
+        let definitions: Vec<crate::graph::Definition> = state
+            .definitions()
+            .map_err(PersistError::Graph)?
+            .filter(|d| d.kind() == crate::graph::DefinitionKind::QUERY)
+            .cloned()
+            .collect();
+        Ok(crate::script::saved_queries_using_removed(&definitions))
+    }
+    #[cfg(not(feature = "script"))]
+    {
+        let _ = state;
+        Ok(Vec::new())
+    }
 }
 
 /// [`Store::upgrade`].

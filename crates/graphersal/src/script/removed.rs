@@ -5,7 +5,9 @@
 
 use rhai::{AST, Dynamic, Expr, Stmt};
 
-use crate::catalog::{Definition, QUERY_DIALECT, QueryDefinition, WRITING_QUERY_DIALECT};
+use crate::catalog::{
+    Definition, QUERY_DIALECT, QueryDefinition, RemovedFunctionUse, WRITING_QUERY_DIALECT,
+};
 
 /// The replacement of a DSL function a release removed, for a script written before it:
 /// `Some(help)` when `signature` (a Rhai "function not found" signature or a plain name) names
@@ -42,41 +44,6 @@ fn removed(name: &str) -> Option<&'static Removed> {
     match name {
         "embed_property" | "embedProperty" => Some(&EMBED_PROPERTY),
         _ => None,
-    }
-}
-
-/// One call of a removed DSL function in the body of a saved query
-/// ([`saved_queries_using_removed`]).
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemovedFunctionUse {
-    /// The saved query's name in the catalog.
-    pub query: String,
-    /// The removed function the body calls (its snake_case name, `embed_property`).
-    pub function: String,
-    /// The release that removed it (`0.5.0`).
-    pub removed_in: String,
-    /// What replaces the call, in words with an example (the help a call gets).
-    pub replacement: String,
-    /// For `embed_property`: the schema patch (JSON, for `set_schema`/`patch_schema`) that
-    /// declares the vector rule replacing the call, when the call names its label, `from` and
-    /// `to` as literal strings (its `embedder`, when literal, becomes the rule's model, else
-    /// `hash-ngram/1`; a rule accepts only `hash-ngram/1` and the store's models). `None` when
-    /// the call computes them.
-    pub schema_patch: Option<String>,
-}
-
-impl RemovedFunctionUse {
-    /// One line for a report: `saved query "q" calls embed_property (removed in 0.5.0); ...`.
-    pub fn note(&self) -> String {
-        let fix = match &self.schema_patch {
-            Some(patch) => format!("declare the vector rule instead (schema patch): {patch}"),
-            None => self.replacement.clone(),
-        };
-        format!(
-            "saved query \"{}\" calls {} (removed in {}); {fix}",
-            self.query, self.function, self.removed_in
-        )
     }
 }
 
@@ -178,13 +145,30 @@ fn embed_property_patch(options: &Expr) -> Option<String> {
         Some(Some(element)) if element == "edge" => "edges",
         Some(_) => return None,
     };
-    let json =
-        |text: &str| crate::value::physical::to_json_text(&crate::ElementProperty::from(text)).ok();
-    let (label, to, embedder, from) = (json(&label)?, json(&to)?, json(&embedder)?, json(&from)?);
+    let label_text = label;
     Some(format!(
-        "{{\"{kind}\": {{{label}: {{\"schema\": {{\"type\": \"object\", \"properties\": {{{to}: {{\"type\": \"array\", \
-         \"format\": \"vector\", \"embedder\": {embedder}, \"from\": {from}}}}}}}}}}}}}",
+        "g.patch_schema(#{{{kind}: #{{{label}: #{{schema: #{{type: \"object\", properties: \
+         #{{{to}: #{{type: \"array\", format: \"vector\", embedder: {embedder}, from: \
+         {from}}}}}}}}}}}}})",
+        label = rhai_key(&label_text),
+        to = rhai_key(&to),
+        embedder = crate::value::literal::rhai_string(&embedder),
+        from = crate::value::literal::rhai_string(&from),
     ))
+}
+
+/// A map key of a Rhai object literal: bare when it is an identifier, else quoted.
+fn rhai_key(key: &str) -> String {
+    let bare = key
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if bare {
+        key.to_string()
+    } else {
+        crate::value::literal::rhai_string(key)
+    }
 }
 
 fn text_of(value: &Dynamic) -> Option<String> {

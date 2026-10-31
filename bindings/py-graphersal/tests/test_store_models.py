@@ -145,3 +145,23 @@ def test_upgrade_converts_models(tmp_path):
     assert needed["identity"] == "model2vec/acme/gone@0123456789ab"
     assert needed["needed_by"] == ["doc.emb"]
     assert needed["commands"][1] == f"graphersal embed-model import acme/gone --into {missing}"
+
+
+def test_upgrade_lists_saved_queries_calling_a_removed_function(tmp_path):
+    """A 0.4.0 store whose saved queries call embed_property (removed in 0.5.0): the report
+    names each with the vector rule replacing the call; the query is not rewritten."""
+    import pathlib
+    import shutil
+
+    fixtures = pathlib.Path(__file__).resolve().parents[3] / "crates/graphersal/tests/data/v0.4.0"
+    path = tmp_path / "store"
+    shutil.copytree(fixtures / "saved_queries", path)
+    report = graphersal.Store.upgrade(str(path), in_place=True)
+    removed = report["saved_queries_using_removed"]
+    assert [r["query"] for r in removed] == ["fill", "fill_any"]
+    fill = removed[0]
+    assert (fill["function"], fill["removed_in"]) == ("embed_property", "0.5.0")
+    assert 'from: "text"' in fill["schema_patch"]
+    assert fill["schema_patch"] in fill["note"]
+    assert removed[1]["schema_patch"] is None
+    assert "vector rule" in removed[1]["replacement"]

@@ -96,7 +96,7 @@ pub(crate) use jobs::run_query_job;
 pub use limits::{ScriptLimits, resource_limit_from_rhai};
 #[doc(hidden)]
 pub use register::doc_examples;
-pub use removed::{RemovedFunctionUse, saved_queries_using_removed};
+pub use removed::saved_queries_using_removed;
 use render::*;
 pub use render::{
     RENDER_MAX_ITEMS, RENDER_MAX_ROWS, RENDER_SPELLING, RenderedText, debug_value,
