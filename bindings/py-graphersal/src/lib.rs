@@ -33,8 +33,8 @@ pub use embedder::PyEmbedder;
 #[cfg(feature = "model2vec")]
 pub use embedder::PyModel2Vec;
 pub use error::{
-    CommitRejectedError, GraphersalError, PermissionDeniedError,
-    ReturnedClosureError, VectorFillWarning,
+    CommitRejectedError, GraphersalError, PermissionDeniedError, ReturnedClosureError,
+    VectorFillWarning,
 };
 pub use graph::{DryRunResult, Graph};
 pub use policy::AccessPolicy;

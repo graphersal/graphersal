@@ -131,8 +131,8 @@ A schema declares a vector property as an `array` with the custom format `vector
   `similarity()` and `nearest()` use when the query names none ([Metrics](#metrics)). It never
   changes or checks any data.
 - `embedder` (on a label's top-level property only) records the model identity of the
-  embedder that produced the vectors (`"hash-ngram/1"`): `embed_property()` fills it in and the
-  text queries read it ([Which model produced a property](#which-model-produced-a-property)). A
+  embedder that produced the vectors (`"hash-ngram/1"`): a [vector rule](vector_rules.md)
+  embeds with it and the text queries read it ([Which model produced a property](#which-model-produced-a-property)). A
   plain write does not check it.
 - `from` (with `embedder`, on a label's top-level property only) makes the property a
   [vector rule](vector_rules.md): the engine embeds the text of `from` into it at the end of
@@ -446,60 +446,31 @@ the built-in one ([Permissions](permissions.md)); `AccessPolicy::read_only()` al
 saved query may embed. A computed vector is stored as a plain value: replay, recovery, change sets
 and loads never call an embedder, so an embedder that is not deterministic is safe to use.
 
-### Embedding a property: `embed_property()`
+### Filling a vector property
 
-`g.embed_property(#{label, from, to})` embeds the string property `from` (a name or a
-`jpath(..)`) of every element with `label` and stores the vector in its top-level property `to`.
-It is a job, not a traversal step, and returns a report:
+A [vector rule](vector_rules.md) fills a vector property from a text property of the same label
+and keeps it in step: the schema names the source with `from` beside the model in `embedder`, and
+the engine embeds the text at the end of every unit that writes it (the first fill embeds every
+element of the label when the rule is applied):
 
-```rhai,graph=modern,script
-g.set_schema(g.infer_schema(), SchemaMode.open);
-let report = g.embed_property(#{label: "person", from: "name", to: "emb"});
-[report.embedded, report.units, report.schema_changed]   // [4, 1, true]
+```json
+"emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}
 ```
 
-| Option | Default | |
-|---|---|---|
-| `label` | (required) | the label of the elements |
-| `from` | (required) | the text property, a name or a `jpath(..)` |
-| `to` | (required) | the vector property, a top-level name |
-| `element` | `"vertex"` | `"edge"` embeds edges |
-| `embedder` | the host's default | the registry name of the embedder |
-| `only_missing` | `true` | skip elements that have `to` already; `false` embeds every element again |
-| `batch` | the embedder's `max_batch` | elements per page (one embedder call and one unit each) |
+A rule embeds with the built-in `hash-ngram/1` or a model the Store keeps
+([Models in the store](../persistence/store_models.md)). With any other embedder a host
+registered, write the vectors in a query of your own, and again for the elements whose text
+changed:
 
-The report counts `embedded`, `skipped_no_text` (no such property, `null`, or a text with
-nothing to embed), `not_text` (a value that is not a string: nothing is converted),
-`skipped_changed` and `skipped_removed` (see below), the committed `units`, whether the job
-declared the property in the schema (`schema_changed`), `elapsed_ms`, and the `embedder` and
-`model` that ran.
+```rhai,graph=modern
+g.v().has_label("person").property("emb", __.embed("name")).iterate()
+```
 
-**How it runs.** The job works in pages so that a slow embedder (a model in another process, a
-network service) never blocks the graph:
-
-1. it collects the ids of the elements to embed (a short read lock);
-2. per page it reads their texts (a short read lock), calls the embedder **without any lock of
-   the graph**, so other queries and writers go on meanwhile, and then writes the page's vectors
-   in one unit under the write lock;
-3. before writing an element it reads its text again: a text another writer changed since step 2
-   is skipped (`skipped_changed`), as is an element removed meanwhile (`skipped_removed`), so a
-   stale vector is never stored.
-
-Each page is atomic; the job as a whole is not. When it fails (the embedder fails, a schema
-refuses a write, the run is cancelled), the pages before stay committed, the failing page is
-rolled back, and the error stops the script; since `only_missing` is the default, running the job
-again continues where it stopped. A text the embedder finds nothing in (an empty one, punctuation
-only) is skipped and counted, never a failure.
-
-Inside an open unit (an explicit `transaction`, and every script of the playground, which runs
-as one unit) the job releases nothing: it runs every phase under the unit's lock, its pages are
-savepoints of that unit, and it commits or rolls back with it. The CLI runs it two-phase.
-
-The job asks `Read` and `Update` on the label's data, `Execute` on the embedder and, when it
-declares the property, `Update` on `Schema` ([Permissions](permissions.md)); a saved query
-cannot run it (it may write data only, never the schema). From Rust it is `Graph::embed_property(&EmbedJob, &Embedders,
-&CancelToken, &mut progress)` (two-phase, a progress callback after every page, a partial
-report in the error) or `EmbedJob::run_in(&mut storage, ..)` inside a transaction you hold.
+(`__.embed("name", #{embedder: "minilm"})` names the embedder; an element without the text, or
+with a text the embedder finds nothing in, fails the whole query, so filter first:
+`has("name", P.neq(""))`.) Declare the model in the schema then, as the next section shows, so a
+text query finds it. The job `embed_property` of earlier releases was removed in 0.5.0: a call
+fails with a help naming the vector rule.
 
 ### Which model produced a property
 
@@ -512,31 +483,23 @@ model produced the vectors: the keyword `embedder` of a vector declaration holds
 {"type": "array", "format": "vector", "element": "f32", "dimension": 256, "metric": "cosine", "embedder": "hash-ngram/1"}
 ```
 
-`embed_property` needs an **attached schema** (mode `open` or `closed`) and keeps it right; it
-never creates or attaches one itself (`g.set_schema(g.infer_schema(), SchemaMode.open)` attaches
-the structure a graph has):
+A vector rule declares it by its `embedder`; for vectors you write yourself, declare it in an
+**attached schema** (mode `open` or `closed`; `g.set_schema(g.infer_schema(), SchemaMode.open)`
+attaches the structure a graph has) with `g.patch_schema(..)`. The schema then keeps it right:
 
-- `to` undeclared for the label: the job declares it (`type`, `format: vector`, `element`,
-  `dimension`, `metric` from the embedder, `embedder` its model), in the unit of the first page,
-  so the declaration and the first vectors commit together (and travel together through the
-  journal, a rollback, a fork);
-- declared as a vector of the embedder's dimension (or of any dimension) without `embedder`:
-  the job adds `embedder`;
-- declared with the same model: nothing to change;
-- declared with **another model**: refused ("the schema declares "doc"."emb" as vectors of the
-  model ..."): embed into another property, or change the schema deliberately and embed again
-  with `only_missing: false`;
-- declared as something else (not a vector, or another dimension): refused with the schema's
-  own type mismatch, before the embedder runs;
-- declared with **another element kind** (`i8`, `f16`, `bit`) than the embedder returns: fine,
-  each vector is quantized to the declared element on write, exactly as a schema write of a
-  vector of another element is, so an f32 model can fill an `i8` property (a quarter of the
-  memory) directly.
+- changing the `embedder` of a declared property is an incompatible schema change (the stored
+  vectors and a text query embedded by the new model are not comparable): embed into another
+  property, or change it deliberately and write the vectors again (a rule does it for you:
+  changing its model re-embeds every element);
+- a declaration of another element kind (`i8`, `f16`, `bit`) than the embedder returns is fine:
+  each vector is quantized to the declared element on write, as a schema write of a vector of
+  another element is, so an f32 model can fill an `i8` property (a quarter of the memory)
+  directly.
 
 Different labels and properties may use different models: `doc.emb` from one, `doc.title_emb`
 or `person.emb` from another. A plain write of a vector (`property("emb", vector)`) still checks
-only the element kind and the dimension: the provenance is kept by `embed_property` and used by
-the text queries, not checked on every write.
+only the element kind and the dimension (a rule's vector refuses direct writes): the provenance
+is used by the text queries, not checked on every write.
 
 ### Text queries
 
@@ -545,16 +508,20 @@ is embedded once per execution, with the registered embedder whose model the sch
 the property, so the query vector always comes from the model of the stored ones:
 
 ```rhai,graph=modern,script
+g.v().has_label("person").property("emb", __.embed("name")).iterate();
 g.set_schema(g.infer_schema(), SchemaMode.open);
-g.embed_property(#{label: "person", from: "name", to: "emb"});
+g.patch_schema(#{vertices: #{person: #{schema: #{properties: #{emb: #{embedder: "hash-ngram/1"}}}}}});
 g.v().has_label("person").nearest("emb", "Markus", 2).values("name").to_list()   // ["marko", "vadas"]
 ```
+
+With a vector rule instead, the vectors appear when the unit that applied it ends: run the text
+query as the next query.
 
 - The model is read per element from the attached schema (the element's labels, the property);
   every element the query meets must declare the same model, else the query fails naming both
   (filter by label first: `has_label("doc")`).
 - No schema attached, or no `embedder` declared for the property: the query fails, and its help
-  shows how to attach a schema or run `embed_property`; passing a vector, `nearest("emb",
+  shows how to attach a schema and declare a vector rule; passing a vector, `nearest("emb",
   embed("Markus"), 2)`, keeps working without any schema.
 - No registered embedder of the declared model (`Embedders::by_model`): the query fails, and its
   help shows how a host registers one.
@@ -743,8 +710,7 @@ Python registers its own embedders: `graphersal.Embedder(name, fn, dimension=..)
 Python model (`fn(texts)` returns the rows, or one 2-D numpy array), `graphersal.Model2Vec(name,
 path, model="minishlab/potion-base-8M")` loads a Model2Vec model from a directory you downloaded
 (the same model identity as the command line's download), and `Graph(embedders=[..])`,
-`graph.register_embedder`, `graph.embed_property(label=.., source=.., target=..)` and text
-queries work as described above ([Python Quick Start: Embedders](../library/python.md#embedders)).
+`graph.register_embedder` and text queries work as described above ([Python Quick Start: Embedders](../library/python.md#embedders)).
 
 ## In the playground and the CLI
 

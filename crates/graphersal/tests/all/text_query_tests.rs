@@ -571,7 +571,10 @@ fn embed_property_was_removed_and_the_error_names_the_vector_rule() {
         let err = script_err(&graph, &embedders, call);
         assert!(err.contains("Function not found"), "{err}");
         assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
-        assert!(err.contains(r#"from: \"text\""#) || err.contains(r#"from: "text""#), "{err}");
+        assert!(
+            err.contains(r#"from: \"text\""#) || err.contains(r#"from: "text""#),
+            "{err}"
+        );
         assert!(err.contains("Vector Rules"), "{err}");
     }
     // Nothing was written.

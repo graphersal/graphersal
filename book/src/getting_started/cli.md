@@ -113,15 +113,19 @@ graphersal embed-model download minishlab/potion-base-8M     # into ~/.cache/gra
 graphersal embed-model download minishlab/potion-multilingual-128M   # 101 languages (about 510 MB)
 graphersal embed-model list                                  # repository, size, model identity
 graphersal --embedder potion=minishlab/potion-base-8M \
-  -e 'g.set_schema(g.infer_schema(), SchemaMode.open);
-      g.embed_property(#{label: "person", from: "name", to: "emb", embedder: "potion"});
+  -e 'g.v().has_label("person").property("emb", __.embed("name", #{embedder: "potion"})).iterate();
+      let model = g.embedders().filter(|e| e.name == "potion")[0].model;
+      g.set_schema(g.infer_schema(), SchemaMode.open);
+      g.patch_schema(#{vertices: #{person: #{schema: #{properties: #{emb: #{embedder: model}}}}}});
       g.v().has_label("person").nearest("emb", "Marco", 2).values("name").to_list()'
 ```
 
 `embedder: "potion"` picks the embedder by the name given to `--embedder` (without it the default
-runs: `--default-embedder`, else `hash-ngram/1`); `g.embedders()` lists the names. The schema then
-records the model's full identity, `model2vec/minishlab/potion-base-8M@fac4fa854e68`, the one
-`embed-model list` shows: copy it from there when you declare a vector property by hand.
+runs: `--default-embedder`, else `hash-ngram/1`); `g.embedders()` lists the names with their
+model's full identity, `model2vec/minishlab/potion-base-8M@fac4fa854e68`, the one `embed-model
+list` shows. The schema records it for `person.emb`, so the text query embeds with that model. A
+model imported into a Store (`--into`) can fill the property by itself through a
+[vector rule](../users_guide/vector_rules.md).
 
 The models directory is `$GRAPHERSAL_EMBED_MODELS` (or `--dir`), else the user cache. A model
 that does not load stops the command with exit code 2 and the reason. More:
