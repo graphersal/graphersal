@@ -1963,7 +1963,7 @@ pub enum GraphError {
         model: String,
         /// The embedder's error.
         #[source]
-        cause: crate::value::EmbedError,
+        cause: Box<crate::value::EmbedError>,
     },
 
     /// A schema declares a vector rule whose model is neither `hash-ngram/1` nor a model of the
@@ -11252,7 +11252,7 @@ mod tests {
             label: "doc".to_string(),
             key: "emb".to_string(),
             model: "model2vec/acme/tiny@0123456789ab".to_string(),
-            cause: crate::value::EmbedError::unavailable("the blob is damaged"),
+            cause: Box::new(crate::value::EmbedError::unavailable("the blob is damaged")),
         };
         assert!(err.to_string().contains("the blob is damaged"), "{err}");
         let help = err.help().expect("help");

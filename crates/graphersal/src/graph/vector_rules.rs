@@ -1448,7 +1448,7 @@ impl TraversalGraph {
                 label: first.label.to_string(),
                 key: first.to.to_string(),
                 model: model.to_string(),
-                cause,
+                cause: Box::new(cause),
             };
             let Some(embedder) = rule_embedder(&model) else {
                 return Err(fail(EmbedError::unavailable(format!(
