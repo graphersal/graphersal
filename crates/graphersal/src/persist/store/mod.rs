@@ -493,6 +493,9 @@ struct Shared {
     /// The blobs written but not yet referenced by a durable commit (format spec 12.4): no
     /// collection removes them.
     blob_gate: Arc<blobs::BlobGate>,
+    /// What each attic entry's WAL references (the blob counts of the info and the compaction
+    /// advice read an entry's WAL once, not on every call).
+    attic_blobs: blobs::AtticBlobs,
 }
 
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
@@ -870,7 +873,7 @@ impl Store {
         let dir = &DirPath::root(dir.into_store_dir());
         files::refuse_other_version(dir)?;
         let file = read_graph_file(dir)?.file;
-        let mut info = info_of(dir, &file)?;
+        let mut info = info_of(dir, &file, BlobCount::Unreferenced, None)?;
         let (commit_seq, time) = maintenance::last_commit_in_files(dir, &info.snapshots)?;
         info.commit_seq = commit_seq;
         info.last_commit_at = time;
@@ -913,7 +916,7 @@ impl Store {
                 marker.commit_seq
             )
         });
-        compaction::advise(&dir, policy, blocked)
+        compaction::advise(&dir, policy, blocked, None)
     }
 
     /// What [`Store::prune`] (or [`Store::prune_backup`] on a backup directory) up to `up_to`
@@ -929,7 +932,7 @@ impl Store {
         let dir = DirPath::root(dir.into_store_dir());
         files::refuse_other_version(&dir)?;
         read_graph_file(&dir)?;
-        Ok(maintenance::prune_estimate(&dir, up_to)?.0)
+        Ok(maintenance::prune_estimate(&dir, up_to, None)?.0)
     }
 
     /// [`Store::verify`] of the store in `dir`, without a lock (works while a writer has it
@@ -1377,7 +1380,19 @@ impl<S: PersistentStorage + Default> Store<S> {
 
     /// Identity, position and files of this open store.
     pub fn info(&self) -> Result<StoreInfo, PersistError> {
-        self.core.info()
+        self.core.info(BlobCount::Unreferenced)
+    }
+
+    /// [`Store::info`] for a front end that shows it often (the playground's Store menu): the
+    /// same answer, except that [`StoreInfo::blobs`] is a listing by names and lengths
+    /// ([`BlobUsage::unreferenced`](blobs::BlobUsage::unreferenced) is `0`: not counted). It reads only names, lengths and the
+    /// small metadata files (`GRAPH`, `marks`, the head of every snapshot manifest, every attic
+    /// entry's `ATTIC` file), never the WAL, the attic entries' WAL or a blob, so its cost does
+    /// not grow with the length of the history. ([`Store::info`] counts the unreferenced blobs
+    /// from the snapshots' blob tables and the ledger, and reads the attic entries' WAL only for
+    /// a blob neither of them references.)
+    pub fn quick_info(&self) -> Result<StoreInfo, PersistError> {
+        self.core.info(BlobCount::Listing)
     }
 
     /// Writes the packed snapshot (`.gsnap`) of the stored snapshot at `commit_seq` (`None`:
@@ -1887,6 +1902,7 @@ impl StoreCore {
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
             blob_gate: Arc::default(),
+            attic_blobs: Default::default(),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -2190,6 +2206,7 @@ impl StoreCore {
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
             blob_gate: Arc::default(),
+            attic_blobs: Default::default(),
             system_journal,
         });
         let thread = if shared.options.checkpoint_after_bytes > 0 {
@@ -2261,6 +2278,7 @@ impl StoreCore {
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
             blob_gate: Arc::default(),
+            attic_blobs: Default::default(),
             system_journal,
         });
         shared.journal_opened(&report, started, true);
@@ -2351,6 +2369,7 @@ impl StoreCore {
             found: Mutex::new(Vec::new()),
             workload: workload_stats,
             blob_gate: Arc::default(),
+            attic_blobs: Default::default(),
             system_journal,
         });
         shared.journal_opened(&report, web_time::Instant::now(), true);
@@ -2688,7 +2707,7 @@ impl StoreCore {
         list_marks(&self.shared.dir)
     }
 
-    pub fn info(&self) -> Result<StoreInfo, PersistError> {
+    pub fn info(&self, blobs: BlobCount) -> Result<StoreInfo, PersistError> {
         let (commit_seq, last_commit_at) = {
             let graph = self.shared.graph.read();
             (graph.last_commit_seq()?, graph.last_committed_at())
@@ -2705,7 +2724,12 @@ impl StoreCore {
                 )
             })?
             .clone();
-        let mut info = info_of(&self.shared.dir, &file)?;
+        let mut info = info_of(
+            &self.shared.dir,
+            &file,
+            blobs,
+            Some(&self.shared.attic_blobs),
+        )?;
         info.commit_seq = commit_seq;
         info.last_commit_at = last_commit_at;
         info.durable = self.durable_position();
@@ -2808,7 +2832,8 @@ impl StoreCore {
             )
         })?;
         let bytes =
-            maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
+            maintenance::prune_estimate(&self.shared.dir, up_to, Some(&self.shared.attic_blobs))
+                .map_or(0, |(_, bytes)| bytes);
         let report = maintenance::prune(
             &self.shared.dir,
             up_to,
@@ -2818,8 +2843,13 @@ impl StoreCore {
         self.shared
             .journal_collected(report.blobs_removed, report.blob_bytes_removed, "prune");
         if self.shared.options.auto_compact
-            && compaction::advise(&self.shared.dir, self.shared.options.compaction, None)?
-                .recommended
+            && compaction::advise(
+                &self.shared.dir,
+                self.shared.options.compaction,
+                None,
+                Some(&self.shared.attic_blobs),
+            )?
+            .recommended
         {
             self.shared
                 .dir
@@ -2841,7 +2871,8 @@ impl StoreCore {
             )
         })?;
         let bytes =
-            maintenance::prune_estimate(&self.shared.dir, up_to).map_or(0, |(_, bytes)| bytes);
+            maintenance::prune_estimate(&self.shared.dir, up_to, Some(&self.shared.attic_blobs))
+                .map_or(0, |(_, bytes)| bytes);
         let prune = maintenance::prune(
             &self.shared.dir,
             up_to,
@@ -2871,7 +2902,12 @@ impl StoreCore {
             .writable("compact the store")
             .err()
             .map(|e| e.to_string());
-        compaction::advise(&self.shared.dir, policy, blocked)
+        compaction::advise(
+            &self.shared.dir,
+            policy,
+            blocked,
+            Some(&self.shared.attic_blobs),
+        )
     }
 
     pub fn verify(&self) -> Result<VerifyReport, PersistError> {
@@ -5126,7 +5162,22 @@ fn all_marks(dir: &DirPath) -> Result<Vec<Mark>, PersistError> {
     })
 }
 
-fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
+/// How far [`info_of`] counts the store's blobs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlobCount {
+    /// Names and lengths, and which of them no retained history references
+    /// ([`BlobUsage::unreferenced`](blobs::BlobUsage::unreferenced); may read the attic entries' WAL).
+    Unreferenced,
+    /// Names and lengths only ([`Store::quick_info`]).
+    Listing,
+}
+
+fn info_of(
+    dir: &DirPath,
+    file: &GraphFile,
+    blobs: BlobCount,
+    attic: Option<&blobs::AtticBlobs>,
+) -> Result<StoreInfo, PersistError> {
     // The 0.4.0 model directories (`models/`, migrated by the upgrade) must be readable: an
     // unreadable one fails the info, never an empty answer.
     models::model_ids(dir)?;
@@ -5167,7 +5218,10 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         models: Vec::new(),
         default_model: None,
         schema_models: Vec::new(),
-        blobs: blobs::usage(dir, &file.chain())?,
+        blobs: match blobs {
+            BlobCount::Unreferenced => blobs::usage(dir, &file.chain(), attic)?,
+            BlobCount::Listing => blobs::listing_usage(dir)?,
+        },
     })
 }
 

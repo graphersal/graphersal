@@ -48,6 +48,8 @@ const JSON_METHODS = {
   diffSchema: (json) => playground.diffSchema(json),
   // The store in memory (the Store menu).
   storeInfo: () => playground.storeInfo(),
+  storeSummary: () => playground.storeSummary(),
+  storeDetails: () => playground.storeDetails(),
   checkpoint: (name) => playground.checkpoint(name || ''),
   mark: (name) => playground.mark(name),
   openView: (target) => playground.openView(JSON.stringify({ target })),

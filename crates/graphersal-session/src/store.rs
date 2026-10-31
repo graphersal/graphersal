@@ -350,12 +350,83 @@ impl Session {
 
     /// `GET /api/store`: identity, position, snapshots, marks, attic (with whether each entry
     /// can be restored now), the maintenance report, the open view, the sizes, and the
-    /// databases of the session.
+    /// databases of the session: [`Self::store_summary`] with the figures of
+    /// [`Self::store_details`] filled in (without `detailsPending`).
     pub fn store_info(&self) -> Result<Value, StoreError> {
+        let mut answer = self.summary_value()?;
+        let details = self.store_details()?;
+        for key in STORE_DETAIL_KEYS {
+            answer[*key] = details[*key].clone();
+        }
+        Ok(answer)
+    }
+
+    /// `GET /api/store/summary`, the Store menu's first call: [`Self::store_info`] without the
+    /// figures that weigh the store or walk the graph ([`STORE_DETAIL_KEYS`] are `null`,
+    /// `detailsPending: true`). It reads only names, lengths and the store's small metadata
+    /// files ([`graphersal::persist::Store::quick_info`], the attic entries' restorability),
+    /// never the WAL, an attic entry's WAL, a blob or the graph's elements: its cost does not
+    /// grow with the history or the data, so the menu opens at once.
+    pub fn store_summary(&self) -> Result<Value, StoreError> {
+        let mut answer = self.summary_value()?;
+        for key in STORE_DETAIL_KEYS {
+            answer[*key] = Value::Null;
+        }
+        answer["detailsPending"] = json!(true);
+        Ok(answer)
+    }
+
+    /// `GET /api/store/details`, the Store menu's second call: `{commitSeq, compaction,
+    /// compactionError, storeBytes, storeBytesText, graphBytes, graphBytesText}` (the keys of
+    /// [`STORE_DETAIL_KEYS`] as [`Self::store_info`] answers them, and the commit they belong
+    /// to). The compaction advice sizes the store's files by their lengths (a prune's estimate
+    /// reads the kept snapshots' manifests, and an attic entry's WAL only for a blob nothing
+    /// else references); the graph's size is its footprint, walked once per commit
+    /// ([`graphersal::storage::AnyGraph::memory_footprint_bytes`]).
+    pub fn store_details(&self) -> Result<Value, StoreError> {
+        let store = self.store_or_409()?;
+        let graph = store.session_graph();
+        let commit_seq = graph.last_commit_seq()?;
+        // The store's ONE size: every byte it occupies on its backend (the container file of a
+        // single-file store; every file of a directory or a store in memory: snapshots, WAL,
+        // attic AND the small files GRAPH, GRAPH.copy, marks, ...), the figure the compaction
+        // advice works with. Snapshots + WAL + attic alone (without the small files) would be
+        // a second, smaller "store size"; it is only the fallback without an advice.
+        // An advice that cannot be computed (an unreadable file of a damaged store) does not
+        // hide the rest of the info: it is `compactionError`, beside `compaction: null`.
+        let (advice, advice_error) = match store.compaction_advice() {
+            Ok(advice) => (Some(advice), None),
+            Err(err) => (None, Some(graphersal::error::format_diagnostic(&err))),
+        };
+        let store_bytes = match &advice {
+            Some(advice) => advice.total_bytes,
+            None => {
+                let info = store
+                    .quick_info()
+                    .map_err(|err| StoreError::internal(err.to_string()))?;
+                info.snapshot_bytes
+                    + info.wal_bytes
+                    + info.attic.iter().map(|a| a.bytes).sum::<u64>()
+            }
+        };
+        let graph_bytes = graph.memory_footprint_bytes()?;
+        Ok(json!({
+            "commitSeq": commit_seq,
+            "compaction": advice.as_ref().map_or(Value::Null, advice_value),
+            "compactionError": advice_error,
+            "storeBytes": store_bytes,
+            "storeBytesText": bytes_text(store_bytes),
+            "graphBytes": graph_bytes,
+            "graphBytesText": graph_bytes.map(bytes_text),
+        }))
+    }
+
+    /// Everything of [`Self::store_info`] but [`STORE_DETAIL_KEYS`].
+    fn summary_value(&self) -> Result<Value, StoreError> {
         let stores = self.stores_or_409()?;
         let store = self.store_or_409()?;
         let info = store
-            .info()
+            .quick_info()
             .map_err(|err| StoreError::internal(err.to_string()))?;
         let mut answer = store_value(&info);
         if let Some(entries) = answer["attic"].as_array_mut() {
@@ -372,29 +443,6 @@ impl Session {
                 };
             }
         }
-        // The store's ONE size: every byte it occupies on its backend (the container file of a
-        // single-file store; every file of a directory or a store in memory: snapshots, WAL,
-        // attic AND the small files GRAPH, GRAPH.copy, marks, ...), the figure the compaction
-        // advice works with. Snapshots + WAL + attic alone (without the small files) would be
-        // a second, smaller "store size"; it is only the fallback without an advice.
-        // An advice that cannot be computed (an unreadable file of a damaged store) does not
-        // hide the rest of the info: it is `compactionError`, beside `compaction: null`.
-        let (advice, advice_error) = match store.compaction_advice() {
-            Ok(advice) => (Some(advice), None),
-            Err(err) => (None, Some(graphersal::error::format_diagnostic(&err))),
-        };
-        let store_bytes = advice.as_ref().map_or_else(
-            || {
-                info.snapshot_bytes
-                    + info.wal_bytes
-                    + info.attic.iter().map(|a| a.bytes).sum::<u64>()
-            },
-            |advice| advice.total_bytes,
-        );
-        let graph_bytes = store
-            .session_graph()
-            .memory_usage()?
-            .map(|m| m.total_bytes());
         answer["memory"] = json!(store.dir().is_volatile());
         answer["kind"] = json!(if store.dir().is_volatile() {
             "memory"
@@ -412,13 +460,6 @@ impl Session {
                 "garbageBytesText": bytes_text(space.garbage_bytes()),
             })
         });
-        // Cheap (no data is read): the menu shows it on every refresh.
-        answer["compaction"] = advice.as_ref().map_or(Value::Null, advice_value);
-        answer["compactionError"] = json!(advice_error);
-        answer["storeBytes"] = json!(store_bytes);
-        answer["storeBytesText"] = json!(bytes_text(store_bytes));
-        answer["graphBytes"] = json!(graph_bytes);
-        answer["graphBytesText"] = json!(graph_bytes.map(bytes_text));
         answer["walSinceCheckpoint"] = json!(store.wal_bytes_since_checkpoint());
         answer["lastAutoCheckpointError"] = json!(
             store
@@ -1091,6 +1132,17 @@ pub fn advice_value(advice: &CompactionAdvice) -> Value {
         },
     })
 }
+
+/// The keys of [`Session::store_info`] that [`Session::store_summary`] leaves `null` and
+/// [`Session::store_details`] answers: the compaction advice, the store's size and the graph's.
+pub const STORE_DETAIL_KEYS: &[&str] = &[
+    "compaction",
+    "compactionError",
+    "storeBytes",
+    "storeBytesText",
+    "graphBytes",
+    "graphBytesText",
+];
 
 /// Identity, position, snapshots, marks and attic.
 pub fn store_value(info: &StoreInfo) -> Value {

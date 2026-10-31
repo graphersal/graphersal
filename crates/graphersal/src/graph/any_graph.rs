@@ -106,6 +106,12 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`Self::capabilities`].
     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError>;
 
+    /// [`GraphStorage::memory_footprint_bytes`] of the storage: the total of
+    /// [`Self::memory_usage`] ([`MemoryStats::total_bytes`]), which a storage may cache by its
+    /// commit position (`TraversalGraph` does: an unchanged graph is not walked again). `None`:
+    /// the storage reports none. Fails like [`Self::capabilities`].
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError>;
+
     /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>>;
 
@@ -339,6 +345,10 @@ where
             stats.model_bytes = Graph::model_registry(self).map_or(0, |r| r.model_bytes());
             stats
         }))
+    }
+
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        self.read_checked()?.memory_footprint_bytes()
     }
 
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {
