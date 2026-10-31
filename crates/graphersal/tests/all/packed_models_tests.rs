@@ -345,3 +345,156 @@ fn a_converted_040_model_loads_from_the_rows() {
     let err = embed_on(&other, "local/b6b362e7a651").unwrap_err();
     assert!(err.contains("unavailable"), "{err}");
 }
+
+/// `Store::create_from_packed_dir` (CLI `store create <dir> --from file.gsnap`) makes the store
+/// WITHOUT opening it: a file exported without the model its schema needs still becomes a
+/// store, the report names the model (with the commands), and the store opens once the model
+/// is imported into it (as with a 0.4.0 file whose model 0.4.0 served through `--embedder`).
+#[test]
+fn a_store_made_from_a_gsnap_lacking_its_model_names_it_and_opens_after_the_import() {
+    let temp = Temp::new("packed-create-without");
+    let (path, identity) = exported(&temp, "without.gsnap", ModelCopy::Exclude);
+    let dir = temp.join("made");
+    let report =
+        Store::create_from_packed_dir(&dir, std::fs::File::open(&path).unwrap(), options())
+            .unwrap();
+    assert_eq!(
+        report.from_version,
+        graphersal::persist::STORE_FORMAT_VERSION
+    );
+    assert!(report.models_converted.is_empty() && report.migration_commit.is_none());
+    assert_eq!(
+        report.models_missing.len(),
+        1,
+        "{:?}",
+        report.models_missing
+    );
+    let missing = &report.models_missing[0];
+    assert_eq!(missing.identity(), identity);
+    assert_eq!(missing.needed_by(), ["doc.emb"]);
+    assert_eq!(
+        missing.commands("made"),
+        [
+            "graphersal embed-model download acme/tiny",
+            "graphersal embed-model import acme/tiny --into made",
+        ]
+    );
+    // `doc.emb` names the model without a source property; no element holds a vector.
+    assert_eq!(report.vectors_without_rule.len(), 1);
+    let note = report.vectors_without_rule[0].note("made");
+    assert!(
+        note.starts_with("doc.emb is declared with vectors of acme/tiny (no element holds one"),
+        "{note}"
+    );
+    // The store is there, closed cleanly, and refuses to open while the model is missing.
+    assert!(Store::inspect(&dir).unwrap().clean);
+    let refused = Store::open(&dir, options())
+        .err()
+        .expect("the model is missing");
+    assert!(refused.to_string().contains("acme/tiny"), "{refused}");
+    // The import brings it back: the store opens and serves it.
+    Store::import_model_dir(
+        &dir,
+        graphersal::persist::ModelSource::Files(crate::model_fixture::tiny_model(1, "acme/tiny")),
+        graphersal::persist::ImportModelOptions::new(),
+    )
+    .unwrap();
+    let store = Store::open(&dir, options()).unwrap();
+    assert_eq!(store.graph().read().vertex_count(), 1);
+    store.close().unwrap();
+}
+
+/// An open store that defines a model without its blob (made from an export without models)
+/// takes the blob back by the import of the same model (it was a silent no-op before).
+#[test]
+fn an_open_store_takes_back_the_blob_of_a_model_it_defines() {
+    let temp = Temp::new("packed-restore-open");
+    let store = Store::create(temp.join("s"), options()).unwrap();
+    import(&store, 1, "acme/tiny");
+    store.checkpoint(None).unwrap();
+    let path = temp.join("bare.gsnap");
+    store
+        .export_packed_with(
+            None,
+            std::fs::File::create(&path).unwrap(),
+            ModelCopy::Exclude,
+        )
+        .unwrap();
+    store.close().unwrap();
+    let made = Store::create_from_packed(
+        temp.join("made"),
+        std::fs::File::open(&path).unwrap(),
+        options(),
+    )
+    .unwrap();
+    assert_eq!(made.models().unwrap()[0].state, ModelState::Missing);
+    let report = import(&made, 1, "acme/tiny");
+    assert!(!report.already_present);
+    let state = made.models().unwrap()[0].state.clone();
+    assert!(
+        !matches!(state, ModelState::Missing | ModelState::Damaged { .. }),
+        "{state:?}"
+    );
+    made.close().unwrap();
+}
+
+/// A store made from a 0.4.0 `.gsnap` without opening it reports what the store upgrade
+/// reports: the converted models and their commit, the vectors without a rule (counted).
+#[test]
+fn a_store_made_from_a_040_gsnap_reports_the_migration() {
+    let temp = Temp::new("packed-create-040");
+    let dir = temp.join("made");
+    let report = Store::create_from_packed_dir(
+        &dir,
+        std::fs::File::open(v040("snapshot.gsnap")).unwrap(),
+        options(),
+    )
+    .unwrap();
+    assert_eq!(report.from_version, 3);
+    assert_eq!(report.models_converted.len(), 2);
+    assert!(report.migration_commit.is_some());
+    assert!(
+        report.models_missing.is_empty(),
+        "{:?}",
+        report.models_missing
+    );
+    let doc = report
+        .vectors_without_rule
+        .iter()
+        .find(|v| v.label() == "doc")
+        .unwrap();
+    assert_eq!(doc.elements(), 3);
+    assert!(doc.exact());
+    let store = Store::open(&dir, options()).unwrap();
+    assert_eq!(store.models().unwrap().len(), 2);
+    store.close().unwrap();
+}
+
+/// The notes of a `.gsnap` loaded without a store run their schema patch in a store: a schema
+/// change of the loaded file stays in memory.
+#[test]
+fn the_gsnap_notes_put_the_graph_into_a_store_first() {
+    let (_, report) = load(&v040("snapshot.gsnap"));
+    let notes = report.notes("snapshot.gsnap").join("\n");
+    assert!(
+        notes.contains(
+            "graphersal store create <dir> --from snapshot.gsnap, then graphersal --graph <dir> \
+             -e 'g.patch_schema(#{vertices: #{doc:"
+        ),
+        "{notes}"
+    );
+    assert!(
+        !notes.contains("graphersal --graph snapshot.gsnap"),
+        "{notes}"
+    );
+    let (_, report) = load(&v040("saved_queries.gsnap"));
+    let notes = report.notes("saved_queries.gsnap").join("\n");
+    assert!(
+        notes.contains("graphersal store create <dir> --from saved_queries.gsnap"),
+        "{notes}"
+    );
+    assert!(
+        !notes.contains("graphersal --graph saved_queries.gsnap"),
+        "{notes}"
+    );
+}

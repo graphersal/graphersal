@@ -179,12 +179,21 @@ Changes stay in memory: the file is never written.
   rows when the model loads. `graphersal store create <dir> --from file.gsnap` keeps them
   converted (the documented route for a 0.4.0 file).
 - A `.gsnap` exported `--without-models` keeps the definitions but not the blobs: the models
-  are listed as `missing`, and a query that needs one fails with the import command.
+  are listed as `missing`, and a query that needs one fails with the import command. In a store
+  made from it, `graphersal embed-model import <repo> --into <store>` (or `Store::import_model`)
+  of the same model writes its blob back.
+- A 0.4.0 `.gsnap` whose schema names a model the file does not carry (0.4.0 served it through
+  `--embedder`) loads, but text queries and vector rules on those properties fail until the
+  graph is in a store holding the model: `graphersal store create <dir> --from file.gsnap`
+  makes the store (and says so with a `warning:`), the import puts the model in, then the store
+  opens.
 - The CLI prints what the load found as `note:` lines on stderr (`SnapshotLoadReport::notes`,
   the same text in Python as a `UserWarning`, in Rust from the report; `GraphSource::from_file`
   logs them as `tracing` warnings): converted models, models stored but none the default, models
   the schema names that the file lacks, vector properties without a rule, saved queries calling
-  a removed function.
+  a removed function. Their schema patches run in a store (`graphersal store create <dir> --from
+  file.gsnap`, then `graphersal --graph <dir> -e '...'`): a schema change of the loaded file
+  stays in memory.
 
 ## Older Graphersal versions
 

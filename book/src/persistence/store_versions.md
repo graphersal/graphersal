@@ -176,11 +176,22 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   ready schema patch, for example
 
   ```text
-  note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs)
+  note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs), and from then on emb itself is not written directly (write the source property)
   ```
 
   See [Vector Rules](../users_guide/vector_rules.md): adding `from` makes it a rule whose first
-  fill re-embeds EVERY element of the label while the whole database is locked.
+  fill re-embeds EVERY element of the label while the whole database is locked. Several labels
+  can take their rule in ONE patch (one fill, one lock), and the preview says what it fills
+  before anything is written:
+
+  ```rhai
+  g.validate_schema_patch(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "text"}}}}}, note: #{schema: #{properties: #{emb: #{from: "text"}}}}}})["fill_warning"]
+  ```
+
+  From then on a direct write of the vector is refused (`GraphError::DerivedProperty`): a loader
+  or saved query of 0.4.0 that computed the vector itself (`property("emb", ..)`) writes the
+  source property instead. A property declared with a model but holding no vector yet is listed
+  too ("no element holds one yet").
 - **Saved queries calling a removed function.** A saved query of 0.4.0 that calls
   `g.embed_property(..)` (removed in 0.5.0) is kept as it is, and a call of it fails with a
   help naming the vector rule. The upgrade lists each such query
@@ -193,7 +204,9 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   ```
 
   Then redefine or drop the query. `graphersal store create <dir> --from <0.4.0 .gsnap>` prints
-  the same notes; from Rust, `graphersal::script::saved_queries_using_removed(&definitions)`
+  the same notes and warnings (`Store::create_from_packed_dir` returns them as an
+  `UpgradeReport`; the store is created even when the schema needs a model the file does not
+  carry, and opens once it is imported); from Rust, `graphersal::script::saved_queries_using_removed(&definitions)`
   scans any catalog.
 - **Take a full backup after the upgrade.** A backup directory of the 0.4.0 store upgrades too
   (it stays a backup), but it gets its own migration commit, so it no longer takes increments of

@@ -633,6 +633,27 @@ impl Store {
         Self::open_at(dir, options)
     }
 
+    /// Creates a store from a packed snapshot (`.gsnap`) as [`Store::create_from_packed`] does,
+    /// WITHOUT opening it (the closed-store form, like [`Store::import_model_dir`]; CLI
+    /// `graphersal store create <dir> --from file.gsnap`), and reports what the file brought
+    /// that still needs a decision, in the fields a store upgrade fills ([`UpgradeReport`]):
+    /// the model rows of a Graphersal 0.4.0 file, migrated by the new store's first commit
+    /// (`models_converted`, `migration_commit`); the models the schema needs that the file does
+    /// not carry (`models_missing`: the store is created, and opens once they are imported);
+    /// the vector properties without a rule (`vectors_without_rule`, counted in its snapshot);
+    /// the saved queries calling a removed function (`saved_queries_using_removed`).
+    /// `from_version` is 3 when 0.4.0 model rows were migrated, else the current version;
+    /// `in_place` is `true`, `verify` is empty.
+    pub fn create_from_packed_dir(
+        dir: impl IntoStoreDir,
+        packed: impl std::io::Read,
+        options: StoreOptions,
+    ) -> Result<UpgradeReport, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        let migrated = StoreCore::create_from_packed_at(&dir, packed, &options)?;
+        upgrade::report_new_store(&dir, migrated)
+    }
+
     /// Opens the store in `dir` read-write and runs the recovery: takes the `LOCK`, completes
     /// an interrupted multi-file operation (`INTENT`), removes temporary files, loads the
     /// latest snapshot, replays the WAL after it, cuts an interrupted last write (a torn tail;
@@ -1880,12 +1901,13 @@ impl StoreCore {
         })
     }
 
-    /// The files of [`Store::create_from_packed`] (the store is not opened).
+    /// The files of [`Store::create_from_packed`] (the store is not opened), with the migration
+    /// of the 0.4.0 model rows.
     fn create_from_packed_at(
         dir: &DirPath,
         packed: impl std::io::Read,
         options: &StoreOptions,
-    ) -> Result<(), PersistError> {
+    ) -> Result<migrate_models::Migrated, PersistError> {
         let existed = dir.exists();
         prepare_new_dir(dir)?;
         let result = (|| {
@@ -1918,13 +1940,12 @@ impl StoreCore {
             // The model rows of a Graphersal 0.4.0 `.gsnap` (format spec 4.5, 8) became
             // `models/`: they are migrated into blobs and definitions by the new store's first
             // commit (format spec 15.1).
-            migrate_models::migrate_new_store(dir).map(|_| ())
+            migrate_models::migrate_new_store(dir)
         })();
-        if let Err(err) = result {
+        if result.is_err() {
             undo_create(dir, existed);
-            return Err(err);
         }
-        Ok(())
+        result
     }
 
     fn create_lineage<S: PersistentStorage + ?Sized>(
