@@ -10,9 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use graphersal::persist::{
-    BackupMode, BackupReport, CompactionAdvice, CompactionPolicy, DamagePolicy, ModelCopy,
-    ModelInfo, PersistError, RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir,
-    StoreOptions, store_dir_at,
+    BackupMode, BackupReport, ClosedCommitOptions, CompactionAdvice, CompactionPolicy,
+    DamagePolicy, ModelCopy, ModelInfo, PersistError, RecoveryTarget, RollbackMode, SingleFileDir,
+    Store, StoreDir, StoreOptions, store_dir_at,
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
@@ -1086,7 +1086,11 @@ pub fn run(args: &[String]) -> i32 {
                         "`store models remove` takes the store and the model's repository",
                     );
                 }
-                return match Store::remove_model_dir(positional[1].as_str(), &positional[2]) {
+                return match Store::remove_model_dir(
+                    positional[1].as_str(),
+                    &positional[2],
+                    ClosedCommitOptions::new().with_principal("cli"),
+                ) {
                     Ok(report) => {
                         if let Some(model) = &report.model {
                             outln!("Removed {}.", model_line(model));

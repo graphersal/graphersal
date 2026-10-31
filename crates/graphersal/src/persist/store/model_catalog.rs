@@ -20,7 +20,7 @@ use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::model_definition::{BaseModel, ModelDefinition};
 use crate::graph::schema::GraphSchema;
 use crate::graph::system_journal::{Event, catalogue};
-use crate::graph::{CommitMetadata, GraphStorage, PersistentStorage, Transactional};
+use crate::graph::{CommitMetadata, GraphStorage, Mutation, PersistentStorage, Transactional};
 use crate::persist::model_tar::{
     self, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, ManifestBase, ManifestFile, ModelManifest,
     TarContent, TarFile, TarStream, is_model_file_name, sha256_hex,
@@ -202,6 +202,9 @@ pub struct ImportModelReport {
 pub struct ModelChangeReport {
     /// The commit that made the change; `None` when nothing changed.
     pub commit_seq: Option<u64>,
+    /// The time of that commit (microseconds since the Unix epoch); `None` when nothing
+    /// changed.
+    pub committed_at: Option<i64>,
     /// The model the change concerns (as it was removed, or as it is now the default).
     pub model: Option<ModelInfo>,
 }
@@ -921,23 +924,394 @@ fn catalog_of<S: PersistentStorage>(
     graph: &crate::graph::Graph<S>,
 ) -> Result<(Vec<Definition>, Option<GraphSchema>), PersistError> {
     let read = graph.read_checked().map_err(PersistError::Graph)?;
-    let definitions = read
-        .definitions()
-        .map_err(PersistError::Graph)?
-        .filter(|d| d.kind() == DefinitionKind::MODEL)
-        .cloned()
-        .collect();
+    let definitions = model_definitions(&*read).map_err(PersistError::Graph)?;
     let schema = read.get_schema().map_err(PersistError::Graph)?;
     Ok((definitions, schema))
 }
 
 /// The refusal of an operation on a model the store does not hold.
-fn unknown(operation: &'static str, repo: &str) -> PersistError {
+pub(crate) fn unknown(operation: &'static str, repo: &str) -> PersistError {
     PersistError::store(
         operation,
         StoreFailure::UnknownModel,
         format!("the store holds no model {repo:?} at its current position"),
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The planner: the catalog changes of a model change, shared by the open store (applied in one
+// unit) and the closed store (one commit appended to the WAL, `closed_commit.rs`)
+// ---------------------------------------------------------------------------------------------
+
+/// The model definitions (catalog kind 5) of a catalog.
+pub(crate) fn model_definitions<G: GraphStorage + ?Sized>(
+    g: &G,
+) -> Result<Vec<Definition>, GraphError> {
+    Ok(g.definitions()?
+        .filter(|d| d.kind() == DefinitionKind::MODEL)
+        .cloned()
+        .collect())
+}
+
+/// The definition of the model of `repo` in `definitions`.
+pub(crate) fn of_repo<'a>(definitions: &'a [Definition], repo: &str) -> Option<&'a Definition> {
+    definitions
+        .iter()
+        .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
+}
+
+/// The default model's definition in `definitions`.
+fn default_of(definitions: &[Definition]) -> Option<&Definition> {
+    definitions
+        .iter()
+        .find(|d| d.as_model().is_some_and(ModelDefinition::is_default))
+}
+
+/// What an import of the model `identity` of `repo` finds in the catalog.
+pub(crate) enum ImportPlan {
+    /// The same identity is defined already: nothing is imported (at most the default changes).
+    Present,
+    /// A new definition; `old` is the revision of the same repository it replaces.
+    New { old: Option<Definition> },
+}
+
+/// Plans an import (format spec 4.5): the same identity present, or a new revision, refused
+/// while the store holds another revision of the repository and `replace` is not set
+/// ([`StoreFailure::ModelRevisionExists`]), and (until vector rules) while a schema property's
+/// vectors were made by the revision it would replace.
+pub(crate) fn plan_import(
+    definitions: &[Definition],
+    schema: Option<&GraphSchema>,
+    identity: &str,
+    repo: &str,
+    replace: bool,
+) -> Result<ImportPlan, PersistError> {
+    const OP: &str = "import a model";
+    if definitions
+        .iter()
+        .any(|d| d.name() == identity && d.as_model().is_some())
+    {
+        return Ok(ImportPlan::Present);
+    }
+    let old = of_repo(definitions, repo).cloned();
+    if let Some(old) = &old {
+        let using = needed_by(schema, old.name());
+        if !replace {
+            return Err(PersistError::store(
+                OP,
+                StoreFailure::ModelRevisionExists,
+                format!(
+                    "the store holds the revision {} of {repo}; the import is the revision \
+                     {identity}. {}",
+                    old.name(),
+                    if using.is_empty() {
+                        "No schema property uses the current revision: replacing it changes \
+                         no data"
+                            .to_string()
+                    } else {
+                        format!(
+                            "The vectors of {} were made by the current revision: a replace \
+                             re-embeds them",
+                            using.join(", ")
+                        )
+                    }
+                ),
+            ));
+        }
+        // P7 HOOK (K1): a replace whose old revision made a schema property's vectors re-embeds
+        // them in the same unit (vector rules). On a closed store the CLI then opens the store
+        // and runs that unit, saying so; until vector rules exist it is refused here, on the
+        // open and on the closed store alike.
+        if !using.is_empty() {
+            return Err(PersistError::Graph(GraphError::Unsupported {
+                operation: "replacing a model whose vectors are in the data (requires \
+                            vector rules)",
+            }));
+        }
+    }
+    Ok(ImportPlan::New { old })
+}
+
+/// The changes clearing the default flag of every model but `keep` and `removed`.
+fn clear_default_changes(
+    definitions: &[Definition],
+    keep: &str,
+    removed: Option<&str>,
+) -> Vec<Mutation> {
+    definitions
+        .iter()
+        .filter(|d| d.name() != keep && Some(d.name()) != removed)
+        .filter_map(|d| {
+            d.as_model().filter(|m| m.is_default()).map(|m| {
+                Mutation::set_definition(
+                    DefinitionKind::MODEL,
+                    d.name(),
+                    Some(d.clone()),
+                    Some(Definition::model(d.name(), m.clone().with_default(false))),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The changes of an import (format spec 4.5): the replaced revision `old` dropped, the default
+/// flag of every other model cleared when `new` is the default, `new` defined.
+pub(crate) fn import_changes(
+    definitions: &[Definition],
+    old: Option<&Definition>,
+    new: Definition,
+) -> Vec<Mutation> {
+    let mut changes = Vec::new();
+    if let Some(old) = old {
+        changes.push(Mutation::set_definition(
+            DefinitionKind::MODEL,
+            old.name(),
+            Some(old.clone()),
+            None,
+        ));
+    }
+    if new.as_model().is_some_and(ModelDefinition::is_default) {
+        changes.extend(clear_default_changes(
+            definitions,
+            new.name(),
+            old.map(Definition::name),
+        ));
+    }
+    let name = new.name().to_string();
+    changes.push(Mutation::set_definition(
+        DefinitionKind::MODEL,
+        name,
+        None,
+        Some(new),
+    ));
+    changes
+}
+
+/// The changes making the model `target` (a definition name) the default, or clearing the
+/// default (`None`); empty when nothing changes.
+pub(crate) fn default_changes(definitions: &[Definition], target: Option<&str>) -> Vec<Mutation> {
+    if default_of(definitions).map(Definition::name) == target {
+        return Vec::new();
+    }
+    let mut changes = clear_default_changes(definitions, target.unwrap_or_default(), None);
+    if let Some(target) = target
+        && let Some(definition) = definitions.iter().find(|d| d.name() == target)
+        && let Some(model) = definition.as_model()
+    {
+        changes.push(Mutation::set_definition(
+            DefinitionKind::MODEL,
+            target,
+            Some(definition.clone()),
+            Some(Definition::model(target, model.clone().with_default(true))),
+        ));
+    }
+    changes
+}
+
+/// Plans the removal of the model of `repo`: its definition, refused for a repository the
+/// catalog does not hold and while the schema needs it ([`StoreFailure::ModelInUse`]).
+pub(crate) fn plan_remove(
+    definitions: &[Definition],
+    schema: Option<&GraphSchema>,
+    repo: &str,
+) -> Result<Definition, PersistError> {
+    const OP: &str = "remove a model";
+    let definition = of_repo(definitions, repo).ok_or_else(|| unknown(OP, repo))?;
+    let using = needed_by(schema, definition.name());
+    if !using.is_empty() {
+        return Err(PersistError::store(
+            OP,
+            StoreFailure::ModelInUse,
+            format!(
+                "the schema's vector properties {} use the model {} ({repo})",
+                using.join(", "),
+                definition.name()
+            ),
+        ));
+    }
+    Ok(definition.clone())
+}
+
+/// The change removing `definition`.
+pub(crate) fn remove_changes(definition: &Definition) -> Vec<Mutation> {
+    vec![Mutation::set_definition(
+        definition.kind(),
+        definition.name(),
+        Some(definition.clone()),
+        None,
+    )]
+}
+
+/// Applies planned catalog changes inside an open unit.
+fn apply_changes<G: GraphStorage + ?Sized>(
+    g: &mut G,
+    changes: &[Mutation],
+) -> Result<(), GraphError> {
+    for change in changes {
+        if let Mutation::SetDefinition {
+            kind, name, after, ..
+        } = change
+        {
+            match after {
+                Some(after) => g.set_definition((**after).clone())?,
+                None => {
+                    g.remove_definition(*kind, name)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The journal event of an import that defined `definition` (replacing the revision named
+/// `replaced`).
+pub(crate) fn import_event(
+    definition: &Definition,
+    replaced: Option<&str>,
+) -> (&'static catalogue::EventKind, Event) {
+    let identity = definition.name();
+    let (repo, bytes, default) = definition
+        .as_model()
+        .map_or((String::new(), 0, false), |m| {
+            (m.repo().to_string(), m.blob().length(), m.is_default())
+        });
+    match replaced {
+        Some(old) => (
+            &catalogue::MODEL_REPLACED,
+            Event::new(format!(
+                "the model {repo} was replaced by the revision {identity}"
+            ))
+            .field("repo", repo.as_str())
+            .field("old_identity", old)
+            .field("new_identity", identity),
+        ),
+        None => (
+            &catalogue::MODEL_IMPORTED,
+            Event::new(format!("the model {repo} was imported"))
+                .field("repo", repo.as_str())
+                .field("identity", identity)
+                .count("bytes", bytes)
+                .field("default", default),
+        ),
+    }
+}
+
+/// The journal event of a default change from the repository `from` to `to`.
+pub(crate) fn default_event(
+    from: Option<&str>,
+    to: Option<&str>,
+) -> (&'static catalogue::EventKind, Event) {
+    (
+        &catalogue::MODEL_DEFAULT_CHANGED,
+        Event::new(format!(
+            "the default model changed from {} to {}",
+            from.unwrap_or("none"),
+            to.unwrap_or("none")
+        ))
+        .field("from", from.unwrap_or(""))
+        .field("to", to.unwrap_or("")),
+    )
+}
+
+/// The journal event of the removal of `definition`.
+pub(crate) fn remove_event(definition: &Definition) -> (&'static catalogue::EventKind, Event) {
+    let repo = definition
+        .as_model()
+        .map(|m| m.repo().to_string())
+        .unwrap_or_default();
+    (
+        &catalogue::MODEL_REMOVED,
+        Event::new(format!("the model {repo} was removed"))
+            .field("repo", repo.as_str())
+            .field("identity", definition.name()),
+    )
+}
+
+/// The repository of the default model in `definitions`.
+pub(crate) fn default_repo(definitions: &[Definition]) -> Option<String> {
+    default_of(definitions).and_then(|d| d.as_model().map(|m| m.repo().to_string()))
+}
+
+/// Writes the files of a prepared import as one blob through `write` (the open store's
+/// [`Store::write_blob`], or the closed store's blob writer) and checks the model by a load
+/// where the build can run it (a failed load refuses the import; the blob stays an orphan for
+/// the next prune). Returns the definition (with the `default` flag) and the warnings of the
+/// check.
+pub(crate) fn write_model_blob(
+    prepared: Prepared,
+    default: bool,
+    write: &mut dyn FnMut(&mut dyn Read) -> Result<BlobRef, PersistError>,
+    dir: &DirPath,
+    journal: Option<&Arc<crate::graph::system_journal::SystemJournal>>,
+) -> Result<(Definition, Vec<String>), PersistError> {
+    let blob_length = prepared.tar_length();
+    let Prepared {
+        manifest,
+        files,
+        identity,
+        dimension,
+        load_bytes,
+    } = prepared;
+    let mut stream = TarStream::new(files);
+    let blob = write(&mut stream)?;
+    if blob.length() != blob_length {
+        return Err(invalid(format!(
+            "the model's tar is {} bytes, {blob_length} were expected",
+            blob.length()
+        )));
+    }
+    let prepared = Prepared {
+        manifest,
+        files: Vec::new(),
+        identity,
+        dimension,
+        load_bytes,
+    };
+    let definition = prepared.definition(blob, default);
+    let check_source = StoreModelBytes::new(dir.clone());
+    if let Some(journal) = journal {
+        let _ = check_source.journal.set(Arc::downgrade(journal));
+    }
+    let check_source: Arc<dyn registry::ModelBytes> = Arc::new(check_source);
+    let mut warnings = Vec::new();
+    match registry::check_load(&check_source, &definition) {
+        registry::CheckLoad::Loaded | registry::CheckLoad::NotAvailable => {}
+        registry::CheckLoad::Skipped(reason) => warnings.push(reason),
+        registry::CheckLoad::Failed(reason) => {
+            return Err(invalid(format!("the model does not load: {reason}")));
+        }
+    }
+    Ok((definition, warnings))
+}
+
+/// The metadata of a model change's commit.
+fn metadata_of(principal: Option<&str>) -> CommitMetadata {
+    match principal {
+        Some(principal) => CommitMetadata::new().with_principal(principal.to_string()),
+        None => CommitMetadata::new(),
+    }
+}
+
+impl ImportModelOptions {
+    /// Whether a new revision replaces the current one (crate-internal reader).
+    pub(crate) fn replace(&self) -> bool {
+        self.replace
+    }
+
+    /// Whether the model becomes the default (crate-internal reader).
+    pub(crate) fn default_model(&self) -> bool {
+        self.default
+    }
+
+    /// The principal of the commit (crate-internal reader).
+    pub(crate) fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
+    }
+}
+
+/// The licence warnings of a prepared import (crate-internal: the closed-store import).
+pub(crate) fn warnings_of(prepared: &Prepared) -> Vec<String> {
+    licence_warnings(&prepared.manifest)
 }
 
 impl<S: PersistentStorage + Default> Store<S> {
@@ -988,7 +1362,8 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// vectors were made by the old revision, a replace needs vector rules (not in this
     /// version: [`GraphError::Unsupported`]). In a build that can run the model (feature
     /// `model2vec`, native) it is loaded once as a check, when it fits under the memory
-    /// ceiling. Refused on a read-only store, a backup and in maintenance mode.
+    /// ceiling. Refused on a read-only store, a backup and in maintenance mode. A CLOSED store
+    /// takes the same import without loading its graph: [`Store::import_model_dir`].
     pub fn import_model(
         &self,
         source: ModelSource,
@@ -1001,121 +1376,66 @@ impl<S: PersistentStorage + Default> Store<S> {
         let (definitions, schema) = catalog_of(&self.graph)?;
         let identity = prepared.identity.clone();
         let repo = prepared.manifest.repo.clone();
-        let existing = definitions.iter().find(|d| d.name() == identity).cloned();
         let dir = self.core.shared.dir.clone();
-        if let Some(existing) = existing
-            && let Some(model) = existing.as_model()
-        {
-            // The same model: at most the default changes.
-            let mut commit_seq = None;
-            if options.default && !model.is_default() {
-                commit_seq = Some(self.change_default(Some(&repo), options.principal.clone())?);
+        let old = match plan_import(
+            &definitions,
+            schema.as_ref(),
+            &identity,
+            &repo,
+            options.replace,
+        )? {
+            ImportPlan::Present => {
+                // The same model: at most the default changes.
+                let mut commit_seq = None;
+                if options.default {
+                    commit_seq = self.change_default(Some(&repo), options.principal.as_deref())?;
+                }
+                let (definitions, schema) = catalog_of(&self.graph)?;
+                let info = definitions
+                    .iter()
+                    .find(|d| d.name() == identity)
+                    .and_then(|d| {
+                        d.as_model()
+                            .map(|m| model_info(d, m, schema.as_ref(), blob_state(&dir, m.blob())))
+                    })
+                    .ok_or_else(|| unknown(OP, &repo))?;
+                return Ok(ImportModelReport {
+                    model: info,
+                    already_present: true,
+                    commit_seq,
+                    replaced: None,
+                    warnings,
+                });
             }
-            let (definitions, schema) = catalog_of(&self.graph)?;
-            let current = definitions
-                .iter()
-                .find(|d| d.name() == identity)
-                .and_then(|d| d.as_model().map(|m| (d, m)));
-            let info = match current {
-                Some((d, m)) => model_info(d, m, schema.as_ref(), blob_state(&dir, m.blob())),
-                None => return Err(unknown(OP, &repo)),
-            };
-            return Ok(ImportModelReport {
-                model: info,
-                already_present: true,
-                commit_seq,
-                replaced: None,
-                warnings,
-            });
-        }
-        let old = definitions
-            .iter()
-            .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
-            .cloned();
-        if let Some(old) = &old {
-            let using = needed_by(schema.as_ref(), old.name());
-            if !options.replace {
-                return Err(PersistError::store(
-                    OP,
-                    StoreFailure::ModelRevisionExists,
-                    format!(
-                        "the store holds the revision {} of {repo}; the import is the revision \
-                         {identity}. {}",
-                        old.name(),
-                        if using.is_empty() {
-                            "No schema property uses the current revision: replacing it changes \
-                             no data"
-                                .to_string()
-                        } else {
-                            format!(
-                                "The vectors of {} were made by the current revision: a replace \
-                                 re-embeds them",
-                                using.join(", ")
-                            )
-                        }
-                    ),
-                ));
-            }
-            if !using.is_empty() {
-                return Err(PersistError::Graph(GraphError::Unsupported {
-                    operation: "replacing a model whose vectors are in the data (requires \
-                                vector rules)",
-                }));
-            }
-        }
-        // A check load where the build can run the model and it fits.
-        let blob_length = prepared.tar_length();
-        let manifest = prepared.manifest.clone();
+            ImportPlan::New { old } => old,
+        };
         let default = options.default
             || old
                 .as_ref()
                 .is_some_and(|o| o.as_model().is_some_and(ModelDefinition::is_default));
-        let files = std::mem::take(&mut { prepared.files });
-        let mut stream = TarStream::new(files);
-        let pending = self.write_blob(&mut stream)?;
-        let blob = pending.blob().clone();
-        if blob.length() != blob_length {
-            return Err(invalid(format!(
-                "the model's tar is {} bytes, {blob_length} were expected",
-                blob.length()
-            )));
-        }
-        let prepared = Prepared {
-            manifest,
-            files: Vec::new(),
-            identity: identity.clone(),
-            dimension: prepared.dimension,
-            load_bytes: prepared.load_bytes,
-        };
-        let definition = prepared.definition(blob.clone(), default);
-        let check_source = StoreModelBytes::new(self.core.shared.dir.clone());
-        let _ = check_source
-            .journal
-            .set(Arc::downgrade(&self.core.shared.system_journal));
-        let check_source: Arc<dyn registry::ModelBytes> = Arc::new(check_source);
-        match registry::check_load(&check_source, &definition) {
-            registry::CheckLoad::Loaded | registry::CheckLoad::NotAvailable => {}
-            registry::CheckLoad::Skipped(reason) => warnings.push(reason),
-            registry::CheckLoad::Failed(reason) => {
-                return Err(invalid(format!("the model does not load: {reason}")));
-            }
-        }
-        let metadata = match &options.principal {
-            Some(principal) => CommitMetadata::new().with_principal(principal.clone()),
-            None => CommitMetadata::new(),
-        };
-        let old_name = old.as_ref().map(|o| o.name().to_string());
+        let mut pending = None;
+        let (definition, checked) = write_model_blob(
+            prepared,
+            default,
+            &mut |reader| {
+                let written = self.write_blob(reader)?;
+                let blob = written.blob().clone();
+                pending = Some(written);
+                Ok(blob)
+            },
+            &dir,
+            Some(&self.core.shared.system_journal),
+        )?;
+        warnings.extend(checked);
         let commit_seq = {
             let mut write = self.graph.write_checked().map_err(PersistError::Graph)?;
             write
-                .transaction_with(metadata, |g| -> Result<(), GraphError> {
-                    if let Some(old_name) = &old_name {
-                        g.remove_definition(DefinitionKind::MODEL, old_name)?;
-                    }
-                    if default {
-                        clear_default(g, &identity)?;
-                    }
-                    g.set_definition(definition.clone())
+                .transaction_with(metadata_of(options.principal.as_deref()), |g| {
+                    // Planned again inside the unit: the changes continue the catalog as it is.
+                    let definitions = model_definitions(g)?;
+                    let old = of_repo(&definitions, &repo).filter(|d| d.name() != identity);
+                    let changes = import_changes(&definitions, old, definition.clone());
+                    apply_changes(g, &changes)
                 })
                 .map_err(PersistError::Graph)?;
             write.last_commit_seq().map_err(PersistError::Graph)?
@@ -1130,28 +1450,11 @@ impl<S: PersistentStorage + Default> Store<S> {
             o.as_model()
                 .map(|m| model_info(o, m, schema.as_ref(), blob_state(&dir, m.blob())))
         });
-        let journal = &self.core.shared.system_journal;
-        match &replaced {
-            Some(old) => journal.emit(
-                &catalogue::MODEL_REPLACED,
-                Event::new(format!(
-                    "the model {repo} was replaced by the revision {identity}"
-                ))
-                .commit(commit_seq)
-                .field("repo", repo.as_str())
-                .field("old_identity", old.identity.as_str())
-                .field("new_identity", identity.as_str()),
-            ),
-            None => journal.emit(
-                &catalogue::MODEL_IMPORTED,
-                Event::new(format!("the model {repo} was imported"))
-                    .commit(commit_seq)
-                    .field("repo", repo.as_str())
-                    .field("identity", identity.as_str())
-                    .count("bytes", blob.length())
-                    .field("default", default),
-            ),
-        }
+        let (kind, event) = import_event(&definition, old.as_ref().map(Definition::name));
+        self.core
+            .shared
+            .system_journal
+            .emit(kind, event.commit(commit_seq));
         Ok(ImportModelReport {
             model,
             already_present: false,
@@ -1165,132 +1468,94 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// queries use without a model name), or clears the default (`None`): one commit. The
     /// default follows the history like the models. Nothing changes (no commit) when it is the
     /// default already. Refused for a repository the store does not hold
-    /// ([`StoreFailure::UnknownModel`]) and on a read-only store.
+    /// ([`StoreFailure::UnknownModel`]) and on a read-only store. A CLOSED store:
+    /// [`Store::set_default_model_dir`].
     pub fn set_default_model(&self, repo: Option<&str>) -> Result<ModelChangeReport, PersistError> {
         const OP: &str = "set the default model";
         self.core.writable(OP)?;
         let (definitions, _) = catalog_of(&self.graph)?;
-        let target = match repo {
-            Some(repo) => Some(
-                definitions
-                    .iter()
-                    .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
-                    .ok_or_else(|| unknown(OP, repo))?,
-            ),
-            None => None,
-        };
-        let current = definitions
-            .iter()
-            .find(|d| d.as_model().is_some_and(ModelDefinition::is_default));
-        if current.map(Definition::name) == target.map(Definition::name) {
+        if let Some(repo) = repo
+            && of_repo(&definitions, repo).is_none()
+        {
+            return Err(unknown(OP, repo));
+        }
+        let Some(commit_seq) = self.change_default(repo, None)? else {
             return Ok(ModelChangeReport {
                 commit_seq: None,
+                committed_at: None,
                 model: None,
             });
-        }
-        let commit_seq = self.change_default(repo, None)?;
+        };
         let (definitions, schema) = catalog_of(&self.graph)?;
         let dir = &self.core.shared.dir;
         let model = repo.and_then(|repo| {
-            definitions.iter().find_map(|d| {
+            of_repo(&definitions, repo).and_then(|d| {
                 d.as_model()
-                    .filter(|m| m.repo() == repo)
                     .map(|m| model_info(d, m, schema.as_ref(), blob_state(dir, m.blob())))
             })
         });
         Ok(ModelChangeReport {
             commit_seq: Some(commit_seq),
+            committed_at: Some(self.last_committed_at()?),
             model,
         })
     }
 
-    /// One commit making `repo` the default (or clearing it), with the journal record.
+    /// The time of the store's last commit.
+    fn last_committed_at(&self) -> Result<i64, PersistError> {
+        let read = self.graph.read_checked().map_err(PersistError::Graph)?;
+        Ok(PersistentStorage::last_committed_at(&*read))
+    }
+
+    /// One commit making `repo` the default (or clearing it), with the journal record; `None`
+    /// when it is the default already (nothing committed).
     fn change_default(
         &self,
         repo: Option<&str>,
-        principal: Option<String>,
-    ) -> Result<u64, PersistError> {
+        principal: Option<&str>,
+    ) -> Result<Option<u64>, PersistError> {
         let (definitions, _) = catalog_of(&self.graph)?;
-        let from = definitions.iter().find_map(|d| {
-            d.as_model()
-                .filter(|m| m.is_default())
-                .map(|m| m.repo().to_string())
-        });
-        let target = repo.and_then(|repo| {
-            definitions
-                .iter()
-                .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
-                .cloned()
-        });
-        let metadata = match principal {
-            Some(principal) => CommitMetadata::new().with_principal(principal),
-            None => CommitMetadata::new(),
-        };
+        let from = default_repo(&definitions);
+        let mut changed = false;
         let commit_seq = {
             let mut write = self.graph.write_checked().map_err(PersistError::Graph)?;
             write
-                .transaction_with(metadata, |g| -> Result<(), GraphError> {
-                    let keep = target
-                        .as_ref()
-                        .map(|t| t.name().to_string())
-                        .unwrap_or_default();
-                    clear_default(g, &keep)?;
-                    if let Some(target) = &target
-                        && let Some(model) = target.as_model()
-                    {
-                        g.set_definition(Definition::model(
-                            target.name(),
-                            model.clone().with_default(true),
-                        ))?;
-                    }
-                    Ok(())
+                .transaction_with(metadata_of(principal), |g| {
+                    let definitions = model_definitions(g)?;
+                    let target = repo.and_then(|repo| of_repo(&definitions, repo));
+                    let changes = default_changes(&definitions, target.map(Definition::name));
+                    changed = !changes.is_empty();
+                    apply_changes(g, &changes)
                 })
                 .map_err(PersistError::Graph)?;
             write.last_commit_seq().map_err(PersistError::Graph)?
         };
-        self.core.shared.system_journal.emit(
-            &catalogue::MODEL_DEFAULT_CHANGED,
-            Event::new(format!(
-                "the default model changed from {} to {}",
-                from.as_deref().unwrap_or("none"),
-                repo.unwrap_or("none")
-            ))
-            .commit(commit_seq)
-            .field("from", from.as_deref().unwrap_or(""))
-            .field("to", repo.unwrap_or("")),
-        );
-        Ok(commit_seq)
+        if !changed {
+            return Ok(None);
+        }
+        let (kind, event) = default_event(from.as_deref(), repo);
+        self.core
+            .shared
+            .system_journal
+            .emit(kind, event.commit(commit_seq));
+        Ok(Some(commit_seq))
     }
 
     /// Removes the model of the repository `repo` from the store's current state: one commit
     /// dropping its definition (earlier positions keep it; its blob is removed by the prune
     /// that drops the last history referencing it). Refused while the current schema needs it
     /// ([`StoreFailure::ModelInUse`], naming the properties), for a repository the store does
-    /// not hold ([`StoreFailure::UnknownModel`]) and on a read-only store.
+    /// not hold ([`StoreFailure::UnknownModel`]) and on a read-only store. A CLOSED store:
+    /// [`Store::remove_model_dir`].
     pub fn remove_model(&self, repo: &str) -> Result<ModelChangeReport, PersistError> {
         const OP: &str = "remove a model";
         self.core.writable(OP)?;
         let (definitions, schema) = catalog_of(&self.graph)?;
-        let definition = definitions
-            .iter()
-            .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
-            .ok_or_else(|| unknown(OP, repo))?;
-        let using = needed_by(schema.as_ref(), definition.name());
-        if !using.is_empty() {
-            return Err(PersistError::store(
-                OP,
-                StoreFailure::ModelInUse,
-                format!(
-                    "the schema's vector properties {} use the model {} ({repo})",
-                    using.join(", "),
-                    definition.name()
-                ),
-            ));
-        }
+        let definition = plan_remove(&definitions, schema.as_ref(), repo)?;
         let dir = &self.core.shared.dir;
         let info = definition
             .as_model()
-            .map(|m| model_info(definition, m, schema.as_ref(), blob_state(dir, m.blob())));
+            .map(|m| model_info(&definition, m, schema.as_ref(), blob_state(dir, m.blob())));
         let name = definition.name().to_string();
         let commit_seq = {
             let mut write = self.graph.write_checked().map_err(PersistError::Graph)?;
@@ -1301,36 +1566,17 @@ impl<S: PersistentStorage + Default> Store<S> {
                 .map_err(PersistError::Graph)?;
             write.last_commit_seq().map_err(PersistError::Graph)?
         };
-        self.core.shared.system_journal.emit(
-            &catalogue::MODEL_REMOVED,
-            Event::new(format!("the model {repo} was removed"))
-                .commit(commit_seq)
-                .field("repo", repo)
-                .field("identity", name.as_str()),
-        );
+        let (kind, event) = remove_event(&definition);
+        self.core
+            .shared
+            .system_journal
+            .emit(kind, event.commit(commit_seq));
         Ok(ModelChangeReport {
             commit_seq: Some(commit_seq),
+            committed_at: Some(self.last_committed_at()?),
             model: info,
         })
     }
-}
-
-/// Clears the default flag of every model but `keep` (inside an open unit).
-fn clear_default<G: GraphStorage + ?Sized>(g: &mut G, keep: &str) -> Result<(), GraphError> {
-    let defaults: Vec<Definition> = g
-        .definitions()?
-        .filter(|d| d.name() != keep && d.as_model().is_some_and(ModelDefinition::is_default))
-        .cloned()
-        .collect();
-    for definition in defaults {
-        if let Some(model) = definition.as_model() {
-            g.set_definition(Definition::model(
-                definition.name(),
-                model.clone().with_default(false),
-            ))?;
-        }
-    }
-    Ok(())
 }
 
 /// The model definitions and the schema of the latest state in the files of `dir` (a closed

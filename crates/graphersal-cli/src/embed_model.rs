@@ -793,10 +793,14 @@ fn licence_warnings(repo: &str, license: &str, gated: bool) {
     }
 }
 
-/// Imports `model` into the closed store at `store` (one commit; the store is opened and
-/// closed again).
+/// Imports `model` into the closed store at `store`: one commit appended to its WAL without
+/// loading the graph (`Store::import_model_dir`).
 fn add_to_store(store: &str, model: NewModel) -> Result<ModelInfo, DownloadError> {
-    match Store::import_model_dir(store, ModelSource::Files(model), ImportModelOptions::new()) {
+    match Store::import_model_dir(
+        store,
+        ModelSource::Files(model),
+        ImportModelOptions::new().with_principal("cli"),
+    ) {
         Ok(report) => {
             if report.already_present {
                 errln!("note: the store {store} holds this model already");

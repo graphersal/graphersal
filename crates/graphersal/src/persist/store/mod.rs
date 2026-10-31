@@ -28,6 +28,7 @@
 mod backup;
 mod backup_check;
 pub(crate) mod blobs;
+mod closed_commit;
 mod compaction;
 mod damage;
 mod files;
@@ -66,6 +67,7 @@ use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalG
 
 pub use backup::BackupMode;
 use blobs::PendingBlob;
+pub use closed_commit::ClosedCommitOptions;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
 pub use damage::{Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairReport};
 pub use files::{BackupMarker, DamagePolicy, LineageEntry};
@@ -144,9 +146,6 @@ pub struct StoreOptions {
     workload_level: crate::graph::workload::WorkloadLevel,
     journal_segment_bytes: u64,
     instance_name: Option<String>,
-    /// Open without the check of the models the schema needs (a model change of a closed
-    /// store, `Store::import_model_dir`): crate-internal.
-    pub(crate) models_unchecked: bool,
     /// The uncompressed body bytes per WAL Commit part (format spec 9.3.1; a test knob).
     commit_part_bytes: usize,
     /// Injected WAL failures (crate tests only).
@@ -171,7 +170,6 @@ impl Default for StoreOptions {
             workload_level: crate::graph::workload::WorkloadLevel::Persisted,
             journal_segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
             instance_name: None,
-            models_unchecked: false,
             commit_part_bytes: crate::persist::wal::PART_BODY_BYTES,
             faults: None,
         }
@@ -770,35 +768,7 @@ impl Store {
         name: Option<&str>,
     ) -> Result<CheckpointReport, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(&dir)?;
-        if !Self::is_store(dir.store_dir())? {
-            return Err(PersistError::NotAStore {
-                path: dir.display(),
-                reason: "it has no GRAPH file".into(),
-            });
-        }
-        let _lock = DirLock::exclusive(&dir)?;
-        let backend = crate::persist::dir::backend_check(&**dir.store_dir());
-        if !backend.damage.is_empty() {
-            return Err(PersistError::corrupt(
-                dir.display(),
-                0,
-                format!("the container is damaged: {}", backend.damage.join("; ")),
-            ));
-        }
-        let mut graph_file = read_graph_file(&dir)?.file;
-        guard_version(&dir, graph_file.version)?;
-        if let Some(marker) = graph_file.backup {
-            return Err(PersistError::IsBackup {
-                path: dir.display(),
-                commit_seq: marker.commit_seq,
-            });
-        }
-        if let Some(intent) = Intent::read(&dir)? {
-            complete_intent(&dir, &intent)?;
-            graph_file = read_graph_file(&dir)?.file;
-        }
-        remove_tmp(&dir)?;
+        let (_lock, graph_file) = closed_commit::closed_store_prelude(&dir)?;
         let name = name.unwrap_or_default();
         // The name's uniqueness is checked once the position is known (the merge does it).
         check_snapshot_name(&[], name)?;
@@ -2049,7 +2019,7 @@ impl StoreCore {
             definitions,
             schema.as_ref(),
             &model_catalog::OpenCheck {
-                unchecked: options.models_unchecked,
+                unchecked: false,
                 journal_writable: loaded.read_only.is_none(),
                 instance_name: options.instance_name.as_deref(),
             },
@@ -4513,12 +4483,41 @@ fn attach_journal(
         .map(|len| len.saturating_sub(super::wal::WAL_HEADER_BYTES as u64))
         .sum();
     wal.since_checkpoint.store(since, Ordering::Release);
-    let graph_id = graph.graph_id();
-    let next = graph.last_commit_seq()?.checked_add(1).ok_or(
-        crate::error::GraphError::SequenceOverflow {
-            sequence: crate::error::COMMIT_SEQUENCE,
-        },
+    let (journal, durable) = new_journal(
+        dir,
+        (graph.graph_id(), graph.last_commit_seq()?),
+        options,
+        wal,
+        graph_file,
+        segments,
+        marks,
+        durable,
     )?;
+    cell.set(Some(journal));
+    Ok(durable)
+}
+
+/// A journal continuing the last WAL segment of the lineage `graph_id` after commit
+/// `last_commit_seq`, or starting a new segment (one of an older file format version is never
+/// continued), with the Store's segment rotation, refused-record cut and ledger frames
+/// (`StoreWalFiles`); used by an open and by a closed-store catalog commit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn new_journal(
+    dir: &DirPath,
+    (graph_id, last_commit_seq): (u128, u64),
+    options: &StoreOptions,
+    wal: &Arc<WalShared>,
+    graph_file: &Arc<Mutex<GraphFile>>,
+    segments: &[(u64, DirPath)],
+    marks: &[Mark],
+    durable: DurableEnd,
+) -> Result<(Journal<WalWriter>, DurableEnd), PersistError> {
+    let next =
+        last_commit_seq
+            .checked_add(1)
+            .ok_or(crate::error::GraphError::SequenceOverflow {
+                sequence: crate::error::COMMIT_SEQUENCE,
+            })?;
     let last_lineage = match segments.last() {
         Some((_, path)) => segment_lineage(path)?,
         None => None,
@@ -4604,9 +4603,8 @@ fn attach_journal(
         .with_known_marks(marks.iter().map(|m| m.name().to_string()))
         .with_files(Box::new(files))
         .with_durable_end(durable)
-        .continuing(graph.last_commit_seq()?, segment, offset);
-    cell.set(Some(journal));
-    Ok(durable)
+        .continuing(last_commit_seq, segment, offset);
+    Ok((journal, durable))
 }
 
 /// How much of WAL segment `first` is valid given a recorded cut of a refused record.
@@ -5107,55 +5105,6 @@ impl Store {
         files::refuse_other_version(&dir)?;
         read_graph_file(&dir)?;
         model_catalog::infos_in_files(&dir)
-    }
-
-    /// [`Store::import_model`] into the CLOSED store in `dir` (CLI: `graphersal embed-model
-    /// import <repo> --into <dir>`): the store is opened (the writer lock: a store open
-    /// elsewhere is refused with [`PersistError::Locked`]; refused on a backup) WITHOUT the
-    /// open's check of the models the schema needs (the import is how a missing model comes
-    /// back), the model imported in one commit, and the store closed.
-    pub fn import_model_dir(
-        dir: impl IntoStoreDir,
-        source: ModelSource,
-        options: ImportModelOptions,
-    ) -> Result<ImportModelReport, PersistError> {
-        let store = Self::open_for_models(dir)?;
-        let report = store.import_model(source, options);
-        store.close()?;
-        report
-    }
-
-    /// [`Store::remove_model`] from the CLOSED store in `dir` (CLI: `graphersal store models
-    /// remove <dir> <repo>`), opened and closed like [`Store::import_model_dir`].
-    pub fn remove_model_dir(
-        dir: impl IntoStoreDir,
-        repo: &str,
-    ) -> Result<ModelChangeReport, PersistError> {
-        let store = Self::open_for_models(dir)?;
-        let report = store.remove_model(repo);
-        store.close()?;
-        report
-    }
-
-    /// [`Store::set_default_model`] of the CLOSED store in `dir`, opened and closed like
-    /// [`Store::import_model_dir`].
-    pub fn set_default_model_dir(
-        dir: impl IntoStoreDir,
-        repo: Option<&str>,
-    ) -> Result<ModelChangeReport, PersistError> {
-        let store = Self::open_for_models(dir)?;
-        let report = store.set_default_model(repo);
-        store.close()?;
-        report
-    }
-
-    /// Opens the store in `dir` for a model change: no needed-model check, no automatic
-    /// checkpoint.
-    fn open_for_models(dir: impl IntoStoreDir) -> Result<Store, PersistError> {
-        let dir = DirPath::root(dir.into_store_dir());
-        let mut options = StoreOptions::new().with_checkpoint_after_bytes(0);
-        options.models_unchecked = true;
-        Store::from_core(StoreCore::open_at(dir, options, &TraversalGraphs)?)
     }
 
     /// The snapshots of the store in `dir`, without a lock.

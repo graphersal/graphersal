@@ -467,6 +467,44 @@ pub(crate) static BLOB_REPAIRED: EventKind = event(
     &[
         f("hash", "the blob's hash (hex)"),
         f("how", "rewritten (written again) or restored (copied back)"),
+        opt(
+            "source",
+            "where a restored blob came from (graphersal store restore-blobs --from)",
+        ),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static BLOB_DROPPED: EventKind = event(
+    "blob.dropped",
+    "blob",
+    Level::Warn,
+    "A repair left out a missing or damaged blob and the catalog definitions referencing it \
+     (graphersal store repair --drop-damaged-blobs).",
+    &[
+        f("hash", "the blob's hash (hex)"),
+        f(
+            "referrers",
+            "the catalog definitions left out with it, as kind:name",
+        ),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static CATALOG_CLOSED_COMMIT: EventKind = event(
+    "catalog.closed_commit",
+    "catalog",
+    Level::Notice,
+    "A catalog change was appended to a CLOSED store's WAL as one commit, without loading the \
+     graph (format spec 12.12).",
+    &[
+        f("ops", "the catalog and schema changes of the commit"),
+        f("kinds", "the definition kinds it changed"),
+        f(
+            "wal_tail_commits",
+            "the commits after the newest snapshot read to find the current catalog",
+        ),
+        f("ms", "how long it took"),
     ],
     Collapse::Never,
 );
@@ -506,6 +544,10 @@ pub(crate) static MODEL_IMPORTED: EventKind = event(
         f("identity", "its identity"),
         f("bytes", "the bytes of its blob"),
         f("default", "whether it became the default model"),
+        opt(
+            "closed",
+            "true when the change was committed to a closed store (format spec 12.12)",
+        ),
     ],
     Collapse::Never,
 );
@@ -519,6 +561,10 @@ pub(crate) static MODEL_REPLACED: EventKind = event(
         f("repo", "its repository"),
         f("old_identity", "the replaced revision's identity"),
         f("new_identity", "the new revision's identity"),
+        opt(
+            "closed",
+            "true when the change was committed to a closed store (format spec 12.12)",
+        ),
     ],
     Collapse::Never,
 );
@@ -528,7 +574,14 @@ pub(crate) static MODEL_REMOVED: EventKind = event(
     "model",
     Level::Notice,
     "An embedding model was removed from the store's current state (one commit).",
-    &[f("repo", "its repository"), f("identity", "its identity")],
+    &[
+        f("repo", "its repository"),
+        f("identity", "its identity"),
+        opt(
+            "closed",
+            "true when the change was committed to a closed store (format spec 12.12)",
+        ),
+    ],
     Collapse::Never,
 );
 
@@ -543,6 +596,10 @@ pub(crate) static MODEL_DEFAULT_CHANGED: EventKind = event(
             "the repository of the previous default (empty: none)",
         ),
         f("to", "the repository of the new default (empty: none)"),
+        opt(
+            "closed",
+            "true when the change was committed to a closed store (format spec 12.12)",
+        ),
     ],
     Collapse::Never,
 );
@@ -629,7 +686,9 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &AUTH_DENIED,
     &BLOB_DAMAGED,
     &BLOB_REPAIRED,
+    &BLOB_DROPPED,
     &BLOB_COLLECTED,
+    &CATALOG_CLOSED_COMMIT,
     &LEDGER_REBUILT,
     &MODEL_IMPORTED,
     &MODEL_REPLACED,

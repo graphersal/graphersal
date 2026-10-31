@@ -1013,7 +1013,11 @@ impl DiagnosticError for PersistError {
             PersistError::Locked { .. } => "Close the other writer first (stop the server or \
                  the program that has the store open). To only read the data while it runs, use \
                  Store::open_read_only (CLI: graphersal store info / list / backup work on a \
-                 store in use)."
+                 store in use). A change of a closed store's catalog (graphersal \
+                 embed-model import --into, graphersal store models remove; \
+                 Store::import_model_dir and its kin) needs the lock too: make it on the open \
+                 store instead (Store::import_model, Store::remove_model, \
+                 Store::set_default_model; the dev server's Store menu), or close it first."
                 .to_string(),
             PersistError::NotAStore { .. } => "Create a store with Store::create (CLI: \
                  graphersal store create <dir>, or --graph <dir> --create-store), or name the \
