@@ -602,7 +602,7 @@ pub(crate) static MODEL_UNAVAILABLE: EventKind = event(
 
 pub(crate) static VECTOR_FILL_STARTED: EventKind = event(
     "vector_fill.started",
-    "schema.vector_rule",
+    "vector_fill",
     Level::Notice,
     "A vector fill started under the write lock (a vector rule added or changed, or its model \
      replaced): the whole database is locked until it ends.",
@@ -620,7 +620,7 @@ pub(crate) static VECTOR_FILL_STARTED: EventKind = event(
 
 pub(crate) static VECTOR_FILL_DONE: EventKind = event(
     "vector_fill.done",
-    "schema.vector_rule",
+    "vector_fill",
     Level::Notice,
     "A vector fill ended with the commit of its unit (`commit`); `op` is its start record.",
     &[
@@ -633,7 +633,7 @@ pub(crate) static VECTOR_FILL_DONE: EventKind = event(
 
 pub(crate) static VECTOR_FILL_FAILED: EventKind = event(
     "vector_fill.failed",
-    "schema.vector_rule",
+    "vector_fill",
     Level::Error,
     "A vector fill failed (the model, the memory ceiling, a cancel): its unit was rolled back, \
      nothing was written.",
