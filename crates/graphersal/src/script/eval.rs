@@ -291,6 +291,12 @@ pub fn map_eval_error(
     Box::new(match *err {
         EvalAltResult::ErrorFunctionNotFound(signature, position) => {
             let signature = names(&signature);
+            if let Some(help) = super::removed::removed_function_help(&signature) {
+                return Box::new(EvalAltResult::ErrorRuntime(
+                    Dynamic::from(format!("Function not found: {signature}\nHelp: {help}")),
+                    position,
+                ));
+            }
             match snake_case_twin(&signature) {
                 Some(snake) => EvalAltResult::ErrorRuntime(
                     Dynamic::from(format!(

@@ -89,7 +89,7 @@
         "element": { "enum": ["f32", "f16", "i8", "bit"], "description": "With format vector: the element kind of the stored vectors (default f32)." },
         "dimension": { "type": "integer", "minimum": 1, "maximum": 65536, "description": "With format vector: the number of components." },
         "metric": { "enum": ["cosine", "dot", "l2", "hamming"], "description": "With format vector: an annotation, the metric the vectors are compared with." },
-        "embedder": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._/:@?=-]+$", "description": "With format vector, on a label's top-level property only: the model identity of the embedder that produced the vectors (hash-ngram/1). embed_property records and checks it; a text query of nearest() or similarity() embeds its text with the registered embedder of that model." },
+        "embedder": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._/:@?=-]+$", "description": "With format vector, on a label's top-level property only: the model identity of the embedder that produced the vectors (hash-ngram/1). a vector rule (from) embeds with that model; a text query of nearest() or similarity() embeds its text with the registered embedder of that model." },
         "from": { "type": "string", "minLength": 1, "maxLength": 128, "description": "With format vector and embedder, on a label's top-level property only: the vector rule. The name of the top-level property of the same label whose text the engine embeds into this property at the end of every unit that writes it; a text-less source removes the vector." },
         "items": { "$ref": "#/$defs/node" },
         "properties": { "type": "object", "additionalProperties": { "$ref": "#/$defs/node" } },

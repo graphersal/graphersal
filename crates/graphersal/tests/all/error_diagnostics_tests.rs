@@ -6978,21 +6978,13 @@ fn embed_errors_carry_their_help() {
     );
 }
 
-/// The provenance errors of `embed_property` and of the text queries of `nearest` /
-/// `similarity` (book page "Vectors") carry the help of their cause; the text-query ones are
-/// located at their step.
+/// The provenance errors of the text queries of `nearest` / `similarity` (book page
+/// "Vectors") carry the help of their cause, name the vector rule as the way to declare and
+/// fill a property, and are located at their step.
 #[test]
-fn embed_property_and_text_query_errors_carry_their_help() {
-    use graphersal::exec::CancelToken;
-    use graphersal::vector::{EmbedJob, Embedders};
+fn text_query_errors_name_the_vector_rule() {
+    use graphersal::vector::VectorElement;
 
-    let embedders = Embedders::default();
-    let run_job = |graph: &Graph, job: &EmbedJob| {
-        let failed = graph
-            .embed_property(job, &embedders, &CancelToken::new(), &mut |_| {})
-            .expect_err("the job fails");
-        format_diagnostic(&*failed.error)
-    };
     let text_query = |graph: &Graph| {
         let lock = graph.read();
         lock.traversal()
@@ -7004,21 +6996,18 @@ fn embed_property_and_text_query_errors_carry_their_help() {
 
     // No schema attached.
     let graph = GraphSource::tinkerpop_modern();
-    let report = run_job(&graph, &EmbedJob::new("person", "name", "emb"));
-    assert!(
-        report.contains("embed_property needs a schema attached"),
-        "{report}"
-    );
-    assert!(
-        report.contains("g.set_schema(g.infer_schema(), SchemaMode.open)"),
-        "{report}"
-    );
     let err = text_query(&graph);
     let report = format_diagnostic(&err);
     assert!(
         report.contains("nearest needs a schema attached"),
         "{report}"
     );
+    assert!(
+        report.contains("g.set_schema(g.infer_schema(), SchemaMode.open)"),
+        "{report}"
+    );
+    assert!(report.contains("\"from\": \"text\""), "{report}");
+    assert!(!report.contains("embed_property"), "{report}");
     assert!(
         report.contains("g.v().nearest(\"emb\", embed(\"graph indexes\"), 5)"),
         "{report}"
@@ -7035,38 +7024,35 @@ fn embed_property_and_text_query_errors_carry_their_help() {
     let report = format_diagnostic(&text_query(&graph));
     assert!(report.contains("declares no embedder"), "{report}");
     assert!(
-        report.contains("g.embed_property(#{label: \"doc\", from: \"text\", to: \"emb\"})"),
+        report.contains("embedder: \"hash-ngram/1\", from: \"text\""),
         "{report}"
     );
+    assert!(!report.contains("embed_property"), "{report}");
 
-    // Declared for one model per label: another embedder, a text query over both.
-    graph
-        .embed_property(
-            &EmbedJob::new("person", "name", "emb"),
-            &embedders,
-            &CancelToken::new(),
-            &mut |_| {},
-        )
-        .unwrap();
+    // Declared for one model per label: a vector rule fills "person", "software" declares
+    // another model; a text query over both.
     {
         let mut lock = graph.write();
         let mut schema = lock.get_schema().unwrap().unwrap();
-        let mut other = schema.vertices["person"].schema.properties["emb"].clone();
+        let mut rule = PropertySchema::vector(VectorElement::F32, None);
+        if let Some(vector) = rule.vector.as_mut() {
+            vector.embedder = Some("hash-ngram/1".to_string());
+            vector.from = Some("name".to_string());
+        }
+        let mut other = PropertySchema::vector(VectorElement::F32, Some(256));
         if let Some(vector) = other.vector.as_mut() {
             vector.embedder = Some("acme/other@2".to_string());
         }
+        schema.vertices["person"]
+            .schema
+            .properties
+            .insert("emb".to_string(), rule);
         schema.vertices["software"]
             .schema
             .properties
             .insert("emb".to_string(), other);
         lock.traversal_mut().set_schema(schema).unwrap();
     }
-    let report = run_job(&graph, &EmbedJob::new("software", "name", "emb"));
-    assert!(
-        report.contains("vectors of the model \"acme/other@2\""),
-        "{report}"
-    );
-    assert!(report.contains("Embed into another property"), "{report}");
     {
         let mut lock = graph.write();
         lock.traversal_mut()
@@ -12544,4 +12530,66 @@ fn vector_rule_errors_carry_their_help() {
         report.contains("embedder: \"hash-ngram/1\", from: \"text\""),
         "{report}"
     );
+}
+
+/// A call of a DSL function a release removed (here `embed_property`, removed in 0.5.0) fails
+/// with a help naming its replacement, the vector rule, with a runnable example: in a script and
+/// in a saved query stored by an earlier release (a call never rewrites the query).
+#[cfg(feature = "script")]
+#[test]
+fn a_removed_function_names_its_replacement_also_in_a_saved_query() {
+    use crate::script_host::eval_value;
+    use graphersal::catalog::QueryDefinition;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let err = eval_value(
+        graph.clone(),
+        r#"g.embed_property(#{label: "person", from: "name", to: "emb"})"#,
+    )
+    .expect_err("removed")
+    .to_string();
+    assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
+    assert!(
+        err.contains(r#"embedder: "hash-ngram/1", from: "text""#),
+        "{err}"
+    );
+
+    // The help's example runs: the rule fills the vector of a doc from its text.
+    let docs = std::sync::Arc::new(GraphSource::empty());
+    eval_value(
+        docs.clone(),
+        r#"g.set_schema(#{mode: "open"}); g.add_v("doc").property("text", "graph indexes").iterate()"#,
+    )
+    .unwrap();
+    eval_value(
+        docs.clone(),
+        r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})"#,
+    )
+    .unwrap();
+    let filled = eval_value(docs, r#"g.v().has_label("doc").has("emb").count().next()"#).unwrap();
+    assert_eq!(filled.as_int().unwrap(), 1);
+
+    // A saved query of an earlier release calling it, stored through the Rust API (as a 0.4.0
+    // catalog holds it): a call fails with the same help.
+    let body = r#"fn fill() { g.embed_property(#{label: "person", from: "name", to: "emb"}) }"#;
+    graph
+        .write()
+        .traversal_mut()
+        .define_query("fill", QueryDefinition::new(body))
+        .unwrap();
+    let err = eval_value(graph.clone(), r#"g.query("fill")"#)
+        .expect_err("removed")
+        .to_string();
+    assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
+    assert!(err.contains("Vector Rules"), "{err}");
+    // Nothing rewrote the query.
+    let stored = graph
+        .read()
+        .traversal()
+        .list_definitions(None)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name() == "fill")
+        .unwrap();
+    assert_eq!(stored.as_query().unwrap().source(), body);
 }

@@ -1611,3 +1611,128 @@ mod v040 {
         assert_eq!(persist_version(), 4);
     }
 }
+
+/// 0.4.0 stores whose catalog holds saved queries calling `g.embed_property`, removed in 0.5.0
+/// (fixtures `tests/data/v0.4.0/saved_queries/` and `saved_queries.gsnap`, written by
+/// `make_saved_queries.sh`): the upgrade report lists them with the vector rule replacing each
+/// call, and nothing rewrites them.
+#[cfg(feature = "script")]
+mod v040_saved_queries {
+    use super::*;
+    use graphersal::catalog::{DefinitionKind, RemovedFunctionUse};
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v0.4.0")
+    }
+
+    fn copy(temp: &Temp, name: &str) -> PathBuf {
+        let to = temp.join(name);
+        for (relative, bytes) in files_of(&fixtures().join(name)) {
+            let path = to.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        to
+    }
+
+    const FILL: &str = r#"fn fill() { g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "hash-ngram/1"}) }"#;
+
+    fn assert_listed(uses: &[RemovedFunctionUse]) {
+        let names: Vec<&str> = uses.iter().map(|u| u.query.as_str()).collect();
+        assert_eq!(names, ["fill", "fill_any"], "{uses:?}");
+        assert!(
+            uses.iter()
+                .all(|u| u.function == "embed_property" && u.removed_in == "0.5.0")
+        );
+        assert_eq!(
+            uses[0].schema_patch.as_deref(),
+            Some(
+                r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})"#
+            )
+        );
+        // The label is computed: no patch, the replacement in words.
+        assert_eq!(uses[1].schema_patch, None);
+        assert!(
+            uses[1].note("x").contains("vector rule"),
+            "{}",
+            uses[1].note("x")
+        );
+    }
+
+    fn stored_fill(store: &Store) -> String {
+        store
+            .graph()
+            .read()
+            .traversal()
+            .get_definition(DefinitionKind::QUERY, "fill")
+            .unwrap()
+            .unwrap()
+            .as_query()
+            .unwrap()
+            .source()
+            .to_string()
+    }
+
+    #[test]
+    fn the_upgrade_report_lists_saved_queries_calling_a_removed_function() {
+        let temp = Temp::new("v040-sq-copy");
+        let source = copy(&temp, "saved_queries");
+        let target = temp.join("upgraded");
+        let report = Store::upgrade(&source, &target).unwrap();
+        assert_listed(&report.saved_queries_using_removed);
+
+        let temp = Temp::new("v040-sq-in-place");
+        let dir = copy(&temp, "saved_queries");
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert_listed(&report.saved_queries_using_removed);
+
+        // Never rewritten; a call fails with the help naming the vector rule.
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(stored_fill(&store), FILL);
+        let err = graphersal::script::eval_value(store.graph().clone(), r#"g.query("fill")"#)
+            .expect_err("removed")
+            .to_string();
+        assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
+        // The listed patch declares the rule, and the rule fills the docs.
+        let patch = report.saved_queries_using_removed[0]
+            .schema_patch
+            .clone()
+            .unwrap();
+        graphersal::script::eval_value(store.graph().clone(), &patch).unwrap();
+        let filled = store
+            .graph()
+            .read()
+            .traversal()
+            .v(None)
+            .has_label("doc")
+            .has_key("emb")
+            .to_list()
+            .unwrap()
+            .len();
+        assert_eq!(filled, 2);
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn a_0_4_0_gsnap_loaded_into_a_store_keeps_them_and_the_scan_lists_them() {
+        let temp = Temp::new("v040-sq-gsnap");
+        let packed = fs::File::open(fixtures().join("saved_queries.gsnap")).unwrap();
+        let store = Store::create_from_packed(
+            temp.join("store"),
+            std::io::BufReader::new(packed),
+            StoreOptions::new(),
+        )
+        .unwrap();
+        assert_eq!(stored_fill(&store), FILL);
+        let definitions = store
+            .graph()
+            .read()
+            .traversal()
+            .list_definitions(Some(DefinitionKind::QUERY))
+            .unwrap();
+        assert_listed(&graphersal::script::saved_queries_using_removed(
+            &definitions,
+        ));
+        store.close().unwrap();
+    }
+}

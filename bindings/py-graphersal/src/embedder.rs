@@ -1,10 +1,10 @@
 //! Embedders (book page "Vectors", section "Embeddings") from Python: ``graphersal.Embedder``
 //! (a Python callable as an engine `Embedder`), ``graphersal.Model2Vec`` (the engine's
 //! `vector::Model2Vec`, loaded from a local directory: the binding never downloads) and the
-//! per-graph registry the scripts and ``Graph.embed_property`` use.
+//! per-graph registry the scripts use.
 //!
 //! **GIL.** A Python embedder is called from inside the engine: by the `embed` step while the
-//! traversal holds the graph's lock, by ``embed_property`` without it. It attaches to the
+//! traversal holds the graph's lock. It attaches to the
 //! interpreter for the call (`Python::try_attach`), so the binding keeps one rule everywhere:
 //! no path waits for a graph lock while it holds the GIL (every lock is taken inside
 //! `py.detach`). Otherwise a thread holding the GIL and waiting for the lock and a traversal
@@ -129,8 +129,8 @@ fn metric_of(name: &str) -> PyResult<VectorMetric> {
     })
 }
 
-/// An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``,
-/// ``Graph.embed_property`` and text queries. Register it with ``Graph(embedders=[..])`` or
+/// An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``
+/// and text queries. Register it with ``Graph(embedders=[..])`` or
 /// ``graph.register_embedder``.
 ///
 /// ``Embedder(name, fn, *, dimension, element="f32", metric="cosine", max_batch=64,

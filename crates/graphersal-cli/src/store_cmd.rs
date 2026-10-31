@@ -929,10 +929,28 @@ pub fn run(args: &[String]) -> i32 {
             };
             match created.and_then(|store| {
                 let info = store.info();
+                // A `.gsnap` of an earlier release may hold saved queries calling a removed
+                // function.
+                let removed = store
+                    .graph()
+                    .read_checked()
+                    .and_then(|graph| {
+                        use graphersal::storage::GraphStorage;
+                        Ok(graph
+                            .definitions()?
+                            .filter(|d| d.kind() == graphersal::catalog::DefinitionKind::QUERY)
+                            .cloned()
+                            .collect::<Vec<_>>())
+                    })
+                    .map(|definitions| {
+                        graphersal::script::saved_queries_using_removed(&definitions)
+                    })
+                    .map_err(graphersal::persist::PersistError::Graph);
                 store.close()?;
-                info
+                info.and_then(|info| Ok((info, removed?)))
             }) {
-                Ok(info) => {
+                Ok((info, removed)) => {
+                    print_removed_function_uses(&removed, dir);
                     outln!(
                         "Created the {} {dir}: graph {}, commit {}, {} snapshot(s); damage \
                          policy {} (fixed for its life).",
@@ -2041,6 +2059,15 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
     }
     for vector in &report.vectors_without_rule {
         errln!("note: {}", vector.note(target));
+    }
+    print_removed_function_uses(&report.saved_queries_using_removed, target);
+}
+
+/// The saved queries calling a DSL function this version removed (`note:` lines with the
+/// replacement); a saved query is never rewritten.
+fn print_removed_function_uses(uses: &[graphersal::catalog::RemovedFunctionUse], store: &str) {
+    for removed in uses {
+        errln!("note: {}", removed.note(store));
     }
 }
 

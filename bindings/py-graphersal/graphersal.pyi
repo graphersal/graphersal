@@ -21,7 +21,6 @@ __all__ = [
     "GraphersalError",
     "PermissionDeniedError",
     "CommitRejectedError",
-    "EmbedPropertyError",
     "ReturnedClosureError",
     "VectorFillWarning",
     "set_memory_limit",
@@ -122,9 +121,9 @@ class Vector:
 _EmbedOutput = Any
 
 class Embedder:
-    """An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``,
-    ``Graph.embed_property`` and text queries (``nearest("emb", "a question", 5)``). Register it
-    with ``Graph(embedders=[..])`` or ``graph.register_embedder``. Immutable."""
+    """An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``
+    and text queries (``nearest("emb", "a question", 5)``). Register it with
+    ``Graph(embedders=[..])`` or ``graph.register_embedder``. Immutable."""
 
     def __init__(
         self,
@@ -322,13 +321,6 @@ class VectorFillWarning(UserWarning):
     whole database is locked while it runs. ``warnings.simplefilter("error",
     VectorFillWarning)`` stops such a change before anything is applied."""
 
-class EmbedPropertyError(GraphersalError):
-    """``Graph.embed_property`` failed. The pages before the failure stay committed, the
-    failing one was rolled back; a second run continues where it stopped."""
-
-    #: The job's report up to the failure (the dict ``embed_property`` returns).
-    report: dict[str, Any]
-
 class ReturnedClosureError(GraphersalError):
     """A script run as one unit (``atomic=True``, ``Graph.dry_run``) returned a closure or
     function pointer. Everything the script changed was rolled back."""
@@ -388,9 +380,9 @@ class Graph:
     ) -> None:
         """A new, empty graph.
 
-        ``embedders``: the ``Embedder``s (also ``Model2Vec``) its scripts and
-        ``embed_property`` call, beside the built-in ``"hash-ngram/1"``; ``default_embedder``
-        names the one used when a call names none (default ``"hash-ngram/1"``). A duplicate or
+        ``embedders``: the ``Embedder``s (also ``Model2Vec``) its scripts call,
+        beside the built-in ``"hash-ngram/1"``; ``default_embedder`` names the one used when a
+        call names none (default ``"hash-ngram/1"``). A duplicate or
         reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
 
         The process memory ceiling is not a keyword of a graph: it is one setting of the whole
@@ -649,25 +641,6 @@ class Graph:
     def embedders(self) -> list[dict[str, Any]]:
         """This graph's embedders, the default first: ``name``, ``model``, ``dimension``,
         ``element``, ``metric``, ``max_batch``, ``deterministic``, ``local``, ``default``."""
-    def embed_property(
-        self,
-        *,
-        label: str,
-        source: str,
-        target: str,
-        element: Literal["vertex", "edge"] = "vertex",
-        embedder: Optional[str] = None,
-        only_missing: bool = True,
-        batch: Optional[int] = None,
-    ) -> dict[str, Any]:
-        """Embeds the text property ``source`` of every ``element`` labelled ``label`` into its
-        vector property ``target``, page by page (the embedder runs without the graph's lock;
-        each page is one unit). Needs an attached schema (mode ``open``/``closed``), where the
-        job records the embedder's model for ``target``. Returns the report (``embedded``,
-        ``skipped_no_text``, ``not_text``, ``skipped_changed``, ``skipped_removed``, ``units``,
-        ``schema_changed``, ``elapsed_ms``, ``embedder``, ``model``); a failure raises
-        ``EmbedPropertyError`` with ``report``. Releases the GIL; Ctrl+C cancels between pages
-        (the ``KeyboardInterrupt`` carries ``report`` too)."""
     def call_query(
         self,
         name: str,
@@ -795,13 +768,18 @@ class Store:
         defined by one commit (a damaged one raises with ``err.cause ==
         "upgrade_model_damaged"``, nothing written). ``{"from_version", "to_version",
         "already_current", "in_place", "backup", "files", "bytes", "models_converted",
-        "migration_commit", "models_missing", "vectors_without_rule"}``: ``models_converted``
+        "migration_commit", "models_missing", "vectors_without_rule",
+        "saved_queries_using_removed"}``: ``models_converted``
         lists ``{"repo", "identity", "former_identity", "bytes"}``, ``models_missing``
         ``{"identity", "repo", "needed_by", "commands"}`` (models the schema needs that the store
         lacks: it opens once they are imported), ``vectors_without_rule`` ``{"element",
         "label", "property", "embedder", "model", "elements", "exact", "commits_not_counted",
         "schema_patch", "note"}`` (vector properties with a model but no source property
-        ``from``: the note says how to add one; nothing is recomputed)."""
+        ``from``: the note says how to add one; nothing is recomputed),
+        ``saved_queries_using_removed`` ``{"query", "function", "removed_in", "replacement",
+        "schema_patch", "note"}`` (saved queries calling a function this version removed, such
+        as 0.4.0's ``embed_property``; ``schema_patch`` is the vector rule replacing the call, or
+        ``None``; a saved query is never rewritten)."""
     def prune(self, up_to: int) -> dict[str, Any]:
         """Removes snapshots and WAL only needed for targets before ``up_to`` (the last two
         snapshots stay): ``{"kept_from", "snapshots_removed", "segments_removed",

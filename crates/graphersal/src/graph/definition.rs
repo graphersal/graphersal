@@ -1748,6 +1748,48 @@ mod serde_impl {
     }
 }
 
+/// One call of a removed DSL function in the body of a saved query
+/// (`graphersal::script::saved_queries_using_removed`, feature `script`; the
+/// `saved_queries_using_removed` of a store upgrade's report).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedFunctionUse {
+    /// The saved query's name in the catalog.
+    pub query: String,
+    /// The removed function the body calls (its snake_case name, `embed_property`).
+    pub function: String,
+    /// The release that removed it (`0.5.0`).
+    pub removed_in: String,
+    /// What replaces the call, in words with an example (the help a call gets).
+    pub replacement: String,
+    /// For `embed_property`: the ready `g.patch_schema(..)` call that declares the vector rule
+    /// replacing the call, when the call names its label, `from` and
+    /// `to` as literal strings (its `embedder`, when literal, becomes the rule's model, else
+    /// `hash-ngram/1`; a rule accepts only `hash-ngram/1` and the store's models). `None` when
+    /// the call computes them.
+    pub schema_patch: Option<String>,
+}
+
+impl RemovedFunctionUse {
+    /// The text every front end shows for it (one line: the CLI prints it as a `note:`), with
+    /// the ready command for the store at `store` when [`Self::schema_patch`] is known.
+    pub fn note(&self, store: &str) -> String {
+        let fix = match &self.schema_patch {
+            Some(patch) => format!(
+                "replace the call by the vector rule (graphersal --graph {store} -e '{patch}'); \
+                 its first fill embeds every element of the label (the whole database is locked \
+                 while it runs)"
+            ),
+            None => self.replacement.clone(),
+        };
+        format!(
+            "saved query \"{}\" calls {}, removed in {}: a call of the query fails now, and it \
+             is not rewritten; {fix}",
+            self.query, self.function, self.removed_in
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

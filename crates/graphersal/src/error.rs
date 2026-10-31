@@ -1916,7 +1916,7 @@ pub enum GraphError {
         /// `"commit"` (an outermost unit at its commit), or an operation checked while it
         /// builds or before it allocates: `"snapshot load"`, `"store open"`, `"recovery"`,
         /// `"store read"`, `"checkpoint"`, `"snapshot write"`, `"backup verify"`,
-        /// `"maintenance copy"`, `"GraphSON load"`, `"GraphML load"`, `"embed_property"`, or
+        /// `"maintenance copy"`, `"GraphSON load"`, `"GraphML load"`, or
         /// the name a host passed to [`check_memory_for`](crate::exec::check_memory_for).
         operation: &'static str,
         /// The limit that was hit: `memory.limit`.
@@ -2970,8 +2970,7 @@ fn traversal_argument_help(step_name: &str) -> String {
              g.v().has(\"name\", \"marko\"), g.v().has(\"name\", __.is(\"marko\")), \
              g.v().has(T.id, \"1\") or g.v().has(T.label, __.is(\"person\"))."
             .to_string(),
-        "values" | "properties" | "element_map" | "similarity" | "nearest" | "embed"
-        | "embed_property" => format!(
+        "values" | "properties" | "element_map" | "similarity" | "nearest" | "embed" => format!(
             "{step_name}() takes property keys as strings or jpath(..) values, not a traversal, \
              for example g.v().values(\"name\") or g.v().values(jpath(\"meta.k\")). To read a \
              value through a traversal, project it: \

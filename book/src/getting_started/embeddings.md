@@ -223,17 +223,19 @@ g.v().has_label("doc").nearest("emb", [0.5, 0.8, 0.0], 1).as("hit")
 The host then turns the rows into the prompt for its language model. In Python this is a few
 lines ([below](#graphrag-from-python)).
 
-### GraphRAG with text: `embed_property()` and a text query
+### GraphRAG with text: a vector rule and a text query
 
-The same flow without making up any vector: `embed_property()` embeds every document's title
-with an embedder (here the built-in `hash-ngram/1`, which compares spelling, not meaning; a host
-registers a semantic model the same way) and records in the schema which model produced the
-vectors. A query then passes the question as **text**: `nearest()` embeds it once, with that
-same model, so the question and the documents are always comparable. Both need a schema
-attached (mode `open` or `closed`):
+The same flow without making up any vector: a [vector rule](../users_guide/vector_rules.md) in
+the schema embeds every document's title with a model (here the built-in `hash-ngram/1`, which
+compares spelling, not meaning; a model the Store keeps works the same way) and records which
+model produced the vectors. A query then passes the question as **text**: `nearest()` embeds it
+once, with that same model, so the question and the documents are always comparable. The rule is
+the `from` beside the `embedder` of the vector property:
 
-```rhai,graph=empty,script
-g.set_schema(#{mode: "open"});
+```rhai
+g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
+  title: #{type: "string"},
+  emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "title"}}}}}});
 for d in [
   ["Cats and dogs",      "Ada",  "pets"],
   ["Feeding your cat",   "Ada",  "pets"],
@@ -241,6 +243,7 @@ for d in [
   ["Cooking for robots", "Cleo", "cooking"],
   ["Rust for beginners", "Cleo", "programming"],
 ] {
+  // Each write of a title embeds it into "emb" when its unit ends.
   g.merge_v(#{"T.label": "person", name: d[1]}).as("a")
    .merge_v(#{"T.label": "topic", name: d[2]}).as("t")
    .add_v("doc").property("title", d[0]).as("d")
@@ -248,8 +251,6 @@ for d in [
    .add_e("wrote").from("a").to("d")
    .iterate();
 }
-// Embeds the 5 titles into "emb" and declares {"format": "vector", "embedder": "hash-ngram/1", ..}.
-g.embed_property(#{label: "doc", from: "title", to: "emb"});
 
 // [#{"author": "Ada", "title": "Feeding your cat", "topic": "pets"},
 //  #{"author": "Ada", "title": "Cats and dogs", "topic": "pets"}]
@@ -261,20 +262,21 @@ g.v().has_label("doc").nearest("emb", "feeding cats", 2)
  .to_list()
 ```
 
-The job works page by page and never holds the graph's lock while the embedder runs, so a slow
-model does not block other queries; a second run embeds only documents added since
-([Embedding a property](../users_guide/vectors.md#embedding-a-property-embed_property)). One more
-hop works as before:
+The rule writes the vectors when the unit that wrote the titles ends. The command line runs every
+traversal as its own unit, so the script runs as it is (`graphersal --graph empty -e '..'`); the
+playground runs a whole script as one unit, so run the text query there as a second run. A
+document added or retitled later is embedded by the same rule, in the unit that writes it
+([Vector Rules](../users_guide/vector_rules.md)). One more hop works as before:
 
-```rhai,graph=empty,script
-g.set_schema(#{mode: "open"});
+```rhai
+g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
+  emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "title"}}}}}});
 for d in [["Pasta at home", "cooking"], ["Cooking for robots", "cooking"], ["Cats and dogs", "pets"]] {
   g.merge_v(#{"T.label": "topic", name: d[1]}).as("t")
    .add_v("doc").property("title", d[0])
    .add_e("about").to("t")
    .iterate();
 }
-g.embed_property(#{label: "doc", from: "title", to: "emb"});
 // The best hit for "cooking pasta" shares its topic with: ["Pasta at home"]
 g.v().has_label("doc").nearest("emb", "cooking pasta", 1).as("hit")
  .out("about").in("about").where(P.neq("hit"))
@@ -451,15 +453,19 @@ graphersal --embedder potion=minishlab/potion-base-8M \
   -e 'g.add_v("doc").property("text", "a graph database stores vertices and edges")
         .add_v("doc").property("text", "banana bread recipe with walnuts")
         .add_v("doc").property("text", "traversal queries over a network of nodes").iterate();
+      g.v().has_label("doc").property("emb", __.embed("text", #{embedder: "potion"})).iterate();
+      let model = g.embedders().filter(|e| e.name == "potion")[0].model;
       g.set_schema(g.infer_schema(), SchemaMode.open);
-      g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "potion"});
+      g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{embedder: model}}}}}});
       g.v().has_label("doc").nearest("emb", "how do I query connected data?", 2)
         .values("text").to_list()'
 ```
 
 `embedder: "potion"` names the embedder registered by `--embedder potion=..`; without it the
-default runs (`--default-embedder NAME`, else `hash-ngram/1`). The text query needs no embedder:
-it uses the model the schema recorded for `doc.emb`.
+default runs (`--default-embedder NAME`, else `hash-ngram/1`). The schema records the model's
+identity for `doc.emb`, so the text query needs no embedder: it uses that model. (With the model
+imported into a Store, a [vector rule](../users_guide/vector_rules.md) fills and refreshes
+`doc.emb` by itself.)
 
 ```text
 "traversal queries over a network of nodes"
@@ -479,8 +485,8 @@ model is local: no text is sent anywhere.
 a manifest `model2vec@<12 hex digits>`). It names the model, never a path: a copied or moved
 model directory keeps it, a changed file gets another one. Vectors are comparable only between
 embedders of the same identity, so embed documents and questions with the same model.
-`embed_property()` writes the identity into the schema itself. To declare a vector property by
-hand, copy the full identity, hash included, from `graphersal embed-model list` or
+A vector rule naming a model of the Store by its repository stores the identity in the schema
+itself. To declare a vector property by hand, copy the full identity, hash included, from `graphersal embed-model list` or
 `g.embedders()`: a schema naming a model without its hash matches no embedder (the error shows
 the full identity of the one you tried), so a changed model file can never quietly mix its
 vectors with the old ones.
@@ -611,13 +617,14 @@ graph.define_query({
 graph.call_query("semantic_search", {"q": graphersal.Vector(q), "k": 2})
 ```
 
-When the host registers its model as an embedder and the documents were embedded with
-`embed_property()`, the schema knows the model, and the parameter can be the question itself:
+When the host registers its model as an embedder and the schema declares it for the documents'
+vectors (its `embedder`), the schema knows the model, and the parameter can be the question itself:
 `nearest("emb", question, k)` with `params: {"question": "string"}` embeds it with that model, so
 the agent needs no embedding tool at all. From Python that is
 `graphersal.Embedder("minilm", model.encode, dimension=384, model="sentence-transformers/all-MiniLM-L6-v2")`
-in `Graph(embedders=[..])`, then `graph.embed_property(label="chunk", source="text",
-target="emb")` ([Python Quick Start: Embedders](../library/python.md#embedders)).
+in `Graph(embedders=[..])`, the vectors written with
+`g.v().has_label("chunk").property("emb", __.embed("text")).iterate()` and the model declared
+with `graph.patch_schema(..)` ([Python Quick Start: Embedders](../library/python.md#embedders)).
 
 **Any model works.** OpenAI, Cohere, Ollama or a model of your own: an embedding is just a list
 of numbers. Keep the schema's `dimension` equal to the model's, embed documents and questions

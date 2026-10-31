@@ -40,8 +40,8 @@ const RESOURCES: [(&str, ResourceKind); 8] = [
 /// Resources: ``"data"`` (the graph's elements), ``"schema"``, ``"file"``, ``"option"`` (the
 /// administrative ``g.with()`` options such as ``evaluationTimeout``), ``"definition"`` (the
 /// catalog of definitions: saved queries), ``"custom"``, ``"embedder"`` (``execute`` on it runs
-/// an embedder: the ``embed`` step, ``embed(text)``, a text query, ``embed_property`` in a
-/// script), ``"journal"`` (``read`` on it reads the system journal). ``"*"`` stands for every action or every resource.
+/// an embedder: the ``embed`` step, ``embed(text)``, a text query),
+/// ``"journal"`` (``read`` on it reads the system journal). ``"*"`` stands for every action or every resource.
 ///
 /// An ``AccessPolicy`` is immutable: ``allow``, ``deny`` and ``with_file_root`` return a new
 /// value. ``AccessPolicy(("read", "data"), ("read", "schema"))`` allows exactly the given pairs;

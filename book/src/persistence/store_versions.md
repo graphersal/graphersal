@@ -181,6 +181,20 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
 
   See [Vector Rules](../users_guide/vector_rules.md): adding `from` makes it a rule whose first
   fill re-embeds EVERY element of the label while the whole database is locked.
+- **Saved queries calling a removed function.** A saved query of 0.4.0 that calls
+  `g.embed_property(..)` (removed in 0.5.0) is kept as it is, and a call of it fails with a
+  help naming the vector rule. The upgrade lists each such query
+  (`UpgradeReport::saved_queries_using_removed`, Python `report["saved_queries_using_removed"]`)
+  and the CLI prints a `note:` with the ready command when the call names its label and
+  properties literally, for example
+
+  ```text
+  note: saved query "fill" calls embed_property, removed in 0.5.0: a call of the query fails now, and it is not rewritten; replace the call by the vector rule (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})'); its first fill embeds every element of the label (the whole database is locked while it runs)
+  ```
+
+  Then redefine or drop the query. `graphersal store create <dir> --from <0.4.0 .gsnap>` prints
+  the same notes; from Rust, `graphersal::script::saved_queries_using_removed(&definitions)`
+  scans any catalog.
 - **Take a full backup after the upgrade.** A backup directory of the 0.4.0 store upgrades too
   (it stays a backup), but it gets its own migration commit, so it no longer takes increments of
   the upgraded store (`PersistError::BackupRefused`): back the upgraded store up into a new

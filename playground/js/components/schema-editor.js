@@ -170,7 +170,7 @@ export const SchemaNodeDetails = {
         to it (quantized). dimension: the number of components every value must have (empty: any). metric: the default of
         <code>similarity</code> and <code>nearest</code> on this property; <code>hamming</code> needs bit vectors.
         embedder (a label's top-level property only): the model identity of the embedder that produced the vectors, as
-        <code>g.embedders()</code> lists it under <code>model</code> (<code>hash-ngram/1</code>); <code>embed_property</code> fills it in,
+        <code>g.embedders()</code> lists it under <code>model</code> (<code>hash-ngram/1</code>); a vector rule (from, below) embeds with it,
         and a text query (<code>nearest("emb", "graph indexes", 5)</code>) embeds its text with that model.
         from (with embedder, a label's top-level property only): the vector rule. The engine embeds the text of this property
         of the same label into the vector at the end of every write (a missing or empty text removes the vector), and the

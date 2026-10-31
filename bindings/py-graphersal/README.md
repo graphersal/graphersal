@@ -427,8 +427,7 @@ g.query('g.v().has_label("doc").similarity("emb", q).to_list()', params={"q": Ve
 ## Embedders
 
 An embedder turns text into vectors inside the engine: the step `embed()`, the function
-`embed(text)`, the job `embed_property` and text queries (`nearest("emb", "a question", 5)`)
-call the embedders a graph has registered (book page "Vectors", section "Embeddings").
+`embed(text)` and text queries (`nearest("emb", "a question", 5)`) call the embedders a graph has registered (book page "Vectors", section "Embeddings").
 The built-in `hash-ngram/1` is always there; Python adds its own two ways.
 
 **Any Python model** becomes an embedder through `graphersal.Embedder(name, fn, *, dimension,
@@ -487,31 +486,29 @@ later (a running execution keeps the embedders it started with); a duplicate or 
 first, with their `model`. Scripts see the registry in `execute`, `query`, `dry_run` and
 `atomic=True` runs.
 
-**Embedding a property and searching by text.** `embed_property` needs a schema attached (mode
-`open` or `closed`): it declares the target property as vectors of the embedder's model, which
-is what a text query embeds the question with:
+**Filling a property and searching by text.** With the built-in `hash-ngram/1` or a model the
+Store keeps, a vector rule (`"from"`, above) fills and refreshes the vectors by itself. With an
+embedder of your own, write the vectors in a query and declare the property as vectors of its
+model in an attached schema (mode `open` or `closed`), which is what a text query embeds the
+question with:
 
 ```python
 graph.execute("""
     for t in ["Cats need fresh water every day.", "Salt the pasta water generously."] {
         g.add_v("chunk").property("text", t).iterate();
     }
+    g.v().has_label("chunk").property("emb", __.embed("text")).iterate();
 """)
 graph.set_schema(graph.infer_schema(), "open")
-report = graph.embed_property(label="chunk", source="text", target="emb")
-# {'embedded': 2, 'units': 1, 'schema_changed': True, 'embedder': 'minilm',
-#  'model': 'sentence-transformers/all-MiniLM-L6-v2', ...}
+graph.patch_schema({"vertices": {"chunk": {"schema": {"properties": {"emb": {
+    "embedder": "sentence-transformers/all-MiniLM-L6-v2"}}}}}})
 
 graph.query('g.v().has_label("chunk").nearest("emb", question, 5).values("text").to_list()',
             params={"question": "How often should I feed my cat?"})
 ```
 
-The job reads the texts under a short read lock, runs the embedder without any lock of the graph
-(other threads keep reading and writing) and writes each page of `batch` elements (default the
-embedder's `max_batch`) as one unit; the GIL is released for the whole job. A second run embeds
-only the elements still missing the property (`only_missing=False` re-embeds all). A failure
-raises `graphersal.EmbedPropertyError`, whose `report` holds the counts up to it (earlier pages
-stay); Ctrl+C cancels the job between pages and the `KeyboardInterrupt` carries the `report` too.
+A new or changed text needs the same write again (`property("emb", __.embed("text"))` on the
+elements that changed). The job `embed_property` of earlier releases was removed in 0.5.0.
 
 **Threads and the GIL.** A Python embedder runs while a traversal holds the graph's lock (the
 `embed` step) and takes the GIL for the call. No method of the binding waits for the graph's

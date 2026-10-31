@@ -245,9 +245,6 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "embedders":
         "Lists the registered embedders (name, model, dimension, element, metric, ...), the default first.",
         "g.embedders()[0].name" => "hash-ngram/1";
-    "traversal" "embed_property":
-        "Embeds the property from of every element with label into the vector property to, page by page, with the embedder of that registry name (#{embedder: name}, else the default; g.embedders() lists them), and records its model in the attached schema; other keys: element, only_missing, batch; returns the report.",
-        "{ g.set_schema(g.infer_schema(), SchemaMode.open); g.embed_property(#{label: \"person\", from: \"name\", to: \"emb\", embedder: \"hash-ngram/1\"}).model }" => "hash-ngram/1";
     "traversal" "date_add":
         "Adds n DT units or a duration, optionally in a zone whose IANA name the result keeps (TinkerPop dateAdd()).",
         "g.inject(date(\"2024-01-31\")).date_add(DT.month, 1).next().day" => "29";

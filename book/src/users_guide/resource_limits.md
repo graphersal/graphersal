@@ -297,7 +297,6 @@ checkpoint leaves the store as it was.
 | `maintenance copy` | the copy of a salvaged graph (twice the graph) |
 | `backup verify` | every metadata entry of a ZIP backup read back whole |
 | `GraphSON load`, `GraphML load` (`GraphSource::from_graphson*`, `from_graphml*`, `GraphSONImport::load`) | every 4096 elements and at the end; without a tracking allocator the size is estimated by the bytes of text read so far |
-| `embed_property` | the id collection before it starts |
 
 Two errors tell when a persisted graph was refused: `PersistError::MemoryBudget` (the estimate
 did not fit: refused before reading; its `setting` is `memory.limit`, or

@@ -16,7 +16,6 @@ use graphersal::script::{
     materialize_traversals, with_traversal_presets,
 };
 use graphersal::storage::ElementKind;
-use graphersal::vector::EmbedJob;
 use graphersal::{GraphSource, prelude::Graph as EngineGraph};
 use graphersal::{auth::Authorizer, storage::GraphStorage};
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -39,7 +38,7 @@ pub struct Graph {
     inner: Arc<EngineGraph>,
     /// Resource limits of every script this graph runs: the SAFE defaults until `set_limits`.
     limits: Mutex<GraphLimits>,
-    /// The embedders of its scripts and `embed_property` (shared with the `Store` it came from).
+    /// The embedders of its scripts (shared with the `Store` it came from).
     embedders: RegistryCell,
 }
 
@@ -151,8 +150,8 @@ impl Graph {
     /// process, ``graphersal.set_memory_limit``.
     ///
     /// ``embedders`` is a list of ``Embedder`` (also ``Model2Vec``) the graph's scripts
-    /// (``embed()``, text queries in ``nearest``/``similarity``) and ``embed_property`` call,
-    /// beside the built-in ``"hash-ngram/1"``; ``default_embedder`` names the one used when a
+    /// (``embed()``, text queries in ``nearest``/``similarity``) call, beside
+    /// the built-in ``"hash-ngram/1"``; ``default_embedder`` names the one used when a
     /// call names none (default ``"hash-ngram/1"``). A duplicate or reserved name raises
     /// ``ValueError``. Every graph constructor and loader takes the same two keywords.
     #[new]
@@ -1395,146 +1394,6 @@ impl Graph {
     /// there. The same list as the DSL's ``g.embedders()``.
     fn embedders(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.run(py, "g.embedders()", None, false, None)
-    }
-
-    /// ``graph.embed_property(*, label, source, target, element="vertex", embedder=None,
-    /// only_missing=True, batch=None)``: embeds the text property ``source`` of every
-    /// ``element`` (``"vertex"`` or ``"edge"``) labelled ``label`` and stores the vector in its
-    /// property ``target``, page by page (``batch`` elements per page, default the embedder's
-    /// ``max_batch``): the texts are read under a short read lock, the embedder runs without
-    /// any lock (other threads keep reading and writing), each page is written as one unit.
-    /// ``embedder`` names a registered embedder (default: the graph's default);
-    /// ``only_missing=False`` embeds again the elements that have ``target`` already.
-    ///
-    /// The graph needs a schema attached (mode ``open`` or ``closed``): the job declares
-    /// ``target`` there as vectors of the embedder's model (its ``embedder`` keyword), which is
-    /// what a text query (``nearest("emb", "a question", 5)``) embeds with later. Returns the
-    /// report ``dict``: ``embedded``, ``skipped_no_text``, ``not_text``, ``skipped_changed``,
-    /// ``skipped_removed``, ``units``, ``schema_changed``, ``elapsed_ms``, ``embedder``,
-    /// ``model``. A failure raises ``EmbedPropertyError`` (a ``GraphersalError``) whose
-    /// ``report`` holds the counts up to the failure: earlier pages stay, the failing one is
-    /// rolled back, and a second run continues where it stopped. The GIL is released for the
-    /// whole job; Ctrl+C (``KeyboardInterrupt``) cancels it between pages and is raised with
-    /// the same ``report`` attribute.
-    #[pyo3(signature = (*, label, source, target, element="vertex", embedder=None, only_missing=true, batch=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn embed_property(
-        &self,
-        py: Python<'_>,
-        label: &str,
-        source: &str,
-        target: &str,
-        element: &str,
-        embedder: Option<&str>,
-        only_missing: bool,
-        batch: Option<usize>,
-    ) -> PyResult<Py<PyAny>> {
-        let kind = match element {
-            "vertex" => ElementKind::Vertex,
-            "edge" => ElementKind::Edge,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "element must be \"vertex\" or \"edge\", got {other:?}"
-                )));
-            }
-        };
-        let registry = self.embedders.current();
-        // The embedder of the report, resolved like the job does (an unknown name fails in the
-        // job, with its diagnostic).
-        let resolved = match embedder {
-            None => Some(Arc::clone(registry.default_embedder())),
-            Some(name) => registry.get(name).cloned(),
-        };
-        let mut job = EmbedJob::new(label, source, target)
-            .element(kind)
-            .only_missing(only_missing);
-        if let Some(name) = embedder {
-            job = job.embedder(name);
-        }
-        if let Some(batch) = batch {
-            job = job.batch(batch);
-        }
-        let graph = Arc::clone(&self.inner);
-        let cancel = CancelToken::new();
-        let job_cancel = cancel.clone();
-        let (outcome, interrupted) = py.detach(move || {
-            let (done, finished) = std::sync::mpsc::channel();
-            std::thread::scope(|threads| {
-                threads.spawn(move || {
-                    let result = graph.embed_property(&job, &registry, &job_cancel, &mut |_| {});
-                    let _ = done.send(result);
-                });
-                let mut interrupted = None;
-                loop {
-                    match finished.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(result) => return (Some(result), interrupted),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            // Signals (Ctrl+C) reach Python only through `check_signals`, on
-                            // the main thread, with the GIL: taken briefly, never while
-                            // waiting for a graph lock.
-                            if interrupted.is_none()
-                                && let Some(Err(err)) = Python::try_attach(|py| py.check_signals())
-                            {
-                                cancel.cancel();
-                                interrupted = Some(err);
-                            }
-                        }
-                        // The job thread panicked (a bug): the scope resumes the panic.
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            return (None, interrupted);
-                        }
-                    }
-                }
-            })
-        });
-        let report_of = |report: &graphersal::vector::EmbedReport| -> PyResult<Py<PyAny>> {
-            let dict = PyDict::new(py);
-            dict.set_item("embedded", report.embedded)?;
-            dict.set_item("skipped_no_text", report.skipped_no_text)?;
-            dict.set_item("not_text", report.not_text)?;
-            dict.set_item("skipped_changed", report.skipped_changed)?;
-            dict.set_item("skipped_removed", report.skipped_removed)?;
-            dict.set_item("units", report.units)?;
-            dict.set_item("schema_changed", report.schema_changed)?;
-            dict.set_item(
-                "elapsed_ms",
-                u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
-            )?;
-            dict.set_item(
-                "embedder",
-                resolved.as_ref().map(|e| e.info().name.to_string()),
-            )?;
-            dict.set_item(
-                "model",
-                resolved.as_ref().map(|e| e.info().model.to_string()),
-            )?;
-            Ok(dict.into_any().unbind())
-        };
-        let Some(outcome) = outcome else {
-            return Err(map_diagnostic(
-                py,
-                "Error: the embed_property job ended without a result",
-            ));
-        };
-        match (outcome, interrupted) {
-            (Ok(report), None) => report_of(&report),
-            (Ok(report), Some(err)) => {
-                let _ = err.value(py).setattr("report", report_of(&report)?);
-                Err(err)
-            }
-            (Err(failed), Some(err)) => {
-                let _ = err.value(py).setattr("report", report_of(&failed.report)?);
-                Err(err)
-            }
-            (Err(failed), None) => {
-                let report = report_of(&failed.report)?;
-                Err(crate::error::embed_property_error(
-                    py,
-                    &format_diagnostic(&*failed.error),
-                    report,
-                ))
-            }
-        }
     }
 }
 

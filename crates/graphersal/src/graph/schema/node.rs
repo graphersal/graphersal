@@ -207,7 +207,7 @@ impl SchemaFormat {
 /// steps. `embedder` (a top-level property of a label only) records the model identity of the
 /// embedder that produced the vectors (`"hash-ngram/1"`; an
 /// [`EmbedderInfo::model`](crate::vector::EmbedderInfo::model), never a path or a registry name):
-/// `embed_property` fills it in and checks it, and a text query
+/// a vector rule (`from`) embeds with that model, and a text query
 /// (`nearest("emb", "graph indexes", 5)`) embeds the text with the registered embedder of that
 /// model. A plain write of a vector checks only `element` and `dimension`. `items` is not
 /// allowed next to it. A list of numbers written to the property in mode
@@ -224,8 +224,8 @@ pub struct VectorSchema {
     pub metric: Option<VectorMetric>,
     /// `embedder`: the model identity of the embedder that produced the vectors
     /// ([`EmbedderInfo::model`](crate::vector::EmbedderInfo::model)), on a label's top-level
-    /// property only. Not checked by a plain write; `embed_property` and the text queries of
-    /// `nearest`/`similarity` read it.
+    /// property only. Not checked by a plain write; a vector rule (`from`) and the text queries
+    /// of `nearest`/`similarity` read it.
     pub embedder: Option<String>,
     /// `from`: the vector rule (book page "Vector Rules"): the top-level property of the same
     /// label whose text the engine embeds with `embedder` into this property at the end of

@@ -209,7 +209,6 @@
   - [element](traversal/steps/element.md)
   - [element_map](traversal/steps/element_map.md)
   - [embed](traversal/steps/embed.md)
-  - [embed_property](traversal/steps/embed_property.md)
   - [embedders](traversal/steps/embedders.md)
   - [emit](traversal/steps/emit.md)
   - [estimate_compression](traversal/steps/estimate_compression.md)

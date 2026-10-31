@@ -1903,101 +1903,19 @@ mod embedders {
     }
 }
 
-/// The job `embed_property` and the text queries of `nearest`/`similarity` (book page
-/// "Vectors"): the job asks `Read` and `Update` on the label's data, `Execute` on the embedder
-/// and `Update` on the schema when it declares the property; it is denied in a saved query;
-/// a text query asks `Execute` on the embedder of the declared model.
-mod embed_jobs {
+/// The text queries of `nearest`/`similarity` (book page "Vectors"): a text query asks
+/// `Execute` on the embedder of the declared model.
+mod text_queries {
     use super::*;
 
     const ATTACH: &str = r#"g.set_schema(g.infer_schema(), SchemaMode.open)"#;
-    const JOB: &str = r#"g.embed_property(#{label: "person", from: "name", to: "emb"})"#;
-
-    #[test]
-    fn the_job_asks_for_the_data_the_embedder_and_the_schema() {
-        let graph = modern();
-        let _ = run(&graph, ATTACH, AllowAll).unwrap();
-        let recorder = Arc::new(Recorder::default());
-        let _ = run(&graph, JOB, recorder.clone()).unwrap();
-        assert_eq!(
-            recorder.seen(),
-            [
-                r#"Read Data(vertex "person")"#,
-                r#"Update Data(vertex "person")"#,
-                r#"Execute Embedder("hash-ngram/1")"#,
-                "Update Schema",
-            ]
-        );
-        // Declared already: the schema is not asked for again.
-        let recorder = Arc::new(Recorder::default());
-        let _ = run(
-            &graph,
-            r#"g.embed_property(#{label: "person", from: "name", to: "emb", only_missing: false})"#,
-            recorder.clone(),
-        )
-        .unwrap();
-        assert!(!recorder.seen().iter().any(|seen| seen == "Update Schema"));
-    }
-
-    #[test]
-    fn a_denied_request_stops_the_job_before_anything_is_written() {
-        let graph = modern();
-        let _ = run(&graph, ATTACH, AllowAll).unwrap();
-        assert_denied(
-            run(&graph, JOB, AccessPolicy::read_only()),
-            "embed_property",
-            r#"Update Data(vertex "person")"#,
-        );
-        let no_schema = AccessPolicy::allow_all().deny(ActionKind::Update, ResourceKind::Schema);
-        assert_denied(
-            run(&graph, JOB, no_schema),
-            "embed_property",
-            "Update Schema",
-        );
-        let no_embedder =
-            AccessPolicy::allow_all().deny(ActionKind::Execute, ResourceKind::Embedder);
-        assert_denied(
-            run(&graph, JOB, no_embedder),
-            "embed_property",
-            r#"Execute Embedder("hash-ngram/1")"#,
-        );
-        assert_eq!(
-            run(&graph, r#"g.v().has("emb").count().next()"#, AllowAll)
-                .unwrap()
-                .as_int()
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn a_saved_query_cannot_run_the_job() {
-        let graph = modern();
-        let _ = run(&graph, ATTACH, AllowAll).unwrap();
-        // Stored through the Rust API in the read-only dialect (as by 0.2.0 or a catalog file):
-        // `g.define_query` refuses such a body (it changes the schema).
-        graph
-            .write()
-            .traversal_mut()
-            .define_query(
-                "fill",
-                graphersal::catalog::QueryDefinition::new(
-                    r#"fn fill() { g.embed_property(#{label: "person", from: "name", to: "emb"}) }"#,
-                ),
-            )
-            .unwrap();
-        let err = run(&graph, r#"g.query("fill")"#, AllowAll).unwrap_err();
-        assert!(
-            err.contains("Permission denied for 'embed_property'"),
-            "{err}"
-        );
-        assert!(err.contains("a saved query is read-only"), "{err}");
-    }
+    /// A vector rule fills `emb` of every person from its name.
+    const RULE: &str = r#"g.patch_schema(#{vertices: #{person: #{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "name"}}}}}})"#;
 
     #[test]
     fn a_text_query_asks_execute_on_the_embedder_of_its_model() {
         let graph = modern();
-        let _ = run(&graph, &format!("{ATTACH}; {JOB}"), AllowAll).unwrap();
+        let _ = run(&graph, &format!("{ATTACH}; {RULE}"), AllowAll).unwrap();
         let recorder = Arc::new(Recorder::default());
         let _ = run(
             &graph,

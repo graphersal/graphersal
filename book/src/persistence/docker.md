@@ -48,7 +48,7 @@ command line first, for example:
 ```bash
 graphersal --graph my.gstore --create-store -e 'g.add_v("doc").property("text", "a cat on the mat").iterate()'
 graphersal embed-model download minishlab/potion-base-8M --into my.gstore
-graphersal --graph my.gstore -e '{ g.set_schema(g.infer_schema(), SchemaMode.open); g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "minishlab/potion-base-8M"}).model }'
+graphersal --graph my.gstore -e 'g.set_schema(g.infer_schema(), SchemaMode.open); g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: "minishlab/potion-base-8M", from: "text"}}}}}})'
 ```
 
 Pass other arguments after the image name to replace the command (`docker run ... graphersal

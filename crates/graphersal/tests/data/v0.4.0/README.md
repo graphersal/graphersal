@@ -19,6 +19,8 @@ repository name (identity `model2vec@b6b362e7a651`).
 | `backup.zip` | A ZIP backup of `store/`, with the models. |
 | `snapshot.gsnap` | A packed snapshot of `store/` with the model rows (segment kind 3). |
 | `single.gstore` | A single-file store: `acme/tiny` and the `doc`/`person` vectors, all in the WAL (no checkpoint: commits 1 to 10). |
+| `saved_queries/` | A directory store (written by `make_saved_queries.sh`): two `doc` vertices with a `text`, an open schema, the saved query `docs` and two saved queries calling `g.embed_property` (removed in 0.5.0): `fill` (label and properties literal) and `fill_any` (label computed). 0.4.0 refused such a body in `g.define_query`; they came in through the catalog file (`POST /api/catalog/load` of the dev server). |
+| `saved_queries.gsnap` | A packed snapshot of `saved_queries/` (after a checkpoint). |
 | `missing/` | A store whose schema names `model2vec/acme/gone@0123456789ab` (`doc.emb`), a model it does not keep (0.4.0 served such models through `--embedder`). |
 
 They were produced by `make.sh` with the binary built from the tag `v0.4.0` (in a separate
@@ -27,6 +29,7 @@ checkout: `git worktree add <dir> v0.4.0`, `cargo build -p graphersal-cli` there
 
 ```sh
 crates/graphersal/tests/data/v0.4.0/make.sh <dir>/target/debug/graphersal
+crates/graphersal/tests/data/v0.4.0/make_saved_queries.sh <dir>/target/debug/graphersal   # also needs curl
 ```
 
 The script lists every command. The lock files (`LOCK`, `BACKUP`) are removed afterwards; they
