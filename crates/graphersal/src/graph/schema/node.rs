@@ -227,6 +227,11 @@ pub struct VectorSchema {
     /// property only. Not checked by a plain write; `embed_property` and the text queries of
     /// `nearest`/`similarity` read it.
     pub embedder: Option<String>,
+    /// `from`: the vector rule (book page "Vector Rules"): the top-level property of the same
+    /// label whose text the engine embeds with `embedder` into this property at the end of
+    /// every unit that writes it (a text-less `from` removes the vector). Needs `embedder`; a
+    /// label's top-level property only. Direct writes of a rule's property are refused.
+    pub from: Option<String>,
 }
 
 impl VectorSchema {
@@ -237,7 +242,16 @@ impl VectorSchema {
             dimension: None,
             metric: None,
             embedder: None,
+            from: None,
         }
+    }
+
+    /// The same declaration as a vector rule: the engine fills it from the text of the
+    /// top-level property `from` of the same label with its `embedder` (book page "Vector
+    /// Rules").
+    pub fn with_from(mut self, from: impl Into<String>) -> Self {
+        self.from = Some(from.into());
+        self
     }
 
     /// The same declaration with the model identity of its embedder (`"hash-ngram/1"`).
@@ -616,6 +630,7 @@ impl PropertySchema {
                 dimension,
                 metric: None,
                 embedder: None,
+                from: None,
             }),
             ..Self::of(JsonType::Array)
         }

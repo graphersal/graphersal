@@ -1057,6 +1057,27 @@ impl SystemJournal {
         self.emit_at(kind, event, time);
     }
 
+    /// [`Self::emit`] of a kind that is never collapsed, returning the record's seq (the `op`
+    /// of the records that end the operation it starts).
+    pub(crate) fn emit_op(&self, kind: &'static EventKind, event: Event) -> u64 {
+        let time = self.clock.now();
+        let draft = event.into_draft(kind, time);
+        let mut seq = 0;
+        {
+            let mut state = self.state.lock();
+            let state = &mut *state;
+            let mut collapser = std::mem::take(&mut state.collapse);
+            collapser.admit(draft, &mut |draft| {
+                seq = self.write_locked(state, draft);
+                seq
+            });
+            state.collapse = collapser;
+        }
+        self.changed.notify_all();
+        self.deliver();
+        seq
+    }
+
     /// [`Self::emit`] at `time` (never earlier than the last record).
     pub(crate) fn emit_at(&self, kind: &'static EventKind, event: Event, time: i64) {
         let draft = event.into_draft(kind, time);

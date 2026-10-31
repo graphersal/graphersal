@@ -600,6 +600,54 @@ pub(crate) static MODEL_UNAVAILABLE: EventKind = event(
     Collapse::By(&["identity", "cause"]),
 );
 
+pub(crate) static VECTOR_FILL_STARTED: EventKind = event(
+    "vector_fill.started",
+    "schema.vector_rule",
+    Level::Notice,
+    "A vector fill started under the write lock (a vector rule added or changed, or its model \
+     replaced): the whole database is locked until it ends.",
+    &[
+        f("reason", "rule_added, rule_changed or model_replaced"),
+        f("rules", "the rules filled: element, label, from, to, model"),
+        f("elements", "the elements to embed"),
+        opt(
+            "estimate_ms",
+            "the estimated time, when the model's speed is known",
+        ),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static VECTOR_FILL_DONE: EventKind = event(
+    "vector_fill.done",
+    "schema.vector_rule",
+    Level::Notice,
+    "A vector fill ended with the commit of its unit (`commit`); `op` is its start record.",
+    &[
+        f("embedded", "the elements embedded"),
+        f("removed", "the vectors removed (a source without text)"),
+        f("elapsed_ms", "how long the fill held the lock"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static VECTOR_FILL_FAILED: EventKind = event(
+    "vector_fill.failed",
+    "schema.vector_rule",
+    Level::Error,
+    "A vector fill failed (the model, the memory ceiling, a cancel): its unit was rolled back, \
+     nothing was written.",
+    &[
+        f("cause", "the error"),
+        f("elapsed_ms", "how long the fill held the lock"),
+        f(
+            "embedded_before_failure",
+            "the elements embedded before it failed",
+        ),
+    ],
+    Collapse::Never,
+);
+
 /// Every declared event kind, in catalogue order.
 pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &REPEATED,
@@ -639,6 +687,9 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &MODEL_UNLOADED,
     &MODEL_LOAD_FAILED,
     &MODEL_UNAVAILABLE,
+    &VECTOR_FILL_STARTED,
+    &VECTOR_FILL_DONE,
+    &VECTOR_FILL_FAILED,
 ];
 
 /// The declared kind with `code`.

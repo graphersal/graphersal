@@ -1930,6 +1930,57 @@ pub enum GraphError {
         /// `None` when it was stopped while it grew.
         needed: Option<u64>,
     },
+
+    /// A direct write or removal of a property that a vector rule of the schema computes
+    /// (book page "Vector Rules"): `key` of `label` is embedded from `from` at the end of every
+    /// unit that writes `from`. Nothing was written. Replay, recovery, loads and
+    /// `apply_change_set` take such a property as given.
+    #[error(
+        "The property '{key}' of '{label}' is computed by a vector rule from '{from}' and cannot \
+         be written directly"
+    )]
+    #[non_exhaustive]
+    DerivedProperty {
+        /// The label whose rule computes it.
+        label: String,
+        /// The vector property.
+        key: String,
+        /// The source property of the rule.
+        from: String,
+    },
+
+    /// The vector rule of `key` of `label` could not embed with `model` (the model failed, does
+    /// not load, the execution was cancelled): the whole unit was rolled back, nothing was
+    /// written.
+    #[error("The vector rule of '{key}' of '{label}' failed with the model {model}: {cause}")]
+    #[non_exhaustive]
+    VectorRuleFailed {
+        /// The label of the rule.
+        label: String,
+        /// The vector property.
+        key: String,
+        /// The model identity of the rule.
+        model: String,
+        /// The embedder's error.
+        #[source]
+        cause: crate::value::EmbedError,
+    },
+
+    /// A schema declares a vector rule whose model is neither `hash-ngram/1` nor a model of the
+    /// store's catalog: nothing was applied.
+    #[error(
+        "The vector rule of '{key}' of '{label}' names the model {model}, which this graph \
+         does not hold"
+    )]
+    #[non_exhaustive]
+    VectorRuleModelMissing {
+        /// The label of the rule.
+        label: String,
+        /// The vector property.
+        key: String,
+        /// The model the rule names.
+        model: String,
+    },
 }
 
 /// The `sequence` name of the commit sequence number in [`GraphError::SequenceOverflow`].
@@ -2441,6 +2492,37 @@ impl DiagnosticError for GraphError {
             } => Some(unit_resource_limit_help(
                 operation, limit, *max, *observed, *needed,
             )),
+            GraphError::DerivedProperty { label, key, from } => Some(format!(
+                "{key} of {label} is computed from {from} by the vector rule of the schema: \
+                 write {from} instead; the engine fills {key} at the end of the unit: \
+                 g.v(id).property(\"{from}\", \"...\"). To write {key} yourself, remove \
+                 \"from\" from its schema declaration (g.patch_schema(..)); the vectors stay."
+            )),
+            GraphError::VectorRuleFailed {
+                label, key, model, ..
+            } => Some(format!(
+                "Nothing was written: the whole unit was rolled back. The vector rule of \
+                 {label}.{key} embeds with {model}. A model that does not load or is damaged \
+                 comes back with graphersal embed-model download <repo>, then graphersal \
+                 embed-model import <repo> --into <store> --replace; a fill stopped by the \
+                 memory ceiling needs a higher one (--memory-limit, memory.limit); a cancelled \
+                 or timed-out fill runs again unchanged."
+            )),
+            GraphError::VectorRuleModelMissing { model, .. } => Some(if model.contains("?normalize=") {
+                format!(
+                    "A vector rule embeds with hash-ngram/1 or a model of the store, named by \
+                     its repository or identity; a stored model is served as imported, so \
+                     drop the override {} from the identity: \"embedder\": \"{}\".",
+                    model.split_once('?').map_or("", |(_, o)| o),
+                    model.split_once('?').map_or(model.as_str(), |(base, _)| base)
+                )
+            } else {
+                format!(
+                    "A vector rule embeds with hash-ngram/1 or a model of the store. Import the \
+                     model first: graphersal embed-model import <repo> --into <store> (the \
+                     repository of {model}), or use \"embedder\": \"hash-ngram/1\"."
+                )
+            }),
         }
     }
 }
@@ -11159,6 +11241,28 @@ mod tests {
             err.respell(crate::traversal::Spelling::Camel);
             let help = err.help().unwrap_or_default();
             assert!(help.starts_with("use addV() or mergeV(). "), "{help}");
+        }
+    }
+
+    /// `VectorRuleFailed` (built by the rule pass only) says nothing was written and how to
+    /// bring a model back or raise the ceiling.
+    #[test]
+    fn a_failed_vector_rule_names_the_model_and_the_fixes() {
+        let err = GraphError::VectorRuleFailed {
+            label: "doc".to_string(),
+            key: "emb".to_string(),
+            model: "model2vec/acme/tiny@0123456789ab".to_string(),
+            cause: crate::value::EmbedError::unavailable("the blob is damaged"),
+        };
+        assert!(err.to_string().contains("the blob is damaged"), "{err}");
+        let help = err.help().expect("help");
+        for needle in [
+            "Nothing was written",
+            "model2vec/acme/tiny@0123456789ab",
+            "graphersal embed-model import <repo> --into <store> --replace",
+            "--memory-limit",
+        ] {
+            assert!(help.contains(needle), "{needle} missing in: {help}");
         }
     }
 }

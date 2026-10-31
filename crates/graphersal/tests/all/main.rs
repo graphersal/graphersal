@@ -257,6 +257,7 @@ mod unfold_tests;
 mod uuid_tests;
 mod value_map_tests;
 mod value_map_token_tests;
+mod vector_rule_tests;
 mod vector_search_tests;
 mod vector_tests;
 mod verified_backup_tests;

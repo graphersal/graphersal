@@ -572,13 +572,20 @@ impl EmbedError {
                  produced a vector property, so embed_property and a text query need one \
                  attached (mode open or closed). Attach the structure the graph has: \
                  g.set_schema(g.infer_schema(), SchemaMode.open). Or search with a vector \
-                 instead of a text: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5)."
+                 instead of a text: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). A \
+                 vector rule in the schema declares the model and keeps the vectors filled: \
+                 \"emb\": {\"type\": \"array\", \"format\": \"vector\", \"embedder\": \
+                 \"hash-ngram/1\", \"from\": \"text\"} (book page \"Vector Rules\")."
                 .to_string(),
             EmbedError::NoDeclaredEmbedder { .. } => "A text query embeds its text with the \
                  embedder model the schema declares for the property (its \"embedder\"). \
                  embed_property declares it when it fills the property: \
                  g.embed_property(#{label: \"doc\", from: \"text\", to: \"emb\"}). Or pass a \
-                 vector: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5)."
+                 vector: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). The vector \
+                 rule declares it and fills the property from its text at every write: \
+                 g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: \
+                 \"array\", format: \"vector\", embedder: \"hash-ngram/1\", from: \
+                 \"text\"}}}}}})."
                 .to_string(),
             EmbedError::ModelConflict { .. } => "The labels the query meets store vectors of \
                  different models in this property. Search one label at a time: \
@@ -590,7 +597,10 @@ impl EmbedError {
                  registers it: Embedders::builder().with(..) and \
                  GraphTraversalSource::with_embedders in Rust, the session's embedders, or a \
                  flag of the command line such as --embedder NAME=REPO. Or pass a vector \
-                 computed elsewhere: g.v().nearest(\"emb\", vector([0.1, 0.2]), 5)."
+                 computed elsewhere: g.v().nearest(\"emb\", vector([0.1, 0.2]), 5). A \
+                 vector rule (\"from\") embeds only with the store's models and \
+                 hash-ngram/1: graphersal embed-model import <repo> --into <store> brings a \
+                 model into the store."
                 .to_string(),
             EmbedError::EmbedderMismatch { .. } => "Vectors of different models cannot be \
                  compared, so a property holds vectors of one model. Embed into another \

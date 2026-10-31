@@ -1781,8 +1781,18 @@ impl GraphStorage for TraversalGraph {
 
     /// The default's unit, with every added element's map copied `Shaped` into this graph's
     /// shape table (no `IndexMap` clone, adopted with one comparison).
+    ///
+    /// The vector rules are off for it (the change set carries its vectors, book page "Vector
+    /// Rules"): neither refused nor recomputed.
     fn apply_change_set(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
-        apply_change_set_with(self, changes, &mut TraversalGraph::stored_copy)
+        let start = self.undo.entries().len();
+        self.rules_off += 1;
+        let applied = apply_change_set_with(self, changes, &mut TraversalGraph::stored_copy);
+        self.rules_off -= 1;
+        if applied.is_ok() {
+            self.undo.exempt_from(start);
+        }
+        applied
     }
 
     #[inline]
@@ -1794,6 +1804,11 @@ impl GraphStorage for TraversalGraph {
     ) -> Result<VertexHandle, GraphError> {
         let labels = normalize_vertex_labels(labels)?;
         check_properties(&properties)?;
+        self.check_derived_map(
+            crate::graph::schema::ElementKind::Vertex,
+            &labels,
+            &properties,
+        )?;
 
         // Coerce to, and validate against, the active schema.
         {
@@ -2058,6 +2073,11 @@ impl GraphStorage for TraversalGraph {
             return Err(GraphError::vertex_removed());
         };
         check_properties(&properties)?;
+        self.check_derived_map(
+            crate::graph::schema::ElementKind::Edge,
+            label.as_slice(),
+            &properties,
+        )?;
         // Topology: ANY label of an endpoint can satisfy a declared connection.
         let source_labels: &[CompactString] = self.labels.set(source.1);
         let target_labels: &[CompactString] = self.labels.set(target.1);
@@ -2105,6 +2125,7 @@ impl GraphStorage for TraversalGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         check_property_value(&key, &value)?;
+        self.check_derived_vertex(node, &key)?;
         let Some(index) = self.resolve_vertex(node) else {
             return Err(GraphError::vertex_removed());
         };
@@ -2171,6 +2192,7 @@ impl GraphStorage for TraversalGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         check_property_value(&key, &value)?;
+        self.check_derived_edge(edge, &key)?;
         let Some(index) = self.resolve_edge(edge) else {
             return Err(GraphError::edge_removed());
         };
@@ -2243,6 +2265,7 @@ impl GraphStorage for TraversalGraph {
     ) -> Result<(), GraphError> {
         let name = path_property_name(path)?;
         check_property_value(name, &value)?;
+        self.check_derived_vertex(node, name)?;
         if matches!(
             self.schema.read().mode,
             crate::graph::schema::SchemaMode::None
@@ -2303,6 +2326,7 @@ impl GraphStorage for TraversalGraph {
     ) -> Result<(), GraphError> {
         let name = path_property_name(path)?;
         check_property_value(name, &value)?;
+        self.check_derived_edge(edge, name)?;
         if matches!(
             self.schema.read().mode,
             crate::graph::schema::SchemaMode::None
@@ -2370,6 +2394,12 @@ impl GraphStorage for TraversalGraph {
     ) -> Result<(), GraphError> {
         if let Some(name) = single_segment_name(path) {
             return self.drop_vertex_property(name, node);
+        }
+        if let Some(name) = path.segments().first().and_then(|s| match s {
+            crate::value::json_path::JsonPathSegment::Key(name) => Some(name),
+            _ => None,
+        }) {
+            self.check_derived_vertex(node, name)?;
         }
         let schema_off = matches!(
             self.schema.read().mode,
@@ -2444,6 +2474,12 @@ impl GraphStorage for TraversalGraph {
     ) -> Result<(), GraphError> {
         if let Some(name) = single_segment_name(path) {
             return self.drop_edge_property(name, edge);
+        }
+        if let Some(name) = path.segments().first().and_then(|s| match s {
+            crate::value::json_path::JsonPathSegment::Key(name) => Some(name),
+            _ => None,
+        }) {
+            self.check_derived_edge(edge, name)?;
         }
         let schema_off = matches!(
             self.schema.read().mode,
@@ -2528,6 +2564,7 @@ impl GraphStorage for TraversalGraph {
 
     #[inline]
     fn drop_vertex_property(&mut self, prop: &str, node: VertexHandle) -> Result<(), GraphError> {
+        self.check_derived_vertex(node, prop)?;
         // Schema: a required (non-nullable) declared property cannot be removed (decision B);
         // an absent one is a no-op. Checked before anything is touched.
         if let Some(vertex) = self.vertex_weight(node)
@@ -2576,6 +2613,7 @@ impl GraphStorage for TraversalGraph {
 
     #[inline]
     fn drop_edge_property(&mut self, prop: &str, edge: EdgeHandle) -> Result<(), GraphError> {
+        self.check_derived_edge(edge, prop)?;
         // Schema: see `drop_vertex_property`.
         if let Some(edge_weight) = self.edge_weight(edge)
             && edge_weight.2.as_ref().is_some_and(|p| p.contains_key(prop))
@@ -2793,7 +2831,7 @@ impl GraphStorage for TraversalGraph {
     /// Derives the unit's mutations from the undo log, then undoes them and closes the unit
     /// without hooks.
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
-        Ok(self.discard_undo_unit_with_changes(mark))
+        self.discard_undo_unit_with_changes(mark)
     }
 
     /// The journal slot's mark (see [`GraphStorage::mark`]).
@@ -5375,6 +5413,30 @@ mod tests {
         let stats = GraphStatistics::from_storage(&mock).unwrap();
         assert_eq!(stats.vertex_label_count("person"), 2);
         assert_eq!(stats.edge_label_count("knows"), 1);
+    }
+
+    /// A schema with a vector rule needs change capture (the rule pass walks the unit's undo
+    /// log): a storage without it refuses the rule, not the schema's other parts.
+    #[test]
+    fn a_storage_without_change_capture_refuses_rules() {
+        let mut mock = MockStorage {
+            tg: TraversalGraph::new(),
+        };
+        assert!(!mock.capabilities().unwrap().change_capture);
+        let schema = GraphSchema::from_json(
+            r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1",
+                        "from": "text"}}}}}}"#,
+        )
+        .unwrap();
+        let err = crate::GraphTraversalSource::new(&mut mock)
+            .set_schema(schema)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not support vector rules"),
+            "{err}"
+        );
     }
 
     fn assert_send_sync<T: Send + Sync>() {}

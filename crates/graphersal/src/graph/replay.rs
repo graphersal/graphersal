@@ -244,6 +244,7 @@ impl crate::graph::TraversalGraph {
                     match mutation {
                         Mutation::SetSchema { after, .. } => {
                             *graph.schema.write() = (**after).clone();
+                            graph.refresh_vector_rules();
                         }
                         // A definition that was valid when committed is stored anyway.
                         Mutation::SetDefinition {
