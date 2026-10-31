@@ -1668,6 +1668,7 @@ impl Definition {
             DefinitionBody::Query(_)
             | DefinitionBody::PropertyIndex(_)
             | DefinitionBody::Job(_)
+            | DefinitionBody::Model(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }

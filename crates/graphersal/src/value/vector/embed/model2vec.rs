@@ -256,9 +256,9 @@ impl Model2Vec {
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn load_bytes(
         name: CompactString,
-        config: Vec<u8>,
-        tokenizer: Vec<u8>,
-        model: Vec<u8>,
+        config: &[u8],
+        tokenizer: &[u8],
+        model: &[u8],
         options: &Model2VecOptions,
         location: &str,
     ) -> Result<Self, EmbedError> {
@@ -272,17 +272,19 @@ impl Model2Vec {
             )));
         }
         let digest = identity_digest([
-            (config.len() as u64, &sha256_hex(&config)),
-            (tokenizer.len() as u64, &sha256_hex(&tokenizer)),
-            (model.len() as u64, &sha256_hex(&model)),
+            (config.len() as u64, &sha256_hex(config)),
+            (tokenizer.len() as u64, &sha256_hex(tokenizer)),
+            (model.len() as u64, &sha256_hex(model)),
         ]);
-        let files = ModelFiles {
+        Self::from_slices(
+            name,
             config,
             tokenizer,
             model,
-            identity: identity_text(repo, &digest),
-        };
-        Self::from_files(name, files, options, location)
+            identity_text(repo, &digest),
+            options,
+            location,
+        )
     }
 
     /// The load of files read: `location` names them in messages.
@@ -292,7 +294,28 @@ impl Model2Vec {
         options: &Model2VecOptions,
         location: &str,
     ) -> Result<Self, EmbedError> {
-        let config: Value = serde_json::from_slice(&files.config).map_err(|err| {
+        Self::from_slices(
+            name,
+            &files.config,
+            &files.tokenizer,
+            &files.model,
+            files.identity,
+            options,
+            location,
+        )
+    }
+
+    /// The load of the three files' bytes with the identity computed from them.
+    fn from_slices(
+        name: CompactString,
+        config_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        model_bytes: &[u8],
+        identity: String,
+        options: &Model2VecOptions,
+        location: &str,
+    ) -> Result<Self, EmbedError> {
+        let config: Value = serde_json::from_slice(config_bytes).map_err(|err| {
             unavailable(format!(
                 "the config of the model in {location} is not JSON: {err}"
             ))
@@ -302,7 +325,7 @@ impl Model2Vec {
             .and_then(Value::as_bool)
             .unwrap_or(true);
         let normalize = options.normalize.unwrap_or(config_normalize);
-        let (rows, cols) = check_model(location, &files.tokenizer, &files.model)?;
+        let (rows, cols) = check_model(location, tokenizer_bytes, model_bytes)?;
         if cols == 0 || cols > MAX_VECTOR_DIMENSION {
             return Err(unavailable(format!(
                 "the model in {location} has dimension {cols}; a vector has 1 to \
@@ -310,12 +333,7 @@ impl Model2Vec {
             )));
         }
         let loaded = catch_unwind(AssertUnwindSafe(|| {
-            StaticModel::from_bytes(
-                &files.tokenizer,
-                &files.model,
-                &files.config,
-                Some(normalize),
-            )
+            StaticModel::from_bytes(tokenizer_bytes, model_bytes, config_bytes, Some(normalize))
         }));
         let model = match loaded {
             Ok(Ok(model)) => model,
@@ -331,7 +349,7 @@ impl Model2Vec {
                 )));
             }
         };
-        let mut identity = files.identity;
+        let mut identity = identity;
         if normalize != config_normalize {
             identity.push_str(if normalize {
                 "?normalize=true"
@@ -359,7 +377,7 @@ impl Model2Vec {
             memory_bytes: (rows as u64)
                 .saturating_mul(cols as u64)
                 .saturating_mul(4)
-                .saturating_add(files.tokenizer.len() as u64),
+                .saturating_add(tokenizer_bytes.len() as u64),
         })
     }
 

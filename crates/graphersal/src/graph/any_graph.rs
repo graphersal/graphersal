@@ -330,6 +330,7 @@ where
         let stats = self.read_checked()?.memory_usage()?;
         Ok(stats.map(|mut stats| {
             stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
+            stats.model_bytes = Graph::model_registry(self).map_or(0, |r| r.model_bytes());
             stats
         }))
     }

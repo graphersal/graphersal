@@ -326,9 +326,11 @@ pub(crate) fn import_packed(
 pub(crate) fn import_packed_models(
     store: &DirPath,
     packed: impl Read,
-) -> Result<Vec<super::models::StoredModel>, PersistError> {
+    hold: &mut dyn FnMut(&crate::value::BlobRef),
+) -> Result<(Vec<super::models::StoredModel>, Vec<crate::value::BlobRef>), PersistError> {
     let mut reader = PackedReader::open(packed)?;
     let mut staged: Vec<(String, DirPath)> = Vec::new();
+    let mut blobs = Vec::new();
     let result = (|| {
         for entry in reader.manifest.segments.clone() {
             if entry.kind == super::models::PACKED_MODEL_KIND
@@ -346,6 +348,15 @@ pub(crate) fn import_packed_models(
                     }
                 };
                 write_file(&dir.join(file), |out| reader.copy_segment(out).map(|_| ()))?;
+            } else if entry.kind == super::blobs::PACKED_BLOB_KIND {
+                // A blob (format spec 4.6, 8): staged, checked by hash, length and CRC-32C
+                // (foreign input), moved into place, protected from collection by `hold`.
+                let blob = super::blobs::packed_blob_ref(&entry, &reader.manifest.blobs)?;
+                let staged_at = super::blobs::stage(store)?;
+                write_file(&staged_at, |out| reader.copy_segment(out).map(|_| ()))?;
+                hold(&blob);
+                super::blobs::install_staged(store, &blob, &staged_at)?;
+                blobs.push(blob);
             } else {
                 reader.copy_segment(&mut std::io::sink())?;
             }
@@ -364,7 +375,7 @@ pub(crate) fn import_packed_models(
                 }
             }
         }
-        Ok(installed)
+        Ok((installed, std::mem::take(&mut blobs)))
     })();
     for (_, dir) in &staged {
         let _ = super::files::remove_path(dir);

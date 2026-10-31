@@ -82,9 +82,9 @@ pub struct ForkReport {
     /// order. A fork starts a new lineage with its own, empty set of marks (format spec 10):
     /// these names stay targets in the source store only.
     pub marks_not_carried: Vec<Mark>,
-    /// The embedding models the new store holds: every model of the source is carried
-    /// (format spec 4.5).
-    pub models: Vec<super::StoredModel>,
+    /// The embedding models of the new store (catalog kind 5 of the forked state, format spec
+    /// 4.5), with the states of their blobs there.
+    pub models: Vec<super::ModelInfo>,
     /// The blobs the new store's state references, copied from the source (format spec 4.6),
     /// relative names.
     pub blobs: Vec<String>,
@@ -107,21 +107,16 @@ impl std::fmt::Display for ForkReport {
     }
 }
 
-/// The lines of the models a copy carried (`  model carried: identity (licence mit)`).
+/// The lines of the models a copy holds (`  model carried: repo (identity, licence mit)`).
 pub(super) fn write_models_carried(
     f: &mut std::fmt::Formatter<'_>,
-    models: &[super::StoredModel],
+    models: &[super::ModelInfo],
 ) -> std::fmt::Result {
     for model in models {
         writeln!(
             f,
-            "  model carried: {} (licence {})",
-            if model.identity.is_empty() {
-                &model.id
-            } else {
-                &model.identity
-            },
-            model.license
+            "  model carried: {} ({}, licence {})",
+            model.repo, model.identity, model.license
         )?;
     }
     Ok(())
@@ -1315,9 +1310,10 @@ pub(super) fn attic_fork(
         &options,
         ("attic_fork", Some((old.store_id, branched_at))),
     )?;
-    let models = super::models::carry_into_new(dir, new_dir, existed)?;
+    super::models::carry_into_new(dir, new_dir, existed)?;
     let (blobs, blobs_not_carried) = super::blobs::carry_state(dir, new_dir, false)
         .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
+    let models = super::model_catalog::infos_in_files(new_dir)?;
     let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
         PersistError::store(
             "fork the attic entry",

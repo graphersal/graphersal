@@ -471,6 +471,21 @@ pub enum StoreFailure {
     /// A blob an operation needs (format spec 4.6) is damaged: its length, CRC-32C or hash is
     /// not its reference's. Blob damage is never store damage.
     BlobDamaged,
+    /// An embedding model the current schema needs (a vector property's `embedder`) cannot be
+    /// used: its definition is missing, or its blob is missing or damaged (format spec 4.5).
+    /// The store does not open, in any mode, until the model is imported again or the store
+    /// is restored.
+    ModelUnavailable,
+    /// An embedding model the current schema needs does not fit under the process memory
+    /// ceiling (its size is known from its definition before anything is read): the store
+    /// does not open. The message names the smallest ceiling that fits.
+    ModelDoesNotFit,
+    /// An embedding model cannot be removed: the current schema needs it (a vector property's
+    /// `embedder`). The message names the properties.
+    ModelInUse,
+    /// Another revision of the model's repository is in the store: an import of a new revision
+    /// replaces the current one only when asked to (`ImportModelOptions::with_replace`).
+    ModelRevisionExists,
     /// The automatic checkpoint run by [`Store::run_due_checkpoint`](super::Store::run_due_checkpoint)
     /// failed with a graph error: the copy [`Store::last_auto_checkpoint_error`](super::Store::last_auto_checkpoint_error)
     /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
@@ -510,6 +525,10 @@ impl StoreFailure {
             StoreFailure::InvalidModel => "invalid_model",
             StoreFailure::BlobUnavailable => "blob_unavailable",
             StoreFailure::BlobDamaged => "blob_damaged",
+            StoreFailure::ModelUnavailable => "model_unavailable",
+            StoreFailure::ModelDoesNotFit => "model_does_not_fit",
+            StoreFailure::ModelInUse => "model_in_use",
+            StoreFailure::ModelRevisionExists => "model_revision_exists",
             StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
         }
     }
@@ -651,19 +670,45 @@ impl StoreFailure {
                  (persistence/store_versions.md)."
             }
             StoreFailure::UnknownModel => {
-                "List the models the store holds and their identities (Store::models; CLI: \
-                 graphersal store models <dir>) and name one of them, by its identity \
-                 (model2vec/<repo>@<12 hex>) or its id (model2vec-<12 hex>). A model enters a \
-                 store only by an explicit add (CLI: graphersal embed-model download <repo> \
-                 --into <dir>, or embed-model import <model_dir> --into <dir>)."
+                "List the models the store holds (Store::models; CLI: graphersal store models \
+                 <dir>) and name one of them by its repository (owner/name). A model enters a \
+                 store only by an explicit import (Store::import_model; CLI: graphersal \
+                 embed-model download <repo> then graphersal embed-model import <repo> --into \
+                 <dir>)."
             }
             StoreFailure::InvalidModel => {
                 "Nothing was added. A Model2Vec model is one config, one tokenizer and one \
                  weights file (config.json, tokenizer.json, model.safetensors), plus its card \
                  (README.md) and licence files; file names are 1 to 40 ASCII letters, digits, \
-                 '.', '_' and '-'. Check the model directory (it loads with `graphersal \
-                 --embedder name=<model_dir>`) and add it again (CLI: graphersal embed-model \
-                 import <model_dir> --into <dir>)."
+                 '.', '_' and '-'; the model needs its Hugging Face repository name \
+                 (ImportModelOptions::with_repo; CLI --repo). Check the model directory and \
+                 import it again (Store::import_model; CLI: graphersal embed-model import \
+                 <model_dir> --into <dir>)."
+            }
+            StoreFailure::ModelUnavailable => {
+                "The store is intact but does not open while a model its schema needs is \
+                 missing or damaged. Get the model's files again (graphersal embed-model \
+                 download <repo>) and import them into the store (graphersal embed-model import \
+                 <repo> --into <dir> --replace; Store::import_model), or restore the store from \
+                 a backup or a replica that holds the model."
+            }
+            StoreFailure::ModelDoesNotFit => {
+                "Nothing was loaded. Raise the process memory ceiling to at least the minimum \
+                 the message names (CLI --memory-limit; Rust exec::set_memory_limit; Python \
+                 graphersal.set_memory_limit), or open the store on a machine with more memory."
+            }
+            StoreFailure::ModelInUse => {
+                "Nothing was changed. The schema's vector properties named in the message use the \
+                 model: re-embed them with another model, or drop the properties (or their \
+                 `embedder`) from the schema first, then remove the model."
+            }
+            StoreFailure::ModelRevisionExists => {
+                "Nothing was changed. The store keeps one revision per repository. Import the new \
+                 revision with replace (ImportModelOptions::with_replace(true); CLI: graphersal \
+                 embed-model import <repo> --into <dir> --replace): it becomes the current \
+                 revision (and the default if the old one was), the old definition is dropped \
+                 in the same commit and its blob is removed by the next prune. Vectors the old \
+                 revision made must be re-embedded (the message names their properties)."
             }
             StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
                 "The store itself is intact and keeps working; only what needs this blob fails. \

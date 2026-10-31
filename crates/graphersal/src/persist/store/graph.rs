@@ -43,6 +43,13 @@ pub(crate) trait StoreGraph: Send + Sync + 'static {
     /// The instance clock ([`Graph::clock`]): the Store times its checkpoint records with it
     /// and raises it at the open to the latest time its files hold. No lock.
     fn clock(&self) -> &CommitClock;
+    /// The registry of the catalog's embedding models ([`Graph::model_registry`]).
+    fn model_registry(&self) -> Option<Arc<crate::value::vector::embed::registry::ModelRegistry>>;
+    /// Attaches the registry (set once).
+    fn attach_model_registry(
+        &self,
+        registry: Arc<crate::value::vector::embed::registry::ModelRegistry>,
+    ) -> bool;
 }
 
 /// What the Store reads from its graph under the read lock.
@@ -57,6 +64,10 @@ pub(crate) trait LiveRead {
     fn definition_kinds(&self) -> Result<Vec<DefinitionKind>, GraphError>;
     /// The model identities the schema's `embedder` keywords name (format spec 4.5).
     fn schema_models(&self) -> Result<Vec<String>, GraphError>;
+    /// The definitions of catalog kind 5 (embedding models).
+    fn model_definitions(&self) -> Result<Vec<crate::graph::definition::Definition>, GraphError>;
+    /// The schema.
+    fn schema(&self) -> Result<Option<crate::graph::schema::GraphSchema>, GraphError>;
     /// Why the state must not be written by this version: a critical definition of a kind it
     /// does not know (format spec 16 rule 3).
     fn critical_definition(&self) -> Result<Option<String>, GraphError>;
@@ -108,6 +119,17 @@ impl<S: PersistentStorage + Default> StoreGraph for Graph<S> {
     fn clock(&self) -> &CommitClock {
         Graph::clock(self)
     }
+
+    fn model_registry(&self) -> Option<Arc<crate::value::vector::embed::registry::ModelRegistry>> {
+        Graph::model_registry(self)
+    }
+
+    fn attach_model_registry(
+        &self,
+        registry: Arc<crate::value::vector::embed::registry::ModelRegistry>,
+    ) -> bool {
+        Graph::attach_model_registry(self, registry)
+    }
 }
 
 /// A lock guard of a `Graph<S>` seen as [`LiveRead`] / [`LiveWrite`].
@@ -145,6 +167,19 @@ where
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn model_definitions(&self) -> Result<Vec<crate::graph::definition::Definition>, GraphError> {
+        Ok(self
+            .0
+            .definitions()?
+            .filter(|d| d.kind() == DefinitionKind::MODEL)
+            .cloned()
+            .collect())
+    }
+
+    fn schema(&self) -> Result<Option<crate::graph::schema::GraphSchema>, GraphError> {
+        self.0.get_schema()
     }
 
     fn critical_definition(&self) -> Result<Option<String>, GraphError> {

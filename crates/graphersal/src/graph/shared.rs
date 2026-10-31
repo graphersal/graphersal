@@ -120,7 +120,15 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     /// The system journal: the Store's ([`Graph::attach_system_journal`]), else an in-memory
     /// one made at the first use.
     system_journal: OnceLock<Arc<crate::graph::system_journal::SystemJournal>>,
+    /// The embedding models of the catalog ([`Graph::model_registry`]; a Store attaches it).
+    models: OnceLock<Arc<crate::value::vector::embed::registry::ModelRegistry>>,
 }
+
+/// What a lock guard attaches to its thread while it lives (dropped with the guard).
+struct Attachments(
+    #[allow(dead_code)] Option<crate::graph::workload::scope::Attached>,
+    #[allow(dead_code)] Option<crate::value::vector::embed::registry::AttachedModels>,
+);
 
 /// The poison of a [`Graph`]: set once a rollback of one of its units failed, never cleared.
 ///
@@ -530,7 +538,7 @@ pub struct GraphRead<'a, S: GraphStorage = TraversalGraph> {
     guard: ReadAccess<'a, S>,
     /// Makes the graph's statistics the thread's while the guard lives (executions record into
     /// them).
-    _attached: Option<crate::graph::workload::scope::Attached>,
+    _attached: Attachments,
 }
 
 /// Exclusive write access to the storage of a [`Graph`] ([`Graph::write`],
@@ -546,7 +554,7 @@ pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph> {
     /// When the lock was acquired and where the hold time goes (statistics attached only).
     held: Option<(Instant, &'a Arc<WorkloadStats>)>,
     /// Makes the graph's statistics the thread's while the guard lives.
-    _attached: Option<crate::graph::workload::scope::Attached>,
+    _attached: Attachments,
 }
 
 /// How a [`GraphRead`] reaches the storage: its own read lock, or the lock of the unit its
@@ -624,6 +632,7 @@ impl<S: GraphStorage> Graph<S> {
             poison: Poison::default(),
             clock,
             system_journal: OnceLock::new(),
+            models: OnceLock::new(),
         }
     }
 
@@ -847,11 +856,35 @@ impl<S: GraphStorage> Graph<S> {
         })
     }
 
-    /// The guard that makes this graph's statistics the thread's (none attached: `None`).
-    fn attached(&self) -> Option<crate::graph::workload::scope::Attached> {
-        self.workload
-            .get()
-            .map(crate::graph::workload::scope::Attached::new)
+    /// What a lock guard makes the thread's while it lives: this graph's statistics and its
+    /// catalog's embedding models (none attached: nothing).
+    fn attached(&self) -> Attachments {
+        Attachments(
+            self.workload
+                .get()
+                .map(crate::graph::workload::scope::Attached::new),
+            self.models.get().map(|registry| {
+                crate::value::vector::embed::registry::AttachedModels::new(registry.embedders())
+            }),
+        )
+    }
+
+    /// The registry of the embedding models of this graph's catalog (a Store attaches one at
+    /// open; book page "Embedding Models in a Store"). `None`: the traversals use the process
+    /// default embedders.
+    pub(crate) fn model_registry(
+        &self,
+    ) -> Option<Arc<crate::value::vector::embed::registry::ModelRegistry>> {
+        self.models.get().cloned()
+    }
+
+    /// Attaches the registry of the catalog's models (set once: `false` when one is attached).
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn attach_model_registry(
+        &self,
+        registry: Arc<crate::value::vector::embed::registry::ModelRegistry>,
+    ) -> bool {
+        self.models.set(registry).is_ok()
     }
 
     /// Locks the graph for writing, blocking until no reader, writer or unit
@@ -1532,6 +1565,7 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
             poison: Poison::default(),
             clock,
             system_journal: OnceLock::new(),
+            models: OnceLock::new(),
         }
     }
 }

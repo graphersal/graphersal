@@ -100,6 +100,13 @@ pub struct MemoryStats {
     /// NOT part of [`Self::total_bytes`], which is the graph's own data.
     #[cfg_attr(feature = "serde", serde(default))]
     pub workload_bytes: u64,
+    /// The embedding models of the graph's catalog that are loaded (book page "Embedding
+    /// Models in a Store"): what each loaded model takes in memory, a model shared by several
+    /// positions counted once per graph that holds it. Filled in by the graph (`g.memory_usage()`,
+    /// the front ends' statistics), `0` from a storage alone. NOT part of
+    /// [`Self::total_bytes`], which is the graph's own data; the process ceiling counts it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_bytes: u64,
 }
 
 impl MemoryStats {
@@ -207,6 +214,7 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
         dedup_table_bytes,
         shape_bytes,
         workload_bytes: 0,
+        model_bytes: 0,
     }
 }
 

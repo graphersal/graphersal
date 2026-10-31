@@ -178,7 +178,9 @@ impl MemoryBudget {
             .max(MIN_ELEMENT_BYTES);
         Ok(Self {
             tracked: false,
-            base,
+            // The embedding models loaded in the process are in memory too (counted exactly
+            // by a tracking allocator; estimated here from their recorded sizes).
+            base: base.saturating_add(crate::value::vector::embed::registry::loaded_model_bytes()),
             elements_at_start: elements,
             element_bytes,
             ..self
