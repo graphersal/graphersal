@@ -34,6 +34,11 @@ assert_eq!(recovered.report.commit_seq, 1);
 
 ## The journal
 
+Not every commit of a Store comes from an open graph: a catalog change of a CLOSED store
+(`graphersal embed-model import --into`, `store models remove`) appends one commit to its WAL
+without loading the graph ([format spec 12.12](format.md#1212-catalog-commits-on-a-closed-store)).
+Recovery replays it like any other.
+
 A `Journal` is a [commit hook](../users_guide/transactions.md) that writes each committed unit (a
 lossless `ChangeSet`: every mutation with its before and after values, the commit time, the
 commit metadata, the auto-id sequences) to its writer **before** the commit becomes final.

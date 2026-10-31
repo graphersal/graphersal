@@ -257,6 +257,8 @@ graphersal store compact data/ --drop-marks          # ... also when marks becom
 graphersal store convert data/ data.gstore           # a closed store into one file (or back)
 graphersal store upgrade old/ new/                   # a store of Graphersal 0.1.x into the current format (or: old/ --in-place)
 graphersal store repair damaged/ --to repaired/      # a damaged store, repaired into a new directory
+graphersal store restore-blobs data/ --from /mnt/backup/data  # missing or damaged blobs (models) back from a copy
+graphersal store repair data/ --to repaired/ --drop-damaged-blobs  # a copy without what references lost blobs
 graphersal store rollback --help                     # the usage of one command (or: store help rollback)
 ```
 

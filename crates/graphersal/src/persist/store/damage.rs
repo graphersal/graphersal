@@ -363,6 +363,41 @@ pub struct RepairReport {
     /// `marks` file and WAL could not be read (`None`: they were read). A repair still
     /// completes then, because the damaged store's marks are not carried anyway.
     pub marks_unreadable: Option<String>,
+    /// The blobs left out because they are missing or damaged in the damaged store
+    /// ([`RepairOptions::with_drop_damaged_blobs`]), relative names.
+    pub blobs_dropped: Vec<String>,
+    /// The catalog definitions left out with them, as `kind:name`.
+    pub definitions_dropped: Vec<String>,
+}
+
+/// The options of a repair ([`Store::repair_dir_with`](super::Store::repair_dir_with),
+/// [`Store::repair_to_with`](super::Store::repair_to_with)).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct RepairOptions {
+    drop_damaged_blobs: bool,
+}
+
+impl RepairOptions {
+    /// The defaults: a repair as [`Store::repair_dir`](super::Store::repair_dir) makes it.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Leaves out of the repaired store every catalog definition that references a blob
+    /// missing or damaged in the damaged store, and the blob (CLI `store repair
+    /// --drop-damaged-blobs`; journal `blob.dropped`). Refused, before anything is written,
+    /// while the schema needs such a definition (a model a vector property's `embedder`
+    /// names): restore the blob first (`Store::restore_blobs_from`), or change the schema.
+    /// Without it, such a definition is carried and its blob reported as not carried.
+    pub fn with_drop_damaged_blobs(mut self, drop: bool) -> Self {
+        self.drop_damaged_blobs = drop;
+        self
+    }
+
+    pub(crate) fn drop_damaged_blobs(&self) -> bool {
+        self.drop_damaged_blobs
+    }
 }
 
 impl RepairReport {

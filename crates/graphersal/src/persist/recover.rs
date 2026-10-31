@@ -139,6 +139,9 @@ pub struct Recovery<'a, S: PersistentStorage = TraversalGraph> {
     /// journals of an ancestor lineage are accepted up to their branch point and a journal of
     /// a descendant continues the replay under its id (an in-place rollback, format spec 5.4, 12.5).
     chain: Option<Vec<(u128, u64)>>,
+    /// Only the schema and catalog mutations of each commit are replayed (a closed-store
+    /// catalog commit reads the catalog of the WAL tail without the data, format spec 12.12).
+    catalog_only: bool,
 }
 
 impl<S: PersistentStorage> std::fmt::Debug for Recovered<S> {
@@ -181,6 +184,7 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
             target: RecoveryTarget::Latest,
             options: ReadOptions::default(),
             chain: None,
+            catalog_only: false,
         }
     }
 
@@ -210,6 +214,15 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
     /// (the WAL does not continue that state) is damage (`PersistentStorage::replay` with `verify`).
     pub(crate) fn verify_before_images(mut self) -> Self {
         self.verify_before_images = true;
+        self
+    }
+
+    /// Replays only the schema (op 9) and catalog (op 10) mutations of every commit, with their
+    /// before images checked when [`Recovery::verify_before_images`] is set; the data mutations
+    /// are read (their frames checked) and skipped. The start graph holds the base snapshot's
+    /// catalog and schema only (a closed-store catalog commit, `store::closed_commit`).
+    pub(crate) fn catalog_only(mut self) -> Self {
+        self.catalog_only = true;
         self
     }
 
@@ -243,6 +256,7 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
             target,
             options,
             chain,
+            catalog_only,
         } = self;
         // `based`: the graph holds a base state (a start graph, a snapshot, or the first
         // journal's lineage); before that it is the empty storage.
@@ -265,7 +279,10 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
             target,
             &options,
             chain.as_deref(),
-            verify_before_images,
+            Replay {
+                verify_before_images,
+                catalog_only,
+            },
         )?;
         Ok(Recovered {
             graph,
@@ -288,7 +305,55 @@ pub(crate) fn recover_into<'a, S: PersistentStorage + ?Sized>(
     chain: Option<&[(u128, u64)]>,
 ) -> Result<RecoveryReport, PersistError> {
     super::snapshot::load_snapshot(snapshot, options, graph)?;
-    replay_journals(graph, true, journals, target, options, chain, false)
+    replay_journals(
+        graph,
+        true,
+        journals,
+        target,
+        options,
+        chain,
+        Replay {
+            verify_before_images: false,
+            catalog_only: false,
+        },
+    )
+}
+
+/// How [`replay_journals`] applies each commit.
+#[derive(Debug, Clone, Copy)]
+struct Replay {
+    /// Every mutation's before image is checked against the state it is replayed onto.
+    verify_before_images: bool,
+    /// Only the schema and catalog mutations are replayed.
+    catalog_only: bool,
+}
+
+/// The schema and catalog part of `changes` (same position, time and sequences): what a
+/// catalog-only replay applies.
+fn catalog_part(
+    changes: &crate::graph::ChangeSet,
+) -> Result<crate::graph::ChangeSet, crate::error::GraphError> {
+    use crate::graph::Mutation;
+    let mut builder =
+        crate::graph::ChangeSet::builder(changes.commit_seq(), changes.committed_at())
+            .with_sequences(changes.node_sequence(), changes.edge_sequence());
+    for mutation in changes.mutations() {
+        match mutation {
+            Mutation::SetSchema { .. } | Mutation::SetDefinition { .. } => {
+                builder.push(mutation.clone());
+            }
+            Mutation::AddVertex { .. }
+            | Mutation::AddEdge { .. }
+            | Mutation::DropVertex { .. }
+            | Mutation::DropEdge { .. }
+            | Mutation::SetProperty { .. }
+            | Mutation::RemoveProperty { .. }
+            | Mutation::AddLabel { .. }
+            | Mutation::RemoveLabel { .. }
+            | Mutation::SetEdgeLabel { .. } => {}
+        }
+    }
+    builder.build()
 }
 
 /// Replays `journals` onto `graph` up to `target` (the rules of [`Recovery`]); `based`: the
@@ -300,8 +365,9 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
     target: RecoveryTarget,
     options: &ReadOptions,
     chain: Option<&[(u128, u64)]>,
-    verify_before_images: bool,
+    mode: Replay,
 ) -> Result<RecoveryReport, PersistError> {
+    let verify_before_images = mode.verify_before_images;
     {
         let not_reached = |reason: String| PersistError::TargetNotReached {
             target: target.to_string(),
@@ -427,7 +493,20 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                             break;
                         }
                         let verify = verify_before_images;
-                        PersistentStorage::replay(graph, &changes, verify).map_err(|reason| {
+                        let catalog;
+                        let changes = if mode.catalog_only {
+                            catalog = catalog_part(&changes).map_err(|err| {
+                                PersistError::corrupt(
+                                    format!("journal {index}"),
+                                    offset,
+                                    format!("commit {seq}: {err}"),
+                                )
+                            })?;
+                            &catalog
+                        } else {
+                            &changes
+                        };
+                        PersistentStorage::replay(graph, changes, verify).map_err(|reason| {
                             let reason = if verify {
                                 format!(
                                     "commit {seq} does not continue the state it is \

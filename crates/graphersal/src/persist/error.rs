@@ -714,9 +714,14 @@ impl StoreFailure {
             StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
                 "The store itself is intact and keeps working; only what needs this blob fails. \
                  Run graphersal store verify <dir> (Store::verify) to list every missing or \
-                 damaged blob. Any copy of a blob with the same hash is the same bytes: copy the \
-                 file from a backup or another copy of the store into blobs/<2 hex>/<hash> (the \
-                 name the error gives), or restore the backup, or write the content again \
+                 damaged blob. Any copy of a blob with the same hash is the same bytes: with the \
+                 store closed, graphersal store restore-blobs <dir> --from <backup|file.zip|\
+                 file.gsnap|other store> (Store::restore_blobs_from) copies every missing or \
+                 damaged blob back and checks it. Without a copy, graphersal store repair <dir> \
+                 --to <new_dir> --drop-damaged-blobs (RepairOptions::with_drop_damaged_blobs) \
+                 builds a store without the definitions that reference them (refused while the \
+                 schema needs one: change the schema first). By hand: copy the file into \
+                 blobs/<2 hex>/<hash> (the name the error gives), or write the content again \
                  (Store::write_blob) where you still have it."
             }
             StoreFailure::AutoCheckpointFailed => {
@@ -1013,7 +1018,11 @@ impl DiagnosticError for PersistError {
             PersistError::Locked { .. } => "Close the other writer first (stop the server or \
                  the program that has the store open). To only read the data while it runs, use \
                  Store::open_read_only (CLI: graphersal store info / list / backup work on a \
-                 store in use)."
+                 store in use). A change of a closed store's catalog (graphersal \
+                 embed-model import --into, graphersal store models remove; \
+                 Store::import_model_dir and its kin) needs the lock too: make it on the open \
+                 store instead (Store::import_model, Store::remove_model, \
+                 Store::set_default_model; the dev server's Store menu), or close it first."
                 .to_string(),
             PersistError::NotAStore { .. } => "Create a store with Store::create (CLI: \
                  graphersal store create <dir>, or --graph <dir> --create-store), or name the \
