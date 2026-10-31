@@ -117,7 +117,9 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   `Graph::system_journal`, in Python with `graph.journal(...)`, `store.journal(...)` and
   `Store.journal_dir(path, ...)` (pages of dicts with the keys of `--json`), and in the
   playground under **Catalog ▸ System journal…** (newest first, level and source filters,
-  incremental refresh; WebAssembly and dev server); reading needs `Read` on the new
+  incremental refresh; WebAssembly and dev server); a newest-first page
+  (`JournalQuery::newest_first`/`before`, `newest_first=true&before=N`, `--last N`) reads a
+  stored journal from its end; reading needs `Read` on the new
   `Resource::Journal` (`AccessPolicy::read_only()` allows it; Python `policy=`).
 - **One clock per instance** (format spec 18): commit, mark and checkpoint times and journal
   times never go backwards, also when the system clock steps back; the floor is restored from

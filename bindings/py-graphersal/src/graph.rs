@@ -693,13 +693,16 @@ impl Graph {
     /// instance id, a UUID ``str``), ``limit`` (default 1000, at most 10000). ``policy``: an
     /// ``AccessPolicy`` that must allow ``("read", "journal")``, else
     /// ``PermissionDeniedError``; ``None`` allows it, like a script.
-    #[pyo3(signature = (*, after=None, since=None, until=None, level=None, source=None,
-        kind=None, op=None, origin=None, limit=None, policy=None))]
+    #[pyo3(signature = (*, after=None, before=None, newest_first=false, since=None,
+        until=None, level=None, source=None, kind=None, op=None, origin=None, limit=None,
+        policy=None))]
     #[allow(clippy::too_many_arguments)]
     fn journal<'py>(
         &self,
         py: Python<'py>,
         after: Option<u64>,
+        before: Option<u64>,
+        newest_first: bool,
         since: Option<Bound<'py, PyAny>>,
         until: Option<Bound<'py, PyAny>>,
         level: Option<String>,
@@ -712,6 +715,8 @@ impl Graph {
     ) -> PyResult<Py<PyAny>> {
         let query = crate::journal::JournalArgs {
             after,
+            before,
+            newest_first,
             since,
             until,
             level,

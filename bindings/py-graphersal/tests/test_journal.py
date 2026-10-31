@@ -173,3 +173,57 @@ def test_records_have_the_keys_of_the_cli_json(tmp_path):
     from_python = graphersal.Store.journal_dir(path)["records"]
     assert [sorted(r) for r in from_cli] == [sorted(r) for r in from_python]
     assert [r["seq"] for r in from_cli] == [r["seq"] for r in from_python]
+
+
+def newest_first_pages(read, limit):
+    """Every record of a journal read newest first, page by page with `before`."""
+    seen, before = [], None
+    while True:
+        page = read(newest_first=True, before=before, limit=limit)
+        assert "next_before" in page
+        seqs = [r["seq"] for r in page["records"]]
+        assert seqs == sorted(seqs, reverse=True)
+        seen += page["records"]
+        if not page["more"]:
+            return seen
+        before = page["next_before"]
+
+
+def test_newest_first_pages_backwards_and_follows_forwards():
+    graph = graphersal.Graph()
+    for script in ('g.addV("a").next()', 'g.V().drop().iterate()', 'g.V().property("x", 1).iterate()'):
+        with pytest.raises(graphersal.PermissionDeniedError):
+            graph.execute(script, policy=graphersal.AccessPolicy.read_only())
+    everything = graph.journal()["records"]
+    assert len(everything) == 3
+    newest = graph.journal(newest_first=True, limit=1)
+    assert newest["records"] == everything[-1:]
+    assert newest["more"] is True
+    assert newest["next_after"] == everything[-1]["seq"]
+    assert newest_first_pages(graph.journal, 1) == list(reversed(everything))
+    # An oldest-first page has no next_before; `before` bounds it too.
+    assert "next_before" not in graph.journal()
+    assert graph.journal(before=everything[1]["seq"])["records"] == everything[:1]
+    # Following from the newest page sees only what comes later.
+    with pytest.raises(graphersal.PermissionDeniedError):
+        graph.execute('g.set_schema(#{mode: "open"})', policy=graphersal.AccessPolicy.read_only())
+    later = graph.journal(after=newest["next_after"])["records"]
+    assert [r["kind"] for r in later] == ["auth.denied"]
+    assert all(r["seq"] > newest["next_after"] for r in later)
+
+
+def test_newest_first_on_a_store_and_a_closed_store(tmp_path):
+    path = str(tmp_path / "data")
+    with graphersal.Store.create(path) as store:
+        for i in range(3):
+            store.graph.execute(f'g.addV("p").property("i", {i}).next()')
+            store.checkpoint()
+        everything = store.journal()["records"]
+        assert newest_first_pages(store.journal, 2) == list(reversed(everything))
+        assert store.journal(newest_first=True, limit=1)["records"] == everything[-1:]
+    closed = graphersal.Store.journal_dir(path)["records"]
+    assert closed[-1]["kind"] == "store.closed"
+    assert graphersal.Store.journal_dir(path, newest_first=True, limit=1)["records"] == closed[-1:]
+    assert newest_first_pages(
+        lambda **kw: graphersal.Store.journal_dir(path, **kw), 2
+    ) == list(reversed(closed))

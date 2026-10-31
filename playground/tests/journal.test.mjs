@@ -4,8 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  emptyJournal, journalSpec, addJournalPage, readJournal, journalRows, journalFooter, journalTime,
-  journalIsoTime, fieldsText, levelClass, sourceChoices, JOURNAL_LEVELS, JOURNAL_PAGE_ROWS,
+  emptyJournal, journalSpec, newestSpec, startJournal, addJournalPage, addOlderPage, openJournal,
+  readJournal, showMoreJournal, journalRows, journalFooter, journalTime, journalIsoTime, fieldsText,
+  levelClass, sourceChoices, JOURNAL_LEVELS, JOURNAL_PAGE_ROWS,
 } from '../js/journal.js';
 import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
 
@@ -20,62 +21,75 @@ function record(seq, extra = {}) {
   };
 }
 
-/** A journal of `n` records served page by page like the engine (cursor `after`, `limit`). */
+/**
+ * A journal served like the engine: forward pages from `after` (oldest first), newest-first
+ * pages below `before` (newest first, `next_before`); every request recorded.
+ */
 function engineOf(records) {
   const calls = [];
   const fetchPage = async (spec) => {
     calls.push(spec);
-    const matching = records.filter((r) => r.seq > spec.after
+    const end = records.length ? records[records.length - 1].seq : 0;
+    const matching = records.filter((r) => r.seq > (spec.after || 0)
+      && (spec.before == null || r.seq < spec.before)
       && (!spec.source || r.source === spec.source || r.source.startsWith(`${spec.source}.`)));
+    if (spec.newest_first) {
+      const newest = matching.slice().reverse();
+      const page = newest.slice(0, spec.limit);
+      const more = newest.length > page.length;
+      return {
+        records: page, next_after: spec.before == null ? end : Math.min(end, spec.before - 1),
+        next_before: more ? page[page.length - 1].seq : (spec.after || 0) + 1,
+        truncated: false, more, notes: [],
+      };
+    }
     const page = matching.slice(0, spec.limit);
-    const last = page.length ? page[page.length - 1].seq : spec.after;
-    return { records: page, next_after: last, truncated: false, more: matching.length > page.length, notes: [] };
+    const more = matching.length > page.length;
+    return { records: page, next_after: more ? page[page.length - 1].seq : Math.max(end, spec.after || 0), truncated: false, more, notes: [] };
   };
   return { fetchPage, calls };
 }
 
-test('the request leaves out empty filters and keeps the cursor', () => {
+const seqs = (view) => view.records.map((r) => r.seq);
+
+test('the requests leave out empty filters', () => {
   assert.deepEqual(journalSpec({}, 0), { after: 0, limit: 1000 });
   assert.deepEqual(journalSpec({ level: 'warn', source: ' store ' }, 7, 50), { after: 7, limit: 50, level: 'warn', source: 'store' });
   assert.deepEqual(journalSpec({ level: '', source: '' }, -3), { after: 0, limit: 1000 });
+  assert.deepEqual(newestSpec({}), { newest_first: true, limit: JOURNAL_PAGE_ROWS });
+  assert.deepEqual(newestSpec({ level: 'error' }, 40, 10), { newest_first: true, limit: 10, before: 40, level: 'error' });
   assert.equal(JOURNAL_LEVELS[0].name, '');
   assert.deepEqual(JOURNAL_LEVELS.slice(1).map((l) => l.name), ['info', 'notice', 'warn', 'error']);
 });
 
-test('pages are added newest first, without duplicates, bounded, with the cursor moved', () => {
-  let view = addJournalPage(emptyJournal(), { records: [record(1), record(2)], next_after: 2, more: true, truncated: false, notes: [] });
-  assert.deepEqual(view.records.map((r) => r.seq), [2, 1]);
-  assert.equal(view.after, 2);
-  assert.equal(view.more, true);
-  // The same record again (an overlapping read) is not added twice.
-  view = addJournalPage(view, { records: [record(2), record(3)], next_after: 3, more: false, notes: ['segment x: skipped'] });
-  assert.deepEqual(view.records.map((r) => r.seq), [3, 2, 1]);
-  assert.equal(view.more, false);
-  assert.deepEqual(view.notes, ['segment x: skipped']);
-  // At most `keep` records; the oldest are dropped and counted.
-  view = addJournalPage(view, { records: [record(4), record(5)], next_after: 5, truncated: true }, 3);
-  assert.deepEqual(view.records.map((r) => r.seq), [5, 4, 3]);
-  assert.equal(view.dropped, 2);
-  assert.equal(view.truncated, true);
-  // A page with nothing new keeps the view and never moves the cursor back.
-  const same = addJournalPage(view, { records: [], next_after: 1 });
-  assert.equal(same.after, 5);
-  assert.equal(same.records.length, 3);
+test('opening reads only the newest page of a long journal', async () => {
+  const engine = engineOf(Array.from({ length: 50_000 }, (_, i) => record(i + 1)));
+  const view = await openJournal({}, engine.fetchPage);
+  assert.equal(engine.calls.length, 1, 'one request');
+  assert.deepEqual(engine.calls[0], { newest_first: true, limit: JOURNAL_PAGE_ROWS });
+  assert.equal(view.records.length, JOURNAL_PAGE_ROWS);
+  assert.equal(view.records[0].seq, 50_000, 'the newest first');
+  assert.equal(view.after, 50_000, 'following goes on from the end');
+  assert.equal(view.before, 50_000 - JOURNAL_PAGE_ROWS + 1);
+  assert.equal(view.older, true);
 });
 
-test('reading goes on from the cursor and asks only for what is new', async () => {
-  const records = Array.from({ length: 2500 }, (_, i) => record(i + 1));
+test('following reads only what is new, in front of the held records', async () => {
+  const records = Array.from({ length: 10 }, (_, i) => record(i + 1));
   const engine = engineOf(records);
-  let view = await readJournal(emptyJournal(), {}, engine.fetchPage);
-  assert.deepEqual(engine.calls.map((c) => c.after), [0, 1000, 2000]);
-  assert.equal(view.records.length, 2000, 'the newest 2000 are kept');
-  assert.equal(view.records[0].seq, 2500);
-  assert.equal(view.dropped, 500);
-  records.push(record(2501));
+  let view = await openJournal({}, engine.fetchPage, 4);
+  assert.deepEqual(seqs(view), [10, 9, 8, 7]);
+  records.push(record(11), record(12));
   engine.calls.length = 0;
   view = await readJournal(view, {}, engine.fetchPage);
-  assert.deepEqual(engine.calls, [{ after: 2500, limit: 1000 }]);
-  assert.equal(view.records[0].seq, 2501);
+  assert.deepEqual(engine.calls, [{ after: 10, limit: 1000 }]);
+  assert.deepEqual(seqs(view), [12, 11, 10, 9, 8, 7]);
+  assert.equal(view.after, 12);
+  // Nothing new: one request, nothing added.
+  engine.calls.length = 0;
+  view = await readJournal(view, {}, engine.fetchPage);
+  assert.equal(engine.calls.length, 1);
+  assert.equal(view.records.length, 6);
   // A bounded number of requests per refresh; the next refresh goes on.
   const many = engineOf(Array.from({ length: 50 }, (_, i) => record(i + 1)));
   const partial = await readJournal(emptyJournal(), {}, async (spec) => many.fetchPage({ ...spec, limit: 10 }), 2);
@@ -83,18 +97,65 @@ test('reading goes on from the cursor and asks only for what is new', async () =
   assert.equal(partial.more, true);
 });
 
-test('filters go to the engine', async () => {
+test('following keeps at most `keep` records; the dropped ones become older records again', () => {
+  let view = startJournal({ records: [record(3), record(2), record(1)], next_after: 3, next_before: 1, more: false });
+  assert.equal(view.older, false);
+  view = addJournalPage(view, { records: [record(4), record(5)], next_after: 5, more: false }, 3);
+  assert.deepEqual(seqs(view), [5, 4, 3]);
+  assert.equal(view.older, true);
+  assert.equal(view.before, 3);
+  // A record already held is not added twice; the cursor never goes back.
+  view = addJournalPage(view, { records: [record(5)], next_after: 2, notes: ['segment x: skipped'] }, 3);
+  assert.deepEqual(seqs(view), [5, 4, 3]);
+  assert.equal(view.after, 5);
+  assert.deepEqual(view.notes, ['segment x: skipped']);
+});
+
+test('show more renders the held rows first, then pages backwards with `before`', async () => {
+  const engine = engineOf(Array.from({ length: 1000 }, (_, i) => record(i + 1)));
+  let view = await openJournal({}, engine.fetchPage, 400);
+  let shown = JOURNAL_PAGE_ROWS;
+  engine.calls.length = 0;
+  ({ view, shown } = await showMoreJournal(view, shown, {}, engine.fetchPage));
+  assert.equal(shown, 2 * JOURNAL_PAGE_ROWS);
+  assert.deepEqual(engine.calls, [{ newest_first: true, limit: 200, before: 601 }]);
+  assert.equal(view.records.length, 600);
+  assert.equal(view.records[599].seq, 401);
+  assert.ok(view.records.every((r, i) => i === 0 || r.seq < view.records[i - 1].seq), 'newest first');
+  engine.calls.length = 0;
+  ({ view, shown } = await showMoreJournal(view, shown, {}, engine.fetchPage));
+  ({ view, shown } = await showMoreJournal(view, shown, {}, engine.fetchPage));
+  ({ view, shown } = await showMoreJournal(view, shown, {}, engine.fetchPage));
+  assert.equal(view.records.length, 1000);
+  assert.equal(view.older, false);
+  assert.equal(journalFooter(view, shown).more, false);
+  // Nothing more to read: no request.
+  engine.calls.length = 0;
+  ({ view } = await showMoreJournal(view, shown, {}, engine.fetchPage));
+  assert.equal(engine.calls.length, 0);
+  // Held rows not yet shown need no request either.
+  const held = startJournal({ records: Array.from({ length: 500 }, (_, i) => record(500 - i)), next_after: 500, next_before: 1, more: false });
+  const local = await showMoreJournal(held, JOURNAL_PAGE_ROWS, {}, engine.fetchPage);
+  assert.equal(engine.calls.length, 0);
+  assert.equal(local.shown, 2 * JOURNAL_PAGE_ROWS);
+  // An older page never adds a record twice.
+  const again = addOlderPage(held, { records: [record(3), record(1)], next_before: 1, more: false });
+  assert.equal(again.records.length, 500);
+});
+
+test('filters go to every request', async () => {
   const engine = engineOf([record(1), record(2, { source: 'auth', kind: 'auth.denied', level: 'warn' }), record(3, { source: 'store.backup' })]);
-  const view = await readJournal(emptyJournal(), { source: 'store' }, engine.fetchPage);
-  assert.deepEqual(view.records.map((r) => r.seq), [3, 1]);
-  assert.equal(engine.calls[0].source, 'store');
+  const view = await openJournal({ source: 'store' }, engine.fetchPage);
+  assert.deepEqual(seqs(view), [3, 1]);
+  await readJournal(view, { source: 'store' }, engine.fetchPage);
+  assert.ok(engine.calls.every((c) => c.source === 'store'));
 });
 
 test('rows: readable times, level badges, fields, at most `shown` of them', () => {
-  const view = addJournalPage(emptyJournal(), {
+  const view = startJournal({
     records: [
-      record(1),
       record(2, { level: 'error', source: 'store.backup', kind: 'store.backup_failed', fields: { path: '/b', bytes: 12, nested: { a: [1] } }, principal: 'cli', commit: 9 }),
+      record(1),
     ],
     next_after: 2,
   });
@@ -117,19 +178,23 @@ test('rows: readable times, level badges, fields, at most `shown` of them', () =
   assert.equal(fieldsText(null), '');
 });
 
-test('the footer counts the rows not shown and what is gone', () => {
-  const records = Array.from({ length: JOURNAL_PAGE_ROWS + 5 }, (_, i) => record(i + 1));
-  const view = addJournalPage(emptyJournal(), { records, next_after: records.length, truncated: true });
+test('the footer counts the rows not shown and says what is older or gone', () => {
+  const records = Array.from({ length: JOURNAL_PAGE_ROWS + 5 }, (_, i) => record(JOURNAL_PAGE_ROWS + 5 - i));
+  const view = startJournal({ records, next_after: records.length, next_before: 1, truncated: true, more: false });
   const footer = journalFooter(view, JOURNAL_PAGE_ROWS);
   assert.equal(footer.hidden, 5);
-  assert.match(footer.text, /^5 more · the oldest records are gone/);
-  assert.equal(journalFooter(view, JOURNAL_PAGE_ROWS + 5).hidden, 0);
+  assert.equal(footer.more, true);
+  assert.match(footer.text, /^5 more loaded · the oldest records are gone/);
+  assert.equal(journalFooter(view, JOURNAL_PAGE_ROWS + 5).more, false);
+  const older = journalFooter({ ...view, older: true }, JOURNAL_PAGE_ROWS + 5);
+  assert.equal(older.more, true);
+  assert.match(older.text, /older records in the journal/);
   assert.equal(journalFooter(emptyJournal(), JOURNAL_PAGE_ROWS).text, '');
 });
 
 test('source suggestions are the sources and their dotted prefixes', () => {
-  const view = addJournalPage(emptyJournal(), {
-    records: [record(1, { source: 'store.backup' }), record(2, { source: 'auth' }), record(3)],
+  const view = startJournal({
+    records: [record(3), record(2, { source: 'auth' }), record(1, { source: 'store.backup' })],
     next_after: 3,
   });
   assert.deepEqual(sourceChoices(view), ['auth', 'store', 'store.backup']);
@@ -137,7 +202,7 @@ test('source suggestions are the sources and their dotted prefixes', () => {
 
 test('the dev server engine asks GET /api/journal with the request keys as parameters', async () => {
   const calls = [];
-  const page = { records: [record(1)], next_after: 1, truncated: false, more: false, notes: [] };
+  const page = { records: [record(1)], next_after: 1, next_before: 1, truncated: false, more: false, notes: [] };
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     calls.push({ method: init.method || 'GET', path: u.pathname, search: u.searchParams });
@@ -147,12 +212,13 @@ test('the dev server engine asks GET /api/journal with the request keys as param
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   };
   const engine = await HttpEngine.detect({ base: 'http://127.0.0.1:8080/', fetch });
-  const answer = await engine.journal({ after: 4, level: 'warn', source: '', limit: 1000 });
+  const answer = await engine.journal({ newest_first: true, before: 40, level: 'warn', source: '', limit: 300 });
   assert.deepEqual(answer, page);
   const call = calls.find((c) => c.path === '/api/journal');
   assert.equal(call.method, 'GET');
-  assert.equal(call.search.get('after'), '4');
+  assert.equal(call.search.get('newest_first'), 'true');
+  assert.equal(call.search.get('before'), '40');
   assert.equal(call.search.get('level'), 'warn');
-  assert.equal(call.search.get('limit'), '1000');
+  assert.equal(call.search.get('limit'), '300');
   assert.equal(call.search.has('source'), false, 'empty filters are left out');
 });

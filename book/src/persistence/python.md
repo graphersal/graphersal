@@ -95,6 +95,8 @@ page = store.journal(level="warn", since="2026-10-31T00:00:00Z")   # or store.gr
 for record in page["records"]:                                      # oldest first
     print(record["time"], record["level"], record["kind"], record["message"], record["fields"])
 newer = store.journal(after=page["next_after"])                     # only what came since
+latest = store.journal(newest_first=True, limit=20)                 # the newest 20, newest first
+older = store.journal(newest_first=True, before=latest["next_before"], limit=20)
 graphersal.Store.journal_dir("data", kind="store.closed")           # a closed store: no lock, nothing written
 graphersal.Graph().journal()                                        # a graph without a store: in memory
 ```
@@ -111,6 +113,10 @@ All three take the same keyword arguments and answer one page, `{"records", "nex
 - `after`: the cursor; pass the previous page's `next_after` to read what came since. `more`
   says that another page follows; `truncated` that older records are gone from an in-memory
   journal; `notes` names damaged stored records that were skipped.
+- `newest_first=True`: the newest matching records, newest first (a stored journal is read
+  from its end); the page then has `next_before`: pass it as `before` for the next older page
+  (`more` says older ones exist), and its `next_after` follows what comes next. `before` also
+  bounds an oldest-first page.
 - `since` (at or after) and `until` (before): microseconds since the Unix epoch, a
   timezone-aware `datetime`, or an ISO 8601 text with a zone (a naive `datetime` raises
   `ValueError`).

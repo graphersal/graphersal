@@ -1,7 +1,7 @@
 //! Reading the system journal from Python (book page "System Journal"): `Graph.journal`,
 //! `Store.journal` and the closed-store `Store.journal_dir` share the keyword filters and the
 //! page form here. A page is the dict of `JournalPage::to_property` (`{"records", "next_after",
-//! "truncated", "more", "notes"}`), each record the dict of `JournalRecord::to_property`: the
+//! "truncated", "more", "notes"}`, plus `"next_before"` of a newest-first page), each record the dict of `JournalRecord::to_property`: the
 //! keys of `graphersal store journal --json` and `GET /api/journal`.
 
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use crate::policy::AccessPolicy;
 /// The keyword filters every journal method takes, as Python passed them.
 pub(crate) struct JournalArgs<'py> {
     pub after: Option<u64>,
+    pub before: Option<u64>,
+    pub newest_first: bool,
     pub since: Option<Bound<'py, PyAny>>,
     pub until: Option<Bound<'py, PyAny>>,
     pub level: Option<String>,
@@ -33,6 +35,12 @@ impl JournalArgs<'_> {
         let mut query = JournalQuery::new();
         if let Some(after) = self.after {
             query = query.after(after);
+        }
+        if let Some(before) = self.before {
+            query = query.before(before);
+        }
+        if self.newest_first {
+            query = query.newest_first();
         }
         if let Some(name) = &self.level {
             let level = Level::from_name(name).ok_or_else(|| {

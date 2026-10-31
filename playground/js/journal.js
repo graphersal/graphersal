@@ -3,20 +3,22 @@
 // (tests/journal.test.mjs).
 //
 // A page is `Session::journal`'s answer (`GET /api/journal`, wasm `journal(spec)`):
-// `{records, next_after, truncated, more, notes}`, records oldest first, each
-// `{seq, origin: {id, name}, origin_seq, time (µs), level, source, kind, message, fields,
-// op?, parent?, commit?, principal?}` (book "System Journal"). The engine reads forward from a
-// cursor (`after`); the panel keeps the newest `JOURNAL_KEEP` records it has read, NEWEST
-// FIRST, and renders at most `shown` of them (`JOURNAL_PAGE_ROWS` more per "Show more"), so a
-// long journal never becomes an unbounded table.
+// `{records, next_after, next_before?, truncated, more, notes}`, each record `{seq, origin:
+// {id, name}, origin_seq, time (µs), level, source, kind, message, fields, op?, parent?,
+// commit?, principal?}` (book "System Journal"). The panel opens on the NEWEST page
+// (`newest_first`, records newest first, read from the end of a stored journal), follows new
+// records forward from `next_after` (`after`, oldest first), and "Show more" first renders
+// what it holds, then pages backwards from `next_before` (`before`). It keeps at most
+// `JOURNAL_KEEP` records from following (the oldest are dropped, and fetched again by Show more)
+// and renders at most `shown` rows, so a long journal never becomes an unbounded table.
 
-/** Records asked per request (the engine's default page). */
+/** Records asked per forward request (the engine's default page). */
 export const JOURNAL_REQUEST_LIMIT = 1000;
-/** Requests per refresh at most; the next refresh goes on from the cursor. */
+/** Forward requests per refresh at most; the next refresh goes on from the cursor. */
 export const JOURNAL_MAX_REQUESTS = 20;
-/** Records kept in the panel (the newest). */
+/** Records kept by following (the newest). */
 export const JOURNAL_KEEP = 2000;
-/** Rows rendered at first and added per "Show more". */
+/** Rows rendered at first and added per "Show more"; also the size of a backwards page. */
 export const JOURNAL_PAGE_ROWS = 300;
 
 /** The levels, most severe first, with the filter's labels (`level` = that one and above). */
@@ -30,15 +32,13 @@ export const JOURNAL_LEVELS = [
 
 /** An empty view: nothing read yet. */
 export function emptyJournal() {
-  return { records: [], after: 0, truncated: false, dropped: 0, notes: [], more: false };
+  return {
+    records: [], after: 0, before: null, older: false, truncated: false, notes: [], more: false,
+  };
 }
 
-/**
- * The request object for the engine (`{after, level?, source?, limit}`): empty filters are
- * left out; the source is a prefix (`store` matches `store.backup`).
- */
-export function journalSpec(filters, after, limit = JOURNAL_REQUEST_LIMIT) {
-  const spec = { after: Math.max(0, Number(after) || 0), limit };
+/** The filters as request keys (empty ones left out; the source is a prefix). */
+function filterKeys(spec, filters) {
   const level = filters && filters.level ? String(filters.level).trim() : '';
   const source = filters && filters.source ? String(filters.source).trim() : '';
   if (level) spec.level = level;
@@ -46,40 +46,98 @@ export function journalSpec(filters, after, limit = JOURNAL_REQUEST_LIMIT) {
   return spec;
 }
 
+/** The forward request (`{after, limit, level?, source?}`): what came after the cursor. */
+export function journalSpec(filters, after, limit = JOURNAL_REQUEST_LIMIT) {
+  return filterKeys({ after: Math.max(0, Number(after) || 0), limit }, filters);
+}
+
 /**
- * The view after one more page: its records put in front (newest first, a record already held
- * is not added twice), the cursor moved, at most `keep` records (the oldest dropped and
- * counted in `dropped`). `truncated` (older records gone from an in-memory journal) and the
- * notes (damaged stored records skipped) are kept once seen.
+ * The newest-first request (`{newest_first: true, limit, before?, level?, source?}`): the
+ * newest records, or with `before` the next older page.
  */
-export function addJournalPage(view, page, keep = JOURNAL_KEEP) {
-  const base = view || emptyJournal();
-  const records = (page && Array.isArray(page.records)) ? page.records : [];
-  const held = base.records.length ? base.records[0].seq : 0;
-  const fresh = records.filter((r) => r && typeof r.seq === 'number' && r.seq > held).reverse();
-  let all = fresh.concat(base.records);
-  let dropped = base.dropped || 0;
-  if (all.length > keep) {
-    dropped += all.length - keep;
-    all = all.slice(0, keep);
-  }
-  const notes = base.notes.slice();
-  for (const note of (page && page.notes) || []) if (!notes.includes(note)) notes.push(note);
-  const next = page && typeof page.next_after === 'number' ? page.next_after : base.after;
+export function newestSpec(filters, before = null, limit = JOURNAL_PAGE_ROWS) {
+  const spec = { newest_first: true, limit };
+  if (before != null) spec.before = Math.max(0, Number(before) || 0);
+  return filterKeys(spec, filters);
+}
+
+/** Notes of `page` added to `notes` once. */
+function mergeNotes(notes, page) {
+  const out = notes.slice();
+  for (const note of (page && page.notes) || []) if (!out.includes(note)) out.push(note);
+  return out;
+}
+
+/** The view of the first, newest-first page (its records already newest first). */
+export function startJournal(page) {
+  const base = emptyJournal();
+  const records = ((page && page.records) || []).filter((r) => r && typeof r.seq === 'number');
   return {
-    records: all,
-    after: Math.max(base.after, next),
-    truncated: base.truncated || !!(page && page.truncated),
-    dropped,
-    notes,
-    more: !!(page && page.more),
+    ...base,
+    records,
+    after: page && typeof page.next_after === 'number' ? page.next_after : 0,
+    before: page && typeof page.next_before === 'number' ? page.next_before : null,
+    older: !!(page && page.more),
+    truncated: !!(page && page.truncated),
+    notes: mergeNotes([], page),
   };
 }
 
 /**
- * Reads the journal forward from the view's cursor: `fetchPage(spec)` is the engine call;
- * stops when no more follow or after `maxRequests` requests (the next refresh goes on).
- * Returns the new view.
+ * The view after one more FORWARD page (oldest first): its new records put in front (newest
+ * first, a record already held is not added twice), the cursor moved, at most `keep` records
+ * (the oldest dropped: they become older records again, `before` moves up). `truncated`
+ * (older records gone from an in-memory journal) and the notes are kept once seen.
+ */
+export function addJournalPage(view, page, keep = JOURNAL_KEEP) {
+  const base = view || emptyJournal();
+  const records = (page && Array.isArray(page.records)) ? page.records : [];
+  const held = base.records.length ? base.records[0].seq : base.after;
+  const fresh = records.filter((r) => r && typeof r.seq === 'number' && r.seq > held).reverse();
+  let all = fresh.concat(base.records);
+  let { before, older } = base;
+  if (all.length > keep) {
+    all = all.slice(0, keep);
+    before = all[all.length - 1].seq;
+    older = true;
+  }
+  const next = page && typeof page.next_after === 'number' ? page.next_after : base.after;
+  return {
+    ...base,
+    records: all,
+    after: Math.max(base.after, next),
+    before,
+    older,
+    truncated: base.truncated || !!(page && page.truncated),
+    notes: mergeNotes(base.notes, page),
+    more: !!(page && page.more),
+  };
+}
+
+/** The view after one OLDER page (newest first): its records appended below the held ones. */
+export function addOlderPage(view, page) {
+  const base = view || emptyJournal();
+  const oldest = base.records.length ? base.records[base.records.length - 1].seq : Infinity;
+  const records = ((page && page.records) || [])
+    .filter((r) => r && typeof r.seq === 'number' && r.seq < oldest);
+  return {
+    ...base,
+    records: base.records.concat(records),
+    before: page && typeof page.next_before === 'number' ? page.next_before : base.before,
+    older: !!(page && page.more),
+    truncated: base.truncated || !!(page && page.truncated),
+    notes: mergeNotes(base.notes, page),
+  };
+}
+
+/** Opens the journal: the newest page (`fetchPage(spec)` is the engine call). */
+export async function openJournal(filters, fetchPage, limit = JOURNAL_PAGE_ROWS) {
+  return startJournal(await fetchPage(newestSpec(filters, null, limit)));
+}
+
+/**
+ * Reads the journal forward from the view's cursor: stops when no more follow or after
+ * `maxRequests` requests (the next refresh goes on). Returns the new view.
  */
 export async function readJournal(view, filters, fetchPage, maxRequests = JOURNAL_MAX_REQUESTS) {
   let current = view || emptyJournal();
@@ -89,6 +147,20 @@ export async function readJournal(view, filters, fetchPage, maxRequests = JOURNA
     if (!current.more) break;
   }
   return current;
+}
+
+/**
+ * "Show more": `{view, shown}` with `JOURNAL_PAGE_ROWS` more rows: the held records first, an
+ * older page from the engine (`before`) when they are all shown and older ones exist.
+ */
+export async function showMoreJournal(view, shown, filters, fetchPage) {
+  const target = shown + JOURNAL_PAGE_ROWS;
+  let current = view;
+  if (current.records.length < target && current.older && current.before != null) {
+    const page = await fetchPage(newestSpec(filters, current.before, target - current.records.length));
+    current = addOlderPage(current, page);
+  }
+  return { view: current, shown: target };
 }
 
 const pad = (n, width = 2) => String(n).padStart(width, '0');
@@ -166,15 +238,19 @@ export function journalRows(view, shown = JOURNAL_PAGE_ROWS, utc = false) {
   });
 }
 
-/** The line under the table: how many rows are not shown, and what is gone. */
+/**
+ * The line under the table: how many held rows are not shown, whether older records exist in
+ * the journal, what is gone; `more` = "Show more" has something to show.
+ */
 export function journalFooter(view, shown) {
   const total = (view && view.records && view.records.length) || 0;
   const hidden = Math.max(0, total - shown);
+  const older = !!(view && view.older);
   const parts = [];
-  if (hidden) parts.push(`${hidden} more`);
-  if (view && view.dropped) parts.push(`${view.dropped} older records not kept here`);
+  if (hidden) parts.push(`${hidden} more loaded`);
+  if (older) parts.push('older records in the journal');
   if (view && view.truncated) parts.push('the oldest records are gone from the in-memory journal');
-  return { hidden, text: parts.join(' · ') };
+  return { hidden, more: hidden > 0 || older, text: parts.join(' · ') };
 }
 
 /**

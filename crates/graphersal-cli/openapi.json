@@ -328,7 +328,7 @@
           "Store"
         ],
         "summary": "System journal",
-        "description": "One page of the served graph's system journal (book page \"System Journal\"): `{records, next_after, truncated, more, notes}`, each record `{seq, origin: {id, name}, origin_seq, time, level, source, kind, message, op?, parent?, commit?, principal?, fields}`, oldest first. Page with `after` = the previous `next_after`. A bad parameter is a 422.",
+        "description": "One page of the served graph's system journal (book page \"System Journal\"): `{records, next_after, next_before?, truncated, more, notes}`, each record `{seq, origin: {id, name}, origin_seq, time, level, source, kind, message, op?, parent?, commit?, principal?, fields}`, oldest first. Page with `after` = the previous `next_after`. With `newest_first=true` the page holds the NEWEST matching records, newest first, and `next_before`: page backwards with `before` = the previous `next_before`, follow new records with `after` = `next_after`. A bad parameter is a 422.",
         "operationId": "getApiJournal",
         "parameters": [
           {
@@ -339,6 +339,25 @@
             "schema": {
               "type": "integer",
               "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Only records before this seq (with `newest_first`: the previous page's `next_before`).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "newest_first",
+            "in": "query",
+            "required": false,
+            "description": "`true`: the newest matching records, newest first (the page then has `next_before`).",
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -3010,7 +3029,10 @@
             "description": "`with` (the default) carries the store's embedding models; `without` leaves them out.",
             "schema": {
               "type": "string",
-              "enum": ["with", "without"]
+              "enum": [
+                "with",
+                "without"
+              ]
             }
           }
         ],

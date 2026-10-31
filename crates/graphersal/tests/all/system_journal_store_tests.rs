@@ -567,3 +567,183 @@ fn every_backend_keeps_the_journal() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A [`MemDir`] that counts the reads of journal segments (newest-first reading is bounded).
+#[derive(Debug, Clone)]
+struct CountingReads {
+    inner: MemDir,
+    reads: Arc<Mutex<Vec<String>>>,
+}
+
+impl CountingReads {
+    fn note(&self, name: &str) {
+        if name.starts_with("journal/") {
+            self.reads.lock().unwrap().push(name.to_string());
+        }
+    }
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
+    }
+}
+
+impl StoreDir for CountingReads {
+    fn location(&self) -> String {
+        "memory:counting-reads".into()
+    }
+    fn entry_kind(&self, name: &str) -> io::Result<Option<EntryKind>> {
+        self.inner.entry_kind(name)
+    }
+    fn list(&self, dir: &str) -> io::Result<Vec<DirEntry>> {
+        self.inner.list(dir)
+    }
+    fn file_len(&self, name: &str) -> io::Result<u64> {
+        self.inner.file_len(name)
+    }
+    fn read(&self, name: &str, max: u64) -> io::Result<Vec<u8>> {
+        self.note(name);
+        self.inner.read(name, max)
+    }
+    // Ranges are the version walk's header reads (64 bytes per segment): not counted.
+    fn read_range(&self, name: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.inner.read_range(name, offset, len)
+    }
+    fn open_read(&self, name: &str) -> io::Result<Box<dyn io::Read + Send>> {
+        self.note(name);
+        self.inner.open_read(name)
+    }
+    fn create_dir_all(&self, name: &str) -> io::Result<()> {
+        self.inner.create_dir_all(name)
+    }
+    fn create(&self, name: &str, exclusive: bool) -> io::Result<Box<dyn StoreFile>> {
+        self.inner.create(name, exclusive)
+    }
+    fn open_write(&self, name: &str, offset: u64) -> io::Result<Box<dyn StoreFile>> {
+        self.inner.open_write(name, offset)
+    }
+    fn append(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        self.inner.append(name, bytes)
+    }
+    fn write_atomic(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_atomic(name, bytes)
+    }
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.inner.rename(from, to)
+    }
+    fn truncate(&self, name: &str, len: u64) -> io::Result<()> {
+        self.inner.truncate(name, len)
+    }
+    fn remove_file(&self, name: &str) -> io::Result<()> {
+        self.inner.remove_file(name)
+    }
+    fn remove_tree(&self, name: &str) -> io::Result<()> {
+        self.inner.remove_tree(name)
+    }
+    fn sync_dir(&self, name: &str) -> io::Result<()> {
+        self.inner.sync_dir(name)
+    }
+    fn lock(&self, kind: LockKind) -> io::Result<Option<DirLockGuard>> {
+        self.inner.lock(kind)
+    }
+}
+
+/// Every record of a page sequence read newest first, following `next_before`.
+fn newest_first_pages(
+    read: impl Fn(JournalQuery) -> graphersal::system_journal::JournalPage,
+    limit: usize,
+) -> Vec<JournalRecord> {
+    let mut out = Vec::new();
+    let mut query = JournalQuery::new().newest_first().limit(limit);
+    loop {
+        let page = read(query.clone());
+        assert!(
+            page.records.windows(2).all(|w| w[0].seq > w[1].seq),
+            "newest first"
+        );
+        out.extend(page.records.iter().cloned());
+        if !page.more {
+            break;
+        }
+        query = query.before(
+            page.next_before
+                .expect("a newest-first page has next_before"),
+        );
+    }
+    out
+}
+
+#[test]
+fn a_newest_first_query_reads_the_segments_from_the_end_and_pages_backwards() {
+    let inner = MemDir::new();
+    let counting = CountingReads {
+        inner: inner.clone(),
+        reads: Arc::new(Mutex::new(Vec::new())),
+    };
+    let dir: Arc<dyn StoreDir> = Arc::new(counting.clone());
+    let options = options().with_journal_segment_bytes(150);
+    let store = Store::create(&dir, options.clone()).unwrap();
+    for i in 0..8 {
+        add_person(&store, &format!("p{i}"));
+        store.checkpoint(None).unwrap();
+    }
+    store.close().unwrap();
+    let names = segments(&inner);
+    assert!(names.len() >= 5, "rotation at the size: {names:?}");
+    let every = all(&inner);
+    let newest: Vec<u64> = every.iter().rev().map(|r| r.seq).collect();
+
+    // The closed store: the newest two records, from the newest segment(s) only.
+    counting.take();
+    let page = Store::journal_dir(&dir, &JournalQuery::new().newest_first().limit(2)).unwrap();
+    let read = counting.take();
+    assert_eq!(
+        page.records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        newest[..2]
+    );
+    assert!(page.more);
+    assert_eq!(page.next_after, newest[0], "a reader follows from the end");
+    assert_eq!(page.next_before, Some(newest[1]));
+    let oldest_name = &names[0];
+    assert!(
+        !read.contains(oldest_name),
+        "the oldest segment is not read for the newest records: {read:?}"
+    );
+    assert!(read.len() < names.len(), "{read:?} of {names:?}");
+
+    // Paging backwards gives every record once, newest first.
+    let backwards = newest_first_pages(|q| Store::journal_dir(&dir, &q).unwrap(), 3);
+    assert_eq!(backwards.iter().map(|r| r.seq).collect::<Vec<_>>(), newest);
+    // Filters apply: the checkpoints only.
+    let checkpoints = Store::journal_dir(
+        &dir,
+        &JournalQuery::new()
+            .newest_first()
+            .kind("store.checkpoint_done")
+            .limit(100),
+    )
+    .unwrap();
+    assert_eq!(checkpoints.records.len(), 8);
+    assert!(!checkpoints.more);
+
+    // An open store: the newest from memory, older ones from the segments, the same order.
+    let store = Store::open(&dir, options).unwrap();
+    let journal = store.journal().unwrap();
+    let live = journal.query(&JournalQuery::new().limit(10_000)).unwrap();
+    let live_newest: Vec<u64> = live.records.iter().rev().map(|r| r.seq).collect();
+    let open_backwards = newest_first_pages(|q| journal.query(&q).unwrap(), 4);
+    assert_eq!(
+        open_backwards.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        live_newest
+    );
+    let first = journal
+        .query(&JournalQuery::new().newest_first().limit(1))
+        .unwrap();
+    assert_eq!(first.records[0].kind, "store.opened");
+    // Following forwards from the newest page sees exactly what comes next.
+    add_person(&store, "later");
+    store.checkpoint(None).unwrap();
+    let next = journal
+        .query(&JournalQuery::new().after(first.next_after))
+        .unwrap();
+    assert_eq!(kinds(&next.records), ["store.checkpoint_done"]);
+    store.close().unwrap();
+}

@@ -363,6 +363,8 @@ class Graph:
         self,
         *,
         after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
         since: Union[int, datetime.datetime, str, None] = None,
         until: Union[int, datetime.datetime, str, None] = None,
         level: Optional[Literal["error", "warn", "notice", "info"]] = None,
@@ -379,7 +381,9 @@ class Graph:
         (microseconds since the Unix epoch), ``level``, ``source``, ``kind``, ``message``,
         ``fields`` and, when set, ``op``, ``parent``, ``commit``, ``principal``. A graph without
         a store keeps its newest records in memory; a Store's graph reads the store's journal.
-        ``after`` is the cursor (the previous page's ``next_after``); ``since`` (at or after) and
+        ``after`` is the cursor (the previous page's ``next_after``); ``newest_first=True``
+        answers the newest matching records, newest first, with ``next_before`` (pass it as
+        ``before`` for the next older page; ``more``: older ones exist); ``since`` (at or after) and
         ``until`` (before) take microseconds, an aware ``datetime`` or an ISO 8601 text with a
         zone; ``level`` keeps that level and the more severe ones; ``source`` matches a source
         and the ones below it; ``limit`` defaults to 1000 (at most 10000). ``policy`` must allow
@@ -692,6 +696,8 @@ class Store:
         self,
         *,
         after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
         since: Union[int, datetime.datetime, str, None] = None,
         until: Union[int, datetime.datetime, str, None] = None,
         level: Optional[Literal["error", "warn", "notice", "info"]] = None,
@@ -709,6 +715,8 @@ class Store:
         path: str,
         *,
         after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
         since: Union[int, datetime.datetime, str, None] = None,
         until: Union[int, datetime.datetime, str, None] = None,
         level: Optional[Literal["error", "warn", "notice", "info"]] = None,

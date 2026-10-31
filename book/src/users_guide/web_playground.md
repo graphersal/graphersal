@@ -502,11 +502,14 @@ the source, the kind, the message with its fields, and the record's sequence num
 - **Level** shows that level and the more severe ones (`error` > `warn` > `notice` > `info`);
   **Source** shows a source and the ones below it (`store` shows `store.backup` too; the
   sources seen so far are suggested).
+- It opens on the newest 300 records: a long journal on disk is read from its end, never from
+  its start.
 - While the dialog is open it reads the records written since its last read every five seconds
   (switch it off with *refresh every 5 s*, or press **Refresh**); it never reads the whole journal
-  again.
-- It keeps the newest 2000 records it has read and shows 300 rows at a time: **Show more** adds
-  the next 300, and the line under the table says how many are not shown or no longer kept.
+  again. It keeps the newest 2000 records it follows.
+- **Show more** shows 300 more rows, reading the next older page from the journal when all held
+  rows are shown; the line under the table says how many loaded rows are not shown and whether
+  older records exist.
 
 In the WebAssembly playground the journal is the one of the graph's [store in
 memory](#the-store-in-memory), gone with a page reload like the store. On the dev server it is
