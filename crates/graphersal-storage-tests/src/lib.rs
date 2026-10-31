@@ -1,8 +1,8 @@
 //! Conformance tests for [`GraphStorage`](graphersal::storage::GraphStorage) implementations.
 //!
 //! **EXPERIMENTAL**, like the trait itself: the `GraphStorage` trait and this suite may change
-//! in any minor release before 1.0 (also in a 0.4.x release). Pin the exact version
-//! (`graphersal-storage-tests = "=0.2.0"`, the same version as `graphersal`).
+//! in any minor release before 1.0 (also in a 0.5.x release). Pin the exact version
+//! (`graphersal-storage-tests = "=0.5.0"`, the same version as `graphersal`).
 //!
 //! The contract is derived from the trait documentation and from the behaviour of
 //! [`TraversalGraph`](graphersal::TraversalGraph), the reference implementation; where the

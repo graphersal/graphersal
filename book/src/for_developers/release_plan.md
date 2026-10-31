@@ -18,15 +18,15 @@ Python package and the web playground are released with the same number:
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
 
-## Stability in 0.4.x
+## Stability in 0.5.x
 
-The same rules hold for every minor line before 1.0 (they held for 0.1.x, 0.2.x and 0.3.x as well); a
-minor release (0.3 to 0.4) may break them, and its release notes list every break with the upgrade step
-([Release Notes 0.4.0](../release_notes/release_notes_0.4.0.md)).
+The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.4.x as well); a
+minor release (0.4 to 0.5) may break them, and its release notes list every break with the upgrade step
+([Release Notes 0.5.0](../release_notes/release_notes_0.5.0.md)).
 
-- Stable within 0.4.x (additive changes only): the public API of `graphersal` outside the items marked
+- Stable within 0.5.x (additive changes only): the public API of `graphersal` outside the items marked
   EXPERIMENTAL, the DSL and the schema format.
-- EXPERIMENTAL (may change in any 0.4.x release): the `GraphStorage` trait and its associated types,
+- EXPERIMENTAL (may change in any 0.5.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
 - Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
@@ -56,8 +56,9 @@ Before a version is tagged:
   `CLAUDE.md`, `mdbook build book`, and the TinkerPop suite on the foreign storage
   (`GRAPHERSAL_TEST_STORAGE=forwarding`);
 - `cargo deny check` (licences, RustSec advisories, duplicate crates, sources) passes against `deny.toml`;
-- the long fuzz budgets pass: robustness, the merge checkpoint and the verified backups (below; a fast budget of
-  each runs in every `cargo test`);
+- the long fuzz budgets pass: robustness, the merge checkpoint, the verified backups and the closed-store
+  catalog commits (below; a fast budget of each runs in every `cargo test`), and the ignored test of a commit
+  larger than 1 GiB;
 - a benchmark run on a quiet machine shows no unexplained regression against the previous release;
 - a dry run of the CLI binaries (`gh workflow run "CLI binaries" --ref <release branch>`, see Publishing) is
   green on all four platforms;
@@ -75,14 +76,22 @@ ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=7 \
   --test all robustness_fuzz_tests::fuzz_long -- --ignored
 ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal \
   --features script,io,display,serde,persist,gql --test all robustness_input_tests::
+ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal \
+  --features script,io,display,serde,persist,gql --test all persist_robustness_tests::
 MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal \
   --features script,io,display,serde,persist,gql,persist-zip --test all merge_checkpoint_fuzz_tests::
 BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal \
   --features script,io,display,serde,persist,gql,persist-zip --test all backup_fuzz_tests::
+CLOSED_FUZZ_CASES=60000 CLOSED_FUZZ_SEED=1 CLOSED_FUZZ_THREADS=8 cargo test --release -p graphersal \
+  --features script,io,display,serde,persist,gql,persist-zip --test all closed_commit_fuzz_tests::
+cargo test --release -p graphersal --features script,io,display,serde,persist,gql \
+  --test all persist_tests::a_unit_over_one_gib_commits -- --ignored --exact
 ```
 
 Robustness findings go to `target/robustness-findings.txt` (`ROBUSTNESS_REPLAY=<seed>` replays one case); a failing
-merge or backup case prints `MERGE_FUZZ_REPLAY=<seed>` or `BACKUP_FUZZ_REPLAY=<seed>`.
+merge, backup or closed-commit case prints `MERGE_FUZZ_REPLAY=<seed>`, `BACKUP_FUZZ_REPLAY=<seed>` or
+`CLOSED_FUZZ_REPLAY=<seed>`. Memory: the long robustness run (7 threads, each under its own memory ceiling) and the
+commit of more than 1 GiB (it peaks at 4.4 to 5.7 GB) need about 9 GB of RAM.
 
 ## Benchmarks
 
@@ -101,13 +110,13 @@ machine and are compared with the previous release, not per change.
    `graphersal-storage-tests`, `graphersal-session` and `graphersal-cli`.
 3. The workflow `release.yml`, started on the tag: `gh workflow run Release --ref v0.2.0`. It checks that the
    tag matches the version and that the version's release notes exist, then runs two independent parts:
-   - **PyPI.** It builds the five-platform wheels and the sdist through `python.yml` (which also runs the
+   - **PyPI.** It builds the four-platform wheels and the sdist through `python.yml` (which also runs the
      binding's tests and installs each wheel it can run), and uploads them with PyPI Trusted Publishing from
      the environment `pypi` (no token is stored).
    - **CLI binaries and the draft GitHub Release.** It builds the `graphersal` binary through `binaries.yml`
      with the `dist` profile (release + fat LTO + stripped symbols; never `panic = "abort"`, units roll back
      on unwind), natively on each platform's runner: Linux x86_64 and aarch64 as static musl builds,
-     macOS arm64 and x86_64, Windows x86_64. Each build is smoke-tested on its runner (`--version`, a query,
+     macOS arm64, Windows x86_64. Each build is smoke-tested on its runner (`--version`, a query,
      the dev server's `/api/info`) and packed as `graphersal-v<version>-<platform>.tar.gz` (Windows `.zip`)
      with `LICENSE-APACHE`, `NOTICE`, `README.md` and `THIRD-PARTY-LICENSES.html` (cargo-about, `about.toml`).
      A final job writes `SHA256SUMS` and creates the GitHub build provenance attestations. The job
