@@ -162,15 +162,22 @@ A packed snapshot exported from a store (`graphersal store export`, the playgrou
 graph") carries the blobs of its models. Loaded WITHOUT a store (`graphersal --graph
 file.gsnap`, `GraphSource::from_file`, Python `Graph.load`; in Rust
 `persist::read_snapshot_file`, which also returns a `SnapshotLoadReport`) the graph serves those
-models: their blobs are kept in memory beside the graph, and `embed()`, `embed(text)`, text
-queries, vector rules and `g.embedders()` use them as a store's graph does (a model is loaded at
-its first use). A graph with no packed models has the built-in `hash-ngram/1` only. Changes stay
-in memory: the file is never written.
+models: `embed()`, `embed(text)`, text queries, vector rules and `g.embedders()` use them as a
+store's graph does. The load only notes where each model's blob lies in the file; a model is
+loaded at its first use by reading its blob from the file (checked by length, CRC-32C and
+SHA-256), so no copy of a blob stays in memory, only the loaded model. The file must therefore
+stay as it was while the graph serves its models: a file changed, truncated or removed after the
+load makes a model that was not loaded yet unavailable, with an error naming the file (a model
+loaded before keeps running). A graph with no packed models has the built-in `hash-ngram/1` only.
+Changes stay in memory: the file is never written.
 
-- A `.gsnap` of Graphersal 0.4.0 holds its models as model rows: they are converted in memory
-  as the store upgrade converts them (one blob and definition each; a model without a repository
+- A `.gsnap` of Graphersal 0.4.0 holds its models as model rows: they are converted as the
+  store upgrade converts them (one blob and definition each; a model without a repository
   becomes `local/<12 hex>` and the schema's `embedder` naming it is rewritten in memory), the
-  file stays as it is. `graphersal store create <dir> --from file.gsnap` keeps them converted.
+  file stays as it is. The load reads the rows once to convert them (briefly holding a model's
+  files in memory) and keeps only how to build each model's tar; the tar is built again from the
+  rows when the model loads. `graphersal store create <dir> --from file.gsnap` keeps them
+  converted (the documented route for a 0.4.0 file).
 - A `.gsnap` exported `--without-models` keeps the definitions but not the blobs: the models
   are listed as `missing`, and a query that needs one fails with the import command.
 - The CLI prints what the load found as `note:` lines on stderr (`SnapshotLoadReport::notes`,

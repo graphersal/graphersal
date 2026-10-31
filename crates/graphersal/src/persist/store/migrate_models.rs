@@ -516,18 +516,39 @@ pub(crate) fn migrate_new_store(dir: &DirPath) -> Result<Migrated, PersistError>
     complete(dir, graph_file, 3)
 }
 
+/// One file of a converted 0.4.0 model's tar ([`LegacyTar`]): the manifest's bytes, or the
+/// packed snapshot row (`<id>.<file>`) that holds the file.
+#[derive(Debug, Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) enum LegacyFileSource {
+    Bytes(Vec<u8>),
+    Row(String),
+}
+
+/// How the tar of a 0.4.0 model converted for a `.gsnap` without a Store is built again when
+/// the model loads (`store/packed_load.rs`): nothing of it is kept but this recipe.
+#[derive(Debug, Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct LegacyTar {
+    /// The blob the tar is (its SHA-256, length and CRC-32C, checked after every rebuild).
+    pub(crate) blob: crate::value::BlobRef,
+    /// The tar's files: name, size, SHA-256 (hex), where the bytes come from.
+    pub(crate) files: Vec<(String, u64, String, LegacyFileSource)>,
+}
+
 /// The 0.4.0 models a packed snapshot carried as model rows (kind 3), staged into `models/` of
-/// the in-memory directory `dir`, converted for a graph loaded WITHOUT a Store
-/// ([`read_snapshot_file`](crate::persist::read_snapshot_file)): every model becomes a blob of
-/// `dir` and a definition loaded into `graph` (outside units, like the rest of the load), the
-/// schema's `embedder` naming a renamed identity rewritten (format spec 15.1, the same rules as
-/// the store migration); then `models/` is removed. A damaged model refuses with
-/// [`StoreFailure::UpgradeModelDamaged`].
+/// the temporary in-memory directory `dir`, converted for a graph loaded WITHOUT a Store
+/// ([`read_snapshot_file`](crate::persist::read_snapshot_file)): every model's tar is streamed
+/// once through its hashes (never kept) and a definition referencing that blob is loaded into
+/// `graph` (outside units, like the rest of the load), the schema's `embedder` naming a renamed
+/// identity rewritten (format spec 15.1, the same rules as the store migration). Returns each
+/// model with the recipe of its tar (the files come from the snapshot's rows when the model
+/// loads). A damaged model refuses with [`StoreFailure::UpgradeModelDamaged`].
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn convert_in_memory(
     dir: &DirPath,
     graph: &mut TraversalGraph,
-) -> Result<Vec<Converted>, PersistError> {
+) -> Result<Vec<(Converted, Option<LegacyTar>)>, PersistError> {
     use crate::graph::PersistentStorage;
     let legacy = check_legacy(dir)?;
     let mut definitions = model_catalog::model_definitions(graph).map_err(PersistError::Graph)?;
@@ -543,15 +564,18 @@ pub(crate) fn convert_in_memory(
             if former != definition.name() {
                 renames.push((former.clone(), definition.name().to_string()));
             }
-            converted.push(Converted {
-                repo: definition
-                    .as_model()
-                    .map(|m| m.repo().to_string())
-                    .unwrap_or_default(),
-                identity: definition.name().to_string(),
-                bytes: definition.as_model().map_or(0, |m| m.blob().length()),
-                former_identity: former,
-            });
+            converted.push((
+                Converted {
+                    repo: definition
+                        .as_model()
+                        .map(|m| m.repo().to_string())
+                        .unwrap_or_default(),
+                    identity: definition.name().to_string(),
+                    bytes: definition.as_model().map_or(0, |m| m.blob().length()),
+                    former_identity: former,
+                },
+                None,
+            ));
             continue;
         }
         let repo = match &legacy.model.repo {
@@ -568,10 +592,19 @@ pub(crate) fn convert_in_memory(
             dimension,
             load_bytes,
         } = prepared;
+        let recipe: Vec<(String, u64, String, LegacyFileSource)> = files
+            .iter()
+            .map(|f| {
+                let source = match &f.content {
+                    TarContent::Bytes(bytes) => LegacyFileSource::Bytes(bytes.clone()),
+                    _ => LegacyFileSource::Row(models::packed_name(&legacy.model.id, &f.name)),
+                };
+                (f.name.clone(), f.size, f.sha256.clone(), source)
+            })
+            .collect();
+        // The tar streamed once through its hashes: its blob reference, nothing kept.
         let mut stream = TarStream::new(files);
-        let blob = blobs::write_blob(dir, &mut stream, &mut |_| {})
-            .map_err(|err| damaged(dir, &legacy.model.id, err))?
-            .blob;
+        let blob = hash_stream(&mut stream).map_err(|err| damaged(dir, &legacy.model.id, err))?;
         if blob.length() != expected {
             return Err(damaged(
                 dir,
@@ -590,7 +623,7 @@ pub(crate) fn convert_in_memory(
             dimension,
             load_bytes,
         }
-        .definition(blob, false);
+        .definition(blob.clone(), false);
         graph
             .load_definition(definition.clone())
             .map_err(PersistError::Graph)?;
@@ -598,12 +631,18 @@ pub(crate) fn convert_in_memory(
         if former != identity {
             renames.push((former.clone(), identity.clone()));
         }
-        converted.push(Converted {
-            repo,
-            identity,
-            former_identity: former,
-            bytes,
-        });
+        converted.push((
+            Converted {
+                repo,
+                identity,
+                former_identity: former,
+                bytes,
+            },
+            Some(LegacyTar {
+                blob,
+                files: recipe,
+            }),
+        ));
     }
     if !renames.is_empty()
         && let Some(schema) = graph.get_schema().map_err(PersistError::Graph)?
@@ -611,6 +650,32 @@ pub(crate) fn convert_in_memory(
     {
         graph.load_schema(after).map_err(PersistError::Graph)?;
     }
-    remove_models_dir(dir)?;
     Ok(converted)
+}
+
+/// The SHA-256 blob reference (length, CRC-32C) of what `reader` yields, read through a bounded
+/// buffer.
+pub(crate) fn hash_stream(reader: &mut dyn std::io::Read) -> Result<crate::value::BlobRef, String> {
+    let mut sha = crate::value::vector::embed::sha256::Sha256::new();
+    let mut crc = 0u32;
+    let mut length = 0u64;
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err.to_string()),
+        };
+        sha.update(&buf[..n]);
+        crc = crate::persist::codec::crc_append(crc, &buf[..n]);
+        length += n as u64;
+    }
+    crate::value::BlobRef::new(
+        crate::blob::BlobHashAlgo::Sha256,
+        &sha.finish(),
+        length,
+        crc,
+    )
+    .map_err(|err| err.to_string())
 }

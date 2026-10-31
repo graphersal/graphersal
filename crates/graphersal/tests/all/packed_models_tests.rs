@@ -1,9 +1,11 @@
 //! A packed snapshot (`.gsnap`) loaded WITHOUT a Store serves the embedding models it carries
-//! (user decision on Q11.6, book page "Embedding Models in a Store", section "A `.gsnap`
-//! without a store"): `persist::read_snapshot_file` and `GraphSource::from_file` keep the
-//! packed blobs in memory, the 0.4.0 model rows are converted in memory (the file stays as it
-//! is), the report lists what an earlier release left; a graph without packed models has
-//! `hash-ngram/1` only.
+//! (user decisions on Q11.6 and of 2026-10-31, book page "Embedding Models in a Store", section
+//! "A `.gsnap` without a store"): `persist::read_snapshot_file` and `GraphSource::from_file`
+//! record where each blob lies and read it from the file when the model loads (no copy kept), the
+//! 0.4.0 model rows are converted (their tar built again from the rows at the load; the file
+//! stays as it is), a changed or removed file makes the model unavailable naming the file, the
+//! report lists what an earlier release left; a graph without packed models has `hash-ngram/1`
+//! only.
 
 #![cfg(all(feature = "persist", feature = "script", not(target_arch = "wasm32")))]
 
@@ -249,4 +251,97 @@ fn a_040_gsnap_names_the_saved_queries_calling_a_removed_function() {
     assert_eq!(names, ["fill", "fill_any"]);
     let notes = report.notes("saved_queries.gsnap").join("\n");
     assert!(notes.contains("saved query \"fill\" calls"), "{notes}");
+}
+
+/// `embed(text)` with `embedder` on `graph`: the dimension, or the error text.
+#[cfg(feature = "model2vec")]
+fn embed_on(graph: &Arc<Graph>, embedder: &str) -> Result<i64, String> {
+    let mut engine = graphersal::script::engine();
+    graphersal::script::set_engine_graph(&mut engine, graph.clone());
+    let mut scope = graphersal::script::graph_scope(graph.clone());
+    engine
+        .eval_with_scope::<graphersal::script::rhai::INT>(
+            &mut scope,
+            &format!(r#"embed("graph", #{{embedder: "{embedder}"}}).dimension"#),
+        )
+        .map_err(|err| err.to_string())
+}
+
+/// The blob stays in the file: a model loads from the file at its first use, so a file removed,
+/// truncated or replaced after the load (before the model's first use) makes the model
+/// unavailable, naming the file; nothing was kept in memory to load it from.
+#[cfg(feature = "model2vec")]
+#[test]
+fn a_model_loads_from_the_file_and_a_changed_file_is_refused() {
+    let temp = Temp::new("packed-file-reads");
+    // Different seeds per case: the process-wide cache of loaded models never serves one of them
+    // from an earlier load (a cached model is still checked against the file, see below).
+    let cases: [(&str, &dyn Fn(&Path)); 3] = [
+        ("removed", &|path| std::fs::remove_file(path).unwrap()),
+        ("truncated", &|path| {
+            let bytes = std::fs::read(path).unwrap();
+            std::fs::write(path, &bytes[..bytes.len() / 2]).unwrap();
+        }),
+        ("replaced", &|path| {
+            GraphSource::tinkerpop_modern()
+                .write_snapshot(&mut std::fs::File::create(path).unwrap())
+                .unwrap();
+        }),
+    ];
+    for (seed, (case, change)) in (11u8..).zip(cases) {
+        let dir = Temp::new(case);
+        let store = Store::create(dir.join("s"), options()).unwrap();
+        import(&store, seed, "acme/tiny");
+        store.checkpoint(None).unwrap();
+        let path = dir.join("m.gsnap");
+        store
+            .export_packed(None, std::fs::File::create(&path).unwrap())
+            .unwrap();
+        store.close().unwrap();
+        let (graph, _) = load(&path);
+        change(&path);
+        let err = embed_on(&graph, "acme/tiny").unwrap_err();
+        assert!(err.contains("unavailable"), "{case}: {err}");
+        assert!(
+            err.contains(&path.display().to_string()) || case == "removed",
+            "{case}: {err}"
+        );
+        assert!(
+            err.contains("changed after it was loaded") || err.contains("cannot be read"),
+            "{case}: {err}"
+        );
+        // The graph itself is unaffected.
+        assert_eq!(graph.read().vertex_count(), 0);
+    }
+    // An intact file serves the model; a model loaded once stays loaded.
+    let (path, _) = exported(&temp, "ok.gsnap", ModelCopy::Include);
+    let (graph, _) = load(&path);
+    assert_eq!(embed_on(&graph, "acme/tiny"), Ok(DIMENSION as i64));
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(embed_on(&graph, "acme/tiny"), Ok(DIMENSION as i64));
+    // A second graph of the same (now removed) file content: the cached model is checked
+    // against its own file first, which is gone.
+    let again = Temp::new("packed-file-cache");
+    let (path, _) = exported(&again, "ok.gsnap", ModelCopy::Include);
+    let (other, _) = load(&path);
+    std::fs::remove_file(&path).unwrap();
+    let err = embed_on(&other, "acme/tiny").unwrap_err();
+    assert!(err.contains("unavailable"), "{err}");
+}
+
+/// A converted 0.4.0 model loads from the file's model rows (its tar built again, checked by
+/// its hash) and stays unavailable once the file is gone.
+#[cfg(feature = "model2vec")]
+#[test]
+fn a_converted_040_model_loads_from_the_rows() {
+    let temp = Temp::new("packed-040-rows");
+    let path = temp.join("snapshot.gsnap");
+    std::fs::copy(v040("snapshot.gsnap"), &path).unwrap();
+    let (graph, report) = load(&path);
+    assert_eq!(report.models_converted.len(), 2);
+    assert_eq!(embed_on(&graph, "acme/tiny"), Ok(DIMENSION as i64));
+    let (other, _) = load(&path);
+    std::fs::remove_file(&path).unwrap();
+    let err = embed_on(&other, "local/b6b362e7a651").unwrap_err();
+    assert!(err.contains("unavailable"), "{err}");
 }

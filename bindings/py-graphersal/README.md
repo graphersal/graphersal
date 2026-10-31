@@ -457,7 +457,8 @@ licences and states; an open of a store that holds models but none of them the d
 `UserWarning`.
 
 A `.gsnap` exported with its models (`store.export(path)`) serves them too when loaded without
-a store (`Graph.load(path)`, their blobs kept in memory); a graph that has neither has
+a store (`Graph.load(path)`; a model reads its blob from the file when it first loads, so keep
+the file in place); a graph that has neither has
 `hash-ngram/1` only. What a file of an earlier release left that this version does not keep
 current (vectors without a vector rule, a model the schema names that the file lacks, saved
 queries calling a removed function) is one `UserWarning` per note.
