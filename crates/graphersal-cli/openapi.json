@@ -2916,6 +2916,49 @@
         }
       }
     },
+    "/api/store/summary": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Store info without the sizes",
+        "description": "The Store menu's first call: `{store: null}` without a store, else the answer of `GET /api/store` with `compaction`, `compactionError`, `storeBytes`, `storeBytesText`, `graphBytes` and `graphBytesText` null and `detailsPending: true`. Reads no WAL, no attic WAL, no blob, walks no graph: its cost does not grow with the history.",
+        "operationId": "getApiStoreSummary",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/store/details": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Store sizes and compaction advice",
+        "description": "The Store menu's second call: `{details: {commitSeq, compaction, compactionError, storeBytes, storeBytesText, graphBytes, graphBytesText}}`, the keys `GET /api/store/summary` leaves null.",
+        "operationId": "getApiStoreDetails",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
     "/api/store/checkpoint": {
       "post": {
         "tags": [

@@ -27,6 +27,36 @@ export function storeWhere(store) {
   return 'Every commit is on disk before its query answers; it survives a restart.';
 }
 
+/**
+ * The keys the Store menu's second call fills in (`storeDetails()`, `GET /api/store/details`):
+ * the first call (`storeSummary()`, `GET /api/store/summary`) answers them `null` with
+ * `detailsPending: true`, so the menu shows at once without walking the graph or weighing the
+ * history.
+ */
+export const STORE_DETAIL_KEYS = Object.freeze([
+  'compaction', 'compactionError', 'storeBytes', 'storeBytesText', 'graphBytes', 'graphBytesText',
+]);
+
+/**
+ * The menu's info: the `summary` with the figures of `details` filled in (`details` null: the
+ * summary as it is, its figures pending). A `details` of another commit than the summary's is
+ * left out (the store moved between the two calls; the next refresh brings both again). A
+ * complete info (`storeInfo()`, no `detailsPending`) is returned as it is.
+ */
+export function withStoreDetails(summary, details) {
+  if (!summary || !summary.detailsPending || !details) return summary;
+  if (details.commitSeq !== undefined && details.commitSeq !== summary.commitSeq) return summary;
+  const out = { ...summary, detailsPending: false };
+  for (const key of STORE_DETAIL_KEYS) if (key in details) out[key] = details[key];
+  return out;
+}
+
+/** A size of the menu: its text, `…` while the second call is pending, else `?`. */
+export function pendingText(store, text) {
+  if (text) return text;
+  return store && store.detailsPending ? '…' : '?';
+}
+
 const percent = (ratio) => `${Math.round((Number(ratio) || 0) * 100)} %`;
 
 /**

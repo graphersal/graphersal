@@ -671,6 +671,19 @@ impl Playground {
         store_text(self.session.store_info())
     }
 
+    /// The Store menu's first call: `storeInfo` without the sizes and the compaction advice
+    /// (`detailsPending: true`; reads no history, walks no graph).
+    #[wasm_bindgen(js_name = storeSummary)]
+    pub fn store_summary(&self) -> Result<String, JsError> {
+        store_text(self.session.store_summary())
+    }
+
+    /// The Store menu's second call: `{commitSeq, compaction, storeBytes, graphBytes, ...}`.
+    #[wasm_bindgen(js_name = storeDetails)]
+    pub fn store_details(&self) -> Result<String, JsError> {
+        store_text(self.session.store_details())
+    }
+
     /// Checkpoint: a snapshot of the current state (`name` optional): `{snapshot}`.
     pub fn checkpoint(&mut self, name: &str) -> Result<String, JsError> {
         store_text(self.session.store_checkpoint(name))

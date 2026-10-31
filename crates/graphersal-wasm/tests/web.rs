@@ -785,6 +785,25 @@ fn deeply_nested_list_functions_run_within_the_wasm_stack() {
     }
 }
 
+/// The Store menu's two calls in the browser build: the summary without the sizes and the
+/// compaction advice, then the details with them, as `storeInfo` answers them.
+#[wasm_bindgen_test]
+fn the_store_menu_loads_its_summary_then_its_details_in_the_browser() {
+    let mut p = modern();
+    let r = json(&p.execute("g.add_v(\"p\").next()", "{}").unwrap());
+    assert_eq!(r["ok"], true, "{r}");
+    let summary = json(&p.store_summary().unwrap());
+    assert_eq!(summary["detailsPending"], true, "{summary}");
+    assert_eq!(summary["storeBytes"], Value::Null, "{summary}");
+    let details = json(&p.store_details().unwrap());
+    let info = json(&p.store_info().unwrap());
+    assert_eq!(details["commitSeq"], 1, "{details}");
+    assert_eq!(details["storeBytes"], info["storeBytes"], "{details}");
+    assert_eq!(details["graphBytes"], info["graphBytes"], "{details}");
+    assert_eq!(details["compaction"], info["compaction"], "{details}");
+    assert_eq!(summary["snapshots"], info["snapshots"], "{summary}");
+}
+
 /// The System journal panel's call in the browser build: the loaded graph's store in memory
 /// keeps a journal; a page has the panel's keys, the cursor returns only what is new, the
 /// filters apply, and a bad request is an error.

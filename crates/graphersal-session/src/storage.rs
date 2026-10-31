@@ -917,6 +917,10 @@ pub trait SessionStore: Send + Sync {
     fn session_graph(&self) -> Arc<dyn SessionGraph>;
     /// [`Store::info`].
     fn info(&self) -> Result<StoreInfo, PersistError>;
+    /// [`Store::quick_info`] (default: [`Self::info`]).
+    fn quick_info(&self) -> Result<StoreInfo, PersistError> {
+        self.info()
+    }
     /// [`Store::location`].
     fn location(&self) -> String;
     /// [`Store::dir`].
@@ -1026,6 +1030,9 @@ where
     }
     fn info(&self) -> Result<StoreInfo, PersistError> {
         Store::<S>::info(self)
+    }
+    fn quick_info(&self) -> Result<StoreInfo, PersistError> {
+        Store::<S>::quick_info(self)
     }
     fn location(&self) -> String {
         Store::<S>::location(self)

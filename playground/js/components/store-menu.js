@@ -31,6 +31,7 @@ import {
   EXPLAIN, actionsFor, commitTarget, markTarget, parseCommit, parseTime, atticRows, viewBanner,
   storeWhere, databaseRows, backupBanner, compactionModel, actionDisabled, storeTask, taskButton,
   waitTitle, storeButtonText, modelRows, modelsNote, offersWithoutModels, snapshotFileName,
+  withStoreDetails, pendingText,
 } from '../store-model.js';
 import { recentHistory } from '../store-calendar.js';
 import { formatBytes, formatCount } from '../statistics.js';
@@ -52,16 +53,31 @@ export const StoreMenu = {
     const calendar = ref(null);
 
     const refreshing = ref(false);
+    // Two calls: the summary shows at once (no graph walk, no history read), the sizes and the
+    // compaction advice follow (`withStoreDetails`); an engine without them answers everything
+    // in one `storeInfo()`. A details answer of an older refresh is dropped.
+    let refreshes = 0;
     async function refresh() {
       if (!state.engine || !state.engine.storeInfo || refreshing.value) return;
       refreshing.value = true;
+      const engine = state.engine;
+      const split = !!(engine.storeSummary && engine.storeDetails);
+      const own = ++refreshes;
       try {
-        info.value = await state.engine.storeInfo();
+        info.value = split ? await engine.storeSummary() : await engine.storeInfo();
         error.value = '';
       } catch (err) {
         error.value = err && err.message ? err.message : String(err);
       } finally {
         refreshing.value = false;
+      }
+      if (split && info.value && info.value.detailsPending) {
+        try {
+          const details = await engine.storeDetails();
+          if (own === refreshes) info.value = withStoreDetails(info.value, details);
+        } catch (err) {
+          if (own === refreshes) error.value = err && err.message ? err.message : String(err);
+        }
       }
     }
 
@@ -231,7 +247,7 @@ export const StoreMenu = {
       memory, calendar, recent, openCalendar, actionDisabled,
       actions: computed(() => actionsFor(memory.value, !!(info.value && info.value.backup))),
       backupBanner,
-      bytesText: formatBytes,
+      bytesText: formatBytes, pendingText,
       snapshotUrl: (commit, withModels = true) => (state.engine.snapshotUrl ? state.engine.snapshotUrl(commit, withModels) : null),
       downloadSnapshot: (commit, withModels = true) => downloadStoredSnapshot(commit, withModels),
       models, noDefaultNote, withoutModels, snapshotFileName,
@@ -252,8 +268,8 @@ export const StoreMenu = {
     <template v-if="info">
       <div class="menu-item store-block">
         <div>{{ info.backup ? 'Backup at commit' : 'Live graph at commit' }} <b>{{ info.commitSeq }}</b> · last commit {{ info.lastCommitText }}</div>
-        <div v-if="memory"><small>store {{ info.storeBytesText }} in memory · graph {{ info.graphBytesText || '?' }} · {{ info.snapshots.length }} snapshot(s), WAL {{ bytesText(info.walBytes) }}</small></div>
-        <div v-else><small>WAL: {{ info.walSegments }} segment(s), {{ bytesText(info.walBytes) }} · store {{ info.storeBytesText }} on disk · graph {{ info.graphId }}</small></div>
+        <div v-if="memory"><small>store {{ pendingText(info, info.storeBytesText) }} in memory · graph {{ pendingText(info, info.graphBytesText) }} · {{ info.snapshots.length }} snapshot(s), WAL {{ bytesText(info.walBytes) }}</small></div>
+        <div v-else><small>WAL: {{ info.walSegments }} segment(s), {{ bytesText(info.walBytes) }} · store {{ pendingText(info, info.storeBytesText) }} on disk · graph {{ info.graphId }}</small></div>
         <div v-if="info.definitions !== undefined"><small>catalog: {{ catalogCountsText(info.definitionsByKind, info.definitions) }}</small></div>
         <div :class="{ 'store-volatile': memory }"><small>{{ storeWhere(info) }}</small></div>
         <div v-if="info.damagePolicy"><small title="Fixed when the store was created; forks, backups and repairs carry it">created {{ info.createdText }} · on damage: <b>{{ info.damagePolicy }}</b> ({{ info.damagePolicy === 'continue' ? 'keeps committing and reports it' : 'turns read-only' }}; fixed at creation)</small></div>
@@ -442,6 +458,11 @@ export const StoreMenu = {
                     v-bind="task('compact', state.storeView ? 'Go back to the live graph first' : compaction.title)"><store-task-label task="compact" label="Compact"></store-task-label></button>
           </div>
         </div>
+      </template>
+      <template v-else-if="info.detailsPending && !info.maintenance && !info.backup">
+        <div class="menu-sep"></div>
+        <div class="menu-title">Disk space</div>
+        <div class="menu-item store-block store-compaction" aria-busy="true"><small>Weighing the store…</small></div>
       </template>
       <template v-if="canBackup && !memory && !info.backup && !info.maintenance">
         <div class="menu-sep"></div>

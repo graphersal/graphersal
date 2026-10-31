@@ -36,6 +36,16 @@ pub(super) fn route(
             None => value(json!({ "store": null })),
             Some(_) => value(json!({ "store": session_call(context, |s| s.store_info())? })),
         },
+        // The Store menu's two calls: the summary at once (no history read, no graph walk),
+        // then the sizes and the compaction advice.
+        (Method::Get, "store/summary") => match &context.store {
+            None => value(json!({ "store": null })),
+            Some(_) => value(json!({ "store": session_call(context, |s| s.store_summary())? })),
+        },
+        (Method::Get, "store/details") => {
+            own_store(context)?;
+            value(json!({ "details": session_call(context, |s| s.store_details())? }))
+        }
         (Method::Post, "store/checkpoint") => {
             own_store(context)?;
             let name = body_text(&json_body(request)?, "name");
@@ -199,6 +209,8 @@ pub(super) fn route(
         (
             _,
             "store"
+            | "store/summary"
+            | "store/details"
             | "store/checkpoint"
             | "store/mark"
             | "store/snapshot"

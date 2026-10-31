@@ -915,7 +915,8 @@ pub struct BlobUsage {
     /// Their total length in bytes.
     pub bytes: u64,
     /// Blob files no retained history references (removed by the next prune); `0` when the
-    /// referenced set could not be read.
+    /// referenced set could not be read, and in [`Store::quick_info`](super::Store::quick_info)
+    /// (not counted).
     pub unreferenced: u64,
 }
 
@@ -1012,7 +1013,11 @@ fn referenced_from(
 /// The blob files a prune up to `kept_from` would remove (count, bytes): those the history
 /// from `kept_from` on does not reference (estimated without pending writes; `(0, 0)` when the
 /// referenced set does not read). Reads manifests and the ledger only when blobs exist.
-pub(crate) fn estimate_unreferenced(root: &DirPath, kept_from: u64) -> (u64, u64) {
+pub(crate) fn estimate_unreferenced(
+    root: &DirPath,
+    kept_from: u64,
+    attic: Option<&AtticBlobs>,
+) -> (u64, u64) {
     let Ok(listing) = list_blobs(root) else {
         return (0, 0);
     };
@@ -1022,14 +1027,113 @@ pub(crate) fn estimate_unreferenced(root: &DirPath, kept_from: u64) -> (u64, u64
     let Ok(file) = files::read_graph_file(root) else {
         return (0, 0);
     };
-    let Ok(referenced) = referenced_from(root, &file.file.chain(), false, kept_from) else {
+    let Ok(unreferenced) =
+        unreferenced_files(root, &file.file.chain(), kept_from, &listing.blobs, attic)
+    else {
         return (0, 0);
     };
-    listing
-        .blobs
+    unreferenced
         .iter()
-        .filter(|b| !referenced.contains(&b.key))
         .fold((0, 0), |(count, bytes), b| (count + 1, bytes + b.len))
+}
+
+/// The files of `blobs` that the history from `kept_from` on does not reference: the same
+/// answer as filtering by [`referenced_from`], but the sources are read cheapest first (the
+/// snapshots' blob tables, then the ledger, then the attic entries' own WAL, entry by entry)
+/// and reading stops as soon as every file is found referenced. The common case (every blob
+/// in use by the current state) reads no WAL at all; an open store remembers what each attic
+/// entry's WAL references (`attic`), so a blob only an attic entry or nothing references costs
+/// one read of that WAL per process, not one per call: the Store menu's info and the
+/// compaction advice stay independent of the history's length. Fails like [`referenced_from`].
+fn unreferenced_files<'a>(
+    root: &DirPath,
+    chain: &[(u128, u64)],
+    kept_from: u64,
+    blobs: &'a [BlobFile],
+    attic: Option<&AtticBlobs>,
+) -> Result<Vec<&'a BlobFile>, PersistError> {
+    let mut left: Vec<&BlobFile> = blobs.iter().collect();
+    if left.is_empty() {
+        return Ok(left);
+    }
+    let mut found = Referenced::default();
+    let snapshots: Vec<DirPath> = files::list_snapshots(root)?
+        .into_iter()
+        .filter(|(seq, _)| *seq >= kept_from)
+        .map(|(_, path)| path)
+        .collect();
+    add_tables(&mut found, &snapshots)?;
+    add_tables(&mut found, &super::rollback::attic_snapshot_dirs(root)?)?;
+    left.retain(|b| !found.contains(&b.key));
+    if left.is_empty() {
+        return Ok(left);
+    }
+    let frames = match read_ledger(root)? {
+        Some(frames) => frames,
+        None => scan_frames(&files::list_wal(root)?),
+    };
+    for frame in frames
+        .iter()
+        .filter(|f| f.on_chain(chain) && (kept_from == 0 || f.commit_seq > kept_from))
+    {
+        found.add(&frame.blob);
+    }
+    left.retain(|b| !found.contains(&b.key));
+    for entry in super::rollback::attic_list(root)? {
+        if left.is_empty() {
+            break;
+        }
+        let (_, segments) = super::rollback::attic_segments(root, &entry.id)?;
+        for blob in AtticBlobs::of_entry(attic, &entry.id, &segments) {
+            found.add(&blob);
+        }
+        left.retain(|b| !found.contains(&b.key));
+    }
+    Ok(left)
+}
+
+/// What the WAL of each attic entry references, remembered by an open store (`Shared`): an
+/// entry's WAL never changes while it is in the attic (a restore moves it out, a removal
+/// deletes it), and the remembered blobs are used only while the entry's segments have the
+/// same names and lengths.
+#[derive(Default)]
+pub(crate) struct AtticBlobs {
+    /// Entry id -> (its segments' first commits and lengths, the blobs their frames reference).
+    entries: Mutex<BTreeMap<String, (Vec<(u64, u64)>, Vec<BlobRef>)>>,
+}
+
+impl AtticBlobs {
+    /// The blobs the frames of attic entry `id` (WAL `segments`) reference: remembered in
+    /// `cache` when given, else read.
+    fn of_entry(cache: Option<&Self>, id: &str, segments: &[(u64, DirPath)]) -> Vec<BlobRef> {
+        let read = || -> Vec<BlobRef> {
+            scan_frames(segments)
+                .into_iter()
+                .map(|frame| frame.blob)
+                .collect()
+        };
+        let Some(cache) = cache else {
+            return read();
+        };
+        let Some(shape) = segments
+            .iter()
+            .map(|(first, path)| path.len().ok().map(|len| (*first, len)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return read();
+        };
+        if let Ok(entries) = cache.entries.lock()
+            && let Some((known, blobs)) = entries.get(id)
+            && *known == shape
+        {
+            return blobs.clone();
+        }
+        let blobs = read();
+        if let Ok(mut entries) = cache.entries.lock() {
+            entries.insert(id.to_string(), (shape, blobs.clone()));
+        }
+        blobs
+    }
 }
 
 #[cfg(feature = "persist-zip")]
@@ -1310,7 +1414,21 @@ pub(crate) fn collect(
 
 /// The blob usage of the store at `root` (names and lengths; the unreferenced count from the
 /// referenced set when it reads).
-pub(crate) fn usage(root: &DirPath, chain: &[(u128, u64)]) -> Result<BlobUsage, PersistError> {
+/// [`usage`] without the unreferenced count: the listing only (no table, ledger or WAL read).
+pub(crate) fn listing_usage(root: &DirPath) -> Result<BlobUsage, PersistError> {
+    let listing = list_blobs(root).map_err(|err| PersistError::io("listing the blobs", err))?;
+    Ok(BlobUsage {
+        count: listing.blobs.len() as u64,
+        bytes: listing.blobs.iter().map(|b| b.len).sum(),
+        unreferenced: 0,
+    })
+}
+
+pub(crate) fn usage(
+    root: &DirPath,
+    chain: &[(u128, u64)],
+    attic: Option<&AtticBlobs>,
+) -> Result<BlobUsage, PersistError> {
     let listing = list_blobs(root).map_err(|err| PersistError::io("listing the blobs", err))?;
     let mut usage = BlobUsage {
         count: listing.blobs.len() as u64,
@@ -1318,13 +1436,9 @@ pub(crate) fn usage(root: &DirPath, chain: &[(u128, u64)]) -> Result<BlobUsage, 
         unreferenced: 0,
     };
     if usage.count > 0
-        && let Ok(referenced) = referenced(root, chain, false)
+        && let Ok(unreferenced) = unreferenced_files(root, chain, 0, &listing.blobs, attic)
     {
-        usage.unreferenced = listing
-            .blobs
-            .iter()
-            .filter(|b| !referenced.contains(&b.key))
-            .count() as u64;
+        usage.unreferenced = unreferenced.len() as u64;
     }
     Ok(usage)
 }
