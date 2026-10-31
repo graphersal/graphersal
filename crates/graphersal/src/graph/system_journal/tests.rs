@@ -262,40 +262,41 @@ impl tracing::Subscriber for Capture {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+/// Every written record goes to `tracing` at its level, a collapsed one never.
+///
+/// Deterministic under parallel tests: what `mirror` hands to `tracing` is read from its
+/// thread-local log (exact records and levels), and the subscriber check rebuilds `tracing`'s
+/// process-wide callsite interest after installing the thread's subscriber (another thread may
+/// have registered the mirror's callsite while only the global no-op subscriber existed, which
+/// caches "never"), retrying a bounded number of times for a registration racing that rebuild.
 #[test]
 fn every_written_record_is_mirrored_to_tracing_at_its_level() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    MIRRORED.with(|mirrored| mirrored.borrow_mut().clear());
     let journal = SystemJournal::in_memory(CommitClock::new());
-    tracing::subscriber::with_default(Capture(seen.clone()), || {
-        journal.emit(
-            &catalogue::CHECKPOINT_FAILED,
-            Event::new("failed")
-                .field("error", "x")
-                .field("automatic", false),
-        );
-        journal.emit(&catalogue::STORE_OPENED, Event::new("opened"));
-        // Collapsed: not mirrored.
-        journal.emit(
-            &catalogue::CHECKPOINT_FAILED,
-            Event::new("failed")
-                .field("error", "x")
-                .field("automatic", false),
-        );
-    });
-    let seen: Vec<_> = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(target, _)| target == "graphersal::journal")
-        .map(|(_, level)| *level)
-        .collect();
-    // The error record is seen; the callsite interest of the `info` event may be cached by
-    // another thread's dispatcher (tracing's cache is process-wide), so its mapping is checked
-    // directly below.
-    assert_eq!(seen.first(), Some(&tracing::Level::ERROR));
-    assert!(
-        seen.len() <= 2,
-        "a collapsed record is never mirrored: {seen:?}"
+    journal.emit(
+        &catalogue::CHECKPOINT_FAILED,
+        Event::new("failed")
+            .field("error", "x")
+            .field("automatic", false),
+    );
+    journal.emit(&catalogue::STORE_OPENED, Event::new("opened"));
+    // Collapsed: not mirrored.
+    journal.emit(
+        &catalogue::CHECKPOINT_FAILED,
+        Event::new("failed")
+            .field("error", "x")
+            .field("automatic", false),
+    );
+    let written = journal.query(&JournalQuery::new()).unwrap().records;
+    assert_eq!(written.len(), 2, "the repeat is collapsed: {written:?}");
+    let mirrored = MIRRORED.with(|mirrored| mirrored.borrow().clone());
+    assert_eq!(
+        mirrored,
+        [
+            (written[0].seq, tracing::Level::ERROR),
+            (written[1].seq, tracing::Level::INFO)
+        ],
+        "each written record once, at its level; the collapsed one never"
     );
     assert_eq!(
         Level::ALL.map(tracing_level),
@@ -306,6 +307,37 @@ fn every_written_record_is_mirrored_to_tracing_at_its_level() {
             tracing::Level::INFO
         ]
     );
+
+    // And `tracing` really receives them: a thread-local subscriber sees the error record.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(seen.clone()), || {
+        for _ in 0..20 {
+            tracing::callsite::rebuild_interest_cache();
+            let journal = SystemJournal::in_memory(CommitClock::new());
+            journal.emit(
+                &catalogue::CHECKPOINT_FAILED,
+                Event::new("failed")
+                    .field("error", "x")
+                    .field("automatic", false),
+            );
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(target, _)| target == "graphersal::journal")
+            {
+                break;
+            }
+        }
+    });
+    let seen: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(target, _)| target == "graphersal::journal")
+        .map(|(_, level)| *level)
+        .collect();
+    assert_eq!(seen.first(), Some(&tracing::Level::ERROR), "{seen:?}");
 }
 
 #[test]

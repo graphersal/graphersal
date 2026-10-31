@@ -1481,6 +1481,8 @@ pub(crate) fn mirror(record: &JournalRecord) {
         };
     }
     let level = tracing_level(record.level);
+    #[cfg(test)]
+    MIRRORED.with(|mirrored| mirrored.borrow_mut().push((record.seq, level)));
     if level == tracing::Level::ERROR {
         mirror_at!(error);
     } else if level == tracing::Level::WARN {
@@ -1488,6 +1490,14 @@ pub(crate) fn mirror(record: &JournalRecord) {
     } else {
         mirror_at!(info);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What [`mirror`] handed to `tracing` on this thread, `(seq, level)` in order: the unit
+    /// tests check the mirror here, independent of `tracing`'s process-wide callsite cache.
+    static MIRRORED: std::cell::RefCell<Vec<(u64, tracing::Level)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
