@@ -580,3 +580,76 @@ fn embed_property_was_removed_and_the_error_names_the_vector_rule() {
     // Nothing was written.
     assert_eq!(stored_elements(&graph).len(), 0);
 }
+
+#[test]
+fn the_scan_lists_saved_queries_calling_a_removed_function_with_the_rule_to_declare() {
+    use graphersal::catalog::{Definition, QueryDefinition};
+    use graphersal::script::saved_queries_using_removed;
+
+    let definitions = [
+        Definition::query(
+            "fill",
+            QueryDefinition::new(
+                r#"fn fill() { g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "minishlab/potion-base-8M"}) }"#,
+            ),
+        ),
+        Definition::query(
+            "edges",
+            QueryDefinition::new(
+                r#"fn edges() { g.embedProperty(#{label: "cites", element: "edge", from: "note", to: "note_emb"}) }"#,
+            ),
+        ),
+        Definition::query(
+            "computed",
+            QueryDefinition::new(
+                r#"fn computed(l) { g.embed_property(#{label: l, from: "text", to: "emb"}) }"#,
+            ),
+        ),
+        Definition::query(
+            "fine",
+            QueryDefinition::new(r#"fn fine() { g.v().has_label("doc").count() }"#),
+        ),
+    ];
+    let uses = saved_queries_using_removed(&definitions);
+    let found: Vec<(&str, &str, &str)> = uses
+        .iter()
+        .map(|u| (u.query.as_str(), u.function.as_str(), u.removed_in.as_str()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("fill", "embed_property", "0.5.0"),
+            ("edges", "embed_property", "0.5.0"),
+            ("computed", "embed_property", "0.5.0"),
+        ]
+    );
+    assert_eq!(
+        uses[0].schema_patch.as_deref(),
+        Some(
+            r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {"emb": {"type": "array", "format": "vector", "embedder": "minishlab/potion-base-8M", "from": "text"}}}}}}"#
+        )
+    );
+    assert_eq!(
+        uses[1].schema_patch.as_deref(),
+        Some(
+            r#"{"edges": {"cites": {"schema": {"type": "object", "properties": {"note_emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "note"}}}}}}"#
+        )
+    );
+    assert_eq!(uses[2].schema_patch, None);
+    assert!(uses[2].replacement.contains("vector rule"), "{uses:?}");
+    let note = uses[0].note();
+    assert!(
+        note.starts_with(r#"saved query "fill" calls embed_property (removed in 0.5.0)"#),
+        "{note}"
+    );
+
+    // A patch of the scan is a valid schema patch that declares the rule.
+    let graph = docs(2);
+    let patch = r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {"emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}}"#;
+    graph
+        .write()
+        .traversal_mut()
+        .patch_schema(&graphersal::schema::SchemaPatch::from_json(patch).unwrap())
+        .unwrap();
+    assert_eq!(stored_elements(&graph).len(), 2);
+}

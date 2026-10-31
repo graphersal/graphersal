@@ -566,9 +566,9 @@ impl EmbedError {
                  embedder model the schema declares for the property (its \"embedder\"). \
                  Or pass a vector: g.v().nearest(\"emb\", embed(\"graph indexes\"), 5). The \
                  vector rule declares it and fills the property from its text at every write: \
-                 g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: \
-                 \"array\", format: \"vector\", embedder: \"hash-ngram/1\", from: \
-                 \"text\"}}}}}})."
+                 g.patch_schema(#{vertices: #{doc: #{schema: #{type: \"object\", properties: \
+                 #{emb: #{type: \"array\", format: \"vector\", embedder: \"hash-ngram/1\", \
+                 from: \"text\"}}}}}})."
                 .to_string(),
             EmbedError::ModelConflict { .. } => "The labels the query meets store vectors of \
                  different models in this property. Search one label at a time: \

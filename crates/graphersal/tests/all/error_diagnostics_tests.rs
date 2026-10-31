@@ -12531,3 +12531,65 @@ fn vector_rule_errors_carry_their_help() {
         "{report}"
     );
 }
+
+/// A call of a DSL function a release removed (here `embed_property`, removed in 0.5.0) fails
+/// with a help naming its replacement, the vector rule, with a runnable example: in a script and
+/// in a saved query stored by an earlier release (a call never rewrites the query).
+#[cfg(feature = "script")]
+#[test]
+fn a_removed_function_names_its_replacement_also_in_a_saved_query() {
+    use crate::script_host::eval_value;
+    use graphersal::catalog::QueryDefinition;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let err = eval_value(
+        graph.clone(),
+        r#"g.embed_property(#{label: "person", from: "name", to: "emb"})"#,
+    )
+    .expect_err("removed")
+    .to_string();
+    assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
+    assert!(
+        err.contains(r#"embedder: "hash-ngram/1", from: "text""#),
+        "{err}"
+    );
+
+    // The help's example runs: the rule fills the vector of a doc from its text.
+    let docs = std::sync::Arc::new(GraphSource::empty());
+    eval_value(
+        docs.clone(),
+        r#"g.set_schema(#{mode: "open"}); g.add_v("doc").property("text", "graph indexes").iterate()"#,
+    )
+    .unwrap();
+    eval_value(
+        docs.clone(),
+        r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})"#,
+    )
+    .unwrap();
+    let filled = eval_value(docs, r#"g.v().has_label("doc").has("emb").count().next()"#).unwrap();
+    assert_eq!(filled.as_int().unwrap(), 1);
+
+    // A saved query of an earlier release calling it, stored through the Rust API (as a 0.4.0
+    // catalog holds it): a call fails with the same help.
+    let body = r#"fn fill() { g.embed_property(#{label: "person", from: "name", to: "emb"}) }"#;
+    graph
+        .write()
+        .traversal_mut()
+        .define_query("fill", QueryDefinition::new(body))
+        .unwrap();
+    let err = eval_value(graph.clone(), r#"g.query("fill")"#)
+        .expect_err("removed")
+        .to_string();
+    assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
+    assert!(err.contains("Vector Rules"), "{err}");
+    // Nothing rewrote the query.
+    let stored = graph
+        .read()
+        .traversal()
+        .list_definitions(None)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name() == "fill")
+        .unwrap();
+    assert_eq!(stored.as_query().unwrap().source(), body);
+}
