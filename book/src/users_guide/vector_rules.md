@@ -11,13 +11,16 @@ or neither does.
         "metric": "cosine", "embedder": "hash-ngram/1", "from": "text"}
 ```
 
-```rhai,graph=empty,script
-g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
-    text: #{type: "string"},
-    emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}});
-g.add_v("doc").property("text", "graph databases keep vertices and edges").next();
-g.v().has_label("doc").values("emb").next().dimension   // 256
+The preview says what applying the rule fills (on the `modern` sample: the names of the four
+people), and applying it embeds every name:
+
+```rhai,graph=modern
+g.validate_schema(#{vertices: #{person: #{schema: #{type: "object", properties: #{name: #{type: "string"}, emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "name"}}}}}})["fill"][0]["elements"]   // 4
+g.patch_schema(#{vertices: #{person: #{schema: #{type: "object", properties: #{name: #{type: "string"}, emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "name"}}}}}})
 ```
+
+The vectors are written when the writing unit ends: run a read in the next query. (The
+playground and a script run as one unit see them in their next run.)
 
 ## The keyword
 
@@ -54,6 +57,8 @@ a live import), once per element, however often the unit wrote it:
 
 Inside the unit a read of the vector after a write of `from` sees the old vector: the new one
 appears when the outermost unit ends (`Execution::changes()` of an inner unit does not show it).
+A whole script run as one unit (the playground, `eval_value_atomic`) therefore reads the new
+vectors in its NEXT run.
 
 **A source without text removes the vector**, in the same unit: `from` removed, set to `null`,
 set to `""`, set to a value that is not a string, or a text in which the model finds nothing to

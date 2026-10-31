@@ -23,6 +23,7 @@ __all__ = [
     "CommitRejectedError",
     "EmbedPropertyError",
     "ReturnedClosureError",
+    "VectorFillWarning",
     "set_memory_limit",
     "memory_limit",
 ]

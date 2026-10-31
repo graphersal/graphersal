@@ -29,7 +29,10 @@ RULE = {
 
 def ruled():
     graph = graphersal.Graph()
-    graph.set_schema(RULE)
+    with warnings.catch_warnings():
+        # An empty graph fills nothing: no warning.
+        warnings.simplefilter("error", graphersal.VectorFillWarning)
+        graph.set_schema(RULE)
     return graph
 
 

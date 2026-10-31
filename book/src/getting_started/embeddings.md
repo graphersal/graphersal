@@ -27,11 +27,14 @@ embeds it into the vector in the same unit, a text removed removes the vector, a
 rule fills every existing element (the whole database is locked while that runs: the schema
 preview says how long first).
 
-```rhai,graph=empty,script
+```rhai
+// one query: the rule
 g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
     text: #{type: "string"},
-    emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}});
-g.add_v("doc").property("text", "vector search in a graph").next();
+    emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})
+// the next query: a write of the text (its vector is written when the query's unit ends)
+g.add_v("doc").property("text", "vector search in a graph").next()
+// and later: a text query
 g.v().has_label("doc").nearest("emb", "graph search", 1).values("text").next()
 ```
 

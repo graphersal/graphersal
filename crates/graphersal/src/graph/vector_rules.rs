@@ -701,7 +701,8 @@ pub(crate) fn fills_value(fills: &[PlannedFill]) -> ElementProperty {
 
 /// The ONE warning text of a schema change that fills vectors (every front end shows this
 /// string: the playground dialog, the CLI note, the Python warning, the MCP refusal), or
-/// `None` when `fills` is empty.
+/// `None` when nothing is filled (no fill, or fills of labels without elements: an empty label
+/// locks nothing worth a warning).
 ///
 /// ```text
 /// Applying this schema fills vectors: 1,204,331 elements of doc.emb from doc.text with the
@@ -710,6 +711,10 @@ pub(crate) fn fills_value(fills: &[PlannedFill]) -> ElementProperty {
 /// Run it at a quiet time. If it fails, nothing is written.
 /// ```
 pub fn fill_warning(fills: &[PlannedFill]) -> Option<String> {
+    let fills: Vec<&PlannedFill> = fills
+        .iter()
+        .filter(|f| f.elements > 0 || f.removals > 0)
+        .collect();
     if fills.is_empty() {
         return None;
     }
