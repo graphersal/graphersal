@@ -286,6 +286,73 @@ fn apply_change_set_takes_to_as_given() {
     assert_eq!(emb(&replica, "1"), Some(embedded("graph databases")));
 }
 
+/// A change set applied inside an outer unit is exempt from the rules as a whole: its
+/// `SetSchema` adding a rule starts no first fill at the outer commit (the change set carries the
+/// vectors of its source); a schema change of the outer unit itself still fills.
+#[test]
+fn a_change_set_inside_a_unit_starts_no_fill_of_its_own() {
+    let mut source = TraversalGraph::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    source
+        .register_commit_hook(Box::new(Recorder(seen.clone())))
+        .unwrap();
+    source
+        .traversal_mut()
+        .set_schema(rule_schema("none"))
+        .unwrap();
+    let changes = seen.lock().unwrap().last().unwrap().clone();
+    assert!(
+        changes
+            .mutations()
+            .iter()
+            .any(|m| matches!(m, Mutation::SetSchema { .. }))
+    );
+
+    let mut replica = TraversalGraph::new();
+    add_doc(&mut replica, "1", "graph databases".into());
+    replica
+        .transaction(|g| -> Result<(), GraphError> {
+            add_doc(g, "2", "vector search".into());
+            g.apply_change_set(&changes)
+        })
+        .unwrap();
+    // The rule came with the change set: no fill of the existing data.
+    assert!(replica.traversal().get_schema().unwrap().is_some());
+    assert_eq!(emb(&replica, "1"), None);
+    // The outer unit's own insert happened before the rule existed in it; it is touched,
+    // and the rule in force at the end of the unit embeds it.
+    assert_eq!(emb(&replica, "2"), Some(embedded("vector search")));
+
+    // Also after a schema change of the outer unit itself (a rule-less schema first, then the
+    // change set's rule): only the outer unit's own changes are compared.
+    let mut mixed = TraversalGraph::new();
+    add_doc(&mut mixed, "1", "graph databases".into());
+    let plain = GraphSchema::from_json(
+        r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {"text": {"type": "string"}}}}}}"#,
+    )
+    .unwrap();
+    mixed
+        .transaction(|g| -> Result<(), TraverserError> {
+            g.traversal_mut().set_schema(plain).map_err(|e| *e)?;
+            g.apply_change_set(&changes)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(emb(&mixed, "1"), None);
+
+    // The same rule set by the outer unit itself fills every element.
+    let mut direct = TraversalGraph::new();
+    add_doc(&mut direct, "1", "graph databases".into());
+    direct
+        .transaction(|g| -> Result<(), TraverserError> {
+            g.traversal_mut()
+                .set_schema(rule_schema("none"))
+                .map_err(|e| *e)
+        })
+        .unwrap();
+    assert_eq!(emb(&direct, "1"), Some(embedded("graph databases")));
+}
+
 fn assert_removed_by(value: ElementProperty) {
     let mut graph = ruled();
     add_doc(&mut graph, "1", "graph databases".into());

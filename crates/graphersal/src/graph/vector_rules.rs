@@ -1202,38 +1202,57 @@ impl TraversalGraph {
         let Some(rules) = self.vector_rules.clone() else {
             return Ok(None);
         };
-        // 1. Full fills: rules added or changed since the unit started.
+        // 1. Full fills: rules added or changed by a schema change of the unit itself. Each
+        // `Schema` entry holds the schema before its change; the schema after it is the next
+        // entry's old one (or the current schema). A change written by an applied change set
+        // (an exempt range) is skipped: the change set carries its vectors.
         let mut full: Vec<(usize, FillReason)> = Vec::new();
         let exempt = self.undo.rules_exempt().to_vec();
         let in_exempt = |position: usize| exempt.iter().any(|(a, b)| (*a..*b).contains(&position));
-        let first_schema = self
+        let schemas: Vec<(usize, &GraphSchema)> = self
             .undo
             .entries()
             .iter()
             .enumerate()
-            .find(|(_, e)| matches!(e, UndoEntry::Schema(_)));
-        if let Some((position, UndoEntry::Schema(old))) = first_schema
-            && !in_exempt(position)
-        {
-            let old_rules = VectorRules::compile(old);
-            for (index, rule) in rules.all().iter().enumerate() {
-                let previous = old_rules
-                    .as_ref()
-                    .and_then(|o| o.all().iter().find(|p| p.same_target(rule)));
-                match previous {
-                    Some(previous) if previous.equivalent(rule) => {}
-                    Some(previous) => {
-                        let reason = if previous.from == rule.from
-                            && previous.model != rule.model
-                            && display_model(&previous.model) == display_model(&rule.model)
+            .filter_map(|(position, entry)| match entry {
+                UndoEntry::Schema(old) => Some((position, &**old)),
+                _ => None,
+            })
+            .collect();
+        if !schemas.is_empty() {
+            let current = self.schema.read().clone();
+            for (at, (position, before)) in schemas.iter().enumerate() {
+                if in_exempt(*position) {
+                    continue;
+                }
+                let after = schemas.get(at + 1).map_or(&current, |(_, next)| *next);
+                let (Some(after_rules), old_rules) =
+                    (VectorRules::compile(after), VectorRules::compile(before))
+                else {
+                    continue;
+                };
+                for rule in after_rules.all() {
+                    let previous = old_rules
+                        .as_ref()
+                        .and_then(|o| o.all().iter().find(|p| p.same_target(rule)));
+                    let reason = match previous {
+                        Some(previous) if previous.equivalent(rule) => continue,
+                        Some(previous)
+                            if previous.from == rule.from
+                                && previous.model != rule.model
+                                && display_model(&previous.model) == display_model(&rule.model) =>
                         {
                             FillReason::ModelReplaced
-                        } else {
-                            FillReason::RuleChanged
-                        };
+                        }
+                        Some(_) => FillReason::RuleChanged,
+                        None => FillReason::RuleAdded,
+                    };
+                    // Only a rule still in force at the end of the unit is filled.
+                    if let Some(index) = rules.all().iter().position(|r| r.equivalent(rule))
+                        && !full.iter().any(|(i, _)| *i == index)
+                    {
                         full.push((index, reason));
                     }
-                    None => full.push((index, FillReason::RuleAdded)),
                 }
             }
         }
