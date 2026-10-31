@@ -645,3 +645,7 @@ fn check_model(
     }
     Ok((rows, cols))
 }
+
+#[cfg(test)]
+#[path = "model2vec_tests.rs"]
+mod tests;

@@ -25,7 +25,6 @@ use graphersal::script::{
     try_render_value,
 };
 use graphersal::storage::{AnyGraph, ElementKind};
-use graphersal::vector::Embedders;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -107,10 +106,6 @@ pub struct SessionPresets {
     /// Budget of a whole run in milliseconds: the Rhai code between the traversals (a `loop
     /// {}`) is stopped once the run is older than this. `None`: no budget.
     pub script_timeout_ms: Option<u64>,
-    /// The embedders every run's `embed` step and `embed(text)` call (and `g.embedders()`
-    /// lists). The default holds only the built-in `hash-ngram/1`; a host that loads models
-    /// registers them here ([`Self::with_embedders`]).
-    pub embedders: Arc<Embedders>,
 }
 
 impl Default for SessionPresets {
@@ -119,7 +114,6 @@ impl Default for SessionPresets {
             limits: ScriptLimits::unlimited(),
             options: Vec::new(),
             script_timeout_ms: None,
-            embedders: Arc::new(Embedders::default()),
         }
     }
 }
@@ -139,12 +133,6 @@ impl SessionPresets {
     /// Adds a preset traversal option (`evaluationTimeout`, `traversal.max_traversers`, ...).
     pub fn with_option(mut self, key: impl Into<String>, value: ElementProperty) -> Self {
         self.options.push((key.into(), value));
-        self
-    }
-
-    /// Sets the embedders of every run (the default: only the built-in `hash-ngram/1`).
-    pub fn with_embedders(mut self, embedders: Arc<Embedders>) -> Self {
-        self.embedders = embedders;
         self
     }
 
@@ -339,7 +327,6 @@ impl Session {
             playground_authorizer(),
             &presets.option_slice(),
         );
-        graphersal::script::set_engine_embedders(&mut engine, presets.embedders.clone());
         // A script loop that runs no traversal is stopped here, on Stop or past the script
         // budget; traversals check the token and their own evaluationTimeout themselves.
         let run_cancel = Arc::new(Mutex::new(cancel.clone()));
@@ -672,26 +659,26 @@ impl Session {
     }
 
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
-    /// bytes, default}] }`, one entry per registered embedder that reports its size
-    /// ([`graphersal::vector::Embedder::memory_bytes`]: a loaded model; the built-in
-    /// `hash-ngram/1` and remote providers report none and are left out). A host adds its own
+    /// bytes, default}] }`, one entry per embedding model of the active store that is loaded
+    /// (its load size; the built-in `hash-ngram/1` holds none and is left out). A host adds its own
     /// members: `memory`, the whole process ([`crate::process::add_to_statistics`]; volatile,
     /// so `Session::statistics` itself stays deterministic), and the dev server's `aiChat`. Separate from `GraphStatistics`, which holds data
     /// counts only.
     pub fn process_memory(&self) -> Value {
-        let embedders = &self.presets.embedders;
-        let default = embedders.default_embedder().info().name.clone();
-        let models: Vec<Value> = embedders
-            .infos()
-            .filter_map(|info| {
-                let bytes = embedders.get(&info.name)?.memory_bytes()?;
-                Some(json!({
-                    "name": info.name,
-                    "model": info.model,
-                    "dimension": info.dimension,
-                    "bytes": bytes,
-                    "default": info.name == default,
-                }))
+        let models: Vec<Value> = self
+            .active_store()
+            .and_then(|store| store.models().ok())
+            .unwrap_or_default()
+            .iter()
+            .filter(|model| model.state == graphersal::persist::ModelState::Loaded)
+            .map(|model| {
+                json!({
+                    "name": model.repo,
+                    "model": model.identity,
+                    "dimension": model.dimension,
+                    "bytes": model.load_bytes,
+                    "default": model.default,
+                })
             })
             .collect();
         json!({ "models": models })
@@ -1002,8 +989,10 @@ impl Session {
         let mut scope_options = self.presets.option_slice();
         scope_options.extend(render_scope_options(&render));
         let any: Arc<dyn AnyGraph> = self.graph.clone();
+        // The served graph's embedding models are those of `embed(text)` too (the graph
+        // changes with loads, store opens and views: set on every run).
+        graphersal::script::set_engine_graph(&mut self.engine, any.clone());
         let mut scope = graph_scope_with_options(any, &scope_options, authorizer);
-        graphersal::script::set_scope_embedders(&mut scope, self.presets.embedders.clone());
         let hint = trailing_terminal(script);
         // Read before the run: a graph that cannot be read runs nothing.
         let before = self
@@ -3287,57 +3276,17 @@ mod tests {
         assert!(free.presets().options.is_empty());
     }
 
-    /// The process memory block lists the embedders that report a size and nothing else; the
-    /// graph statistics beside it are untouched.
+    /// The process memory block lists the loaded models of the active store and nothing else;
+    /// the graph statistics beside it are untouched. The default session has none.
     #[test]
     fn statistics_carry_the_process_memory_of_the_loaded_models() {
-        use graphersal::vector::{
-            EmbedContext, EmbedError, Embedder, EmbedderInfo, Vector, VectorElement,
-        };
-        struct Sized(EmbedderInfo);
-        impl Embedder for Sized {
-            fn info(&self) -> &EmbedderInfo {
-                &self.0
-            }
-            fn embed(
-                &self,
-                texts: &[&str],
-                _ctx: &EmbedContext<'_>,
-            ) -> Result<Vec<Vector>, EmbedError> {
-                texts
-                    .iter()
-                    .map(|_| {
-                        Vector::from_f32(vec![1.0]).map_err(|e| EmbedError::failed(e.to_string()))
-                    })
-                    .collect()
-            }
-            fn memory_bytes(&self) -> Option<u64> {
-                Some(1234)
-            }
-        }
-        let embedders = Embedders::builder()
-            .with(Arc::new(Sized(EmbedderInfo::new(
-                "acme/m",
-                1,
-                VectorElement::F32,
-            ))))
-            .unwrap()
-            .build();
-        let mut s =
-            Session::with_presets(SessionPresets::new().with_embedders(Arc::new(embedders)));
-        s.load_sample("modern").unwrap();
+        let mut s = modern();
         let stats = s.statistics().unwrap();
-        let models = stats["process"]["models"].as_array().unwrap();
-        assert_eq!(models.len(), 1, "{stats}");
-        assert_eq!(models[0]["name"], "acme/m");
-        assert_eq!(models[0]["bytes"], 1234);
-        assert_eq!(models[0]["default"], false);
+        assert_eq!(stats["process"]["models"], json!([]), "{stats}");
         assert_eq!(stats["statistics"]["vertex_count"], 6);
-        // The default session has only the built-in embedder, which reports no size.
-        assert_eq!(
-            modern().statistics().unwrap()["process"]["models"],
-            json!([])
-        );
+        // The built-in embedder runs, and is never listed.
+        assert_eq!(run(&mut s, r#"embed("x").dimension"#)["ok"], true);
+        assert_eq!(s.statistics().unwrap()["process"]["models"], json!([]));
     }
 
     /// `process.memory` is always present with a `source`; its figures are optional.
@@ -3400,26 +3349,22 @@ mod tests {
         }
     }
 
-    /// The host's embedders reach every run: the `embed` step (also inside the MCP read-only
-    /// authorizer), `embed(text)` and `g.embedders()`; the default session has `hash-ngram/1`.
+    /// The served graph's embedders reach every run: the `embed` step (also inside the MCP
+    /// read-only authorizer), `embed(text)` and `g.embedders()`; a graph without models has
+    /// `hash-ngram/1` only.
     #[test]
-    fn the_session_embedders_reach_every_run() {
-        let small = graphersal::vector::HashNgram::with_dimension("acme/small", 8).unwrap();
-        let embedders = Embedders::builder()
-            .with(Arc::new(small))
-            .unwrap()
-            .default_name("acme/small")
-            .unwrap()
-            .build();
-        let mut s =
-            Session::with_presets(SessionPresets::new().with_embedders(Arc::new(embedders)));
-        s.load_sample("modern").unwrap();
+    fn the_graph_embedders_reach_every_run() {
+        let mut s = modern();
         let shape = run(
             &mut s,
             r#"[g.v().embed("name").next().dimension, embed("x").dimension, g.embedders().len()]"#,
         );
         assert_eq!(shape["ok"], true, "{shape}");
-        assert_eq!(shape["execution"]["results"], json!([8, 8, 2]), "{shape}");
+        assert_eq!(
+            shape["execution"]["results"],
+            json!([256, 256, 1]),
+            "{shape}"
+        );
         let read_only: Value = serde_json::from_str(&s.execute_with_authorizer(
             r#"g.v().embed("name").next().dimension"#,
             &RunOptions::default(),
@@ -3427,8 +3372,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(read_only["ok"], true, "{read_only}");
-        let mut free = modern();
-        let builtin = run(&mut free, r#"g.embedders()[0].name"#);
+        let builtin = run(&mut s, r#"g.embedders()[0].name"#);
         assert!(
             builtin["display"]["raw"]
                 .as_str()

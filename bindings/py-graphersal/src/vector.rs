@@ -94,17 +94,6 @@ fn buffer_values(values: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f64>>> {
     view_floats(&view).map(Some)
 }
 
-/// A buffer object read as a matrix: its shape (`memoryview(values).shape`) and its float32 /
-/// float64 values flat in C order (a numpy array of shape `(N, D)` is N rows of D values).
-/// `Ok(None)` for an object that exposes no buffer; another format is an error.
-pub(crate) fn buffer_matrix(values: &Bound<'_, PyAny>) -> PyResult<Option<(Vec<usize>, Vec<f64>)>> {
-    let Some(view) = memoryview_of(values)? else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = view.getattr("shape")?.extract()?;
-    view_floats(&view).map(|values| Some((shape, values)))
-}
-
 /// A script parameter given as a float32/float64 buffer (a one-dimensional numpy array, an
 /// `array.array("f")`): the f32 vector of its values. `Ok(None)` for an object that is no such
 /// buffer (the caller reports the unsupported type); a 2-D array or a NaN is an error.

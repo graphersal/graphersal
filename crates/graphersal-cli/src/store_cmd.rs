@@ -72,6 +72,9 @@ USAGE:
     graphersal store models remove <DIR> <REPO>
                                      remove a model from the store's current state: one commit
                                      appended without loading the graph
+    graphersal store models default <DIR> <REPO>|--none
+                                     make the model of REPO the default (the one embed() uses
+                                     without a name), or none (hash-ngram/1): one commit
     graphersal store restore-blobs <DIR> --from <SOURCE> [--json]
                                      copy missing or damaged blobs (models) back from a backup
                                      (directory or .zip), a .gsnap or another store
@@ -324,7 +327,8 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "models" => (
-            "graphersal store models <DIR>\n    graphersal store models remove <DIR> <REPO>",
+            "graphersal store models <DIR>\n    graphersal store models remove <DIR> <REPO>\n    \
+             graphersal store models default <DIR> <REPO>|--none",
             "Lists the embedding models of the store's current state (catalog definitions, each\n\
              with its files as one blob; format spec 4.5): the identity a schema's `embedder`\n\
              records (model2vec/<repo>@<12 hex>), the size, the licence and where its text comes\n\
@@ -334,6 +338,9 @@ pub fn command_help(command: &str) -> Option<String> {
              current state: ONE commit appended to the WAL without loading the graph (format\n\
              spec 12.12; earlier positions keep it, a prune removes its blob later); refused\n\
              while the schema needs it, and with \"in use\" while a writer has the store open.\n\
+             `default` makes the model of REPO the default model (the one `embed` and\n\
+             `embed(text)` use without a name), `--none` makes none the default (then\n\
+             hash-ngram/1 is): one commit the same way.\n\
              A model enters a store by `graphersal embed-model download <REPO> --into <DIR>` or\n\
              `embed-model import <REPO|MODEL_DIR> --into <DIR>`.",
             false,
@@ -830,6 +837,7 @@ pub fn run(args: &[String]) -> i32 {
         "restore-blobs" => &["from", "json"],
         "backup" => &["zip", "full", "from-memory", "without-models"],
         "export" => &["commit", "without-models"],
+        "models" => &["none"],
         _ => &[],
     };
     if let Some((unknown, _)) = flags.iter().find(|(n, _)| !known.contains(&n.as_str())) {
@@ -1135,6 +1143,41 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "models" => {
+            if positional.first().map(String::as_str) == Some("default") {
+                let none = flag("none").is_some();
+                let repo = match (positional.len(), none) {
+                    (3, false) => Some(positional[2].as_str()),
+                    (2, true) => None,
+                    _ => {
+                        return usage(
+                            "`store models default` takes the store and the model's repository, \
+                             or the store and --none",
+                        );
+                    }
+                };
+                return match Store::set_default_model_dir(
+                    positional[1].as_str(),
+                    repo,
+                    ClosedCommitOptions::new().with_principal("cli"),
+                ) {
+                    Ok(report) => {
+                        match (&report.model, repo) {
+                            (Some(model), Some(_)) => {
+                                outln!("The default model is now {}.", model_line(model))
+                            }
+                            _ => outln!(
+                                "No model is the default now: embed() without a name uses \
+                                 hash-ngram/1."
+                            ),
+                        }
+                        EXIT_OK
+                    }
+                    Err(err) => fail(err),
+                };
+            }
+            if flag("none").is_some() {
+                return usage("--none belongs to `store models default`");
+            }
             if positional.first().map(String::as_str) == Some("remove") {
                 if positional.len() != 3 {
                     return usage(
@@ -2051,7 +2094,7 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
     for missing in &report.models_missing {
         errln!(
             "warning: the schema needs the model {} ({}), which the store does not keep (0.4.0 \
-             served it through --embedder); the store does not open until it is imported: {}",
+             served it through a command-line embedder); the store does not open until it is imported: {}",
             missing.identity(),
             missing.needed_by().join(", "),
             missing.commands(target).join(" then ")

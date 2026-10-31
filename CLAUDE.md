@@ -44,7 +44,7 @@ Nested files under `crates/graphersal/src/` are kept out of the published crate 
 - `serde`: `ChangeSet` serialization, `Serialize`/`Deserialize` of `GraphSchema` (the schema format itself, `from_json`/`to_json`, needs no feature) and the `json` visualizer. It is not a graph file format.
 - `persist`: the native lossless binary format, journal, recovery and the Store (`lz4_flex`, `crc32c`); `persist-zstd` adds zstd chunks, `persist-zip` ZIP backups. All build for wasm32 (`src/persist/CLAUDE.md`).
 - `alloc-tracking`: exact per-step memory figures for `.profile_with(ProfileType::Memory)` via `alloc_tracking::TrackingAllocator`, which the *binary* installs as its `#[global_allocator]`. Off for `graphersal` itself, but `graphersal-cli`, `graphersal-wasm` (wasm32 only) and `py-graphersal` build with it ON and install it: a small constant per-allocation cost (thread-local counters plus one relaxed global atomic, `alloc_tracking::global_live_bytes`, which the memory budget reads). Without it the `Mem` column is `MemorySource::Estimated`. A bare `.profile()` never collects memory data.
-- `model2vec`: the local-directory Model2Vec embedder, native only, never for wasm32 (`src/value/CLAUDE.md`).
+- `model2vec`: the engine can load the Model2Vec embedding models kept in the database (a Store, a `.gsnap`); no public item; native only, never for wasm32 (`src/value/CLAUDE.md`). Without it a store keeps and copies its models but cannot run them.
 - `gql`: the ISO GQL read query language (hand-written parser, lowered into the ordinary pipeline), no dependencies, independent of `script`, builds for wasm32 (`src/gql/CLAUDE.md`).
 
 The acceptance feature set is `script,io,display,serde,persist,gql` (the surface snapshot is taken with it; without `persist` the snapshot functions are filtered out of the comparison).
@@ -113,7 +113,7 @@ for f in "--no-default-features" "--no-default-features --features script" \
          "--no-default-features --features script,io,display,serde,persist,gql"; do
   cargo check --package graphersal --target wasm32-unknown-unknown ${=f} || break; done
 ```
-Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown); do not add `std::thread`/`std::fs` use outside the `io` feature (on wasm32 `std::fs` returns errors; it must never panic); the exceptions are the parallel chunk decode of `persist` (`std::thread::scope`), `persist::FsDir` / `persist::SingleFileDir` (`std::fs`, `fd-lock`) and `vector::Model2Vec` (`std::fs`, feature `model2vec`), all `cfg(not(target_arch = "wasm32"))`; the Store itself never touches `std::fs` (it goes through `StoreDir`).
+Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown); do not add `std::thread`/`std::fs` use outside the `io` feature (on wasm32 `std::fs` returns errors; it must never panic); the exceptions are the parallel chunk decode of `persist` (`std::thread::scope`), `persist::FsDir` / `persist::SingleFileDir` (`std::fs`, `fd-lock`), `persist::ModelCache` and `persist::read_snapshot_file` (`std::fs`) and the crate-internal Model2Vec directory loader (`std::fs`, feature `model2vec`), all `cfg(not(target_arch = "wasm32"))`; the Store itself never touches `std::fs` (it goes through `StoreDir`).
 
 The playground engine and its tests:
 ```bash

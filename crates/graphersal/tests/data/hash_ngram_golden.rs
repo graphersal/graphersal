@@ -1,7 +1,7 @@
 // The golden vectors of `hash-ngram/1`: each text with the FNV-1a 64 hash of its 256 f32
 // components' bits (little endian, in index order). `hash-ngram/1` is frozen: these values never
 // change (a change of the algorithm is a new name, `hash-ngram/2`). Shared by
-// `crates/graphersal/tests/all/embed_tests.rs` (native) and
+// the unit tests of `crates/graphersal/src/value/vector/embed/hash_ngram.rs` (native) and
 // `crates/graphersal-wasm/tests/embed_parity.rs` (wasm32), so both targets give the same bits.
 // Included with `include!`, not a module.
 

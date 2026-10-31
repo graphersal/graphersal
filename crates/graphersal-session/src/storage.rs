@@ -1102,10 +1102,12 @@ where
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError> {
         let recovered = Store::<S>::read_only_at(self, target)?;
         let commit_seq = GraphStorage::last_commit_seq(&recovered.graph)?;
+        let committed_at = recovered.report.committed_at;
         Ok(StoreView {
-            graph: Arc::new(Graph::new_persistent(recovered.graph)),
+            // The view serves the embedding models of its position.
+            graph: Arc::new(recovered.into_graph()),
             commit_seq,
-            committed_at: recovered.report.committed_at,
+            committed_at,
         })
     }
     fn fork(

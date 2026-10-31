@@ -1,6 +1,7 @@
-"""Embedding models kept in a `graphersal.Store` (format spec 4.5): listed with their licences,
-exported with or without them, loaded at open for the models the schema names; an explicit
-embedder wins; a model the schema names but nobody provides is a warning."""
+"""Embedding models kept in a `graphersal.Store` (format spec 4.5): imported from the download
+cache or a directory, listed with their licences, exported with or without them, loaded at open
+for the models the schema names, served by a `.gsnap` loaded without a store; a model the schema
+names that the store lacks refuses the open. 0.5.0 removed every external embedder."""
 
 import hashlib
 import json
@@ -10,7 +11,6 @@ import warnings
 import pytest
 
 import graphersal
-from graphersal import Model2Vec
 
 VOCAB = ["[UNK]", "graph", "vector", "model"]
 
@@ -79,20 +79,11 @@ def test_the_models_of_a_store_are_listed_exported_and_loaded_at_open(tmp_path):
         assert identity in found
 
 
-def test_an_explicit_embedder_wins_and_a_missing_model_refuses_the_open(tmp_path):
+def test_a_missing_model_refuses_the_open(tmp_path):
     path = tmp_path / "data"
     with graphersal.Store.create(str(path)) as store:
         identity = put_model(store, tmp_path)
         store.graph.execute(schema_naming(identity))
-    own_dir = tmp_path / "own"
-    own_dir.mkdir()
-    for name, data in model_files().items():
-        (own_dir / name).write_bytes(data)
-    own = Model2Vec("own", str(own_dir), model="acme/tiny")
-    assert own.model == identity
-    with graphersal.Store.open(str(path), embedders=[own]) as store:
-        names = store.graph.query(f'g.embedders().filter(|e| e.model == "{identity}").map(|e| e.name)')
-        assert names == ["own"]
     # Without the model's blob: the store does not open, the error names the command.
     import shutil
 
@@ -165,3 +156,87 @@ def test_upgrade_lists_saved_queries_calling_a_removed_function(tmp_path):
     assert fill["schema_patch"] in fill["note"]
     assert removed[1]["schema_patch"] is None
     assert "vector rule" in removed[1]["replacement"]
+
+
+def test_import_model_from_the_cache_and_a_directory(tmp_path, monkeypatch):
+    """`store.import_model("<repo>")` finds a download in the cache ($GRAPHERSAL_EMBED_MODELS),
+    a path is a model directory, `Store.import_model_into` imports into a closed store."""
+    cache = tmp_path / "cache"
+    downloaded = cache / "acme" / "cached"
+    downloaded.mkdir(parents=True)
+    for file, data in model_files().items():
+        (downloaded / file).write_bytes(data)
+    (downloaded / "graphersal-embed-model.json").write_text(
+        json.dumps({"format": 2, "repo": "acme/cached", "revision": "main", "license": "mit"})
+    )
+    monkeypatch.setenv("GRAPHERSAL_EMBED_MODELS", str(cache))
+    path = tmp_path / "data"
+    with graphersal.Store.create(str(path)) as store:
+        report = store.import_model("acme/cached", default=True)
+        assert report["model"]["repo"] == "acme/cached"
+        assert report["model"]["license"] == "mit" and report["model"]["default"] is True
+        assert report["already_present"] is False and report["reembedded"] == []
+        assert report["commit_seq"] is not None
+        # The same model again: nothing new.
+        assert store.import_model("acme/cached")["already_present"] is True
+        local = store.import_model(str(model_dir(tmp_path)), repo="acme/local", license="mit")
+        assert local["model"]["repo"] == "acme/local"
+        names = [e["name"] for e in store.graph.embedders()]
+        assert names[0] == "acme/cached" and "acme/local" in names and "hash-ngram/1" in names
+        assert store.graph.query('embed("graph vector").dimension') == 3
+        assert store.set_default_model("acme/local") is not None
+        assert store.graph.embedders()[0]["name"] == "acme/local"
+        with pytest.raises(graphersal.GraphersalError) as raised:
+            store.import_model("acme/not-downloaded")
+        assert raised.value.cause == "unknown_model"
+        assert "embed-model download acme/not-downloaded" in str(raised.value)
+    other = tmp_path / "other"
+    graphersal.Store.create(str(other)).close()
+    closed = graphersal.Store.import_model_into(str(other), "acme/cached")
+    assert closed["model"]["repo"] == "acme/cached" and closed["commit_seq"] is not None
+    with pytest.warns(UserWarning, match="none is the default"):
+        reopened = graphersal.Store.open(str(other))
+    with reopened:
+        assert [m["repo"] for m in reopened.models()] == ["acme/cached"]
+
+
+def test_removed_embedder_keywords_raise_type_error(tmp_path):
+    assert not hasattr(graphersal, "Embedder") and not hasattr(graphersal, "Model2Vec")
+    assert not hasattr(graphersal.Graph, "register_embedder")
+    with pytest.raises(TypeError):
+        graphersal.Graph(embedders=[])
+    with pytest.raises(TypeError):
+        graphersal.Graph.tinkerpop_modern(default_embedder="hash-ngram/1")
+    with pytest.raises(TypeError):
+        graphersal.Store.create(str(tmp_path / "s"), embedders=[])
+
+
+def test_a_gsnap_without_a_store_serves_its_models(tmp_path):
+    """`Graph.load` of a `.gsnap` exported with its models: the graph serves them (embed,
+    text queries, `embedders()`); a file without models has hash-ngram/1 only."""
+    path = tmp_path / "data"
+    with graphersal.Store.create(str(path)) as store:
+        identity = put_model(store, tmp_path)
+        store.graph.execute(
+            'g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: '
+            '#{text: #{type: "string"}, emb: #{type: "array", format: "vector", dimension: 3, '
+            'embedder: "' + identity + '", from: "text"}}}}}})'
+        )
+        store.graph.execute('g.add_v("doc").property("text", "graph").iterate()')
+        store.graph.execute('g.add_v("doc").property("text", "vector model").iterate()')
+        store.checkpoint()
+        store.export(str(tmp_path / "with.gsnap"))
+        store.export(str(tmp_path / "without.gsnap"), without_models=True)
+    with pytest.warns(UserWarning, match="none is the default"):
+        g = graphersal.Graph.load(str(tmp_path / "with.gsnap"))
+    assert [e["model"] for e in g.embedders() if e["name"] == "acme/tiny"] == [identity]
+    top = g.query('g.v().nearest("emb", "graph", 1).values("text").to_list()')
+    assert top == ["graph"]
+    assert g.query('embed("graph", #{embedder: "acme/tiny"}).dimension') == 3
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bare = graphersal.Graph.load(str(tmp_path / "without.gsnap"))
+    # The definition came with the file, its blob did not: listed, but it cannot run.
+    assert [e["name"] for e in bare.embedders()] == ["hash-ngram/1", "acme/tiny"]
+    with pytest.raises(graphersal.GraphersalError, match="blob is missing"):
+        bare.query('g.v().nearest("emb", "graph", 1).values("text").to_list()')

@@ -424,103 +424,66 @@ g.query('g.v().has_label("doc").nearest("emb", q, 10).values("title").to_list()'
 g.query('g.v().has_label("doc").similarity("emb", q).to_list()', params={"q": Vector(q)})
 ```
 
-## Embedders
+## Embedding models
 
 An embedder turns text into vectors inside the engine: the step `embed()`, the function
-`embed(text)` and text queries (`nearest("emb", "a question", 5)`) call the embedders a graph has registered (book page "Vectors", section "Embeddings").
-The built-in `hash-ngram/1` is always there; Python adds its own two ways.
-
-**Any Python model** becomes an embedder through `graphersal.Embedder(name, fn, *, dimension,
-..)`. `fn` gets a `list[str]` (at most `max_batch` texts) and returns one row per text: a list of
-rows or one 2-D `float32`/`float64` numpy array of shape `(len(texts), dimension)` (read through
-`memoryview`; the extension does not depend on numpy). With
-[sentence-transformers](https://www.sbert.net/):
+`embed(text)`, text queries (`nearest("emb", "a question", 5)`) and vector rules (`"from"` in
+the schema) use the built-in `hash-ngram/1` (hashed words and character n-grams, no model file)
+or an embedding model kept IN THE DATABASE (book page "Embedding Models in a Store"). A model
+serves a database only once it is imported into it: the store keeps the model's files as one
+blob with its licence, every copy of the store carries it, and every program that opens the
+store gets the same model.
 
 ```python
-import graphersal
-from sentence_transformers import SentenceTransformer
-
-st = SentenceTransformer("all-MiniLM-L6-v2")
-minilm = graphersal.Embedder(
-    "minilm",
-    lambda texts: st.encode(texts),          # numpy float32, shape (len(texts), 384)
-    dimension=384,
-    model="sentence-transformers/all-MiniLM-L6-v2",
-    max_batch=64,
-)
-graph = graphersal.Graph(embedders=[minilm], default_embedder="minilm")
+# Download once into the cache (the command line; the wheel has no HTTP client):
+#   graphersal embed-model download minishlab/potion-base-8M
+with graphersal.Store.open("data") as store:
+    report = store.import_model("minishlab/potion-base-8M", default=True)  # from the cache
+    print(report["model"]["identity"], report["model"]["license"])
+    store.graph.query('embed("a question").dimension')                   # 256
+    store.graph.embedders()        # hash-ngram/1 and the store's models, the default first
 ```
 
-`model` (default: the name) is the **model identity** the schema records for the vectors the
-embedder produces, and what a text query looks up later: keep it stable across runs and hosts,
-and change it whenever the model (or its version) changes. Wrong answers (another number of rows
-or of values) and exceptions of `fn` (also `KeyboardInterrupt`) fail the query with
-`GraphersalError`, the exception's type and message in the text.
+`store.import_model(source, *, repo=None, license=None, replace=False, default=False)` takes a
+repository name found in the download cache (`$GRAPHERSAL_EMBED_MODELS`, else the user cache
+`~/.cache/graphersal/embed-models`; one download feeds any number of databases without the
+network) or a model directory (`config.json`, `tokenizer.json`, `model.safetensors`; `repo=`
+names its repository when it has no download manifest). `replace=True` replaces another revision
+of the repository (vector rules naming the old one are re-embedded in the same commit:
+`report["reembedded"]`), `default=True` makes it the model `embed` uses without a name
+(`store.set_default_model(repo)` later). `Store.import_model_into(path, source, ...)` imports
+into a CLOSED store without loading its graph. `store.models()` lists the models with their
+licences and states; an open of a store that holds models but none of them the default is a
+`UserWarning`.
 
-**Model2Vec models** load from a local directory through `graphersal.Model2Vec(name, path, *,
-model=None, max_tokens=512, normalize=None, max_batch=256)` (semantic, fast on a CPU, no
-PyTorch). The library never downloads: fetch the files however you like, for example with
-`huggingface_hub`, and pass the model's name together with the directory:
+A `.gsnap` exported with its models (`store.export(path)`) serves them too when loaded without
+a store (`Graph.load(path)`, their blobs kept in memory); a graph that has neither has
+`hash-ngram/1` only. What a file of an earlier release left that this version does not keep
+current (vectors without a vector rule, a model the schema names that the file lacks, saved
+queries calling a removed function) is one `UserWarning` per note.
 
-```python
-from huggingface_hub import snapshot_download
-
-path = snapshot_download("minishlab/potion-base-8M")
-potion = graphersal.Model2Vec("potion", path, model="minishlab/potion-base-8M")
-potion.model         # 'model2vec/minishlab/potion-base-8M@<12 hex digits>'
-graph.register_embedder(potion, default=True)
-```
-
-The identity `model2vec/<model>@<12 hex>` hashes the three model files, so it is the same as a
-`graphersal embed-model download minishlab/potion-base-8M` of the same files: a graph embedded
-with the command line finds its model in Python and the other way round. Without `model=` the
-directory's `graphersal-embed-model.json` (written by that download) names the model, else the
-identity is `model2vec@<12 hex>`; a `model=` that differs from that file raises. Loading
-releases the GIL.
-
-**The registry.** Every graph constructor and loader (`Graph()`, `Graph.tinkerpop_modern`,
-`from_graphml`, `from_graphson`, `load`, `recover`) and every `Store` opener take
-`embedders=[..]` and `default_embedder=`; `graph.register_embedder(e, default=False)` adds one
-later (a running execution keeps the embedders it started with); a duplicate or reserved name
-(`hash-ngram`, `hash-ngram/*`) raises `ValueError`. `graph.embedders()` lists them, the default
-first, with their `model`. Scripts see the registry in `execute`, `query`, `dry_run` and
-`atomic=True` runs.
-
-**Filling a property and searching by text.** With the built-in `hash-ngram/1` or a model the
-Store keeps, a vector rule (`"from"`, above) fills and refreshes the vectors by itself. With an
-embedder of your own, write the vectors in a query and declare the property as vectors of its
-model in an attached schema (mode `open` or `closed`), which is what a text query embeds the
-question with:
+**Searching by text.** The schema says which model made a property's vectors; a vector rule
+fills and refreshes them by itself:
 
 ```python
-graph.execute("""
-    for t in ["Cats need fresh water every day.", "Salt the pasta water generously."] {
-        g.add_v("chunk").property("text", t).iterate();
-    }
-    g.v().has_label("chunk").property("emb", __.embed("text")).iterate();
-""")
-graph.set_schema(graph.infer_schema(), "open")
-graph.patch_schema({"vertices": {"chunk": {"schema": {"properties": {"emb": {
-    "embedder": "sentence-transformers/all-MiniLM-L6-v2"}}}}}})
-
+graph.patch_schema({"vertices": {"chunk": {"schema": {"type": "object", "properties": {
+    "text": {"type": "string"},
+    "emb": {"type": "array", "format": "vector", "embedder": "minishlab/potion-base-8M",
+            "from": "text"}}}}}})
 graph.query('g.v().has_label("chunk").nearest("emb", question, 5).values("text").to_list()',
             params={"question": "How often should I feed my cat?"})
 ```
 
-A new or changed text needs the same write again (`property("emb", __.embed("text"))` on the
-elements that changed). The job `embed_property` of earlier releases was removed in 0.5.0.
+**Vectors of a model outside the database** (an API, a model this version does not run): compute
+them in Python and write them as values (`property("emb", v)` with a `graphersal.Vector`, a list
+or a float buffer); search with a vector instead of a text
+(`nearest("emb", v, 5)`).
 
-**Threads and the GIL.** A Python embedder runs while a traversal holds the graph's lock (the
-`embed` step) and takes the GIL for the call. No method of the binding waits for the graph's
-lock while it holds the GIL, so a sleeping embedder and other Python threads writing to the
-same graph never wait for each other forever.
-
-**Reference cycles.** A graph keeps its embedders (and so their Python functions) alive, and
-Python's garbage collector cannot see that reference, which is held by the engine. An embedder
-whose function captures its own graph (`Embedder("e", lambda t: use(graph, t), ..)`) therefore
-forms a cycle that is never collected: that graph and its data stay in memory until the process
-ends. Let the function capture the model only, not the graph; this matters only for a program
-that creates and drops many graphs.
+**Migrating from 0.4.** 0.5.0 removed every external embedder: `graphersal.Embedder`,
+`graphersal.Model2Vec`, the `embedders=` and `default_embedder=` keywords of every `Graph`
+constructor, loader and `Store` opener (passing one raises Python's own `TypeError`) and
+`graph.register_embedder`. Import the model into the store instead (above); the job
+`embed_property` was replaced by vector rules.
 
 **Threads of Model2Vec.** The tokenizer (`tokenizers`, through `rayon`) starts a thread pool of
 one thread per CPU core on the first batch it encodes. `TOKENIZERS_PARALLELISM=false` in the

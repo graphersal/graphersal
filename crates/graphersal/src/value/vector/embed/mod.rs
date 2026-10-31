@@ -17,6 +17,8 @@ pub(crate) mod identity;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 mod model2vec;
 pub(crate) mod sha256;
+#[cfg(all(test, feature = "script"))]
+mod tests;
 
 pub(crate) use hash_ngram::HashNgram;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
@@ -367,7 +369,7 @@ pub enum EmbedError {
         /// Its own message.
         reason: String,
     },
-    /// [`EmbedContext::check`] saw the execution cancelled or past its deadline.
+    /// The execution was cancelled or ran past its deadline while it embedded.
     #[error("the embedding was cancelled")]
     Cancelled,
     /// A text query (`nearest("emb", "text", 5)`) needs a schema attached to the graph (mode
@@ -405,9 +407,9 @@ pub enum EmbedError {
         /// The other model and a label declaring it.
         second: String,
     },
-    /// The schema declares a model for the property, and the graph's database does not keep
-    /// it (an imported model is found by its identity).
-    #[error("the model {model} the schema declares for {key} is not in this database")]
+    /// The schema declares a model for the property, and no embedder of the graph has it: its
+    /// database does not keep that model (an imported model is found by its identity).
+    #[error("no registered embedder has the model {model} the schema declares for {key}")]
     #[non_exhaustive]
     ModelNotRegistered {
         /// The declared model identity (quoted).

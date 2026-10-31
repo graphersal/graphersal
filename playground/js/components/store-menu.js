@@ -30,7 +30,7 @@ import {
 import {
   EXPLAIN, actionsFor, commitTarget, markTarget, parseCommit, parseTime, atticRows, viewBanner,
   storeWhere, databaseRows, backupBanner, compactionModel, actionDisabled, storeTask, taskButton,
-  waitTitle, storeButtonText, modelRows, offersWithoutModels, snapshotFileName,
+  waitTitle, storeButtonText, modelRows, modelsNote, offersWithoutModels, snapshotFileName,
 } from '../store-model.js';
 import { recentHistory } from '../store-calendar.js';
 import { formatBytes, formatCount } from '../statistics.js';
@@ -195,6 +195,7 @@ export const StoreMenu = {
 
     const databases = computed(() => databaseRows(info.value));
     const models = computed(() => modelRows(info.value));
+    const noDefaultNote = computed(() => modelsNote(info.value));
     const withoutModels = computed(() => offersWithoutModels(info.value));
     const switchTo = (row) => act('switch', async () => {
       const res = await switchDatabase(row.id);
@@ -233,7 +234,7 @@ export const StoreMenu = {
       bytesText: formatBytes,
       snapshotUrl: (commit, withModels = true) => (state.engine.snapshotUrl ? state.engine.snapshotUrl(commit, withModels) : null),
       downloadSnapshot: (commit, withModels = true) => downloadStoredSnapshot(commit, withModels),
-      models, withoutModels, snapshotFileName,
+      models, noDefaultNote, withoutModels, snapshotFileName,
       saveSnapshot: () => saveGraph('snapshot'),
       locked,
     };
@@ -388,9 +389,10 @@ export const StoreMenu = {
         <div class="menu-sep"></div>
         <div class="menu-title">Models ({{ models.filter((m) => !m.missing).length }})</div>
         <div class="store-explain">{{ EXPLAIN.model }}</div>
+        <div v-if="noDefaultNote" class="store-explain">{{ noDefaultNote }}</div>
         <div v-for="m in models" :key="m.id" class="menu-item store-row store-model">
           <div class="store-row-head">
-            <span :style="m.missing ? 'color:var(--danger)' : ''">{{ m.identity }}</span>
+            <span :style="m.missing ? 'color:var(--danger)' : ''">{{ m.identity }}{{ m.isDefault ? ' (the default)' : '' }}</span>
             <small v-if="!m.missing">{{ m.size }} · licence {{ m.licence }} ({{ m.licenceText }}){{ m.gated ? ' · gated repository' : '' }} · {{ m.used ? 'used by the schema' : 'not used by the schema' }}</small>
           </div>
           <div v-if="m.problem"><small style="color:var(--danger)">{{ m.problem }}</small></div>

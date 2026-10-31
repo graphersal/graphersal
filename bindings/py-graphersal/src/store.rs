@@ -19,7 +19,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::embedder::{PyEmbedder, RegistryCell, registry_of};
 use crate::error::map_diagnostic;
 use crate::graph::Graph;
 
@@ -27,8 +26,6 @@ use crate::graph::Graph;
 #[pyclass(module = "graphersal")]
 pub struct Store {
     inner: Arc<Mutex<Option<persist::Store>>>,
-    /// The embedders of `store.graph` (every `Graph` it hands out shares them).
-    embedders: RegistryCell,
 }
 
 fn store_error(py: Python<'_>, err: PersistError) -> PyErr {
@@ -171,44 +168,29 @@ impl Store {
         result.map_err(|(text, cause)| raise_with_cause(py, &text, cause))
     }
 
-    fn wrap(store: persist::Store, embedders: RegistryCell) -> Self {
+    fn wrap(store: persist::Store) -> Self {
         Store {
             inner: Arc::new(Mutex::new(Some(store))),
-            embedders,
         }
     }
 
-    /// [`Store::wrap`] of an opened store: the models it keeps that its schema names are
-    /// registered beside the ``embedders=`` ones (which win); a model the schema names that
-    /// neither provides is a ``UserWarning`` naming the command that adds it.
-    fn wrap_opened(
-        py: Python<'_>,
-        store: persist::Store,
-        embedders: RegistryCell,
-    ) -> PyResult<Self> {
-        // The models of the store's catalog join the ``embedders=`` ones (which win).
-        let stored = store.embedders().map_err(|err| store_error(py, err))?;
-        let registered = embedders.current();
-        let mut merged = Some(registered.to_builder());
-        let mut added = false;
-        for info in stored.infos() {
-            if info.name.starts_with("hash-ngram")
-                || registered.by_model(&info.model).is_some()
-                || registered.get(&info.name).is_some()
-            {
-                continue;
-            }
-            if let Some(embedder) = stored.get(&info.name).cloned()
-                && let Some(builder) = merged.take()
-            {
-                merged = builder.with(embedder).ok();
-                added = true;
-            }
+    /// [`Store::wrap`] of an opened store. The engine serves the store's embedding models
+    /// itself (`store.graph`'s scripts use them); a store that holds models but none of them
+    /// the default is one ``UserWarning`` (the command line's note).
+    fn wrap_opened(py: Python<'_>, store: persist::Store, path: &str) -> PyResult<Self> {
+        let store = Store::wrap(store);
+        let models = store.with(py, |store| store.models())?;
+        if !models.is_empty() && !models.iter().any(|m| m.default) {
+            crate::error::warn(
+                py,
+                &format!(
+                    "the store {path} holds embedding models but none is the default: `embed` \
+                     without a model name uses hash-ngram/1 (name the model, or make one the \
+                     default with store.set_default_model)"
+                ),
+            )?;
         }
-        if added && let Some(builder) = merged {
-            embedders.replace(std::sync::Arc::new(builder.build()));
-        }
-        Ok(Store::wrap(store, embedders))
+        Ok(store)
     }
 }
 
@@ -219,79 +201,53 @@ impl Store {
     /// fixed for its life: ``"maintenance"`` (damage found on disk while it is open makes it
     /// read-only) or ``"continue"`` (it keeps committing and reports the damage).
     #[staticmethod]
-    #[pyo3(signature = (path, *, on_damage="maintenance", embedders=None, default_embedder=None))]
-    fn create(
-        py: Python<'_>,
-        path: &str,
-        on_damage: &str,
-        embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
-        default_embedder: Option<&str>,
-    ) -> PyResult<Self> {
-        let registry = registry_of(embedders, default_embedder)?;
+    #[pyo3(signature = (path, *, on_damage="maintenance"))]
+    fn create(py: Python<'_>, path: &str, on_damage: &str) -> PyResult<Self> {
         let path = path.to_string();
         let options = create_options(on_damage)?;
         let store = py
             .detach(move || persist::Store::create(&path, options))
             .map_err(|err| store_error(py, err))?;
-        Ok(Store::wrap(store, registry))
+        Ok(Store::wrap(store))
     }
 
     /// ``Store.open(path)``: opens the store in ``path`` read-write and runs its recovery
     /// (interrupted operations completed, the WAL replayed, an interrupted last write cut).
     /// One writer per directory: a second open raises.
     #[staticmethod]
-    #[pyo3(signature = (path, *, embedders=None, default_embedder=None))]
-    fn open(
-        py: Python<'_>,
-        path: &str,
-        embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
-        default_embedder: Option<&str>,
-    ) -> PyResult<Self> {
-        let registry = registry_of(embedders, default_embedder)?;
+    fn open(py: Python<'_>, path: &str) -> PyResult<Self> {
         let path = path.to_string();
+        let shown = path.clone();
         let store = py
             .detach(move || persist::Store::open(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Store::wrap_opened(py, store, registry)
+        Store::wrap_opened(py, store, &shown)
     }
 
     /// ``Store.create_file(path)``: creates a SINGLE-FILE store (the whole store in the one
     /// file ``path``, whatever its extension) for an empty graph and opens it. ``Store.create``
     /// of a path ending in ``.gstore`` makes one too.
     #[staticmethod]
-    #[pyo3(signature = (path, *, on_damage="maintenance", embedders=None, default_embedder=None))]
-    fn create_file(
-        py: Python<'_>,
-        path: &str,
-        on_damage: &str,
-        embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
-        default_embedder: Option<&str>,
-    ) -> PyResult<Self> {
-        let registry = registry_of(embedders, default_embedder)?;
+    #[pyo3(signature = (path, *, on_damage="maintenance"))]
+    fn create_file(py: Python<'_>, path: &str, on_damage: &str) -> PyResult<Self> {
         let path = path.to_string();
         let options = create_options(on_damage)?;
         let store = py
             .detach(move || persist::Store::create_file(&path, options))
             .map_err(|err| store_error(py, err))?;
-        Ok(Store::wrap(store, registry))
+        Ok(Store::wrap(store))
     }
 
     /// ``Store.open_file(path)``: opens the single-file store ``path`` read-write
     /// (``Store.open`` of an existing file does the same).
     #[staticmethod]
-    #[pyo3(signature = (path, *, embedders=None, default_embedder=None))]
-    fn open_file(
-        py: Python<'_>,
-        path: &str,
-        embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
-        default_embedder: Option<&str>,
-    ) -> PyResult<Self> {
-        let registry = registry_of(embedders, default_embedder)?;
+    fn open_file(py: Python<'_>, path: &str) -> PyResult<Self> {
         let path = path.to_string();
+        let shown = path.clone();
         let store = py
             .detach(move || persist::Store::open_file(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Store::wrap_opened(py, store, registry)
+        Store::wrap_opened(py, store, &shown)
     }
 
     /// ``Store.convert(source, target, *, single_file=False)``: copies the closed store in
@@ -448,19 +404,13 @@ impl Store {
     /// ``Store.open_backup(path)``: opens the BACKUP in ``path`` read-only (no lock, nothing
     /// written): listing, verify, fork and backups of it work; every write raises.
     #[staticmethod]
-    #[pyo3(signature = (path, *, embedders=None, default_embedder=None))]
-    fn open_backup(
-        py: Python<'_>,
-        path: &str,
-        embedders: Option<Vec<PyRef<'_, PyEmbedder>>>,
-        default_embedder: Option<&str>,
-    ) -> PyResult<Self> {
-        let registry = registry_of(embedders, default_embedder)?;
+    fn open_backup(py: Python<'_>, path: &str) -> PyResult<Self> {
         let path = path.to_string();
+        let shown = path.clone();
         let store = py
             .detach(move || persist::Store::open_backup(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Store::wrap_opened(py, store, registry)
+        Store::wrap_opened(py, store, &shown)
     }
 
     /// ``Store.restore_backup(path)``: makes the backup in ``path`` the LIVE store, in place
@@ -488,9 +438,8 @@ impl Store {
     /// ``store.graph``: the store's graph; every commit of it is durable before it returns.
     #[getter]
     fn graph(&self, py: Python<'_>) -> PyResult<Graph> {
-        let embedders = self.embedders.clone();
         self.with(py, |store| {
-            Ok(Graph::from_shared(Arc::clone(store.graph()), embedders))
+            Ok(Graph::from_shared(Arc::clone(store.graph())))
         })
     }
 
@@ -674,45 +623,69 @@ impl Store {
         Ok(list.into_any().unbind())
     }
 
-    /// ``store.import_model(directory, *, repo=None, license=None, replace=False,
-    /// default=False)``: imports the Model2Vec model in ``directory`` (a ``graphersal
-    /// embed-model download`` directory or any directory with ``config.json``,
-    /// ``tokenizer.json`` and ``model.safetensors``) into this open store as one commit (format
-    /// spec 4.5): ``repo`` names its repository when the directory has no manifest, ``license``
-    /// its licence; ``replace`` replaces another revision of the repository, ``default`` makes
-    /// it the default model. Returns ``{"model": <models() entry>, "already_present",
-    /// "commit_seq", "replaced", "warnings"}``.
-    #[pyo3(signature = (directory, *, repo=None, license=None, replace=false, default=false))]
+    /// ``store.import_model(source, *, repo=None, license=None, replace=False,
+    /// default=False)``: imports a Model2Vec embedding model into this open store as one
+    /// commit (format spec 4.5); the only way a model serves a database. ``source`` is a
+    /// repository name (``owner/name``) downloaded before into the download cache
+    /// (``graphersal embed-model download <repo>``; the cache is ``$GRAPHERSAL_EMBED_MODELS``,
+    /// else the user cache ``.../graphersal/embed-models``), looked up there first, or a model
+    /// directory (``config.json``, ``tokenizer.json``, ``model.safetensors``). ``repo`` names
+    /// its repository when the directory has no manifest, ``license`` its licence; ``replace``
+    /// replaces another revision of the repository (vector rules naming the old one are
+    /// re-embedded in the same commit: ``reembedded``), ``default`` makes it the default model.
+    /// Returns ``{"model": <models() entry>, "already_present", "commit_seq", "replaced",
+    /// "reembedded", "warnings"}``. The GIL is released for the whole import.
+    #[pyo3(signature = (source, *, repo=None, license=None, replace=false, default=false))]
     fn import_model(
         &self,
         py: Python<'_>,
-        directory: &str,
+        source: &str,
         repo: Option<String>,
         license: Option<String>,
         replace: bool,
         default: bool,
     ) -> PyResult<Py<PyAny>> {
-        let mut options = persist::ImportModelOptions::new()
-            .with_replace(replace)
-            .with_default(default);
-        if let Some(repo) = repo {
-            options = options.with_repo(repo);
-        }
-        if let Some(license) = license {
-            options = options.with_license(license);
-        }
-        let source = persist::ModelSource::Dir(std::path::PathBuf::from(directory));
-        let report = self.with(py, move |store| store.import_model(source, options))?;
-        let dict = PyDict::new(py);
-        dict.set_item("model", model_dict(py, &report.model)?)?;
-        dict.set_item("already_present", report.already_present)?;
-        dict.set_item("commit_seq", report.commit_seq)?;
-        match &report.replaced {
-            Some(replaced) => dict.set_item("replaced", model_dict(py, replaced)?)?,
-            None => dict.set_item("replaced", py.None())?,
-        }
-        dict.set_item("warnings", report.warnings.clone())?;
-        Ok(dict.into_any().unbind())
+        let options = import_options(repo, license, replace, default);
+        let source = source.to_string();
+        let report = self.with(py, move |store| {
+            store.import_model(model_source(&source)?, options)
+        })?;
+        import_report_dict(py, &report)
+    }
+
+    /// ``Store.import_model_into(path, source, *, repo=None, license=None, replace=False,
+    /// default=False)``: ``store.import_model`` into the CLOSED store in ``path``
+    /// (``graphersal embed-model import <source> --into <path>``): one commit appended without
+    /// loading the graph, unless ``replace`` must re-embed vector rules (then the store is
+    /// opened for the commit, ``reembedded`` names them). A store open elsewhere raises (cause
+    /// ``locked``). Returns the dict of ``import_model``.
+    #[staticmethod]
+    #[pyo3(signature = (path, source, *, repo=None, license=None, replace=false, default=false))]
+    fn import_model_into(
+        py: Python<'_>,
+        path: &str,
+        source: &str,
+        repo: Option<String>,
+        license: Option<String>,
+        replace: bool,
+        default: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let options = import_options(repo, license, replace, default);
+        let (path, source) = (path.to_string(), source.to_string());
+        let report = py
+            .detach(move || {
+                persist::Store::import_model_dir(&path, model_source(&source)?, options)
+            })
+            .map_err(|err| store_error(py, err))?;
+        import_report_dict(py, &report)
+    }
+
+    /// ``store.set_default_model(repo)``: makes the model of ``repo`` the default model (the one
+    /// ``embed`` uses without a name), or with ``None`` none (``hash-ngram/1`` is the default
+    /// then); one commit. Returns the commit (``None`` when nothing changed).
+    fn set_default_model(&self, py: Python<'_>, repo: Option<String>) -> PyResult<Option<u64>> {
+        let report = self.with(py, move |store| store.set_default_model(repo.as_deref()))?;
+        Ok(report.commit_seq)
     }
 
     /// ``store.export(path, *, commit_seq=None, without_models=False)``: writes the latest
@@ -1017,4 +990,54 @@ impl Store {
         self.close(py)?;
         Ok(false)
     }
+}
+
+/// The options of an import.
+fn import_options(
+    repo: Option<String>,
+    license: Option<String>,
+    replace: bool,
+    default: bool,
+) -> persist::ImportModelOptions {
+    let mut options = persist::ImportModelOptions::new()
+        .with_replace(replace)
+        .with_default(default);
+    if let Some(repo) = repo {
+        options = options.with_repo(repo);
+    }
+    if let Some(license) = license {
+        options = options.with_license(license);
+    }
+    options
+}
+
+/// The model `source` names: a repository of the download cache first, else a directory.
+fn model_source(source: &str) -> Result<persist::ModelSource, PersistError> {
+    match persist::ModelCache::new() {
+        Ok(cache) => cache.source(source),
+        // No cache location (no home directory): only a directory can be meant.
+        Err(_) => {
+            let path = std::path::Path::new(source);
+            if path.is_dir() {
+                Ok(persist::ModelSource::Dir(path.to_path_buf()))
+            } else {
+                persist::ModelCache::at(path).source(source)
+            }
+        }
+    }
+}
+
+/// The dict of an import report.
+fn import_report_dict(py: Python<'_>, report: &persist::ImportModelReport) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("model", model_dict(py, &report.model)?)?;
+    dict.set_item("already_present", report.already_present)?;
+    dict.set_item("commit_seq", report.commit_seq)?;
+    match &report.replaced {
+        Some(replaced) => dict.set_item("replaced", model_dict(py, replaced)?)?,
+        None => dict.set_item("replaced", py.None())?,
+    }
+    dict.set_item("reembedded", report.reembedded.clone())?;
+    dict.set_item("warnings", report.warnings.clone())?;
+    Ok(dict.into_any().unbind())
 }

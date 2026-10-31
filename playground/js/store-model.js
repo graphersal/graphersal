@@ -337,13 +337,16 @@ export function changesModel(summary) {
 
 /**
  * The embedding models of the store (`store.models`, format spec 4.5) as the Store menu lists
- * them: `{id, identity, size, licence, licenceText, gated, used, problem}`; then one row per model
- * the schema names that the store does not keep (`missing: true`). Empty without models.
+ * them: `{id, identity, repo, size, licence, licenceText, gated, used, isDefault, problem}`; then
+ * one row per model the schema names that the store does not keep (`missing: true`). Empty
+ * without models.
  */
 export function modelRows(store) {
   const rows = ((store && store.models) || []).map((m) => ({
     id: m.id,
     identity: m.identity || m.id,
+    repo: m.repo || '',
+    isDefault: !!m.default,
     size: m.bytesText || '',
     licence: m.license || 'unknown',
     licenceText: m.licenseText === 'file' ? 'licence text from the repository'
@@ -356,11 +359,21 @@ export function modelRows(store) {
   }));
   for (const identity of (store && store.missingModels) || []) {
     rows.push({
-      id: identity, identity, size: '', licence: '', licenceText: '', gated: false, used: true,
+      id: identity, identity, repo: '', isDefault: false, size: '', licence: '', licenceText: '',
+      gated: false, used: true,
       problem: 'the schema names it, the store does not keep it', missing: true,
     });
   }
   return rows;
+}
+
+/**
+ * The note of a store that holds embedding models but none is the default (`store.modelsNote`,
+ * the session's text; the CLI prints the same): `embed()` without a name then uses
+ * hash-ngram/1. Empty when there is nothing to say.
+ */
+export function modelsNote(store) {
+  return (store && store.modelsNote) || '';
 }
 
 /** Whether the snapshot downloads offer a copy without the models (the store keeps some). */

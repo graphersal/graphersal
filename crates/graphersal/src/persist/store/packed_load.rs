@@ -5,6 +5,9 @@
 //! converted in memory the way the store upgrade converts them (format spec 15.1). A graph
 //! without packed models has the built-in `hash-ngram/1` only.
 
+// The file loader (`read_snapshot_file`) is native only; on wasm32 its parts are unused.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::sync::Arc;
 
 use super::files::DirPath;
@@ -63,6 +66,19 @@ impl SnapshotLoadReport {
                      memory; the file stays as it is (graphersal store create <dir> --from \
                      {file} keeps it converted)",
                     converted.repo()
+                ));
+            }
+        }
+        for model in &self.models {
+            if model.state == super::ModelState::Missing {
+                notes.push(format!(
+                    "{file} names the embedding model {} but does not carry it (an export \
+                     without models): text queries and vector rules with it fail; put the graph \
+                     into a store and import the model: graphersal store create <dir> --from \
+                     {file}, graphersal embed-model download {repo}, graphersal embed-model \
+                     import {repo} --into <dir>",
+                    model.identity,
+                    repo = model.repo
                 ));
             }
         }

@@ -397,8 +397,7 @@ was; from Python pass `atomic=True` to `execute()` for the same.
 
 ## Real models: Model2Vec
 
-The `graphersal` command line (and the dev server it starts) can run a real, semantic text model
-itself: a [Model2Vec](https://github.com/MinishLab/model2vec) *static* embedding model. Such a
+A database can run a real, semantic text model itself: a [Model2Vec](https://github.com/MinishLab/model2vec) *static* embedding model. Such a
 model keeps one vector per token and averages them for a text, so it needs no GPU and no neural
 network at run time: a small model like `minishlab/potion-base-8M` (256 dimensions, about 30 MB)
 embeds thousands of sentences per second on a laptop CPU, and it captures meaning, not only
@@ -413,7 +412,7 @@ graphersal embed-model download minishlab/potion-multilingual-128M     # 101 lan
 ```
 
 It fetches `config.json`, `tokenizer.json` and `model.safetensors` from Hugging Face into the
-models directory (`$GRAPHERSAL_EMBED_MODELS`, else `~/.cache/graphersal/embed-models`, on
+download cache (`$GRAPHERSAL_EMBED_MODELS`, else `~/.cache/graphersal/embed-models`, on
 Windows `%LOCALAPPDATA%\graphersal\embed-models`; `--dir` overrides it), checks the SHA-256
 Hugging Face states for the large file and the git blob id of the small ones, and writes a
 manifest `graphersal-embed-model.json` (repository, revision, the commit it resolved to, the
@@ -443,38 +442,38 @@ is less precise across languages than within one; combining the vector search wi
 on names (`has` with `TextP.containing`) covers exact identifiers. The larger model costs memory
 for as long as it is loaded (about its file size).
 
-**2. Register it under a name.** `--embedder NAME=REPO` (a downloaded repository) or
-`--embedder NAME=PATH` (any directory holding a Model2Vec model) works with every mode: a
-one-shot query, the REPL, `--server` and its MCP tools, a Store. `--default-embedder NAME` makes
-it the embedder `embed()` uses without `#{embedder: ..}`:
+**2. Import it into the database.** A model serves a database only once it is imported into
+it: the import puts the model's files into the store as one blob with a catalog entry, so the
+store carries its model wherever it is copied. `--default` makes it the model `embed()` uses
+without `#{embedder: ..}`:
 
 ```bash
-graphersal --embedder potion=minishlab/potion-base-8M \
-  -e 'g.add_v("doc").property("text", "a graph database stores vertices and edges")
+graphersal store create kb
+graphersal embed-model import minishlab/potion-base-8M --into kb --default
+graphersal --graph kb \
+  -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array",
+        format: "vector", embedder: "minishlab/potion-base-8M", from: "text"}}}}}});
+      g.add_v("doc").property("text", "a graph database stores vertices and edges")
         .add_v("doc").property("text", "banana bread recipe with walnuts")
-        .add_v("doc").property("text", "traversal queries over a network of nodes").iterate();
-      g.v().has_label("doc").property("emb", __.embed("text", #{embedder: "potion"})).iterate();
-      let model = g.embedders().filter(|e| e.name == "potion")[0].model;
-      g.set_schema(g.infer_schema(), SchemaMode.open);
-      g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{embedder: model}}}}}});
-      g.v().has_label("doc").nearest("emb", "how do I query connected data?", 2)
-        .values("text").to_list()'
+        .add_v("doc").property("text", "traversal queries over a network of nodes").iterate()'
+graphersal --graph kb \
+  -e 'g.v().has_label("doc").nearest("emb", "how do I query connected data?", 2).values("text").to_list()'
 ```
 
-`embedder: "potion"` names the embedder registered by `--embedder potion=..`; without it the
-default runs (`--default-embedder NAME`, else `hash-ngram/1`). The schema records the model's
-identity for `doc.emb`, so the text query needs no embedder: it uses that model. (With the model
-imported into a Store, a [vector rule](../users_guide/vector_rules.md) fills and refreshes
-`doc.emb` by itself.)
+The [vector rule](../users_guide/vector_rules.md) (`from: "text"`) fills and refreshes `doc.emb`
+with the store's model at every write; the schema records the model's identity for `doc.emb`,
+so the text query needs no embedder: it uses that model.
 
 ```text
 "traversal queries over a network of nodes"
 "a graph database stores vertices and edges"
 ```
 
-The model loads once when the command starts (a model that does not load stops it with exit
-code 2 and the reason); the built-in `hash-ngram/1` stays registered beside it. `g.embedders()`
-lists both, `GET /api/info` of the dev server too.
+The import takes the model from the download cache (or a model directory given as a path) and
+loads it once as a check; the store loads it again when a query or a vector rule first needs it
+(a model the schema needs loads when the store opens). The built-in `hash-ngram/1` stays
+beside it. `g.embedders()` lists both by repository, `GET /api/info` of the dev server too.
+`embed("text", #{embedder: "minishlab/potion-base-8M"})` names a model of the database.
 
 **What leaves the machine.** Only the explicit `embed-model download`: it connects to
 `https://huggingface.co` (or the mirror in `$GRAPHERSAL_HF_ENDPOINT`). Loading and running a
@@ -498,13 +497,16 @@ and the licence id beside the model, and warns about an unknown or non-commercia
 gated repository; `embed-model list` shows the licences.
 
 **A model inside a store.** `graphersal embed-model download minishlab/potion-base-8M --into
-data/` puts the model into the Store `data/` instead: whenever the store is opened, its models
-are loaded without `--embedder`, and every copy of the store carries them with
-their licences (see [Embedding Models in a Store](../persistence/store_models.md)).
+data/` downloads and imports in one step. Every copy of the store (backup, fork, export to a
+`.gsnap`) carries its models with their licences; a `.gsnap` file serves them even without a
+store (`--graph file.gsnap`). From Python: `store.import_model("minishlab/potion-base-8M")` (see
+[Embedding Models in a Store](../persistence/store_models.md)).
 
-The Rust library has the same embedder as `graphersal::vector::Model2Vec` (feature
-`model2vec`, native targets; it loads from a local directory only), see
-[Vectors](../users_guide/vectors.md#embeddings).
+Changed in 0.5.0: the command line flags `--embedder`/`--default-embedder`, the Python
+`graphersal.Embedder`/`graphersal.Model2Vec` and the Rust embedder registry
+(`graphersal::vector::Embedders`, `Model2Vec`, `with_embedders`) are removed: the models a
+database uses are imported into it. A host with a model of its own computes the vectors itself
+and writes them as values (below).
 
 ## With real embeddings (Python)
 
@@ -617,14 +619,13 @@ graph.define_query({
 graph.call_query("semantic_search", {"q": graphersal.Vector(q), "k": 2})
 ```
 
-When the host registers its model as an embedder and the schema declares it for the documents'
-vectors (its `embedder`), the schema knows the model, and the parameter can be the question itself:
+With a Model2Vec model imported into a store and declared in the schema for the documents'
+vectors (its `embedder`, best as a vector rule), the parameter can be the question itself:
 `nearest("emb", question, k)` with `params: {"question": "string"}` embeds it with that model, so
-the agent needs no embedding tool at all. From Python that is
-`graphersal.Embedder("minilm", model.encode, dimension=384, model="sentence-transformers/all-MiniLM-L6-v2")`
-in `Graph(embedders=[..])`, the vectors written with
-`g.v().has_label("chunk").property("emb", __.embed("text")).iterate()` and the model declared
-with `graph.patch_schema(..)` ([Python Quick Start: Embedders](../library/python.md#embedders)).
+the agent needs no embedding tool at all
+([Embedding Models in a Store](../persistence/store_models.md)). A model the database does not
+keep, like the sentence-transformers model above, stays with the host: it computes the vectors
+and passes them in.
 
 **Any model works.** OpenAI, Cohere, Ollama or a model of your own: an embedding is just a list
 of numbers. Keep the schema's `dimension` equal to the model's, embed documents and questions

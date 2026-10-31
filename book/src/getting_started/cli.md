@@ -104,31 +104,38 @@ More: [The graphersal store Command](../persistence/store_cli.md).
 ## Embedding models
 
 `embed()` computes vectors from text with an embedder; built in is `hash-ngram/1` (lexical only).
-`graphersal embed-model download <repo>` fetches a real Model2Vec model from Hugging Face once
-(the only network access of the tool), and `--embedder NAME=REPO` (or `NAME=<directory>`) loads it
-for any mode, `--default-embedder NAME` makes it the default:
+A real model serves a database only once it is imported into it: `graphersal embed-model
+download <repo>` fetches a Model2Vec model from Hugging Face once into the download cache (the
+only network access of the tool), and `graphersal embed-model import <repo> --into <store>`
+puts it into a store (`--default` makes it the model `embed()` uses without a name):
 
 ```bash
 graphersal embed-model download minishlab/potion-base-8M     # into ~/.cache/graphersal/embed-models
 graphersal embed-model download minishlab/potion-multilingual-128M   # 101 languages (about 510 MB)
 graphersal embed-model list                                  # repository, size, model identity
-graphersal --embedder potion=minishlab/potion-base-8M \
-  -e 'g.v().has_label("person").property("emb", __.embed("name", #{embedder: "potion"})).iterate();
-      let model = g.embedders().filter(|e| e.name == "potion")[0].model;
-      g.set_schema(g.infer_schema(), SchemaMode.open);
-      g.patch_schema(#{vertices: #{person: #{schema: #{properties: #{emb: #{embedder: model}}}}}});
+graphersal store create data
+graphersal embed-model import minishlab/potion-base-8M --into data --default
+graphersal --graph data \
+  -e 'g.add_v("person").property("name", "Marco").iterate();
+      g.add_v("person").property("name", "Mary").iterate();
+      g.patch_schema(#{vertices: #{person: #{schema: #{type: "object", properties: #{emb: #{type: "array",
+        format: "vector", embedder: "minishlab/potion-base-8M", from: "name"}}}}}});
       g.v().has_label("person").nearest("emb", "Marco", 2).values("name").to_list()'
 ```
 
-`embedder: "potion"` picks the embedder by the name given to `--embedder` (without it the default
-runs: `--default-embedder`, else `hash-ngram/1`); `g.embedders()` lists the names with their
-model's full identity, `model2vec/minishlab/potion-base-8M@fac4fa854e68`, the one `embed-model
-list` shows. The schema records it for `person.emb`, so the text query embeds with that model. A
-model imported into a Store (`--into`) can fill the property by itself through a
-[vector rule](../users_guide/vector_rules.md).
+The vector rule (`from: "name"`) fills `person.emb` with the store's model at every write
+([Vector Rules](../users_guide/vector_rules.md)); `embed(text)` and `g.v().embed("name",
+#{embedder: "minishlab/potion-base-8M"})` name a model by its repository; `g.embedders()` lists
+the built-in and the database's models with their full identity,
+`model2vec/minishlab/potion-base-8M@fac4fa854e68`, the one `embed-model list` shows. A `.gsnap`
+file carries its models too: `--graph file.gsnap` serves them without a store.
 
-The models directory is `$GRAPHERSAL_EMBED_MODELS` (or `--dir`), else the user cache. A model
-that does not load stops the command with exit code 2 and the reason. More:
+Changed in 0.5.0: the flags `--embedder NAME=...` and `--default-embedder` are removed (a command
+line that still passes them stops with exit code 2 and the import command); a model is imported
+into the database instead.
+
+The download cache is `$GRAPHERSAL_EMBED_MODELS` (or `--dir`), else the user cache. A model
+that does not load stops the command and gives the reason. More:
 [Embeddings and Vector Search](embeddings.md#real-models-model2vec).
 
 Every option of the tool is in

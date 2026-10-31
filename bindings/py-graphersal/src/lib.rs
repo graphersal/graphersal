@@ -17,7 +17,6 @@ static ALLOC: ::graphersal::alloc_tracking::TrackingAllocator =
 
 mod convert;
 mod element;
-mod embedder;
 mod error;
 mod graph;
 mod policy;
@@ -29,9 +28,6 @@ mod vector;
 use pyo3::prelude::*;
 
 pub use element::{Edge, Vertex};
-pub use embedder::PyEmbedder;
-#[cfg(feature = "model2vec")]
-pub use embedder::PyModel2Vec;
 pub use error::{
     CommitRejectedError, GraphersalError, PermissionDeniedError, ReturnedClosureError,
     VectorFillWarning,
@@ -86,9 +82,6 @@ fn graphersal(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Edge>()?;
     m.add_class::<Interval>()?;
     m.add_class::<PyVector>()?;
-    m.add_class::<PyEmbedder>()?;
-    #[cfg(feature = "model2vec")]
-    m.add_class::<PyModel2Vec>()?;
     let error_type = py.get_type::<GraphersalError>();
     // A class-level default so every `GraphersalError` has `.help` even when raised through a
     // path that never calls `error::new_graphersal_error` (e.g. the `Dynamic` conversion

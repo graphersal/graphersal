@@ -797,7 +797,7 @@ pub fn run(options: Cli) -> Result<()> {
     let mut opened = Some(opened);
     let mut limits = options.script_limits();
     let mut budget = options.budget();
-    let mut engine = budget.engine(&limits);
+    let mut engine = budget.engine(&limits, arc_graph.clone());
     let mut render = options.render_options();
     let mut scope = budget.scope(arc_graph.clone(), &render);
 
@@ -916,7 +916,7 @@ Use /exit or CTRL-D to exit; CTRL-C breaks the line input
                                                         limits.max_value_depth,
                                                     ))
                                                     .with_max_string_bytes(Some(string_bytes));
-                                                engine = budget.engine(&limits);
+                                                engine = budget.engine(&limits, arc_graph.clone());
                                                 budget.refresh_scope(
                                                     &mut scope,
                                                     arc_graph.clone(),
@@ -1109,7 +1109,7 @@ mod tests {
         let cli = Cli::parse(Vec::<String>::new()).unwrap();
         let opened = cli.graph.open(false, None, None, false).unwrap();
         let budget = cli.budget();
-        let engine = budget.engine(&cli.script_limits());
+        let engine = budget.engine(&cli.script_limits(), opened.graph.clone());
         let scope = budget.scope(opened.graph.clone(), &cli.render_options());
         Catalogue::new(&engine, &scope)
     }

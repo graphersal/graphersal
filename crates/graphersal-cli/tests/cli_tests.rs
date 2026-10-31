@@ -4221,8 +4221,8 @@ fn store_commands_refuse_files_of_a_newer_graphersal() {
     let _ = std::fs::remove_file(&snap);
 }
 
-/// `--embedder`, `--default-embedder` and `graphersal embed-model download|list` on a TINY
-/// synthetic Model2Vec model written by the test; the download runs against a local mock of the
+/// `graphersal embed-model download|import|list`, `store models` and the models a database
+/// serves, on a TINY synthetic Model2Vec model written by the test; the download runs against a local mock of the
 /// Hugging Face endpoint (`GRAPHERSAL_HF_ENDPOINT`), never the network.
 #[cfg(feature = "model2vec")]
 mod embed_models {
@@ -4311,167 +4311,222 @@ mod embed_models {
         }
     }
 
+    /// The flags 0.5.0 removed answer with the import command (exit 2), on the command line
+    /// and in an args file.
     #[test]
-    fn embedder_from_a_directory_becomes_the_default() {
-        let dir = fresh_dir("m2v_path");
-        write_model(&dir);
-        let spec = format!("tiny={}", dir.display());
-        let res = run_env(
-            &[
-                "--embedder",
-                &spec,
-                "--default-embedder",
-                "tiny",
-                "-e",
-                r#"g.embedders().map(|e| e.name + " " + e.model + " " + e.dimension + " " + e.default)"#,
-                "-e",
-                r#"embed("graph vector").to_string()"#,
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(res.stdout.contains("tiny model2vec@"), "{}", res.stdout);
-        assert!(res.stdout.contains(" 3 true"), "{}", res.stdout);
-        assert!(
-            res.stdout.contains("hash-ngram/1 hash-ngram/1 256 false"),
-            "{}",
-            res.stdout
-        );
-        // The default embedder (3 components) answered embed(text).
-        let last = res.stdout.trim().lines().last().unwrap_or("").to_string();
-        assert!(last.contains("vector(["), "{last}");
-        assert_eq!(last.matches(',').count(), 2, "{last}");
-
-        // Without flags only the built-in is there, and it is the default.
-        let res = run_env(&["-e", r#"g.embedders().map(|e| e.name)"#], &[]);
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(res.stdout.contains("hash-ngram/1"), "{}", res.stdout);
-        assert!(!res.stdout.contains("tiny"), "{}", res.stdout);
-
-        // The step on the model, in the explicit form.
-        let res = run_env(
-            &[
-                "--embedder",
-                &spec,
-                "-e",
-                r#"g.v().has_label("software").embed("name", #{embedder: "tiny"}).count().next()"#,
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert_eq!(res.stdout.trim(), "2");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn embedder_from_a_repository_in_the_models_dir() {
-        let models = fresh_dir("m2v_models");
-        let model = models.join("acme").join("tiny-model");
-        write_model(&model);
-        std::fs::write(
-            model.join("graphersal-embed-model.json"),
-            r#"{"format": 1, "repo": "acme/tiny-model", "revision": "main", "files": []}"#,
-        )
-        .unwrap();
-        let models_text = models.display().to_string();
-        let env = [("GRAPHERSAL_EMBED_MODELS", models_text.as_str())];
-        let res = run_env(
-            &[
-                "--embedder",
-                "t=acme/tiny-model",
-                "-e",
-                r#"g.embedders().filter(|e| e.name == "t")[0].model"#,
-            ],
-            &env,
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(
-            res.stdout.contains("model2vec/acme/tiny-model@"),
-            "{}",
-            res.stdout
-        );
-
-        // A copy elsewhere (as a path) has the same identity.
-        let copy = fresh_dir("m2v_copy");
-        for file in [
-            "config.json",
-            "tokenizer.json",
-            "model.safetensors",
-            "graphersal-embed-model.json",
+    fn the_removed_embedder_flags_answer_with_the_import_command() {
+        for args in [
+            vec!["--embedder", "potion=minishlab/potion-base-8M", "-e", "1"],
+            vec!["--embedder=t=./model", "-e", "1"],
+            vec!["--default-embedder", "potion", "-e", "1"],
         ] {
-            std::fs::copy(model.join(file), copy.join(file)).unwrap();
+            let res = run_env(&args, &[]);
+            assert_eq!(res.code, 2, "{args:?}: {}", res.stderr);
+            assert!(
+                res.stderr.contains("was removed in 0.5.0"),
+                "{args:?}: {}",
+                res.stderr
+            );
+            assert!(
+                res.stderr
+                    .contains("graphersal embed-model import <repo> --into <store>"),
+                "{}",
+                res.stderr
+            );
+            assert!(res.stdout.is_empty(), "{}", res.stdout);
         }
-        let spec = format!("t={}", copy.display());
-        let again = run_env(
-            &[
-                "--embedder",
-                &spec,
-                "-e",
-                r#"g.embedders().filter(|e| e.name == "t")[0].model"#,
-            ],
-            &[],
-        );
-        assert_eq!(again.stdout, res.stdout);
-
-        // list shows it with that identity.
-        let list = run_env(&["embed-model", "list"], &env);
-        assert_eq!(list.code, 0, "{}", list.stderr);
-        assert!(list.stdout.contains("acme/tiny-model"), "{}", list.stdout);
-        let identity = res.stdout.trim().trim_matches('"').to_string();
-        assert!(
-            list.stdout.contains(&identity),
-            "{} / {identity}",
-            list.stdout
-        );
-
-        // An unknown repository: exit 2 with the download hint.
-        let res = run_env(&["--embedder", "x=acme/missing", "-e", "1"], &env);
-        assert_eq!(res.code, 2, "{}", res.stderr);
-        assert!(
-            res.stderr
-                .contains("run `graphersal embed-model download acme/missing`"),
-            "{}",
-            res.stderr
-        );
-        assert!(res.stdout.is_empty());
-        let _ = std::fs::remove_dir_all(&models);
-        let _ = std::fs::remove_dir_all(&copy);
     }
 
     #[test]
-    fn embedder_flag_errors_are_usage_errors() {
-        let dir = fresh_dir("m2v_errors");
-        write_model(&dir);
-        let spec = format!("tiny={}", dir.display());
-        let empty = fresh_dir("m2v_errors_models");
-        let empty_text = empty.display().to_string();
-        let reserved = format!("hash-ngram/2={}", dir.display());
-        let no_model = format!("x={}", empty.display());
-        let cases: Vec<(Vec<&str>, &str)> = vec![
-            (vec!["--embedder", "tiny"], "Expected NAME=PATH"),
-            (vec!["--embedder", "=x"], "Expected NAME=PATH"),
-            (
-                vec!["--embedder", &spec, "--embedder", &spec],
-                "given twice",
-            ),
-            (vec!["--default-embedder", "nope"], "is not registered"),
-            (vec!["--embedder", "x=./no/such/dir/"], "no such directory"),
-            (
-                vec!["--embedder", "x=acme/missing"],
-                "neither a model directory",
-            ),
-            (vec!["--embedder", &reserved], "reserved"),
-            (vec!["--embedder", &no_model], "embed-model download"),
-        ];
-        for (mut args, needle) in cases {
-            args.extend(["-e", "1"]);
-            let res = run_env(&args, &[("GRAPHERSAL_EMBED_MODELS", empty_text.as_str())]);
-            assert_eq!(res.code, 2, "{args:?}: {}", res.stderr);
-            assert!(res.stderr.contains(needle), "{args:?}: {}", res.stderr);
-            assert!(res.stdout.is_empty(), "{args:?}: {}", res.stdout);
+    fn the_removed_args_file_keys_answer_with_the_import_command() {
+        let dir = fresh_dir("m2v_args_removed");
+        for key in ["embedder", "default-embedder"] {
+            let file = dir.join(format!("{key}.json"));
+            std::fs::write(
+                &file,
+                format!(r#"{{"graph": "modern", "{key}": "secret-value"}}"#),
+            )
+            .unwrap();
+            let res = run_env(&["--args-file", file.to_str().unwrap(), "-e", "1"], &[]);
+            assert_eq!(res.code, 2, "{key}: {}", res.stderr);
+            assert!(
+                res.stderr
+                    .contains(&format!("--{key} was removed in 0.5.0")),
+                "{}",
+                res.stderr
+            );
+            assert!(res.stderr.contains("embed-model import"), "{}", res.stderr);
+            assert!(!res.stderr.contains("did you mean"), "{}", res.stderr);
+            assert!(!res.stderr.contains("secret-value"), "{}", res.stderr);
         }
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// `embed-model import --default` makes the model the store's default, `--replace` puts a
+    /// new revision of the repository in place of the old one, `store models default` changes
+    /// the default; the database serves its default to `embed` without a name.
+    #[test]
+    fn import_replace_default_and_store_models_default() {
+        let base = fresh_dir("m2v_replace_default");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let import = |dir: &str, extra: &[&str]| {
+            let mut args = vec![
+                "embed-model",
+                "import",
+                dir,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+            ];
+            args.extend_from_slice(extra);
+            run_env(&args, &[])
+        };
+        let res = import(&model_text, &["--default"]);
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains(", the default"), "{}", res.stdout);
+        // `embed` without a name uses the database's default (3 components).
+        let dims = run_env(
+            &["--graph", &store_text, "-e", r#"embed("graph").dimension"#],
+            &[],
+        );
+        assert_eq!(dims.code, 0, "{}", dims.stderr);
+        assert_eq!(dims.stdout.trim(), "3");
+        // A new revision of the repository is refused without --replace, taken with it.
+        let second = base.join("model2");
+        write_model(&second);
+        std::fs::write(second.join("README.md"), "revision 2").unwrap();
+        let mut weights = std::fs::read(second.join("model.safetensors")).unwrap();
+        let last = weights.len() - 1;
+        weights[last] ^= 0x01;
+        std::fs::write(second.join("model.safetensors"), weights).unwrap();
+        let second_text = second.display().to_string();
+        let refused = import(&second_text, &[]);
+        assert_eq!(refused.code, 1, "{}", refused.stderr);
+        assert!(
+            refused.stderr.contains("--replace") || refused.stderr.contains("replace"),
+            "{}",
+            refused.stderr
+        );
+        let replaced = import(&second_text, &["--replace"]);
+        assert_eq!(replaced.code, 0, "{}", replaced.stderr);
+        assert!(
+            replaced.stderr.contains("replaced the revision"),
+            "{}",
+            replaced.stderr
+        );
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        assert_eq!(listed.stdout.lines().count(), 1, "{}", listed.stdout);
+        assert!(
+            listed.stdout.contains(", the default"),
+            "the default stays: {}",
+            listed.stdout
+        );
+        // store models default: none, then the repository again.
+        let none = run_env(&["store", "models", "default", &store_text, "--none"], &[]);
+        assert_eq!(none.code, 0, "{}", none.stderr);
+        assert!(none.stdout.contains("hash-ngram/1"), "{}", none.stdout);
+        let dims = run_env(
+            &["--graph", &store_text, "-e", r#"embed("graph").dimension"#],
+            &[],
+        );
+        assert_eq!(dims.stdout.trim(), "256", "{}", dims.stderr);
+        assert!(
+            dims.stderr.contains("none is the default"),
+            "{}",
+            dims.stderr
+        );
+        let set = run_env(
+            &["store", "models", "default", &store_text, "acme/tiny"],
+            &[],
+        );
+        assert_eq!(set.code, 0, "{}", set.stderr);
+        assert!(set.stdout.contains("acme/tiny"), "{}", set.stdout);
+        let unknown = run_env(
+            &["store", "models", "default", &store_text, "acme/nope"],
+            &[],
+        );
+        assert_eq!(unknown.code, 1, "{}", unknown.stderr);
+        let usage = run_env(&["store", "models", "default", &store_text], &[]);
+        assert_eq!(usage.code, 2, "{}", usage.stderr);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A `.gsnap` exported with its model serves it without a store (`--graph file.gsnap`),
+    /// with the one-line notes of the file.
+    #[test]
+    fn a_gsnap_serves_the_models_it_carries() {
+        let base = fresh_dir("m2v_gsnap");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_eq!(run_env(&["store", "checkpoint", &store_text], &[]).code, 0);
+        let file = base.join("g.gsnap");
+        let file_text = file.display().to_string();
+        let res = run_env(&["store", "export", &store_text, &file_text], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(
+            &[
+                "--graph",
+                &file_text,
+                "-e",
+                r#"[g.embedders().len(), embed("graph", #{embedder: "acme/tiny"}).dimension]"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stdout.contains('2') && res.stdout.contains('3'),
+            "{}",
+            res.stdout
+        );
+        // The file holds a model but none is the default: one note, naming the file.
+        assert!(res.stderr.contains("none is the default"), "{}", res.stderr);
+        assert!(res.stderr.contains(&file_text), "{}", res.stderr);
+        // Without its models the file serves hash-ngram/1 only.
+        let bare = base.join("bare.gsnap");
+        let bare_text = bare.display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "export",
+                &store_text,
+                &bare_text,
+                "--without-models",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(
+            &[
+                "--graph",
+                &bare_text,
+                "-e",
+                r#"embed("graph", #{embedder: "acme/tiny"})"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 1, "{}", res.stderr);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -4736,7 +4791,7 @@ mod embed_models {
             }
         }
 
-        // list, and the model through --embedder REPO.
+        // list, and the model imported from the cache by its repository into a store.
         let env = [("GRAPHERSAL_EMBED_MODELS", models_text.as_str())];
         let list = run_env(&["embed-model", "list"], &env);
         assert_eq!(list.code, 0, "{}", list.stderr);
@@ -4746,17 +4801,26 @@ mod embed_models {
             "{}",
             list.stdout
         );
+        let store = models.join(".store");
+        let store_text = store.display().to_string();
+        assert_eq!(run_env(&["store", "create", &store_text], &[]).code, 0);
+        let res = run_env(
+            &["embed-model", "import", "acme/tiny", "--into", &store_text],
+            &env,
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
         let res = run_env(
             &[
-                "--embedder",
-                "t=acme/tiny",
+                "--graph",
+                &store_text,
                 "-e",
-                r#"embed("graph", #{embedder: "t"}).to_string()"#,
+                r#"embed("graph", #{embedder: "acme/tiny"}).to_string()"#,
             ],
             &env,
         );
         assert_eq!(res.code, 0, "{}", res.stderr);
         assert!(res.stdout.contains("vector(["), "{}", res.stdout);
+        let _ = std::fs::remove_dir_all(&store);
 
         // A second download replaces the first one.
         let again = run_env(
@@ -5418,95 +5482,6 @@ mod embed_models {
     }
 
     #[test]
-    fn a_model_the_store_keeps_can_be_the_default_embedder() {
-        let base = fresh_dir("m2v_stored_default");
-        let model = base.join("model");
-        write_model(&model);
-        let store = base.join("store");
-        create_store(&store);
-        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
-        let res = run_env(
-            &[
-                "embed-model",
-                "import",
-                &model_text,
-                "--into",
-                &store_text,
-                "--repo",
-                "acme/tiny",
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-
-        // The name the store registers its model under is a valid default, read-write and
-        // read-only: the default is chosen once the store's models are registered.
-        let schema = r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{text: #{type: "string"}}}}}})"#;
-        let res = run_env(
-            &[
-                "--graph",
-                &store_text,
-                "--default-embedder",
-                "acme/tiny",
-                "-e",
-                schema,
-                "-e",
-                r#"g.add_v("doc").property("text", "graph vector").iterate()"#,
-                "-e",
-                r#"g.v().has_label("doc").property("emb", __.embed("text")).iterate()"#,
-                "-e",
-                r#"g.embedders()[0].model"#,
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(
-            res.stdout.contains("model2vec/acme/tiny@"),
-            "{}",
-            res.stdout
-        );
-        let res = run_env(
-            &[
-                "--graph",
-                &store_text,
-                "--read-only",
-                "--default-embedder",
-                "acme/tiny",
-                "-e",
-                "1",
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-
-        // A name neither an --embedder nor the store registers is still an invalid invocation,
-        // naming what is registered.
-        let res = run_env(
-            &[
-                "--graph",
-                &store_text,
-                "--default-embedder",
-                "potion",
-                "-e",
-                "1",
-            ],
-            &[],
-        );
-        assert_eq!(res.code, 2, "{}", res.stderr);
-        assert!(
-            res.stderr.contains("--default-embedder potion"),
-            "{}",
-            res.stderr
-        );
-        assert!(
-            res.stderr.contains("registered: hash-ngram/1, acme/tiny"),
-            "{}",
-            res.stderr
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
     fn an_imported_model_the_schema_names_is_loaded_when_the_store_opens() {
         let base = fresh_dir("m2v_autoload");
         let model = base.join("model");
@@ -5541,24 +5516,21 @@ mod embed_models {
 
         // A vector rule naming the model's identity fills the vectors and records it in the
         // schema.
-        let spec = format!("t={model_text}");
         let res = run_env(
             &[
                 "--graph",
                 &store_text,
-                "--embedder",
-                &spec,
                 "-e",
                 r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{text: #{type: "string"}}}}}})"#,
                 "-e",
                 r#"g.add_v("doc").property("text", "graph vector").to_list()"#,
                 "-e",
-                r#"let m = g.embedders().filter(|e| e.name == "t")[0].model; g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: m, from: "text"}}}}}})"#,
+                r#"let m = g.embedders().filter(|e| e.name == "acme/tiny")[0].model; g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: m, from: "text"}}}}}})"#,
             ],
             &[],
         );
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        // Opened again WITHOUT --embedder: the stored model serves the text query.
+        // Opened again: the stored model serves the text query.
         let res = run_env(
             &[
                 "--graph",
@@ -5581,18 +5553,6 @@ mod embed_models {
             info.stdout.contains("used by the schema"),
             "{}",
             info.stdout
-        );
-
-        // An explicit --embedder of the same model wins: nothing is loaded from the store.
-        let res = run_env(
-            &["--graph", &store_text, "--embedder", &spec, "-e", "1"],
-            &[],
-        );
-        assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(
-            !res.stderr.contains("loaded the embedding model"),
-            "{}",
-            res.stderr
         );
 
         // A model the schema needs is not removed (its properties are named).

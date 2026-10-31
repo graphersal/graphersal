@@ -16,7 +16,7 @@ use graphersal::exec::CancelToken;
 use graphersal::prelude::*;
 use graphersal::schema::{FillReason, SchemaChangeKind, fill_warning};
 use graphersal::storage::ElementKind;
-use graphersal::vector::{EmbedContext, Embedder, HashNgram, Vector};
+use graphersal::vector::Vector;
 
 const RULE: &str =
     r#"{"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}"#;
@@ -39,11 +39,17 @@ fn ruled() -> TraversalGraph {
     graph
 }
 
+/// `text` embedded by the built-in `hash-ngram/1` (the `embed` step of a graph without models).
 fn embedded(text: &str) -> Vector {
-    HashNgram::new()
-        .embed(&[text], &EmbedContext::new())
+    GraphSource::empty()
+        .read()
+        .traversal()
+        .inject(vec![ElementProperty::from(text)])
+        .embed_value(Some("hash-ngram/1"))
+        .next()
         .unwrap()
-        .remove(0)
+        .and_then(|value| value.as_vector().cloned())
+        .unwrap()
 }
 
 fn add_doc(graph: &mut TraversalGraph, id: &str, text: ElementProperty) {

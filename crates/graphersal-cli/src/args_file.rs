@@ -27,8 +27,6 @@ enum Kind {
     Graph,
     /// A string or an array of strings, one occurrence of the repeatable flag each.
     Repeat,
-    /// `--embedder NAME=PATH|REPO`: repeatable, the PATH part resolved like a path.
-    Embedder,
 }
 
 /// Every key: the long flag name and how its value is written. `help`, `version` and
@@ -70,8 +68,6 @@ const KEYS: &[(&str, Kind)] = &[
     ("mcp-instructions", Kind::Path),
     ("mcp-max-chars", Kind::Value),
     ("ai", Kind::Path),
-    ("embedder", Kind::Embedder),
-    ("default-embedder", Kind::Value),
 ];
 
 /// The flags that take the next argument as their value (long and short spellings), so the
@@ -107,12 +103,10 @@ const VALUE_FLAGS: &[&str] = &[
     "--mcp-instructions",
     "--mcp-max-chars",
     "--ai",
-    "--embedder",
-    "--default-embedder",
 ];
 
 const EXAMPLE: &str =
-    r#"{"graph": "modern", "server": true, "port": 8080, "embedder": ["a=/models/a"]}"#;
+    r#"{"graph": "modern", "server": true, "port": 8080, "eval": ["g.v().count()"]}"#;
 
 /// The Levenshtein distance of two keys (small inputs, no dependency).
 pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
@@ -225,18 +219,13 @@ fn translate(text: &str, base: &Path) -> Result<Vec<String>, String> {
                 };
                 out.push(format!("--{key}={spec}"));
             }
-            Kind::Repeat | Kind::Embedder => {
+            Kind::Repeat => {
                 let items = match value {
                     Value::Array(items) => items.iter().collect(),
                     single => vec![single],
                 };
                 for item in items {
                     let item = scalar(key, item)?;
-                    let item = if *kind == Kind::Embedder {
-                        resolve_embedder(&item, base)
-                    } else {
-                        item
-                    };
                     out.push(format!("--{key}={item}"));
                 }
             }
@@ -259,6 +248,13 @@ fn check_keys(map: &Map<String, Value>) -> Result<(), String> {
         }
         if key == "args-file" {
             return Err("key \"args-file\": an args file cannot include another one".to_string());
+        }
+        // Removed in 0.5.0: the hint names the import, never a did-you-mean.
+        if key == "embedder" || key == "default-embedder" {
+            return Err(format!(
+                "key \"{key}\": {}",
+                crate::cli::removed_embedder_flag(&format!("--{key}"))
+            ));
         }
         if key == "help" || key == "version" {
             return Err(format!(
@@ -330,20 +326,6 @@ fn resolve(path: &str, base: &Path) -> String {
     joined.to_string_lossy().into_owned()
 }
 
-/// `NAME=PATH|REPO`: the part after the first `=` is a path (resolved against `base`) when it
-/// is written as one (`./`, `../`) or exists there; otherwise a model repository, as it is.
-fn resolve_embedder(spec: &str, base: &Path) -> String {
-    let Some((name, target)) = spec.split_once('=') else {
-        return spec.to_string();
-    };
-    let written_as_path = target.starts_with("./") || target.starts_with("../");
-    if written_as_path || base.join(target).exists() {
-        format!("{name}={}", resolve(target, base))
-    } else {
-        spec.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,8 +357,7 @@ mod tests {
     fn relative_paths_resolve_against_the_file() {
         let args = tr(
             r#"{"graph": "data/g.json", "schema": "/abs/s.json", "ai": "ai.json",
-                          "ui-dir": "ui", "mcp-instructions": "n.md",
-                          "embedder": "a=./m"}"#,
+                          "ui-dir": "ui", "mcp-instructions": "n.md"}"#,
         )
         .unwrap();
         // Joined with the platform's separator (`\` on Windows).
@@ -389,10 +370,20 @@ mod tests {
         assert!(args.contains(&format!("--ai={}", under("ai.json"))));
         assert!(args.contains(&format!("--ui-dir={}", under("ui"))));
         assert!(args.contains(&format!("--mcp-instructions={}", under("n.md"))));
-        assert!(args.contains(&format!("--embedder=a={}", under("./m"))));
-        // a repository name stays one
-        let args = tr(r#"{"embedder": "p=minishlab/potion-base-8M"}"#).unwrap();
-        assert_eq!(args, ["--embedder=p=minishlab/potion-base-8M"]);
+    }
+
+    #[test]
+    fn the_removed_embedder_keys_name_the_import() {
+        for key in ["embedder", "default-embedder"] {
+            let err = tr(&format!(r#"{{"{key}": "a=./m"}}"#)).unwrap_err();
+            assert!(
+                err.contains(&format!("--{key} was removed in 0.5.0")),
+                "{err}"
+            );
+            assert!(err.contains("embed-model import"), "{err}");
+            assert!(!err.contains("did you mean"), "{err}");
+            assert!(!err.contains("./m"), "never echoes values: {err}");
+        }
     }
 
     #[test]

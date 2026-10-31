@@ -323,7 +323,17 @@ test('the live region announces the start and the end', () => {
 });
 
 // Embedding models kept in the store (format spec 4.5).
-import { modelRows, offersWithoutModels, snapshotFileName } from '../js/store-model.js';
+import { modelRows, modelsNote, offersWithoutModels, snapshotFileName } from '../js/store-model.js';
+
+test('the menu shows the default model and the note of a store without one', () => {
+  const rows = modelRows({ models: [{ id: 'a', identity: 'model2vec/acme/a@0123456789ab', repo: 'acme/a', default: true }] });
+  assert.equal(rows[0].isDefault, true);
+  assert.equal(rows[0].repo, 'acme/a');
+  const note = 'The store holds 1 embedding model(s) but none is the default: embed() without a model name uses hash-ngram/1.';
+  assert.equal(modelsNote({ modelsNote: note }), note);
+  assert.equal(modelsNote({ modelsNote: null }), '');
+  assert.equal(modelsNote(null), '');
+});
 
 test('the menu lists the store models with their licences and the models the schema misses', () => {
   const store = {

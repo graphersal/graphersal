@@ -205,11 +205,11 @@ impl SchemaFormat {
 /// keywords and sees an array, which is what a vector exports as. `element` (default `f32`) and
 /// `dimension` (default: any) are checked exactly; `metric` is an annotation for the search
 /// steps. `embedder` (a top-level property of a label only) records the model identity of the
-/// embedder that produced the vectors (`"hash-ngram/1"`; an
-/// [`EmbedderInfo::model`](crate::vector::EmbedderInfo::model), never a path or a registry name):
-/// a vector rule (`from`) embeds with that model, and a text query
-/// (`nearest("emb", "graph indexes", 5)`) embeds the text with the registered embedder of that
-/// model. A plain write of a vector checks only `element` and `dimension`. `items` is not
+/// embedder that produced the vectors (`"hash-ngram/1"`, or the identity of a model of the
+/// database, `model2vec/<repo>@<12 hex>`, as `g.embedders()` lists it under `model`; never a
+/// path; a repository name is turned into its identity): a vector rule (`from`) embeds with that
+/// model, and a text query (`nearest("emb", "graph indexes", 5)`) embeds the text with the
+/// database's embedder of that model. A plain write of a vector checks only `element` and `dimension`. `items` is not
 /// allowed next to it. A list of numbers written to the property in mode
 /// `open`/`closed` is coerced to a vector of the declared element, and a vector of another
 /// element is quantized to it: a property can be stored quantized from the start.
@@ -222,8 +222,8 @@ pub struct VectorSchema {
     pub dimension: Option<u32>,
     /// `metric`: an annotation, the metric the vectors are meant to be compared with.
     pub metric: Option<VectorMetric>,
-    /// `embedder`: the model identity of the embedder that produced the vectors
-    /// ([`EmbedderInfo::model`](crate::vector::EmbedderInfo::model)), on a label's top-level
+    /// `embedder`: the model identity of the embedder that produced the vectors (the `model`
+    /// of `g.embedders()`), on a label's top-level
     /// property only. Not checked by a plain write; a vector rule (`from`) and the text queries
     /// of `nearest`/`similarity` read it.
     pub embedder: Option<String>,

@@ -376,6 +376,7 @@ playground put them back into a store. A damaged model blob stops the export (ex
 
 ```text
 graphersal store models <DIR>
+graphersal store models default <DIR> <REPO>|--none
 graphersal store models remove <DIR> <REPO>
 ```
 
@@ -392,12 +393,17 @@ $ graphersal store models data/
 minishlab/potion-base-8M  model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
 ```
 
+`default` makes the model of `REPO` the default model (the one `embed()` uses without a name;
+`--none` clears it, `hash-ngram/1` is then the default), as one commit appended to the WAL
+WITHOUT loading the graph; refused for an unknown repository and while a writer has the store
+open. `graphersal embed-model import <REPO> --into <DIR> --default` imports and sets it at once.
+
 `remove` removes one model by its repository as one commit appended to the WAL WITHOUT loading
 the graph (format spec 12.12; earlier positions keep it; its blob goes with the prune that drops
 the last history referencing it). It is refused while a writer has
 the store open, on a backup, while the schema needs the model (its properties are named), and for
 an unknown repository (exit 1). Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
-`graphersal embed-model import <REPO|MODEL_DIR> --into <DIR>` (see
+`graphersal embed-model import <REPO|MODEL_DIR> --into <DIR> [--default] [--replace]` (see
 [Embedding Models in a Store](store_models.md)).
 
 ### prune

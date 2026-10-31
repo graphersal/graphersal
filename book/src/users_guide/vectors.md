@@ -395,9 +395,12 @@ hits exactly, `nearest("emb_bit", q.quantize("bit"), 100, #{metric: "hamming"})`
 
 An **embedder** turns text into vectors. The step `embed()` embeds the incoming string,
 `embed(key)` the string property `key` (a name or a `jpath(..)`) of the incoming element, and the
-function `embed(text)` makes a query vector before any traversal runs. Each takes an option map
-naming the embedder, `#{embedder: "name"}`; without it the host's default runs. `g.embedders()`
-lists what is registered:
+function `embed(text)` makes a query vector before any traversal runs. The embedders of a graph
+are the built-in `hash-ngram/1` and the embedding models kept in its database (imported into a
+Store, or carried by a `.gsnap` file: [Embedding Models in a
+Store](../persistence/store_models.md)). Each step and function takes an option map naming the
+embedder, `#{embedder: "name"}` (a model by its repository, `minishlab/potion-base-8M`); without
+it the database's default model runs, else `hash-ngram/1`. `g.embedders()` lists them:
 
 ```rhai,graph=modern
 g.embedders()[0].name   // "hash-ngram/1"
@@ -432,8 +435,8 @@ What `g.embedders()` returns for each embedder:
 
 | Key | |
 |---|---|
-| `name` | the registry name, what `#{embedder: ..}` takes |
-| `model` | the stable identity of what computes the vectors (`hash-ngram/1`, `acme/minilm@3f2a9c41b7de`), independent of the host's name for it and of any file path: two embedders of one model give comparable vectors |
+| `name` | what `#{embedder: ..}` takes: `hash-ngram/1`, or a model's repository |
+| `model` | the stable identity of what computes the vectors (`hash-ngram/1`, `model2vec/minishlab/potion-base-8M@fac4fa854e68`), independent of any file path: two embedders of one model give comparable vectors |
 | `dimension`, `element` | the shape of every vector it returns |
 | `metric` | the metric it recommends for comparing them |
 | `max_batch` | the most texts per call |
@@ -457,16 +460,15 @@ element of the label when the rule is applied):
 "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}
 ```
 
-A rule embeds with the built-in `hash-ngram/1` or a model the Store keeps
-([Models in the store](../persistence/store_models.md)). With any other embedder a host
-registered, write the vectors in a query of your own, and again for the elements whose text
-changed:
+A rule embeds with the built-in `hash-ngram/1` or a model of the database
+([Models in the store](../persistence/store_models.md)). Without a rule, write the vectors in a
+query of your own, and again for the elements whose text changed:
 
 ```rhai,graph=modern
 g.v().has_label("person").property("emb", __.embed("name")).iterate()
 ```
 
-(`__.embed("name", #{embedder: "minilm"})` names the embedder; an element without the text, or
+(`__.embed("name", #{embedder: "minishlab/potion-base-8M"})` names a model of the database; an element without the text, or
 with a text the embedder finds nothing in, fails the whole query, so filter first:
 `has("name", P.neq(""))`.) Declare the model in the schema then, as the next section shows, so a
 text query finds it. The job `embed_property` of earlier releases was removed in 0.5.0: a call
@@ -477,7 +479,8 @@ fails with a help naming the vector rule.
 Vectors of different models cannot be compared: a cosine between a `hash-ngram/1` vector and one
 of a semantic model means nothing. The schema therefore records, per label and property, which
 model produced the vectors: the keyword `embedder` of a vector declaration holds the embedder's
-**model identity** (`model` in `g.embedders()`, never a registry name or a file path):
+**model identity** (`model` in `g.embedders()`, never a file path; a vector rule may name a
+model of the database by its repository, and the schema stores its identity):
 
 ```json
 {"type": "array", "format": "vector", "element": "f32", "dimension": 256, "metric": "cosine", "embedder": "hash-ngram/1"}
@@ -504,8 +507,8 @@ is used by the text queries, not checked on every write.
 ### Text queries
 
 With the provenance recorded, `nearest()` and `similarity()` take the query as **text**: the text
-is embedded once per execution, with the registered embedder whose model the schema declares for
-the property, so the query vector always comes from the model of the stored ones:
+is embedded once per execution, with the embedder of the database whose model the schema
+declares for the property, so the query vector always comes from the model of the stored ones:
 
 ```rhai,graph=modern,script
 g.v().has_label("person").property("emb", __.embed("name")).iterate();
@@ -523,8 +526,9 @@ query as the next query.
 - No schema attached, or no `embedder` declared for the property: the query fails, and its help
   shows how to attach a schema and declare a vector rule; passing a vector, `nearest("emb",
   embed("Markus"), 2)`, keeps working without any schema.
-- No registered embedder of the declared model (`Embedders::by_model`): the query fails, and its
-  help shows how a host registers one.
+- The database does not keep the declared model: the query fails, and its help shows how to
+  import it (`graphersal embed-model import <repo> --into <store>`, Python
+  `store.import_model(..)`); passing a vector keeps working.
 - The key form only: `similarity("emb", "text")` and `nearest("emb", "text", k)`, with a
   top-level property name.
 - On a property declared `i8` or `f16` the embedded (f32) query is compared with the stored
@@ -560,112 +564,49 @@ embed_hash_ngram_1000`, 1000 texts per call, Apple M-series, source build): abou
 short title (5 words) and about 18.5 µs per paragraph of about 1 KB, so embedding a property of
 100 000 short texts takes well under a second.
 
-### Embedders for hosts
+### Models of the database (feature `model2vec`)
 
-A host plugs in its own embedder (a model loaded from a file, an HTTP client, a binding
-language's function) by implementing the Rust trait `graphersal::vector::Embedder` (an embedder that holds a model in memory may also override `memory_bytes()`, which a host's process memory report shows): `info()`
-returns its `EmbedderInfo` (name, model identity, dimension, element kind, metric, batch size,
-determinism, locality; built at runtime, so a dimension learnt from a model file is fine), and
-`embed(texts, ctx)` returns one vector per text, calling `ctx.check()` between pieces of work so a
-cancelled or timed-out query stops. A constructor that cannot load its model returns
-`EmbedError::unavailable(..)`. The host registers it in an `Embedders` registry and hands that to
-its traversals:
+Besides `hash-ngram/1`, the embedders are [Model2Vec](https://github.com/MinishLab/model2vec)
+static embedding models (one vector per token, averaged over the text; semantic, fast on a CPU)
+kept in the graph's database: one blob plus a catalog definition that follows the history
+(`Store::import_model`, CLI `graphersal embed-model import <repo> --into <store>`, Python
+`store.import_model(..)`); every copy carries them with their licences. A store's traversals,
+`embed(text)` and `g.embedders()` use its models without any setup: each model is an embedder
+named by its repository (the default model, when one is set, is the default), the models the
+schema needs are loaded at open, the others at their first use
+([Embedding Models in a Store](../persistence/store_models.md)). A `.gsnap` file loaded without a
+store serves the models it carries the same way; a graph without models has `hash-ngram/1` only.
 
-```rust
-use std::sync::Arc;
-use graphersal::prelude::*;
-use graphersal::vector::{Embedders, HashNgram};
+Running a model needs the feature `model2vec` of the `graphersal` crate (off by default, native
+targets only; the command line and the Python wheel have it on): the engine then loads the
+models kept in the database. It adds no public item. A build without it (and the browser
+playground) keeps and copies the models but opens a store whose schema needs one read-only
+without text queries.
 
-// Any `Embedder`; here the built-in algorithm with 64 components under the host's own name.
-let small = HashNgram::with_dimension("acme/small", 64).unwrap();
-let embedders = Arc::new(
-    Embedders::builder()
-        .with(Arc::new(small))
-        .unwrap()
-        .default_name("acme/small")
-        .unwrap()
-        .build(),
-);
-// The Rust API.
-let graph = GraphSource::tinkerpop_modern();
-let n = graph
-    .read()
-    .traversal()
-    .with_embedders(embedders.clone())
-    .v(None::<()>)
-    .embed("name", None)
-    .count()
-    .next()
-    .unwrap();
-assert_eq!(n.and_then(|n| n.as_i64()), Some(6));
-// A script host: the engine (embed(text), GraphSource::x()) and the scope (g, _g, __).
-let mut engine = graphersal::script::engine();
-graphersal::script::set_engine_embedders(&mut engine, embedders.clone());
-let mut scope = graphersal::script::graph_scope(Arc::new(graph));
-graphersal::script::set_scope_embedders(&mut scope, embedders);
-```
-
-The script entry points that build their own engine and scope (`eval_value_with_limits`,
-`eval_value_atomic`, `eval_value_dry_run`, ...) take the registry from `Embedders::scope`:
-`embedders.scope(|| eval_value_atomic(graph, script, params, &limits, authorizer))` gives every
-engine, scope and traversal created inside the closure on that thread the host's registry (an
-explicit `with_embedders`/`set_*_embedders` wins). The Python binding runs its scripts this way.
-
-The registry always keeps `hash-ngram/1`; `hash-ngram` and every `hash-ngram/*` name are
-reserved, a name is unique and made of letters, digits and `. _ - / :` (such as
-`minishlab/potion-base-8M`), and `Embedders::by_model` finds an embedder by its model identity.
-`graphersal-session` takes the registry in `SessionPresets::with_embedders`, which the dev server
-(its MCP `query` tool and the AI Chat's tools included) and the WebAssembly playground run under.
-
-### Model2Vec models (feature `model2vec`)
-
-`graphersal::vector::Model2Vec` is a ready-made embedder for
-[Model2Vec](https://github.com/MinishLab/model2vec) static embedding models (one vector per
-token, averaged over the text; semantic, fast on a CPU), behind the feature `model2vec` of the
-`graphersal` crate (off by default, native targets only; the `graphersal` command line has it on:
-[Real models: Model2Vec](../getting_started/embeddings.md#real-models-model2vec)). It loads from a
-**local directory only** and never touches the network:
-
-```rust,ignore
-use std::sync::Arc;
-use graphersal::vector::{Embedder, Embedders, Model2Vec};
-
-let model = Model2Vec::options()
-    .with_max_tokens(256) // a longer text is cut (default 512)
-    .load("potion", "models/minishlab/potion-base-8M")?;
-assert_eq!(model.info().dimension, 256);
-let embedders = Embedders::builder().with(Arc::new(model))?.default_name("potion")?.build();
-# Ok::<(), graphersal::vector::EmbedError>(())
-```
-
-- **Layouts**: `config.json`, `tokenizer.json` and `model.safetensors` in the directory (the
-  Model2Vec layout), or `config_sentence_transformers.json` beside them or beside a
-  `0_StaticEmbedding` directory holding them (the sentence-transformers layout).
+- **Layouts** an import reads: `config.json`, `tokenizer.json` and `model.safetensors` in the
+  directory (the Model2Vec layout), or `config_sentence_transformers.json` beside them or beside
+  a `0_StaticEmbedding` directory holding them (the sentence-transformers layout).
 - **Info**: the model's dimension, `f32`, metric cosine, 256 texts per call, `local`, and
   `deterministic: false`: one build gives the same bits for the same text, but they depend on the
-  versions of `model2vec-rs` and `tokenizers` it was built with. Vectors are L2-normalized when the
-  model's config says so (`with_normalize` overrides it).
-- **Model identity**: `model2vec/<repo>@<12 hex digits>`, where `<repo>` comes from the manifest
-  `graphersal-embed-model.json` that `graphersal embed-model download` writes or from
-  `Model2VecOptions::with_repo("minishlab/potion-base-8M")` for a directory the host downloaded
-  itself (the same identity as the download of the same files; a repository differing from the
-  manifest's refuses the load), else `model2vec@<12 hex digits>`. The digits start a SHA-256 over the three files
-  (`Model2Vec::model_identity(dir)` computes it without loading the model); no path is part of it,
-  so a copied or moved directory keeps its identity. A normalization other than the config's adds
-  `?normalize=false`.
-- **Load failures** are `EmbedError::Unavailable` with the reason (a missing file, a file that
-  does not parse, a tokenizer whose vocabulary does not fit the embedding matrix) and the hint to
-  download a model. The checks at load make every later lookup safe; a tokenizer failure while
-  embedding is `EmbedError::Failed`, never a panic. A text with no known token (an empty text, or
-  only unknown words) fails like an empty text for `hash-ngram/1`.
+  versions of `model2vec-rs` and `tokenizers` it was built with.
+- **Model identity**: `model2vec/<repo>@<12 hex digits>`; the digits start a SHA-256 over the
+  three files, no path is part of it (`persist::ModelCache::identity(dir)` computes it for a
+  downloaded directory).
+- **Failures**: a model that does not load (a missing or damaged blob, a model that does not fit
+  under the memory ceiling) is `EmbedError::Unavailable` with the reason and the commands that
+  bring it back; a tokenizer failure while embedding is `EmbedError::Failed`, never a panic. A
+  text with no known token fails like an empty text for `hash-ngram/1`.
 
-- **Models in a Store**: a model is data of the store, one blob plus a catalog definition that
-  follows the history (`Store::import_model`, CLI `graphersal embed-model import <repo> --into
-  <store>`); every copy carries it with its licences. A store's traversals use its models
-  without any host setup: each model is an embedder named by its repository (the default model,
-  when one is set, is the default), the models the schema needs are loaded at open. An explicit
-  `with_embedders` (or `--embedder`) still wins:
-  [Embedding Models in a Store](../persistence/store_models.md).
+**Changed in 0.5.0.** The host embedder API is removed: the Rust trait `vector::Embedder`, the
+registry `vector::Embedders` (`builder`, `scope`), `vector::HashNgram`, `vector::Model2Vec`,
+`GraphTraversalSource::with_embedders`, `script::set_engine_embedders`/`set_scope_embedders`, the
+CLI flags `--embedder`/`--default-embedder` and the Python `graphersal.Embedder`/
+`graphersal.Model2Vec`. A host with a model of its own computes the vectors outside and writes
+them as values (`property("emb", vector)`), and searches with a vector
+(`nearest("emb", q, 10)`); `embed()` stays for `hash-ngram/1` and the database's models. A
+script host that builds its own engine and scope gives the global `embed(text)` the graph's
+models with `script::set_engine_graph(&mut engine, graph)` (the `eval_*` entry points do it
+themselves).
 
 ## Storage and exchange
 
@@ -706,11 +647,9 @@ g.query('g.v().nearest("emb", q, 10).to_list()', params={"q": q})
 A one-dimensional `float32`/`float64` numpy array passed as a parameter arrives as an f32
 vector, like `Vector(array)`. See the Python binding's README for the details.
 
-Python registers its own embedders: `graphersal.Embedder(name, fn, dimension=..)` wraps any
-Python model (`fn(texts)` returns the rows, or one 2-D numpy array), `graphersal.Model2Vec(name,
-path, model="minishlab/potion-base-8M")` loads a Model2Vec model from a directory you downloaded
-(the same model identity as the command line's download), and `Graph(embedders=[..])`,
-`graph.register_embedder` and text queries work as described above ([Python Quick Start: Embedders](../library/python.md#embedders)).
+From Python, a model enters a store with `store.import_model("minishlab/potion-base-8M")`; text
+queries and vector rules then work as described above ([Python Quick Start: Embedding
+models](../library/python.md#embedding-models)).
 
 ## In the playground and the CLI
 

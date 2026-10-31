@@ -243,7 +243,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Embeds the incoming string, or the string property key, as a vector; #{embedder: name} picks the embedder (default hash-ngram/1).",
         "g.v().has(\"name\", \"marko\").embed(\"name\").next().dimension" => "256";
     "traversal" "embedders":
-        "Lists the registered embedders (name, model, dimension, element, metric, ...), the default first.",
+        "Lists the embedders of the database, the built-in hash-ngram/1 and its imported models (name, model, dimension, element, metric, ...), the default first.",
         "g.embedders()[0].name" => "hash-ngram/1";
     "traversal" "date_add":
         "Adds n DT units or a duration, optionally in a zone whose IANA name the result keeps (TinkerPop dateAdd()).",
