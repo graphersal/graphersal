@@ -5705,3 +5705,42 @@ fn store_journal_prints_filters_and_follows() {
     assert!(seen[lines.len()].contains("store.opened"), "{seen:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--schema` with a vector rule over a sample graph: the preview's one warning text is a
+/// `note:` on stderr before the fill (book page "Vector Rules"); stdout keeps the result only.
+#[test]
+fn a_schema_with_a_vector_rule_notes_the_fill() {
+    let path = temp_path("vector_rule_schema.json");
+    std::fs::write(
+        &path,
+        r#"{"vertices": {"person": {"schema": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}}}}}}"#,
+    )
+    .unwrap();
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "--schema",
+            path.to_str().unwrap(),
+            "-e",
+            r#"g.v().values("emb").count().next()"#,
+        ],
+        "",
+    );
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert_eq!(res.stdout.trim(), "4");
+    assert!(
+        res.stderr
+            .starts_with("note: Applying this schema fills vectors: 4 elements of person.emb"),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        res.stderr.contains("note: The whole database is LOCKED"),
+        "{}",
+        res.stderr
+    );
+}

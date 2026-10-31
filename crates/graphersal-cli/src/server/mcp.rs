@@ -1104,8 +1104,11 @@ fn all_tools() -> Vec<Tool> {
             Kind::Destructive,
             "Stores a schema (replacing the stored one). In mode open/closed the existing data \
              is validated first: on violations nothing changes and the error lists them. Run \
-             validate_schema first.",
-            json!({"type": "object", "properties": {"schema": schema_arg("The new schema"), "mode": mode_arg()}, "required": ["schema"]}),
+             validate_schema first. A vector rule (\"from\" on a vector property) added or \
+             changed fills its vectors in the same unit while the WHOLE database is LOCKED \
+             (every read and write waits); a large fill is refused with the warning text until \
+             it is repeated with confirm_lock: true.",
+            json!({"type": "object", "properties": {"schema": schema_arg("The new schema"), "mode": mode_arg(), "confirm_lock": confirm_lock_arg()}, "required": ["schema"]}),
         ),
         tool(
             "patch_schema",
@@ -1115,9 +1118,11 @@ fn all_tools() -> Vec<Tool> {
                 "Applies a JSON Merge Patch (RFC 7396) to the stored schema and stores the \
                  result (validated against the data like set_schema); returns the new schema. \
                  Example: {PATCH_EXAMPLE}. Without a stored schema, set_schema first (e.g. \
-                 the infer_schema result with mode open)."
+                 the infer_schema result with mode open). A vector rule added or changed fills \
+                 its vectors while the WHOLE database is LOCKED; a large fill needs \
+                 confirm_lock: true."
             ),
-            json!({"type": "object", "properties": {"patch": {"type": "object", "description": "A JSON Merge Patch of the stored schema (a JSON string is accepted too)."}}, "required": ["patch"]}),
+            json!({"type": "object", "properties": {"patch": {"type": "object", "description": "A JSON Merge Patch of the stored schema (a JSON string is accepted too)."}, "confirm_lock": confirm_lock_arg()}, "required": ["patch"]}),
         ),
         tool(
             "statistics",
@@ -1614,6 +1619,48 @@ fn json_arg(args: &Value, key: &str, mode: Option<&str>) -> Result<String, Strin
     Ok(value.to_string())
 }
 
+/// The `confirm_lock` argument of `set_schema` / `patch_schema`.
+fn confirm_lock_arg() -> Value {
+    json!({"type": "boolean", "description": "Confirms a vector fill above the threshold (an estimate of 1 s or more, or 10,000 elements without an estimate): the whole database is locked while it runs. Default false: such a change is refused with the warning text and nothing is applied."})
+}
+
+fn confirm_lock(args: &Value) -> bool {
+    args.get("confirm_lock")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// What the schema preview's planned vector fill means for a schema tool.
+enum FillGate {
+    /// Above the threshold without `confirm_lock`: the answer (nothing applied).
+    Refused(String),
+    /// Applied; the note before the answer (empty without a fill).
+    Note(String),
+}
+
+/// The fill gate of a schema tool from the preview's `fill`/`fill_warning` (book page
+/// "Vector Rules"): the warning text is the session's, never the tool's own.
+fn fill_gate(validation: &Value, confirmed: bool) -> FillGate {
+    let Some(warning) = validation.get("fill_warning").and_then(Value::as_str) else {
+        return FillGate::Note(String::new());
+    };
+    let needs = validation
+        .get("fill")
+        .and_then(Value::as_array)
+        .is_some_and(|fills| {
+            fills
+                .iter()
+                .any(|f| f.get("needs_confirmation").and_then(Value::as_bool) == Some(true))
+        });
+    if needs && !confirmed {
+        FillGate::Refused(format!(
+            "Nothing was applied.\n{warning}\nRepeat with confirm_lock: true."
+        ))
+    } else {
+        FillGate::Note(format!("{warning}\n"))
+    }
+}
+
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1665,18 +1712,44 @@ fn run_tool(
         "set_schema" => {
             let schema = json_arg(args, "schema", None)?;
             let mode = str_arg(args, "mode").map(str::to_string);
+            let note = if schema.contains("\"from\"") {
+                let proposed = json_arg(args, "schema", str_arg(args, "mode"))?;
+                let validation = context
+                    .call(move |s| s.validate_schema(&proposed))
+                    .map_err(http_failed)?
+                    .map_err(|err| err.to_string())?;
+                match fill_gate(&validation, confirm_lock(args)) {
+                    FillGate::Refused(text) => return Ok(text),
+                    FillGate::Note(note) => note,
+                }
+            } else {
+                String::new()
+            };
             let info = context
                 .call(move |s| s.set_schema(&schema, mode.as_deref()))
                 .map_err(http_failed)??;
-            Ok(format!("Schema stored.\n{}", compact(&info)))
+            Ok(format!("{note}Schema stored.\n{}", compact(&info)))
         }
         "patch_schema" => {
             let patch = json_arg(args, "patch", None)?;
+            let note = if patch.contains("\"from\"") || patch.contains("\"embedder\"") {
+                let proposed = patch.clone();
+                let validation = context
+                    .call(move |s| s.validate_schema_patch(&proposed))
+                    .map_err(http_failed)?
+                    .map_err(|err| err.to_string())?;
+                match fill_gate(&validation, confirm_lock(args)) {
+                    FillGate::Refused(text) => return Ok(text),
+                    FillGate::Note(note) => note,
+                }
+            } else {
+                String::new()
+            };
             let text = context
                 .call(move |s| s.patch_schema_text(&patch))
                 .map_err(http_failed)??;
             Ok(format!(
-                "Schema patched; the stored schema is now:\n{}",
+                "{note}Schema patched; the stored schema is now:\n{}",
                 text
             ))
         }
@@ -2933,6 +3006,36 @@ fn examples_text(examples: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vector fill above the threshold is refused without `confirm_lock` (the session's
+    /// warning text plus the instruction), applied with it; a small fill is applied with the
+    /// warning as a note; a schema without a fill passes silently.
+    #[test]
+    fn a_large_fill_needs_confirm_lock() {
+        let large = json!({
+            "fill": [{"needs_confirmation": true}],
+            "fill_warning": "Applying this schema fills vectors: 20,000 elements."
+        });
+        match fill_gate(&large, false) {
+            FillGate::Refused(text) => {
+                assert!(
+                    text.starts_with("Nothing was applied.\nApplying this schema"),
+                    "{text}"
+                );
+                assert!(text.ends_with("Repeat with confirm_lock: true."), "{text}");
+            }
+            FillGate::Note(note) => panic!("applied: {note}"),
+        }
+        assert!(matches!(fill_gate(&large, true), FillGate::Note(n) if n.contains("20,000")));
+        let small = json!({
+            "fill": [{"needs_confirmation": false}],
+            "fill_warning": "Applying this schema fills vectors: 3 elements."
+        });
+        assert!(matches!(fill_gate(&small, false), FillGate::Note(n) if n.contains("3 elements")));
+        assert!(
+            matches!(fill_gate(&json!({"fill": []}), false), FillGate::Note(n) if n.is_empty())
+        );
+    }
 
     /// A GQL example of the playground (`lang: "gql"`, plain GQL with its `params`) is listed as
     /// the `g.gql(..)` call the `query` tool runs; a Rhai example as it is.

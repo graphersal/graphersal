@@ -315,6 +315,12 @@ class CommitRejectedError(GraphersalError):
     """A commit hook of the graph vetoed the commit; everything the unit changed was rolled
     back. Only raised for graphs whose hooks were registered on the Rust side."""
 
+class VectorFillWarning(UserWarning):
+    """Issued by ``Graph.set_schema`` / ``Graph.patch_schema`` before a schema change that fills
+    vectors (a vector rule added or changed): the elements, the model, the time, and that the
+    whole database is locked while it runs. ``warnings.simplefilter("error",
+    VectorFillWarning)`` stops such a change before anything is applied."""
+
 class EmbedPropertyError(GraphersalError):
     """``Graph.embed_property`` failed. The pages before the failure stay committed, the
     failing one was rolled back; a second run continues where it stopped."""
@@ -510,12 +516,15 @@ class Graph:
         replaces the schema's own mode, so ``graph.set_schema(graph.infer_schema(),
         mode="closed")`` freezes the structure the graph has. Existing data is validated first;
         on violations nothing changes and ``GraphersalError`` carries the report. ``{}`` removes
-        the schema."""
+        the schema. A schema that fills vectors (a vector rule, ``"from"`` on a vector property,
+        added or changed) issues ``VectorFillWarning`` with the preview's text first: the whole
+        database is locked while the fill runs."""
     def patch_schema(
         self, patch: Union[Mapping[str, Any], str], *, policy: Optional[AccessPolicy] = None
     ) -> dict[str, Any]:
         """Applies a JSON Merge Patch (RFC 7396) to the stored schema and stores the result
-        like ``set_schema``; returns the new schema."""
+        like ``set_schema`` (``VectorFillWarning`` before a vector fill); returns the new
+        schema."""
     def validate_schema(
         self,
         schema: Union[Mapping[str, Any], str],

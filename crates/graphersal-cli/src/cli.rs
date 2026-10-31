@@ -979,6 +979,13 @@ impl GraphSpec {
             }
             GraphSpec::Modern | GraphSpec::Empty | GraphSpec::Large | GraphSpec::FileTree => {
                 let graph = self.load()?;
+                // A vector rule fills its vectors in the schema's unit, the whole graph locked:
+                // the one warning text of the preview, before applying (book "Vector Rules").
+                if let Ok(validation) = graph.read().traversal().validate_schema(&schema)
+                    && let Some(warning) = validation.fill_warning()
+                {
+                    errln!("note: {}", warning.replace('\n', "\nnote: "));
+                }
                 graph
                     .write()
                     .traversal_mut()

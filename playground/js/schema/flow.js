@@ -8,6 +8,19 @@ import { SchemaDraft } from './draft.js';
 
 const message = (err) => (err && err.message ? err.message : String(err));
 
+/**
+ * The engine's fill warning as HTML: escaped, the element count and the time estimate in bold,
+ * one paragraph line per sentence line.
+ */
+export function fillHtml(text) {
+  const escaped = String(text || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return escaped
+    .replace(/(up to )?\d[\d,]* elements?/g, '<b>$&</b>')
+    .replace(/\((about [^)]*|under a second|time depends on the model)\)/g, '(<b>$1</b>)')
+    .replace(/\n/g, '<br>');
+}
+
 export class SchemaFlow {
   /** @param {import('./api.js').SchemaApi} api */
   constructor(api) {
@@ -22,6 +35,11 @@ export class SchemaFlow {
     this.checkError = null; // {version, message}
     this.applyError = null;
     this.freezeError = null;
+    // A vector fill the draft starts (book "Vector Rules"): above the threshold Apply stops
+    // here and the dialog asks ({version, warning, fill}); `applyAndLock()` goes on.
+    this.pendingFill = null;
+    // The warning text of the last applied fill below the threshold (a plain note).
+    this.fillNote = null;
     // The graph changed after the schema shown was inferred (or the stored one was dropped)
     // and nothing inferred it again: "may be outdated - refresh". Inference is never automatic
     // on a change of the graph (it walks the whole graph: ~0.7 s on `large`).
@@ -119,7 +137,10 @@ export class SchemaFlow {
     const { patch, exact } = this.ed.patch;
     const via = exact ? 'patch' : 'schema';
     const res = exact ? await this.api.validatePatch(patch) : await this.api.validate(this.ed.draft);
-    this.check = { version, via, violations: res.violations, diff: res.diff || [], compatible: !!res.compatible };
+    this.check = {
+      version, via, violations: res.violations, diff: res.diff || [], compatible: !!res.compatible,
+      fill: res.fill || [], fillWarning: res.fill_warning || null,
+    };
     this.checkError = null;
     this.diff = { version, changes: res.diff || [], compatible: !!res.compatible };
     this.diffError = null;
@@ -143,16 +164,30 @@ export class SchemaFlow {
    * "Apply": checks first (unless the current version was checked), stops on violations, else
    * `patch_schema(patch)` (one unit), or `set_schema(draft)` when the patch is not exact. On
    * success the draft is gone and the stored schema reloaded. Resolves to true when applied.
+   *
+   * A draft that fills vectors (a vector rule added or changed) locks the whole database while
+   * the fill runs: when a planned fill `needs_confirmation`, Apply stops with `pendingFill`
+   * (the dialog "Apply and lock" / "Cancel" shows its warning, the engine's one text) unless
+   * `confirmed`; below the threshold it applies and keeps the text as `fillNote`.
+   * @param {{confirmed?: boolean}} [opts]
    */
-  async apply() {
+  async apply({ confirmed = false } = {}) {
     if (!this.ed.draft || this.busy) return false;
     const version = this.ed.version;
     this.busy = 'apply';
     this.applyError = null;
+    this.fillNote = null;
     let stage = 'check';
     try {
       const check = this.freshCheck || (await this.runCheck());
       if (check.violations && check.violations.total_violations > 0) return false;
+      const fill = check.fill || [];
+      if (!confirmed && fill.some((f) => f.needs_confirmation)) {
+        this.pendingFill = { version, warning: check.fillWarning, fill };
+        return false;
+      }
+      this.pendingFill = null;
+      const note = fill.length ? check.fillWarning : null;
       stage = 'apply';
       const { patch, exact } = this.ed.patch;
       if (exact) await this.api.patch(patch);
@@ -160,6 +195,7 @@ export class SchemaFlow {
       this.ed.discard();
       this.diff = null;
       this.check = null;
+      this.fillNote = note;
       await this.load({ infer: false }); // no inference: a dropped schema shows `outdated`
       return true;
     } catch (err) {
@@ -169,6 +205,21 @@ export class SchemaFlow {
     } finally {
       this.busy = null;
     }
+  }
+
+  /** "Apply and lock" in the fill dialog: applies the draft it was asked for. */
+  async applyAndLock() {
+    const pending = this.pendingFill;
+    if (!pending || pending.version !== this.ed.version) {
+      this.pendingFill = null;
+      return false;
+    }
+    return this.apply({ confirmed: true });
+  }
+
+  /** "Cancel" in the fill dialog: nothing is applied. */
+  cancelFill() {
+    this.pendingFill = null;
   }
 
   /** "Infer from data": a new draft from `infer_schema()` (stores nothing). */
@@ -222,6 +273,7 @@ export class SchemaFlow {
 
   discard() {
     this.ed.discard();
+    this.pendingFill = null;
     this.applyError = null;
     this.freezeError = null;
   }
