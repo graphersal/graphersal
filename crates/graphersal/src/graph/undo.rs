@@ -446,6 +446,9 @@ impl TraversalGraph {
 
     /// Stores `schema` and records the old one when a unit is open.
     pub(crate) fn set_schema_recorded(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
+        // A vector property may name its model by repository (K2): the schema stores the
+        // identity of the catalog's current revision (book page "Embedding Models in a Store").
+        let schema = crate::graph::model_definition::resolve_model_names(&self.definitions, schema);
         let old = self
             .undo
             .is_recording()
@@ -721,6 +724,7 @@ impl TraversalGraph {
         definition.validate()?;
         crate::graph::compression::check_conflict(self, &definition)?;
         crate::graph::property_index::check_conflict(self, &definition)?;
+        crate::graph::model_definition::check_conflict(self, &definition)?;
         let current = self.definitions.get(definition.kind(), definition.name());
         if current == Some(&definition) {
             return Ok(());

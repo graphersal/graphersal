@@ -834,6 +834,7 @@ impl Definition {
             DefinitionBody::Query(_)
             | DefinitionBody::Compression(_)
             | DefinitionBody::Job(_)
+            | DefinitionBody::Model(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }

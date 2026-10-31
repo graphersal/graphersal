@@ -10,9 +10,11 @@
 //! # The catalog
 //!
 //! The catalog of definitions: named, typed entries stored IN the database next to the schema
-//! (`book/src/users_guide/saved_queries.md`). Three kinds are defined: the **saved query**
+//! (`book/src/users_guide/saved_queries.md`). Five kinds are defined: the **saved query**
 //! ([`QueryDefinition`], kind `1`), the **property index** ([`PropertyIndexDefinition`], kind
-//! `2`) and the **compression rule** ([`CompressionDefinition`], kind `3`); kinds
+//! `2`), the **compression rule** ([`CompressionDefinition`], kind `3`), the **scheduled job**
+//! ([`JobDefinition`], kind `4`) and the **embedding model** ([`ModelDefinition`], kind `5`,
+//! made by `Store::import_model`: book page "Embedding Models in a Store"); kinds
 //! `128..=255` belong to hosts, every other kind is unassigned; a kind this version does not
 //! decode is kept as an opaque entry (see below).
 //!
@@ -36,7 +38,7 @@
 //! | Kinds | Owner |
 //! |---|---|
 //! | `0` | invalid |
-//! | `1..=127` | the library: `1` saved query, `2` property index, `3` compression rule, the rest unassigned |
+//! | `1..=127` | the library: `1` saved query, `2` property index, `3` compression rule, `4` job, `5` model, the rest unassigned |
 //! | `128..=255` | hosts ([`DefinitionKind::HOST_FIRST`]..=[`DefinitionKind::HOST_LAST`]): never assigned by the library |
 //!
 //! A host (a server built on the library, say) adds its own catalog entities under a host kind
@@ -101,6 +103,7 @@ pub use crate::graph::definition::{decode_payload, encode_payload};
 pub use crate::graph::jobs::{
     JobDefinition, JobTask, MAX_JOB_EFFECTS, MAX_JOB_PATH_BYTES, MAX_SCHEDULE_BYTES, RunOn,
 };
+pub use crate::graph::model_definition::{BaseModel, MAX_MODEL_NAME_BYTES, ModelDefinition};
 pub use crate::graph::property_index::{
     MAX_INDEX_KEY_BYTES, MAX_INDEX_LABEL_BYTES, PropertyIndexDefinition, PropertyIndexTransform,
     PropertyIndexType,

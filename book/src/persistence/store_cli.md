@@ -366,31 +366,35 @@ Writes the latest stored snapshot (or the one at commit `N`, which must be a sna
 with `--graph FILE.gsnap`, `store create --from FILE.gsnap`, or the playground.
 
 The file carries the store's [embedding models](store_models.md) with their cards and licences
-(listed after the first line), unless `--without-models`. `store create --from FILE.gsnap` and the
-playground put them back into a store; Graphersal 0.3.0 loads such a file and ignores them. A
-damaged model stops the export (exit 1; export `--without-models`, or remove the model).
+(listed after the first line) as blobs, unless `--without-models` (the definitions stay; the
+models are missing in what is made from the file). `store create --from FILE.gsnap` and the
+playground put them back into a store. A damaged model blob stops the export (exit 1; export
+`--without-models`).
 
 ### models
 
 ```text
 graphersal store models <DIR>
-graphersal store models remove <DIR> <IDENTITY>
+graphersal store models remove <DIR> <REPO>
 ```
 
-Lists the [embedding models](store_models.md) the store keeps, one line each: the identity a
-schema's `embedder` records (`model2vec/<repo>@<12 hex>`), the size, the licence and where its text
+Lists the [embedding models](store_models.md) of the store's latest state, one line each: the
+repository, the identity a schema's `embedder` records (`model2vec/<repo>@<12 hex>`), the size of
+its blob, the licence and where its text
 comes from (`text from the repository`, `standard text, written by Graphersal`, `no licence
-text`), `gated repository` when it applies, and whether the schema uses it; then every model the
-schema names that the store does not keep (`missing`). Works while a server has the store open.
+text`), `gated repository`, `the default` and a missing or damaged blob when they apply, and
+whether the schema uses it; then every model the schema names that the store does not keep
+(`missing`). Works while a server has the store open.
 
 ```text
 $ graphersal store models data/
-model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
+minishlab/potion-base-8M  model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
 ```
 
-`remove` deletes one model, by its identity or its id `model2vec-<12 hex>` (refused while a writer
-has the store open, and on a backup; an unknown model exits 1). It is the only way a model leaves a
-store. Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
+`remove` removes one model by its repository as one commit (earlier positions keep it; its blob
+goes with the prune that drops the last history referencing it). It is refused while a writer has
+the store open, on a backup, while the schema needs the model (its properties are named), and for
+an unknown repository (exit 1). Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
 `graphersal embed-model import <REPO|MODEL_DIR> --into <DIR>` (see
 [Embedding Models in a Store](store_models.md)).
 

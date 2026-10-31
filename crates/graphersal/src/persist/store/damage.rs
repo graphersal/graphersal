@@ -347,11 +347,11 @@ pub struct RepairReport {
     /// store starts a new lineage without marks, so these names stay targets of the damaged
     /// store only (best effort: what its `marks` file or WAL still yields).
     pub marks_not_carried: Vec<Mark>,
-    /// The embedding models the repaired store holds: every model of the damaged store whose
-    /// files check against its manifest (format spec 4.5).
-    pub models: Vec<super::StoredModel>,
-    /// The models that were NOT carried because their files are damaged, with the reason:
-    /// add them to the repaired store again.
+    /// The embedding models of the repaired state (catalog kind 5, format spec 4.5), with the
+    /// states of their blobs in the repaired store.
+    pub models: Vec<super::ModelInfo>,
+    /// The models whose blobs were NOT carried because they are missing or damaged in the
+    /// damaged store, with the reason: import them into the repaired store again.
     pub models_not_carried: Vec<String>,
     /// The blobs the repaired state references, copied (format spec 4.6, 13.4), relative
     /// names.

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use graphersal::changes::{ChangeSet, CommitHook, HookError, HookRefusal, Mutation};
 use graphersal::persist::{
     BackupMarker, BackupMode, CompactionAdvice, DamageReport, ForkReport, FoundDamage, MemDir,
-    ModelCopy, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir, StoreInfo,
-    StoreOptions, StoredModel,
+    ModelCopy, ModelInfo, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir,
+    StoreInfo, StoreOptions,
 };
 use serde_json::{Value, json};
 
@@ -1159,40 +1159,47 @@ pub fn store_value(info: &StoreInfo) -> Value {
     })
 }
 
-/// One stored model as the Store menu shows it.
-pub fn model_value(model: &StoredModel, used: bool) -> Value {
+/// One model of the store as the Store menu shows it (`ModelInfo`).
+pub fn model_value(model: &ModelInfo, used: bool) -> Value {
     json!({
-        "id": model.id,
+        "id": model.identity,
         "identity": model.identity,
-        "family": model.family,
         "repo": model.repo,
         "revision": model.revision,
         "commit": model.commit,
+        "dimension": model.dimension,
         "license": model.license,
         "licenseText": model.license_text,
         "baseModels": model.base_models.iter().map(|b| json!({
             "repo": b.repo, "license": b.license,
         })).collect::<Vec<_>>(),
         "gated": model.gated,
-        "addedAt": model.added_at,
+        "default": model.default,
         "bytes": model.bytes,
         "bytesText": bytes_text(model.bytes),
-        "files": model.files.iter().map(|f| json!({
-            "name": f.name, "role": f.role, "bytes": f.bytes,
-        })).collect::<Vec<_>>(),
+        "loadBytes": model.load_bytes,
+        "state": model.state.name(),
+        "stateReason": model.state.reason(),
+        "neededBy": model.needed_by,
         "usedBySchema": used,
-        "problem": model.problem,
+        "problem": match &model.state {
+            graphersal::persist::ModelState::Missing => Some("its blob is missing"),
+            state => state.reason(),
+        },
     })
 }
 
 /// Whether the schema's model identity `named` (with or without a `?normalize=` suffix) is the
-/// stored model `model` (the same files: the same 12 hex digits).
-fn names_model(named: &str, model: &StoredModel) -> bool {
-    named
-        .split('?')
-        .next()
-        .and_then(|base| base.rsplit_once('@'))
-        .is_some_and(|(_, hex)| model.id.strip_prefix("model2vec-") == Some(hex))
+/// model `model` (the same files: the same 12 hex digits).
+fn names_model(named: &str, model: &ModelInfo) -> bool {
+    let hex = |identity: &str| {
+        identity
+            .split('?')
+            .next()
+            .and_then(|base| base.rsplit_once('@'))
+            .map(|(_, hex)| hex.to_string())
+    };
+    hex(named).is_some() && hex(named) == hex(&model.identity)
 }
 
 /// The models of `info`, each with whether the schema names it.
@@ -1608,34 +1615,45 @@ mod tests {
         );
     }
 
-    /// A `.gsnap` carrying one embedding model (format spec 4.5), and that model.
-    fn packed_with_a_model() -> (Vec<u8>, graphersal::persist::StoredModel) {
-        use graphersal::persist::{ModelRole, NewModel, Store};
+    /// A `.gsnap` carrying one embedding model (format spec 4.5: a blob and its catalog
+    /// definition), and that model.
+    fn packed_with_a_model() -> (Vec<u8>, graphersal::persist::ModelInfo) {
+        use graphersal::persist::{ImportModelOptions, ModelRole, ModelSource, NewModel, Store};
         use std::io::Cursor;
+        let header =
+            r#"{"embeddings": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}"#;
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(header.as_bytes());
+        weights.extend_from_slice(&[0u8; 16]);
         let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
         let model = store
-            .add_model(
-                NewModel::new()
-                    .with_file(
-                        "config.json",
-                        ModelRole::Config,
-                        Cursor::new(b"{}".to_vec()),
-                    )
-                    .with_file(
-                        "tokenizer.json",
-                        ModelRole::Tokenizer,
-                        Cursor::new(vec![1; 50]),
-                    )
-                    .with_file(
-                        "model.safetensors",
-                        ModelRole::Weights,
-                        Cursor::new(vec![2; 4000]),
-                    )
-                    .with_repo("acme/tiny")
-                    .with_license("mit"),
+            .import_model(
+                ModelSource::Files(
+                    NewModel::new()
+                        .with_file(
+                            "config.json",
+                            ModelRole::Config,
+                            Cursor::new(b"{}".to_vec()),
+                        )
+                        .with_file(
+                            "tokenizer.json",
+                            ModelRole::Tokenizer,
+                            Cursor::new(vec![1; 50]),
+                        )
+                        .with_file(
+                            "model.safetensors",
+                            ModelRole::Weights,
+                            Cursor::new(weights),
+                        )
+                        .with_file("README.md", ModelRole::Card, Cursor::new(vec![b'x'; 4000]))
+                        .with_repo("acme/tiny")
+                        .with_license("mit"),
+                ),
+                ImportModelOptions::new(),
             )
             .unwrap()
             .model;
+        store.checkpoint(None).unwrap();
         let mut bytes = Vec::new();
         store.export_packed(None, &mut bytes).unwrap();
         (bytes, model)
@@ -1657,7 +1675,7 @@ mod tests {
         assert_eq!(info["models"][0]["usedBySchema"], false);
         assert_eq!(info["missingModels"], json!([]));
         let models = s.store_models().unwrap();
-        assert_eq!(models["models"][0]["id"], model.id.as_str());
+        assert_eq!(models["models"][0]["identity"], model.identity.as_str());
 
         let commit = info["snapshots"][0]["commitSeq"].as_u64();
         let (with, _) = s.store_snapshot(commit).unwrap();
@@ -1666,11 +1684,12 @@ mod tests {
         // The download with models loads into a new store with the model again.
         s.load_snapshot(&with, "again.gsnap").unwrap();
         assert_eq!(
-            s.store_info().unwrap()["models"][0]["id"],
-            model.id.as_str()
+            s.store_info().unwrap()["models"][0]["identity"],
+            model.identity.as_str()
         );
         s.load_snapshot(&without, "bare.gsnap").unwrap();
-        assert_eq!(s.store_info().unwrap()["models"], json!([]));
+        // Without the blobs: the definition stays, its blob is missing.
+        assert_eq!(s.store_info().unwrap()["models"][0]["state"], "missing");
     }
 
     #[test]

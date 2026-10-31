@@ -41,6 +41,7 @@ pub(crate) mod labels;
 pub mod memory;
 /// The memory report: where a graph's memory goes, per label and per property path.
 pub mod memory_report;
+pub mod model_definition;
 #[cfg(feature = "persist")]
 pub(crate) mod persistent;
 /// Property indexes: declared, ordered indexes on `(element kind, label, key)`

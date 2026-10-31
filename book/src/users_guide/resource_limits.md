@@ -323,6 +323,16 @@ println!("{:?} bytes left", room.available());
 `check_memory_for` compares the live heap plus the bytes with a tracking allocator, else only
 the bytes (the rest of the process is not seen).
 
+**Embedding models of a store** (book page [Embedding Models in a
+Store](../persistence/store_models.md)) load under the ceiling too: before a load the blob's
+length plus the loaded size its definition records (`load_bytes`) are checked against what is in
+use (the live heap with a tracking allocator, else the models already loaded), so nothing is read
+when it does not fit (operation `"model load"`). A model the schema NEEDS is loaded when the
+store opens: one that does not fit refuses the open with `StoreFailure::ModelDoesNotFit`, whose
+message names the smallest ceiling that fits. Other models are loaded at the first query that
+embeds with them; a refusal there fails that query. Loaded models count in the estimated memory
+of every run (without a tracking allocator) and in `g.memory_usage()` as `model_bytes`.
+
 ### Seeing how full the process is
 
 Every front end shows the process against its ceiling with the same figures (computed once, in

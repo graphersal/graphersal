@@ -11,18 +11,11 @@
 mod hash_ngram;
 mod job;
 pub(crate) mod provenance;
+pub(crate) mod registry;
 
-#[cfg(any(
-    feature = "persist",
-    all(feature = "model2vec", not(target_arch = "wasm32"))
-))]
 pub(crate) mod identity;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 mod model2vec;
-#[cfg(any(
-    feature = "persist",
-    all(feature = "model2vec", not(target_arch = "wasm32"))
-))]
 pub(crate) mod sha256;
 
 pub use hash_ngram::HashNgram;
@@ -800,7 +793,9 @@ impl Embedders {
     }
 
     /// The registry a source or engine without an explicit one uses: the innermost
-    /// [`Self::scope`] of this thread, else the process-wide default registry (built once).
+    /// [`Self::scope`] of this thread, else the models of the graph whose lock guard the
+    /// thread holds (a Store's catalog models, `registry.rs`), else the process-wide default
+    /// registry (built once).
     pub(crate) fn current() -> Arc<Embedders> {
         if let Some(scoped) = CURRENT
             .try_with(|current| current.try_borrow().ok().and_then(|c| c.clone()))
@@ -808,6 +803,9 @@ impl Embedders {
             .flatten()
         {
             return scoped;
+        }
+        if let Some(models) = registry::attached() {
+            return models;
         }
         static DEFAULT: OnceLock<Arc<Embedders>> = OnceLock::new();
         DEFAULT

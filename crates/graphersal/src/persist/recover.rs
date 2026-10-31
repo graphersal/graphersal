@@ -103,6 +103,11 @@ pub struct Recovered<S: PersistentStorage = TraversalGraph> {
     pub graph: S,
     /// What the recovery did.
     pub report: RecoveryReport,
+    /// The embedding models of the recovered position (catalog kind 5; book page "Embedding
+    /// Models in a Store"), those its schema needs loaded: give them to the view's traversals
+    /// (`GraphTraversalSource::with_embedders`, script `set_engine_embedders`). `None` when
+    /// the position holds no model, and for a recovery outside a Store.
+    pub embedders: Option<std::sync::Arc<crate::value::Embedders>>,
 }
 
 /// A recovery: an optional packed snapshot, the journals written since (in order) and a
@@ -262,7 +267,11 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
             chain.as_deref(),
             verify_before_images,
         )?;
-        Ok(Recovered { graph, report })
+        Ok(Recovered {
+            graph,
+            report,
+            embedders: None,
+        })
     }
 }
 

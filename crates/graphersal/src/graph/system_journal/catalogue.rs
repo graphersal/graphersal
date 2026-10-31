@@ -496,6 +496,110 @@ pub(crate) static LEDGER_REBUILT: EventKind = event(
     Collapse::Never,
 );
 
+pub(crate) static MODEL_IMPORTED: EventKind = event(
+    "model.imported",
+    "model",
+    Level::Notice,
+    "An embedding model was imported into the store (one commit defining it).",
+    &[
+        f("repo", "its repository"),
+        f("identity", "its identity"),
+        f("bytes", "the bytes of its blob"),
+        f("default", "whether it became the default model"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static MODEL_REPLACED: EventKind = event(
+    "model.replaced",
+    "model",
+    Level::Notice,
+    "A new revision of an embedding model replaced the current one (one commit).",
+    &[
+        f("repo", "its repository"),
+        f("old_identity", "the replaced revision's identity"),
+        f("new_identity", "the new revision's identity"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static MODEL_REMOVED: EventKind = event(
+    "model.removed",
+    "model",
+    Level::Notice,
+    "An embedding model was removed from the store's current state (one commit).",
+    &[f("repo", "its repository"), f("identity", "its identity")],
+    Collapse::Never,
+);
+
+pub(crate) static MODEL_DEFAULT_CHANGED: EventKind = event(
+    "model.default_changed",
+    "model",
+    Level::Notice,
+    "The default embedding model changed (one commit).",
+    &[
+        f(
+            "from",
+            "the repository of the previous default (empty: none)",
+        ),
+        f("to", "the repository of the new default (empty: none)"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static MODEL_LOADED: EventKind = event(
+    "model.loaded",
+    "model",
+    Level::Info,
+    "An embedding model was loaded into memory.",
+    &[
+        f("repo", "its repository"),
+        f("identity", "its identity"),
+        f("load_bytes", "the memory it takes"),
+        f("ms", "how long the load took"),
+    ],
+    Collapse::By(&["identity"]),
+);
+
+pub(crate) static MODEL_UNLOADED: EventKind = event(
+    "model.unloaded",
+    "model",
+    Level::Info,
+    "An embedding model no open position uses was unloaded.",
+    &[f("repo", "its repository"), f("identity", "its identity")],
+    Collapse::By(&["identity"]),
+);
+
+pub(crate) static MODEL_LOAD_FAILED: EventKind = event(
+    "model.load_failed",
+    "model",
+    Level::Error,
+    "An embedding model the schema needs did not load: the store did not open.",
+    &[
+        f("repo", "its repository"),
+        f("identity", "its identity"),
+        f("cause", "damaged, missing, does_not_fit or invalid"),
+        f("needed", "the bytes a load needs (blob and loaded model)"),
+        f("recommendation", "how to bring the model back"),
+    ],
+    Collapse::By(&["identity", "cause"]),
+);
+
+pub(crate) static MODEL_UNAVAILABLE: EventKind = event(
+    "model.unavailable",
+    "model",
+    Level::Error,
+    "An embedding model nothing needs at open is missing or damaged: the store works, queries \
+     with the model fail.",
+    &[
+        f("repo", "its repository"),
+        f("identity", "its identity"),
+        f("cause", "damaged, missing, does_not_fit or invalid"),
+        f("recommendation", "how to bring the model back"),
+    ],
+    Collapse::By(&["identity", "cause"]),
+);
+
 /// Every declared event kind, in catalogue order.
 pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &REPEATED,
@@ -527,6 +631,14 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &BLOB_REPAIRED,
     &BLOB_COLLECTED,
     &LEDGER_REBUILT,
+    &MODEL_IMPORTED,
+    &MODEL_REPLACED,
+    &MODEL_REMOVED,
+    &MODEL_DEFAULT_CHANGED,
+    &MODEL_LOADED,
+    &MODEL_UNLOADED,
+    &MODEL_LOAD_FAILED,
+    &MODEL_UNAVAILABLE,
 ];
 
 /// The declared kind with `code`.

@@ -345,3 +345,61 @@ fn mutated_journals_in_parts_never_crash_recovery() {
     }
     assert!(fatal.is_empty(), "{fatal:#?}");
 }
+
+/// Mutated model blobs (the tar of a model, format spec 4.5) and mutated model definition
+/// payloads (catalog kind 5) never crash an open, a verify or a listing: a blob whose bytes
+/// still check but whose content is no model tar is a verify problem; a damaged payload is
+/// kept opaque or refused, never a panic.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn mutated_model_blobs_and_definitions_never_crash_the_store() {
+    use graphersal::catalog::ModelDefinition;
+    use graphersal::persist::{MemDir, Store, StoreOptions};
+    let base = MemDir::new();
+    let options = StoreOptions::new().with_checkpoint_after_bytes(0);
+    let store = Store::create(&base, options.clone()).unwrap();
+    let report = crate::model_fixture::import(&store, 1, "acme/tiny");
+    let definition = store
+        .graph()
+        .read()
+        .definition(DefinitionKind::MODEL, &report.model.identity)
+        .unwrap()
+        .unwrap()
+        .clone();
+    store.close().unwrap();
+    let blob_name = base
+        .file_names()
+        .into_iter()
+        .find(|name| name.starts_with("blobs/") && !name.contains("tmp-"))
+        .unwrap();
+    let tar = base.file(&blob_name).unwrap();
+    let payload =
+        graphersal::catalog::encode_payload(&definition.as_model().unwrap().to_payload()).unwrap();
+    let mut rng = Rng::new(0x0000_A0DE);
+    let mut fatal = Vec::new();
+    for case in 0..budget(200) {
+        // A mutated payload: decoded (kept opaque when not a model) without a panic.
+        let bytes = mutate(&mut rng, &payload);
+        if let Ok(map) = graphersal::catalog::decode_payload(&bytes) {
+            let _ = ModelDefinition::from_payload(&map).map(|m| m.to_payload());
+        }
+        // A mutated tar under the blob's name (its CRC no longer matches unless the mutation
+        // was empty): verify reports, the open never panics.
+        let image = base.deep_copy();
+        image.put_file(&blob_name, mutate(&mut rng, &tar));
+        let options = options.clone();
+        let result = guarded(WATCHDOG, move || {
+            let _ = Store::verify_dir(&image);
+            let _ = Store::models_dir(&image);
+            if let Ok(store) = Store::open(&image, options) {
+                let _ = store.models();
+                let _ = store.verify();
+                let _ = store.close();
+            }
+        });
+        if let Err(outcome) = result {
+            fatal.push(format!("case {case}: {outcome:?}"));
+        }
+    }
+    assert!(fatal.is_empty(), "{fatal:#?}");
+}

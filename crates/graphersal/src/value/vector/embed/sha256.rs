@@ -3,6 +3,15 @@
 //! dependency tree of `graphersal`); not used for anything secret, so constant time does not
 //! matter. Tested against the FIPS 180-4 examples.
 
+// The identity rule serves the Store and the Model2Vec loader; the catalog only parses.
+#![cfg_attr(
+    not(any(
+        feature = "persist",
+        all(feature = "model2vec", not(target_arch = "wasm32"))
+    )),
+    allow(dead_code)
+)]
+
 /// The round constants: the first 32 bits of the fractional parts of the cube roots of the
 /// first 64 primes.
 const K: [u32; 64] = [

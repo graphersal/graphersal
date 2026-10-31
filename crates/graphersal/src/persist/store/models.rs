@@ -43,14 +43,12 @@ const MAX_MODEL_FILES: usize = 64;
 /// The longest file name inside a model directory: `<id>.<file>` stays within the 64 bytes of a
 /// plain name of a backup archive (format spec 12.8) and a packed snapshot's file name.
 const MAX_FILE_NAME_BYTES: usize = 40;
-/// The longest licence id kept.
-const MAX_LICENSE_BYTES: usize = 64;
 /// The most base models kept.
 const MAX_BASE_MODELS: usize = 16;
 /// The streaming buffer.
 const BUFFER: usize = 1 << 20;
 
-/// What a model file is for ([`NewModel::with_file`]; [`ModelFile::role`] as text).
+/// What a model file is for ([`NewModel::with_file`]; its name in the model's tar manifest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ModelRole {
@@ -64,7 +62,7 @@ pub enum ModelRole {
     /// The model card (`README.md`): states the licence and the attribution.
     Card,
     /// A licence file of the repository (`LICENSE`, `LICENSE.txt`, ...), or the standard text
-    /// of the stated licence the store wrote ([`StoredModel::license_text`] `template`).
+    /// of the stated licence the store wrote (`ModelInfo::license_text` `template`).
     License,
     /// A notice file of the repository (`NOTICE`, ...).
     Notice,
@@ -89,7 +87,7 @@ impl ModelRole {
 /// licence and files, from its manifest (format spec 4.5).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
-pub struct StoredModel {
+pub(crate) struct StoredModel {
     /// The directory name under `models/`: `model2vec-<12 hex>`, the content address.
     pub id: String,
     /// The model identity a schema's `embedder` records: `model2vec/<repo>@<12 hex>` (or
@@ -127,30 +125,12 @@ pub struct StoredModel {
     pub problem: Option<String>,
 }
 
-/// A base model of a [`StoredModel`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct BaseModel {
-    /// Its repository.
-    pub repo: String,
-    /// Its licence, when known.
-    pub license: Option<String>,
-}
-
-impl BaseModel {
-    /// A base model `repo` under `license`.
-    pub fn new(repo: impl Into<String>, license: Option<String>) -> Self {
-        BaseModel {
-            repo: repo.into(),
-            license,
-        }
-    }
-}
+pub(crate) use crate::graph::model_definition::BaseModel;
 
 /// One file of a [`StoredModel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ModelFile {
+pub(crate) struct ModelFile {
     /// The file name in the model's directory.
     pub name: String,
     /// What it is for ([`ModelRole::as_str`]; a role a newer Graphersal wrote is kept as text).
@@ -164,7 +144,8 @@ pub struct ModelFile {
 /// What [`Store::add_model`](super::Store::add_model) did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct AddModelReport {
+#[allow(dead_code)]
+pub(crate) struct AddModelReport {
     /// The model as the store keeps it.
     pub model: StoredModel,
     /// The store held the same model already (the same files: the same id); nothing was
@@ -176,8 +157,9 @@ pub struct AddModelReport {
 /// store's models (and, since 0.5, its blobs).
 pub type ModelCopy = super::blobs::BlobCopy;
 
-/// A model to add to a store ([`Store::add_model`](super::Store::add_model)): its files (read
-/// as streams) and what is known about its origin and licence.
+/// A model to import into a store (`ModelSource::Files`,
+/// [`Store::import_model`](super::Store::import_model)): its files (read as streams) and what is
+/// known about its origin and licence.
 pub struct NewModel {
     files: Vec<(String, ModelRole, Box<dyn Read + Send>)>,
     repo: Option<String>,
@@ -211,7 +193,31 @@ impl Default for NewModel {
     }
 }
 
+/// The parts of a [`NewModel`] (the import reads them).
+pub(crate) struct NewModelParts {
+    pub(crate) files: Vec<(String, ModelRole, Box<dyn Read + Send>)>,
+    pub(crate) repo: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) commit: Option<String>,
+    pub(crate) license: Option<String>,
+    pub(crate) base_models: Vec<BaseModel>,
+    pub(crate) gated: bool,
+}
+
 impl NewModel {
+    /// The parts.
+    pub(crate) fn into_parts(self) -> NewModelParts {
+        NewModelParts {
+            files: self.files,
+            repo: self.repo,
+            revision: self.revision,
+            commit: self.commit,
+            license: self.license,
+            base_models: self.base_models,
+            gated: self.gated,
+        }
+    }
+
     /// A model without files yet (a Model2Vec model needs one file of each of the roles
     /// [`ModelRole::Config`], [`ModelRole::Tokenizer`] and [`ModelRole::Weights`]).
     pub fn new() -> Self {
@@ -258,7 +264,7 @@ impl NewModel {
 
     /// The licence as an SPDX id (`mit`, `apache-2.0`; default `unknown`). Without a
     /// [`ModelRole::License`] file, the store writes the standard text of an MIT or Apache-2.0
-    /// licence as `LICENSE` ([`StoredModel::license_text`] `template`).
+    /// licence as `LICENSE` (`ModelInfo::license_text` `template`).
     pub fn with_license(mut self, license: impl Into<String>) -> Self {
         self.license = Some(license.into());
         self
@@ -279,10 +285,6 @@ impl NewModel {
 
 fn io(context: &'static str) -> impl Fn(std::io::Error) -> PersistError {
     move |err| PersistError::io(context, err)
-}
-
-fn invalid(operation: &'static str, reason: impl Into<String>) -> PersistError {
-    PersistError::store(operation, StoreFailure::InvalidModel, reason)
 }
 
 /// Whether `name` is a model's directory name: `model2vec-<12 lowercase hex>`.
@@ -366,13 +368,6 @@ fn copy_hashed(
         len += n as u64;
     }
     Ok((len, hex(&hash.finish())))
-}
-
-/// The SHA-256 hex digest of `bytes`.
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hash = Sha256::new();
-    hash.update(bytes);
-    hex(&hash.finish())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -536,71 +531,6 @@ pub(crate) fn parse_manifest(id: &str, bytes: &[u8]) -> Result<StoredModel, Stri
     Ok(model)
 }
 
-/// The manifest text of `model` (pretty JSON, format spec 4.5).
-fn manifest_text(model: &StoredModel) -> String {
-    let mut object = PropertyMap::default();
-    let text = |s: &str| ElementProperty::from(s);
-    object.insert("format", ElementProperty::from(MANIFEST_FORMAT));
-    object.insert("family", text(&model.family));
-    object.insert("identity", text(&model.identity));
-    for (key, value) in [
-        ("repo", &model.repo),
-        ("revision", &model.revision),
-        ("commit", &model.commit),
-    ] {
-        if let Some(value) = value {
-            object.insert(key, text(value));
-        }
-    }
-    object.insert("license", text(&model.license));
-    object.insert("license_text", text(&model.license_text));
-    object.insert(
-        "base_models",
-        ElementProperty::Array(
-            model
-                .base_models
-                .iter()
-                .map(|base| {
-                    let mut entry = PropertyMap::default();
-                    entry.insert("repo", text(&base.repo));
-                    if let Some(license) = &base.license {
-                        entry.insert("license", text(license));
-                    }
-                    ElementProperty::Object(Box::new(entry))
-                })
-                .collect(),
-        ),
-    );
-    object.insert("gated", ElementProperty::from(model.gated));
-    if let Some(added_at) = &model.added_at {
-        object.insert("added_at", text(added_at));
-    }
-    object.insert(
-        "files",
-        ElementProperty::Array(
-            model
-                .files
-                .iter()
-                .map(|file| {
-                    let mut entry = PropertyMap::default();
-                    entry.insert("name", text(&file.name));
-                    entry.insert("role", text(&file.role));
-                    entry.insert(
-                        "size",
-                        ElementProperty::from(i64::try_from(file.bytes).unwrap_or(i64::MAX)),
-                    );
-                    entry.insert("sha256", text(&file.sha256));
-                    ElementProperty::Object(Box::new(entry))
-                })
-                .collect(),
-        ),
-    );
-    let mut out =
-        crate::graph::schema::parse::pretty_json(&ElementProperty::Object(Box::new(object)));
-    out.push('\n');
-    out
-}
-
 // ---------------------------------------------------------------------------------------------
 // Listing and reading
 // ---------------------------------------------------------------------------------------------
@@ -669,32 +599,6 @@ pub(crate) fn find(root: &DirPath, key: &str) -> Result<Option<StoredModel>, Per
         return Ok(None);
     }
     Ok(list(root)?.into_iter().find(|m| m.id == id))
-}
-
-/// Reads the file `name` of the model `id` whole, checked against the manifest's size and
-/// SHA-256 (at most [`MAX_MODEL_FILE_BYTES`]).
-pub(crate) fn read_file(root: &DirPath, id: &str, name: &str) -> Result<Vec<u8>, PersistError> {
-    let (_, model) = read_model_manifest(root, id).map_err(|reason| {
-        PersistError::corrupt(format!("{MODELS_DIR}/{id}/{MODEL_MANIFEST}"), 0, reason)
-    })?;
-    let Some(file) = model.files.iter().find(|f| f.name == name) else {
-        return Err(PersistError::store(
-            "read a model file",
-            StoreFailure::UnknownModel,
-            format!("the model {id} has no file {name:?}"),
-        ));
-    };
-    let location = format!("{MODELS_DIR}/{id}/{name}");
-    let bytes = read_bounded(&models_dir(root).join(id).join(name), file.bytes)
-        .map_err(io("reading a model file"))?;
-    if bytes.len() as u64 != file.bytes || sha256_hex(&bytes) != file.sha256 {
-        return Err(PersistError::corrupt(
-            location,
-            0,
-            "the file's size or SHA-256 differs from the model's manifest",
-        ));
-    }
-    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -844,220 +748,6 @@ pub(crate) fn remove_tmp(root: &DirPath) -> usize {
         }
     }
     removed
-}
-
-/// Writes `reader` to `path` (synced), at most [`MAX_MODEL_FILE_BYTES`]: length and SHA-256.
-fn write_stream(path: &DirPath, reader: &mut dyn Read) -> Result<(u64, String), PersistError> {
-    let mut out = path.create(true).map_err(io("writing a model file"))?;
-    let (len, sha256) =
-        copy_hashed(reader, &mut out, MAX_MODEL_FILE_BYTES).map_err(io("writing a model file"))?;
-    if len > MAX_MODEL_FILE_BYTES {
-        return Err(invalid(
-            "add a model",
-            format!(
-                "the file {} is larger than {} GiB",
-                path.file_name(),
-                MAX_MODEL_FILE_BYTES >> 30
-            ),
-        ));
-    }
-    out.sync().map_err(io("writing a model file"))?;
-    Ok((len, sha256))
-}
-
-/// Adds `new` to the store at `root` (format spec 4.5): every file streamed into a temporary
-/// model directory with its SHA-256, the licence template written when the repository has no
-/// licence file, the manifest last, then the directory renamed to its id. The model is checked
-/// for its roles and names, not loaded (the caller loads it as a check when it can). Returns
-/// the model and whether it was new.
-pub(crate) fn add(
-    root: &DirPath,
-    new: NewModel,
-    added_at: Option<String>,
-) -> Result<(StoredModel, bool), PersistError> {
-    const OP: &str = "add a model";
-    if new.files.len() > MAX_MODEL_FILES {
-        return Err(invalid(OP, format!("at most {MAX_MODEL_FILES} files")));
-    }
-    for (index, (name, _, _)) in new.files.iter().enumerate() {
-        if !is_file_name(name) {
-            return Err(invalid(
-                OP,
-                format!(
-                    "the file name {name:?} is not allowed (1 to {MAX_FILE_NAME_BYTES} ASCII \
-                     letters, digits, '.', '_' and '-', not starting with '.' or \"tmp-\", not \
-                     the manifest's name)"
-                ),
-            ));
-        }
-        if new.files[..index].iter().any(|(other, _, _)| other == name) {
-            return Err(invalid(OP, format!("the file {name:?} is given twice")));
-        }
-    }
-    for role in [ModelRole::Config, ModelRole::Tokenizer, ModelRole::Weights] {
-        let count = new.files.iter().filter(|(_, r, _)| *r == role).count();
-        if count != 1 {
-            return Err(invalid(
-                OP,
-                format!(
-                    "a Model2Vec model needs exactly one {} file ({count} given)",
-                    role.as_str()
-                ),
-            ));
-        }
-    }
-    if let Some(repo) = &new.repo
-        && !is_repo_name(repo)
-    {
-        return Err(invalid(
-            OP,
-            format!("{repo:?} is not a Hugging Face repository name (owner/name)"),
-        ));
-    }
-    let license = new
-        .license
-        .clone()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    let label_ok =
-        |text: &str| text.len() <= MAX_LICENSE_BYTES && text.chars().all(|c| c.is_ascii_graphic());
-    if !label_ok(&license) {
-        return Err(invalid(
-            OP,
-            format!("the licence {license:?} is not an SPDX id"),
-        ));
-    }
-    for base in &new.base_models {
-        if !is_repo_name(&base.repo) || !base.license.as_deref().is_none_or(label_ok) {
-            return Err(invalid(
-                OP,
-                format!("the base model {:?} is not a repository name", base.repo),
-            ));
-        }
-    }
-    for text in [&new.revision, &new.commit].into_iter().flatten() {
-        if text.len() > 255 || text.chars().any(char::is_control) {
-            return Err(invalid(OP, "a revision or commit that is not plain text"));
-        }
-    }
-
-    models_dir(root)
-        .create_dir_all()
-        .map_err(io("creating the models directory"))?;
-    let dir = NewModelDir::begin(root)?;
-    let mut files_out = Vec::with_capacity(new.files.len() + 1);
-    let has_license_file = new
-        .files
-        .iter()
-        .any(|(_, role, _)| *role == ModelRole::License);
-    for (name, role, mut reader) in new.files {
-        let (bytes, sha256) = write_stream(&dir.tmp.join(&name), &mut reader)?;
-        files_out.push(ModelFile {
-            name,
-            role: role.as_str().to_string(),
-            bytes,
-            sha256,
-        });
-    }
-    let license_text = if has_license_file {
-        "file"
-    } else if let Some(template) = super::licenses::template(&license, new.repo.as_deref())
-        && !files_out.iter().any(|f| f.name == "LICENSE")
-        && files_out.len() < MAX_MODEL_FILES
-    {
-        let (bytes, sha256) = write_stream(&dir.tmp.join("LICENSE"), &mut template.as_bytes())?;
-        files_out.push(ModelFile {
-            name: "LICENSE".to_string(),
-            role: ModelRole::License.as_str().to_string(),
-            bytes,
-            sha256,
-        });
-        "template"
-    } else {
-        "none"
-    };
-    // Every other licence of the base models travels too (a tokenizer may come from one):
-    // `LICENSE-BASE-<licence>` with its standard text, one file per licence.
-    let mut base_licenses: Vec<String> = Vec::new();
-    for base in &new.base_models {
-        let Some(other) = base.license.as_deref().map(str::to_ascii_lowercase) else {
-            continue;
-        };
-        if other != license.to_ascii_lowercase() && !base_licenses.contains(&other) {
-            base_licenses.push(other);
-        }
-    }
-    for other in base_licenses {
-        let bases: Vec<&str> = new
-            .base_models
-            .iter()
-            .filter(|b| b.license.as_deref().map(str::to_ascii_lowercase) == Some(other.clone()))
-            .map(|b| b.repo.as_str())
-            .collect();
-        let name = format!("LICENSE-BASE-{other}");
-        let Some(text) = super::licenses::base_template(&other, &bases, new.repo.as_deref()) else {
-            continue;
-        };
-        if !is_file_name(&name)
-            || files_out.iter().any(|f| f.name == name)
-            || files_out.len() >= MAX_MODEL_FILES
-        {
-            continue;
-        }
-        let (bytes, sha256) = write_stream(&dir.tmp.join(&name), &mut text.as_bytes())?;
-        files_out.push(ModelFile {
-            name,
-            role: ModelRole::License.as_str().to_string(),
-            bytes,
-            sha256,
-        });
-    }
-    let by_role = |role: ModelRole| {
-        files_out
-            .iter()
-            .find(|f| f.role == role.as_str())
-            .map(|f| (f.bytes, f.sha256.clone()))
-            .unwrap_or_default()
-    };
-    let (config, tokenizer, weights) = (
-        by_role(ModelRole::Config),
-        by_role(ModelRole::Tokenizer),
-        by_role(ModelRole::Weights),
-    );
-    let digest = identity_digest([
-        (config.0, &config.1),
-        (tokenizer.0, &tokenizer.1),
-        (weights.0, &weights.1),
-    ]);
-    let id = format!("{FAMILY}-{}", &digest[..12]);
-    let bytes = files_out.iter().map(|f| f.bytes).sum();
-    let model = StoredModel {
-        identity: identity_text(new.repo.as_deref(), &digest),
-        id: id.clone(),
-        family: FAMILY.to_string(),
-        repo: new.repo,
-        revision: new.revision,
-        commit: new.commit,
-        license,
-        license_text: license_text.to_string(),
-        base_models: new.base_models,
-        gated: new.gated,
-        added_at,
-        files: files_out,
-        bytes,
-        problem: None,
-    };
-    write_stream(
-        &dir.tmp.join(MODEL_MANIFEST),
-        &mut manifest_text(&model).as_bytes(),
-    )?;
-    if dir.finish(root, &id)? {
-        return Ok((model, true));
-    }
-    // The same files are stored already (the same id): that model, as it is.
-    let existing = find(root, &id)?.unwrap_or(model);
-    Ok((existing, false))
 }
 
 /// Removes the model `key` names (identity or id) from the store at `root`: its directory is
@@ -1365,14 +1055,6 @@ pub(crate) fn packed_files(
         models.push(model);
     }
     Ok((out, models))
-}
-
-/// The time text of now (UTC, whole seconds) for a manifest's `added_at`.
-pub(crate) fn now_text() -> Option<String> {
-    let micros = crate::graph::undo::now_micros();
-    crate::value::temporal::DateTime::from_micros(micros - micros.rem_euclid(1_000_000), 0)
-        .ok()
-        .map(|t| t.to_string())
 }
 
 #[cfg(test)]

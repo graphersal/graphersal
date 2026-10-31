@@ -35,6 +35,7 @@ impl DefinitionRecord {
             DefinitionBody::Compression(rule) => Some(rule.to_payload()),
             DefinitionBody::PropertyIndex(index) => Some(index.to_payload()),
             DefinitionBody::Job(job) => Some(job.to_payload()),
+            DefinitionBody::Model(model) => Some(model.to_payload()),
             DefinitionBody::Opaque(_) => None,
         };
         let payload = match (known, definition.body()) {
@@ -51,7 +52,8 @@ impl DefinitionRecord {
                 DefinitionBody::Query(_)
                 | DefinitionBody::Compression(_)
                 | DefinitionBody::PropertyIndex(_)
-                | DefinitionBody::Job(_),
+                | DefinitionBody::Job(_)
+                | DefinitionBody::Model(_),
             ) => Vec::new(),
         };
         Ok(Self {
@@ -94,6 +96,9 @@ impl DefinitionRecord {
         } else if kind == DefinitionKind::JOB {
             crate::graph::jobs::JobDefinition::from_payload(&map)
                 .map(|job| Definition::job(self.name.clone(), job))
+        } else if kind == DefinitionKind::MODEL {
+            crate::graph::model_definition::ModelDefinition::from_payload(&map)
+                .map(|model| Definition::model(self.name.clone(), model))
         } else if kind == DefinitionKind::PROPERTY_INDEX {
             PropertyIndexDefinition::from_payload(&map)
                 .map(|index| Definition::property_index(self.name.clone(), index))

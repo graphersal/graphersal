@@ -825,14 +825,23 @@ class Store:
         """The marks a target can reach, in order (a mark before the oldest snapshot is left
         out: a prune removed its history)."""
     def models(self) -> list[dict[str, Any]]:
-        """The embedding models the store keeps (``models/`` in the store), each ``{"id",
-        "identity", "repo", "revision", "commit", "license", "license_text", "gated",
-        "base_models", "bytes", "files", "used_by_schema", "problem"}``. ``license_text``:
-        ``"file"`` (the repository's licence file), ``"template"`` (the standard text of the
-        licence, written beside the model) or ``"none"``. Every copy of the store carries them:
-        handing the store on redistributes them. The store's models are registered
-        when the store is opened (an ``embedders=`` embedder of the same model wins; a model
-        neither provides is a ``UserWarning`` naming the command that adds it)."""
+        """The embedding models of the store's current position (catalog kind 5), each
+        ``{"identity", "repo", "revision", "commit", "dimension", "license", "license_text",
+        "gated", "base_models", "default", "bytes", "load_bytes", "state", "needed_by",
+        "used_by_schema", "problem"}``. ``state``: ``loaded``, ``not_loaded``, ``damaged``,
+        ``missing`` or ``unsupported``. Every copy of the store carries them: handing the store
+        on redistributes them."""
+    def import_model(
+        self,
+        directory: str,
+        *,
+        repo: str | None = None,
+        license: str | None = None,
+        replace: bool = False,
+        default: bool = False,
+    ) -> dict[str, Any]:
+        """Imports the Model2Vec model in ``directory`` as one commit; returns ``{"model",
+        "already_present", "commit_seq", "replaced", "warnings"}``."""
     def export(
         self,
         path: str,

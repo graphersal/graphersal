@@ -308,79 +308,87 @@ a segment's or a WAL segment's, so the version guard (15) ignores the file.
 
 ### 4.5 Embedding models
 
-`models/` holds embedding models the store keeps beside its graph (book page "Embedding Models
-in a Store"), so a schema's vector properties find the model that made them (their `embedder`
-identity, `model2vec/<repo>@<12 hex>`) wherever the store goes. A model enters a store only by an
-explicit add and leaves it only by an explicit removal; nothing else (checkpoint, prune, compact,
-rollback, attic operations) touches `models/`.
+An embedding model the store keeps (book page "Embedding Models in a Store") is ONE blob (4.6)
+holding all its files as a deterministic tar, referenced by a catalog definition of kind 5
+(`model`, 6.3) that follows the history: every position (commit, mark, snapshot, rollback,
+view) has exactly the models, and the default model, of that moment. A model enters a store
+only by an explicit import (one commit defining it) and leaves its current state only by a
+removal (one commit dropping the definition, refused while the current schema needs the
+model); its blob goes with the prune that drops the last retained history referencing it
+(12.4). The **identity** stays the link between a schema's vector properties (their `embedder`)
+and the model: `model2vec/<repo>@<12 hex>`, the first 12 lowercase hex digits of the SHA-256 of
+the text `model2vec-identity/1\n` followed by one line `<role> <size> <sha256 hex>\n` per
+identity file, for the roles `config`, `tokenizer` and `model` in that order (the rule of the
+Model2Vec loader; no path is part of it).
 
-**One directory per model**, named by its **content address** `model2vec-<12 hex>`: the 12 hex
-digits of the model identity, the first 12 lowercase hex digits of the SHA-256 of the text
-`model2vec-identity/1\n` followed by one line `<role> <size> <sha256 hex>\n` per identity file,
-for the roles `config`, `tokenizer` and `model` in that order (the rule of the Model2Vec loader;
-no path and no repository name is part of it). The same files are the same directory; the
-schema's identity names the directory directly. A name under `models/` that is neither such a
-directory nor a `tmp-` entry is a problem for verify (12.9).
+**The tar.** POSIX ustar (`magic "ustar\0"`, `version "00"`): one regular-file entry
+(`typeflag '0'`) per file, entries sorted by name bytewise, `mode 0000644`, `uid`/`gid` 0,
+`uname`/`gname` empty, `mtime` 0, `devmajor`/`devminor` 0, `prefix` and `linkname` empty, the
+checksum as ustar defines it (six octal digits, NUL, space), the size as eleven octal digits and
+a NUL (so a file is at most 8 GiB - 1), the data padded with zeros to 512 bytes; the end is two
+zero blocks and nothing after them (a reader accepts further zero bytes only). No directories,
+links, pax or GNU headers. The same files give the same bytes, so the same blob hash.
 
 **Files.** The model's own files (the three identity files under the names they had, for
 example `config.json` or `config_sentence_transformers.json`, `tokenizer.json`,
-`model.safetensors`), its card `README.md`, the repository's licence and notice files (`LICENSE*`,
-`LICENCE*`, `COPYING*`, `NOTICE*`), and the manifest `graphersal-embed-model.json`. Every file
-name is 1 to 40 bytes of ASCII letters, digits, `.`, `_` and `-`, not starting with `.` or
-`tmp-` (so `<id>.<file>` stays within the 64 bytes of a plain name of a ZIP backup, 12.8, and of
-a packed snapshot's file, 8). A model has at most 64 files besides its manifest, each at most
-8 GiB.
+`model.safetensors`), its card `README.md`, the repository's licence and notice files
+(`LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`), and the manifest `graphersal-model.json`. Every
+file name is 1 to 40 bytes of ASCII letters, digits, `.`, `_` and `-`, not starting with `.`. A
+model has at most 64 files besides its manifest. When the repository has no licence file, the
+writer adds the standard text of an MIT or Apache-2.0 `license` as `LICENSE` (`license_text`
+`template`); for every known base-model licence other than `license` with a bundled text, the
+file `LICENSE-BASE-<licence>` (lowercase SPDX id, role `license`), since parts of a base model
+(such as a tokenizer) may be in the model.
 
-**Manifest** (UTF-8 JSON, at most 1 MiB; the format 1 of Graphersal 0.3.0's model downloads
-is a subset and reads the same way):
+**Manifest** (format 3; compact UTF-8 JSON, keys in this order, absent optional keys left out,
+so the bytes are deterministic; at most 1 MiB):
 
 | Key | Content |
 |---|---|
-| `format` | `2`; a reader that sees a higher value keeps and copies the model but does not use it (newer content, 16 rule 9) |
-| `family` | `model2vec`; another family is kept and copied, not used |
-| `identity` | `model2vec/<repo>@<12 hex>`, or `model2vec@<12 hex>` without `repo`; MUST match the files (optional, recomputed) |
-| `repo`, `revision`, `commit` | the Hugging Face repository (`name` or `owner/name`), the revision asked for, the commit it resolved to (optional) |
-| `license` | the licence as an SPDX id as the repository states it (`cardData.license`), else `unknown` |
-| `license_text` | where the licence text comes from: `file` (a licence file of the repository), `template` (the repository has none: the writer stored the standard text of `license` as `LICENSE`, for MIT and Apache-2.0, with a first paragraph saying so) or `none` |
-| `base_models` | `[{repo, license?}]`: the models this one was made from (`cardData.base_model`), with their licences when known. For every known base licence other than `license` with a bundled text (MIT, Apache-2.0) the writer stores its standard text as the file `LICENSE-BASE-<licence>` (lowercase SPDX id, role `license`, one file per licence, a first paragraph naming the base models), since parts of a base model (such as a tokenizer) may be in the model |
+| `format` | `3`; a reader that sees a higher value does not load the model |
+| `family` | `model2vec` |
+| `identity` | `model2vec/<repo>@<12 hex>`: MUST match the files |
+| `repo` | the Hugging Face repository (`name` or `owner/name`) |
+| `revision`, `commit` | the revision asked for, the commit it resolved to (optional) |
+| `license` | the licence as an SPDX id as the repository states it, else `unknown` |
+| `license_text` | `file` (a licence file of the repository), `template` (the standard text the writer added) or `none` |
+| `base_models` | `[{repo, license?}]`: the models this one was made from |
 | `gated` | whether the repository is gated (its terms may restrict passing the model on) |
-| `added_at` (or `downloaded_at`) | RFC 3339 time (informative) |
-| `files` | `[{name, role, size, sha256}]`: every file of the directory but the manifest; `role` is `config`, `tokenizer`, `model` (exactly one each), `card`, `license`, `notice` (a role a reader does not know is kept) |
+| `files` | `[{name, role, size, sha256}]`, sorted by name: every file of the tar but the manifest; `role` is `config`, `tokenizer`, `model` (exactly one each), `card`, `license`, `notice` |
 
-Unknown keys are allowed and kept: a copy copies the manifest byte for byte.
+No time stamp is part of the manifest or the definition (when a model was added is instance
+data, never part of the immutable model).
 
-**Writing.** An add streams every file into `models/tmp-<32 hex>/` computing its SHA-256,
-writes the manifest last, syncs, and renames the directory to its id (a model already present
-is left as it is). A removal renames the directory to a `tmp-` name, then deletes it. An open of
-a writable store deletes leftover `models/tmp-*` entries. A store's lock rules apply: an add or
-removal of a closed store takes the writer lock; a removal waits for no backup and is refused
-while the backup pin is held shared.
+**Reading.** A reader reads the blob whole into memory (after the memory check below) and the
+tar from it: every header's checksum is checked, sizes are bounded by the remaining bytes, names
+validated; an unknown type flag, a duplicate or unsorted name, more than 64 files besides the
+manifest, a manifest that does not list exactly the tar's files are invalid content of the
+model's blob (never damage of the store, 13). The files are used where they are (no extraction
+to disk).
 
-**Checks.** A model is intact when its manifest parses, lists exactly the files of its
-directory, every file has the listed size and SHA-256, and the identity files give its id.
-Files from a foreign store are hostile input: a reader bounds every count and size before it
-allocates. A damaged model is a problem of `verify` (12.9) under its path; it is not damage of
-the graph: it never makes an open store read-only (13).
+**Needed models and the open.** A model the CURRENT schema needs (a vector property's
+`embedder` naming its identity) is loaded when the store opens, in every mode (also read-only,
+a backup, a view of a past position). A needed model that is not in the catalog of that
+position, whose blob is missing or damaged, or whose files do not load refuses the open
+(`model_unavailable`), with the commands that bring it back; one whose load would take the
+process over its memory ceiling refuses it too (`model_does_not_fit`): the check uses the blob's
+`length` plus the definition's `load_bytes` before anything is read, and the message names the
+smallest ceiling that fits. A writable open records the refusal in the journal (`model.load_failed`,
+4.7) best effort. A model of a family or blob algorithm the reader does not know opens the store
+read-only (16 rule 9); a reader that cannot run models at all (no Model2Vec loader, such as the
+browser) checks the needed blobs by length and CRC-32C and opens the store read-only without
+text queries. A model nothing needs is loaded at the first query that embeds with it; a missing
+or damaged one is a journal record (`model.unavailable`), the store works.
 
-**Copies.** Unlike `WORKLOAD`, the models are part of what a store hands on. Every copy carries
-every model, each checked against its manifest while it is copied: a full or incremental backup
-(12.6, 12.7; an increment adds the models the backup lacks and removes the ones the store no
-longer holds, after the increment itself), a ZIP backup (12.8: entries `models/<id>/<file>`), a
-backup from memory (12.11: intact models only), a fork and an attic fork (12.5), a repair (13.4:
-intact models only, the others reported), a conversion and a copying upgrade (file by file), a
-restore (a backup directory has them in place; a ZIP restore checks them), and a packed snapshot
-(8: as files of segment kind 3). A damaged model stops a backup, a fork or an export; the ZIP
-backup and the packed export can leave the models out (a copy to hand on without
-redistributing them).
+**Copies.** The models travel as blobs: every copy carries the blobs its history references
+(4.6, 12.x) and the definitions with the catalog, so the copy has the models of every position
+it holds.
 
-**Readers without models** (Graphersal 0.3.0 and older; the store and file format versions are
-unchanged, 15):
-
-| Copy with models | What 0.3.0 does |
-|---|---|
-| a store directory or single-file store | opens, reads, writes, checkpoints, prunes, compacts and verifies it; ignores `models/` and keeps it; its backups and forks do not carry the models |
-| a ZIP backup | refuses the restore as written by a newer version (12.8, 16 rule 9; nothing is written); an archive without models restores |
-| a packed snapshot | loads it and ignores the models (8: ignorable files, checked by length and CRC); a store created from it keeps them as ignorable files of its first snapshot, dropped by its next checkpoint |
+**Older stores.** Graphersal 0.4.0 kept models as `models/<model2vec-12hex>/` directories with a
+manifest `graphersal-embed-model.json` (format 2, with `added_at`), outside the history, carried
+by every copy as files and by a packed snapshot as segment-table rows of kind 3. This version
+still carries such directories through its copies and reads them for the migration (15) into
+blobs and definitions; it writes none.
 
 ### 4.6 Blobs
 
@@ -703,8 +711,32 @@ payload     = property map (3) with inline keys (as in a WAL record)
 | 2 | property index |
 | 3 | compression rule |
 | 4 | scheduled job of a user (since 0.3.0) |
-| 5..127 | unassigned (assigned only by this format) |
+| 5 | embedding model (since 0.5.0, 4.5) |
+| 6..127 | unassigned (assigned only by this format) |
 | 128..255 | host kinds: reserved for applications built on the library, never assigned by this format (16 rule 8) |
+
+An **embedding model** (kind 5, not critical: a reader that does not know the kind keeps it and
+serves no model) is named by the model identity (`model2vec/<repo>@<12 hex>`, at most 256 bytes;
+for a family the reader does not know, any name of 1 to 256 bytes). Its payload keys, in this
+order, followed by the keys the writer does not know:
+
+| Key | Value |
+|---|---|
+| `blob` | `blobref` (3, tag 21): the model's tar (4.5) |
+| `family` | string: `model2vec`; another family is kept, written back unchanged, not served |
+| `repo` | string: the repository, the model's user-visible name (required) |
+| `revision`, `commit` | strings (optional) |
+| `dimension` | int64: the vector dimension |
+| `load_bytes` | int64: the memory the loaded model takes (measured at import; the memory check of a load uses it before reading the blob) |
+| `license`, `license_text` | strings, as the manifest's (4.5) |
+| `base_models` | array of `{repo, license?}` |
+| `gated` | boolean |
+| `default` | boolean, absent = false: the default model |
+
+A catalog holds at most one model per `repo` (the current revision) and at most one `default`
+(a writer refuses a second; a replace drops the old revision and defines the new one in one
+commit). A model of an unknown `family` or blob hash algorithm is kept, listed as unsupported and
+written back unchanged, never loaded.
 
 A **saved query** (kind 1) is one Rhai function (or one GQL query) stored as text and called by
 name; its name is

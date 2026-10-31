@@ -79,18 +79,14 @@ fn marks_list<'py>(py: Python<'py>, marks: &[Mark]) -> PyResult<Bound<'py, PyLis
     Ok(list)
 }
 
-/// One stored model as ``store.models()`` returns it.
-fn model_dict<'py>(
-    py: Python<'py>,
-    model: &persist::StoredModel,
-    used: &[String],
-) -> PyResult<Bound<'py, PyDict>> {
+/// One model of the store as ``store.models()`` returns it.
+fn model_dict<'py>(py: Python<'py>, model: &persist::ModelInfo) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("id", &model.id)?;
     dict.set_item("identity", &model.identity)?;
     dict.set_item("repo", &model.repo)?;
     dict.set_item("revision", &model.revision)?;
     dict.set_item("commit", &model.commit)?;
+    dict.set_item("dimension", model.dimension)?;
     dict.set_item("license", &model.license)?;
     dict.set_item("license_text", &model.license_text)?;
     dict.set_item("gated", model.gated)?;
@@ -102,27 +98,19 @@ fn model_dict<'py>(
         bases.append(entry)?;
     }
     dict.set_item("base_models", bases)?;
+    dict.set_item("default", model.default)?;
     dict.set_item("bytes", model.bytes)?;
-    let files = PyList::empty(py);
-    for file in &model.files {
-        let entry = PyDict::new(py);
-        entry.set_item("name", &file.name)?;
-        entry.set_item("role", &file.role)?;
-        entry.set_item("bytes", file.bytes)?;
-        entry.set_item("sha256", &file.sha256)?;
-        files.append(entry)?;
-    }
-    dict.set_item("files", files)?;
-    let hex = model.id.strip_prefix("model2vec-").unwrap_or_default();
-    let in_use = used.iter().any(|named| {
-        named
-            .split('?')
-            .next()
-            .and_then(|base| base.rsplit_once('@'))
-            .is_some_and(|(_, h)| h == hex)
-    });
-    dict.set_item("used_by_schema", in_use)?;
-    dict.set_item("problem", &model.problem)?;
+    dict.set_item("load_bytes", model.load_bytes)?;
+    dict.set_item("state", model.state.name())?;
+    dict.set_item("needed_by", model.needed_by.clone())?;
+    dict.set_item("used_by_schema", !model.needed_by.is_empty())?;
+    dict.set_item(
+        "problem",
+        match &model.state {
+            persist::ModelState::Missing => Some("its blob is missing"),
+            state => state.reason(),
+        },
+    )?;
     Ok(dict)
 }
 
@@ -198,24 +186,28 @@ impl Store {
         store: persist::Store,
         embedders: RegistryCell,
     ) -> PyResult<Self> {
-        #[cfg(feature = "model2vec")]
-        {
-            let registered = embedders.current();
-            let found = py
-                .detach(|| store.stored_embedders(&registered))
-                .map_err(|err| store_error(py, err))?;
-            if !found.loaded.is_empty() {
-                embedders.replace(found.embedders);
+        // The models of the store's catalog join the ``embedders=`` ones (which win).
+        let stored = store.embedders().map_err(|err| store_error(py, err))?;
+        let registered = embedders.current();
+        let mut merged = Some(registered.to_builder());
+        let mut added = false;
+        for info in stored.infos() {
+            if info.name.starts_with("hash-ngram")
+                || registered.by_model(&info.model).is_some()
+                || registered.get(&info.name).is_some()
+            {
+                continue;
             }
-            for note in &found.notes {
-                let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
-                let message = std::ffi::CString::new(note.replace('\0', " "))
-                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                PyErr::warn(py, &category, &message, 1)?;
+            if let Some(embedder) = stored.get(&info.name).cloned()
+                && let Some(builder) = merged.take()
+            {
+                merged = builder.with(embedder).ok();
+                added = true;
             }
         }
-        #[cfg(not(feature = "model2vec"))]
-        let _ = py;
+        if added && let Some(builder) = merged {
+            embedders.replace(std::sync::Arc::new(builder.build()));
+        }
         Ok(Store::wrap(store, embedders))
     }
 }
@@ -602,22 +594,62 @@ impl Store {
         Ok(dict.into_any().unbind())
     }
 
-    /// ``store.models()``: the embedding models the store keeps (format spec 4.5), each
-    /// ``{"id", "identity", "repo", "revision", "commit", "license", "license_text", "gated",
-    /// "base_models": [{"repo", "license"}], "bytes", "files": [{"name", "role", "bytes",
-    /// "sha256"}], "used_by_schema", "problem"}``. ``license_text`` says where the licence text
+    /// ``store.models()``: the embedding models of the store's current position (format spec
+    /// 4.5, catalog kind 5), each ``{"identity", "repo", "revision", "commit", "dimension",
+    /// "license", "license_text", "gated", "base_models": [{"repo", "license"}], "default",
+    /// "bytes", "load_bytes", "state", "needed_by": ["label.key"], "used_by_schema",
+    /// "problem"}``. ``license_text`` says where the licence text
     /// comes from: ``"file"`` (the repository's), ``"template"`` (the standard text of the
     /// licence, written beside the model) or ``"none"``. Every copy of the store carries them:
     /// handing the store on redistributes them.
     fn models(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (models, used) = self.with(py, |store| {
-            Ok((store.models()?, store.info()?.schema_models))
-        })?;
+        let models = self.with(py, |store| store.models())?;
         let list = PyList::empty(py);
         for model in &models {
-            list.append(model_dict(py, model, &used)?)?;
+            list.append(model_dict(py, model)?)?;
         }
         Ok(list.into_any().unbind())
+    }
+
+    /// ``store.import_model(directory, *, repo=None, license=None, replace=False,
+    /// default=False)``: imports the Model2Vec model in ``directory`` (a ``graphersal
+    /// embed-model download`` directory or any directory with ``config.json``,
+    /// ``tokenizer.json`` and ``model.safetensors``) into this open store as one commit (format
+    /// spec 4.5): ``repo`` names its repository when the directory has no manifest, ``license``
+    /// its licence; ``replace`` replaces another revision of the repository, ``default`` makes
+    /// it the default model. Returns ``{"model": <models() entry>, "already_present",
+    /// "commit_seq", "replaced", "warnings"}``.
+    #[pyo3(signature = (directory, *, repo=None, license=None, replace=false, default=false))]
+    fn import_model(
+        &self,
+        py: Python<'_>,
+        directory: &str,
+        repo: Option<String>,
+        license: Option<String>,
+        replace: bool,
+        default: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let mut options = persist::ImportModelOptions::new()
+            .with_replace(replace)
+            .with_default(default);
+        if let Some(repo) = repo {
+            options = options.with_repo(repo);
+        }
+        if let Some(license) = license {
+            options = options.with_license(license);
+        }
+        let source = persist::ModelSource::Dir(std::path::PathBuf::from(directory));
+        let report = self.with(py, move |store| store.import_model(source, options))?;
+        let dict = PyDict::new(py);
+        dict.set_item("model", model_dict(py, &report.model)?)?;
+        dict.set_item("already_present", report.already_present)?;
+        dict.set_item("commit_seq", report.commit_seq)?;
+        match &report.replaced {
+            Some(replaced) => dict.set_item("replaced", model_dict(py, replaced)?)?,
+            None => dict.set_item("replaced", py.None())?,
+        }
+        dict.set_item("warnings", report.warnings.clone())?;
+        Ok(dict.into_any().unbind())
     }
 
     /// ``store.export(path, *, commit_seq=None, without_models=False)``: writes the latest

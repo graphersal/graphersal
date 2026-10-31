@@ -90,10 +90,15 @@ pub struct VerifyReport {
     /// independent donor. Checkpoints never write such a snapshot; the next checkpoint writes
     /// copies. Each one is also in [`Self::notes`].
     pub without_donor: Vec<String>,
-    /// Embedding models checked (every file against its manifest's SHA-256, format spec 4.5).
-    /// A damaged model is a problem with a path under `models/`; it does not make an open
-    /// store read-only (it is no graph data).
+    /// Embedding models checked (format spec 4.5): every model of the latest state, its blob
+    /// read as the model tar of its identity (every file against the manifest's SHA-256). A
+    /// damaged model is a problem with the path of its blob (`blobs/..`); it never makes an
+    /// open store read-only (it is no graph data). Models of a store written before 0.5.0
+    /// (`models/<id>/`) are counted too.
     pub models_checked: usize,
+    /// The models of the latest state with what verify found (`state` damaged or missing for
+    /// a model whose blob is).
+    pub models: Vec<super::ModelInfo>,
     /// Problems of the system journal (format spec 4.7: damaged records, unreadable
     /// segments). Never damage of the store; each one is also in [`Self::notes`].
     pub journal_notes: Vec<String>,
@@ -148,9 +153,10 @@ pub struct BackupReport {
     /// Whether the backup was written from the graph in memory
     /// ([`Store::backup_from_memory`](super::Store::backup_from_memory)).
     pub from_memory: bool,
-    /// The embedding models the backup holds (format spec 4.5) with their licences: who hands
-    /// the backup on redistributes them.
-    pub models: Vec<super::StoredModel>,
+    /// The embedding models of the backup's latest state (catalog kind 5, format spec 4.5)
+    /// with their licences and the states of their blobs in the backup: who hands the backup
+    /// on redistributes them. For a ZIP backup, the models of the store's current position.
+    pub models: Vec<super::ModelInfo>,
     /// The system journal's segments copied (relative name, bytes; format spec 12.6, 12.7):
     /// not counted in [`Self::files`] and [`Self::bytes`], which are the graph's files.
     pub journal_files: Vec<(String, u64)>,
@@ -628,6 +634,175 @@ pub(super) fn definitions_in_files(
     ))
 }
 
+/// The model definitions (catalog kind 5) and the schema of the latest state in the files of
+/// `dir`: the newest snapshot's definitions table and schema with the WAL's catalog and schema
+/// changes after it applied (a closed store, a copy, a backup).
+pub(super) fn models_in_files(
+    dir: &DirPath,
+) -> Result<
+    (
+        Vec<crate::graph::definition::Definition>,
+        Option<crate::graph::schema::GraphSchema>,
+    ),
+    PersistError,
+> {
+    use crate::graph::DefinitionKind;
+    let depth = crate::value::depth::DEFAULT_MAX_VALUE_DEPTH;
+    let mut models: Vec<crate::graph::definition::Definition> = Vec::new();
+    let mut schema: Option<crate::graph::schema::GraphSchema> = None;
+    let mut base = 0;
+    if let Some((commit_seq, path)) = list_snapshots(dir)?.last() {
+        schema = read_bounded(&path.join(super::snapshot_dir::SCHEMA_FILE), 256 << 20)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| crate::graph::schema::GraphSchema::from_json(&text).ok());
+        let (_, manifest) = super::snapshot_dir::read_manifest(path)?;
+        for record in &manifest.definitions {
+            if record.kind == DefinitionKind::MODEL.code()
+                && let Ok(definition) = record.decode(depth)
+            {
+                models.push(definition);
+            }
+        }
+        base = *commit_seq;
+    }
+    for (_, path) in list_wal(dir)? {
+        let source = open_segment_reader(&path, None)?;
+        let Ok(mut reader) = JournalReader::open(source, 0, depth) else {
+            continue;
+        };
+        while let Ok(Some((_, _, record))) = reader.next_known_record(&mut |_| {}) {
+            let JournalRecord::Commit(changes) = record else {
+                continue;
+            };
+            if changes.commit_seq() <= base {
+                continue;
+            }
+            for mutation in changes.mutations() {
+                match mutation {
+                    crate::graph::Mutation::SetDefinition {
+                        kind, name, after, ..
+                    } if *kind == DefinitionKind::MODEL => {
+                        models.retain(|d| d.name() != name);
+                        if let Some(after) = after {
+                            models.push((**after).clone());
+                        }
+                    }
+                    crate::graph::Mutation::SetSchema { after, .. } => {
+                        schema = Some((**after).clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok((models, schema))
+}
+
+/// The model part of [`verify`]: the models of the latest state, each one's blob read and
+/// checked as the tar of the model its definition names (a blob whose bytes check but whose
+/// content is no such tar is a problem); [`VerifyReport::models`] lists them with their
+/// states.
+fn verify_models(dir: &DirPath, report: &mut VerifyReport) {
+    use super::ModelState;
+    let infos = match super::model_catalog::catalog_in_files(dir) {
+        Ok((definitions, schema)) => {
+            let mut checked = Vec::new();
+            for definition in &definitions {
+                let Some(model) = definition.as_model() else {
+                    continue;
+                };
+                report.models_checked += 1;
+                let blob = model.blob();
+                let state = if report.blob_faults.iter().any(|(b, _)| b == blob) {
+                    match super::model_catalog::blob_state(dir, blob) {
+                        ModelState::Missing => ModelState::Missing,
+                        _ => ModelState::Damaged {
+                            reason: "its blob is damaged".to_string(),
+                        },
+                    }
+                } else if !model.served() {
+                    ModelState::NotLoaded
+                } else {
+                    match check_model_blob(dir, definition.name(), model) {
+                        Ok(()) => ModelState::NotLoaded,
+                        Err(reason) => {
+                            report.problems.push(VerifyProblem {
+                                path: super::blobs::blob_name(blob),
+                                offset: None,
+                                reason: format!(
+                                    "the blob of the model {} ({}) {reason}",
+                                    model.repo(),
+                                    definition.name()
+                                ),
+                            });
+                            ModelState::Damaged { reason }
+                        }
+                    }
+                };
+                checked.push((definition.clone(), state));
+            }
+            checked
+                .iter()
+                .filter_map(|(d, state)| {
+                    d.as_model().map(|m| {
+                        super::model_catalog::model_info(d, m, schema.as_ref(), state.clone())
+                    })
+                })
+                .collect()
+        }
+        Err(err) => {
+            report.notes.push(format!(
+                "the models of the latest state cannot be read: {err}"
+            ));
+            Vec::new()
+        }
+    };
+    report.models = infos;
+}
+
+/// Reads the blob of `model` and checks it is the model tar of the identity `identity`.
+fn check_model_blob(
+    dir: &DirPath,
+    identity: &str,
+    model: &crate::graph::model_definition::ModelDefinition,
+) -> Result<(), String> {
+    let bytes = match super::blobs::read_blob(dir, model.blob()) {
+        Ok(bytes) => bytes,
+        // Not read (does not fit, I/O): the blob check reported what it found.
+        Err(_) => return Ok(()),
+    };
+    let tar = crate::persist::model_tar::read_tar(&bytes)
+        .map_err(|reason| format!("is not a valid model tar: {reason}"))?;
+    let manifest = &tar.manifest;
+    if !manifest.is_known_family() || manifest.identity != identity {
+        return Err(format!(
+            "holds the model {} of the family {}",
+            manifest.identity, manifest.family
+        ));
+    }
+    let digest = manifest
+        .digest()
+        .ok_or("lists no config, tokenizer and model file")?;
+    let short = super::model_catalog::base_identity(identity)
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    if !digest.starts_with(short) || short.is_empty() {
+        return Err("lists files that are another model than its identity".into());
+    }
+    for (name, data) in tar.files() {
+        if let Some(file) = manifest.files.iter().find(|f| f.name == name)
+            && crate::persist::model_tar::sha256_hex(data) != file.sha256
+        {
+            return Err(format!(
+                "holds the file {name} with another SHA-256 than listed"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The blob part of [`verify`].
 fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport) {
     use super::blobs::{self, BlobError};
@@ -849,6 +1024,9 @@ pub(super) fn verify(
     // The blobs (format spec 4.6, 12.9): every referenced blob read whole; strays are problems,
     // unreferenced blob files notes.
     verify_blobs(dir, &chain.chain(), &mut report);
+    // The models of the latest state (format spec 4.5): each blob a model tar of the model its
+    // definition names.
+    verify_models(dir, &mut report);
 
     // The system journal (format spec 4.7): notes, never damage.
     report.journal_notes = super::system_journal::verify_notes(dir);
@@ -1495,7 +1673,6 @@ fn full_report(plan: &BackupPlan) -> BackupReport {
         segments_copied: plan.segments.iter().map(|(first, _)| *first).collect(),
         taken_at: plan.taken_at,
         warnings: plan.warnings.clone(),
-        models: plan.models.iter().map(|(model, _)| model.clone()).collect(),
         blobs: plan.blobs.iter().map(super::blobs::blob_name).collect(),
         blobs_not_carried: plan.blobs_not_carried.clone(),
         ..BackupReport::default()

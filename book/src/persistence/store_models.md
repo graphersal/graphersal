@@ -1,134 +1,103 @@
 # Embedding Models in a Store
 
-Vectors made by a real embedding model are only useful with that model: a text query
-(`nearest("emb", "a question", 5)`) embeds its text with the model the schema recorded for the
-property (`model2vec/<repo>@<12 hex digits>`, see
-[Which model produced a property](../users_guide/vectors.md#which-model-produced-a-property)).
-A Store can keep the models it needs **inside it**, beside the graph, so the store opens with
-its model wherever it goes: on another machine, from a backup, after a fork.
+A store keeps the embedding models its vectors were made with. A model is **data of the
+database**: ONE blob (its files as a deterministic tar, see [Blobs](store_blobs.md)) referenced
+by a catalog definition of kind `model` that follows the history like every other definition.
+Every position of the store (a commit, a mark, a snapshot, a rollback, a view of the past) has
+exactly the models, and the default model, of that moment; every copy of the store carries them.
+The normative description is the [format specification](format.md), sections 4.5 and 6.3.
 
-## Putting a model into a store
+A model is named by its **repository** (`minishlab/potion-base-8M`): that is the name `embed`
+and text queries use. Inside, the schema records the model's **identity**
+(`model2vec/<repo>@<12 hex>`, a hash of its files), so the vectors stay tied to the exact model
+that made them.
 
-A model enters a store only by an explicit command, never on its own:
-
-```bash
-graphersal store create data/
-graphersal embed-model download minishlab/potion-base-8M --into data/
-graphersal embed-model download minishlab/potion-multilingual-128M --into data/   # 101 languages
-graphersal embed-model import minishlab/potion-base-8M --into other/   # downloaded before: no network
-graphersal embed-model import ./my-model --into data/ --repo acme/my-model --license mit
-```
-
-`download --into` fetches the model from Hugging Face (as `embed-model download` does, plus its
-model card, its licence files and its metadata) and puts it into the store instead of the models
-directory. `import` puts a model downloaded before (`embed-model download <REPO>` without
-`--into`) into the store by its repository name, looked up in the models directory (`--dir`,
-else the default one) without the network; anything else is taken as a local Model2Vec directory
-(any directory with `config.json`, `tokenizer.json` and `model.safetensors`; write `./owner/name`
-for a directory that looks like a repository name); `--repo` names its
-repository when the directory has no manifest (the repository is part of the model identity),
-`--license` its licence. Both load the model once as a check. The store must be closed (a
-server holding it open keeps its writer lock).
-
-In a program: `Store::add_model(NewModel::new().with_file(..).with_repo(..).with_license(..))`
-on an open store, `Store::add_model_dir` on a closed one.
-
-## Opening a store loads its models
-
-When a store is opened (`graphersal --graph data/`, the dev server, Python `Store.open`), every
-model the store keeps is registered as an embedder (under its repository name,
-`minishlab/potion-base-8M`; a model **the schema names** under the identity the schema records),
-so text queries and `embed_property()` work without `--embedder`. Such a name is also a valid
-`--default-embedder` (`--default-embedder minishlab/potion-base-8M`); a short name of your own
-(`potion`) exists only with `--embedder potion=...`:
-
-```bash
-graphersal --graph data/ -e 'g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "minishlab/potion-base-8M"})'
-graphersal --graph data/ -e 'g.v().has_label("doc").nearest("emb", "connected data", 3).values("text").to_list()'
-```
- An embedder you register yourself for the same model wins (`--embedder
-potion=...`, Python `embedders=[...]`): the stored copy is not loaded then. A model the schema
-names that neither you nor the store provides is a note on stderr (Python: a `UserWarning`)
-naming the command that adds it. The REPL and a one-shot run print one note per model, with its
-licence; the dev server lists the models (name, repository, licence, where each comes from) and
-these notes in the Embedding models section of its start banner instead
-([Dev Server](dev_server.md)):
+## Importing a model
 
 ```text
-note: loaded the embedding model model2vec/minishlab/potion-base-8M@fac4fa854e68 from the store data/ as minishlab/potion-base-8M (licence MIT)
-note: the schema names the embedding model model2vec/acme/gone@0123456789ab (doc.emb), which is neither registered nor stored in data/: add it with `graphersal embed-model download acme/gone --into data/`, or pass it with --embedder NAME=<model_dir>
+graphersal embed-model download minishlab/potion-base-8M
+graphersal embed-model import minishlab/potion-base-8M --into data/
 ```
 
-A program asks for the same with `Store::stored_embedders(&registered)` (features `persist` and
-`model2vec`), which returns the registry to use, what it loaded and the notes (a model that does
-not load is a note; a `models/` directory that cannot be read is the call's error). Models of other
-kinds than Model2Vec are not kept in a store yet. The WebAssembly playground keeps the models of a
-store (in its copies and downloads) but cannot run them.
+The import writes the model's files (config, tokenizer, weights, model card, licence files) as
+one blob and commits one definition. In Rust:
 
-## Listing and removing
+```rust,ignore
+use graphersal::persist::{ImportModelOptions, ModelSource, Store, StoreOptions};
 
-```bash
-graphersal store models data/
-graphersal store models remove data/ model2vec/minishlab/potion-base-8M@fac4fa854e68
+let store = Store::open("data", StoreOptions::new())?;
+let report = store.import_model(
+    ModelSource::Dir("models/minishlab/potion-base-8M".into()),
+    ImportModelOptions::new().with_default(true),
+)?;
+println!("{} ({}), commit {:?}", report.model.repo, report.model.identity, report.commit_seq);
 ```
 
-```text
-model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
-```
+- The same model again commits nothing (`already_present`).
+- Another revision of a repository the store holds is refused (`ModelRevisionExists`) unless
+  `with_replace(true)`: then the new revision replaces the old one in ONE commit (and becomes
+  the default if the old one was). While vectors of the old revision are in the data, a replace
+  needs vector rules, which a later release adds.
+- `ModelSource::Files(NewModel)` imports files given as streams (a host without a file system,
+  such as the browser).
+- A closed store: `Store::import_model_dir` (what the CLI does); it opens the store without the
+  needed-model check below, so it is also how a missing model comes back.
 
-`graphersal store info data/` shows the same block; the Store menu of the playground lists them
-with their licences, and Python has `store.models()`. A removal is the only way a model leaves a
-store; the schema keeps its identity (a later open notes the missing model).
+## The default model
+
+`Store::set_default_model(Some(repo))` makes a model the one `embed` uses without a model name
+(one commit; `None` clears it). At most one model is the default. Without one, `embed` uses the
+built-in `hash-ngram/1`, and the CLI notes that the store holds models but none is the default.
+
+## Removing a model
+
+`Store::remove_model(repo)` (CLI `graphersal store models remove <dir> <repo>`) commits the
+removal of the definition. It is refused while the current schema needs the model
+(`ModelInUse`: re-embed or drop the properties first). Earlier positions keep the model; its
+blob is removed by the [prune](store_prune.md) that drops the last retained history referencing
+it.
+
+## Loading and memory
+
+A model the CURRENT schema needs (a vector property's `embedder` names it) is loaded when the
+store opens; every other model is loaded at the first query that embeds with it. A model is
+loaded once per process, shared by every position that uses the same blob, and unloaded when no
+position uses it any more. Loaded models count in `g.memory_usage()` as `model_bytes` and fall
+under the process [memory ceiling](../users_guide/resource_limits.md): before a load the ceiling
+is checked with the size the definition records, so nothing is read when it does not fit.
+
+The store does **not open** (in any mode: writable, `--read-only`, a backup, a view of a past
+position) when a model its schema needs is not in its catalog at that position, its blob is
+missing or damaged (`ModelUnavailable`; the message names the commands that bring it back), or
+it does not fit under the ceiling (`ModelDoesNotFit`, naming the smallest ceiling that fits). A
+model nothing needs that is damaged is a journal record (`model.unavailable`); the store works.
+A build that cannot run models (the browser playground, a library build without the feature
+`model2vec`) opens a store whose schema needs one read-only, without text queries.
+
+## Listing
+
+`Store::models()` (CLI `graphersal store models <dir>`, `store info`) lists the models of the
+current position: repository, identity, revision, dimension, licence, size, the memory it takes
+loaded, whether it is the default, its state (`loaded`, `not_loaded`, `damaged`, `missing`,
+`unsupported`) and the schema properties that need it. `Store::verify` reads every model's blob
+and checks it is the tar of its identity.
 
 ## The licence travels with the model
 
-A model's licence is the model's own. When a model enters a store, its licence comes with it:
-
-- the **model card** (`README.md`), which states the licence and the attribution;
-- the repository's **licence and notice files** (`LICENSE*`, `NOTICE*`) when it has them;
-- the **licence id** from the repository's metadata (`cardData.license`, an SPDX id such as
-  `mit`), else `unknown`, the models it was made from (`base_model`) with their licences, and
-  whether the repository is **gated**;
-- when the repository has no licence file (none of the Model2Vec models from MinishLab has one:
-  their licence is only in the card), the **standard text** of an MIT or Apache-2.0 licence is
-  written beside the model as `LICENSE`, marked as a template (`license_text: template`) and
-  saying where it comes from;
-- when a **base model has another licence** than the model's own (a tokenizer may come from
-  it: `minishlab/M2V_multilingual_output` is MIT, its tokenizer comes from the Apache-2.0
-  `sentence-transformers/LaBSE`), the standard text of that licence (MIT or Apache-2.0) as
-  `LICENSE-BASE-<licence>`, e.g. `LICENSE-BASE-apache-2.0`, naming the base models it covers.
-
-`download` and `import` warn when the licence is unknown or non-commercial, or the repository is
-gated: the terms you accepted may restrict passing the model on.
-
-**A store handed on redistributes its models.** A backup, a ZIP backup, a `.gsnap` export, a
-fork or a copied store carries every model with its card and licence files, and whoever passes
-it on must follow the models' licences. The copies you hand on can leave the models out:
-
-```bash
-graphersal store export data/ graph.gsnap --without-models
-graphersal store backup data/ data.zip --zip --without-models
-```
-
-The reports of `store export`, `store backup` and a fork list the models (and licences) a copy
-carries. The playground's Store menu offers each snapshot download with the models and without
-them. The receiver of a copy without models adds them again by the identities its schema records.
+The licence the repository states, its licence file (or, without one, the standard MIT or
+Apache-2.0 text, marked as a template) and the licences of its base models are part of the
+model's tar. `graphersal store info <dir>` names every model with its licence: who hands a store
+or a copy of it on redistributes its models.
 
 ## What carries the models
 
-| Operation | Models |
-|---|---|
-| checkpoint, prune, compact, rollback, attic | untouched |
-| `store verify` | every file checked against its SHA-256; a damaged model is a problem (exit 1) but never makes an open store read-only |
-| backup (full and incremental) | carried, checked in the store and in the copy; a damaged model stops the backup |
-| ZIP backup | carried unless `--without-models` |
-| `.gsnap` export | carried unless `--without-models`; `store create --from x.gsnap` (and loading it in the playground) puts them back into a store |
-| fork, attic fork, convert, upgrade, restore | carried |
-| repair | the intact models carried, damaged ones listed as not carried |
+Every copy: full and incremental backups, the ZIP backup, fork, attic fork, repair, conversion
+and upgrade, a packed snapshot (`.gsnap`; `--without-models` leaves the blobs out, the
+definitions stay and the models are then missing in the copy). Prune, checkpoint and compact
+keep the blobs the retained history references.
 
 ## Older Graphersal versions
 
-Models do not change the store format version. Graphersal 0.3.0 opens a store with models and
-ignores (and keeps) them, loads a `.gsnap` with models and ignores them, but **refuses a ZIP
-backup with models** as written by a newer version: hand it one made with `--without-models`
-(details in [format spec 4.5](format.md#45-embedding-models)).
+Graphersal 0.4.0 kept models as `models/<model2vec-12hex>/` directories outside the history.
+This version carries such directories through its copies; the migration into blobs and
+definitions comes with the store upgrade of the 0.5.0 release.

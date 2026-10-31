@@ -338,28 +338,72 @@ fn a_damaged_older_store_is_not_upgraded() {
 /// The causes of the embedding models a store keeps (format spec 4.5).
 #[test]
 fn an_unknown_or_invalid_model_is_refused_with_its_cause() {
-    use graphersal::persist::{ModelRole, NewModel};
+    use graphersal::persist::{ImportModelOptions, ModelRole, ModelSource, NewModel};
     use std::io::Cursor;
     let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
     assert_cause(
-        store.remove_model("model2vec/acme/none@0123456789ab"),
+        store.remove_model("acme/none"),
         StoreFailure::UnknownModel,
         "graphersal store models",
     );
     assert_cause(
-        store.read_model_file("model2vec-0123456789ab", "config.json"),
+        store.set_default_model(Some("acme/none")),
         StoreFailure::UnknownModel,
         "embed-model download",
     );
     assert_cause(
-        store.add_model(NewModel::new().with_file(
-            "config.json",
-            ModelRole::Config,
-            Cursor::new(b"{}".to_vec()),
-        )),
+        store.import_model(
+            ModelSource::Files(NewModel::new().with_file(
+                "config.json",
+                ModelRole::Config,
+                Cursor::new(b"{}".to_vec()),
+            )),
+            ImportModelOptions::new().with_repo("acme/tiny"),
+        ),
         StoreFailure::InvalidModel,
         "embed-model import",
     );
     assert_eq!(StoreFailure::UnknownModel.name(), "unknown_model");
     assert_eq!(StoreFailure::InvalidModel.name(), "invalid_model");
+}
+
+/// The causes of the embedding models as catalog definitions (format spec 4.5, kind 5).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_model_definition_causes_are_refused_with_their_help() {
+    use crate::model_fixture::{import, set_schema, tiny_model};
+    use graphersal::persist::{ImportModelOptions, ModelSource};
+    let dir = MemDir::new();
+    let store = Store::create(dir.clone(), StoreOptions::new()).unwrap();
+    let model = import(&store, 1, "acme/tiny").model;
+    assert_cause(
+        store.import_model(
+            ModelSource::Files(tiny_model(2, "acme/tiny")),
+            ImportModelOptions::new(),
+        ),
+        StoreFailure::ModelRevisionExists,
+        "with_replace",
+    );
+    set_schema(&store, &model.identity);
+    assert_cause(
+        store.remove_model("acme/tiny"),
+        StoreFailure::ModelInUse,
+        "re-embed",
+    );
+    // A schema that needs a model the catalog does not hold: the store does not open.
+    set_schema(&store, "model2vec/acme/gone@0123456789ab");
+    store.close().unwrap();
+    assert_cause(
+        Store::open(dir.clone(), StoreOptions::new()),
+        StoreFailure::ModelUnavailable,
+        "embed-model download",
+    );
+    assert_eq!(StoreFailure::ModelUnavailable.name(), "model_unavailable");
+    assert_eq!(StoreFailure::ModelDoesNotFit.name(), "model_does_not_fit");
+    assert_eq!(StoreFailure::ModelInUse.name(), "model_in_use");
+    assert_eq!(
+        StoreFailure::ModelRevisionExists.name(),
+        "model_revision_exists"
+    );
+    // The memory refusal needs a model loader (feature `model2vec`): `model_open_tests.rs`.
 }

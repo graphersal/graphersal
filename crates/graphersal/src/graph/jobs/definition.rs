@@ -655,6 +655,7 @@ impl Definition {
             DefinitionBody::Query(_)
             | DefinitionBody::Compression(_)
             | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Model(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }

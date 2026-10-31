@@ -30,14 +30,13 @@ mod backup_check;
 pub(crate) mod blobs;
 mod compaction;
 mod damage;
-#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
-mod embedders;
 mod files;
 mod from_memory;
 mod graph;
 mod licenses;
 mod maintenance;
 mod merge;
+mod model_catalog;
 mod models;
 mod rollback;
 mod snapshot_dir;
@@ -69,13 +68,13 @@ pub use backup::BackupMode;
 use blobs::PendingBlob;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
 pub use damage::{Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairReport};
-#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
-pub use embedders::StoredEmbedders;
 pub use files::{BackupMarker, DamagePolicy, LineageEntry};
 pub use maintenance::{BackupReport, ChangesSince, PruneReport, VerifyProblem, VerifyReport};
-pub use models::{
-    AddModelReport, BaseModel, ModelCopy, ModelFile, ModelRole, NewModel, StoredModel,
+pub use model_catalog::{
+    ImportModelOptions, ImportModelReport, ModelChangeReport, ModelInfo, ModelSource, ModelState,
 };
+pub(crate) use models::StoredModel;
+pub use models::{ModelCopy, ModelRole, NewModel};
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
 pub use upgrade::UpgradeReport;
 pub(crate) use upgrade::upgradable_from;
@@ -145,6 +144,9 @@ pub struct StoreOptions {
     workload_level: crate::graph::workload::WorkloadLevel,
     journal_segment_bytes: u64,
     instance_name: Option<String>,
+    /// Open without the check of the models the schema needs (a model change of a closed
+    /// store, `Store::import_model_dir`): crate-internal.
+    pub(crate) models_unchecked: bool,
     /// The uncompressed body bytes per WAL Commit part (format spec 9.3.1; a test knob).
     commit_part_bytes: usize,
     /// Injected WAL failures (crate tests only).
@@ -169,6 +171,7 @@ impl Default for StoreOptions {
             workload_level: crate::graph::workload::WorkloadLevel::Persisted,
             journal_segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
             instance_name: None,
+            models_unchecked: false,
             commit_part_bytes: crate::persist::wal::PART_BODY_BYTES,
             faults: None,
         }
@@ -422,9 +425,12 @@ pub struct StoreInfo {
     /// Why the store stopped after an in-place rollback or attic restore failed part-way
     /// ([`Store::stopped_reason`]); `None`: not stopped (always from [`Store::inspect`]).
     pub stopped: Option<String>,
-    /// The embedding models the store keeps (format spec 4.5), with their licences
-    /// ([`Store::models`]).
-    pub models: Vec<StoredModel>,
+    /// The embedding models of the store's current position (format spec 4.5, catalog kind
+    /// 5), with their licences and states ([`Store::models`]; from the files for
+    /// [`Store::inspect`], states by the blobs' lengths).
+    pub models: Vec<ModelInfo>,
+    /// The repository of the default model, when one is the default.
+    pub default_model: Option<String>,
     /// The model identities the schema's `embedder` keywords name (of the open graph, or from
     /// the files for [`Store::inspect`]): a stored model whose identity is among them is in
     /// use; one named here but not stored nor registered is missing.
@@ -742,11 +748,10 @@ impl Store {
         dir: impl IntoStoreDir,
         target: RecoveryTarget,
     ) -> Result<Recovered, PersistError> {
-        StoreCore::load_at(
-            &DirPath::root(dir.into_store_dir()),
-            target,
-            &ReadOptions::default(),
-        )
+        let dir = DirPath::root(dir.into_store_dir());
+        let mut recovered = StoreCore::load_at(&dir, target, &ReadOptions::default())?;
+        recovered.embedders = model_catalog::embedders_of_view(&dir, &recovered.graph)?;
+        Ok(recovered)
     }
 
     /// Writes a snapshot of the CLOSED store in `dir` (`graphersal store checkpoint`): takes
@@ -860,6 +865,12 @@ impl Store {
         info.last_commit_at = time;
         (info.definitions_by_kind, info.schema_models) = maintenance::definitions_in_files(dir)?;
         info.definitions = info.definitions_by_kind.values().sum();
+        info.models = model_catalog::infos_in_files(dir)?;
+        info.default_model = info
+            .models
+            .iter()
+            .find(|m| m.default)
+            .map(|m| m.repo.clone());
         Ok(info)
     }
 
@@ -966,12 +977,12 @@ impl Store {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        maintenance::backup_to_zip(
-            &DirPath::root(dir.into_store_dir()),
-            None,
-            &mut archive,
-            models,
-        )
+        let dir = DirPath::root(dir.into_store_dir());
+        let mut report = maintenance::backup_to_zip(&dir, None, &mut archive, models)?;
+        if models == ModelCopy::Include {
+            report.models = model_catalog::infos_in_files(&dir)?;
+        }
+        Ok(report)
     }
 
     /// Unpacks a backup ZIP ([`Store::backup_zip`]) into `dir` (which must not exist or be
@@ -1225,12 +1236,11 @@ impl<S: PersistentStorage + Default> Store<S> {
         target: RecoveryTarget,
         empty: S,
     ) -> Result<Recovered<S>, PersistError> {
-        StoreCore::load_plan_at(
-            &DirPath::root(dir.into_store_dir()),
-            target,
-            &ReadOptions::default(),
-        )?
-        .run_in(empty)
+        let dir = DirPath::root(dir.into_store_dir());
+        let mut recovered =
+            StoreCore::load_plan_at(&dir, target, &ReadOptions::default())?.run_in(empty)?;
+        recovered.embedders = model_catalog::embedders_of_view(&dir, &recovered.graph)?;
+        Ok(recovered)
     }
 
     /// Why the store is read-only because it holds something critical this version does not
@@ -1376,57 +1386,29 @@ impl<S: PersistentStorage + Default> Store<S> {
         self.core.export_packed(commit_seq, writer, models)
     }
 
-    /// The embedding models this store keeps (format spec 4.5): identity, origin, licence and
-    /// files of each, from their manifests (nothing else is read; [`Store::verify`] checks the
-    /// files). Book page "Embedding Models in a Store".
-    pub fn models(&self) -> Result<Vec<StoredModel>, PersistError> {
-        models::list(&self.core.shared.dir)
-    }
-
-    /// Adds an embedding model to this open store (the explicit command a model enters a store
-    /// by, format spec 4.5): its files are streamed into `models/<id>/` with their SHA-256,
-    /// the standard licence text is written when the model has no licence file and its
-    /// licence is MIT or Apache-2.0, the manifest last; the directory appears at once (a
-    /// rename). The same model stored already is not written again
-    /// ([`AddModelReport::already_stored`]). The files are checked for their roles and names,
-    /// not loaded: a host that can load the model (feature `model2vec`) checks it first.
-    /// Refused on a read-only store (a backup, maintenance mode, ...).
-    pub fn add_model(&self, model: NewModel) -> Result<AddModelReport, PersistError> {
-        self.core.writable("add a model")?;
-        let (model, added) = models::add(&self.core.shared.dir, model, models::now_text())?;
-        Ok(AddModelReport {
-            model,
-            already_stored: !added,
-        })
-    }
-
-    /// Removes the embedding model `key` names (its identity `model2vec/<repo>@<12 hex>` or
-    /// its id `model2vec-<12 hex>`) from this open store: the only way a model leaves a store.
-    /// The schema keeps its `embedder` identity; a later open notes the missing model. Refused
-    /// while a backup copies the store's files, and on a read-only store.
-    pub fn remove_model(&self, key: &str) -> Result<StoredModel, PersistError> {
-        self.core.writable("remove a model")?;
-        remove_model_at(&self.core.shared.dir, key)
-    }
-
-    /// Puts the embedding models a packed snapshot carries (format spec 4.5, 8) into this open
-    /// store, leaving its graph alone: a host that loaded a `.gsnap` into a new store through
-    /// its graph ([`Store::create_with`]) keeps the file's models this way
-    /// ([`Store::create_from_packed`] does it itself). Every model file is checked against its
-    /// manifest; a model the store holds already stays as it is. Returns the models of the
-    /// file. Refused on a read-only store.
+    /// Puts the blobs a packed snapshot carries (format spec 4.6, 8: the model blobs its
+    /// catalog references) into this open store, leaving its graph alone: a host that loaded a
+    /// `.gsnap` into a store through its graph ([`Store::create_with`]) keeps the file's models
+    /// this way ([`Store::create_from_packed`] does it itself). Every blob is checked by its
+    /// hash, length and CRC-32C; a blob the store holds already stays as it is. Returns the
+    /// blobs of the file; a blob no commit of the store references is removed by the next
+    /// prune. Refused on a read-only store.
     pub fn import_models_from_packed(
         &self,
         packed: impl std::io::Read,
-    ) -> Result<Vec<StoredModel>, PersistError> {
+    ) -> Result<Vec<crate::value::BlobRef>, PersistError> {
         self.core.writable("add the models of a packed snapshot")?;
-        snapshot_dir::import_packed_models(&self.core.shared.dir, packed)
-    }
-
-    /// The bytes of the file `name` of the stored model `key` names (identity or id), checked
-    /// against the model's manifest (size and SHA-256).
-    pub fn read_model_file(&self, key: &str, name: &str) -> Result<Vec<u8>, PersistError> {
-        read_model_file_at(&self.core.shared.dir, key, name)
+        let gate = self.core.shared.blob_gate.clone();
+        let mut held = Vec::new();
+        let result =
+            snapshot_dir::import_packed_models(&self.core.shared.dir, packed, &mut |blob| {
+                gate.hold(blob);
+                held.push(blob.clone());
+            });
+        for blob in &held {
+            gate.release(blob);
+        }
+        result.map(|(_, blobs)| blobs)
     }
 
     /// Writes the content `reader` yields as a blob of this open store (format spec 4.6):
@@ -1822,8 +1804,20 @@ impl StoreCore {
         };
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
+        let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
+        let models = model_catalog::check_at_open(
+            &dir,
+            definitions,
+            schema.as_ref(),
+            &model_catalog::OpenCheck {
+                unchecked: false,
+                journal_writable: false,
+                instance_name: None,
+            },
+        )?;
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let system_journal = open_system_journal(&dir, &options, &graph, false);
+        models.finish(&*graph, &system_journal, false)?;
         let shared = Arc::new(Shared {
             chunk_bytes: graph_file.chunk_bytes,
             dir,
@@ -2047,9 +2041,26 @@ impl StoreCore {
         // The instance clock starts at the latest time the files hold (the floor is not stored:
         // format spec 2, "Conventions").
         graph.clock().raise(loaded.clock_floor);
-        if let Some(reason) = loaded.read_only.clone() {
+        // The models the schema needs are loaded now: a store whose needed model is missing,
+        // damaged or does not fit does not open (format spec 4.5).
+        let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
+        let models = model_catalog::check_at_open(
+            &dir,
+            definitions,
+            schema.as_ref(),
+            &model_catalog::OpenCheck {
+                unchecked: options.models_unchecked,
+                journal_writable: loaded.read_only.is_none(),
+                instance_name: options.instance_name.as_deref(),
+            },
+        )?;
+        if let Some(reason) = loaded
+            .read_only
+            .clone()
+            .or_else(|| models.read_only.clone())
+        {
             return Self::open_read_only_mode(
-                dir, lock, options, graph_file, report, graph, reason, started,
+                dir, lock, options, graph_file, report, graph, reason, started, models,
             );
         }
         let marks = sync_marks(&dir, &loaded, &options, &mut report)?;
@@ -2105,6 +2116,7 @@ impl StoreCore {
         }
         let workload_stats = workload::open_stats(&dir, options.workload_level, true);
         let system_journal = open_system_journal(&dir, &options, &graph, true);
+        models.finish(&*graph, &system_journal, true)?;
         let shared = Arc::new(Shared {
             chunk_bytes,
             dir,
@@ -2158,6 +2170,7 @@ impl StoreCore {
         graph: Arc<dyn StoreGraph>,
         reason: String,
         started: web_time::Instant,
+        models: model_catalog::ModelsAtOpen,
     ) -> Result<StoreCore, PersistError> {
         graph.write().register_guard_hook(Box::new(ReadOnlyHook {
             path: dir.display(),
@@ -2169,6 +2182,7 @@ impl StoreCore {
         wal.closed.store(true, Ordering::Release);
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let system_journal = open_system_journal(&dir, &options, &graph, false);
+        models.finish(&*graph, &system_journal, false)?;
         system_journal.emit(
             &catalogue::STORE_READ_ONLY,
             Event::new(format!("the store opens read-only: {reason}"))
@@ -2367,10 +2381,22 @@ impl StoreCore {
             Err(err) => (Vec::new(), Some(err.to_string())),
         };
         // The intact models are carried; a damaged one is reported (format spec 4.5).
-        let (models, models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
+        let (_, mut models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
         // The blobs the repaired state references, each checked by its hash too (the source
         // is damaged); a missing or damaged one is reported, never fails the repair.
         let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
+        let models = model_catalog::infos_in_files(new_dir)?;
+        for model in &models {
+            if matches!(
+                model.state,
+                ModelState::Missing | ModelState::Damaged { .. }
+            ) {
+                models_not_carried.push(format!(
+                    "{} ({}): its blob is missing or damaged in the damaged store",
+                    model.repo, model.identity
+                ));
+            }
+        }
         let mut verified = maintenance::verify(new_dir, None)?;
         verified
             .problems
@@ -2410,8 +2436,10 @@ impl StoreCore {
         target: RecoveryTarget,
         empty: S,
     ) -> Result<Recovered<S>, PersistError> {
-        let recovered = Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?
-            .run_in(empty)?;
+        let mut recovered =
+            Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?
+                .run_in(empty)?;
+        recovered.embedders = model_catalog::embedders_of_view(&self.shared.dir, &recovered.graph)?;
         // A view of the past keeps the instance floor (every time the files and this instance
         // wrote), not the target's commit time.
         if let Some(clock) = recovered.graph.commit_clock()? {
@@ -2593,6 +2621,12 @@ impl StoreCore {
             count_by_kind(self.shared.graph.read().definition_kinds()?.into_iter());
         info.definitions = info.definitions_by_kind.values().sum();
         info.schema_models = self.shared.graph.read().schema_models()?;
+        info.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)?;
+        info.default_model = info
+            .models
+            .iter()
+            .find(|m| m.default)
+            .map(|m| m.repo.clone());
         info.damage_found = self.damage_found()?;
         info.frozen_by_damage = self.is_frozen_by_damage();
         info.stopped = self.stopped_reason()?;
@@ -2651,9 +2685,10 @@ impl StoreCore {
             &options,
             ("fork", Some((parent.store_id, branched_at))),
         )?;
-        let models = models::carry_into_new(dir, new_dir, existed)?;
+        models::carry_into_new(dir, new_dir, existed)?;
         let (blobs, blobs_not_carried) = blobs::carry_state(dir, new_dir, false)
             .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
+        let models = model_catalog::infos_in_files(new_dir)?;
         let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
             PersistError::store(
                 "fork the store",
@@ -2822,7 +2857,11 @@ impl StoreCore {
     ) -> Result<BackupReport, PersistError> {
         let target = DirPath::root(target_dir.into_store_dir());
         let full = !files::has_entries(&target);
-        let result = backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode);
+        let result = backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode)
+            .map(|mut report| {
+                report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+                report
+            });
         let mode = if full { "full" } else { "increment" };
         self.after_backup(result, &target.display(), mode)
     }
@@ -2877,7 +2916,11 @@ impl StoreCore {
         let result = {
             let graph = self.shared.graph.read();
             graph.backup_from_memory(&self.shared.dir, &graph_file, &write, &target, mode)
-        };
+        }
+        .map(|mut report| {
+            report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+            report
+        });
         self.journal_backup(&result, &target.display(), "memory");
         result
     }
@@ -2961,7 +3004,14 @@ impl StoreCore {
             self.durable_position(),
             &mut archive,
             models,
-        );
+        )
+        .map(|mut report| {
+            if models == ModelCopy::Include {
+                report.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
+                    .unwrap_or_default();
+            }
+            report
+        });
         self.after_backup(result, "a ZIP archive", "zip")
     }
 
@@ -3310,7 +3360,40 @@ impl StoreCore {
             self.shared.durable.clone(),
         )?;
         self.shared.wal.rotate.store(false, Ordering::Release);
+        self.refresh_models(graph)?;
         Ok(graph_id)
+    }
+
+    /// Rebuilds the model registry from the reloaded catalog (a rollback, an attic restore)
+    /// and loads the models its schema needs; one that does not load is a journal record (the
+    /// store keeps working, queries with it fail).
+    fn refresh_models(&self, graph: &mut dyn LiveWrite) -> Result<(), PersistError> {
+        let definitions = graph.model_definitions()?;
+        let schema = graph.schema()?;
+        let Some(registry) = self.shared.graph.model_registry() else {
+            return Ok(());
+        };
+        registry.rebuild(definitions);
+        for failure in registry.load_needed(&model_catalog::needed_models(schema.as_ref())) {
+            self.shared.system_journal.emit(
+                &catalogue::MODEL_UNAVAILABLE,
+                Event::new(format!(
+                    "the model {} the schema needs did not load after the reload: {}",
+                    failure.identity,
+                    failure.failure.reason()
+                ))
+                .field("repo", failure.repo.clone().unwrap_or_default())
+                .field("identity", failure.identity.as_str())
+                .field("cause", failure.failure.cause())
+                .field(
+                    "recommendation",
+                    crate::value::vector::embed::registry::recommendation(
+                        failure.repo.as_deref().unwrap_or(&failure.identity),
+                    ),
+                ),
+            );
+        }
+        Ok(())
     }
 
     pub fn shutdown(&self) -> Result<(), PersistError> {
@@ -4911,6 +4994,9 @@ fn all_marks(dir: &DirPath) -> Result<Vec<Mark>, PersistError> {
 }
 
 fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
+    // The 0.4.0 model directories (`models/`, migrated by the upgrade) must be readable: an
+    // unreadable one fails the info, never an empty answer.
+    models::model_ids(dir)?;
     let segments = list_wal(dir)?;
     let wal_bytes = segments
         .iter()
@@ -4945,7 +5031,8 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         damage_found: Vec::new(),
         frozen_by_damage: false,
         stopped: None,
-        models: models::list(dir)?,
+        models: Vec::new(),
+        default_model: None,
         schema_models: Vec::new(),
         blobs: blobs::usage(dir, &file.chain())?,
     })
@@ -4989,31 +5076,6 @@ fn export_packed_from(
     read_listing(path)
 }
 
-/// [`Store::remove_model`] in the store at `dir` (its writer holds the lock): refused while a
-/// backup copies the store's files.
-fn remove_model_at(dir: &DirPath, key: &str) -> Result<StoredModel, PersistError> {
-    let _pin = match dir.store_dir().lock(super::dir::LockKind::BackupExclusive) {
-        Ok(Some(lock)) => lock,
-        Ok(None) => {
-            return Err(PersistError::store(
-                "remove a model",
-                StoreFailure::BackupRunning,
-                "a backup is copying the store's files; remove the model when it has finished",
-            ));
-        }
-        Err(err) => return Err(PersistError::io("opening the store's BACKUP file", err)),
-    };
-    models::remove(dir, key)
-}
-
-/// [`Store::read_model_file`] in the store at `dir`.
-fn read_model_file_at(dir: &DirPath, key: &str, name: &str) -> Result<Vec<u8>, PersistError> {
-    let Some(model) = models::find(dir, key)? else {
-        return Err(models::unknown_model("read a model file", key));
-    };
-    models::read_file(dir, &model.id, name)
-}
-
 impl Store {
     /// [`Store::export_packed`] of the store in `dir`, without a lock.
     pub fn export_packed_dir(
@@ -5038,70 +5100,62 @@ impl Store {
         export_packed_from(&dir, commit_seq, writer, models)
     }
 
-    /// [`Store::models`] of the store in `dir`, without a lock.
-    pub fn models_dir(dir: impl IntoStoreDir) -> Result<Vec<StoredModel>, PersistError> {
+    /// [`Store::models`] of the store in `dir`, without a lock: the models of the latest
+    /// state in its files (states by the blobs' lengths: nothing is loaded).
+    pub fn models_dir(dir: impl IntoStoreDir) -> Result<Vec<ModelInfo>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         files::refuse_other_version(&dir)?;
         read_graph_file(&dir)?;
-        models::list(&dir)
+        model_catalog::infos_in_files(&dir)
     }
 
-    /// [`Store::add_model`] to the CLOSED store in `dir` (CLI:
-    /// `graphersal embed-model download <repo> --into <dir>`): takes the writer lock (a store open elsewhere is refused with
-    /// [`PersistError::Locked`]); refused on a backup.
-    pub fn add_model_dir(
+    /// [`Store::import_model`] into the CLOSED store in `dir` (CLI: `graphersal embed-model
+    /// import <repo> --into <dir>`): the store is opened (the writer lock: a store open
+    /// elsewhere is refused with [`PersistError::Locked`]; refused on a backup) WITHOUT the
+    /// open's check of the models the schema needs (the import is how a missing model comes
+    /// back), the model imported in one commit, and the store closed.
+    pub fn import_model_dir(
         dir: impl IntoStoreDir,
-        model: NewModel,
-    ) -> Result<AddModelReport, PersistError> {
-        let dir = DirPath::root(dir.into_store_dir());
-        let _lock = Self::closed_store_lock(&dir)?;
-        let (model, added) = models::add(&dir, model, models::now_text())?;
-        Ok(AddModelReport {
-            model,
-            already_stored: !added,
-        })
+        source: ModelSource,
+        options: ImportModelOptions,
+    ) -> Result<ImportModelReport, PersistError> {
+        let store = Self::open_for_models(dir)?;
+        let report = store.import_model(source, options);
+        store.close()?;
+        report
     }
 
-    /// [`Store::remove_model`] from the CLOSED store in `dir` (CLI:
-    /// `graphersal store models remove <dir> <identity>`): takes the writer lock; refused on a backup and while a backup copies
-    /// the store's files.
+    /// [`Store::remove_model`] from the CLOSED store in `dir` (CLI: `graphersal store models
+    /// remove <dir> <repo>`), opened and closed like [`Store::import_model_dir`].
     pub fn remove_model_dir(
         dir: impl IntoStoreDir,
-        key: &str,
-    ) -> Result<StoredModel, PersistError> {
-        let dir = DirPath::root(dir.into_store_dir());
-        let _lock = Self::closed_store_lock(&dir)?;
-        remove_model_at(&dir, key)
+        repo: &str,
+    ) -> Result<ModelChangeReport, PersistError> {
+        let store = Self::open_for_models(dir)?;
+        let report = store.remove_model(repo);
+        store.close()?;
+        report
     }
 
-    /// [`Store::read_model_file`] of the store in `dir`, without a lock.
-    pub fn read_model_file_dir(
+    /// [`Store::set_default_model`] of the CLOSED store in `dir`, opened and closed like
+    /// [`Store::import_model_dir`].
+    pub fn set_default_model_dir(
         dir: impl IntoStoreDir,
-        key: &str,
-        name: &str,
-    ) -> Result<Vec<u8>, PersistError> {
-        let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(&dir)?;
-        read_model_file_at(&dir, key, name)
+        repo: Option<&str>,
+    ) -> Result<ModelChangeReport, PersistError> {
+        let store = Self::open_for_models(dir)?;
+        let report = store.set_default_model(repo);
+        store.close()?;
+        report
     }
 
-    /// The writer lock of a closed store that is no backup (a model add or removal).
-    fn closed_store_lock(dir: &DirPath) -> Result<DirLock, PersistError> {
-        files::refuse_other_version(dir)?;
-        if !Self::is_store(dir.store_dir())? {
-            return Err(PersistError::NotAStore {
-                path: dir.display(),
-                reason: "it has no GRAPH file".into(),
-            });
-        }
-        let lock = DirLock::exclusive(dir)?;
-        if let Some(marker) = read_graph_file(dir)?.file.backup {
-            return Err(PersistError::IsBackup {
-                path: dir.display(),
-                commit_seq: marker.commit_seq,
-            });
-        }
-        Ok(lock)
+    /// Opens the store in `dir` for a model change: no needed-model check, no automatic
+    /// checkpoint.
+    fn open_for_models(dir: impl IntoStoreDir) -> Result<Store, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        let mut options = StoreOptions::new().with_checkpoint_after_bytes(0);
+        options.models_unchecked = true;
+        Store::from_core(StoreCore::open_at(dir, options, &TraversalGraphs)?)
     }
 
     /// The snapshots of the store in `dir`, without a lock.

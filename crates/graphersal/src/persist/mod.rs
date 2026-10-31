@@ -51,6 +51,7 @@ mod encoder;
 mod error;
 mod journal;
 mod manifest;
+pub(crate) mod model_tar;
 mod recover;
 mod segment;
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,18 +81,16 @@ pub use snapshot::{
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 
 pub use store::{
-    AddModelReport, AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BaseModel,
-    ChangesSince, CheckpointReport, CompactReport, CompactionAdvice, CompactionPolicy, CutTail,
-    DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES, DEFAULT_STORE_SEGMENT_BYTES,
-    DEFAULT_WAL_SEGMENT_BYTES, Damage, DamageKind, DamagePolicy, DamageReport, Diverged, Donor,
-    ForkReport, FoundDamage, IdRange, LineageEntry, ModelCopy, ModelFile, ModelRole, NewModel,
-    OpenReport, PruneReport, RepairReport, RollbackMode, RollbackReport, Store, StoreInfo,
-    StoreOptions, StoredModel, UpgradeReport, VerifyProblem, VerifyReport,
+    AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, ChangesSince, CheckpointReport,
+    CompactReport, CompactionAdvice, CompactionPolicy, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES,
+    DEFAULT_CHECKPOINT_MERGE_BYTES, DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage,
+    DamageKind, DamagePolicy, DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange,
+    ImportModelOptions, ImportModelReport, LineageEntry, ModelChangeReport, ModelCopy, ModelInfo,
+    ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairReport,
+    RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions, UpgradeReport, VerifyProblem,
+    VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
-
-#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
-pub use store::StoredEmbedders;
 
 /// The file extension of packed snapshots written by the bindings (`graph.gsnap`).
 pub const SNAPSHOT_EXTENSION: &str = "gsnap";

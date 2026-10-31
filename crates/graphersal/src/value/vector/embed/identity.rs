@@ -4,6 +4,15 @@
 //! (`persist/store/models.rs`, which checks a stored model against its manifest without the
 //! `model2vec` feature, also on wasm32).
 
+// The identity rule serves the Store and the Model2Vec loader; the catalog only parses.
+#![cfg_attr(
+    not(any(
+        feature = "persist",
+        all(feature = "model2vec", not(target_arch = "wasm32"))
+    )),
+    allow(dead_code)
+)]
+
 use super::sha256::{Sha256, hex};
 
 /// The roles of the files the identity covers, in hashing order.
