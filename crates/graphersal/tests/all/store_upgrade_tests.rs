@@ -1028,3 +1028,586 @@ fn a_copying_upgrade_survives_a_crash_after_every_write() {
     }
     assert_eq!(store_files(&shared(&source)), before);
 }
+
+/// Stores of the RELEASED Graphersal 0.4.0 (store format version 3, embedding models as files
+/// under `models/`; the fixtures in `tests/data/v0.4.0/`, see the README there): the upgrade
+/// to store format version 4 migrates every model into a blob with a catalog definition (one
+/// commit), lists the models the schema lacks and the vector properties without a rule, and
+/// recomputes nothing.
+mod v040 {
+    use super::*;
+    use graphersal::catalog::DefinitionKind;
+    use graphersal::persist::{RecoveryTarget, VectorWithoutRule};
+    use graphersal::storage::ElementKind;
+
+    /// The 0.4.0 fixtures (never written: every test copies them first).
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v0.4.0")
+    }
+
+    /// The fixture directory `name` copied into `temp`.
+    fn copy(temp: &Temp, name: &str) -> PathBuf {
+        let to = temp.join(name);
+        for (relative, bytes) in files_of(&fixtures().join(name)) {
+            let path = to.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        to
+    }
+
+    /// Every file below `dir` but the lock files (an operation creates `LOCK`).
+    fn data_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        files_of(dir)
+            .into_iter()
+            .filter(|(name, _)| name != "LOCK" && name != "BACKUP")
+            .collect()
+    }
+
+    /// The fixture directory `name` in memory.
+    fn in_memory(name: &str) -> MemDir {
+        let dir = MemDir::named(name);
+        for (relative, bytes) in files_of(&fixtures().join(name)) {
+            if let Some((parent, _)) = relative.rsplit_once('/') {
+                dir.create_dir_all(parent).unwrap();
+            }
+            dir.write_atomic(&relative, &bytes).unwrap();
+        }
+        dir
+    }
+
+    fn holds_vector(properties: Option<&graphersal::prelude::PropertyMap>) -> bool {
+        matches!(
+            properties.and_then(|p| p.get("emb")),
+            Some(ElementProperty::Vector(_))
+        )
+    }
+
+    const TINY: &str = "model2vec/acme/tiny@70c61d0ed332";
+    const OTHER_040: &str = "model2vec@b6b362e7a651";
+    const OTHER: &str = "model2vec/local/b6b362e7a651@b6b362e7a651";
+
+    fn vector(report: &UpgradeReport, label: &str) -> VectorWithoutRule {
+        report
+            .vectors_without_rule
+            .iter()
+            .find(|v| v.label() == label)
+            .unwrap_or_else(|| panic!("{label}: {:?}", report.vectors_without_rule))
+            .clone()
+    }
+
+    /// The report and store after the upgrade of the fixture `store/`: both models converted
+    /// (the one without a repository as `local/<12 hex>`), one commit, `models/` gone, the
+    /// vectors and the schema's other declarations as they were.
+    fn assert_store_migrated(report: &UpgradeReport, dir: &Path) {
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (3, persist_version())
+        );
+        assert_eq!(report.to_version, 4);
+        let converted: Vec<(&str, &str, &str, bool)> = report
+            .models_converted
+            .iter()
+            .map(|m| (m.repo(), m.identity(), m.former_identity(), m.renamed()))
+            .collect();
+        assert_eq!(
+            converted,
+            [
+                ("acme/tiny", TINY, TINY, false),
+                ("local/b6b362e7a651", OTHER, OTHER_040, true),
+            ]
+        );
+        assert!(report.models_converted.iter().all(|m| m.bytes() > 0));
+        assert_eq!(report.migration_commit, Some(12));
+        assert!(
+            report.models_missing.is_empty(),
+            "{:?}",
+            report.models_missing
+        );
+        // The vector properties without a rule, counted exactly (the fixture's last commit is
+        // in its newest snapshot).
+        let doc = vector(report, "doc");
+        assert_eq!(
+            (
+                doc.element_kind(),
+                doc.property(),
+                doc.model(),
+                doc.elements(),
+                doc.exact()
+            ),
+            (ElementKind::Vertex, "emb", "acme/tiny", 3, true)
+        );
+        assert_eq!(doc.embedder(), TINY);
+        let person = vector(report, "person");
+        assert_eq!((person.model(), person.elements()), ("hash-ngram/1", 2));
+        let note = vector(report, "note");
+        assert_eq!((note.model(), note.elements()), ("local/b6b362e7a651", 1));
+        assert_eq!(report.vectors_without_rule.len(), 3);
+        assert_eq!(
+            doc.schema_patch(),
+            "g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: \"<source property>\"}}}}}})"
+        );
+        let text = doc.note("st");
+        assert!(
+            text.starts_with(
+                "doc.emb has vectors of acme/tiny (3 element(s)) but no source property"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("graphersal --graph st -e 'g.patch_schema("),
+            "{text}"
+        );
+        assert!(text.contains("re-embeds every doc"), "{text}");
+
+        let store = Store::open(dir, StoreOptions::new()).unwrap();
+        let models = store.models().unwrap();
+        let mut identities: Vec<&str> = models.iter().map(|m| m.identity.as_str()).collect();
+        identities.sort();
+        assert_eq!(identities, [TINY, OTHER]);
+        assert!(
+            models.iter().all(|m| !m.default),
+            "no default model after a migration"
+        );
+        let tiny = models.iter().find(|m| m.identity == TINY).unwrap();
+        assert_eq!((tiny.dimension, tiny.license.as_str()), (3, "mit"));
+        {
+            let graph = store.graph().read();
+            assert!(
+                graph
+                    .definition(DefinitionKind::MODEL, TINY)
+                    .unwrap()
+                    .is_some()
+            );
+            // The schema: the renamed model's embedder follows it, nothing else changed (no
+            // `from` anywhere: the upgrade never guesses a source).
+            let json = graph.get_schema().unwrap().unwrap().to_json();
+            assert!(
+                json.contains(&format!("\"embedder\":\"{OTHER}\"")),
+                "{json}"
+            );
+            assert!(json.contains(&format!("\"embedder\":\"{TINY}\"")), "{json}");
+            assert!(!json.contains("\"from\""), "{json}");
+            // The vectors are the data 0.4.0 wrote.
+            let with = |label: &str| {
+                graph
+                    .vertices()
+                    .unwrap()
+                    .filter(|v| {
+                        graph.vertex_label(*v).unwrap() == Some(label)
+                            && holds_vector(graph.vertex_properties(*v).unwrap())
+                    })
+                    .count()
+            };
+            assert_eq!((with("doc"), with("person"), with("note")), (3, 2, 1));
+        }
+        store.close().unwrap();
+        // The migration commit: principal `upgrade`, attribute `upgrade` = "3->4", in a new WAL
+        // segment of its own.
+        let mut segments: Vec<PathBuf> = fs::read_dir(dir.join("wal"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        segments.sort();
+        assert_eq!(
+            segments.last().unwrap().file_name().unwrap(),
+            "00000000000000000012.wal"
+        );
+        let commits: Vec<_> =
+            graphersal::persist::read_journal(fs::File::open(segments.last().unwrap()).unwrap())
+                .unwrap()
+                .filter_map(|r| match r.unwrap() {
+                    graphersal::persist::JournalRecord::Commit(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit_seq(), 12);
+        let metadata = commits[0].metadata();
+        assert_eq!(metadata.principal(), Some("upgrade"));
+        assert_eq!(
+            metadata.attributes().get("upgrade"),
+            Some(&ElementProperty::from("3->4"))
+        );
+        assert!(Store::verify_dir(dir).unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_040_store_with_a_model_upgrades_in_place_to_blobs_and_definitions() {
+        let temp = Temp::new("v040-in-place");
+        let dir = copy(&temp, "store");
+        // Before: refused as older, the help names the upgrade and the models.
+        match Store::open(&dir, StoreOptions::new()) {
+            Err(err @ PersistError::OlderFormat { found: 3, .. }) => {
+                let help = graphersal::error::format_diagnostic(&err);
+                assert!(help.contains("store upgrade"), "{help}");
+                assert!(help.contains("embedding models"), "{help}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert!(report.in_place && !report.already_current);
+        assert!(!dir.join("models").exists());
+        assert!(!dir.join("INTENT").exists());
+        assert_eq!(version_of(&fs::read(dir.join("GRAPH")).unwrap()), 4);
+        assert!(dir.join("blobs").is_dir());
+        assert_store_migrated(&report, &dir);
+        // Again: nothing to do.
+        assert!(Store::upgrade_in_place(&dir).unwrap().already_current);
+    }
+
+    #[test]
+    fn a_040_single_file_store_upgrades() {
+        let temp = Temp::new("v040-single");
+        let file = temp.join("single.gstore");
+        fs::copy(fixtures().join("single.gstore"), &file).unwrap();
+        let before = fs::read(&file).unwrap();
+        // Into a copy (another single file), then in place.
+        let copy = temp.join("copy.gstore");
+        let report = Store::upgrade(&file, &copy).unwrap();
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            before,
+            "the source is not changed"
+        );
+        assert_eq!(report.models_converted.len(), 1);
+        assert_eq!(report.models_converted[0].identity(), TINY);
+        // The vectors are all in the WAL after the newest snapshot: the count says so.
+        let doc = vector(&report, "doc");
+        assert!(!doc.exact());
+        assert!(doc.commits_not_counted() > 0);
+        assert!(
+            doc.note("x").contains("later commit(s) not counted"),
+            "{}",
+            doc.note("x")
+        );
+        let report = Store::upgrade_in_place(&file).unwrap();
+        assert_eq!(report.migration_commit, Some(11));
+        for path in [&file, &copy] {
+            let store = Store::open(path, StoreOptions::new()).unwrap();
+            assert_eq!(store.models().unwrap().len(), 1);
+            let docs = store
+                .graph()
+                .read()
+                .vertices()
+                .unwrap()
+                .filter(|v| holds_vector(store.graph().read().vertex_properties(*v).unwrap()))
+                .count();
+            assert_eq!(docs, 5);
+            store.close().unwrap();
+            assert!(Store::verify_dir(path).unwrap().is_ok());
+        }
+    }
+
+    #[test]
+    fn an_upgrade_into_a_copy_converts_the_copy_only() {
+        let temp = Temp::new("v040-copy");
+        let dir = copy(&temp, "store");
+        let before = data_files(&dir);
+        let to = temp.join("upgraded");
+        let report = Store::upgrade(&dir, &to).unwrap();
+        assert!(!report.in_place);
+        assert_eq!(data_files(&dir), before, "the source is not changed");
+        assert!(dir.join("models").is_dir());
+        assert!(!to.join("models").exists());
+        assert!(!to.join("upgrade-in-progress.tmp").exists());
+        assert_store_migrated(&report, &to);
+        // The same store: its identity is carried.
+        assert_eq!(
+            identity(&fs::read(to.join("GRAPH")).unwrap()),
+            identity(&fs::read(dir.join("GRAPH")).unwrap())
+        );
+    }
+
+    #[test]
+    fn an_interrupted_model_migration_completes_at_the_next_open() {
+        let base = in_memory("store");
+        let images = crash_images(&base, |dir| Store::upgrade_in_place(&dir).is_ok());
+        assert!(images.len() > 5, "{}", images.len());
+        let mut completed_at_open = 0;
+        for (step, image) in images.iter().enumerate() {
+            // Either the older store (refused as older: upgrade it again), or one of the
+            // current version that the open completes.
+            let opened = image.deep_copy();
+            match Store::open(&opened, StoreOptions::new()) {
+                Err(PersistError::OlderFormat { found: 3, .. }) => {}
+                Ok(store) => {
+                    if store.open_report().intent_completed.as_deref() == Some("upgrade_models") {
+                        completed_at_open += 1;
+                    }
+                    let mut models: Vec<String> = store
+                        .models()
+                        .unwrap()
+                        .into_iter()
+                        .map(|m| m.identity)
+                        .collect();
+                    models.sort();
+                    assert_eq!(models, [TINY, OTHER], "step {step}");
+                    assert_eq!(store.graph().read().last_commit_seq(), 12, "step {step}");
+                    store.close().unwrap();
+                    assert!(
+                        opened.entry_kind("models").unwrap().is_none(),
+                        "step {step}"
+                    );
+                    assert!(
+                        opened.entry_kind("INTENT").unwrap().is_none(),
+                        "step {step}"
+                    );
+                }
+                Err(other) => panic!("crash after {step} writes: {other}"),
+            }
+            // Repeating the upgrade completes it, with one migration commit.
+            let again = image.deep_copy();
+            let report =
+                Store::upgrade_in_place(&again).unwrap_or_else(|e| panic!("step {step}: {e}"));
+            // It lists the models still under models/ (a crash during their removal leaves
+            // fewer); their definitions exist once, whatever the step.
+            assert!(
+                report.models_converted.len() <= 2,
+                "step {step}: {report:?}"
+            );
+            assert!(
+                report.migration_commit.is_none_or(|c| c == 12),
+                "step {step}"
+            );
+            let store = Store::open(&again, StoreOptions::new()).unwrap();
+            assert_eq!(store.graph().read().last_commit_seq(), 12, "step {step}");
+            assert_eq!(store.models().unwrap().len(), 2, "step {step}");
+            store.close().unwrap();
+            let verified = Store::verify_dir(&again).unwrap();
+            assert!(verified.is_ok(), "step {step}: {:?}", verified.problems);
+        }
+        assert!(completed_at_open > 0, "no image had a pending migration");
+    }
+
+    #[test]
+    fn a_damaged_040_model_refuses_the_upgrade_before_writing() {
+        let temp = Temp::new("v040-damaged");
+        let dir = copy(&temp, "store");
+        let weights = dir.join("models/model2vec-70c61d0ed332/model.safetensors");
+        let mut bytes = fs::read(&weights).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x55;
+        fs::write(&weights, bytes).unwrap();
+        let before = data_files(&dir);
+        for result in [
+            Store::upgrade_in_place(&dir),
+            Store::upgrade(&dir, temp.join("copy")),
+        ] {
+            match result {
+                Err(
+                    err @ PersistError::Store {
+                        cause: StoreFailure::UpgradeModelDamaged,
+                        ..
+                    },
+                ) => {
+                    let text = graphersal::error::format_diagnostic(&err);
+                    assert!(text.contains("model2vec-70c61d0ed332"), "{text}");
+                    assert!(text.contains("model.safetensors"), "{text}");
+                    assert!(text.contains("embed-model import"), "{text}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(data_files(&dir), before, "nothing was written");
+        assert!(!temp.join("copy").join("GRAPH").exists());
+    }
+
+    #[test]
+    fn a_store_without_models_only_changes_the_version_word() {
+        // The 0.2.3 fixture: store format version 3, no models/.
+        let temp = Temp::new("v040-no-models");
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v0.2.3/store");
+        let dir = temp.join("store");
+        for (relative, bytes) in files_of(&from) {
+            let path = dir.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let before = data_files(&dir);
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert_eq!((report.from_version, report.to_version), (3, 4));
+        assert!(report.models_converted.is_empty());
+        assert_eq!(report.migration_commit, None);
+        assert!(report.vectors_without_rule.is_empty());
+        let after = data_files(&dir);
+        // GRAPH and GRAPH.copy rewritten (the version word and its checksum); every other file
+        // byte for byte, nothing added (no blob, no journal record, no INTENT).
+        let others = |files: &[(String, Vec<u8>)]| -> Vec<(String, Vec<u8>)> {
+            files
+                .iter()
+                .filter(|(name, _)| !name.starts_with("GRAPH") && name != "LOCK")
+                .cloned()
+                .collect()
+        };
+        assert_eq!(others(&after), others(&before));
+        for name in ["GRAPH", "GRAPH.copy"] {
+            let old = &before.iter().find(|(n, _)| n == name).unwrap().1;
+            let new = &after.iter().find(|(n, _)| n == name).unwrap().1;
+            assert_eq!((version_of(old), version_of(new)), (3, 4));
+            assert_eq!(old[12..252], new[12..252]);
+            assert_eq!(old[256..], new[256..]);
+        }
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 4);
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn the_report_names_models_the_schema_needs_but_the_store_lacks() {
+        let temp = Temp::new("v040-missing");
+        let dir = copy(&temp, "missing");
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert!(report.models_converted.is_empty());
+        assert_eq!(report.models_missing.len(), 1);
+        let missing = &report.models_missing[0];
+        assert_eq!(missing.identity(), "model2vec/acme/gone@0123456789ab");
+        assert_eq!(missing.repo(), Some("acme/gone"));
+        assert_eq!(missing.needed_by(), ["doc.emb"]);
+        assert_eq!(
+            missing.commands("st"),
+            [
+                "graphersal embed-model download acme/gone",
+                "graphersal embed-model import acme/gone --into st"
+            ]
+        );
+        // The store does not open until the model is imported.
+        match Store::open(&dir, StoreOptions::new()) {
+            Err(PersistError::Store {
+                cause: StoreFailure::ModelUnavailable,
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_jump_before_the_migration_commit_has_no_models() {
+        let temp = Temp::new("v040-jump");
+        let dir = copy(&temp, "store");
+        Store::upgrade_in_place(&dir).unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        // At the migration commit the models are there.
+        let at = store.read_only_at(RecoveryTarget::CommitSeq(12)).unwrap();
+        assert_eq!(at.graph.definitions().unwrap().count(), 2);
+        // Before it the catalog has none: the schema naming them refuses the view.
+        match store.read_only_at(RecoveryTarget::CommitSeq(11)) {
+            Err(
+                err @ PersistError::Store {
+                    cause: StoreFailure::ModelUnavailable,
+                    ..
+                },
+            ) => {
+                let text = err.to_string();
+                assert!(
+                    text.contains("not in the database at this position"),
+                    "{text}"
+                );
+            }
+            other => panic!("{:?}", other.map(|r| r.report.commit_seq)),
+        }
+        store.close().unwrap();
+    }
+
+    #[cfg(feature = "persist-zip")]
+    #[test]
+    fn the_040_zip_backup_restores_with_its_models() {
+        let temp = Temp::new("v040-zip");
+        let zip = fs::read(fixtures().join("backup.zip")).unwrap();
+        let restored = temp.join("restored");
+        Store::restore_zip(zip.as_slice(), &restored).unwrap();
+        assert!(!restored.join("models").exists());
+        assert!(Store::backup_marker_dir(&restored).unwrap().is_none());
+        let store = Store::open(&restored, StoreOptions::new()).unwrap();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
+        models.sort();
+        assert_eq!(models, [TINY, OTHER]);
+        store.close().unwrap();
+        // Into memory too.
+        let mem = MemDir::new();
+        Store::restore_zip(zip.as_slice(), &mem).unwrap();
+        assert!(mem.entry_kind("models").unwrap().is_none());
+        assert_eq!(Store::models_dir(&mem).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_040_packed_snapshot_imports_its_models() {
+        let temp = Temp::new("v040-gsnap");
+        let packed = fs::read(fixtures().join("snapshot.gsnap")).unwrap();
+        let dir = temp.join("store");
+        let store =
+            Store::create_from_packed(&dir, packed.as_slice(), StoreOptions::new()).unwrap();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
+        models.sort();
+        assert_eq!(models, [TINY, OTHER]);
+        // The snapshot's commit 11, then the new store's first commit defining the models.
+        assert_eq!(store.graph().read().last_commit_seq(), 12);
+        store.close().unwrap();
+        assert!(!dir.join("models").exists());
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+        // Into an existing open store: the models come in as imports.
+        let mem = MemDir::new();
+        let store = Store::create(&mem, StoreOptions::new()).unwrap();
+        store.import_models_from_packed(packed.as_slice()).unwrap();
+        let mut models: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
+        models.sort();
+        assert_eq!(models, [TINY, OTHER]);
+        store.close().unwrap();
+        assert!(mem.entry_kind("models").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_increment_after_an_upgrade_needs_a_full_backup() {
+        let temp = Temp::new("v040-backup");
+        let dir = copy(&temp, "store");
+        let backup = copy(&temp, "backup");
+        // The backup directory upgrades and stays a backup.
+        let report = Store::upgrade_in_place(&backup).unwrap();
+        assert!(report.backup.is_some());
+        assert_eq!(report.models_converted.len(), 2);
+        assert!(Store::backup_marker_dir(&backup).unwrap().is_some());
+        Store::upgrade_in_place(&dir).unwrap();
+        // Each has its own migration commit: the increment is refused, with the advice.
+        match Store::backup_dir(&dir, &backup) {
+            Err(err @ PersistError::BackupRefused { .. }) => {
+                let text = graphersal::error::format_diagnostic(&err);
+                assert!(text.contains("take a full backup"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A full backup into a new directory works and carries the models.
+        let full = temp.join("full");
+        Store::backup_dir(&dir, &full).unwrap();
+        assert_eq!(Store::models_dir(&full).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_migrated_store_is_newer_for_040() {
+        // 0.4.0 refuses a store whose GRAPH has a version word above 3 as NEWER (its
+        // `refuse_newer_version`), never as damage; the migration writes 4 before it writes
+        // anything else but the INTENT, whose operation 0.4.0 does not know either.
+        let temp = Temp::new("v040-newer");
+        let dir = copy(&temp, "store");
+        assert_eq!(version_of(&fs::read(dir.join("GRAPH")).unwrap()), 3);
+        Store::upgrade_in_place(&dir).unwrap();
+        for name in ["GRAPH", "GRAPH.copy"] {
+            assert_eq!(version_of(&fs::read(dir.join(name)).unwrap()), 4, "{name}");
+        }
+        assert_eq!(persist_version(), 4);
+    }
+}

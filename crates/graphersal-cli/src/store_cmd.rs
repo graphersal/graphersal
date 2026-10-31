@@ -156,8 +156,8 @@ pub fn command_help(command: &str) -> Option<String> {
         ),
         "upgrade" => (
             "graphersal store upgrade <DIR> <NEW> [--single-file] | graphersal store upgrade <DIR> --in-place",
-            "Converts a store written by an older Graphersal (0.1.x) to the current format; no\n\
-             older binary is needed. With NEW: a new store in NEW (a new directory, or a single\n\
+            "Converts a store written by an older Graphersal (0.1.x to 0.4.x) to the current\n\
+             format; no older binary is needed. With NEW: a new store in NEW (a new directory, or a single\n\
              file: NEW ending in .gstore, or --single-file); DIR is not changed. With\n\
              --in-place: DIR itself (back it up first: afterwards the older Graphersal no longer\n\
              opens it). Everything is carried: the graph, schema, catalog, the history, marks,\n\
@@ -167,7 +167,11 @@ pub fn command_help(command: &str) -> Option<String> {
              first: a damaged store is refused (store repair DIR --to NEW writes a repaired\n\
              store of the current format), and so is a store in use (no server on it). The copy\n\
              is verified before it becomes a store; an interrupted upgrade leaves no store in\n\
-             NEW (run it again). A ZIP backup of an older store is upgraded by `store restore`.",
+             NEW (run it again). A ZIP backup of an older store is upgraded by `store restore`.\n\
+             The embedding models of a 0.4.0 store (models/) become blobs defined by one\n\
+             commit (no default model is set; take a full backup afterwards). It warns about\n\
+             models the schema needs that the store lacks, and notes every vector property\n\
+             with a model but no source property (\"from\") with the schema patch adding one.",
             false,
         ),
         "compact" => (
@@ -468,6 +472,12 @@ pub fn models_carried(models: &[ModelInfo]) -> String {
 /// Whether the schema's identity `named` (`model2vec/<repo>@<12 hex>`, possibly with a
 /// `?normalize=` suffix) names the stored model `model` (the same files: the same 12 hex
 /// digits, whatever repository name the schema recorded).
+/// Whether a schema's `embedder` names a model a store keeps (a Model2Vec identity), not a
+/// built-in embedder such as `hash-ngram/1` (never "missing").
+fn stored_kind(identity: &str) -> bool {
+    identity.starts_with("model2vec/") || identity.starts_with("model2vec@")
+}
+
 pub fn same_model(named: &str, model: &ModelInfo) -> bool {
     let hex = |identity: &str| {
         identity
@@ -1030,7 +1040,9 @@ pub fn run(args: &[String]) -> i32 {
                             );
                         }
                         for identity in &info.schema_models {
-                            if !info.models.iter().any(|m| same_model(identity, m)) {
+                            if stored_kind(identity)
+                                && !info.models.iter().any(|m| same_model(identity, m))
+                            {
                                 outln!("  missing {identity} (the schema names it)");
                             }
                         }
@@ -1137,7 +1149,7 @@ pub fn run(args: &[String]) -> i32 {
                         positional[0],
                         positional[0]
                     );
-                    for identity in &used {
+                    for identity in used.iter().filter(|i| stored_kind(i)) {
                         outln!("missing  {identity}  (the schema names it)");
                     }
                     EXIT_OK
@@ -1156,7 +1168,8 @@ pub fn run(args: &[String]) -> i32 {
                         );
                     }
                     for identity in &used {
-                        if !models.iter().any(|m| same_model(identity, m)) {
+                        if stored_kind(identity) && !models.iter().any(|m| same_model(identity, m))
+                        {
                             outln!(
                                 "missing  {identity}  (the schema names it, the store holds no such model)"
                             );
@@ -1947,9 +1960,14 @@ fn run_upgrade(positional: &[String], in_place: bool, single_file: bool) -> i32 
         verify.records_checked
     );
     if report.in_place {
+        let kept = if report.migration_commit.is_some() || !report.models_converted.is_empty() {
+            "the models/ directory migrated (below), every other file kept"
+        } else {
+            "every other file kept"
+        };
         outln!(
-            "Upgraded {dir} in place to store format version {}: GRAPH rewritten, every other \
-             file kept. The older Graphersal no longer opens it.",
+            "Upgraded {dir} in place to store format version {}: GRAPH rewritten, {kept}. The \
+             older Graphersal no longer opens it.",
             report.to_version
         );
     } else {
@@ -1963,12 +1981,67 @@ fn run_upgrade(positional: &[String], in_place: bool, single_file: bool) -> i32 
         );
     }
     let target = if report.in_place { dir } else { &positional[1] };
+    print_upgrade_models(&report, target);
     if report.backup.is_some() {
         outln!("It stays a backup: graphersal store restore {target} makes it the live store.");
     } else {
         outln!("Use it: graphersal --graph {target}");
     }
     EXIT_OK
+}
+
+/// What an upgrade did to the embedding models (Graphersal 0.4.0 stores keep them under
+/// `models/`; they became blobs with catalog definitions), the models the schema needs that the
+/// store lacks (`warning:`) and the vector properties without a rule (`note:`, with the ready
+/// schema patch). The exit code does not change.
+fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &str) {
+    for model in &report.models_converted {
+        outln!(
+            "Converted the embedding model {} into a blob with its catalog definition: {} ({}).",
+            model.former_identity(),
+            model.identity(),
+            bytes_text(model.bytes())
+        );
+        if model.renamed() {
+            errln!(
+                "note: the model {} had no repository name of its own in the store; it is now {} \
+                 (repository {}), and the schema's embedder naming it was renamed with it. To \
+                 give it its real name, import it again: graphersal embed-model import <dir> \
+                 --into {target} --repo <owner/name>, then point the schema at it.",
+                model.former_identity(),
+                model.identity(),
+                model.repo()
+            );
+        }
+    }
+    if let Some(commit) = report.migration_commit {
+        if report.backup.is_some() {
+            outln!(
+                "The models were defined by commit {commit}; the history before it has no \
+                 models. This backup does not take increments of the store upgraded on its own \
+                 (each has its own migration commit): back the upgraded store up into a new \
+                 directory (graphersal store backup <store> <new_dir>)."
+            );
+        } else {
+            outln!(
+                "The models were defined by commit {commit}; the history before it has no \
+                 models. Take a full backup now (graphersal store backup {target} <new_dir>): a \
+                 backup taken before the upgrade does not take increments of the upgraded store."
+            );
+        }
+    }
+    for missing in &report.models_missing {
+        errln!(
+            "warning: the schema needs the model {} ({}), which the store does not keep (0.4.0 \
+             served it through --embedder); the store does not open until it is imported: {}",
+            missing.identity(),
+            missing.needed_by().join(", "),
+            missing.commands(target).join(" then ")
+        );
+    }
+    for vector in &report.vectors_without_rule {
+        errln!("note: {}", vector.note(target));
+    }
 }
 
 /// The marks a fork or repair did not carry, one line each (`name @ commit N`), with where they

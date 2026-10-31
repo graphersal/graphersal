@@ -4,8 +4,8 @@ Every file of the format starts with a magic and a version. There are two axes (
 single-file container has its own container version):
 
 - the **store format version**, in the store's `GRAPH` file: this release writes and reads
-  **version 3** (`graphersal::persist::STORE_FORMAT_VERSION`); `graphersal store info` prints it
-  (`backend  directory (format version 3)`, `format  version 3`);
+  **version 4** (`graphersal::persist::STORE_FORMAT_VERSION`); `graphersal store info` prints it
+  (`format  version 4`);
 - the **file format version** of snapshot manifests and segments, WAL segments and packed
   snapshots (`.gsnap`): this release writes **version 4** (`graphersal::persist::FORMAT_VERSION`)
   and reads versions 1 to 4.
@@ -15,16 +15,19 @@ single-file container has its own container version):
 | store 1 | the first store format |
 | store 2 (0.1.0) | the store identity `store_id` in `GRAPH` (offset 100), which incremental backups check |
 | store 3 (0.2.0) | the same `GRAPH` layout; marks a store whose files are of file format version 2, so that 0.1.x refuses it as newer instead of taking its files for damage |
+| store 4 (0.5.0) | the same `GRAPH` layout; marks a store that may hold blobs, their ledger and the system journal, whose embedding models are blobs referenced by catalog definitions (0.4.0 kept them as files under `models/`), so that 0.4.x refuses it as newer |
 | file 1 (0.1.x) | the first file format |
 | file 2 (0.2.0) | the value tags of the date and time types (`date`, `localdatetime`, `datetime`, `time`, `duration`) and of vectors (`vector`); a version 1 file is read as it is |
 | file 3 (0.3.0) | nanosecond value tags for `localdatetime`, `datetime` (with or without a zone name), `time`, `offsettime` and `duration` (the whole `java.time.Duration` range); every such value is written with them. Version 1 and 2 files are read as they are |
 | file 4 (0.5.0) | the blob reference value tag (`blobref`, a content-addressed file of the store), the snapshot manifest's blob table and the system journal's segments; version 1 to 3 files are read as they are, and Graphersal 0.4.x refuses a version 4 file as newer, never as damage |
 
-**File format version 4 needs no upgrade either**: a store of 0.3.x or 0.4.x opens as it is,
-and everything written from then on is of file format version 4, which 0.4.x refuses as newer.
+**Store format version 4 needs the upgrade** (`graphersal store upgrade`, below): a store of
+0.2.x to 0.4.x is refused as older until it is upgraded, because a 0.4.0 store may keep
+embedding models as files under `models/`, which become blobs ("0.4.0 -> 0.5.0" below). Its
+older files stay as they are; everything written from then on is of file format version 4.
 
-**File format version 3 needs no upgrade.** The store format version stays 3, so a store
-written by 0.2.x opens as it is: its version 2 snapshots and WAL segments stay and are read
+**File format version 3 (0.3.0) needed no upgrade.** The store format version stayed 3, so a
+store written by 0.2.x opened in 0.3.x as it was: its version 2 snapshots and WAL segments stay and are read
 as they are, and everything written from then on (a new WAL segment, new snapshots, backups,
 `.gsnap` exports) is of file format version 3. From the first such file on, Graphersal 0.2.x
 refuses the store, its backups and those packed snapshots as written by a newer version
@@ -36,7 +39,7 @@ microsecond, an `offsettime` or a zone name: 0.2.x could not write them.
 |---|---|
 | the current version | read and written as usual |
 | **newer** than this build | refused with `PersistError::UnsupportedVersion` ("written by a newer Graphersal") by every operation (open, read-only open, `store info`, `verify`, backup, restore, fork, repair, conversion, upgrade, ...), before any lock, read of data or write: never guessed at, never reported as damage, never repaired. This holds for a newer `GRAPH` (either copy), for any snapshot manifest, snapshot segment or WAL segment of a newer file format version inside an otherwise current or older store (attic entries included), for a single-file container of a newer container version, and for a packed snapshot. Use a newer Graphersal |
-| a store of an **older** released store format version (2: Graphersal 0.1.x) | refused with `PersistError::OlderFormat` by every operation but the converter and `repair` (open, read-only open, `store info`, `verify`, backup, restoring a backup directory, fork, convert; a ZIP backup is upgraded as it is restored); nothing is changed, never reported as damage. Its help names the command that upgrades it |
+| a store of an **older** released store format version (2: Graphersal 0.1.x; 3: Graphersal 0.2.x to 0.4.x) | refused with `PersistError::OlderFormat` by every operation but the converter and `repair` (open, read-only open, `store info`, `verify`, backup, restoring a backup directory, fork, convert; a ZIP backup is upgraded as it is restored); nothing is changed, never reported as damage. Its help names the command that upgrades it |
 | a store of store format version 1 (never released) | refused with `PersistError::OlderFormat` everywhere; the migration is a packed snapshot exported by the build that wrote it (below) |
 
 Two rules bind every release ([format specification, section 15](format.md#15-versioning)):
@@ -59,7 +62,8 @@ Which older store format versions this build upgrades, and how, is one table in 
 [format specification 15.1](format.md#151-upgrading-a-store) and the
 [`store upgrade` command](store_cli.md#upgrade), are generated from it and checked by a test.
 An upgrade is done only as its row says: "version word" rows only rewrite `GRAPH` and
-`GRAPH.copy` and are safe in place; "into a copy only" rows refuse `--in-place`
+`GRAPH.copy` and are safe in place; "migration" rows do that and migrate the embedding models of
+a 0.4.0 store (below), in place too; "into a copy only" rows refuse `--in-place`
 (`StoreFailure::UpgradeNeedsCopy`) before anything is written; an unsupported version (or one
 without a row) is refused with `PersistError::OlderFormat`, whose help is the migration through
 a packed snapshot (below). A bump of a format version fails that test until the table has a
@@ -68,9 +72,10 @@ row for the previous version.
 <!-- upgrades:begin -->
 | From store format version | Written by | To | Upgrade |
 |---|---|---|---|
-| 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
-| 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
+| 1 | never released (no store id) | 4 | unsupported (packed snapshot) |
+| 2 | Graphersal 0.1.x (no models: the version word only) | 4 | in place or into a copy (migration) |
+| 3 | Graphersal 0.2.x - 0.4.x | 4 | in place or into a copy (migration) |
+| 4 | Graphersal 0.5.x and later | 4 | nothing to do |
 <!-- upgrades:end -->
 
 ## Upgrading a store of an older version
@@ -102,7 +107,8 @@ What it does:
   [creation parameter](creation_parameters.md), the store id included: the upgraded store is the
   SAME store in the new format, so an upgraded backup of it continues to take increments.
 - **Only `GRAPH` and `GRAPH.copy` are rewritten** (the store format version word); every
-  snapshot, WAL segment, the `marks` file and the attic stay byte for byte. This build reads them
+  snapshot, WAL segment, the `marks` file and the attic stay byte for byte. (A 0.4.0 store with
+  embedding models also gets their blobs and one commit, and loses `models/`: below.) This build reads them
   as they are (each file names its own file format version), so nothing is decoded and encoded
   again and the history stays exactly what was written. The first commit after the upgrade goes
   into a NEW WAL segment of the current file format version: a record of the new version is
@@ -118,11 +124,75 @@ What it does:
   what was left and completes.
 - **In place** the store is verified, then `GRAPH.copy` and `GRAPH` are replaced, each
   atomically: whatever moment a crash hits, the store is either still the older one (run the
-  upgrade again) or already the upgraded one (a reader takes the intact copy), never lost. No
-  other file changes, so no `INTENT` is needed. Back the store up before (a file copy of the
-  closed store will do): afterwards the older Graphersal refuses it as newer.
+  upgrade again) or already the upgraded one (a reader takes the intact copy), never lost.
+  Without models no other file changes, so no `INTENT` is needed (the model migration has
+  one: below). Back the store up before (a file copy of the closed store will do): afterwards
+  the older Graphersal refuses it as newer.
 - A store that already has the current format is left alone in place (`already_current`); a copy
   of it is refused with `StoreFailure::AlreadyCurrent` (use `store convert` or a backup).
+
+## 0.4.0 -> 0.5.0: models become blobs
+
+Graphersal 0.4.0 kept the embedding models of a store as files under `models/<id>/` (the
+model files, card, licence files and a manifest). 0.5.0 keeps each model as ONE blob (a
+deterministic tar) referenced by a model definition of the catalog
+([Embedding Models in a Store](store_models.md)). The upgrade converts them:
+
+1. Every model under `models/` is checked against its manifest (every byte hashed) BEFORE
+   anything is written. A damaged or incomplete model refuses the upgrade
+   (`StoreFailure::UpgradeModelDamaged`, nothing written): restore `models/<id>` from a backup,
+   or move it away, upgrade and import the model again afterwards.
+2. An `INTENT` (`upgrade_models`) is written, then `GRAPH` gets version 4: from here on 0.4.0
+   refuses the store (as newer), and an interruption is completed by the next read-write open or
+   upgrade.
+3. Each model becomes a blob; ONE commit (principal `upgrade`, attribute `upgrade` = `3->4`)
+   defines all of them, in a new WAL segment. The history before that commit has no models: a
+   view of a position before it whose schema names a model is refused ("not in the database at
+   this position").
+4. `models/` and the `INTENT` are removed.
+
+### After the upgrade
+
+The upgrade prints (and `UpgradeReport` holds) what still needs your decision; the exit code is
+0 in every case.
+
+- **No default model** is set: `hash-ngram/1` stays the default until you choose one
+  (`graphersal store models` lists them; `Store::set_default_model`).
+- A model 0.4.0 kept **without a repository name** (imported from a directory without `--repo`;
+  identity `model2vec@<12 hex>`) gets the repository `local/<12 hex>` (a definition needs one),
+  and the schema's `embedder` naming it is renamed in the same commit; the report and the CLI
+  say so. Import it again with `--repo owner/name` to give it its real name. The same happens to
+  a second revision of a repository another model of the store takes (the catalog keeps one
+  model per repository).
+- **Models the schema needs that the store does not keep** (0.4.0 served them through
+  `--embedder`) are listed (`UpgradeReport::models_missing`, a CLI `warning:` with the
+  commands): such a store opens once they are imported (`graphersal embed-model download
+  <repo>`, `graphersal embed-model import <repo> --into <store>`). The upgrade itself succeeds.
+- **Vector properties without a rule.** 0.4.0's `embed_property` recorded only the model
+  (`embedder`), never the property the text came from, so nothing keeps such vectors current.
+  The upgrade never guesses the source and recomputes nothing: it lists each such property
+  (`UpgradeReport::vectors_without_rule`: element kind, label, property, model, how many
+  elements hold a vector, counted in the newest snapshot) and the CLI prints a `note:` with the
+  ready schema patch, for example
+
+  ```text
+  note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs)
+  ```
+
+  See [Vector Rules](../users_guide/vector_rules.md): adding `from` makes it a rule whose first
+  fill re-embeds EVERY element of the label while the whole database is locked.
+- **Take a full backup after the upgrade.** A backup directory of the 0.4.0 store upgrades too
+  (it stays a backup), but it gets its own migration commit, so it no longer takes increments of
+  the upgraded store (`PersistError::BackupRefused`): back the upgraded store up into a new
+  directory.
+- A **ZIP backup** of 0.4.0 with models is migrated as it is restored (`graphersal store
+  restore`); a **`.gsnap`** of 0.4.0 with model rows becomes a store whose first commit defines
+  the models (`graphersal store create <dir> --from file.gsnap`), and
+  `Store::import_models_from_packed` imports them into an open store. Attic entries are left as
+  they are (their history predates the models).
+
+The golden fixtures written by the released 0.4.0 binary (`crates/graphersal/tests/data/v0.4.0/`)
+are upgraded by every test run.
 
 **Packed snapshots need no converter.** A `.gsnap` written by 0.1.x (file format version 1)
 loads as it is (`--graph graph.gsnap`, `TraversalGraph::read_snapshot`), and `graphersal store

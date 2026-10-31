@@ -1,0 +1,42 @@
+{
+  "format": 2,
+  "family": "model2vec",
+  "identity": "model2vec@b6b362e7a651",
+  "license": "mit",
+  "license_text": "template",
+  "base_models": [],
+  "gated": false,
+  "added_at": "2026-10-31T08:46:35Z",
+  "files": [
+    {
+      "name": "config.json",
+      "role": "config",
+      "size": 19,
+      "sha256": "3c3e436f6bb3071f0422a97caf2383cad51e32896227132a9834803cce974707"
+    },
+    {
+      "name": "tokenizer.json",
+      "role": "tokenizer",
+      "size": 308,
+      "sha256": "8bff14214c919eae5b1e104c2b93f5cae16be62f7260ec4d4fc8d88862ae6679"
+    },
+    {
+      "name": "model.safetensors",
+      "role": "model",
+      "size": 136,
+      "sha256": "42a66fd5eb9e9ceb6b81968975719c4e57f1f1427edf9af31d905caad8938579"
+    },
+    {
+      "name": "README.md",
+      "role": "card",
+      "size": 36,
+      "sha256": "f2cb0f001f8d2e28c179c10ecf98c55515eee068582f862e1381a04bee3d0125"
+    },
+    {
+      "name": "LICENSE",
+      "role": "license",
+      "size": 1389,
+      "sha256": "ee781ff2b72b2469d634cd5db3d8be8f6d29792c619e31feb7c6d16c40d67970"
+    }
+  ]
+}

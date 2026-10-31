@@ -408,6 +408,56 @@ fn the_model_definition_causes_are_refused_with_their_help() {
     // The memory refusal needs a model loader (feature `model2vec`): `model_open_tests.rs`.
 }
 
+/// A damaged embedding model of a Graphersal 0.4.0 store (its `models/`) refuses the upgrade
+/// before anything is written (format spec 15.1).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_damaged_040_model_refuses_the_upgrade_with_its_cause() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v0.4.0/store");
+    fn walk(root: &std::path::Path, at: &std::path::Path, dir: &MemDir) {
+        for entry in std::fs::read_dir(at).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if path.is_dir() {
+                dir.create_dir_all(&name).unwrap();
+                walk(root, &path, dir);
+            } else {
+                dir.write_atomic(&name, &std::fs::read(&path).unwrap())
+                    .unwrap();
+            }
+        }
+    }
+    for damage in ["flip", "remove"] {
+        let dir = MemDir::new();
+        walk(&root, &root, &dir);
+        let file = "models/model2vec-70c61d0ed332/tokenizer.json";
+        match damage {
+            "flip" => {
+                let mut bytes = dir.read(file, u64::MAX).unwrap();
+                bytes[0] ^= 0x55;
+                dir.write_atomic(file, &bytes).unwrap();
+            }
+            _ => dir.remove_file(file).unwrap(),
+        }
+        let before = dir.read("GRAPH", u64::MAX).unwrap();
+        assert_cause(
+            Store::upgrade_in_place(&dir),
+            StoreFailure::UpgradeModelDamaged,
+            "embed-model import",
+        );
+        assert_eq!(dir.read("GRAPH", u64::MAX).unwrap(), before, "{damage}");
+        assert!(dir.entry_kind("INTENT").unwrap().is_none(), "{damage}");
+    }
+    assert_eq!(
+        StoreFailure::UpgradeModelDamaged.name(),
+        "upgrade_model_damaged"
+    );
+}
+
 #[test]
 fn a_missing_blob_names_both_recovery_commands_and_a_closed_change_names_the_open_store() {
     let dir = MemDir::new();
