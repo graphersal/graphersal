@@ -1516,7 +1516,9 @@ fn plan_backup(
             .iter()
             .filter_map(|(first, _)| replay.iter().find(|(f, _)| f == first).cloned())
             .collect();
-        for blob in super::blobs::referenced_by_copy(&[snapshot.clone()], &copied, commit_seq)? {
+        for blob in
+            super::blobs::referenced_by_copy(std::slice::from_ref(&snapshot), &copied, commit_seq)?
+        {
             match super::blobs::check_blob(dir, &blob, false) {
                 Ok(()) => {
                     files.push(BackupFile {

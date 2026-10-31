@@ -796,7 +796,7 @@ pub(crate) fn catalogue_markdown() -> String {
             Form::Event(Collapse::By(fields)) => {
                 format!("event, collapsed by {}", backticked(fields))
             }
-            Form::State { cleared, key } if key.is_empty() => {
+            Form::State { cleared, key: [] } => {
                 format!("state until `{cleared}`")
             }
             Form::State { cleared, key } => {

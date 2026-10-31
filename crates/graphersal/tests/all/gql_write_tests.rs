@@ -2282,20 +2282,57 @@ fn an_unindexed_merge_rolls_back_with_its_query() {
     assert_eq!(graph.vertex_count(), 0);
 }
 
-/// The shape of the cost: 6000 distinct keys merge in well under the time a per-candidate
-/// evaluator needs (that took about 2 s here, the scan lookup about a tenth of it); the
-/// bound is loose so a loaded machine does not fail it, but a regression to the evaluator
-/// plus a debug build would.
+/// The shape of the cost, by work counters instead of wall time (a timing bound failed on
+/// loaded machines): a batch of 6000 MERGE rows over 6000 existing `M` vertices compares the
+/// candidates inside the scan lookup, so no step of the merge's children ever handles a
+/// candidate as a traverser. A per-candidate evaluator (the scan feeding a filter step) would
+/// push 6000 x 6000 traversers through its children; here every child step sees at most one
+/// traverser per row, and the lookup exactly one per row.
 #[test]
 fn an_unindexed_merge_batch_is_not_dominated_by_the_evaluator() {
+    const ROWS: u64 = 6000;
+    let q = "UNWIND range(1, 6000) AS i MERGE (:M {i: i})";
     let mut graph = TraversalGraph::new();
-    let started = std::time::Instant::now();
-    write(&mut graph, "UNWIND range(1, 6000) AS i MERGE (:M {i: i})");
-    write(&mut graph, "UNWIND range(1, 6000) AS i MERGE (:M {i: i})");
-    assert_eq!(graph.vertex_count(), 6000);
+    write(&mut graph, q);
+    assert_eq!(graph.vertex_count(), ROWS as usize);
+    // The second batch matches every row (nothing created); the profile runs it.
+    let profile = graph
+        .traversal_mut()
+        .gql(q)
+        .profile()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(graph.vertex_count(), ROWS as usize);
+    fn walk<'m>(
+        metrics: &'m [graphersal::profile::Metrics],
+        out: &mut Vec<&'m graphersal::profile::Metrics>,
+    ) {
+        for m in metrics {
+            out.push(m);
+            walk(m.nested(), out);
+        }
+    }
+    let merge = profile
+        .metrics()
+        .iter()
+        .find(|m| m.name().starts_with("gql:merge"))
+        .unwrap_or_else(|| panic!("{profile}"));
+    let mut children = Vec::new();
+    walk(merge.nested(), &mut children);
+    let lookup = children
+        .iter()
+        .find(|m| m.name().starts_with("gql:lookup"))
+        .unwrap_or_else(|| panic!("{profile}"));
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(60),
-        "{:?}",
-        started.elapsed()
+        profile.to_string().contains("[scan: vertex M.i]"),
+        "{profile}"
     );
+    assert_eq!(lookup.count_in(), ROWS, "one lookup per row: {profile}");
+    for child in &children {
+        assert!(
+            child.count_in() <= ROWS,
+            "{} handled {} traversers for {ROWS} rows: candidates went through a step\n{profile}",
+            child.name(),
+            child.count_in()
+        );
+    }
 }

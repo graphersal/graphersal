@@ -276,7 +276,8 @@ fn a_model_loads_from_the_file_and_a_changed_file_is_refused() {
     let temp = Temp::new("packed-file-reads");
     // Different seeds per case: the process-wide cache of loaded models never serves one of them
     // from an earlier load (a cached model is still checked against the file, see below).
-    let cases: [(&str, &dyn Fn(&Path)); 3] = [
+    type Damage<'a> = &'a dyn Fn(&Path);
+    let cases: [(&str, Damage); 3] = [
         ("removed", &|path| std::fs::remove_file(path).unwrap()),
         ("truncated", &|path| {
             let bytes = std::fs::read(path).unwrap();
@@ -388,9 +389,7 @@ fn a_store_made_from_a_gsnap_lacking_its_model_names_it_and_opens_after_the_impo
     );
     // The store is there, closed cleanly, and refuses to open while the model is missing.
     assert!(Store::inspect(&dir).unwrap().clean);
-    let refused = Store::open(&dir, options())
-        .err()
-        .expect("the model is missing");
+    let refused = Store::open(&dir, options()).expect_err("the model is missing");
     assert!(refused.to_string().contains("acme/tiny"), "{refused}");
     // The import brings it back: the store opens and serves it.
     Store::import_model_dir(

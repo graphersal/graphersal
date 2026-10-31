@@ -1336,10 +1336,12 @@ fn the_limit_options_are_session_presets() {
     // --max-traversers
     let message = diagnostic(&execute(port, "g.inject(1, 2, 3, 4, 5).to_list()"));
     assert!(message.contains("traversal.max_traversers"), "{message}");
-    // --memory-limit: a run that grows past it fails and rolls back.
+    // --memory-limit: a run that grows past it fails and rolls back. The run lifts the
+    // 200 ms evaluationTimeout for itself (as above), so on a loaded machine the timeout
+    // cannot stop it before the memory ceiling does: only the limit under test decides.
     let message = diagnostic(&execute(
         port,
-        r#"g.addV("x").inject(1).repeat(__.path()).times(40).count().next()"#,
+        r#"g.with("evaluationTimeout", 0).addV("x").inject(1).repeat(__.path()).times(40).count().next()"#,
     ));
     assert!(
         message.contains("Resource limit 'memory.limit' exceeded (limit 64000000"),
@@ -4352,13 +4354,42 @@ mod ai_chat {
     /// result>`; `GEMINI <script>` does the same like Google Gemini's OpenAI-compatible endpoint
     /// (the call carries `extra_content.google.thought_signature`, and a request that sends the
     /// call back without it is refused with HTTP 400); `FAIL <script>` calls `query` and then
-    /// answers HTTP 400; `LOOP` calls `query` forever; `SLOW` answers after 1.5 s; `SAVED
+    /// answers HTTP 400; `LOOP` calls `query` forever; `SLOW` answers once the test calls
+    /// [`MockLlm::release_slow`] (at most 30 s later), counting how many `SLOW` requests wait
+    /// at the same time ([`MockLlm::slow_at_once`]); `SAVED
     /// <name>` calls `run_saved_query` with the name and answers like `RUN`; anything else is
     /// answered `hello`. Every request body is recorded.
     struct MockLlm {
         base_url: String,
         requests: Arc<Mutex<Vec<Value>>>,
         server: Arc<tiny_http::Server>,
+        slow: Arc<SlowGate>,
+    }
+
+    /// The gate `SLOW` requests wait at: how many wait now, the most that waited at once, and
+    /// whether the test released them.
+    #[derive(Default)]
+    struct SlowGate {
+        state: Mutex<(usize, usize, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl SlowGate {
+        fn wait(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.0 += 1;
+            state.1 = state.1.max(state.0);
+            self.changed.notify_all();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !state.2 && Instant::now() < deadline {
+                state = self
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(100))
+                    .unwrap()
+                    .0;
+            }
+            state.0 -= 1;
+        }
     }
 
     impl Drop for MockLlm {
@@ -4372,17 +4403,23 @@ mod ai_chat {
             let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("mock"));
             let port = server.server_addr().to_ip().expect("ip").port();
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let (listener, recorded) = (server.clone(), requests.clone());
+            let slow = Arc::new(SlowGate::default());
+            let (listener, recorded, gate) = (server.clone(), requests.clone(), slow.clone());
             std::thread::spawn(move || {
                 for mut request in listener.incoming_requests() {
                     let recorded = recorded.clone();
+                    let gate = gate.clone();
                     std::thread::spawn(move || {
                         let mut text = String::new();
                         let _ = request.as_reader().read_to_string(&mut text);
                         let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                         recorded.lock().unwrap().push(body.clone());
                         let (answer, delay) = brain(&body);
-                        std::thread::sleep(delay);
+                        if delay == SLOW_GATE {
+                            gate.wait();
+                        } else {
+                            std::thread::sleep(delay);
+                        }
                         let status = if answer.get("error").is_some() {
                             400
                         } else {
@@ -4405,13 +4442,39 @@ mod ai_chat {
                 base_url: format!("http://127.0.0.1:{port}"),
                 requests,
                 server,
+                slow,
             }
         }
 
         fn requests(&self) -> Vec<Value> {
             self.requests.lock().unwrap().clone()
         }
+
+        /// Waits (at most 30 s) until `n` `SLOW` requests wait at once; returns the most that
+        /// did.
+        fn slow_at_once(&self, n: usize) -> usize {
+            let mut state = self.slow.state.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while state.1 < n && Instant::now() < deadline {
+                state = self
+                    .slow
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(100))
+                    .unwrap()
+                    .0;
+            }
+            state.1
+        }
+
+        /// Lets every waiting (and later) `SLOW` request answer.
+        fn release_slow(&self) {
+            self.slow.state.lock().unwrap().2 = true;
+            self.slow.changed.notify_all();
+        }
     }
+
+    /// The `delay` of [`brain`] that means "wait at the [`SlowGate`]".
+    const SLOW_GATE: Duration = Duration::from_secs(3600);
 
     fn completion(message: Value, finish: &str) -> Value {
         json!({"id": "chatcmpl-mock", "object": "chat.completion",
@@ -4516,7 +4579,7 @@ mod ai_chat {
             };
         }
         if user == "SLOW" {
-            return (text("slow answer"), Duration::from_millis(1500));
+            return (text("slow answer"), SLOW_GATE);
         }
         (text("hello"), Duration::ZERO)
     }
@@ -4986,18 +5049,23 @@ mod ai_chat {
         assert_eq!(call(port, "GET", unknown, None, "page-a").status, 404);
 
         // Concurrent turns of two conversations; a second send while a turn runs is 409.
-        let started = Instant::now();
+        // Both provider calls wait in the mock until the test releases them, so "running" and
+        // the concurrency are conditions, never timings: the two calls are in the mock AT
+        // ONCE (a server running turns one after another would leave the first one waiting
+        // alone).
         assert_eq!(send(port, "page-a", &mine, "SLOW").status, 200);
         assert_eq!(send(port, "page-b", &other, "SLOW").status, 200);
         assert_eq!(send(port, "page-a", &mine, "again").status, 409);
         assert_eq!(events(port, "page-a", &mine)["running"], true);
         assert_eq!(events(port, "page-b", &other)["running"], true);
-        let a = finished(port, "page-a", &mine);
-        let b = finished(port, "page-b", &other);
-        assert!(
-            started.elapsed() < Duration::from_millis(2900),
+        assert_eq!(
+            mock.slow_at_once(2),
+            2,
             "the two slow answers ran concurrently"
         );
+        mock.release_slow();
+        let a = finished(port, "page-a", &mine);
+        let b = finished(port, "page-b", &other);
         assert_eq!(of(&a, "assistant")[0]["text"], "slow answer");
         assert_eq!(of(&b, "assistant")[0]["text"], "slow answer");
         // Each has its own history: page-b's conversation never saw page-a's messages.
@@ -6845,6 +6913,86 @@ fn the_journal_endpoint_pages_by_cursor() {
     assert!(text.contains("store.created"), "{text}");
     drop(server);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Records caused by dev-server requests name who caused them (`principal`: the request's
+/// channel, `playground` for the page, `mcp` for an agent) and the instance by the host name,
+/// never `unknown` (macOS exports no `HOSTNAME`).
+#[test]
+fn journal_records_of_requests_name_the_channel_and_the_host() {
+    let ui = ui_dir("journal-origin");
+    let data = ui.parent().unwrap().join("journal-origin-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    ok_json(post(port, "/api/store/checkpoint", "{}"));
+    let page = get(port, "/api/journal?kind=store.checkpoint_done").json();
+    let record = &page["records"][0];
+    assert_eq!(record["principal"], "playground", "{page}");
+    let name = record["origin"]["name"].as_str().unwrap_or_default();
+    assert!(!name.is_empty() && name != "unknown", "{page}");
+
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.add_v(\"doc\").property(\"text\", \"graph\").iterate()"}),
+    );
+    assert!(!error, "{text}");
+    let rule = serde_json::json!({"vertices": {"doc": {"schema": {"type": "object", "properties": {"text": {"type": "string"}, "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}});
+    let (error, text) = mcp.call("set_schema", serde_json::json!({"schema": rule}));
+    assert!(!error, "{text}");
+    let page = get(port, "/api/journal?kind=vector_fill.started").json();
+    assert_eq!(page["records"][0]["principal"], "mcp", "{page}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A vector fill above the confirmation threshold through MCP `set_schema` without
+/// `confirm_lock` is a tool error (`isError: true`) that applies nothing; with it, it is
+/// applied. 70,000 texts at the built-in model's speed (x3) estimate more than a second.
+#[test]
+fn mcp_set_schema_refused_for_confirm_lock_is_a_tool_error() {
+    let ui = ui_dir("confirm-lock");
+    let server = start(&[
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "let xs = []; for i in 0..70000 { xs.push(i); } g.inject(xs).unfold().add_v(\"doc\").property(\"text\", \"graph\").iterate();"}),
+    );
+    assert!(!error, "{text}");
+    let rule = serde_json::json!({"vertices": {"doc": {"schema": {"type": "object", "properties": {"text": {"type": "string"}, "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}});
+    let (error, text) = mcp.call("set_schema", serde_json::json!({"schema": rule.clone()}));
+    assert!(error, "a refusal is a tool error: {text}");
+    assert!(text.starts_with("Nothing was applied.\n"), "{text}");
+    assert!(text.ends_with("Repeat with confirm_lock: true."), "{text}");
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.v().has(\"emb\").count().next()"}),
+    );
+    assert!(
+        !error && text.trim_end().ends_with('0'),
+        "nothing applied: {text}"
+    );
+    let (error, text) = mcp.call(
+        "set_schema",
+        serde_json::json!({"schema": rule, "confirm_lock": true}),
+    );
+    assert!(!error && text.contains("Schema stored."), "{text}");
 }
 
 /// MCP schema tools and vector rules (book page "Vector Rules"): a fill below the

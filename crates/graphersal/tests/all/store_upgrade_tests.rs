@@ -1698,7 +1698,7 @@ mod v040_saved_queries {
             .schema_patch
             .clone()
             .unwrap();
-        graphersal::script::eval_value(store.graph().clone(), &patch).unwrap();
+        let _ = graphersal::script::eval_value(store.graph().clone(), &patch).unwrap();
         let filled = store
             .graph()
             .read()

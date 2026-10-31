@@ -502,7 +502,8 @@ The options combine (`--mcp --mcp-read-only --mcp-token ... --mcp-query-tools`),
 `set_schema` and `patch_schema` run the schema preview first when the schema names a
 [vector rule](../users_guide/vector_rules.md). A fill whose estimate is 1 s or more (or, without
 an estimate, of 10,000 elements or more) locks the whole database while it runs, so the tool
-answers the preview's warning text plus "Repeat with confirm_lock: true" and applies NOTHING;
+answers a tool error (`isError: true`) with the preview's warning text plus "Repeat with
+confirm_lock: true" and applies NOTHING;
 the agent repeats the call with `"confirm_lock": true` once the user agreed. A smaller fill is
 applied, with the warning text before the answer.
 

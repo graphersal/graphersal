@@ -595,14 +595,16 @@ impl TraversalGraph {
     ) -> Result<ChangeSet, GraphError> {
         // A dry run shows the vectors its writes would get (the rule pass runs, journals
         // nothing; a failure discards the unit and is the dry run's error).
-        if self.undo.depth == 1 && self.vector_rules.is_some() && self.rules_off == 0 {
-            if let Err((error, fill)) = self.run_vector_rules(false) {
-                if let Some(fill) = fill {
-                    fill.finish(Err(&error));
-                }
-                self.discard_undo_unit(mark);
-                return Err(error);
+        if self.undo.depth == 1
+            && self.vector_rules.is_some()
+            && self.rules_off == 0
+            && let Err((error, fill)) = self.run_vector_rules(false)
+        {
+            if let Some(fill) = fill {
+                fill.finish(Err(&error));
             }
+            self.discard_undo_unit(mark);
+            return Err(error);
         }
         let mutations = self.derive_mutations_since(mark_position(mark));
         let stamp = CommitStamp {

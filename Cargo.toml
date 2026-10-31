@@ -112,8 +112,10 @@ crc32c = "0.6"
 # rustyline, as fd-lock itself is). `std::fs::File::lock` needs Rust 1.89, above the MSRV.
 fd-lock = "4"
 # The free disk space of a single-file store's file system (`statvfs`, Unix), for the
-# compaction advice. Already in the tree through fd-lock (the same version and features).
-rustix = { version = "1", features = ["fs"] }
+# compaction advice, and the host name a store's system journal names its instance by (`uname`,
+# Unix, when no HOSTNAME is exported: macOS shells and launchd do not). Already in the tree
+# through fd-lock (the same version; feature `system` adds no crate).
+rustix = { version = "1", features = ["fs", "system"] }
 # The physical memory of the machine for the default process memory ceiling
 # (`graphersal::exec::memory_limit`, 80 % of it when no cgroup limit applies): `sysctlbyname`
 # ("hw.memsize") on macOS and `GlobalMemoryStatusEx` on Windows (Linux reads /proc/meminfo with

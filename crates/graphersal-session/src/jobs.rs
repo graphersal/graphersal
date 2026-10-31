@@ -114,11 +114,18 @@ impl Session {
 
     /// Runs the due jobs of the active store at `now` (microseconds since the Unix epoch);
     /// returns the names of the jobs that ran. Fails when the scheduler cannot be built
-    /// (the catalog or the store's jobs cannot be read).
+    /// (the catalog or the store's jobs cannot be read). Also writes the store's batched system
+    /// journal records ([`graphersal::persist::Store::flush_journal`]): without threads
+    /// (wasm32) this tick is what makes them durable (the playground ticks every second).
     pub fn tick_jobs(&mut self, now: i64) -> Result<Vec<String>, SessionError> {
-        Ok(self
+        let ran = self
             .scheduler()?
-            .map_or_else(Vec::new, |scheduler| scheduler.tick(now)))
+            .map_or_else(Vec::new, |scheduler| scheduler.tick(now));
+        if let Some(store) = self.active_store() {
+            // Best effort: a failed journal write is counted by the journal, never an error.
+            let _ = store.flush_journal();
+        }
+        Ok(ran)
     }
 
     /// The jobs of the served graph (module docs, "List"): the active store's system jobs, then

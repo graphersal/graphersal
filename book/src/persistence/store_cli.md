@@ -571,7 +571,9 @@ upgrade before anything is written (exit **1**, `StoreFailure::UpgradeModelDamag
 needs your decision is printed, the exit code stays **0**: a `warning:` for every model the
 schema needs that the store does not keep (with the commands that import it: the store opens
 once it is there), a `note:` per model for the vector properties with a model but no source property
-`from` (one combined schema patch for all properties of the model), and a `note:` for every
+`from` (one combined schema patch for all properties of the model; when that model is one of the
+missing ones, the command starts with "after `graphersal embed-model import <repo> --into
+<store>`:", since the store opens only then), and a `note:` for every
 saved query writing such a property directly (a vector rule refuses that write):
 
 ```text

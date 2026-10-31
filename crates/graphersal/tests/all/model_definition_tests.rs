@@ -20,14 +20,13 @@ use crate::model_fixture::*;
 /// The dimension of `embed(text)` with `embedder` on the store's graph (`None`: its default):
 /// how a test sees which embedders the graph's registry serves (0.5.0 removed
 /// `Store::embedders`).
-fn embed_with(store: &Store, embedder: Option<&str>) -> Result<usize, TraverserError> {
+fn embed_with(store: &Store, embedder: Option<&str>) -> Result<usize, Box<TraverserError>> {
     let graph = store.graph().read();
     let vectors = graph
         .traversal()
         .inject(vec![ElementProperty::from("graph")])
         .embed_value(embedder)
-        .to_list()
-        .map_err(|err| *err)?;
+        .to_list()?;
     Ok(vectors[0].as_vector().map_or(0, |v| v.dimension()))
 }
 
@@ -129,7 +128,7 @@ fn another_revision_is_refused_without_replace_and_switches_with_it() {
         ImportModelOptions::new(),
     );
     assert_eq!(cause_of(refused), StoreFailure::ModelRevisionExists);
-    assert_eq!(model_names(&store), [old.identity.clone()]);
+    assert_eq!(model_names(&store), std::slice::from_ref(&old.identity));
     let seq = store.graph().read().last_commit_seq();
     let report = store
         .import_model(
@@ -141,7 +140,10 @@ fn another_revision_is_refused_without_replace_and_switches_with_it() {
     assert_eq!(report.replaced.as_ref().unwrap().identity, old.identity);
     // The default follows the replace; the old definition is gone, its blob kept.
     assert!(report.model.default);
-    assert_eq!(model_names(&store), [report.model.identity.clone()]);
+    assert_eq!(
+        model_names(&store),
+        std::slice::from_ref(&report.model.identity)
+    );
     assert_eq!(
         store.info().unwrap().default_model.as_deref(),
         Some("acme/tiny")

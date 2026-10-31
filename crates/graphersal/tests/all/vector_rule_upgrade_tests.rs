@@ -161,9 +161,7 @@ fn the_fill_preview_names_direct_writers_and_counts_the_schema_check() {
     // The approximate preview of `diff_schema` says the same.
     let diff = ok(
         &graph,
-        &format!(
-            "let s = g.get_schema(); s.vertices.a.schema.properties.emb.from = \"text\"; let f = g.diff_schema(s).fill[0]; [f.direct_writes, f.scan_elements]"
-        ),
+        "let s = g.get_schema(); s.vertices.a.schema.properties.emb.from = \"text\"; let f = g.diff_schema(s).fill[0]; [f.direct_writes, f.scan_elements]",
     );
     assert_eq!(diff, r#"[["loader"], 2]"#);
 }

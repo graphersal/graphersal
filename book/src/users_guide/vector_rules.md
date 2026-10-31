@@ -105,7 +105,9 @@ Removing a rule does nothing to the data: the vectors stay as plain values.
 anything is applied: `fill` lists per rule the label, `from`, `to`, the model, the reason
 (`rule_added`, `rule_changed`, `model_replaced`), the elements to embed, the vectors to remove,
 the estimated time (`estimate_ms`: the embedding plus the schema check the apply runs under the
-same lock, `scan_elements` / `scan_ms`) and the saved queries whose body writes the rule's
+same lock, `scan_elements` / `scan_ms`; the embedding part is three times what the model's
+measured speed gives, because that speed is measured on short sentences and real texts are
+longer) and the saved queries whose body writes the rule's
 property directly (`direct_writes`: such a write is refused once the rule exists; remove it,
 the queries are never rewritten); `fill_warning` is the ONE text every front end shows:
 
