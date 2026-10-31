@@ -89,6 +89,7 @@ impl ScalarKey {
             ElementProperty::Temporal(t) => ScalarKey::Temporal(Box::new(t.bits())),
             // Not interned: a vector gets a fresh handle like a container.
             ElementProperty::Vector(_)
+            | ElementProperty::Blob(_)
             | ElementProperty::Array(_)
             | ElementProperty::Object(_)
             | ElementProperty::Map(_)

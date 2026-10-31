@@ -440,6 +440,62 @@ pub(crate) static AUTH_DENIED: EventKind = event(
     Collapse::By(&["action", "resource_kind", "channel"]),
 );
 
+pub(crate) static BLOB_DAMAGED: EventKind = event(
+    "blob.damaged",
+    "blob",
+    Level::Error,
+    "A blob is missing or damaged (never store damage: the store keeps working).",
+    &[
+        f("hash", "the blob's hash (hex)"),
+        f("length", "its length in bytes"),
+        f("failure", "what failed: missing, length, crc or hash"),
+        f("found_by", "the operation that found it"),
+        opt(
+            "referrers",
+            "the catalog definitions that reference it, as kind:name",
+        ),
+        f("recommendation", "how to get the bytes back"),
+    ],
+    Collapse::By(&["hash", "failure"]),
+);
+
+pub(crate) static BLOB_REPAIRED: EventKind = event(
+    "blob.repaired",
+    "blob",
+    Level::Notice,
+    "A damaged blob was replaced by intact bytes of the same hash.",
+    &[
+        f("hash", "the blob's hash (hex)"),
+        f("how", "rewritten (written again) or restored (copied back)"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static BLOB_COLLECTED: EventKind = event(
+    "blob.collected",
+    "blob",
+    Level::Info,
+    "Blobs no retained history references were removed.",
+    &[
+        f("count", "blobs removed"),
+        f("bytes", "bytes freed"),
+        f("by", "prune, attic_remove or rollback_delete"),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static LEDGER_REBUILT: EventKind = event(
+    "ledger.rebuilt",
+    "ledger",
+    Level::Notice,
+    "The derived blob ledger was missing or damaged and was rebuilt from the WAL.",
+    &[
+        f("frames", "the frames written"),
+        f("reason", "missing or damaged"),
+    ],
+    Collapse::Never,
+);
+
 /// Every declared event kind, in catalogue order.
 pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &REPEATED,
@@ -467,6 +523,10 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &UPGRADED,
     &VERIFIED,
     &AUTH_DENIED,
+    &BLOB_DAMAGED,
+    &BLOB_REPAIRED,
+    &BLOB_COLLECTED,
+    &LEDGER_REBUILT,
 ];
 
 /// The declared kind with `code`.

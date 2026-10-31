@@ -505,6 +505,7 @@ impl<'a, S: GraphStorage> Cursor<'a, S> {
                 ElementProperty::Uuid(_) => "uuid",
                 ElementProperty::Temporal(value) => value.kind().name(),
                 ElementProperty::Vector(_) => "vector",
+                ElementProperty::Blob(_) => "blob",
                 ElementProperty::Object(_) | ElementProperty::Map(_) => "map",
                 ElementProperty::Array(_) => "list",
                 ElementProperty::Vertex(_) => "vertex",

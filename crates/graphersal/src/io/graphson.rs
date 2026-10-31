@@ -2036,6 +2036,18 @@ fn write_typed(value: &ElementProperty, out: &mut String) -> Result<(), Physical
             }
             out.push_str("]}");
         }
+        // A blob reference (catalog payloads only, never element data): its tagged form.
+        ElementProperty::Blob(blob) => {
+            out.push_str("{\"@type\":\"graphersal:BlobRef\",\"@value\":{\"algo\":");
+            write_json_string(&blob.hash_algo().name(), out)?;
+            out.push_str(",\"hash\":");
+            write_json_string(&blob.hash_hex(), out)?;
+            out.push_str(&format!(
+                ",\"length\":{},\"crc32c\":{}}}}}",
+                blob.length(),
+                blob.crc32c()
+            ));
+        }
         // A vertex or an edge value (a query result, never a stored property) is written as
         // TinkerPop's reference element: id and label (and an edge's endpoints), no properties.
         ElementProperty::Vertex(vertex) => {

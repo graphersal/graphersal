@@ -71,7 +71,50 @@ pub(super) fn backup_from_memory<S: PersistentStorage + ?Sized>(
             .push(format!("the models were not brought up to date: {err}"));
     }
     report.models = super::models::list(target).unwrap_or_default();
+    // The blobs the backup's history references, from the store's directory leniently.
+    match super::blobs::sync_into(store, target) {
+        Ok((copied, missing)) => {
+            report.blobs = copied;
+            report.blobs_not_carried = missing;
+        }
+        Err(err) => report
+            .warnings
+            .push(format!("the blobs were not brought up to date: {err}")),
+    }
     Ok(report)
+}
+
+/// Copies the blobs the snapshot at `seq` in `target` references from the store `store`,
+/// leniently: names copied and names not carried; a failure is a warning.
+pub(super) fn copy_state_blobs(
+    store: &DirPath,
+    target: &DirPath,
+    seq: u64,
+    warnings: &mut Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let snapshot = target
+        .join(SNAPSHOTS_DIR)
+        .join(super::files::snapshot_name(seq));
+    let table = match super::snapshot_dir::read_manifest(&snapshot) {
+        Ok((_, manifest)) => manifest.blobs,
+        Err(err) => {
+            warnings.push(format!("the blobs were not copied: {err}"));
+            return (Vec::new(), Vec::new());
+        }
+    };
+    match super::blobs::copy_set(store, target, table.iter().map(|(blob, _)| blob)) {
+        Ok(done) => done,
+        Err(err) => {
+            warnings.push(format!("the blobs were not copied: {err}"));
+            (
+                Vec::new(),
+                table
+                    .iter()
+                    .map(|(blob, _)| super::blobs::blob_name(blob))
+                    .collect(),
+            )
+        }
+    }
 }
 
 /// The `GRAPH` file of a backup from memory at commit `seq`: the store's identity, lineage and
@@ -197,6 +240,9 @@ fn full<S: PersistentStorage + ?Sized>(
         // The models are files of the store, copied as they are; a damaged one is skipped
         // with a warning (this backup exists because the store's files are damaged).
         let (models, mut model_warnings) = super::models::copy_all_lenient(store, target);
+        // The blobs the state references (its snapshot's blob table), read from the store's
+        // directory leniently (format spec 12.11): a missing or damaged one is listed.
+        let (blobs, blobs_not_carried) = copy_state_blobs(store, target, seq, &mut model_warnings);
         // The readable part of the store's journal (format spec 12.11), before GRAPH.
         let (journal_warnings, journal_files) =
             super::system_journal::sync_into_backup(store, target)?;
@@ -223,6 +269,8 @@ fn full<S: PersistentStorage + ?Sized>(
             models,
             warnings: model_warnings,
             journal_files,
+            blobs,
+            blobs_not_carried,
             ..BackupReport::default()
         })
     })();

@@ -110,6 +110,11 @@ pub(super) fn backup_into(
     // next increment).
     super::models::sync_models(dir, target)?;
     report.models = super::models::list(target)?;
+    // The blobs the backup's history references and it lacks (format spec 12.7), copied and
+    // checked after the increment like the models; nothing is removed (`prune_backup` does).
+    let (copied, missing) = super::blobs::sync_into(dir, target)?;
+    report.blobs = copied;
+    report.blobs_not_carried = missing;
     Ok(report)
 }
 
@@ -1123,7 +1128,7 @@ pub(super) fn prune(
         return Err(not_a_backup(dir, "prune the backup"));
     }
     recover_interrupted(dir)?;
-    super::maintenance::prune(dir, up_to)
+    super::maintenance::prune(dir, up_to, None)
 }
 
 fn not_a_backup(dir: &DirPath, operation: &'static str) -> PersistError {

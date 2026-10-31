@@ -192,6 +192,9 @@ pub(crate) fn lower(value: &ElementProperty) -> PhysicalValue<'_> {
         // reader gets numbers, and a declared vector property turns them back into the vector
         // (`quantize` of the dequantized values gives the same codes).
         ElementProperty::Vector(v) => crate::value::vector::tagged::lower_values(v),
+        // `{"@type": "graphersal:BlobRef", "@value": {..}}`: output only (a blob reference is
+        // never an element property; the serialized `ChangeSet` reads it through `Tagged`).
+        ElementProperty::Blob(blob) => crate::value::blob::lower(blob),
         ElementProperty::Array(items) => PhysicalValue::Array(items.iter().map(lower).collect()),
         ElementProperty::Object(map) => lower_map(map),
         ElementProperty::Vertex(vertex) => lower_vertex(vertex),
@@ -1126,6 +1129,14 @@ mod serde_glue {
                     map.serialize_entry(VALUE_KEY, &vector_tagged::payload(value))?;
                     map.end()
                 }
+                // `{"@type": "graphersal:BlobRef", "@value": {"algo", "hash", "length",
+                // "crc32c"}}` (definitions travel in change sets).
+                ElementProperty::Blob(value) => {
+                    let mut map = serializer.serialize_map(Some(2))?;
+                    map.serialize_entry(TYPE_KEY, crate::value::blob::BLOB_TAG)?;
+                    map.serialize_entry(VALUE_KEY, &crate::value::blob::payload(value))?;
+                    map.end()
+                }
                 // Scalars are JSON-native. Vertices, edges and non-string-keyed maps are never
                 // property values; they keep the plain codec.
                 ElementProperty::Null
@@ -1219,6 +1230,12 @@ mod serde_glue {
             {
                 vector_tagged::from_payload(&payload).map(ElementProperty::Vector)
             }
+            (Some(PhysicalValue::String(tag)), Some(payload))
+                if tag == crate::value::blob::BLOB_TAG =>
+            {
+                crate::value::blob::from_payload(&payload)
+                    .map(|blob| ElementProperty::Blob(Box::new(blob)))
+            }
             (Some(PhysicalValue::String(tag)), Some(PhysicalValue::String(text)))
                 if tags::is_tag(&tag) =>
             {
@@ -1229,7 +1246,7 @@ mod serde_glue {
                 }
             }
             (Some(PhysicalValue::String(tag)), Some(_)) => Err(format!(
-                "unknown or malformed type tag \"{tag}\" (known: \"{UUID_TAG}\" with a uuid string, \"{OBJECT_TAG}\" with an object, the temporal tags \"gx:OffsetDateTime\", \"gx:ZonedDateTime\", \"gx:OffsetTime\", \"gx:LocalDate\", \"gx:LocalDateTime\", \"gx:LocalTime\", \"gx:Duration\", \"gx:Period\", \"graphersal:Interval\" with their text, \"graphersal:Vector\" with its object)"
+                "unknown or malformed type tag \"{tag}\" (known: \"{UUID_TAG}\" with a uuid string, \"{OBJECT_TAG}\" with an object, the temporal tags \"gx:OffsetDateTime\", \"gx:ZonedDateTime\", \"gx:OffsetTime\", \"gx:LocalDate\", \"gx:LocalDateTime\", \"gx:LocalTime\", \"gx:Duration\", \"gx:Period\", \"graphersal:Interval\" with their text, \"graphersal:Vector\" and \"graphersal:BlobRef\" with their objects)"
             )),
             _ => Err(format!(
                 "a tagged value needs a string \"{TYPE_KEY}\" and a \"{VALUE_KEY}\""

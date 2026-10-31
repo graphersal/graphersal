@@ -9,14 +9,16 @@
 
 use compact_str::CompactString;
 
+use crate::value::blob::BlobHashAlgo;
+use crate::value::blob::MAX_BLOB_HASH_BYTES;
 use crate::value::number::{N, Number};
 use crate::value::temporal::zone::ZoneId;
 use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
-use crate::value::{ElementProperty, PropertyMap, Vector, VectorElement};
+use crate::value::{BlobRef, ElementProperty, PropertyMap, Vector, VectorElement};
 
 /// The file format version every file of this build writes (format spec 15).
-pub(crate) const FORMAT_VERSION: u32 = 3;
+pub(crate) const FORMAT_VERSION: u32 = 4;
 
 /// The oldest file format version this build reads: version 1 (Graphersal 0.1.x) differs from
 /// version 2 only by the temporal value tags it does not have, version 2 (0.2.x) from version 3
@@ -30,16 +32,19 @@ pub(crate) const TEMPORAL_FORMAT_VERSION: u32 = 2;
 /// `offsettime` and a `datetime` with a zone name among them.
 pub(crate) const NANOS_FORMAT_VERSION: u32 = 3;
 
+/// The first file format version with the blob reference tag (21), the manifest's blob table
+/// (format spec 6.2 item 5) and the system journal's segments.
+pub(crate) const BLOB_FORMAT_VERSION: u32 = 4;
+
 /// The first file format version whose WAL segments may hold a commit in parts (record type 4,
 /// format spec 9.3.1). File format 4 (Graphersal 0.5.0) introduces it together with the blob
-/// value tag; until `FORMAT_VERSION` is raised to 4 it equals the current version.
-// MERGE (P04): becomes the literal `4` once `FORMAT_VERSION` is 4.
-pub(crate) const COMMIT_PARTS_FORMAT_VERSION: u32 = FORMAT_VERSION;
+/// value tag.
+pub(crate) const COMMIT_PARTS_FORMAT_VERSION: u32 = 4;
 
 /// Nanoseconds per second, for the `svar seconds` + `uvar nanos` pairs of tags 15 to 20.
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
-/// Whether this build reads files of format `version` (1 to 3).
+/// Whether this build reads files of format `version` (1 to 4).
 #[inline]
 pub(crate) fn readable_version(version: u32) -> bool {
     (MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&version)
@@ -296,6 +301,9 @@ pub(crate) mod tag {
     /// `duration` (version 3): `svar` months, `svar` days, `svar` seconds of the time part
     /// rounded down, `uvar` nanoseconds of that second.
     pub(crate) const DURATION_NS: u8 = 20;
+    /// `blobref` (file format version 4): `u8` hash algorithm (1 = SHA-256), `uvar` hash
+    /// length (1..=64; 32 for SHA-256), the hash bytes, `u64` content length, `u32` CRC-32C.
+    pub(crate) const BLOB_REF: u8 = 21;
     /// "Absent" in the `before` of a journal SetProperty (never a value).
     pub(crate) const ABSENT: u8 = 255;
 }
@@ -373,6 +381,10 @@ fn put_value_at<K: KeyWriter>(
         }
         ElementProperty::Temporal(value) => put_temporal(out, value, keys),
         ElementProperty::Vector(vector) => put_vector(out, vector),
+        ElementProperty::Blob(blob) => {
+            put_u8(out, tag::BLOB_REF);
+            put_blob_ref(out, blob);
+        }
         ElementProperty::Vertex(_) => return Err("a vertex is not a storable value".into()),
         ElementProperty::Edge(_) => return Err("an edge is not a storable value".into()),
         ElementProperty::Map(_) => {
@@ -380,6 +392,44 @@ fn put_value_at<K: KeyWriter>(
         }
     }
     Ok(())
+}
+
+/// Writes the payload of a blob reference without its tag (format spec 3, tag 21): also the
+/// form of a blob table row and a ledger frame.
+pub(crate) fn put_blob_ref(out: &mut Vec<u8>, blob: &BlobRef) {
+    put_u8(out, blob.hash_algo().code());
+    put_uvar(out, blob.hash().len() as u64);
+    out.extend_from_slice(blob.hash());
+    out.extend_from_slice(&blob.length().to_le_bytes());
+    out.extend_from_slice(&blob.crc32c().to_le_bytes());
+}
+
+/// Reads the payload of a blob reference (format spec 3, tag 21): algorithm 0, a hash length
+/// outside 1..=64 or a SHA-256 hash that is not 32 bytes is invalid (damage); an unknown
+/// algorithm (2..=255) is kept. The tag in a file of a format version before 4 is damage.
+pub(crate) fn read_blob_ref(reader: &mut Reader<'_>, start: u64) -> DecodeResult<BlobRef> {
+    if reader.version < BLOB_FORMAT_VERSION {
+        return Err(DecodeError::new(
+            start,
+            format!(
+                "value tag {} (a blob reference) in a file of format version {}",
+                tag::BLOB_REF,
+                reader.version
+            ),
+        ));
+    }
+    let invalid = |why: String| DecodeError::new(start, format!("invalid blob reference: {why}"));
+    let code = reader.u8()?;
+    let algo =
+        BlobHashAlgo::from_code(code).ok_or_else(|| invalid(format!("hash algorithm {code}")))?;
+    let len = reader.uvar()?;
+    if len == 0 || len > MAX_BLOB_HASH_BYTES as u64 {
+        return Err(invalid(format!("hash length {len}")));
+    }
+    let hash = reader.bytes(len as usize)?;
+    let length = reader.u64()?;
+    let crc = reader.u32()?;
+    BlobRef::new(algo, hash, length, crc).map_err(|err| invalid(err.to_string()))
 }
 
 /// Writes a vector with its tag (format spec 3, file format version 2).
@@ -804,6 +854,7 @@ pub(crate) fn read_tagged_value<K: KeyReader>(
             ElementProperty::Temporal(read_temporal_ns(reader, tag, keys, start)?)
         }
         tag::VECTOR => ElementProperty::Vector(read_vector(reader, start)?),
+        tag::BLOB_REF => ElementProperty::Blob(Box::new(read_blob_ref(reader, start)?)),
         tag::ARRAY => {
             if depth >= max_depth {
                 return Err(DecodeError::new(

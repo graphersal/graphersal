@@ -7,8 +7,8 @@ single-file container has its own container version):
   **version 3** (`graphersal::persist::STORE_FORMAT_VERSION`); `graphersal store info` prints it
   (`backend  directory (format version 3)`, `format  version 3`);
 - the **file format version** of snapshot manifests and segments, WAL segments and packed
-  snapshots (`.gsnap`): this release writes **version 3** (`graphersal::persist::FORMAT_VERSION`)
-  and reads versions 1, 2 and 3.
+  snapshots (`.gsnap`): this release writes **version 4** (`graphersal::persist::FORMAT_VERSION`)
+  and reads versions 1 to 4.
 
 | Version | What changed |
 |---|---|
@@ -18,6 +18,10 @@ single-file container has its own container version):
 | file 1 (0.1.x) | the first file format |
 | file 2 (0.2.0) | the value tags of the date and time types (`date`, `localdatetime`, `datetime`, `time`, `duration`) and of vectors (`vector`); a version 1 file is read as it is |
 | file 3 (0.3.0) | nanosecond value tags for `localdatetime`, `datetime` (with or without a zone name), `time`, `offsettime` and `duration` (the whole `java.time.Duration` range); every such value is written with them. Version 1 and 2 files are read as they are |
+| file 4 (0.5.0) | the blob reference value tag (`blobref`, a content-addressed file of the store), the snapshot manifest's blob table and the system journal's segments; version 1 to 3 files are read as they are, and Graphersal 0.4.x refuses a version 4 file as newer, never as damage |
+
+**File format version 4 needs no upgrade either**: a store of 0.3.x or 0.4.x opens as it is,
+and everything written from then on is of file format version 4, which 0.4.x refuses as newer.
 
 **File format version 3 needs no upgrade.** The store format version stays 3, so a store
 written by 0.2.x opens as it is: its version 2 snapshots and WAL segments stay and are read

@@ -183,6 +183,8 @@ fn write_literal(out: &mut String, value: &ElementProperty) {
         ElementProperty::Temporal(value) => out.push_str(&rhai_temporal(value)),
         // `vector([0.1, 0.2], "i8")`, cut after the first components like a list.
         ElementProperty::Vector(value) => out.push_str(&value.literal(Some(MAX_LITERAL_ITEMS))),
+        // No literal makes a blob reference: its text as a string.
+        ElementProperty::Blob(blob) => out.push_str(&rhai_string(&blob.to_string())),
         ElementProperty::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().take(MAX_LITERAL_ITEMS).enumerate() {

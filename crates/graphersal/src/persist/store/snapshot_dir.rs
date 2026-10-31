@@ -275,6 +275,16 @@ pub(crate) fn import_packed(
             model_rows.push(number);
             continue;
         }
+        // A blob (format spec 4.6, 8): staged under blobs/, checked by its hash, length and
+        // CRC-32C (foreign input) and moved into place; its row is not kept.
+        if entry.kind == super::blobs::PACKED_BLOB_KIND {
+            let blob = super::blobs::packed_blob_ref(&entry, &reader.manifest.blobs)?;
+            let staged_at = super::blobs::stage(store)?;
+            write_file(&staged_at, |out| reader.copy_segment(out).map(|_| ()))?;
+            super::blobs::install_staged(store, &blob, &staged_at)?;
+            model_rows.push(number);
+            continue;
+        }
         let path = safe_relative(snapshot.tmp(), &entry.path)
             .ok_or_else(|| PersistError::corrupt("packed snapshot", 0, "unsafe segment path"))?;
         write_file(&path, |out| reader.copy_segment(out).map(|_| ()))?;
@@ -553,7 +563,7 @@ impl DirSnapshotReader {
                 .collect();
             for file in &models {
                 with.segments.push(super::super::manifest::SegmentEntry {
-                    kind: super::models::PACKED_MODEL_KIND,
+                    kind: file.kind,
                     path: file.name.clone(),
                     first_id: file.id.as_str().into(),
                     last_id: file.file.as_str().into(),

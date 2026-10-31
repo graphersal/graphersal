@@ -282,6 +282,15 @@ fn allowed(name: &str) -> bool {
         [dir, file] if *dir == super::system_journal::JOURNAL_DIR => file
             .strip_suffix(&format!(".{}", super::system_journal::JOURNAL_EXTENSION))
             .is_some_and(digits),
+        // A blob (format spec 4.6, 12.8): `blobs/<2 hex>/<64 hex>` (SHA-256) or
+        // `blobs/algo-<n>/<2 hex>/<hex>`.
+        [dir, prefix, hash] if *dir == super::blobs::BLOBS_DIR => {
+            super::blobs::is_blob_name(1, prefix, hash)
+        }
+        [dir, algo, prefix, hash] if *dir == super::blobs::BLOBS_DIR => algo
+            .strip_prefix("algo-")
+            .and_then(|code| code.parse::<u8>().ok())
+            .is_some_and(|code| code >= 2 && super::blobs::is_blob_name(code, prefix, hash)),
         // A model (format spec 4.5, 12.8): `models/<id>/<file>`.
         [dir, id, file] if *dir == super::models::MODELS_DIR => {
             super::models::is_model_id(id)

@@ -465,6 +465,13 @@ pub enum StoreFailure {
     /// An embedding model to add is not usable: a file name or role is missing or not
     /// allowed, a file is too large, the repository or licence is not a valid name.
     InvalidModel,
+    /// A blob an operation needs (format spec 4.6) is missing from the store, or is named by
+    /// the hash algorithm of a newer version. Blob damage is never store damage: everything
+    /// that does not need the blob goes on.
+    BlobUnavailable,
+    /// A blob an operation needs (format spec 4.6) is damaged: its length, CRC-32C or hash is
+    /// not its reference's. Blob damage is never store damage.
+    BlobDamaged,
     /// The automatic checkpoint run by [`Store::run_due_checkpoint`](super::Store::run_due_checkpoint)
     /// failed with a graph error: the copy [`Store::last_auto_checkpoint_error`](super::Store::last_auto_checkpoint_error)
     /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
@@ -502,6 +509,8 @@ impl StoreFailure {
             StoreFailure::UpgradeNeedsCopy => "upgrade_needs_copy",
             StoreFailure::UnknownModel => "unknown_model",
             StoreFailure::InvalidModel => "invalid_model",
+            StoreFailure::BlobUnavailable => "blob_unavailable",
+            StoreFailure::BlobDamaged => "blob_damaged",
             StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
         }
     }
@@ -656,6 +665,14 @@ impl StoreFailure {
                  '.', '_' and '-'. Check the model directory (it loads with `graphersal \
                  --embedder name=<model_dir>`) and add it again (CLI: graphersal embed-model \
                  import <model_dir> --into <dir>)."
+            }
+            StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
+                "The store itself is intact and keeps working; only what needs this blob fails. \
+                 Run graphersal store verify <dir> (Store::verify) to list every missing or \
+                 damaged blob. Any copy of a blob with the same hash is the same bytes: copy the \
+                 file from a backup or another copy of the store into blobs/<2 hex>/<hash> (the \
+                 name the error gives), or restore the backup, or write the content again \
+                 (Store::write_blob) where you still have it."
             }
             StoreFailure::AutoCheckpointFailed => {
                 "The automatic checkpoint failed; the commits are safe in the journal. It is \

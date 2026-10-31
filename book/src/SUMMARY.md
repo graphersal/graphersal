@@ -61,6 +61,7 @@
     - [Optimize](persistence/optimize.md)
     - [Scheduled Jobs](persistence/scheduled_jobs.md)
     - [Embedding Models in a Store](persistence/store_models.md)
+    - [Blobs](persistence/store_blobs.md)
   - [The graphersal store Command](persistence/store_cli.md)
   - [The Store in the Playground](persistence/playground_store.md)
   - [Python](persistence/python.md)

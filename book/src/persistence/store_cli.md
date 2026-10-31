@@ -137,7 +137,8 @@ Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back 
 up to commit N, taken T` (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
 (a `models` block: one line per model with its identity, size, licence and where the licence text
 comes from, `used by the schema`; a model the schema names but the store lacks as `missing`, see
-[`models`](#models)), and for a single file
+[`models`](#models)), the store's blobs (`blobs  N (size; M unreferenced, removed by the next
+prune)`, by names and lengths only, see [Blobs](store_blobs.md)), and for a single file
 `file  single file, 23.0 KiB (23.0 KiB live, 0 B free space inside: ...)`. `state` is `open (in
 use, or not closed cleanly)` while a writer has it (or after a crash).
 
@@ -415,7 +416,9 @@ Help: run it again with --drop-marks to prune anyway, or back the store up first
 
 With `--drop-marks` it prunes and names them on a second line ("No longer reachable (their
 history was pruned): the mark(s) ..."); `store marks` no longer lists them. Without affected
-marks the flag changes nothing. See [Prune, Compact and Retention](store_prune.md).
+marks the flag changes nothing. A prune also removes the [blobs](store_blobs.md) no retained
+history references any more and says so on a line of its own ("Removed N unreferenced blob(s)
+(size)."). See [Prune, Compact and Retention](store_prune.md).
 
 ### compact
 

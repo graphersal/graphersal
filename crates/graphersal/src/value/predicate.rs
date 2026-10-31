@@ -296,6 +296,7 @@ impl<'a> Scalar<'a> {
             ElementProperty::Vector(v) => Some(Scalar::Vector(v)),
             ElementProperty::Object(_)
             | ElementProperty::Map(_)
+            | ElementProperty::Blob(_)
             | ElementProperty::Array(_)
             | ElementProperty::Vertex(_)
             | ElementProperty::Edge(_) => None,

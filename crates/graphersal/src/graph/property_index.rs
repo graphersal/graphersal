@@ -1109,6 +1109,7 @@ impl IndexKey {
             // A vector is not an index key (book `users_guide/vectors.md`): `has(key, vector)` finds it
             // by a scan, with value equality.
             ElementProperty::Vector(_)
+            | ElementProperty::Blob(_)
             | ElementProperty::Object(_)
             | ElementProperty::Array(_)
             | ElementProperty::Vertex(_)

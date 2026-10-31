@@ -300,6 +300,7 @@ fn literal_matches<S: GraphStorage>(
         // A container literal has no predicate operand: structural equality.
         ElementProperty::Object(_)
         | ElementProperty::Map(_)
+        | ElementProperty::Blob(_)
         | ElementProperty::Array(_)
         | ElementProperty::Vertex(_)
         | ElementProperty::Edge(_) => {
