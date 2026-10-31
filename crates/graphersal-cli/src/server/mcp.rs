@@ -1167,11 +1167,15 @@ fn all_tools() -> Vec<Tool> {
              rollbacks, permission denials, clock steps), oldest first. Each record: seq (the \
              cursor), time (microseconds since the Unix epoch, UTC), level (error, warn, notice, \
              info), source, kind, message, fields. No data values or query text. Page with \
-             after = the answer's next_after; more says that more records follow.",
+             after = the answer's next_after; more says that more records follow. newest_first: \
+             true answers the NEWEST records first (the recent events at once); go further back \
+             with before = the answer's next_before.",
             json!({
                 "type": "object",
                 "properties": {
                     "after": {"type": "integer", "minimum": 0, "description": "Only records after this seq (the previous page's next_after)."},
+                    "newest_first": {"type": "boolean", "description": "The newest matching records, newest first (the answer then has next_before)."},
+                    "before": {"type": "integer", "minimum": 1, "description": "Only records before this seq (with newest_first: the previous page's next_before)."},
                     "level": {"type": "string", "enum": ["error", "warn", "notice", "info"], "description": "Only this level and the more severe ones."},
                     "since": {"type": "string", "description": "Only records at or after this time: RFC 3339 with a zone, or microseconds since the Unix epoch."},
                     "source": {"type": "string", "description": "Only this source and the ones below it (store matches store.backup)."},
@@ -1800,7 +1804,16 @@ fn run_tool(
         }
         "journal" => {
             let mut spec = serde_json::Map::new();
-            for key in ["after", "level", "since", "source", "kind", "limit"] {
+            for key in [
+                "after",
+                "before",
+                "newest_first",
+                "level",
+                "since",
+                "source",
+                "kind",
+                "limit",
+            ] {
                 if let Some(value) = args.get(key).filter(|v| !v.is_null()) {
                     spec.insert(key.to_string(), value.clone());
                 }

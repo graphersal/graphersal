@@ -458,6 +458,17 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'advise', JSON.stringify(spec || {}));
   }
 
+  // The System journal panel (`GET /api/journal`, the request keys as query parameters).
+
+  async journal(spec) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(spec || {})) {
+      if (value !== undefined && value !== null && value !== '') params.set(key, String(value));
+    }
+    const query = params.toString();
+    return this.request('GET', query ? `journal?${query}` : 'journal');
+  }
+
   async dismissRecommendation(id, days) {
     return this.request('POST', 'advise/dismiss', JSON.stringify(days == null ? { id } : { id, days }));
   }

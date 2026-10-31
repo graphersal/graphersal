@@ -359,6 +359,35 @@ class Graph:
         """The limits ``set_limits`` set, under its keyword names (``0`` = unlimited;
         ``max_materialized_bytes`` is ``None`` while the library default applies)."""
         ...
+    def journal(
+        self,
+        *,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
+        since: Union[int, datetime.datetime, str, None] = None,
+        until: Union[int, datetime.datetime, str, None] = None,
+        level: Optional[Literal["error", "warn", "notice", "info"]] = None,
+        source: Optional[str] = None,
+        kind: Optional[str] = None,
+        op: Optional[int] = None,
+        origin: Optional[str] = None,
+        limit: Optional[int] = None,
+        policy: Optional[AccessPolicy] = None,
+    ) -> dict[str, Any]:
+        """One page of the graph's system journal, oldest first: ``{"records", "next_after",
+        "truncated", "more", "notes"}``. Each record has the keys of ``graphersal store journal
+        --json``: ``seq``, ``origin`` (``{"id", "name"}``), ``origin_seq``, ``time``
+        (microseconds since the Unix epoch), ``level``, ``source``, ``kind``, ``message``,
+        ``fields`` and, when set, ``op``, ``parent``, ``commit``, ``principal``. A graph without
+        a store keeps its newest records in memory; a Store's graph reads the store's journal.
+        ``after`` is the cursor (the previous page's ``next_after``); ``newest_first=True``
+        answers the newest matching records, newest first, with ``next_before`` (pass it as
+        ``before`` for the next older page; ``more``: older ones exist); ``since`` (at or after) and
+        ``until`` (before) take microseconds, an aware ``datetime`` or an ISO 8601 text with a
+        zone; ``level`` keeps that level and the more severe ones; ``source`` matches a source
+        and the ones below it; ``limit`` defaults to 1000 (at most 10000). ``policy`` must allow
+        ``("read", "journal")``, else ``PermissionDeniedError``."""
     def get_schema(self, *, policy: Optional[AccessPolicy] = None) -> Optional[dict[str, Any]]:
         """The stored schema (the schema format as a ``dict``), or ``None`` without one. Never
         inferred."""
@@ -669,6 +698,44 @@ class Store:
         "properties", "locks", "jobs"}``, rows with their ``channel`` and the windows
         ``last_hour`` / ``last_two_days`` / ``last_ninety_days``; ``history`` (``"minutes"``,
         ``"hours"``, ``"days"``) adds every row's buckets of that tier."""
+    def journal(
+        self,
+        *,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
+        since: Union[int, datetime.datetime, str, None] = None,
+        until: Union[int, datetime.datetime, str, None] = None,
+        level: Optional[Literal["error", "warn", "notice", "info"]] = None,
+        source: Optional[str] = None,
+        kind: Optional[str] = None,
+        op: Optional[int] = None,
+        origin: Optional[str] = None,
+        limit: Optional[int] = None,
+        policy: Optional[AccessPolicy] = None,
+    ) -> dict[str, Any]:
+        """One page of the store's system journal (the records in ``journal/`` plus the ones
+        not yet written); filters, record keys and ``policy`` as ``Graph.journal``."""
+    @staticmethod
+    def journal_dir(
+        path: str,
+        *,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        newest_first: bool = False,
+        since: Union[int, datetime.datetime, str, None] = None,
+        until: Union[int, datetime.datetime, str, None] = None,
+        level: Optional[Literal["error", "warn", "notice", "info"]] = None,
+        source: Optional[str] = None,
+        kind: Optional[str] = None,
+        op: Optional[int] = None,
+        origin: Optional[str] = None,
+        limit: Optional[int] = None,
+        policy: Optional[AccessPolicy] = None,
+    ) -> dict[str, Any]:
+        """A page of the system journal of the store in ``path`` without opening it (no lock,
+        nothing written; works while another process has it open). Damaged records are
+        skipped and named in ``notes``."""
     def checkpoint(self, name: Optional[str] = None) -> dict[str, Any]:
         """Writes a snapshot of the current state; returns its listing."""
     def mark(self, name: str) -> dict[str, Any]:

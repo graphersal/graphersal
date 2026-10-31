@@ -1259,12 +1259,23 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
                 value(context.call_fallible(move |s| s.workload_report_with_history(&tier))?)
             }
         },
-        // The system journal (`Session::journal`): one page from the cursor `after`, filtered
-        // by `level`, `since`, `until`, `source`, `kind`, `op`, `origin`, at most `limit`.
+        // The system journal (`Session::journal`): one page from the cursor `after` (or, with
+        // `newest_first=true`, the newest records below `before`, newest first), filtered by
+        // `level`, `since`, `until`, `source`, `kind`, `op`, `origin`, at most `limit`.
         (Method::Get, "journal") => {
             let mut spec = serde_json::Map::new();
             for key in [
-                "after", "level", "since", "until", "source", "kind", "op", "origin", "limit",
+                "after",
+                "before",
+                "newest_first",
+                "level",
+                "since",
+                "until",
+                "source",
+                "kind",
+                "op",
+                "origin",
+                "limit",
             ] {
                 if let Some(text) = query_text(query, key) {
                     spec.insert(key.to_string(), Value::String(text));

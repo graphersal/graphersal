@@ -692,6 +692,63 @@ impl PersistedReader for StoredReader {
         }
         Ok((records, notes))
     }
+
+    fn read_newest(
+        &self,
+        after: u64,
+        before: u64,
+        query: &JournalQuery,
+        limit: usize,
+    ) -> Result<(Vec<JournalRecord>, Vec<String>), JournalError> {
+        let segments =
+            list_segments(&self.root).map_err(|err| JournalError::io("list its segments", err))?;
+        let mut records = Vec::new();
+        let mut notes = Vec::new();
+        // From the newest segment back: one segment in memory at a time, and no segment
+        // older than needed is read.
+        for (index, (first, path)) in segments.iter().enumerate().rev() {
+            if records.len() >= limit {
+                break;
+            }
+            if *first >= before {
+                continue;
+            }
+            // Every seq of this segment is below the next one's first: nothing above `after`.
+            let next_first = segments.get(index + 1).map(|(next, _)| *next);
+            if next_first.is_some_and(|next| next <= after.saturating_add(1)) {
+                break;
+            }
+            let bytes = match read_segment(path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::OutOfMemory => {
+                    return Err(JournalError::MemoryLimit {
+                        reason: format!("{}: {err}", path.relative_to(&self.root)),
+                    });
+                }
+                Err(err) => {
+                    notes.push(format!("{}: {err}", path.relative_to(&self.root)));
+                    continue;
+                }
+            };
+            let scan = scan_segment(&bytes, &mut |seq| seq > after && seq < before);
+            drop(bytes);
+            for damage in &scan.damage {
+                notes.push(format!("{}: {damage}", path.relative_to(&self.root)));
+            }
+            let mut found: Vec<JournalRecord> = scan
+                .records
+                .into_iter()
+                .filter(|record| query.matches(record))
+                .collect();
+            found.sort_by_key(|record| std::cmp::Reverse(record.seq));
+            found.truncate(limit - records.len());
+            records.extend(found);
+            if *first <= after.saturating_add(1) {
+                break;
+            }
+        }
+        Ok((records, notes))
+    }
 }
 
 /// How a store's journal is opened.
@@ -782,7 +839,17 @@ pub(crate) fn open_journal(options: OpenJournal<'_>) -> Arc<SystemJournal> {
 pub(crate) fn query_dir(dir: &DirPath, query: &JournalQuery) -> Result<JournalPage, JournalError> {
     let limit = query.page_size();
     let reader = StoredReader { root: dir.clone() };
-    let (mut records, notes) = reader.read(query.after, u64::MAX, query, limit + 1)?;
+    if query.newest_first {
+        let (records, notes) = reader.read_newest(query.after, query.upper(), query, limit + 1)?;
+        let mut page = JournalPage {
+            notes,
+            ..JournalPage::default()
+        };
+        let end = last_seq(dir).unwrap_or(0);
+        crate::graph::system_journal::finish_newest(&mut page, records, limit, query, end);
+        return Ok(page);
+    }
+    let (mut records, notes) = reader.read(query.after, query.upper(), query, limit + 1)?;
     let mut page = JournalPage {
         notes,
         ..JournalPage::default()
@@ -793,7 +860,10 @@ pub(crate) fn query_dir(dir: &DirPath, query: &JournalQuery) -> Result<JournalPa
     }
     page.next_after = match (page.more, records.last()) {
         (true, Some(last)) => last.seq,
-        _ => last_seq(dir).unwrap_or(0).max(query.after),
+        _ => last_seq(dir)
+            .unwrap_or(0)
+            .min(query.upper().saturating_sub(1))
+            .max(query.after),
     };
     page.records = records;
     Ok(page)

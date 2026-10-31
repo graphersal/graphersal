@@ -28,6 +28,8 @@
 //     value, memory; "not served" on a storage without indexes) with Drop (confirmed), and the
 //     create form (element, label with suggestions, key, optional name with the default name
 //     as placeholder) with the engine's field errors next to their inputs.
+//   * System journal (not a catalog kind: the instance's journal of operational events, in
+//     the menu's "Kept by this instance" section): js/components/journal.js, model js/journal.js.
 // The models are js/compression.js, js/indexes.js and js/saved-queries.js (tested under Node).
 
 import { ref, reactive, computed, watch, nextTick } from 'vue';
@@ -57,6 +59,7 @@ import {
 import { formatBytes } from '../statistics.js';
 import { DropMenu } from './drop-menu.js';
 import { SavedQueryDialog } from './saved-queries.js';
+import { JournalPanel } from './journal.js';
 
 const message = (err) => (err && err.message ? err.message : String(err));
 
@@ -87,6 +90,10 @@ export const CatalogMenu = {
       <button v-for="item in items" :key="item.id" class="menu-item" :title="item.hint" @click="openCatalog(item.id)">
         {{ item.title }}<span class="spacer"></span><span class="badge">{{ item.count }}</span>
       </button>
+      <div class="menu-sep"></div>
+      <div class="menu-title">Kept by this instance</div>
+      <button class="menu-item" @click="openCatalog('journal')"
+              title="The system journal: what this instance did (store opened, checkpoints, backups, damage, denied permissions), newest first">System journal…</button>
       <div class="menu-sep"></div>
       <div class="menu-title">Catalog file (no data inside)</div>
       <button class="menu-item" :disabled="state.saving || state.running" @click="saveCatalogFile()"
@@ -875,12 +882,13 @@ export const JobsManager = {
 
 /** The managers of the Catalog dropdown, opened through `openCatalog(id)`. */
 export const CatalogDialogs = {
-  components: { SavedQueriesManager, CompressionManager, IndexesManager, JobsManager },
+  components: { SavedQueriesManager, CompressionManager, IndexesManager, JobsManager, JournalPanel },
   setup() {
     const queries = ref(null);
     const compression = ref(null);
     const indexes = ref(null);
     const jobs = ref(null);
+    const journal = ref(null);
     watch(() => state.catalogDialogN, async () => {
       const id = state.catalogDialog;
       state.catalogDialog = null;
@@ -894,13 +902,15 @@ export const CatalogDialogs = {
       if (id === 'compression' && compression.value) await compression.value.open();
       if (id === 'indexes' && indexes.value) await indexes.value.open();
       if (id === 'jobs' && jobs.value) await jobs.value.open();
+      if (id === 'journal' && journal.value) await journal.value.open();
     });
-    return { queries, compression, indexes, jobs };
+    return { queries, compression, indexes, jobs, journal };
   },
   template: `
   <saved-queries-manager ref="queries"></saved-queries-manager>
   <compression-manager ref="compression"></compression-manager>
   <indexes-manager ref="indexes"></indexes-manager>
   <jobs-manager ref="jobs"></jobs-manager>
+  <journal-panel ref="journal"></journal-panel>
   `,
 };

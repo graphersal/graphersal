@@ -490,6 +490,32 @@ in its memory part when there are any.
 A catalog change is a commit: in the [store in memory](#the-store-in-memory) it is part of the
 history, and on the dev server another browser tab or an AI agent sees it through the change feed.
 
+### System journal
+
+**Catalog ▾ ▸ System journal…** (in the section *Kept by this instance*: the journal is not part
+of the catalog and no catalog file carries it) shows the [system journal](../persistence/system_journal.md)
+of the served graph: what the instance did, such as the store opened or closed, checkpoints,
+backups, damage found and permissions denied. The newest record is at the top; each row shows the
+time in the browser's time zone (the exact UTC time with microseconds in its tooltip), the level,
+the source, the kind, the message with its fields, and the record's sequence number.
+
+- **Level** shows that level and the more severe ones (`error` > `warn` > `notice` > `info`);
+  **Source** shows a source and the ones below it (`store` shows `store.backup` too; the
+  sources seen so far are suggested).
+- It opens on the newest 300 records: a long journal on disk is read from its end, never from
+  its start.
+- While the dialog is open it reads the records written since its last read every five seconds
+  (switch it off with *refresh every 5 s*, or press **Refresh**); it never reads the whole journal
+  again. It keeps the newest 2000 records it follows.
+- **Show more** shows 300 more rows, reading the next older page from the journal when all held
+  rows are shown; the line under the table says how many loaded rows are not shown and whether
+  older records exist.
+
+In the WebAssembly playground the journal is the one of the graph's [store in
+memory](#the-store-in-memory), gone with a page reload like the store. On the dev server it is
+the served graph's (`GET /api/journal`): the store's journal on disk for a `--graph <store>`,
+else the graph's journal in memory.
+
 ## The store in memory
 
 Every graph you load is kept as a Store in memory: every run that changes the graph is a commit,

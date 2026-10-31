@@ -83,3 +83,50 @@ graphersal.Store.upgrade("old_store", "new_store")         # a store of Graphers
 ```
 
 Times in Python are microseconds since the Unix epoch (`time=`), as in Rust.
+
+## The system journal
+
+Every graph has a [system journal](system_journal.md) of operational events (a store opened,
+a checkpoint written, a backup taken, a permission denied); a graph without a store keeps its
+newest records in memory.
+
+```python
+page = store.journal(level="warn", since="2026-10-31T00:00:00Z")   # or store.graph.journal(...)
+for record in page["records"]:                                      # oldest first
+    print(record["time"], record["level"], record["kind"], record["message"], record["fields"])
+newer = store.journal(after=page["next_after"])                     # only what came since
+latest = store.journal(newest_first=True, limit=20)                 # the newest 20, newest first
+older = store.journal(newest_first=True, before=latest["next_before"], limit=20)
+graphersal.Store.journal_dir("data", kind="store.closed")           # a closed store: no lock, nothing written
+graphersal.Graph().journal()                                        # a graph without a store: in memory
+```
+
+| Method | Does |
+|---|---|
+| `graph.journal(...)` | the graph's journal (a Store's graph: the store's) |
+| `store.journal(...)` | the open store's journal: the records in `journal/` plus the ones not yet written |
+| `Store.journal_dir(path, ...)` | the journal of the store in `path` without opening it (works while another process has it open, like `graphersal store journal`) |
+
+All three take the same keyword arguments and answer one page, `{"records", "next_after",
+"truncated", "more", "notes"}`:
+
+- `after`: the cursor; pass the previous page's `next_after` to read what came since. `more`
+  says that another page follows; `truncated` that older records are gone from an in-memory
+  journal; `notes` names damaged stored records that were skipped.
+- `newest_first=True`: the newest matching records, newest first (a stored journal is read
+  from its end); the page then has `next_before`: pass it as `before` for the next older page
+  (`more` says older ones exist), and its `next_after` follows what comes next. `before` also
+  bounds an oldest-first page.
+- `since` (at or after) and `until` (before): microseconds since the Unix epoch, a
+  timezone-aware `datetime`, or an ISO 8601 text with a zone (a naive `datetime` raises
+  `ValueError`).
+- `level`: `"error"`, `"warn"`, `"notice"` or `"info"`, that level and the more severe ones;
+  `source`: a source and the ones below it (`"store"` matches `"store.backup"`); `kind`, `op`,
+  `origin` (an instance id, a UUID text); `limit` (default 1000, at most 10000).
+- `policy`: an `AccessPolicy` that must allow `("read", "journal")`
+  (`AccessPolicy.read_only()` does), else `PermissionDeniedError`; without one reading is
+  allowed, like a script.
+
+Each record is a dict with the keys of `graphersal store journal --json`: `seq`, `origin`
+(`{"id", "name"}`), `origin_seq`, `time` (microseconds since the Unix epoch), `level`, `source`,
+`kind`, `message`, `fields`, and `op`, `parent`, `commit`, `principal` when set.

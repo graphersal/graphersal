@@ -301,12 +301,22 @@ pub(crate) fn render_fields(fields: &[(String, ElementProperty)]) -> String {
         .join(", ")
 }
 
-/// A question to the journal: the records after a cursor that match every filter set.
+/// A question to the journal: the records after a cursor that match every filter set, oldest
+/// first; or, with [`Self::newest_first`], the NEWEST matching records (below the cursor
+/// [`Self::before`] when set), newest first: a reader shows the end of a long journal at once
+/// and pages backwards from [`JournalPage::next_before`], while [`JournalPage::next_after`]
+/// follows what comes next.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalQuery {
     /// Only records with `seq` greater than this (the cursor; 0: from the start).
     pub after: u64,
+    /// Only records with `seq` less than this (the cursor of a newest-first reader paging
+    /// backwards; `None`: up to the newest).
+    pub before: Option<u64>,
+    /// The newest matching records, newest first, instead of the oldest after the cursor
+    /// (stored segments are read from the end, one at a time).
+    pub newest_first: bool,
     /// Only records at or after this time (µs).
     pub since: Option<i64>,
     /// Only records before this time (µs).
@@ -330,6 +340,8 @@ impl Default for JournalQuery {
     fn default() -> Self {
         Self {
             after: 0,
+            before: None,
+            newest_first: false,
             since: None,
             until: None,
             min_level: None,
@@ -351,6 +363,18 @@ impl JournalQuery {
     /// Only records after `seq` (the cursor of [`JournalPage::next_after`]).
     pub fn after(mut self, seq: u64) -> Self {
         self.after = seq;
+        self
+    }
+
+    /// Only records with `seq` before `seq` (the cursor of [`JournalPage::next_before`]).
+    pub fn before(mut self, seq: u64) -> Self {
+        self.before = Some(seq);
+        self
+    }
+
+    /// The newest matching records, newest first ([`JournalQuery`]).
+    pub fn newest_first(mut self) -> Self {
+        self.newest_first = true;
         self
     }
 
@@ -407,6 +431,11 @@ impl JournalQuery {
         self.limit.clamp(1, MAX_QUERY_LIMIT)
     }
 
+    /// The exclusive upper `seq` bound (`u64::MAX`: none).
+    pub(crate) fn upper(&self) -> u64 {
+        self.before.unwrap_or(u64::MAX)
+    }
+
     /// Whether `record` passes every filter but the cursor.
     pub(crate) fn matches(&self, record: &JournalRecord) -> bool {
         self.since.is_none_or(|since| record.time >= since)
@@ -428,18 +457,46 @@ impl JournalQuery {
     }
 }
 
+/// Fills a newest-first page from `records` (newest first, at most `limit + 1`): `more` when
+/// there is one beyond the limit, the cursors from the newest covered `end` and the oldest
+/// record kept.
+pub(crate) fn finish_newest(
+    page: &mut JournalPage,
+    mut records: Vec<JournalRecord>,
+    limit: usize,
+    query: &JournalQuery,
+    end: u64,
+) {
+    if records.len() > limit {
+        records.truncate(limit);
+        page.more = true;
+    }
+    page.next_after = end.min(query.upper().saturating_sub(1)).max(query.after);
+    page.next_before = Some(match (page.more, records.last()) {
+        (true, Some(oldest)) => oldest.seq,
+        _ => query.after.saturating_add(1),
+    });
+    page.records = records;
+}
+
 /// One page of records.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct JournalPage {
-    /// The records, in `seq` order.
+    /// The records, in `seq` order (newest first for a [`JournalQuery::newest_first`] query).
     pub records: Vec<JournalRecord>,
-    /// The cursor of the next page ([`JournalQuery::after`]): the last record looked at.
+    /// The cursor of the next page ([`JournalQuery::after`]): the last record looked at (of a
+    /// newest-first page: the newest record covered, so a reader goes on with what comes
+    /// next).
     pub next_after: u64,
+    /// Of a newest-first page: the cursor of the next OLDER page ([`JournalQuery::before`]),
+    /// the oldest record looked at; `None` for an oldest-first page.
+    pub next_before: Option<u64>,
     /// Older records the query asked for are gone (an in-memory journal keeps the newest
     /// [`MEMORY_CAPACITY`]).
     pub truncated: bool,
-    /// More matching records follow: ask again with [`Self::next_after`].
+    /// More matching records follow: ask again with [`Self::next_after`] (of a newest-first
+    /// page: OLDER matching records exist, ask with [`Self::next_before`]).
     pub more: bool,
     /// Problems met while reading stored segments (damaged frames skipped, unreadable
     /// segments): never an error, the journal decides nothing.
@@ -448,7 +505,7 @@ pub struct JournalPage {
 
 impl JournalPage {
     /// The page as a map: `records` (each [`JournalRecord::to_property`]), `next_after`,
-    /// `truncated`, `more`, `notes`.
+    /// `next_before` (a newest-first page only), `truncated`, `more`, `notes`.
     pub fn to_property(&self) -> ElementProperty {
         let mut map = PropertyMap::new();
         map.insert(
@@ -456,6 +513,9 @@ impl JournalPage {
             ElementProperty::Array(self.records.iter().map(|r| r.to_property()).collect()),
         );
         map.insert("next_after", collapse::int(self.next_after));
+        if let Some(before) = self.next_before {
+            map.insert("next_before", collapse::int(before));
+        }
         map.insert("truncated", ElementProperty::from(self.truncated));
         map.insert("more", ElementProperty::from(self.more));
         map.insert(
@@ -766,6 +826,17 @@ pub(crate) trait PersistedReader: Send + Sync {
         query: &JournalQuery,
         limit: usize,
     ) -> Result<(Vec<JournalRecord>, Vec<String>), JournalError>;
+
+    /// The NEWEST records with `after < seq < before` that match `query`, newest first, at
+    /// most `limit`, plus notes about damage met: segments are read from the newest, one at a
+    /// time, and reading stops once `limit` records are found.
+    fn read_newest(
+        &self,
+        after: u64,
+        before: u64,
+        query: &JournalQuery,
+        limit: usize,
+    ) -> Result<(Vec<JournalRecord>, Vec<String>), JournalError>;
 }
 
 struct State {
@@ -890,14 +961,24 @@ impl SystemJournal {
         journal
     }
 
-    /// The records after `query.after` that match its filters, at most `query.limit`.
+    /// The records after `query.after` (and before `query.before`) that match its filters, at
+    /// most `query.limit`: the oldest of them, or with [`JournalQuery::newest_first`] the
+    /// newest, newest first.
     pub fn query(&self, query: &JournalQuery) -> Result<JournalPage, JournalError> {
+        if query.newest_first {
+            return self.query_newest(query);
+        }
         let limit = query.page_size();
+        let upper = query.upper();
         let (floor, end, ring_part, ring_more) = {
             let state = self.state.lock();
             let mut part = Vec::new();
             let mut more = false;
-            for record in state.ring.iter().filter(|record| record.seq > query.after) {
+            for record in state
+                .ring
+                .iter()
+                .filter(|record| record.seq > query.after && record.seq < upper)
+            {
                 if query.matches(record) {
                     if part.len() == limit {
                         more = true;
@@ -912,7 +993,8 @@ impl SystemJournal {
         if query.after.saturating_add(1) < floor {
             match &self.reader {
                 Some(reader) => {
-                    let (records, notes) = reader.read(query.after, floor, query, limit + 1)?;
+                    let (records, notes) =
+                        reader.read(query.after, floor.min(upper), query, limit + 1)?;
                     page.records = records;
                     page.notes = notes;
                 }
@@ -928,8 +1010,44 @@ impl SystemJournal {
         page.next_after = if page.more {
             page.records.last().map_or(query.after, |record| record.seq)
         } else {
-            end.max(query.after)
+            end.min(upper.saturating_sub(1)).max(query.after)
         };
+        Ok(page)
+    }
+
+    /// [`Self::query`] of a newest-first query: the ring from its end, then (when the page is
+    /// not full and older records are asked for) the stored segments from the newest.
+    fn query_newest(&self, query: &JournalQuery) -> Result<JournalPage, JournalError> {
+        let limit = query.page_size();
+        let upper = query.upper();
+        let (floor, end, mut records) = {
+            let state = self.state.lock();
+            let mut part = Vec::new();
+            for record in state.ring.iter().rev() {
+                if record.seq <= query.after || part.len() > limit {
+                    break;
+                }
+                if record.seq < upper && query.matches(record) {
+                    part.push(record.clone());
+                }
+            }
+            (state.floor, state.next_seq.saturating_sub(1), part)
+        };
+        let mut page = JournalPage::default();
+        let older_from = floor.min(upper);
+        if records.len() <= limit && query.after.saturating_add(1) < older_from {
+            match &self.reader {
+                Some(reader) => {
+                    let wanted = limit + 1 - records.len();
+                    let (older, notes) =
+                        reader.read_newest(query.after, older_from, query, wanted)?;
+                    records.extend(older);
+                    page.notes = notes;
+                }
+                None => page.truncated = true,
+            }
+        }
+        finish_newest(&mut page, records, limit, query, end);
         Ok(page)
     }
 

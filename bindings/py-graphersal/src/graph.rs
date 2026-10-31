@@ -674,6 +674,74 @@ impl Graph {
         }
     }
 
+    /// ``graph.journal(*, after=None, since=None, until=None, level=None, source=None,
+    /// kind=None, op=None, origin=None, limit=None, policy=None)``: one page of the graph's
+    /// system journal (book page "System Journal"), oldest first: ``{"records", "next_after",
+    /// "truncated", "more", "notes"}``. Each record is a dict with the keys of ``graphersal
+    /// store journal --json``: ``seq``, ``origin`` (``{"id", "name"}``), ``origin_seq``,
+    /// ``time`` (microseconds since the Unix epoch), ``level``, ``source``, ``kind``,
+    /// ``message``, ``fields`` and, when set, ``op``, ``parent``, ``commit``, ``principal``.
+    /// A graph without a store keeps its newest records in memory (``truncated``: older ones
+    /// are gone); a Store's graph reads the store's journal (``store.journal``).
+    ///
+    /// Filters: ``after`` (the cursor: pass the previous page's ``next_after``; ``more`` says
+    /// another page follows), ``since`` (at or after) / ``until`` (before), each ``int``
+    /// microseconds since the Unix epoch, an aware ``datetime`` or an ISO 8601 ``str`` with a
+    /// zone, ``level`` (``"error"``, ``"warn"``, ``"notice"``,
+    /// ``"info"``: that level and the more severe ones), ``source`` (a source and the ones
+    /// below it: ``"store"`` matches ``"store.backup"``), ``kind``, ``op``, ``origin`` (an
+    /// instance id, a UUID ``str``), ``limit`` (default 1000, at most 10000). ``policy``: an
+    /// ``AccessPolicy`` that must allow ``("read", "journal")``, else
+    /// ``PermissionDeniedError``; ``None`` allows it, like a script.
+    #[pyo3(signature = (*, after=None, before=None, newest_first=false, since=None,
+        until=None, level=None, source=None, kind=None, op=None, origin=None, limit=None,
+        policy=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn journal<'py>(
+        &self,
+        py: Python<'py>,
+        after: Option<u64>,
+        before: Option<u64>,
+        newest_first: bool,
+        since: Option<Bound<'py, PyAny>>,
+        until: Option<Bound<'py, PyAny>>,
+        level: Option<String>,
+        source: Option<String>,
+        kind: Option<String>,
+        op: Option<u64>,
+        origin: Option<String>,
+        limit: Option<usize>,
+        policy: Option<PyRef<'py, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let query = crate::journal::JournalArgs {
+            after,
+            before,
+            newest_first,
+            since,
+            until,
+            level,
+            source,
+            kind,
+            op,
+            origin,
+            limit,
+        }
+        .to_query()?;
+        crate::journal::authorize(policy.as_deref()).map_err(|text| map_diagnostic(py, &text))?;
+        let graph = Arc::clone(&self.inner);
+        let page = py
+            .detach(move || {
+                let journal = graph
+                    .system_journal()
+                    .map_err(|err| format_diagnostic(&err))?;
+                journal
+                    .query(&query)
+                    .map_err(|err| format!("Error: {err}\nHelp: {}", err.help()))
+            })
+            .map_err(|text| map_diagnostic(py, &text))?;
+        crate::journal::page_to_py(py, &page)
+    }
+
     // The schema methods: thin wrappers over the engine's `GraphTraversalSource` methods. A
     // schema (or patch) is a ``dict`` or JSON ``str`` in; a ``dict`` (the canonical schema
     // format) out. Each call is one unit of its own; an optional ``policy`` is asked like for a
