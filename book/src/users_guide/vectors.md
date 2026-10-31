@@ -134,6 +134,15 @@ A schema declares a vector property as an `array` with the custom format `vector
   embedder that produced the vectors (`"hash-ngram/1"`): `embed_property()` fills it in and the
   text queries read it ([Which model produced a property](#which-model-produced-a-property)). A
   plain write does not check it.
+- `from` (with `embedder`, on a label's top-level property only) makes the property a
+  [vector rule](vector_rules.md): the engine embeds the text of `from` into it at the end of
+  every unit that writes it, and refuses direct writes of it.
+
+> **Warning:** a [vector rule](vector_rules.md) (`"from"` on a vector property) added or changed
+> fills every element of its label in the schema-changing unit, and the WHOLE database is
+> locked while it runs: every write and every read waits until it ends. The schema preview
+> (`validate_schema`, `diff_schema`) reports how many elements and how long first.
+
 - `items` is not allowed next to the format (the components are numbers of the element kind).
 - Another JSON Schema validator ignores the unknown format and keywords and sees an array of
   numbers, which is what a vector exports as. The schema visualizer's per-label JSON Schema
