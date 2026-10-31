@@ -6944,3 +6944,60 @@ fn the_store_menu_loads_its_summary_then_its_details() {
     );
     assert_eq!(get(server.port, "/api/store/details").status, 409);
 }
+
+/// `GET /api/journal?newest_first=true` (the playground's journal panel opens on it): the
+/// newest records first, `next_before` pages backwards, `next_after` follows; MCP too.
+#[test]
+fn the_journal_endpoint_answers_the_newest_records_first() {
+    let ui = ui_dir("journal-newest");
+    let data = ui.parent().unwrap().join("journal-newest-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let all: Vec<u64> = get(port, "/api/journal").json()["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["seq"].as_u64().unwrap())
+        .collect();
+    assert!(all.len() >= 2, "{all:?}");
+    let mut newest_first = Vec::new();
+    let mut query = "/api/journal?newest_first=true&limit=1".to_string();
+    let first = get(port, &query).json();
+    assert_eq!(first["next_after"], *all.last().unwrap(), "{first}");
+    loop {
+        let page = get(port, &query).json();
+        for record in page["records"].as_array().unwrap() {
+            newest_first.push(record["seq"].as_u64().unwrap());
+        }
+        if page["more"] != true {
+            break;
+        }
+        let before = page["next_before"].as_u64().unwrap();
+        query = format!("/api/journal?newest_first=true&limit=1&before={before}");
+    }
+    let mut expected = all.clone();
+    expected.reverse();
+    assert_eq!(newest_first, expected);
+    let bad = get(port, "/api/journal?newest_first=maybe");
+    assert_eq!(bad.status, 422, "{}", bad.body);
+
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "journal",
+        serde_json::json!({"newest_first": true, "limit": 1}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("next_before"), "{text}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&data);
+}

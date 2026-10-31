@@ -169,6 +169,19 @@ with graphersal.Store.create("data") as store:            # or Store.open("data"
     store.backup("bk")                                     # full, then incremental
 ```
 
+Every graph has a system journal of operational events (store opened or closed, checkpoints,
+backups, damage, permissions denied; book page "System Journal"). `graph.journal(...)`,
+`store.journal(...)` and, for a closed store, `Store.journal_dir(path, ...)` answer one page
+`{"records", "next_after", "truncated", "more", "notes"}`, records oldest first with the keys of
+`graphersal store journal --json`; filters `after` (the cursor), `since`/`until`, `level`,
+`source`, `kind`, `op`, `origin`, `limit`, and `policy=` (needs `("read", "journal")`):
+
+```python
+page = store.journal(level="warn")
+newer = store.journal(after=page["next_after"])            # only what came since
+graphersal.Store.journal_dir("data", kind="store.closed")  # no lock, nothing written
+```
+
 ## Schemas
 
 A schema is a `dict` (or JSON text) in the library's schema format: an envelope with `mode`

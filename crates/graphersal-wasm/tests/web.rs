@@ -803,3 +803,62 @@ fn the_store_menu_loads_its_summary_then_its_details_in_the_browser() {
     assert_eq!(details["compaction"], info["compaction"], "{details}");
     assert_eq!(summary["snapshots"], info["snapshots"], "{summary}");
 }
+
+/// The System journal panel's call in the browser build: the loaded graph's store in memory
+/// keeps a journal; a page has the panel's keys, the cursor returns only what is new, the
+/// filters apply, and a bad request is an error.
+#[wasm_bindgen_test]
+fn the_journal_of_the_store_in_memory_pages_by_cursor() {
+    let mut p = modern();
+    assert_eq!(
+        json(&p.execute("g.add_v(\"p\").next()", "{}").unwrap())["ok"],
+        true
+    );
+    p.checkpoint("cp").unwrap();
+    let page = json(&p.journal("{}").unwrap());
+    for key in ["records", "next_after", "truncated", "more", "notes"] {
+        assert!(page.get(key).is_some(), "{key}: {page}");
+    }
+    let records = page["records"].as_array().unwrap();
+    assert!(!records.is_empty(), "{page}");
+    for key in [
+        "seq", "origin", "time", "level", "source", "kind", "message", "fields",
+    ] {
+        assert!(records[0].get(key).is_some(), "{key}: {}", records[0]);
+    }
+    let after = page["next_after"].as_u64().unwrap();
+    // The panel opens on the newest page and pages backwards with `before`.
+    let newest = json(&p.journal(r#"{"newest_first": true, "limit": 1}"#).unwrap());
+    assert_eq!(newest["records"][0], *records.last().unwrap(), "{newest}");
+    assert_eq!(newest["next_after"], after);
+    let before = newest["next_before"].as_u64().unwrap();
+    let older = json(
+        &p.journal(&format!(r#"{{"newest_first": true, "before": {before}}}"#))
+            .unwrap(),
+    );
+    let mut rest: Vec<Value> = records[..records.len() - 1].to_vec();
+    rest.reverse();
+    assert_eq!(older["records"], Value::Array(rest), "{older}");
+    let newer = json(&p.journal(&format!(r#"{{"after": {after}}}"#)).unwrap());
+    assert_eq!(newer["records"], serde_json::json!([]), "{newer}");
+    let stored = json(&p.journal(r#"{"source": "store", "limit": 1000}"#).unwrap());
+    assert!(
+        stored["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["source"].as_str().unwrap().starts_with("store")),
+        "{stored}"
+    );
+    let errors = json(&p.journal(r#"{"level": "error"}"#).unwrap());
+    assert!(
+        errors["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["level"] == "error"),
+        "{errors}"
+    );
+    assert!(p.journal(r#"{"level": "loud"}"#).is_err());
+    assert!(p.journal("not json").is_err());
+}

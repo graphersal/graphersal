@@ -395,3 +395,68 @@ fn the_book_shows_the_event_catalogue() {
          GRAPHERSAL_UPDATE_BOOK=1 cargo test -p graphersal --lib catalogue"
     );
 }
+
+#[test]
+fn a_newest_first_query_pages_backwards_and_follows_forwards() {
+    let journal = SystemJournal::in_memory(CommitClock::new());
+    for i in 0..25 {
+        journal.emit(&catalogue::STORE_OPENED, Event::new(format!("{i}")));
+    }
+    let seqs = |page: &JournalPage| page.records.iter().map(|r| r.seq).collect::<Vec<_>>();
+    let newest = journal
+        .query(&JournalQuery::new().newest_first().limit(10))
+        .unwrap();
+    assert_eq!(seqs(&newest), (16..=25).rev().collect::<Vec<_>>());
+    assert!(newest.more);
+    assert_eq!(newest.next_after, 25, "a reader follows from the newest");
+    assert_eq!(newest.next_before, Some(16));
+    let older = journal
+        .query(&JournalQuery::new().newest_first().before(16).limit(10))
+        .unwrap();
+    assert_eq!(seqs(&older), (6..=15).rev().collect::<Vec<_>>());
+    let oldest = journal
+        .query(&JournalQuery::new().newest_first().before(6).limit(10))
+        .unwrap();
+    assert_eq!(seqs(&oldest), [5, 4, 3, 2, 1]);
+    assert!(!oldest.more);
+    assert_eq!(oldest.next_before, Some(1));
+    // `after` bounds it from below; an oldest-first page has no `next_before`.
+    let window = journal
+        .query(&JournalQuery::new().newest_first().after(20).limit(100))
+        .unwrap();
+    assert_eq!(seqs(&window), [25, 24, 23, 22, 21]);
+    assert!(!window.more);
+    let forward = journal.query(&JournalQuery::new().after(20)).unwrap();
+    assert_eq!(forward.next_before, None);
+    assert!(!forward.to_json().contains("next_before"));
+    assert!(newest.to_json().contains("\"next_before\":16"));
+    // `before` also bounds an oldest-first query.
+    let bounded = journal
+        .query(&JournalQuery::new().before(4).limit(100))
+        .unwrap();
+    assert_eq!(seqs(&bounded), [1, 2, 3]);
+    assert_eq!(bounded.next_after, 3);
+    // Filters apply before the limit.
+    let none = journal
+        .query(&JournalQuery::new().newest_first().min_level(Level::Error))
+        .unwrap();
+    assert!(none.records.is_empty() && !none.more);
+}
+
+#[test]
+fn a_newest_first_query_of_a_full_ring_says_older_records_are_gone() {
+    let journal = SystemJournal::in_memory(CommitClock::new());
+    for i in 0..(MEMORY_CAPACITY + 5) {
+        journal.emit(&catalogue::STORE_OPENED, Event::new(format!("{i}")));
+    }
+    let newest = journal
+        .query(&JournalQuery::new().newest_first().limit(3))
+        .unwrap();
+    assert_eq!(newest.records[0].seq, (MEMORY_CAPACITY + 5) as u64);
+    assert!(!newest.truncated, "a full page needs nothing older");
+    let past = journal
+        .query(&JournalQuery::new().newest_first().before(7).limit(10))
+        .unwrap();
+    assert_eq!(past.records.len(), 1, "only seq 6 is still held");
+    assert!(past.truncated);
+}

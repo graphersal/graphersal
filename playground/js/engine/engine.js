@@ -780,6 +780,17 @@ export class Engine {
   async workloadReport(history) { throw notImplemented('workloadReport'); }
 
   /**
+   * One page of the graph's system journal (graphersal_session's `journal`): `spec` =
+   * `{after?, level?, since?, until?, source?, kind?, op?, origin?, limit?}` (`after` is the
+   * cursor, `level` that level and the more severe ones, `source` a prefix); answers
+   * `{records, next_after, truncated, more, notes}`, records oldest first, each `{seq, origin,
+   * origin_seq, time (µs), level, source, kind, message, fields, op?, parent?, commit?,
+   * principal?}`. Read-only; the WebAssembly playground reads its graph's in-memory journal
+   * (or its store's), the dev server `GET /api/journal`.
+   */
+  async journal(spec) { throw notImplemented('journal'); }
+
+  /**
    * The storage advisor's recommendations for a spec of thresholds (`{}`: the defaults,
    * `{everything: true}`: every candidate): `{ok: true, advice: {workload_level, observed_since,
    * commit_seq, property_bytes, memory_bytes, graph_bytes, estimates, recommendations: [{id,

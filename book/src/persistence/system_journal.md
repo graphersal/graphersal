@@ -102,6 +102,11 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   level (`min_level`), source (`source_prefix`: `store` matches `store.backup`), `kind`, `op`
   and `origin`, from a cursor (`after(seq)`), at most `limit` records (default 1000):
   `JournalPage::next_after` is the next cursor, `more` says that more follow.
+  `JournalQuery::newest_first()` answers the NEWEST matching records instead, newest first
+  (a stored journal is read from its last segment backwards, one segment in memory at a time,
+  and no older segment than needed is read): `next_before` is the cursor of the next older
+  page (`before(seq)`), `more` says that older ones exist, and `next_after` is the newest
+  record covered, so a reader shows the end of a long journal at once and then follows it.
   `SystemJournal::subscribe(after)` follows the journal (`wait(timeout)` blocks natively,
   WebAssembly polls); `add_sink` forwards every written record to a host's `JournalSink`;
   `open_operations()` is the last record of each operation without a `_done`/`_failed` record.
@@ -109,9 +114,22 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
 - **tracing**: every written record is mirrored under the target `graphersal::journal` at its
   level (`notice` as `info`); the CLI shows them on stderr with `GRAPHERSAL_LOG=info`.
 - **CLI**: `graphersal store journal <DIR> [--level L] [--since TIME] [--source P] [--kind K]
-  [--after SEQ] [--limit N] [--follow] [--json]` ([The graphersal store Command](store_cli.md)).
-- **Dev server**: `GET /api/journal?after=N&level=..&source=..&kind=..&limit=..`, and the
-  read-only MCP tool `journal` ([Dev Server and MCP](dev_server.md)).
+  [--after SEQ | --last N] [--limit N] [--follow] [--json]`; `--last N` prints only the newest
+  N records ([The graphersal store Command](store_cli.md)).
+- **Dev server**: `GET /api/journal?after=N&level=..&source=..&kind=..&limit=..`
+  (`newest_first=true&before=N`: newest first, paging backwards), and the read-only MCP tool
+  `journal` (the same keys) ([Dev Server and MCP](dev_server.md)).
+- **Python**: `graph.journal(...)` (every graph; without a store its in-memory journal),
+  `store.journal(...)` and `Store.journal_dir(path, ...)` (a closed store, or one open
+  elsewhere), with the keyword arguments `after`, `before`, `newest_first`, `since`, `until`,
+  `level`, `source`, `kind`, `op`, `origin`, `limit` and `policy`. A page is a dict `{"records", "next_after",
+  "truncated", "more", "notes"}`; each record has the keys of `store journal --json`
+  ([Python](python.md#the-system-journal)).
+- **Playground**: **Catalog ▸ System journal…** shows the served graph's journal, newest first,
+  with a level and a source filter, in the WebAssembly playground (the graph's store in memory)
+  and over the dev server. It opens on the newest 300 records (a newest-first page), then reads
+  only the records written since, every five seconds; "Show more" shows 300 more rows, reading
+  older pages backwards ([Web Playground](../users_guide/web_playground.md#system-journal)).
 - **Permissions**: reading is the resource `Journal` (`Resource::Journal`, `Read`); the session,
   the dev server and MCP ask the authorizer before they answer. `AccessPolicy::read_only()`
   allows it. The Rust API itself asks nothing (it is the host's).

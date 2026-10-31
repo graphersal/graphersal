@@ -506,6 +506,100 @@ impl Store {
         crate::convert::property_to_pyobject(py, &report.to_property())
     }
 
+    /// ``store.journal(*, after=None, before=None, newest_first=False, since=None, until=None,
+    /// level=None, source=None, kind=None, op=None, origin=None, limit=None, policy=None)``:
+    /// one page of the store's
+    /// system journal (book page "System Journal"), oldest first, the records the store keeps in
+    /// ``journal/`` plus the ones not yet written: ``{"records", "next_after", "truncated",
+    /// "more", "notes"}`` (``notes``: damaged records skipped). Filters, record keys and
+    /// ``policy`` as ``Graph.journal``; ``store.graph.journal(...)`` reads the same journal.
+    #[pyo3(signature = (*, after=None, before=None, newest_first=false, since=None,
+        until=None, level=None, source=None, kind=None, op=None, origin=None, limit=None,
+        policy=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn journal<'py>(
+        &self,
+        py: Python<'py>,
+        after: Option<u64>,
+        before: Option<u64>,
+        newest_first: bool,
+        since: Option<Bound<'py, PyAny>>,
+        until: Option<Bound<'py, PyAny>>,
+        level: Option<String>,
+        source: Option<String>,
+        kind: Option<String>,
+        op: Option<u64>,
+        origin: Option<String>,
+        limit: Option<usize>,
+        policy: Option<PyRef<'py, crate::policy::AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let query = crate::journal::JournalArgs {
+            after,
+            before,
+            newest_first,
+            since,
+            until,
+            level,
+            source,
+            kind,
+            op,
+            origin,
+            limit,
+        }
+        .to_query()?;
+        crate::journal::authorize(policy.as_deref()).map_err(|text| map_diagnostic(py, &text))?;
+        let page = self.with(py, move |store| Ok(store.journal()?.query(&query)?))?;
+        crate::journal::page_to_py(py, &page)
+    }
+
+    /// ``Store.journal_dir(path, *, after=None, since=None, ...)``: a page of the system
+    /// journal of the store in ``path`` WITHOUT opening it (no lock, nothing written; works
+    /// while another process has the store open, like ``graphersal store journal``). Filters,
+    /// page and ``policy`` as ``store.journal``; damaged records are skipped and named in
+    /// ``notes``.
+    #[staticmethod]
+    #[pyo3(signature = (path, *, after=None, before=None, newest_first=false, since=None,
+        until=None, level=None, source=None, kind=None, op=None, origin=None, limit=None,
+        policy=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn journal_dir<'py>(
+        py: Python<'py>,
+        path: &str,
+        after: Option<u64>,
+        before: Option<u64>,
+        newest_first: bool,
+        since: Option<Bound<'py, PyAny>>,
+        until: Option<Bound<'py, PyAny>>,
+        level: Option<String>,
+        source: Option<String>,
+        kind: Option<String>,
+        op: Option<u64>,
+        origin: Option<String>,
+        limit: Option<usize>,
+        policy: Option<PyRef<'py, crate::policy::AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let query = crate::journal::JournalArgs {
+            after,
+            before,
+            newest_first,
+            since,
+            until,
+            level,
+            source,
+            kind,
+            op,
+            origin,
+            limit,
+        }
+        .to_query()?;
+        crate::journal::authorize(policy.as_deref()).map_err(|text| map_diagnostic(py, &text))?;
+        let path = path.to_string();
+        let page = py
+            .detach(move || persist::Store::journal_dir(path.as_str(), &query))
+            .map_err(|err| store_error(py, err))?;
+        crate::journal::page_to_py(py, &page)
+    }
+
     /// ``store.checkpoint(name=None)``: writes a snapshot of the current state; returns its
     /// listing ``{"commit_seq", "name", ...}``.
     #[pyo3(signature = (name=None))]

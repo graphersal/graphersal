@@ -536,6 +536,10 @@ export class WasmEngine extends Engine {
     return this.call('workloadReport', history || null);
   }
 
+  async journal(spec) {
+    return this.call('journal', plain(spec || {}));
+  }
+
   async advise(spec) {
     return this.call('advise', plain(spec || {}));
   }

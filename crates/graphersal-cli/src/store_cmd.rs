@@ -48,7 +48,7 @@ USAGE:
     graphersal store checkpoint <DIR> [--name <N>]  merge a snapshot of the current state
     graphersal store verify <DIR>    scrub every checksum; exit 1 when damage is found
     graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>]
-                                     [--after <SEQ>] [--limit <N>] [--follow] [--json]
+                                     [--after <SEQ> | --last <N>] [--limit <N>] [--follow] [--json]
                                      the system journal: what the store did (opens, backups,
                                      checkpoints, damage, ...); works while it is in use
     graphersal store prune <DIR> --up-to <COMMIT> [--drop-marks]
@@ -238,13 +238,15 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "journal" => (
-            "graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>] [--after <SEQ>] [--limit <N>] [--follow] [--json]",
+            "graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>] [--after <SEQ> | --last <N>] [--limit <N>] [--follow] [--json]",
             "Prints the store's system journal: one line per record (time UTC, seq, level, kind,\n\
              message, fields), oldest first. Reads the files only (no lock, nothing written), so\n\
              it works while a server has the store open. --level error|warn|notice|info shows\n\
              that level and the more severe ones; --since TIME the records at or after TIME;\n\
              --source a source and the ones below it (store matches store.backup); --kind one\n\
-             kind; --after SEQ the records after that seq; --limit at most N (default 1000).\n\
+             kind; --after SEQ the records after that seq; --last N only the newest N matching\n\
+             records (read from the end of the journal, still printed oldest first); --limit at\n\
+             most N per page (default 1000).\n\
              --json prints one JSON object per record. --follow keeps printing new records\n\
              (polls once a second) until interrupted.",
             false,
@@ -706,8 +708,42 @@ fn fail(err: PersistError) -> i32 {
 }
 
 /// `store journal`: prints the pages of the journal (and, following, new records once a
-/// second until the process is interrupted).
-fn journal_command(dir: &str, mut query: JournalQuery, follow: bool, json: bool) -> i32 {
+/// second until the process is interrupted). `last`: only the newest N matching records, read
+/// newest first from the end of the journal and printed oldest first.
+fn journal_command(
+    dir: &str,
+    mut query: JournalQuery,
+    last: Option<u64>,
+    follow: bool,
+    json: bool,
+) -> i32 {
+    if let Some(count) = last {
+        let newest = query
+            .clone()
+            .newest_first()
+            .limit(usize::try_from(count).unwrap_or(usize::MAX));
+        let page = match Store::journal_dir(dir, &newest) {
+            Ok(page) => page,
+            Err(err) => return fail(err),
+        };
+        for note in &page.notes {
+            errln!("note: {note}");
+        }
+        if page.truncated {
+            errln!("note: older records are gone");
+        }
+        for record in page.records.iter().rev() {
+            if json {
+                outln!("{}", record.to_json());
+            } else {
+                outln!("{}", record.to_line());
+            }
+        }
+        if !follow {
+            return EXIT_OK;
+        }
+        query = query.after(page.next_after);
+    }
     loop {
         let page = match Store::journal_dir(dir, &query) {
             Ok(page) => page,
@@ -798,6 +834,7 @@ pub fn run(args: &[String]) -> i32 {
                     | "source"
                     | "kind"
                     | "after"
+                    | "last"
                     | "limit"
             );
             let value = if takes_value && inline.is_none() {
@@ -827,7 +864,7 @@ pub fn run(args: &[String]) -> i32 {
         "upgrade" => &["single-file", "in-place"],
         "compact-advice" => &["min-ratio", "min-reclaimable", "min-size"],
         "journal" => &[
-            "level", "since", "source", "kind", "after", "limit", "follow", "json",
+            "level", "since", "source", "kind", "after", "last", "limit", "follow", "json",
         ],
         "checkpoint" => &["name"],
         "prune" => &["up-to", "drop-marks"],
@@ -1803,9 +1840,17 @@ pub fn run(args: &[String]) -> i32 {
             if let Some(limit) = try_code!(number("limit")) {
                 query = query.limit(limit as usize);
             }
+            let last = try_code!(number("last"));
+            if last.is_some() && flag("after").is_some() {
+                return usage("--last and --after exclude each other");
+            }
+            if last == Some(0) {
+                return usage("--last expects a positive number of records");
+            }
             journal_command(
                 &positional[0],
                 query,
+                last,
                 flag("follow").is_some(),
                 flag("json").is_some(),
             )

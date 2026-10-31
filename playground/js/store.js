@@ -1458,6 +1458,17 @@ export async function dropPropertyIndex(name) {
 
 let jobsLoad = 0;
 
+/**
+ * One page of the served graph's system journal (Catalog ▸ System journal…, model
+ * js/journal.js): `spec` as `Engine.journal`. Read-only.
+ */
+export async function journalPage(spec) {
+  if (!state.engine || typeof state.engine.journal !== 'function') {
+    throw new Error('This engine has no system journal (an older build: reload the page).');
+  }
+  return state.engine.journal(spec);
+}
+
 /** Reloads the scheduled jobs (`state.jobs`). */
 export async function refreshJobs() {
   if (!state.engine || typeof state.engine.jobs !== 'function' || !state.graph) return;

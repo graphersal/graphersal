@@ -95,6 +95,8 @@ const JSON_METHODS = {
   // The Optimize panel: the memory report, the workload statistics, the storage advisor.
   memoryReport: (spec) => playground.memoryReport(JSON.stringify(spec || {})),
   workloadReport: (history) => playground.workloadReport(history || undefined),
+  // The System journal panel (graphersal_session::journal).
+  journal: (spec) => playground.journal(JSON.stringify(spec || {})),
   advise: (spec) => playground.advise(JSON.stringify(spec || {})),
   applyRecommendation: (id, spec) => playground.applyRecommendation(id, JSON.stringify(spec || {})),
   dismissRecommendation: (id, days) => playground.dismissRecommendation(id, days == null ? undefined : days),

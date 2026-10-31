@@ -6079,3 +6079,47 @@ fn a_schema_with_a_vector_rule_notes_the_fill() {
         res.stderr
     );
 }
+
+#[test]
+fn store_journal_last_prints_the_newest_records_oldest_first() {
+    let dir = temp_path("store-journal-last");
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_str().unwrap();
+    assert_eq!(run(&["store", "create", d], "").code, 0);
+    let res = run(&["--graph", d, "-e", r#"g.add_v("person").to_list()"#], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let seqs = |stdout: &str| -> Vec<u64> {
+        stdout
+            .lines()
+            .map(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record["seq"].as_u64().unwrap()
+            })
+            .collect()
+    };
+    let every = seqs(&run(&["store", "journal", d, "--json"], "").stdout);
+    assert!(every.len() >= 3, "{every:?}");
+    let res = run(&["store", "journal", d, "--last", "2", "--json"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(seqs(&res.stdout), every[every.len() - 2..]);
+    // Filters apply before the count.
+    let res = run(
+        &[
+            "store",
+            "journal",
+            d,
+            "--last",
+            "5",
+            "--kind",
+            "store.created",
+            "--json",
+        ],
+        "",
+    );
+    assert_eq!(seqs(&res.stdout), [every[0]], "{}", res.stdout);
+    let res = run(&["store", "journal", d, "--last", "1", "--after", "2"], "");
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    let res = run(&["store", "journal", d, "--last", "0"], "");
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}

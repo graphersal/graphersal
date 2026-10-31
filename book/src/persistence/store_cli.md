@@ -473,7 +473,7 @@ Compacted the file: 23.7 KiB -> 22.8 KiB (930 B given back).
 
 ```text
 graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>]
-                         [--after <SEQ>] [--limit <N>] [--follow] [--json]
+                         [--after <SEQ> | --last <N>] [--limit <N>] [--follow] [--json]
 ```
 
 Prints the store's [system journal](system_journal.md): one line per record (time in UTC, `#seq`,
@@ -486,6 +486,8 @@ so it works while a server has the store open; the records an open store has not
 - `--source P`: a source and the ones below it (`store` matches `store.backup`).
 - `--kind K`: one kind (`store.backup_done`, `auth.denied`, ...).
 - `--after SEQ`, `--limit N`: the records after a cursor, at most N (default 1000).
+- `--last N`: only the newest N matching records, read from the end of the journal (the older
+  segments are not read), printed oldest first; with `--follow` it goes on from there.
 - `--json`: one JSON object per record (`seq`, `origin`, `origin_seq`, `time` in µs, `level`,
   `source`, `kind`, `message`, `fields`, ...).
 - `--follow`: keeps printing new records (it polls once a second) until it is interrupted.

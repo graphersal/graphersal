@@ -1171,8 +1171,12 @@ pre.code-view.wrap { white-space: pre-wrap; word-break: break-word; }
 .seg-btn:disabled { opacity: .5; cursor: not-allowed; }
 .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tier-note { background: var(--surface-2); color: var(--text-muted); }
-.cy-host { flex: 1; min-height: 0; position: relative; }
-.cy-canvas { position: absolute; inset: 0; }
+/* The drawing never scrolls and never makes the panel scroll: the renderers round their canvases to
+   whole pixels (a 758.5 px host gets a 759 px canvas), and that half pixel reaching the panel body
+   (overflow: auto) made classic scrollbars (Windows) appear and vanish in a loop while a notice
+   took a fractional height (js/graph/resize-guard.js). */
+.cy-host { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.cy-canvas { position: absolute; inset: 0; overflow: hidden; }
 .graph-legend {
   position: absolute;
   left: 8px;
@@ -1452,6 +1456,14 @@ dialog * { overscroll-behavior: auto; }
 table.data-table.catalog-table td, table.data-table.catalog-table th { white-space: nowrap; max-width: none; }
 .catalog-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 .cc-sub { font-size: 12px; }
+/* The System journal panel (js/components/journal.js): a scrolling table, messages wrap. */
+.jl-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 6px 0 10px; font-size: 13px; }
+.jl-filters input[type="text"] { width: 22ch; }
+.catalog-dialog .jl-table { font-size: 13px; }
+.catalog-table-wrap:has(> .jl-table) { max-height: 60vh; overflow-y: auto; }
+table.data-table.catalog-table.jl-table td:nth-child(5) { white-space: normal; min-width: 30ch; }
+.jl-fields { word-break: break-word; }
+.jl-time { font-variant-numeric: tabular-nums; }
 table.data-table.catalog-table { width: 100%; }
 table.data-table.catalog-table td .cc-reason { font-size: 12px; white-space: normal; min-width: 28ch; }
 .cc-estimate { margin: 10px 0; padding: 8px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
