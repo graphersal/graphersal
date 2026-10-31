@@ -84,7 +84,8 @@ run single.gstore "$DATA"
 "$BIN" store create missing > /dev/null
 run missing 'g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", dimension: 3, embedder: "model2vec/acme/gone@0123456789ab"}}}}}})'
 
-# The lock files carry no data (an open recreates them); the model sources are not fixtures.
+# The lock files carry no data (an open recreates them), WORKLOAD is instance data (never
+# copied); the model sources are not fixtures.
 rm -rf work
-rm -f store/LOCK store/BACKUP backup/LOCK backup/BACKUP missing/LOCK missing/BACKUP
+rm -f store/LOCK store/BACKUP backup/LOCK backup/BACKUP missing/LOCK missing/BACKUP store/WORKLOAD missing/WORKLOAD backup/WORKLOAD
 echo "fixtures written to $OUT"
