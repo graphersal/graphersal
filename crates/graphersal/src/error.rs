@@ -6252,12 +6252,13 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
              recursively and would overflow the native stack, so the depth is bounded where a \
              value enters the engine. Flatten the value, for example keep a list of items \
              instead of wrapping a list in a list in a loop: let xs = []; for i in 0..10 {{ \
-             xs.push(i); }} g.inject(xs).count(Scope.local).next(). A trusted host raises the limit \
-             with ScriptLimits::default().with_max_value_depth({raised}) passed to \
-             graphersal::script::engine_with_limits(&limits, authorizer); the graphersal \
-             command line takes --max-value-depth {raised}, the Python binding \
-             graph.set_limits(max_value_depth={raised}). ScriptLimits::unlimited() keeps this \
-             bound, because the native stack cannot be raised by configuration.",
+             xs.push(i); }} g.inject(xs).count(Scope.local).next(). The limit belongs to what \
+             runs the script: the graphersal command line (and its dev server, for the \
+             playground and MCP) takes --max-value-depth {raised}, the Python binding \
+             graph.set_limits(max_value_depth={raised}); a host embedding the engine in Rust \
+             builds its script engine with ScriptLimits::default().with_max_value_depth({raised}). \
+             ScriptLimits::unlimited() keeps this bound, because the native stack cannot be \
+             raised by configuration.",
             max.map(|max| format!(" ({max} levels)"))
                 .unwrap_or_default()
         ),
@@ -6340,14 +6341,28 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
         ),
         other if other.starts_with("script.") => {
             let field = other.trim_start_matches("script.");
+            // The limits the command line and the Python binding set (`--max-operations`,
+            // `graph.set_limits(max_operations=..)`); the others only a Rust host sets.
+            let front_ends = if matches!(
+                field,
+                "max_operations" | "max_string_size" | "max_array_size" | "max_map_size"
+            ) {
+                format!(
+                    "the graphersal command line (and its dev server, for the playground and \
+                     MCP) takes --{flag} <n>, for example graphersal --{flag} {raised} -e \
+                     'g.v().count().next()', the Python binding graph.set_limits({field}={raised}); ",
+                    flag = field.replace('_', "-"),
+                )
+            } else {
+                String::new()
+            };
             format!(
                 "The script ran past its '{other}' limit{}. Bound the loop or the data it builds. \
-                 A trusted host raises the limit with ScriptLimits::default().with_{field}({raised}) \
-                 passed to graphersal::script::engine_with_limits(&limits, authorizer), or removes all limits \
-                 with ScriptLimits::unlimited(). The graphersal command line takes \
-                 --{flag} <n>, for example graphersal --{flag} {raised} -e 'g.v().count().next()'.",
+                 The limit belongs to what runs the script: {front_ends}a host embedding the \
+                 engine in Rust builds its script engine with \
+                 ScriptLimits::default().with_{field}({raised}), or with ScriptLimits::unlimited() \
+                 for scripts it trusts.",
                 max.map(|max| format!(" of {max}")).unwrap_or_default(),
-                flag = field.replace('_', "-"),
             )
         }
         "memory.allocation" => format!(
@@ -10409,6 +10424,54 @@ mod tests {
             assert!(help.contains("ScriptLimits::unlimited()"), "{help}");
             assert!(
                 help.contains("graphersal --max-operations 20000000 -e 'g.v().count().next()'"),
+                "{help}"
+            );
+        }
+
+        /// A script user reads these helps: they name the front ends' switches first and the
+        /// Rust builder only as the host's, never a Rust function path to call; a limit no
+        /// front end sets (`max_call_levels`) names no flag.
+        #[test]
+        fn script_limit_helps_address_the_script_user_and_the_host() {
+            for limit in [
+                "script.max_operations",
+                "script.max_call_levels",
+                "script.max_value_depth",
+            ] {
+                let help = TraverserError::ResourceLimitExceeded {
+                    limit: limit.to_string(),
+                    max: Some(100),
+                    observed: None,
+                }
+                .help()
+                .expect("help");
+                assert!(!help.contains("engine_with_limits"), "{limit}: {help}");
+                assert!(
+                    help.contains("a host embedding the engine in Rust builds its script engine"),
+                    "{limit}: {help}"
+                );
+            }
+            let help = TraverserError::ResourceLimitExceeded {
+                limit: "script.max_operations".to_string(),
+                max: Some(100),
+                observed: None,
+            }
+            .help()
+            .expect("help");
+            assert!(
+                help.contains("graph.set_limits(max_operations=200)"),
+                "{help}"
+            );
+            let help = TraverserError::ResourceLimitExceeded {
+                limit: "script.max_call_levels".to_string(),
+                max: Some(100),
+                observed: None,
+            }
+            .help()
+            .expect("help");
+            assert!(!help.contains("--max-call-levels"), "{help}");
+            assert!(
+                help.contains("ScriptLimits::default().with_max_call_levels(200)"),
                 "{help}"
             );
         }
