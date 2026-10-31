@@ -4812,6 +4812,134 @@ mod embed_models {
         assert_eq!(res.code, 0, "{}", res.stderr);
     }
 
+    /// `embed-model import --into` a CLOSED store appends ONE commit without loading the graph
+    /// (format spec 12.12; journal `catalog.closed_commit`), `store models remove` likewise; a
+    /// lost blob comes back with `store restore-blobs` from a backup, and `store repair
+    /// --drop-damaged-blobs` leaves out what references it.
+    #[test]
+    fn embed_model_import_into_a_closed_store_commits() {
+        let base = fresh_dir("m2v_closed_commit");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &["--graph", &store_text, "-e", "g.add_v(\"p\").iterate()"],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "mit",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let journal = run_env(
+            &[
+                "store",
+                "journal",
+                &store_text,
+                "--kind",
+                "catalog.closed_commit",
+            ],
+            &[],
+        );
+        assert_eq!(journal.code, 0, "{}", journal.stderr);
+        assert_eq!(journal.stdout.lines().count(), 1, "{}", journal.stdout);
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert!(info.stdout.contains("acme/tiny"), "{}", info.stdout);
+
+        // A backup holds the blob; then the store loses it.
+        let backup = base.join("backup").display().to_string();
+        let res = run_env(&["store", "backup", &store_text, &backup], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let blobs = store.join("blobs");
+        for entry in std::fs::read_dir(&blobs).unwrap().flatten() {
+            if entry.path().is_dir() {
+                std::fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
+        // Without a source holding it: exit 1 with the list.
+        let empty = base.join("empty").display().to_string();
+        create_store(Path::new(&empty));
+        let res = run_env(
+            &["store", "restore-blobs", &store_text, "--from", &empty],
+            &[],
+        );
+        assert_eq!(res.code, 1, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("not in the source"), "{}", res.stdout);
+        assert!(
+            res.stderr.contains("--drop-damaged-blobs"),
+            "{}",
+            res.stderr
+        );
+        // A repair that drops it.
+        let repaired = base.join("repaired").display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "repair",
+                &store_text,
+                "--to",
+                &repaired,
+                "--drop-damaged-blobs",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stderr.contains("left out"), "{}", res.stderr);
+        // The backup restores it.
+        let res = run_env(
+            &[
+                "store",
+                "restore-blobs",
+                &store_text,
+                "--from",
+                &backup,
+                "--json",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let report: serde_json::Value = serde_json::from_str(res.stdout.trim()).unwrap();
+        assert_eq!(report["restored"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(report["complete"], true);
+        let res = run_env(&["store", "verify", &store_text], &[]);
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+
+        // Removal: one closed commit.
+        let res = run_env(
+            &["store", "models", "remove", &store_text, "acme/tiny"],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("Removed"), "{}", res.stdout);
+        let res = run_env(&["store", "models", &store_text], &[]);
+        assert!(!res.stdout.contains("acme/tiny"), "{}", res.stdout);
+        let journal = run_env(
+            &[
+                "store",
+                "journal",
+                &store_text,
+                "--kind",
+                "catalog.closed_commit",
+            ],
+            &[],
+        );
+        assert_eq!(journal.stdout.lines().count(), 2, "{}", journal.stdout);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn download_into_a_store_keeps_the_licence_with_the_model() {
         let mock = Mock::start(|port| routes_with_metadata(port, model_safetensors(), false));

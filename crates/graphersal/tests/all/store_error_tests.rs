@@ -407,3 +407,34 @@ fn the_model_definition_causes_are_refused_with_their_help() {
     );
     // The memory refusal needs a model loader (feature `model2vec`): `model_open_tests.rs`.
 }
+
+#[test]
+fn a_missing_blob_names_both_recovery_commands_and_a_closed_change_names_the_open_store() {
+    let dir = MemDir::new();
+    let store = Store::create(dir.clone(), StoreOptions::new()).unwrap();
+    let blob = store
+        .write_blob(&mut &b"some bytes"[..])
+        .unwrap()
+        .blob()
+        .clone();
+    dir.remove_file(&format!("blobs/{}", blob.relative_path()))
+        .unwrap();
+    for needle in ["store restore-blobs", "--drop-damaged-blobs"] {
+        assert_cause(
+            store.read_blob(&blob),
+            StoreFailure::BlobUnavailable,
+            needle,
+        );
+    }
+    // A closed-store catalog change while the store is open: refused with the lock, whose help
+    // names the open store's methods.
+    let err = Store::remove_model_dir(
+        dir.clone(),
+        "acme/tiny",
+        graphersal::persist::ClosedCommitOptions::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, PersistError::Locked { .. }), "{err}");
+    assert!(err.help().unwrap().contains("Store::remove_model"));
+    store.close().unwrap();
+}

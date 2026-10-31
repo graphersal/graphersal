@@ -714,9 +714,14 @@ impl StoreFailure {
             StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
                 "The store itself is intact and keeps working; only what needs this blob fails. \
                  Run graphersal store verify <dir> (Store::verify) to list every missing or \
-                 damaged blob. Any copy of a blob with the same hash is the same bytes: copy the \
-                 file from a backup or another copy of the store into blobs/<2 hex>/<hash> (the \
-                 name the error gives), or restore the backup, or write the content again \
+                 damaged blob. Any copy of a blob with the same hash is the same bytes: with the \
+                 store closed, graphersal store restore-blobs <dir> --from <backup|file.zip|\
+                 file.gsnap|other store> (Store::restore_blobs_from) copies every missing or \
+                 damaged blob back and checks it. Without a copy, graphersal store repair <dir> \
+                 --to <new_dir> --drop-damaged-blobs (RepairOptions::with_drop_damaged_blobs) \
+                 builds a store without the definitions that reference them (refused while the \
+                 schema needs one: change the schema first). By hand: copy the file into \
+                 blobs/<2 hex>/<hash> (the name the error gives), or write the content again \
                  (Store::write_blob) where you still have it."
             }
             StoreFailure::AutoCheckpointFailed => {

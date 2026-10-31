@@ -40,8 +40,33 @@ println!("{} ({}), commit {:?}", report.model.repo, report.model.identity, repor
   needs vector rules, which a later release adds.
 - `ModelSource::Files(NewModel)` imports files given as streams (a host without a file system,
   such as the browser).
-- A closed store: `Store::import_model_dir` (what the CLI does); it opens the store without the
-  needed-model check below, so it is also how a missing model comes back.
+- A closed store: `Store::import_model_dir` (what the CLI does). See the next section.
+
+## Changing the models of a closed store
+
+`Store::import_model_dir`, `Store::set_default_model_dir` and `Store::remove_model_dir` (CLI
+`embed-model import|download --into <dir>`, `store models remove <dir> <repo>`) change the
+catalog of a CLOSED store WITHOUT loading its graph: seconds on a store of any size. Each takes
+the writer lock (a store open elsewhere is refused with `Locked`: make the change on the open
+store, or close it), reads the catalog of the latest position from the newest snapshot's
+manifest and the WAL after it (the data changes are read and checked, not applied), and appends
+ONE ordinary commit to the WAL, synced (format spec 12.12). The commit is part of the history
+like any other: the next open replays it, a rollback goes behind it, `changes_since` and
+backups carry it, and it is recorded in the system journal (`catalog.closed_commit`, plus the
+`model.*` record with `closed: true`). The same refusals apply as on an open store
+(`ModelRevisionExists`, `ModelInUse`, `UnknownModel`, `InvalidModel`); a change that changes
+nothing (the model is the default already, the same identity imported again) writes nothing.
+The needed-model check of an open does not apply, so an import is also how a missing model
+comes back. `ClosedCommitOptions::with_principal` records who made the change (the CLI records
+`cli`).
+
+A replace of a revision whose vectors are in the data (a schema property's `embedder` names
+it) is refused on a closed store as on an open one until vector rules exist; it needs the
+data (re-embedding), so the CLI will then open the store and run that unit instead, saying so.
+
+A damaged store refuses the change: open it (it opens in maintenance mode) and
+[repair](store_damage.md) it first. The commit reads the WAL after the newest snapshot; on a
+store with a very long WAL tail run `graphersal store checkpoint <dir>` first.
 
 ## The default model
 
@@ -51,8 +76,8 @@ built-in `hash-ngram/1`, and the CLI notes that the store holds models but none 
 
 ## Removing a model
 
-`Store::remove_model(repo)` (CLI `graphersal store models remove <dir> <repo>`) commits the
-removal of the definition. It is refused while the current schema needs the model
+`Store::remove_model(repo)` (CLI `graphersal store models remove <dir> <repo>`, on a closed
+store `Store::remove_model_dir`) commits the removal of the definition. It is refused while the current schema needs the model
 (`ModelInUse`: re-embed or drop the properties first). Earlier positions keep the model; its
 blob is removed by the [prune](store_prune.md) that drops the last retained history referencing
 it.

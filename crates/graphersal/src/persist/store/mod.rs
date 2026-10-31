@@ -4453,9 +4453,10 @@ fn report_blob_damage_to(
         event.field(
             "recommendation",
             format!(
-                "copy {name} from a backup or another copy of the store (the same hash is the \
-                 same bytes), or write the content again; graphersal store verify lists every \
-                 blob problem"
+                "with the store closed, graphersal store restore-blobs <dir> --from <backup> \
+                 copies {name} back from a backup, a ZIP backup, a .gsnap or another copy of \
+                 the store (the same hash is the same bytes); or write the content again; \
+                 graphersal store verify lists every blob problem"
             ),
         ),
     );

@@ -42,6 +42,7 @@ mod changeset_position_tests;
 mod changeset_tests;
 mod child_step_rendering_tests;
 mod choose_forms_tests;
+mod closed_commit_fuzz_tests;
 mod closed_commit_tests;
 mod column_select_tests;
 mod commit_clock_tests;
