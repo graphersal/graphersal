@@ -240,11 +240,23 @@ impl MemoryBudget {
         storage: &S,
         operation: &'static str,
     ) -> Result<(), GraphError> {
+        self.unit_check_adding(storage, operation, 0)
+    }
+
+    /// [`Self::unit_check`] of a unit that also wrote `written` bytes into existing elements
+    /// (the vectors of a vector rule fill): an estimate counts them on top of the elements it
+    /// added (a tracking allocator sees them in the live heap anyway).
+    pub(crate) fn unit_check_adding<S: GraphStorage + ?Sized>(
+        &self,
+        storage: &S,
+        operation: &'static str,
+        written: u64,
+    ) -> Result<(), GraphError> {
         let (total, grew) = if self.tracked {
             let live = tracked_live_bytes().unwrap_or(0);
             (live, live > self.live_at_start)
         } else {
-            let grown = self.grown_bytes(storage)?;
+            let grown = self.grown_bytes(storage)?.saturating_add(written);
             (self.base.saturating_add(grown), grown > 0)
         };
         if grew && total > self.limit {

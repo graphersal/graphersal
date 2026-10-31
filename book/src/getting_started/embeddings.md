@@ -19,6 +19,25 @@ for you: a downloaded [Model2Vec](#real-models-model2vec) model, run locally.
 This page is the practical tour. Every detail (element kinds, metrics, schema rules, formats) is
 on the reference page [Vectors](../users_guide/vectors.md).
 
+## Keep vectors filled: a vector rule
+
+The way to fill a vector property is a **[vector rule](../users_guide/vector_rules.md)** in the
+schema: `"from": "text"` beside `"embedder"` on the vector property. Every write of `text`
+embeds it into the vector in the same unit, a text removed removes the vector, and adding the
+rule fills every existing element (the whole database is locked while that runs: the schema
+preview says how long first).
+
+```rhai
+// one query: the rule
+g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
+    text: #{type: "string"},
+    emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})
+// the next query: a write of the text (its vector is written when the query's unit ends)
+g.add_v("doc").property("text", "vector search in a graph").next()
+// and later: a text query
+g.v().has_label("doc").nearest("emb", "graph search", 1).values("text").next()
+```
+
 ## Try it in the playground, without a model
 
 Real embeddings have hundreds of dimensions. To see how the steps behave you can make up

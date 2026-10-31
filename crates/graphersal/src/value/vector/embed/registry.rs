@@ -139,6 +139,9 @@ pub(crate) struct LoadedModel {
     bytes: u64,
     repo: String,
     identity: String,
+    /// The texts per second a calibration batch ran at right after the load (the time
+    /// estimate of a vector fill, book page "Vector Rules").
+    texts_per_second: Option<f64>,
     /// Where it was loaded from: its journal gets `model.unloaded`.
     source: Weak<dyn ModelBytes>,
 }
@@ -170,6 +173,17 @@ fn cache() -> &'static Mutex<HashMap<Vec<u8>, Weak<LoadedModel>>> {
 /// once): what the estimated memory figures add when no tracking allocator counts them.
 pub(crate) fn loaded_model_bytes() -> u64 {
     LOADED_BYTES.load(Ordering::Acquire)
+}
+
+/// The texts per second the loaded model `identity` measured at its load, if it is loaded in
+/// this process.
+pub(crate) fn measured_texts_per_second(identity: &str) -> Option<f64> {
+    cache()
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .find(|model| model.identity == identity)
+        .and_then(|model| model.texts_per_second)
 }
 
 /// Loads the model of `definition` (named `identity`), or takes the load another registry made
@@ -245,6 +259,7 @@ fn load_uncached(
     }
     drop(bytes);
     let memory = Embedder::memory_bytes(&loaded).unwrap_or(model.load_bytes());
+    let texts_per_second = calibrate(&loaded);
     let journal = source.journal();
     if let Some(journal) = &journal {
         journal.emit(
@@ -261,8 +276,20 @@ fn load_uncached(
         bytes: memory,
         repo: model.repo().to_string(),
         identity: identity.to_string(),
+        texts_per_second,
         source: Arc::downgrade(source),
     })
+}
+
+/// The texts per second of a fixed calibration batch (64 short sentences, a few ms).
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+fn calibrate(model: &super::Model2Vec) -> Option<f64> {
+    const SENTENCE: &str = "A graph database keeps vertices and edges with their properties.";
+    let texts = [SENTENCE; 64];
+    let started = web_time::Instant::now();
+    model.embed(&texts, &super::EmbedContext::new()).ok()?;
+    let seconds = started.elapsed().as_secs_f64();
+    (seconds > 0.0).then(|| texts.len() as f64 / seconds)
 }
 
 #[cfg(not(all(feature = "model2vec", not(target_arch = "wasm32"))))]

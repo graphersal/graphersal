@@ -2910,6 +2910,41 @@ mod tests {
         assert_eq!(counts["vertex_label_total"], counts["vertex_count"]);
     }
 
+    /// A schema adding a vector rule: the previews (`validate_schema`, `validate_schema_patch`,
+    /// `diff_schema`) carry the planned `fill` and the one `fill_warning` text; applying it
+    /// fills the vectors (book page "Vector Rules").
+    #[test]
+    fn the_schema_previews_carry_the_planned_vector_fill() {
+        let mut s = modern();
+        let rule = r#"{"vertices": {"person": {"schema": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1",
+                    "from": "name"}}}}}}"#;
+        let validation = s.validate_schema(rule).unwrap();
+        let fill = &validation["fill"][0];
+        assert_eq!(fill["label"], "person", "{validation}");
+        assert_eq!(fill["to"], "emb");
+        assert_eq!(fill["elements"], 4);
+        assert_eq!(fill["reason"], "rule_added");
+        assert_eq!(fill["needs_confirmation"], false);
+        let warning = validation["fill_warning"].as_str().unwrap();
+        assert!(
+            warning.starts_with("Applying this schema fills vectors: 4 elements of person.emb"),
+            "{warning}"
+        );
+        let diff = s.diff_schema(rule).unwrap();
+        assert_eq!(diff["fill"][0]["approximate"], true, "{diff}");
+        assert!(diff["fill_warning"].as_str().unwrap().contains("up to 4"));
+        let patch = s
+            .validate_schema_patch(r#"{"vertices": {"person": {"schema": {"type": "object", "properties": {"emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}}}}}}"#)
+            .unwrap();
+        assert_eq!(patch["fill"][0]["elements"], 4, "{patch}");
+        s.set_schema(rule, None).unwrap();
+        let after = s.validate_schema(rule).unwrap();
+        assert_eq!(after["fill"], serde_json::json!([]));
+        assert!(after.get("fill_warning").is_none());
+    }
+
     /// The seven schema methods as the playground calls them (JSON text in, JSON out), and the
     /// `changes` of a run.
     #[test]

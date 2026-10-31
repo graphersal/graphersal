@@ -984,9 +984,11 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// [`ImportModelOptions::with_default`] only the default changes). Another revision of the
     /// same repository is refused ([`StoreFailure::ModelRevisionExists`]) unless
     /// [`ImportModelOptions::with_replace`]: then the new revision replaces the old one in the
-    /// same commit (and becomes the default if the old one was); while a schema property's
-    /// vectors were made by the old revision, a replace needs vector rules (not in this
-    /// version: [`GraphError::Unsupported`]). In a build that can run the model (feature
+    /// same commit (and becomes the default if the old one was); the vector rules naming the old
+    /// revision switch to the new one and re-embed every element of their labels in that
+    /// commit, under the write lock (book page "Vector Rules"); a property whose vectors the
+    /// old revision made WITHOUT a rule refuses the replace ([`StoreFailure::ModelInUse`],
+    /// naming it). In a build that can run the model (feature
     /// `model2vec`, native) it is loaded once as a check, when it fits under the memory
     /// ceiling. Refused on a read-only store, a backup and in maintenance mode.
     pub fn import_model(
@@ -1032,6 +1034,9 @@ impl<S: PersistentStorage + Default> Store<S> {
             .iter()
             .find(|d| d.as_model().is_some_and(|m| m.repo() == repo))
             .cloned();
+        // Whether vector rules name the old revision: the replace then re-embeds their
+        // properties in the same unit (book page "Vector Rules", "Model replacement").
+        let mut replaces_rules = false;
         if let Some(old) = &old {
             let using = needed_by(schema.as_ref(), old.name());
             if !options.replace {
@@ -1057,10 +1062,24 @@ impl<S: PersistentStorage + Default> Store<S> {
                 ));
             }
             if !using.is_empty() {
-                return Err(PersistError::Graph(GraphError::Unsupported {
-                    operation: "replacing a model whose vectors are in the data (requires \
-                                vector rules)",
-                }));
+                // K3: vectors without a rule have no source text to re-embed.
+                let unruled =
+                    crate::graph::vector_rules::places_without_rule(schema.as_ref(), old.name());
+                if !unruled.is_empty() {
+                    return Err(PersistError::store(
+                        OP,
+                        StoreFailure::ModelInUse,
+                        format!(
+                            "the vectors of {} were made by {} and have no vector rule \
+                             (\"from\"), so a replace cannot re-embed them: add the rule \
+                             first (\"from\": \"<source property>\" beside \"embedder\"), \
+                             or remove \"embedder\" from them",
+                            unruled.join(", "),
+                            old.name()
+                        ),
+                    ));
+                }
+                replaces_rules = true;
             }
         }
         // A check load where the build can run the model and it fits.
@@ -1105,7 +1124,20 @@ impl<S: PersistentStorage + Default> Store<S> {
             None => CommitMetadata::new(),
         };
         let old_name = old.as_ref().map(|o| o.name().to_string());
-        let commit_seq = {
+        // The rule pass of the replacing unit embeds with the new revision: the registry
+        // serves it before the commit (its hook rebuilds it again after).
+        let registry = self.graph.model_registry().filter(|_| replaces_rules);
+        if let Some(registry) = &registry {
+            let mut next: Vec<Definition> = definitions
+                .iter()
+                .filter(|d| Some(d.name()) != old_name.as_deref())
+                .cloned()
+                .collect();
+            next.push(definition.clone());
+            registry.rebuild(next);
+        }
+        let dimension = prepared.dimension;
+        let committed = (|| {
             let mut write = self.graph.write_checked().map_err(PersistError::Graph)?;
             write
                 .transaction_with(metadata, |g| -> Result<(), GraphError> {
@@ -1115,10 +1147,31 @@ impl<S: PersistentStorage + Default> Store<S> {
                     if default {
                         clear_default(g, &identity)?;
                     }
-                    g.set_definition(definition.clone())
+                    g.set_definition(definition.clone())?;
+                    if replaces_rules
+                        && let Some(old_name) = &old_name
+                        && let Some(current) = g.get_schema()?
+                        && let Some(next) = crate::graph::vector_rules::replace_model_in_schema(
+                            &current, old_name, &identity, dimension,
+                        )
+                    {
+                        g.set_schema(next)?;
+                    }
+                    Ok(())
                 })
                 .map_err(PersistError::Graph)?;
-            write.last_commit_seq().map_err(PersistError::Graph)?
+            write.last_commit_seq().map_err(PersistError::Graph)
+        })();
+        let commit_seq = match committed {
+            Ok(seq) => seq,
+            Err(err) => {
+                if let Some(registry) = &registry
+                    && let Ok((current, _)) = catalog_of(&self.graph)
+                {
+                    registry.rebuild(current);
+                }
+                return Err(err);
+            }
         };
         drop(pending);
         let schema = catalog_of(&self.graph)?.1;

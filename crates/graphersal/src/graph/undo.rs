@@ -99,6 +99,10 @@ pub(crate) struct UndoLog {
     started_at: Option<i128>,
     /// The start of the last outermost unit: the next one never starts earlier.
     last_started_at: i128,
+    /// The log ranges (`start..end` positions) an `apply_change_set` inside the outermost unit
+    /// wrote: the rule pass skips them (a change set carries its vectors). Reset when the
+    /// outermost unit closes; a rollback cuts them back.
+    rules_exempt: Vec<(usize, usize)>,
 }
 
 impl UndoLog {
@@ -132,6 +136,24 @@ impl UndoLog {
         &self.entries
     }
 
+    /// The ranges of the log the rule pass skips (see `rules_exempt`).
+    pub(crate) fn rules_exempt(&self) -> &[(usize, usize)] {
+        &self.rules_exempt
+    }
+
+    /// Marks the entries from `start` to the end of the log as written by a change set (the
+    /// rule pass skips them); only inside an open unit.
+    pub(crate) fn exempt_from(&mut self, start: usize) {
+        if self.depth > 0 && start < self.entries.len() {
+            self.rules_exempt.push((start, self.entries.len()));
+        }
+    }
+
+    /// The memory budget of the outermost open unit.
+    pub(crate) fn budget(&self) -> Option<MemoryBudget> {
+        self.budget
+    }
+
     /// The number of recorded entries (for tests and diagnostics).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -147,6 +169,7 @@ impl UndoLog {
             self.metadata = CommitMetadata::default();
             self.budget = None;
             self.started_at = None;
+            self.rules_exempt.clear();
             if self.entries.capacity() > KEEP_CAPACITY {
                 self.entries = Vec::new();
             } else {
@@ -346,6 +369,34 @@ impl TraversalGraph {
             self.undo.close();
             return Ok(());
         }
+        // The vector rules (`graph/vector_rules.rs`): the derived writes of the unit, before the
+        // memory check and the commit number, so they are ordinary writes of the unit.
+        let fill = if self.vector_rules.is_some() && self.rules_off == 0 {
+            match self.run_vector_rules(true) {
+                Ok(fill) => fill,
+                Err((error, fill)) => {
+                    self.rollback_undo_unit(mark, &RollbackReason::failed(&error));
+                    if let Some(fill) = fill {
+                        fill.finish(Err(&error));
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let committed = self.commit_checked(mark);
+        if let Some(fill) = fill {
+            match &committed {
+                Ok(()) => fill.finish(Ok(self.undo.last_commit_seq)),
+                Err(error) => fill.finish(Err(error)),
+            }
+        }
+        committed
+    }
+
+    /// [`Self::commit_undo_unit`] after the rule pass: the memory check, the number, the hooks.
+    fn commit_checked(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         if let Some(budget) = self.undo.budget
             && let Err(error) = budget.unit_check(&*self, COMMIT_OPERATION)
         {
@@ -449,11 +500,19 @@ impl TraversalGraph {
         // A vector property may name its model by repository (K2): the schema stores the
         // identity of the catalog's current revision (book page "Embedding Models in a Store").
         let schema = crate::graph::model_definition::resolve_model_names(&self.definitions, schema);
+        // A vector rule embeds with a model of the catalog or `hash-ngram/1` (checked when the
+        // schema is applied, not when a graph nobody sees yet is loaded).
+        let schema = if self.undo.loading {
+            schema
+        } else {
+            crate::graph::vector_rules::check_rule_models(&self.definitions, schema)?
+        };
         let old = self
             .undo
             .is_recording()
             .then(|| Box::new(self.schema.read().clone()));
         self.store_schema(schema)?;
+        self.refresh_vector_rules();
         if let Some(old) = old {
             self.undo.record(UndoEntry::Schema(old));
         }
@@ -530,7 +589,21 @@ impl TraversalGraph {
     /// have received it ([`GraphStorage::discard_unit`](crate::graph::GraphStorage::discard_unit)):
     /// never committed (`commit_seq` and commit time `0`, no metadata), the auto-id sequences
     /// after the unit.
-    pub(crate) fn discard_undo_unit_with_changes(&mut self, mark: UnitMark) -> ChangeSet {
+    pub(crate) fn discard_undo_unit_with_changes(
+        &mut self,
+        mark: UnitMark,
+    ) -> Result<ChangeSet, GraphError> {
+        // A dry run shows the vectors its writes would get (the rule pass runs, journals
+        // nothing; a failure discards the unit and is the dry run's error).
+        if self.undo.depth == 1 && self.vector_rules.is_some() && self.rules_off == 0 {
+            if let Err((error, fill)) = self.run_vector_rules(false) {
+                if let Some(fill) = fill {
+                    fill.finish(Err(&error));
+                }
+                self.discard_undo_unit(mark);
+                return Err(error);
+            }
+        }
         let mutations = self.derive_mutations_since(mark_position(mark));
         let stamp = CommitStamp {
             commit_seq: 0,
@@ -539,7 +612,7 @@ impl TraversalGraph {
             edge_sequence: self.edge_sequence,
         };
         self.discard_undo_unit(mark);
-        ChangeSet::new(stamp, CommitMetadata::default(), mutations)
+        Ok(ChangeSet::new(stamp, CommitMetadata::default(), mutations))
     }
 
     /// The metadata of the open unit's commit
@@ -561,6 +634,10 @@ impl TraversalGraph {
     /// Undoes every change since `mark`, newest first; the unit stays open.
     fn undo_to(&mut self, mark: UnitMark) {
         let position = mark_position(mark);
+        self.undo.rules_exempt.retain_mut(|(start, end)| {
+            *end = (*end).min(position);
+            *start < *end
+        });
         while self.undo.entries.len() > position {
             let Some(entry) = self.undo.entries.pop() else {
                 break;
@@ -702,7 +779,10 @@ impl TraversalGraph {
                 self.compression_normalize_edge(handle);
                 self.pindex_edge(handle, true, None);
             }
-            UndoEntry::Schema(old) => *self.schema.write() = *old,
+            UndoEntry::Schema(old) => {
+                *self.schema.write() = *old;
+                self.refresh_vector_rules();
+            }
             UndoEntry::Definition { kind, name, old } => {
                 let replaced = match old {
                     Some(old) => self.definitions.insert(*old),

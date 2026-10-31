@@ -675,6 +675,7 @@ fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGrap
     // merge is refused, never damage.
     *delta.schema.write() = super::super::snapshot::parse_stored_schema(&base.schema, 0, None)
         .map_err(|err| err.at(schema_location, 0))?;
+    delta.refresh_vector_rules();
     restore_definitions(&mut delta, &base.manifest, depth)?;
     // The delta grows with what the WAL touched: checked against the memory ceiling every
     // 4096 elements and at the end (a failure stops the merge before anything is written).

@@ -34,7 +34,7 @@ pub use embedder::PyEmbedder;
 pub use embedder::PyModel2Vec;
 pub use error::{
     CommitRejectedError, EmbedPropertyError, GraphersalError, PermissionDeniedError,
-    ReturnedClosureError,
+    ReturnedClosureError, VectorFillWarning,
 };
 pub use graph::{DryRunResult, Graph};
 pub use policy::AccessPolicy;
@@ -103,6 +103,7 @@ fn graphersal(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("CommitRejectedError", py.get_type::<CommitRejectedError>())?;
     m.add("EmbedPropertyError", py.get_type::<EmbedPropertyError>())?;
+    m.add("VectorFillWarning", py.get_type::<VectorFillWarning>())?;
     m.add(
         "ReturnedClosureError",
         py.get_type::<ReturnedClosureError>(),

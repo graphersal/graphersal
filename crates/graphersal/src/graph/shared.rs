@@ -119,7 +119,9 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     clock: crate::graph::CommitClock,
     /// The system journal: the Store's ([`Graph::attach_system_journal`]), else an in-memory
     /// one made at the first use.
-    system_journal: OnceLock<Arc<crate::graph::system_journal::SystemJournal>>,
+    system_journal: Arc<OnceLock<Arc<crate::graph::system_journal::SystemJournal>>>,
+    /// The live progress of a vector fill ([`Graph::vector_fill_progress`]).
+    fill_progress: Arc<crate::graph::vector_rules::ProgressCell>,
     /// The embedding models of the catalog ([`Graph::model_registry`]; a Store attaches it).
     models: OnceLock<Arc<crate::value::vector::embed::registry::ModelRegistry>>,
 }
@@ -555,6 +557,9 @@ pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph> {
     held: Option<(Instant, &'a Arc<WorkloadStats>)>,
     /// Makes the graph's statistics the thread's while the guard lives.
     _attached: Attachments,
+    /// Gives the vector rule pass of a commit under this guard the graph's journal and
+    /// progress cell.
+    _writer: crate::graph::vector_rules::AttachedWriter,
 }
 
 /// How a [`GraphRead`] reaches the storage: its own read lock, or the lock of the unit its
@@ -631,7 +636,8 @@ impl<S: GraphStorage> Graph<S> {
             unit: UnitOwner::default(),
             poison: Poison::default(),
             clock,
-            system_journal: OnceLock::new(),
+            system_journal: Arc::new(OnceLock::new()),
+            fill_progress: Arc::default(),
             models: OnceLock::new(),
         }
     }
@@ -871,6 +877,23 @@ impl<S: GraphStorage> Graph<S> {
         )
     }
 
+    /// What a write of this graph gives the vector rule pass: the journal and the progress
+    /// cell.
+    fn attached_writer(&self) -> crate::graph::vector_rules::AttachedWriter {
+        crate::graph::vector_rules::AttachedWriter::new(crate::graph::vector_rules::WriterContext {
+            journal: Arc::clone(&self.system_journal),
+            clock: self.clock.clone(),
+            progress: Arc::clone(&self.fill_progress),
+        })
+    }
+
+    /// The progress of the vector fill running on this graph (book page "Vector Rules", "First
+    /// fill"), or `None` when none runs. Read WITHOUT the graph's lock, so another thread
+    /// (a server showing an indicator) sees a fill that holds the write lock.
+    pub fn vector_fill_progress(&self) -> Option<crate::graph::vector_rules::FillProgress> {
+        self.fill_progress.get()
+    }
+
     /// The registry of the embedding models of this graph's catalog (a Store attaches one at
     /// open; book page "Embedding Models in a Store"). `None`: the traversals use the process
     /// default embedders.
@@ -959,6 +982,7 @@ impl<S: GraphStorage> Graph<S> {
             poison: &self.poison,
             held,
             _attached: self.attached(),
+            _writer: self.attached_writer(),
         }
     }
 
@@ -1502,6 +1526,9 @@ impl<S: GraphStorage> Graph<S> {
         };
         // A failed rollback inside `close` (an explicit rollback or discard, the rollback of a
         // commit whose metadata the storage refused) poisons the graph.
+        // The commit's rule pass sees the graph's models, journal and progress cell.
+        let _attached = self.attached();
+        let _writer = self.attached_writer();
         // SAFETY: this thread holds the lock exclusively and no view of it (checked above).
         let storage = unsafe { &mut *self.lock.data_ptr() };
         let mut watch = RollbackWatch::start(WatchedStorage::of(self, storage));
@@ -1566,7 +1593,8 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
             unit: UnitOwner::default(),
             poison: Poison::default(),
             clock,
-            system_journal: OnceLock::new(),
+            system_journal: Arc::new(OnceLock::new()),
+            fill_progress: Arc::default(),
             models: OnceLock::new(),
         }
     }

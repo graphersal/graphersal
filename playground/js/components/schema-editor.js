@@ -13,6 +13,7 @@ import {
   removeConnection, isPlainObject, backfillScript, DEFAULT_FUNCTIONS, isTopLevelProperty, defaultSummary,
   VECTOR_ELEMENTS, VECTOR_METRICS, MAX_VECTOR_DIMENSION,
 } from '../schema/draft.js';
+import { fillHtml } from '../schema/flow.js';
 
 /** Runs an edit of the draft; a refused edit (a duplicate name) becomes a toast. */
 function edit(flow, fn) {
@@ -108,6 +109,10 @@ export const SchemaNodeDetails = {
         bad.embedder = true;
         return;
       }
+      if (keyword === 'from' && v !== undefined && v.length > 128) {
+        bad.from = true;
+        return;
+      }
       if (keyword === 'element' && v === undefined) v = 'f32';
       bad[keyword] = false;
       edit(props.flow, (doc) => setKeyword(doc, valuePath(), keyword, v));
@@ -157,13 +162,20 @@ export const SchemaNodeDetails = {
       <label v-if="topLevel()"><span>embedder</span>
         <input type="text" :class="{ invalid: bad.embedder }" :value="value().embedder ?? ''" placeholder="none"
                spellcheck="false" @change="setVector('embedder', $event.target.value.trim())"></label>
+      <label v-if="topLevel()"><span>from</span>
+        <input type="text" :class="{ invalid: bad.from }" :value="value().from ?? ''" placeholder="none"
+               spellcheck="false" @change="setVector('from', $event.target.value.trim())"></label>
       <p class="hint wide">element: how components are stored: f32 exact, f16 half precision, i8 one byte per component plus a scale,
         bit one bit per component (the sign). A list of numbers or a vector of another element written to the property is converted
         to it (quantized). dimension: the number of components every value must have (empty: any). metric: the default of
         <code>similarity</code> and <code>nearest</code> on this property; <code>hamming</code> needs bit vectors.
         embedder (a label's top-level property only): the model identity of the embedder that produced the vectors, as
         <code>g.embedders()</code> lists it under <code>model</code> (<code>hash-ngram/1</code>); <code>embed_property</code> fills it in,
-        and a text query (<code>nearest("emb", "graph indexes", 5)</code>) embeds its text with that model.</p>
+        and a text query (<code>nearest("emb", "graph indexes", 5)</code>) embeds its text with that model.
+        from (with embedder, a label's top-level property only): the vector rule. The engine embeds the text of this property
+        of the same label into the vector at the end of every write (a missing or empty text removes the vector), and the
+        vector cannot be written directly. <b>Adding or changing a rule fills every element of the label while the whole
+        database is locked</b>: Apply shows how many and how long first.</p>
     </fieldset>
     <fieldset v-if="CONSTRAINTS[d().base] && CONSTRAINTS[d().base].length">
       <legend>Constraints</legend>
@@ -512,6 +524,7 @@ export const SchemaTables = {
 
 const KIND_TEXT = (k) => String(k || '').replace(/_/g, ' ');
 
+
 /**
  * The review of the draft: the diff (What changes), the check against the data (violations by
  * rule; a click opens a query with the offending elements), the backfill hint, errors.
@@ -526,11 +539,21 @@ export const SchemaReview = {
     const beforeAfter = (c) => (c.before !== null && c.before !== undefined) || (c.after !== null && c.after !== undefined)
       ? `${c.before ?? '—'} → ${c.after ?? '—'}` : '';
     const groupWhere = (g) => [g.element, g.label, g.field].filter((x) => x).join(' ');
-    return { KIND_TEXT, where, beforeAfter, groupWhere, canBackfill };
+    return { KIND_TEXT, where, beforeAfter, groupWhere, canBackfill, fillHtml };
   },
   template: `
   <div class="schema-review" aria-live="polite">
     <div v-if="flow.applyError" class="schema-error" role="alert"><b>Apply failed.</b><pre>{{ flow.applyError }}</pre></div>
+    <div v-if="flow.pendingFill" class="schema-error schema-fill" role="alertdialog" aria-modal="true" aria-label="Apply and lock the database">
+      <b>This schema fills vectors and locks the database.</b>
+      <p class="fill-warning" v-html="fillHtml(flow.pendingFill.warning)"></p>
+      <div class="btns">
+        <button class="btn danger" :disabled="!!flow.busy" @click="flow.applyAndLock()">Apply and lock</button>
+        <button class="btn" @click="flow.cancelFill()">Cancel</button>
+      </div>
+    </div>
+    <div v-if="flow.fillNote" class="schema-note">{{ flow.fillNote }}</div>
+    <div v-if="flow.freshCheck && flow.freshCheck.fillWarning && !flow.pendingFill" class="schema-note">{{ flow.freshCheck.fillWarning }}</div>
     <div v-if="flow.freezeError" class="schema-error" role="alert"><b>Freeze failed: nothing changed.</b><pre>{{ flow.freezeError }}</pre></div>
     <div v-if="flow.freshDiffError" class="schema-error" role="alert"><b>The draft is not a valid schema.</b><pre>{{ flow.freshDiffError }}</pre></div>
     <div v-if="flow.freshCheckError" class="schema-error" role="alert"><b>The check failed.</b><pre>{{ flow.freshCheckError }}</pre></div>

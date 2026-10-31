@@ -26,6 +26,8 @@
 //!   through [`ExecutionPolicy`]) bounding what one query materializes.
 
 pub use crate::graph::ExecutionPolicy;
+/// The live progress of a vector fill ([`Graph::vector_fill_progress`](crate::graph::Graph::vector_fill_progress)).
+pub use crate::graph::vector_rules::FillProgress;
 pub use crate::traversal::memory_limit::{
     MemoryLimit, MemoryLimitSource, MemoryRoom, ProcessMemoryLimit, check_memory_for, memory_limit,
     memory_limit_scope, memory_room, set_memory_headroom, set_memory_limit,

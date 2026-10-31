@@ -25,7 +25,7 @@ pub(crate) const MAX_SCHEMA_NODES: usize = 100_000;
 const NODE_KEYWORDS: &str = "type, format, items, properties, required, additionalProperties, \
      anyOf, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, formatMinimum, \
      formatMaximum, formatExclusiveMinimum, formatExclusiveMaximum, element, dimension, \
-     metric, embedder (with format vector), minLength, \
+     metric, embedder and from (with format vector), minLength, \
      maxLength, pattern, minItems, maxItems, title, description, $comment, examples, \
      deprecated, default, defaultFunction, $ref (and $defs, $schema, $id at a label schema's root)";
 
@@ -36,7 +36,16 @@ pub(crate) const VECTOR_FORMAT: &str = "vector";
 const VECTOR_HINT: &str = "A vector property is {\"type\": \"array\", \"format\": \"vector\", \
      \"element\": \"f32\", \"dimension\": 768} (element f32, f16, i8 or bit, default f32; \
      dimension optional; metric an optional annotation: cosine, dot, l2, hamming; embedder the \
-     model identity of the embedder that produced the vectors, e.g. \"hash-ngram/1\").";
+     model identity of the embedder that produced the vectors, e.g. \"hash-ngram/1\"; from \
+     the vector rule, the property whose text the engine embeds, e.g. \"from\": \"text\").";
+
+/// The longest `from` of a vector rule, in bytes.
+pub(crate) const MAX_RULE_SOURCE_BYTES: usize = 128;
+
+/// The advice of a malformed vector rule.
+pub(crate) const RULE_HINT: &str = "A vector rule names the top-level property of the same label \
+     whose text the engine embeds into the vector property: {\"type\": \"array\", \"format\": \
+     \"vector\", \"embedder\": \"hash-ngram/1\", \"from\": \"text\"}.";
 
 /// The general advice appended to every schema format error.
 pub(crate) const FORMAT_HELP: &str = "The schema format is an envelope ($schema, meta, mode, \
@@ -674,6 +683,7 @@ impl NodeParser<'_, '_> {
         let mut dimension = None;
         let mut metric = None;
         let mut embedder = None;
+        let mut from = None;
         for (key, field) in fields {
             let at = at.child(key.as_ref());
             let key = key.as_ref();
@@ -753,6 +763,21 @@ impl NodeParser<'_, '_> {
                     embedder = Some(model.to_string());
                     vector_keywords.push("embedder");
                     uses.push(("embedder", JsonType::Array));
+                }
+                "from" => {
+                    let source = string(field, &at, key)?;
+                    if source.is_empty() || source.len() > MAX_RULE_SOURCE_BYTES {
+                        return Err(invalid(
+                            &at,
+                            format!(
+                                "from must name a property (1 to {MAX_RULE_SOURCE_BYTES} bytes)"
+                            ),
+                            RULE_HINT,
+                        ));
+                    }
+                    from = Some(source.to_string());
+                    vector_keywords.push("from");
+                    uses.push(("from", JsonType::Array));
                 }
                 "formatMinimum"
                 | "formatMaximum"
@@ -1005,6 +1030,7 @@ impl NodeParser<'_, '_> {
                 dimension,
                 metric,
                 embedder,
+                from,
             });
         }
         for (keyword, text) in format_bounds {
@@ -1299,6 +1325,9 @@ impl PropertySchema {
             }
             if let Some(embedder) = &vector.embedder {
                 map.insert("embedder", ElementProperty::from(embedder.as_str()));
+            }
+            if let Some(from) = &vector.from {
+                map.insert("from", ElementProperty::from(from.as_str()));
             }
         }
         if let Some(c) = self.constraints.as_deref() {
