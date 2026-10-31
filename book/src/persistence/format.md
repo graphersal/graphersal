@@ -28,6 +28,7 @@ and the implementation disagree, it is a bug in one of them; please report it.
 15. [Versioning](#15-versioning)
 16. [Extensibility](#16-extensibility)
 17. [Conformance notes](#17-conformance-notes)
+18. [Time: the instance clock](#18-time-the-instance-clock)
 
 ## 1. Scope, conformance and terms
 
@@ -41,7 +42,7 @@ file records them; a reader MUST NOT assume a default where the file states the 
 | Term | Meaning |
 |---|---|
 | graph | a property graph: vertices (an id, a set of labels, properties) and edges (an id, at most one label, an out and an in vertex, properties), plus an optional schema and a catalog of definitions |
-| definition | a named entry of the graph's catalog, stored beside the schema: a saved query or a compression rule today, other kinds later (6.3) |
+| definition | a named entry of the graph's catalog, stored beside the schema: a saved query, a property index, a compression rule, a scheduled job or an embedding model today, other kinds later (6.3) |
 | commit | one committed unit of change (a transaction); it has a commit sequence number and a time |
 | `commit_seq` | the commit sequence number: `u64`, the first commit of a graph is 1, every later commit is the previous one + 1; 0 is the position before any commit |
 | position | a `commit_seq`: the state after that commit |
@@ -73,7 +74,7 @@ file records them; a reader MUST NOT assume a default where the file states the 
   monotonic: a commit's time is `max(now, time of the previous commit)`. Commit, mark and
   checkpoint times and system-journal times of one instance share one monotonic clock:
   `max(now, the latest time the instance wrote)`; after a restart the floor is the latest time in
-  the WAL and the journal (the floor itself is not stored).
+  the WAL and the journal (the floor itself is not stored). Section 18 gives the rules.
 - **UUID** values and every `graph_id` are 16 bytes in RFC 9562 network order (big-endian), so
   that byte order equals the order of the canonical text.
 - **Element ids** are strings. "Sorted by id" means the bytewise order of the UTF-8 encoding.
@@ -134,11 +135,11 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   preserved. A repeated key in one object or property map is invalid.
 - **Temporal values** use the proleptic Gregorian calendar. Tags 9 to 13 (file format version
   2) have a resolution of one microsecond; tags 15 to 20 (version 3) one nanosecond. A writer
-  of version 3 writes ONE form per kind: a `date` as tag 9, a `localdatetime` as tag 15, a
+  of version 3 or later writes ONE form per kind: a `date` as tag 9, a `localdatetime` as tag 15, a
   `datetime` as tag 16 (tag 17 when it keeps a zone name), a `time` as tag 18, an `offsettime`
   as tag 19, a `duration` as tag 20; every engine value has an encoding, so nothing is refused.
-  A reader of version 3 reads tags 9 to 13 as well (a version 2 segment's chunks copied into
-  a version 3 snapshot keep them). The `svar seconds` + `uvar nanos` pairs hold nanoseconds
+  A reader of version 3 or later reads tags 9 to 13 as well (a version 2 segment's chunks
+  copied into a newer snapshot keep them). The `svar seconds` + `uvar nanos` pairs hold nanoseconds
   over the years -9999 to 9999 (about ±3.2 * 10^20 ns, more than an `i64`) and a duration's
   whole time part. Their ranges are normative; a value outside its range is invalid:
 
@@ -272,7 +273,7 @@ every listing.
 `WORKLOAD` holds the instance's workload statistics (book page "Workload Statistics"): data of
 the running instance, not of the graph. It is never in the WAL, never in a snapshot, and never
 copied by a backup, a ZIP backup, a fork, a repair or a conversion; a restored or copied store
-starts without it. A writable store replaces it whole (`write_atomic`) periodically and at close.
+starts without it. An upgrade into a copy (15.1) keeps it: the copy is the same store. A writable store replaces it whole (`write_atomic`) periodically and at close.
 
 ```text
 magic "GRWLSTAT" | version u32 = 2 | series count u32
@@ -435,8 +436,8 @@ denials. Nothing reads it to decide anything: a missing, cut or damaged journal 
 of the store, is never damage (13) and never stops an operation; `verify` lists its problems as
 notes (12.9).
 
-**`INSTANCE`** (instance data like `WORKLOAD`: never copied by any copy path, regenerated when
-missing or unreadable):
+**`INSTANCE`** (instance data: never copied by any copy path, an upgrade into a copy included;
+regenerated when missing or unreadable):
 
 ```text
 magic "GRSLINST" | version u32 = 1 | instance id 16 bytes (big-endian) | reserved 28 bytes, zero
@@ -675,7 +676,8 @@ index rows are those of the referenced file. Rules:
 ### 6.3 The definitions table
 
 The graph's catalog of definitions: named, typed entries stored in the database beside the
-schema (saved queries and compression rules today). One self-describing table serves every kind,
+schema (saved queries, property indexes, compression rules, scheduled jobs and embedding models
+today). One self-describing table serves every kind,
 present and future,
 so that a new kind needs no new layout and no new version (16).
 
@@ -1074,6 +1076,13 @@ Mutations are in execution order. Before images are always present: a reader can
 the state before each commit, and CDC consumers get before and after values. The edges a vertex
 drop removes appear as DropEdge mutations before the DropVertex. A write to a nested path inside
 a property is a SetProperty of the top-level key.
+
+A schema (op 9) may declare **vector rules**: a vector property with an `embedder` and a `from`
+property (book page "Vector Rules"). The vectors a rule computes are ordinary SetProperty and
+RemoveProperty mutations of the commit that changed their source (or of the commit that added
+the rule, which fills every element of the label), written as they were computed. A replay, a
+recovery, a merge checkpoint and every other reader apply them as recorded and MUST NOT embed:
+replaying a commit never needs the model.
 
 ### 9.3.1 Commit in parts
 
@@ -1733,6 +1742,20 @@ reports it once per blob and failure in its operational journal (the reference i
 `blob.damaged` record names the blob, the failure and a recommendation: any copy with the same
 hash, from a backup or another copy of the store, is the same bytes).
 
+**Bringing blobs back.** Two operations of a CLOSED store (the writer lock) deal with missing or
+damaged blobs; neither changes the history:
+
+- A **blob restore** checks every blob of the referenced set (12.4: length, CRC-32C and hash)
+  and copies each faulty one from another copy (a backup directory with its increments, a ZIP
+  backup, a packed snapshot, another store) by its algorithm and hash, a blob of an unknown
+  algorithm by its name (4.6): streamed into `blobs/tmp-<random>`, checked the same way, synced
+  and renamed into place as a blob write (4.6). A healthy blob is never touched; a source blob
+  that fails the check is not used.
+- A **repair that drops faulty blobs** (13.4 above, opt-in) leaves out of the repaired store's
+  catalog every definition that references a missing or damaged blob, and the blob. It MUST be
+  refused before anything is written while the current schema needs such a definition (a model
+  a vector property's `embedder` names, 4.5).
+
 ## 14. The single-file container
 
 A whole store in ONE file (extension `.gstore` by convention; the content decides): a
@@ -1891,24 +1914,21 @@ many small appends).
 - Version history of the file format: 1 (Graphersal 0.1.x); 2 (Graphersal 0.2.0) added the
   temporal value tags 9 to 13 and the vector value tag 14 (3); 3 (Graphersal 0.3.0) added the
   nanosecond temporal value tags 15 to 20 (with `offsettime` and the zone name of a
-  `datetime`) and writes every temporal kind but `date` with them; 4 (Graphersal 0.5.0) adds
-  the Commit part record type 4 of the WAL (9.2, 9.3.1), written for commits larger than one
-  part, besides the other additions of that version. Nothing else differs, so a
-  reader of version 3 reads version 1 and 2 files as they are: a packed snapshot written by
-  0.1.x or 0.2.x loads, and a store created from it keeps its older manifest and segment files
-  byte for byte (8, 12.1). Every file carries its own version: a snapshot of file format version
-  3 MAY reference (6.2) or a packed snapshot MAY contain segment files of versions 1 and 2, and
-  a manifest of an older version MAY be rewritten as version 3 (its content is valid in both).
-  A file of version 3 is not readable by a reader of version 2: Graphersal 0.2.x refuses a
-  store, backup or packed snapshot holding one as written by a newer version (unsupported
-  version, below), never as damage, because it checks every file header first (it does so since
-  0.1.1). That is why file format version 3 needs no new store format version, unlike version 2
-  (whose readers, 0.1.0, took an unknown file version for damage). The container is still at
-  version 1. File format version 4 (Graphersal 0.5.0) adds the blob reference value tag 21 (3),
-  the manifest's blob table (6.2 item 5), the segments of the system journal (4.7) and the
-  commit in parts of the WAL (record type 4, 9.3.1); a reader of version 4 reads versions 1 to 3 as they are, and an older reader refuses a version
-  4 file as newer (its header walk), never as damage: like version 3 it needs no new store
-  format version.
+  `datetime`) and writes every temporal kind but `date` with them; 4 (Graphersal 0.5.0) adds the
+  blob reference value tag 21 (3), the manifest's blob table (6.2 item 5), the segments of the
+  system journal (4.7) and the Commit part record type 4 of the WAL (9.2, 9.3.1), written for
+  commits larger than one part. Nothing else differs between these versions, so a reader of
+  version 4 reads files of versions 1 to 3 as they are: a packed snapshot written by an older
+  release loads, and a store created from it keeps its older manifest and segment files byte for
+  byte (8, 12.1). Every file carries its own version: a snapshot MAY reference (6.2) or a packed
+  snapshot MAY contain segment files of older versions, and a manifest of an older version MAY be
+  rewritten in the current version (its content is valid in both). A file of a newer version is
+  not readable by an older reader: since 0.1.1 every reader checks every file header first and
+  refuses a store, backup or packed snapshot holding one as written by a newer version
+  (unsupported version, below), never as damage. That is why file format versions 3 and 4 need
+  no new store format version of their own, unlike version 2 (whose readers, 0.1.0, took an
+  unknown file version for damage); store format version 4 marks the model migration (above).
+  The container is still at version 1.
 - A writer writes only the current version.
 - A file with a newer version than the reader knows MUST be refused (unsupported version),
   never guessed at. A reader of file format version 4 MUST accept versions 1 to 4 in every
@@ -2113,15 +2133,38 @@ store format version 4 and file format version 4:
   incomplete record at the end as "not yet written". Records before the writer's durable end are
   final; a record after it may still be cut off (9.7).
 - Read every file with the version in its own header (15): accept files of format versions 1
-  to 3 in one store or packed snapshot, reject a temporal value tag in a version 1 file and a
-  nanosecond temporal value tag (15 to 20) in a version 1 or 2 file, and reject a temporal value
+  to 4 in one store or packed snapshot, reject a temporal value tag in a version 1 file, a
+  nanosecond temporal value tag (15 to 20) in a version 1 or 2 file and a blob reference (tag 21)
+  or a Commit part record (type 4) in a file of version 1 to 3, and reject a temporal value
   outside its range (3) as damage; a zone name you do not know is unsupported content (3).
+- Assemble a commit in parts (9.3.1) as ONE commit at the position of part 0; grow its body part
+  by part, never from `body_length` up front; an incomplete commit in parts at the end of the
+  last segment is a torn tail starting at part 0 (9.6).
+- Check a blob's length before reading it and its CRC-32C on every read; a missing or damaged
+  blob fails only what needs its bytes and is never damage of the store (4.6, 13.4). Treat the
+  content of a blob (a model tar, 4.5) as untrusted input.
+- Treat `marks` and `ledger` as derived from the WAL (10, 10.1) and the system journal as
+  information only (4.7): a damaged or missing one is rebuilt or shown as a note, never damage,
+  and nothing is decided from the system journal.
+- A store whose current schema needs a model (4.5) is opened only with that model loaded, or
+  read-only by a reader that cannot run models; a needed model that is missing, damaged or does
+  not fit refuses the open.
 
 **Writers**
 
-- Write every new file with the current file format version (3) and `GRAPH` with store format
-  version 3; never append a record to a WAL segment of an older file format version (start a new
+- Write every new file with the current file format version (4) and `GRAPH` with store format
+  version 4; never append a record to a WAL segment of an older file format version (start a new
   segment, 15.1), and never write a nanosecond temporal tag into a file of version 1 or 2.
+- Write a commit whose body is larger than the part size in parts (9.3.1): consecutive records
+  of one segment, rotation only before part 0, one sync after the last part, and a failed part
+  cuts the WAL back to part 0 (9.7, 9.9).
+- Write a blob completely (temporary name, sync, rename, directory sync) BEFORE the commit that
+  references it, and remove a blob only when no retained history references it (4.6, 12.4).
+- Never copy instance data (`WORKLOAD` except into an upgraded copy, `INSTANCE`, the locks) as
+  part of another store (4.4, 4.7); never write the system journal of a read-only store or of a
+  store in which damage was found (4.7).
+- Take every commit, mark and checkpoint time and every system-journal time from the instance
+  clock (18).
 - Follow the write ordering of 9.9: a WAL never holds a commit that did not happen, and a caller
   never gets "ok" for a commit that is not durable under the configured durability.
 - Make files visible only when complete: a temporary name, sync, an atomic rename, a sync of the
@@ -2131,3 +2174,27 @@ store format version 4 and file format version 4:
 - Never remove WAL or snapshots implicitly: only an explicit prune (12.4), a rollback (12.5) or
   removal of an attic entry removes history.
 - Record only store-relative names (4.2).
+
+## 18. Time: the instance clock
+
+Every time a store's history holds (commits, 9.3; marks, 9.4; checkpoint records, 9.5) and
+every time of the system journal (4.7) is read from ONE clock per instance (a process that has
+the store open, or a closed-store operation, 12.12):
+
+- **Reading.** A reading is `max(system clock, floor)` in microseconds (section 2) and raises
+  the floor to itself, so readings never decrease (two readings may be equal). A commit's time is
+  at least the time of the commit before it, and a record about commit N (a mark, a checkpoint,
+  a journal record) is never earlier than commit N.
+- **The floor is not stored.** When an instance opens a store, or a closed-store operation
+  starts, the floor is raised to the latest time the store's files hold: the loaded snapshot's
+  times (6.1: created at, last commit at), every commit, mark and checkpoint record of the
+  replayed WAL, and the newest record of the system journal. A recovery to a target (12.1) raises it from what it
+  read; a read-only view of a past position uses the store's full floor.
+- **A system clock that steps back** (a resumed virtual machine, a manual change) leaves every
+  time at the floor until the system clock passes it again; a step of more than one second is
+  reported (the reference implementation writes a `clock.step_back` journal record). Times
+  therefore stay monotonic, and the target "the last commit at or before time T" (12.1) stays
+  well defined.
+- Times that are not part of the history (the "created at" of a snapshot manifest, a WAL
+  segment header, the times of `GRAPH`, backups and attic entries) are informative and read from
+  the system clock.

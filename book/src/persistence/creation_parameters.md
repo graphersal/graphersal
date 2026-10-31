@@ -68,6 +68,14 @@ The storage type of the graph (`Store<TraversalGraph>` or a host's `Store<S>`,
 [Your Own Storage](store_own_storage.md)) is NOT a creation parameter: the files do not depend on
 it, so any storage type opens any store.
 
+Neither are the additions of store format version 4: the **hash algorithm of a blob** is stated
+by each blob reference itself (`hash_algo`, [format spec](format.md) 3 and 4.6), so another
+algorithm needs no new store; the **part size of a commit in parts** (64 MiB) is the writer's
+choice, readers accept any slice size (9.3.1); the **embedding models** and the default model
+are catalog definitions, data of the history that commits change
+([Embedding Models in a Store](store_models.md)); the system journal's segment size and instance
+name are open options (below).
+
 ## Open options (per open, stored nowhere)
 
 | Option | Default | Rust (`StoreOptions`) |

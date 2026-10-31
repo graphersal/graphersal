@@ -291,9 +291,9 @@ OPTIONS:
                            For the four --max-* script limits and this one, 0 means unlimited.
         --max-materialized-bytes <N>
                            Default traversal.max_materialized_bytes: the per-query memory
-                           limit, the estimated size of one value or buffer a query
-                           materializes (the library default, 1 GiB, applies without it; 0
-                           means unlimited). A query's own g.with(...) overrides it.
+                           limit, the memory one query holds at once (the library default,
+                           1 GiB, applies without it; 0 means unlimited). A query's own
+                           g.with(...) overrides it.
         --max-value-depth <N>  Deepest nesting of arrays and maps in one value, for script
                            values (script.max_value_depth) and engine-built values
                            (traversal.max_value_depth); default 128, 0 means the default.
