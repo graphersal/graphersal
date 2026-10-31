@@ -142,6 +142,46 @@ fn a_closed_store_backup_reports_its_models() {
     }
 }
 
+/// A store opened read-only (here: a build without the Model2Vec loader opening a store whose
+/// schema needs a model; with the loader it opens writable and the same holds) lists every
+/// commit in `changes_since` and carries them into a backup. Found after the 0.4.0 upgrade:
+/// such an open never set the WAL's durable end, and its default hid every commit.
+#[test]
+fn a_read_only_open_lists_its_commits_and_backs_them_up() {
+    let temp = Temp::new("read-only-changes");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    add_person(&store, "ann");
+    let model = import(&store, 1, "acme/tiny").model;
+    set_schema(&store, &model.identity);
+    add_person(&store, "bob");
+    let last = store.graph().read().last_commit_seq();
+    store.close().unwrap();
+
+    let store = Store::open(&path, options()).unwrap();
+    #[cfg(not(feature = "model2vec"))]
+    assert!(store.read_only_reason().unwrap().is_some());
+    let seqs: Vec<u64> = store
+        .changes_since(0)
+        .unwrap()
+        .map(|changes| changes.unwrap().commit_seq())
+        .collect();
+    assert_eq!(seqs, (1..=last).collect::<Vec<_>>());
+    let after: Vec<u64> = store
+        .changes_since(last - 1)
+        .unwrap()
+        .map(|changes| changes.unwrap().commit_seq())
+        .collect();
+    assert_eq!(after, [last]);
+    let backup = store.backup(temp.join("backup")).unwrap();
+    assert_eq!(backup.commit_seq, last);
+    store.close().unwrap();
+    Store::restore_backup(temp.join("backup")).unwrap();
+    let restored = Store::open(temp.join("backup"), options()).unwrap();
+    assert_eq!(restored.graph().read().last_commit_seq(), last);
+    restored.close().unwrap();
+}
+
 /// Copies a directory tree.
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();

@@ -3001,9 +3001,14 @@ impl StoreCore {
         self.shared.wal.frozen().is_some()
     }
 
+    /// How far the WAL is durable, for readers of the files (`changes_since`, backups): the
+    /// open journal's end; `None` (the WAL up to its last complete, valid record, like a store
+    /// read by another process) when no journal of this open writes it: a backup, maintenance
+    /// mode, a read-only store (format spec 16, a model this build cannot load) or a stopped one.
+    /// Such an open never set the durable end, so its default (segment 0) would hide every
+    /// commit (found reading `changes_since` of a migrated store opened read-only).
     fn durable_position(&self) -> Option<DurablePosition> {
-        self.backup
-            .is_none()
+        (self.backup.is_none() && self.maintenance.is_none() && !self.writes_nothing())
             .then(|| self.shared.durable.position())
     }
 
