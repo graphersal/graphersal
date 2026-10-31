@@ -80,6 +80,7 @@ mod terminals;
 #[cfg(test)]
 mod tests;
 mod tokens;
+mod vector_writes;
 pub use access::{pin_now, set_engine_graph};
 pub use dynamic::script_value_to_property;
 use dynamic::*;
@@ -117,6 +118,8 @@ pub use tokens::{
     ScriptSet, ScriptSetTokens, ScriptT, ScriptTextP, ScriptUuid, ScriptUuidTokens, ScriptV,
     ScriptVector, ScriptVertex, ScriptVertexRef, ScriptWithOptions,
 };
+pub(crate) use vector_writes::attach_direct_writes;
+pub use vector_writes::saved_queries_writing_vectors;
 
 use crate::graph::schema::{GraphSchema, SchemaMode, VisualizeFormat};
 use crate::graph::{AnyGraph, IntoAnyGraph};

@@ -464,7 +464,10 @@ commit.
 ## Applying a schema to existing data
 
 `set_schema` and `patch_schema` validate **all existing data first**, in one pass over the vertices
-and edges, when the mode is `open` or `closed`. If anything violates the schema, the graph and its
+and edges, when the mode is `open` or `closed`. When the stored schema already has that mode, the
+data satisfies it (every write was checked), so only the elements of the labels whose declaration
+was added, changed or removed are read: a patch of one label checks that label's elements, not
+the whole graph (`validate_schema` checks the same elements). If anything violates the schema, the graph and its
 current schema stay **unchanged** and the call fails with one aggregated error that lists every
 kind of violation, grouped by rule with a count and a few sample ids:
 

@@ -1809,6 +1809,56 @@ impl RemovedFunctionUse {
     }
 }
 
+/// A saved query whose body writes a vector property directly (`.property("emb", ..)` with a
+/// literal key) on labels where that property is the target of a vector rule (`from`), or will
+/// be once the rule a report suggests is added (`graphersal::script::saved_queries_writing_vectors`,
+/// feature `script`; the upgrade report, the notes of a `.gsnap` loaded without a store, the
+/// fill preview of a schema change). A rule fills its property itself and refuses a direct
+/// write of it: the write has to go (the rule computes the value from its source property).
+/// A saved query is never rewritten.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorPropertyWrite {
+    /// The saved query's name in the catalog.
+    pub query: String,
+    /// Vertices or edges.
+    pub element: crate::graph::ElementKind,
+    /// The vector property the body writes.
+    pub property: String,
+    /// The labels its writes may touch that declare the property as a vector (by the query's
+    /// effects; a write whose label is not known statically covers every such label).
+    pub labels: Vec<String>,
+    /// Whether a rule exists already on one of [`Self::labels`] (`false`: the property has a
+    /// model but no source property yet, and a report suggests adding one).
+    pub rule_exists: bool,
+}
+
+impl VectorPropertyWrite {
+    /// The text every front end shows for it (one line: the CLI prints it as a `note:`).
+    pub fn note(&self) -> String {
+        let element = match self.element {
+            crate::graph::ElementKind::Vertex => "",
+            crate::graph::ElementKind::Edge => "edge ",
+        };
+        let places = self
+            .labels
+            .iter()
+            .map(|label| format!("{element}{label}.{}", self.property))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let when = if self.rule_exists {
+            "a vector rule fills it, so its direct writes are refused"
+        } else {
+            "once the vector rule exists, direct writes of it are refused"
+        };
+        format!(
+            "saved query \"{}\" writes {} directly ({places}): {when}: remove that write (the \
+             rule computes {} from its source property); the query is not rewritten",
+            self.query, self.property, self.property
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -356,11 +356,11 @@ where
     }
 
     fn memory_view(&self) -> Result<Value, GraphError> {
-        let mut view = reading_with(self, crate::views::memory_usage)?;
-        if let (Some(stats), Some(map)) = (Graph::workload_stats(self), view.as_object_mut()) {
-            map.insert("workload_bytes".into(), stats.memory_bytes().into());
-        }
-        Ok(view)
+        // The graph's figures: the storage's plus the workload statistics and the loaded models
+        // held beside it.
+        Ok(crate::views::memory_stats_view(AnyGraph::memory_usage(
+            self,
+        )?))
     }
 
     fn element(&self, kind: ElementKind, id: &str) -> Result<Option<InspectedElement>, GraphError> {

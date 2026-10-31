@@ -172,11 +172,19 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   (`embedder`), never the property the text came from, so nothing keeps such vectors current.
   The upgrade never guesses the source and recomputes nothing: it lists each such property
   (`UpgradeReport::vectors_without_rule`: element kind, label, property, model, how many
-  elements hold a vector, counted in the newest snapshot) and the CLI prints a `note:` with the
-  ready schema patch, for example
+  elements hold a vector, counted in the newest snapshot) and the CLI prints ONE `note:` per
+  model with the ready schema patch (`UpgradeReport::vector_notes`). A model with one such
+  property gets its own note, for example
 
   ```text
   note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs), and from then on emb itself is not written directly (write the source property)
+  ```
+
+  A model with several such properties gets one note listing them (element kind, label,
+  property, count) with ONE combined patch for all of them, for example
+
+  ```text
+  note: 3 vector properties are declared with vectors of acme/tiny (5 vector(s) in all) but have no source property: doc.emb (3), note.emb (2), draft.emb (no element holds one yet); to keep them current add "from": "<source property>" to each declaration, all in one change (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}, note: ..., draft: ...}})'); ...
   ```
 
   See [Vector Rules](../users_guide/vector_rules.md): adding `from` makes it a rule whose first
@@ -190,7 +198,14 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
 
   From then on a direct write of the vector is refused (`GraphError::DerivedProperty`): a loader
   or saved query of 0.4.0 that computed the vector itself (`property("emb", ..)`) writes the
-  source property instead. A property declared with a model but holding no vector yet is listed
+  source property instead. The upgrade lists every saved query whose body writes such a
+  property by its literal name on a label its effects may write
+  (`UpgradeReport::saved_queries_writing_vectors`, Python
+  `report["saved_queries_writing_vectors"]`), one `note:` each, for example `note: saved query
+  "load_docs" writes emb directly (doc.emb): once the vector rule exists, direct writes of it
+  are refused: remove that write (the rule computes emb from its source property); the query
+  is not rewritten`; the preview of the patch names them too (`fill[..].direct_writes`, and a
+  line of `fill_warning`). A property declared with a model but holding no vector yet is listed
   too ("no element holds one yet").
 - **Saved queries calling a removed function.** A saved query of 0.4.0 that calls
   `g.embed_property(..)` (removed in 0.5.0) is kept as it is, and a call of it fails with a

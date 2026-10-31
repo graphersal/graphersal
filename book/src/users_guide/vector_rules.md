@@ -103,8 +103,11 @@ Removing a rule does nothing to the data: the vectors stay as plain values.
 
 `validate_schema`, `validate_schema_patch` and `diff_schema` report the planned fill before
 anything is applied: `fill` lists per rule the label, `from`, `to`, the model, the reason
-(`rule_added`, `rule_changed`, `model_replaced`), the elements to embed, the vectors to remove
-and the estimated time; `fill_warning` is the ONE text every front end shows:
+(`rule_added`, `rule_changed`, `model_replaced`), the elements to embed, the vectors to remove,
+the estimated time (`estimate_ms`: the embedding plus the schema check the apply runs under the
+same lock, `scan_elements` / `scan_ms`) and the saved queries whose body writes the rule's
+property directly (`direct_writes`: such a write is refused once the rule exists; remove it,
+the queries are never rewritten); `fill_warning` is the ONE text every front end shows:
 
 ```text
 Applying this schema fills vectors: 1,204,331 elements of doc.emb from doc.text with the model
@@ -113,9 +116,18 @@ The whole database is LOCKED while this runs: every write and every read waits u
 Run it at a quiet time. If it fails, nothing is written.
 ```
 
-`diff_schema` reads no data: its counts come from the label statistics ("up to"). A fill
-**needs confirmation** when its estimate is 1 s or more, or, without an estimate, from 10,000
-elements:
+and, when saved queries write a filled property directly, a line per property such as
+`Saved queries writing doc.emb directly fail once the rule exists (remove that write; they are
+not rewritten): load_docs.`
+
+The schema check of a change that keeps the mode (`open` or `closed`) reads only the elements of
+the labels whose declaration changed: adding a rule to three labels of a graph of millions of
+elements checks those three labels, not the whole graph. A change of the mode checks every
+element. `validate_schema` runs the same check and measures it, so its `scan_ms` is the time the
+apply's check takes; `diff_schema` reads no data: its counts come from the label statistics
+("up to") and its check time from a fixed rate. A fill **needs confirmation** when its estimate
+(the check included) is 1 s or more, or, without an estimate, from 10,000 elements or a check of
+1 s or more:
 
 - the playground's schema editor asks with a dialog "Apply and lock" / "Cancel" (below the
   threshold a plain note);

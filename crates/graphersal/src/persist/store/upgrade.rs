@@ -210,6 +210,12 @@ pub struct UpgradeReport {
     ///
     /// [`RemovedFunctionUse::note`]: crate::catalog::RemovedFunctionUse::note
     pub saved_queries_using_removed: Vec<crate::graph::definition::RemovedFunctionUse>,
+    /// The saved queries of the catalog whose body writes a vector property directly (a
+    /// literal `.property("emb", ..)`) on a label where it is a vector rule's target or, once
+    /// the patch [`Self::vectors_without_rule`] suggests is applied, will be: a rule refuses
+    /// such a write. Listed so the write can be removed; the upgrade never rewrites a saved
+    /// query. Filled with the feature `script` only; empty without it.
+    pub saved_queries_writing_vectors: Vec<crate::graph::definition::VectorPropertyWrite>,
 }
 
 /// An embedding model a Graphersal 0.4.0 store kept under `models/`, converted by the upgrade
@@ -376,15 +382,15 @@ impl VectorWithoutRule {
         ))
     }
 
-    /// [`Self::note`] for a graph loaded from the packed snapshot `file` without a store: a
-    /// schema change of such a graph lives only in memory, so the command puts the graph into
-    /// a store first.
-    pub(crate) fn note_for_packed(&self, file: &str) -> String {
-        self.note_with(&format!(
+    /// The ready command of a note for a graph loaded from the packed snapshot `file` without
+    /// a store, running `patch`: a schema change of such a graph lives only in memory, so the
+    /// command puts the graph into a store first.
+    pub(crate) fn packed_command(file: &str, patch: &str) -> String {
+        format!(
             "in a store, as the change of a .gsnap loaded without one stays in memory: \
-             graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e '{}'",
-            self.schema_patch()
-        ))
+             graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e \
+             '{patch}'"
+        )
     }
 
     /// The note with `command`, the ready command that adds the source property.
@@ -415,6 +421,133 @@ impl VectorWithoutRule {
              written directly (write the source property)",
             self.label, self.property
         )
+    }
+
+    /// The ONE schema patch (the DSL's `g.patch_schema`) that adds the source property to
+    /// every vector property of `vectors` (one change, one lock, one fill per property);
+    /// replace each `<source property>` with the property its vectors were made from.
+    pub fn combined_schema_patch(vectors: &[VectorWithoutRule]) -> String {
+        let group = |kind: crate::graph::schema::ElementKind| {
+            let mut labels: Vec<(&str, Vec<&str>)> = Vec::new();
+            for vector in vectors.iter().filter(|v| v.kind == kind) {
+                match labels.iter_mut().find(|(label, _)| *label == vector.label) {
+                    Some((_, properties)) => properties.push(&vector.property),
+                    None => labels.push((&vector.label, vec![&vector.property])),
+                }
+            }
+            labels
+                .iter()
+                .map(|(label, properties)| {
+                    let properties = properties
+                        .iter()
+                        .map(|p| format!("{}: #{{from: \"<source property>\"}}", rhai_key(p)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "{}: #{{schema: #{{properties: #{{{properties}}}}}}}",
+                        rhai_key(label)
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut groups = Vec::new();
+        for (name, kind) in [
+            ("vertices", crate::graph::schema::ElementKind::Vertex),
+            ("edges", crate::graph::schema::ElementKind::Edge),
+        ] {
+            let labels = group(kind);
+            if !labels.is_empty() {
+                groups.push(format!("{name}: #{{{}}}", labels.join(", ")));
+            }
+        }
+        format!("g.patch_schema(#{{{}}})", groups.join(", "))
+    }
+}
+
+/// The notes of `vectors`, ONE per model (in the order the models first appear): a model with
+/// one property gets that property's note ([`VectorWithoutRule::note`]); a model with several
+/// lists them (element kind, label, property, count; "no element holds one yet" for an empty
+/// one) with ONE combined patch ([`VectorWithoutRule::combined_schema_patch`]) run by
+/// `command(patch)`.
+pub(crate) fn vector_notes(
+    vectors: &[VectorWithoutRule],
+    command: impl Fn(&str) -> String,
+) -> Vec<String> {
+    let mut models: Vec<&str> = Vec::new();
+    for vector in vectors {
+        if !models.contains(&vector.model.as_str()) {
+            models.push(&vector.model);
+        }
+    }
+    models
+        .into_iter()
+        .map(|model| {
+            let group: Vec<VectorWithoutRule> = vectors
+                .iter()
+                .filter(|v| v.model == model)
+                .cloned()
+                .collect();
+            if let [single] = group.as_slice() {
+                return single.note_with(&command(&single.schema_patch()));
+            }
+            let places = group
+                .iter()
+                .map(|v| {
+                    let element = match v.kind {
+                        crate::graph::schema::ElementKind::Vertex => "",
+                        crate::graph::schema::ElementKind::Edge => "edge ",
+                    };
+                    let count = if !v.exact() {
+                        format!(
+                            "{} in the newest snapshot, {} later commit(s) not counted",
+                            v.elements, v.not_counted
+                        )
+                    } else if v.elements == 0 {
+                        "no element holds one yet".to_string()
+                    } else {
+                        v.elements.to_string()
+                    };
+                    format!("{element}{}.{} ({count})", v.label, v.property)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let total: u64 = group.iter().map(|v| v.elements).sum();
+            let mut properties: Vec<&str> = Vec::new();
+            for v in &group {
+                if !properties.contains(&v.property.as_str()) {
+                    properties.push(&v.property);
+                }
+            }
+            format!(
+                "{} vector properties are declared with vectors of {model} ({total} vector(s) in \
+                 all) but have no source property: {places}; to keep them current add \"from\": \
+                 \"<source property>\" to each declaration, all in one change ({}); the first \
+                 fill re-embeds every element of these labels (the whole database is locked \
+                 while it runs), and from then on {} itself is not written directly (write the \
+                 source property)",
+                group.len(),
+                command(&VectorWithoutRule::combined_schema_patch(&group)),
+                properties.join(", ")
+            )
+        })
+        .collect()
+}
+
+impl UpgradeReport {
+    /// The notes of [`Self::vectors_without_rule`], ONE per model (a model with several
+    /// properties lists them with one combined schema patch), with the ready command for the
+    /// store at `store`; then one note per saved query writing a vector property directly
+    /// ([`Self::saved_queries_writing_vectors`]). The CLI prints each as a `note:`.
+    pub fn vector_notes(&self, store: &str) -> Vec<String> {
+        let mut notes = vector_notes(&self.vectors_without_rule, |patch| {
+            format!("graphersal --graph {store} -e '{patch}'")
+        });
+        notes.extend(
+            self.saved_queries_writing_vectors
+                .iter()
+                .map(crate::catalog::VectorPropertyWrite::note),
+        );
+        notes
     }
 }
 
@@ -714,6 +847,7 @@ pub(super) fn report_new_store(
         }
     }
     report.saved_queries_using_removed = saved_queries_using_removed(&state)?;
+    report.saved_queries_writing_vectors = saved_queries_writing_vectors(&state)?;
     Ok(report)
 }
 
@@ -850,6 +984,7 @@ fn finish_journal(
     state: &crate::graph::TraversalGraph,
 ) -> Result<UpgradeReport, PersistError> {
     report.saved_queries_using_removed = saved_queries_using_removed(state)?;
+    report.saved_queries_writing_vectors = saved_queries_writing_vectors(state)?;
     // The journal record only when the models were migrated (the migration commit wrote the
     // journal already): an upgrade by the version word writes nothing but `GRAPH`.
     if report.models_converted.is_empty() {
@@ -884,6 +1019,32 @@ pub(super) fn saved_queries_using_removed<G: crate::graph::GraphStorage + ?Sized
             .cloned()
             .collect();
         Ok(crate::script::saved_queries_using_removed(&definitions))
+    }
+    #[cfg(not(feature = "script"))]
+    {
+        let _ = state;
+        Ok(Vec::new())
+    }
+}
+
+/// The saved queries of `state`'s catalog writing a vector property of its schema directly
+/// ([`UpgradeReport::saved_queries_writing_vectors`]); empty without the feature `script`.
+pub(super) fn saved_queries_writing_vectors<G: crate::graph::GraphStorage + ?Sized>(
+    state: &G,
+) -> Result<Vec<crate::graph::definition::VectorPropertyWrite>, PersistError> {
+    #[cfg(feature = "script")]
+    {
+        let schema = state.get_schema().map_err(PersistError::Graph)?;
+        let definitions: Vec<crate::graph::Definition> = state
+            .definitions()
+            .map_err(PersistError::Graph)?
+            .filter(|d| d.kind() == crate::graph::DefinitionKind::QUERY)
+            .cloned()
+            .collect();
+        Ok(crate::script::saved_queries_writing_vectors(
+            &definitions,
+            schema.as_ref(),
+        ))
     }
     #[cfg(not(feature = "script"))]
     {
