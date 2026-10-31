@@ -3937,6 +3937,92 @@ fn store_upgrade_converts_a_store_of_graphersal_0_1() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `graphersal store upgrade` of stores written by the released 0.4.0 (the golden fixtures of
+/// `graphersal`'s tests, `tests/data/v0.4.0`): the models under `models/` become blobs with
+/// definitions, the exit code stays 0, a model the schema needs but the store lacks is a
+/// `warning:` with the commands, every vector property without a rule a `note:` with the ready
+/// schema patch; the schema keeps no `from` (nothing is recomputed).
+#[test]
+fn store_upgrade_converts_models_and_warns_about_missing_ones() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("store-upgrade-040");
+    let _ = std::fs::remove_dir_all(&root);
+    let old = root.join("store");
+    copy_tree(&fixtures.join("store"), &old);
+    let old = old.to_string_lossy().to_string();
+
+    let res = run(&["store", "upgrade", &old, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    for needle in [
+        "store format version 3",
+        "the models/ directory migrated",
+        "Converted the embedding model model2vec/acme/tiny@70c61d0ed332",
+        "model2vec/local/b6b362e7a651@b6b362e7a651",
+        "defined by commit 12",
+        "Take a full backup now",
+    ] {
+        assert!(res.stdout.contains(needle), "{needle}: {}", res.stdout);
+    }
+    let patch = "g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: \
+                 \"<source property>\"}}}}}})";
+    for needle in [
+        "note: the model model2vec@b6b362e7a651 had no repository name",
+        "note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property",
+        &format!("graphersal --graph {old} -e '{patch}'"),
+        "re-embeds every doc",
+        "note: person.emb has vectors of hash-ngram/1 (2 element(s))",
+        "note: note.emb has vectors of local/b6b362e7a651 (1 element(s))",
+    ] {
+        assert!(res.stderr.contains(needle), "{needle}: {}", res.stderr);
+    }
+    assert!(!res.stderr.contains("warning:"), "{}", res.stderr);
+    let res = run(&["store", "models", &old], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("acme/tiny"), "{}", res.stdout);
+    assert!(!res.stdout.contains("missing"), "{}", res.stdout);
+    let res = run(
+        &["--graph", &old, "-e", "g.v().has(\"emb\").count().next()"],
+        "",
+    );
+    assert_eq!(res.stdout.trim(), "6", "{}", res.stderr);
+    let res = run(
+        &[
+            "--graph",
+            &old,
+            "-e",
+            "g.get_schema().to_json().contains(\"from\")",
+        ],
+        "",
+    );
+    assert_eq!(res.stdout.trim(), "false", "{}", res.stderr);
+
+    // A schema naming a model the store does not keep: upgraded, with a warning and the
+    // commands, exit 0; the store does not open until the model is imported.
+    let missing = root.join("missing");
+    copy_tree(&fixtures.join("missing"), &missing);
+    let missing = missing.to_string_lossy().to_string();
+    let res = run(&["store", "upgrade", &missing, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "warning: the schema needs the model model2vec/acme/gone@0123456789ab (doc.emb)"
+        )),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        res.stderr.contains(&format!(
+            "graphersal embed-model import acme/gone --into {missing}"
+        )),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["--graph", &missing, "-e", "1"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// CRC-32C (Castagnoli), bitwise: the newer-version test recomputes header checksums.
 fn crc32c(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
@@ -3987,7 +4073,8 @@ fn store_commands_refuse_files_of_a_newer_graphersal() {
     for name in ["GRAPH", "GRAPH.copy"] {
         let path = dir.join(name);
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
+        bytes[8..12]
+            .copy_from_slice(&(graphersal::persist::STORE_FORMAT_VERSION + 1).to_le_bytes());
         let crc = crc32c(&bytes[..252]);
         bytes[252..256].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&path, bytes).unwrap();

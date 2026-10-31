@@ -1,6 +1,6 @@
-# Storage Format Specification (store version 3, file version 4)
+# Storage Format Specification (store version 4, file version 4)
 
-This page is the normative specification of Graphersal's storage format, store format version 3
+This page is the normative specification of Graphersal's storage format, store format version 4
 with file format version 4 (15): the packed snapshot (`.gsnap`), the write-ahead log
 (journal), the Store directory and its files, and the single-file container (`.gstore`). It is
 written so that a third party can read (and write) these files without Graphersal's code: a
@@ -211,7 +211,8 @@ ledger                        the blob ledger, derived from the WAL (10.1); opti
 blobs/                        the blobs the store keeps (4.6); optional
     3f/3fa1...e9              one blob: its whole content; the name is the lowercase hex of its hash
     tmp-<32 hex digits>       a blob being written (never listed, removed on open)
-models/                       the embedding models the store keeps (4.5); optional
+models/                       store format version 3 only (Graphersal 0.4.0): the embedding models as
+                              files (4.5 "Older stores"); migrated away by the upgrade (15.1)
     model2vec-0123456789ab/   one model; the name is its content address
         graphersal-embed-model.json   its manifest, written last
         config.json  tokenizer.json  model.safetensors  README.md  LICENSE ...
@@ -386,9 +387,11 @@ it holds.
 
 **Older stores.** Graphersal 0.4.0 kept models as `models/<model2vec-12hex>/` directories with a
 manifest `graphersal-embed-model.json` (format 2, with `added_at`), outside the history, carried
-by every copy as files and by a packed snapshot as segment-table rows of kind 3. This version
-still carries such directories through its copies and reads them for the migration (15) into
-blobs and definitions; it writes none.
+by every copy as files and by a packed snapshot as segment-table rows of kind 3. A store of
+store format version 4 has no `models/`: the upgrade (15.1) migrates each such model into a blob
+(the tar above, its manifest rebuilt from the old one) and one commit defines them all. A
+packed snapshot with kind-3 rows imported into a store is migrated the same way (the new store's
+first commit after the snapshot defines the models; into an open store each is imported).
 
 ### 4.6 Blobs
 
@@ -1249,13 +1252,15 @@ anything else. An unknown `op` MUST fail the open, as unsupported content of a n
 {"op": "<operation>", "files": ["<store-relative names>"], "started_at": <micros>, ...}
 ```
 
-Further parameters are string values. Operations of store format version 3 (the same as version 2):
+Further parameters are string values. Operations of store format version 4 (versions 2 and 3
+have all but `upgrade_models`):
 
 | `op` | Parameters and steps |
 |---|---|
 | `prune` | `files`: the snapshot directories and WAL segments to remove. On open: each listed name is removed (missing is fine), the directories synced, `INTENT` removed |
 | `rollback` | `files`: snapshot directories and WAL segments to move (or delete); `target`, `last_commit`, `base_snapshot` (newest snapshot at or before the target), `mode` (`move` \| `delete`), `old_graph_id`, `new_graph_id` (32 hex digits), `time`, `attic` (`attic/<YYYYMMDDTHHMMSSZ>-<target+1, 20 digits>`), `reason`; and either `split` + `split_offset` (the segment holding the first commit after the target is cut there; its tail becomes `<attic>/wal/<target+1>.wal` with the old lineage's header) or `kept` (hex; when that segment is itself named `target+1`, it moves whole, and the records before the cut, marks pointing at the target, open the new lineage's segment). The tail of a split segment keeps the header lineage of the segment it is cut from (an ANCESTOR's when the target lies before the current lineage's branch point), not necessarily `old_graph_id`. `files` names every directory under `snapshots/` after the target, holders (4.1) included. For the existing attic entries (11.2) whose history before their own WAL reaches past the target, three more parameters, each a list of lines separated by `\n`: `copies` (`<source> <destination>`: the store's WAL segments, or the split segment meaning its tail as the attic gets it, that hold the commits from `target + 1` up to such an entry's prefix end, copied into `<entry>/wal/` under their names), `rebase` (the ids of those entries) and `drop` (the snapshot directories of entries one of whose snapshots references a file of a directory this rollback moves). Steps: attic directories; the `copies` (each written whole under its final name, skipped when present; all of them exist before any source changes); the `drop` directories removed; each `rebase` entry's `ATTIC` rewritten with `base_snapshot` = this rollback's `base_snapshot`; tail and cut; move or delete files; `ATTIC`; `marks` filtered to `<= target`; `GRAPH` with the new lineage entry `[new id, branched at target, time]`; the new lineage's segment `<target+1>.wal` (written whole, its header created at `time`, then the kept records; one found shorter is written again); holders no snapshot of the store or of an attic entry references any more are removed (12.4); `INTENT` removed |
 | `attic_restore` | Allowed only while the store is at the entry's target on the rollback's lineage and its new segment holds nothing beyond the kept records. `files`: the entry's directories under `snapshots/` (holders too) and its WAL segments named after its target (its prefix copies, 11.2, stay behind: the store holds that history again); refused when one of them exists in the store. Steps: remove the new lineage's segment and a snapshot of the new lineage at the target (a checkpoint of the closed store after the rollback writes one without a WAL record), move the entry's files back, drop the lineage entry from `GRAPH`, rebuild `marks` from the WAL, remove the entry |
+| `upgrade_models` | the migration of a store format version 3 store's `models/` (15.1): `files` the model directories `models/<id>` checked before it was written, `from` the old store format version. Written before `GRAPH` gets the new version (a reader of version 3 then refuses the store as newer; one that reads `GRAPH` as 3 but finds this op refuses it as unknown). Steps, each idempotent: every model of `models/` becomes a blob (a blob of the same content stays); ONE catalog commit (12.12) defines every model whose identity's 12 hex digits no model definition has yet (principal `upgrade`, attribute `upgrade` = `"<from>-><to>"`; a renamed model's `embedder` in the schema renamed in the same commit), none when all are defined; each model directory renamed to `models/tmp-<32 hex>` and removed, then `models/`; `INTENT` removed |
 | `backup_increment` | written in the **backup's** root (12.7): `files` (new snapshot directories and WAL segments), `graph_before` (hex of the backup's `GRAPH`), `taken_at`, optionally `tail` + `tail_len` (the segment appended to and its length before) and `replaced` |
 
 Stray `*.tmp` files in the store root and `snapshots/tmp-*` directories are removed on open.
@@ -1659,7 +1664,7 @@ ignores (9.6). No snapshot is written.
   later snapshot covering it. A file the newest snapshot references is a twin in the directory
   (or holder) of an older snapshot; its damage is repaired from the previous snapshot like
   damage of the newest's own files.
-- Flag bit 0 of `GRAPH` is reserved for parity data (not in store format version 3).
+- Flag bit 0 of `GRAPH` is reserved for parity data (not in store format version 4).
 
 ### 13.2 The damage scan
 
@@ -1869,7 +1874,7 @@ many small appends).
 - Every file starts with a magic and a format version. There are three version axes: the
   **store format version** in `GRAPH` (offset 8, 5.1), the **file format version** in the
   manifests, segments, WAL segments and packed snapshots, and the single-file **container
-  version** (14.1). This specification is store format version 3, file format version 4 and
+  version** (14.1). This specification is store format version 4, file format version 4 and
   container version 1.
 - Version history of the store format: 1, the first version; 2 (Graphersal 0.1.0) added the
   store identity `store_id` at `GRAPH` offset 100 (5.5), which version 1 left zero; 3
@@ -1878,7 +1883,11 @@ many small appends).
   file format version 1 and would take the manifests and WAL segments of file format version 2
   for damage (an unknown version word is damage there, 13), open the store in maintenance mode
   and offer a repair that loses data; with version 3 in `GRAPH` it refuses the store as newer
-  before it reads any other file.
+  before it reads any other file. 4 (Graphersal 0.5.0) has the layout of version 3 and marks a
+  store whose embedding models are blobs referenced by catalog definitions (4.5, 4.6), with the
+  blob ledger (10.1) and the system journal (4.7); a version 3 store of Graphersal 0.4.0 may
+  keep models as files under `models/`, which the upgrade migrates (15.1). With version 4 in
+  `GRAPH`, Graphersal 0.4.x refuses the store as newer.
 - Version history of the file format: 1 (Graphersal 0.1.x); 2 (Graphersal 0.2.0) added the
   temporal value tags 9 to 13 and the vector value tag 14 (3); 3 (Graphersal 0.3.0) added the
   nanosecond temporal value tags 15 to 20 (with `offsettime` and the zone name of a
@@ -1931,8 +1940,9 @@ many small appends).
   of a backup directory, fork, conversion), except the upgrade (15.1), the repair (which reads a
   store of a released older version as upgraded and writes the repaired store in the current
   version) and the restore of a ZIP backup (which upgrades what it unpacks).
-- **Every release reads every released version.** A reader of store format version 3 MUST read
-  the files of store format version 2 (Graphersal 0.1.0) and of file format version 1, and a
+- **Every release reads every released version.** A reader of store format version 4 MUST read
+  the files of store format versions 2 (Graphersal 0.1.0) and 3 (0.2.0 to 0.4.x) and of file
+  format versions 1 to 3, and a
   later version MUST keep reading them; a store of a released older version is upgraded without
   the build that wrote it (15.1). Store format version 1 was never released: a store of it is
   migrated through a packed snapshot exported by the build that wrote it, from which the current
@@ -1951,31 +1961,48 @@ upgrade not in it is refused before anything is written. The reference implement
 <!-- upgrades:begin -->
 | From store format version | Written by | To | Upgrade |
 |---|---|---|---|
-| 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
-| 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
+| 1 | never released (no store id) | 4 | unsupported (packed snapshot) |
+| 2 | Graphersal 0.1.x (no models: the version word only) | 4 | in place or into a copy (migration) |
+| 3 | Graphersal 0.2.x - 0.4.x | 4 | in place or into a copy (migration) |
+| 4 | Graphersal 0.5.x and later | 4 | nothing to do |
 <!-- upgrades:end -->
 
 "Version word" means only the version word of `GRAPH` and `GRAPH.copy` (and their checksums)
-changes, which is safe in place; "into a copy only" means the upgrade writes a new store and an
-in-place upgrade is refused; "unsupported" means the migration through a packed snapshot
-(below). A store holding a file of a newer version is never upgraded (15).
+changes, which is safe in place; "migration" means the version word plus the migration of the
+embedding models a version 3 store keeps under `models/` (below; a store without `models/`
+changes only its version word), in place or into a copy; "into a copy only" means the upgrade
+writes a new store and an in-place upgrade is refused; "unsupported" means the migration through
+a packed snapshot (below). A store holding a file of a newer version is never upgraded (15).
 
-An upgrade converts a store of store format version 2 (a store, a backup directory, either
-backend) to version 3. Version 3 has the layout of version 2 and every file of version 2 is a
-valid file of version 3 (its own header names its file format version, 1, which a version 3
-reader reads), so an upgrade:
+An upgrade converts a store of store format version 2 or 3 (a store, a backup directory, either
+backend) to version 4. Version 4 has the layout of versions 2 and 3 and every file of them is a
+valid file of version 4 (its own header names its file format version, which a version 4 reader
+reads), so an upgrade:
 
 1. Takes the writer lock of the store and refuses it while held (an older writer has it open).
-2. Verifies the store as version 3 would read it (12.6's checks: both `GRAPH` copies, every
+2. Checks every model of `models/` against its manifest (4.5 "Older stores": every file's size
+   and SHA-256, the three identity files, the weights' safetensors header) WITHOUT writing; a
+   damaged, incomplete or unconvertible model refuses the upgrade.
+3. Verifies the store as version 4 would read it (12.6's checks: both `GRAPH` copies, every
    snapshot, every WAL record and the segment set of 9.8, the attic) WITHOUT writing: the
-   `GRAPH` copies are read with the version word replaced by 3. Any problem refuses the upgrade
+   `GRAPH` copies are read with the version word replaced by 4. Any problem refuses the upgrade
    (repair it instead, 13).
-3. Rewrites `GRAPH.copy`, then `GRAPH` (each atomically, 5.3) with version 3 and every other field
+4. With `models/`: writes `INTENT` `upgrade_models` (11.1).
+5. Rewrites `GRAPH.copy`, then `GRAPH` (each atomically, 5.3) with version 4 and every other field
    unchanged (lineage, identity, flags, the backup marker, `wal_head`, `closed_at`, `wal_cut`).
-   No other file changes, so no `INTENT` is needed: after a crash between the two writes the
-   copies differ by the version word only and a version 3 reader uses the valid copy (5.3);
-   repeating the upgrade rewrites both. A version 2 reader refuses either state as newer.
+   Without `models/` no other file changes, so no `INTENT` is needed: after a crash between the
+   two writes the copies differ by the version word only and a version 4 reader uses the valid
+   copy (5.3); repeating the upgrade rewrites both. An older reader refuses either state as
+   newer.
+6. With `models/`: completes the `INTENT` (11.1): each model becomes ONE blob, the model tar of
+   4.5 holding its files and a manifest of format 3 built from the old one (identity, repository,
+   revision, commit, licence, licence text, base models, gated, the files); ONE catalog commit
+   (12.12, in a new WAL segment) defines the models (kind 5, no default); `models/` is removed.
+   The repository of a definition is the old manifest's; a model without one, or a second
+   revision of a repository another model of the store takes, gets `local/<12 hex>` (its
+   identity changes; the schema's `embedder` naming the old identity is renamed in the same
+   commit). The positions before the migration commit have no models. A reader of version 4 that
+   finds the `INTENT` completes it at its next read-write open or upgrade.
 
 An upgrade into a NEW location copies every file of the store (as a conversion does: name by name, without the
 locks and temporary files) after step 2, writes a marker `upgrade-in-progress.tmp` into the
@@ -1992,8 +2019,8 @@ lineage is older, the next record goes into a new segment of the current version
 commit) is replaced whole by one of the current version under the same name.
 
 A new FILE format version alone needs no upgrade and no table row: a store of store format
-version 3 written by 0.2.x (files of version 2) is opened and continued as it is by a reader of
-file format version 3; its version 2 files stay, the files written from then on are of version
+version 3 written by 0.2.x (files of version 2) was opened and continued as it is by a reader of
+file format version 3 (Graphersal 0.3.x); its version 2 files stay, the files written from then on are of version
 3 (a new WAL segment, new snapshots), and from then on 0.2.x refuses the store as newer (15).
 - New definition kinds (6.3), new payload keys of a known kind, new segment kinds (7.5) and
   named extra files (8) do **not** change the version: the rules of 16 tell every reader how to
@@ -2002,7 +2029,7 @@ file format version 3; its version 2 files stay, the files written from then on 
 ## 16. Extensibility
 
 The format is meant to grow without migrations. These rules bind every reader and writer of
-store format version 3 and file format version 3:
+store format version 4 and file format version 4:
 
 1. **Length before payload, payload as a map.** Every definition carries its length before its
    payload (6.3), so a reader skips an unknown kind by its length; a payload is a property map,

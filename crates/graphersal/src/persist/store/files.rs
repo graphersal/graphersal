@@ -1122,8 +1122,11 @@ pub(crate) fn undo_new_dir(dir: &DirPath, existed: bool) {
 /// word of `GRAPH`. Version 2 added the store id (offset 100); version 3 (Graphersal 0.2.0)
 /// has the same `GRAPH` layout and marks a store whose snapshots and WAL are of file format
 /// version 2 (the temporal value tags), so that a build that reads only file format version 1
-/// refuses the store as newer instead of taking its files for damage. A store of version 1 or
-/// 2 is refused with [`PersistError::OlderFormat`]; version 2 is upgraded by the converter
-/// (`upgrade.rs`, format spec 15.1), version 1 (never released) migrates through a packed
-/// snapshot.
-pub(crate) const STORE_VERSION: u32 = 3;
+/// refuses the store as newer instead of taking its files for damage. Version 4 (Graphersal
+/// 0.5.0, same `GRAPH` layout) marks a store that may hold blobs, their ledger and the system
+/// journal, and whose embedding models are blobs referenced by catalog definitions (0.4.0 kept
+/// them as files under `models/`): a build of version 3 refuses it as newer. A store of
+/// version 1 to 3 is refused with [`PersistError::OlderFormat`]; versions 2 and 3 are upgraded
+/// by the converter (`upgrade.rs`, format spec 15.1; 3 with the migration of its `models/`),
+/// version 1 (never released) migrates through a packed snapshot.
+pub(crate) const STORE_VERSION: u32 = 4;

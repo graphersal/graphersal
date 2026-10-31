@@ -83,13 +83,13 @@ pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 pub use store::{
     AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BlobSource, ChangesSince,
     CheckpointReport, ClosedCommitOptions, CompactReport, CompactionAdvice, CompactionPolicy,
-    CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES,
+    ConvertedModel, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES,
     DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage, DamageKind, DamagePolicy,
     DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange, ImportModelOptions,
-    ImportModelReport, LineageEntry, ModelChangeReport, ModelCopy, ModelInfo, ModelRole,
-    ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions, RepairReport,
-    RestoreBlobsReport, RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions,
-    UpgradeReport, VerifyProblem, VerifyReport,
+    ImportModelReport, LineageEntry, MissingModel, ModelChangeReport, ModelCopy, ModelInfo,
+    ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions,
+    RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions,
+    UpgradeReport, VectorWithoutRule, VerifyProblem, VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
 
@@ -104,6 +104,7 @@ pub const FORMAT_VERSION: u32 = codec::FORMAT_VERSION;
 
 /// The version of the Store format this build writes and reads: the version word of a store's
 /// `GRAPH` file (format spec 5.1, 15). A store of an older version is refused with
-/// [`PersistError::OlderFormat`]; one of a released older version (2, Graphersal 0.1.x) is
-/// converted by [`Store::upgrade`] / [`Store::upgrade_in_place`] without the older build.
+/// [`PersistError::OlderFormat`]; one of a released older version (2, Graphersal 0.1.x; 3,
+/// Graphersal 0.2.x to 0.4.x, whose embedding models are migrated into blobs) is converted by
+/// [`Store::upgrade`] / [`Store::upgrade_in_place`] without the older build.
 pub const STORE_FORMAT_VERSION: u32 = store::STORE_VERSION;

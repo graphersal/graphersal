@@ -398,7 +398,7 @@ struct SourceFile {
 }
 
 /// The most bytes of the weights file kept to read its safetensors header.
-const MAX_HEADER_BYTES: usize = 16 << 20;
+pub(crate) const MAX_HEADER_BYTES: usize = 16 << 20;
 
 /// Reads `reader` whole into memory under the process memory ceiling.
 fn read_in_memory(name: &str, reader: &mut dyn Read) -> Result<Vec<u8>, PersistError> {

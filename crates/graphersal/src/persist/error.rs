@@ -487,6 +487,12 @@ pub enum StoreFailure {
     /// Another revision of the model's repository is in the store: an import of a new revision
     /// replaces the current one only when asked to (`ImportModelOptions::with_replace`).
     ModelRevisionExists,
+    /// An embedding model a store of store format version 3 (Graphersal 0.4.0) keeps under
+    /// `models/` is damaged or incomplete (a file missing, resized or changed against its
+    /// manifest, a manifest that does not parse) or cannot be converted into a blob: the
+    /// upgrade ([`Store::upgrade`](super::Store::upgrade),
+    /// [`Store::upgrade_in_place`](super::Store::upgrade_in_place)) wrote nothing.
+    UpgradeModelDamaged,
     /// The automatic checkpoint run by [`Store::run_due_checkpoint`](super::Store::run_due_checkpoint)
     /// failed with a graph error: the copy [`Store::last_auto_checkpoint_error`](super::Store::last_auto_checkpoint_error)
     /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
@@ -530,6 +536,7 @@ impl StoreFailure {
             StoreFailure::ModelDoesNotFit => "model_does_not_fit",
             StoreFailure::ModelInUse => "model_in_use",
             StoreFailure::ModelRevisionExists => "model_revision_exists",
+            StoreFailure::UpgradeModelDamaged => "upgrade_model_damaged",
             StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
         }
     }
@@ -710,6 +717,15 @@ impl StoreFailure {
                  revision (and the default if the old one was), the old definition is dropped \
                  in the same commit and its blob is removed by the next prune. Vectors the old \
                  revision made must be re-embedded (the message names their properties)."
+            }
+            StoreFailure::UpgradeModelDamaged => {
+                "Nothing was written: the upgrade converts every embedding model the store keeps \
+                 under models/ into a blob and refuses a damaged one before it changes anything \
+                 (the message names the model and the file). Restore the model's directory \
+                 models/<id> from a backup of the store and upgrade again; or move the damaged \
+                 directory out of models/ (the store closed), upgrade, and import the model again \
+                 afterwards: graphersal embed-model download <repo> then graphersal embed-model \
+                 import <repo> --into <dir> (Store::import_model)."
             }
             StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
                 "The store itself is intact and keeps working; only what needs this blob fails. \
@@ -1044,9 +1060,11 @@ impl DiagnosticError for PersistError {
                      upgrade {path} --in-place. In Rust Store::upgrade / Store::upgrade_in_place, \
                      in Python graphersal.Store.upgrade. Everything is carried: the graph, schema \
                      and catalog, the history, marks, attic entries and the store's identity; a \
-                     backup directory stays a backup. The store is verified first; a damaged one \
-                     is refused (graphersal store repair {path} --to <new_dir> writes a repaired \
-                     store of the current format)."
+                     backup directory stays a backup. The embedding models of a Graphersal 0.4.0 \
+                     store (its models/ directory) become blobs with one catalog definition each, \
+                     added by one commit. The store is verified first; a damaged one is refused \
+                     (graphersal store repair {path} --to <new_dir> writes a repaired store of the \
+                     current format)."
                 )
             }
             PersistError::OlderFormat { path, .. } => format!(
@@ -1093,7 +1111,10 @@ impl DiagnosticError for PersistError {
                  of this store: a fork, repair or copy is a different store and never continues \
                  the original's backups, and after a rollback behind the backup the old backup \
                  stays as the archive of the abandoned history. An increment needs the store's WAL since the backup's position: \
-                 back up more often than you prune (store prune --up-to)."
+                 back up more often than you prune (store prune --up-to). After a store upgrade \
+                 that migrated embedding models (graphersal store upgrade), take a full backup: \
+                 the store and a backup upgraded on their own each have their own migration \
+                 commit, so the backup does not continue the store."
                 .to_string(),
             PersistError::BackupDamaged(damage) => match damage.side {
                 DamageSide::Store => {

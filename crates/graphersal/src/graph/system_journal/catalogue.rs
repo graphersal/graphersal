@@ -409,9 +409,13 @@ pub(crate) static UPGRADED: EventKind = EventKind {
         f("from_version", "the old store format version"),
         f("to_version", "the new one"),
         f("in_place", "whether it was upgraded in place"),
+        f(
+            "models",
+            "the embedding models of models/ that became blobs (Graphersal 0.4.0 stores)",
+        ),
     ],
     form: Form::Event(Collapse::Never),
-    emitted_later_by: Some("the store migrations of a later version"),
+    emitted_later_by: None,
 };
 
 pub(crate) static VERIFIED: EventKind = event(
@@ -544,6 +548,28 @@ pub(crate) static MODEL_IMPORTED: EventKind = event(
         f("identity", "its identity"),
         f("bytes", "the bytes of its blob"),
         f("default", "whether it became the default model"),
+        opt(
+            "closed",
+            "true when the change was committed to a closed store (format spec 12.12)",
+        ),
+    ],
+    Collapse::Never,
+);
+
+pub(crate) static MODEL_MIGRATED: EventKind = event(
+    "model.migrated",
+    "model",
+    Level::Notice,
+    "An embedding model a Graphersal 0.4.0 store kept under models/ became a blob with a \
+     catalog definition (store upgrade to store format version 4; the migration commit).",
+    &[
+        f(
+            "repo",
+            "its repository (local/<12 hex> when 0.4.0 kept none)",
+        ),
+        f("identity", "its identity now"),
+        f("former_identity", "its identity in the 0.4.0 store"),
+        f("bytes", "the bytes of its blob"),
         opt(
             "closed",
             "true when the change was committed to a closed store (format spec 12.12)",
@@ -739,6 +765,7 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &CATALOG_CLOSED_COMMIT,
     &LEDGER_REBUILT,
     &MODEL_IMPORTED,
+    &MODEL_MIGRATED,
     &MODEL_REPLACED,
     &MODEL_REMOVED,
     &MODEL_DEFAULT_CHANGED,

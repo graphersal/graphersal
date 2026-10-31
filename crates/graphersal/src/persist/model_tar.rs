@@ -346,6 +346,9 @@ pub(crate) enum TarContent {
     /// SHA-256 were taken in a first pass and are checked while it streams).
     #[cfg(not(target_arch = "wasm32"))]
     Path(std::path::PathBuf),
+    /// A reader opened when the file's turn comes (a file of a store directory, through
+    /// `StoreDir`: the migration of a 0.4.0 store's `models/`), checked like a path.
+    Open(Box<dyn FnOnce() -> io::Result<Box<dyn Read + Send>> + Send>),
 }
 
 /// One file of a tar being written: its name, size, SHA-256 (hex) and content.
@@ -405,6 +408,7 @@ impl TarStream {
                         format!("cannot read '{}': {err}", path.display()),
                     )
                 })?),
+                TarContent::Open(open) => open()?,
             };
             self.data = Some(DataPart {
                 name: file.name,

@@ -20,7 +20,7 @@ fixed at creation (never changed):
   created       2026-10-08T19:27:26Z
   chunk size    1048576 bytes
   on damage     continue (damage found while open is reported, commits continue)
-  backend       directory (format version 3)
+  backend       directory (format version 4)
 ```
 
 ## The parameters fixed at creation
@@ -32,7 +32,7 @@ fixed at creation (never changed):
 | Store id: the store's identity, which an incremental backup requires to be equal | random (128 bits) | (made by the create) | `GRAPH` offset 100 ([format spec](format.md) 5.5) | every write of `GRAPH`; rollback, attic restore, compact, every backup (full, increment, ZIP, from memory), restore (a restored backup IS the store), upgrade (copy and in place: the upgraded store IS the store in the new format). RENEWED (a new store) by fork, attic fork, repair and convert |
 | Creation time | the time of the create | (the clock) | `GRAPH` offset 32 | convert, backups, restore, rollback, upgrade (a fork or repair is a new store with its own time) |
 | Backend: a directory, one container file (`.gstore`), memory | by the path (`store_dir_at`): an existing file or a new `.gstore` path is a single file | the path; CLI `--single-file`; Rust `SingleFileDir`, `MemDir`; Python `Store.create_file` | the location itself; a single file's preamble holds its container version (14.1) | compact (same file), upgrade in place; `store convert` and `store upgrade <old> <new>` make a NEW store, in any backend |
-| Store format version | the build's (3) | (the build) | `GRAPH` offset 8 (the file format version, 2, is in every other file header; a store created from a 0.1.x packed snapshot keeps that snapshot's version 1 files) | everything; a newer version is refused; an older released one (2, Graphersal 0.1.x) is refused until `graphersal store upgrade` converts it, the only change of this parameter, which carries every other one ([Format Versions](store_versions.md#upgrading-a-store-of-an-older-version)); the pre-release version 1 moves through a [packed snapshot](../users_guide/command_cheat_sheet.md#migrate-a-store-from-an-older-format) |
+| Store format version | the build's (4) | (the build) | `GRAPH` offset 8 (the file format version, 4, is in every other file header; a store created from an older packed snapshot keeps that snapshot's older files) | everything; a newer version is refused; an older released one (2, Graphersal 0.1.x; 3, Graphersal 0.2.x to 0.4.x) is refused until `graphersal store upgrade` converts it (a 0.4.0 store's models become blobs), the only change of this parameter, which carries every other one ([Format Versions](store_versions.md#upgrading-a-store-of-an-older-version)); the pre-release version 1 moves through a [packed snapshot](../users_guide/command_cheat_sheet.md#migrate-a-store-from-an-older-format) |
 
 The **graph id** is not a parameter: it identifies the current lineage. It is set when the store is
 created, an in-place rollback starts a new one in the same store, and a fork or repair has its own
