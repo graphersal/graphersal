@@ -63,10 +63,11 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
     (`0 B` until queries ran, unless a Store brought its saved ones), the loaded embedding models
     (when there are any) and the process heap, and the compressed and deduplicated values when there
     are any (the same data as the playground's Profile -> Statistics tab);
-  - **Embedding models** (when there are any): every model besides the built-in `hash-ngram/1`,
-    with the name queries call it by, its repository and licence, and where it comes from
-    (`--embedder`, stored in the Store, or both), and every model the schema names that nobody
-    provides ([Embedding Models in a Store](store_models.md));
+  - **Embedding models** (when there are any): every model of the database besides the built-in
+    `hash-ngram/1` (imported into the Store, or carried by a `.gsnap` file), by its repository
+    (the name queries call it by) with its licence and whether it is the default, a note when the
+    database holds models but none is the default, and every model the schema names that the
+    database lacks ([Embedding Models in a Store](store_models.md));
   - **Server**: the limits of every query, where the UI comes from, the MCP endpoint and the
     command that connects Claude Code, the AI Chat, and the addresses it listens on.
 
@@ -87,13 +88,14 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
     memory:    graph 703.2 MiB (structure 144.7 MiB, indexes 64.0 MiB, properties
                486.8 MiB, property indexes 7.6 MiB)
                workload statistics 182.4 KiB
-               model 506.4 MiB (potion 506.4 MiB)
+               model 506.4 MiB (minishlab/potion-multilingual-128M 506.4 MiB)
                process heap 1.6 GiB
                process 47 % of 3.4 GiB (cgroup)
 
   ── Embedding models ──────────────────────────────────────────────────────────
-    model:     potion = minishlab/potion-multilingual-128M, licence MIT
-               --embedder; also stored in data
+    model:     minishlab/potion-multilingual-128M (the default), licence MIT
+               stored in data; loaded at its first use
+               model2vec/minishlab/potion-multilingual-128M@<12 hex>
 
   ── Server ────────────────────────────────────────────────────────────────────
     limits:    none (start with --timeout, --safe-limits, --max-* to bound
@@ -126,7 +128,6 @@ starts with one. The keys are the long flag names without dashes:
   "mcp": true,
   "mcp-read-only": true,
   "mcp-instructions": "operator-notes.md",
-  "embedder": ["potion=minishlab/potion-base-8M"],
   "timeout": 30000
 }
 ```
@@ -134,26 +135,27 @@ starts with one. The keys are the long flag names without dashes:
 ```bash
 graphersal --args-file args.json                 # everything from the file
 graphersal @args.json --port 9000                # the command line wins: port 9000
-graphersal --args-file args.json --embedder b=./m   # a repeatable flag adds to the file's
+graphersal --args-file args.json -e 'g.v().count()'   # a repeatable flag adds to the file's
 ```
 
 - A switch (`server`, `mcp`, `no-limit`, ...) is `true`; `false` is the same as leaving it out.
-  A number is written as a number (`"port": 8080`), a string as a string. `eval` and `embedder`
-  repeat: a string or an array of strings. Every flag of `graphersal --help` is a key except
+  A number is written as a number (`"port": 8080`), a string as a string. `eval` repeats: a string
+  or an array of strings. Every flag of `graphersal --help` is a key except
   `help`, `version` and `args-file`.
-- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`, and the path of an
-  `embedder`) resolve against the directory of the args file, not the working directory. The
-  sample names (`modern`, `empty`, `large`, `tree`) and model repositories stay as written.
+- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`) resolve against the
+  directory of the args file, not the working directory. The sample names (`modern`, `empty`,
+  `large`, `tree`) stay as written.
 - **The command line wins.** The file's arguments come first, as if typed before the others: a flag
-  given on the command line replaces the file's, a repeatable flag (`--eval`, `--embedder`) adds to
-  it. The usual validation runs on the merged arguments, so a file with `"server": true` plus
+  given on the command line replaces the file's, a repeatable flag (`--eval`) adds to it. The
+  usual validation runs on the merged arguments, so a file with `"server": true` plus
   `-e` on the command line fails as `--server -e` does.
 - A file may not name another args file, and `--args-file` may appear once. An unreadable file,
   invalid JSON, a value of the wrong type or an unknown key is a usage error (exit code 2) that
   names the key; values are never echoed. Unlike the [`--ai` file](#the-configuration-file),
   where an unknown key only warns, an unknown key here is an error (a near-typo adds
   `did you mean "server"?`): a flag that is silently dropped could switch off `mcp-read-only`
-  or `mcp-token`. Only a key starting with `_` is a silent comment.
+  or `mcp-token`. Only a key starting with `_` is a silent comment. The keys `embedder` and `default-embedder`
+  of earlier releases are refused with the import command (0.5.0 removed the flags).
 
 The file holds no secrets by design (give `--mcp-token` on the command line or keep the file
 private); the repository has an example, `crates/graphersal-cli/examples/args-dev-server.json`.
@@ -189,17 +191,24 @@ graphersal --graph large --server --timeout 5000 --memory-limit 4000000000
 
 ## Embedding models
 
-`--embedder NAME=PATH|REPO` (repeatable) and `--default-embedder NAME` work with `--server` as
-with every other mode: the Model2Vec models are loaded once at start (a model that does not
-load stops the start with exit code 2), and every query of the server, the MCP `query` tool and
-the AI Chat's tools call the same registry (`embed()`, the `embed` step, `g.embedders()`).
-`GET /api/info` lists it as `embedders`. Running a model is local; only `graphersal embed-model
-download` connects to Hugging Face ([Embeddings](../getting_started/embeddings.md#real-models-model2vec)).
+The server serves the embedding models of its database: the models imported into the `--graph`
+Store, or carried by a `--graph` `.gsnap` file; every query of the server, the MCP `query` tool
+and the AI Chat's tools use them (`embed()`, the `embed` step, text queries, vector rules,
+`g.embedders()`). `GET /api/info` lists them as `embedders`. The models the schema needs are
+loaded when the store opens, the others at their first use. Running a model is local; only
+`graphersal embed-model download` connects to Hugging Face
+([Embeddings](../getting_started/embeddings.md#real-models-model2vec)).
 
 ```bash
 graphersal embed-model download minishlab/potion-base-8M
-graphersal --graph data/ --server --mcp --embedder potion=minishlab/potion-base-8M --default-embedder potion
+graphersal embed-model import minishlab/potion-base-8M --into data/ --default   # the store closed
+graphersal --graph data/ --server --mcp
 ```
+
+The import into a closed store appends one commit without loading the graph; while the server
+has the store open the import is refused (`Locked`): stop the server first. Changed in 0.5.0:
+`--embedder` and `--default-embedder` are removed ([Embedding Models in a
+Store](store_models.md)).
 
 ## What the UI does in this mode
 
@@ -881,7 +890,7 @@ keys); the table below and the linked pages describe every answer.
 
 | Endpoint | Engine method |
 |---|---|
-| `GET /api/info` | `info()` (`server: "graphersal-dev"`, `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every `--embedder`) |
+| `GET /api/info` | `info()` (`server: "graphersal-dev"`, `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database) |
 | `GET /api/changes` | `changes()`: the change feed `{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound}`; `by` is the page's `X-Graphersal-Client` header (every request of the page sends it), `mcp`, or `ai` (an AI Chat conversation, its id in `detail`) |
 | `POST /mcp` | the MCP endpoint (with `--mcp`, [above](#mcp-an-ai-agent-on-the-same-graph)) |
 | `POST /api/ai/conversations` | with `--ai` (EXPERIMENTAL): a new AI Chat conversation `{id}` (random, 128 bits) owned by the page's `X-Graphersal-Client` (required); every other client gets `403` for it, an unknown id is `404`, and without `--ai` every `/api/ai/*` is `404` |

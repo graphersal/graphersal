@@ -5250,13 +5250,13 @@ fn property_index_transforms_over_http_and_mcp() {
     );
 }
 
-/// `--embedder` with `--server`: the model is loaded at start, `GET /api/info` lists the
-/// registry and the queries of the session call it (here a tiny synthetic Model2Vec model).
+/// A store (in a fresh temporary directory) holding a tiny synthetic Model2Vec model
+/// (`acme/tiny`, dimension 2) as its default model, imported by the binary.
 #[cfg(feature = "model2vec")]
-#[test]
-fn an_embedder_of_the_command_line_serves_the_session() {
-    let dir = std::env::temp_dir().join(format!("graphersal_srv_{}_m2v", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn store_with_a_tiny_model(name: &str) -> std::path::PathBuf {
+    let base = std::env::temp_dir().join(format!("graphersal_srv_{}_{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("model");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.json"), r#"{"normalize": true}"#).unwrap();
     std::fs::write(
@@ -5283,27 +5283,88 @@ fn an_embedder_of_the_command_line_serves_the_session() {
     model.extend_from_slice(header.as_bytes());
     model.extend_from_slice(&data);
     std::fs::write(dir.join("model.safetensors"), model).unwrap();
-
-    let spec = format!("tiny={}", dir.display());
-    let server = start(&[
-        "--graph",
-        "modern",
-        "--embedder",
-        &spec,
-        "--default-embedder",
-        "tiny",
+    let store = base.join("store");
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("graphersal runs");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let store_text = store.display().to_string();
+    run(&["store", "create", &store_text, "--from", "modern"]);
+    run(&[
+        "embed-model",
+        "import",
+        dir.to_str().unwrap(),
+        "--into",
+        &store_text,
+        "--repo",
+        "acme/tiny",
+        "--license",
+        "mit",
+        "--default",
     ]);
-    let port = server.port;
-    let info = get(port, "/api/info").json();
+    store
+}
+
+/// A store's models with `--server`: the start banner's "Embedding models" section lists them
+/// with their licence and where they are kept, `GET /api/info` lists them beside the built-in
+/// (the default marked), and the session's queries call them.
+#[cfg(feature = "model2vec")]
+#[test]
+fn the_banner_lists_the_database_models() {
+    let store = store_with_a_tiny_model("m2v_banner");
+    let store_text = store.display().to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--graph", &store_text, "--server", "--port", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("graphersal starts");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut banner = Vec::new();
+    let mut lines = BufReader::new(stderr).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let last = line.starts_with("  listening:");
+        banner.push(line);
+        if last {
+            break;
+        }
+    }
+    std::thread::spawn(move || lines.for_each(drop));
+    let _ = child.kill();
+    let _ = child.wait();
+    let banner = banner.join("\n");
+    assert!(banner.contains("── Embedding models ──"), "{banner}");
+    assert!(
+        banner.contains("acme/tiny (the default), licence MIT"),
+        "{banner}"
+    );
+    assert!(banner.contains("stored in"), "{banner}");
+    assert!(!banner.contains("note: loaded"), "{banner}");
+
+    let server = start(&["--graph", &store_text]);
+    let info = get(server.port, "/api/info").json();
     let embedders = info["embedders"].as_array().expect("embedders").clone();
     let tiny = embedders
         .iter()
-        .find(|e| e["name"] == "tiny")
-        .expect("tiny listed");
-    assert_eq!(tiny["dimension"], 2);
-    assert_eq!(tiny["default"], true);
+        .find(|e| e["name"] == "acme/tiny")
+        .expect("acme/tiny listed");
+    assert_eq!(tiny["dimension"], 2, "{info}");
+    assert_eq!(tiny["default"], true, "{info}");
+    assert_eq!(tiny["license"], "MIT", "{info}");
     assert!(
-        tiny["model"].as_str().unwrap().starts_with("model2vec@"),
+        tiny["model"]
+            .as_str()
+            .unwrap()
+            .starts_with("model2vec/acme/tiny@"),
         "{tiny}"
     );
     assert!(
@@ -5311,14 +5372,12 @@ fn an_embedder_of_the_command_line_serves_the_session() {
             .iter()
             .any(|e| e["name"] == "hash-ngram/1" && e["default"] == false)
     );
-
-    let r = execute(
-        port,
-        r#"g.v().has_label("software").embed("name").to_list().len()"#,
-    );
+    assert_eq!(info["modelsNote"], Value::Null, "{info}");
+    let r = execute(server.port, r#"embed("lop").dimension"#);
     assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["execution"]["results"], serde_json::json!([2]), "{r}");
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
 }
 
 /// `GET /api/statistics` carries `process.memory`: the whole process (RSS where the OS gives
@@ -5407,51 +5466,29 @@ fn the_start_banner_shows_the_ceiling_percentage() {
     );
 }
 
-/// `--embedder` with `--server`: the process memory block of `GET /api/statistics` lists the
-/// loaded model with its estimated size, and has no AI Chat member without `--ai`.
+/// A store's model with `--server`: once a query loaded it, the process memory block of
+/// `GET /api/statistics` lists it with its estimated size, and has no AI Chat member without
+/// `--ai`.
 #[cfg(feature = "model2vec")]
 #[test]
 fn the_statistics_list_a_loaded_model_in_the_process_memory() {
-    let dir = std::env::temp_dir().join(format!("graphersal_srv_{}_m2v_mem", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.json"), r#"{"normalize": true}"#).unwrap();
-    std::fs::write(
-        dir.join("tokenizer.json"),
-        r#"{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
-            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
-            "post_processor": null, "decoder": null,
-            "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "lop": 1, "ripple": 2},
-                      "unk_token": "[UNK]"}}"#,
-    )
-    .unwrap();
-    let data: Vec<u8> = [0.0f32, 1.0, 1.0, 0.0, 0.5, 0.5]
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect();
-    let mut header = format!(
-        r#"{{"embeddings": {{"dtype": "F32", "shape": [3, 2], "data_offsets": [0, {}]}}}}"#,
-        data.len()
+    let store = store_with_a_tiny_model("m2v_mem");
+    let server = start(&["--graph", store.to_str().unwrap()]);
+    let r = execute(
+        server.port,
+        r#"g.v().has_label("software").embed("name").to_list().len()"#,
     );
-    while header.len() % 8 != 0 {
-        header.push(' ');
-    }
-    let mut model = (header.len() as u64).to_le_bytes().to_vec();
-    model.extend_from_slice(header.as_bytes());
-    model.extend_from_slice(&data);
-    std::fs::write(dir.join("model.safetensors"), model).unwrap();
-    let spec = format!("tiny={}", dir.display());
-    let server = start(&["--graph", "modern", "--embedder", &spec]);
+    assert_eq!(r["ok"], true, "{r}");
     let stats = get(server.port, "/api/statistics").json();
     let models = stats["process"]["models"].as_array().expect("models");
     assert_eq!(models.len(), 1, "{stats}");
-    assert_eq!(models[0]["name"], "tiny");
+    assert_eq!(models[0]["name"], "acme/tiny");
     assert_eq!(models[0]["dimension"], 2);
     // 3 rows x 2 columns of f32 plus the tokenizer file.
     assert!(models[0]["bytes"].as_u64().unwrap() >= 24, "{stats}");
     assert!(stats["process"].get("aiChat").is_none(), "{stats}");
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
 }
 
 /// Issue #12: `POST /api/compression/estimate` and the MCP tool `estimate_compression` answer

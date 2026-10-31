@@ -80,7 +80,7 @@ mod terminals;
 #[cfg(test)]
 mod tests;
 mod tokens;
-pub use access::{pin_now, set_engine_embedders, set_scope_embedders};
+pub use access::{pin_now, set_engine_graph};
 pub use dynamic::script_value_to_property;
 use dynamic::*;
 pub use engine::{engine, engine_with_limits, engine_with_options, registered_step_names};

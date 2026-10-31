@@ -217,10 +217,10 @@ pub struct UpgradeReport {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ConvertedModel {
-    repo: String,
-    identity: String,
-    former_identity: String,
-    bytes: u64,
+    pub(crate) repo: String,
+    pub(crate) identity: String,
+    pub(crate) former_identity: String,
+    pub(crate) bytes: u64,
 }
 
 impl ConvertedModel {
@@ -258,9 +258,9 @@ impl ConvertedModel {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct MissingModel {
-    identity: String,
-    repo: Option<String>,
-    needed_by: Vec<String>,
+    pub(crate) identity: String,
+    pub(crate) repo: Option<String>,
+    pub(crate) needed_by: Vec<String>,
 }
 
 impl MissingModel {
@@ -298,13 +298,13 @@ impl MissingModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VectorWithoutRule {
-    kind: crate::graph::schema::ElementKind,
-    label: String,
-    property: String,
-    embedder: String,
-    model: String,
-    elements: u64,
-    not_counted: u64,
+    pub(crate) kind: crate::graph::schema::ElementKind,
+    pub(crate) label: String,
+    pub(crate) property: String,
+    pub(crate) embedder: String,
+    pub(crate) model: String,
+    pub(crate) elements: u64,
+    pub(crate) not_counted: u64,
 }
 
 impl VectorWithoutRule {
@@ -663,13 +663,38 @@ fn finish(
     let schema = state.get_schema().map_err(PersistError::Graph)?;
     let definitions =
         super::model_catalog::model_definitions(&state).map_err(PersistError::Graph)?;
-    let defined = |identity: &str| {
-        let base = super::model_catalog::base_identity(identity);
-        definitions.iter().find(|d| d.name() == base)
-    };
-    for (identity, places) in super::model_catalog::needed_models(schema.as_ref()) {
-        if defined(&identity).is_none() {
-            report.models_missing.push(MissingModel {
+    report.models_missing = missing_models(schema.as_ref(), &definitions);
+    // The vector properties with a model but no rule, counted in the newest snapshot.
+    let (wanted, mut found) = vectors_without_rule(schema.as_ref(), &definitions);
+    if !wanted.is_empty()
+        && let Some((seq, path)) = files::list_snapshots(dir)?.pop()
+    {
+        let depth = crate::persist::snapshot::ReadOptions::default().max_value_depth();
+        let counts = super::merge::count_vectors(seq, path, depth, &wanted)?;
+        // The data's last commit: the migration commit holds no data.
+        let last = match migrated.commit_seq {
+            Some(commit) => commit.saturating_sub(1),
+            None => state.last_commit_seq(),
+        };
+        for (entry, count) in found.iter_mut().zip(counts) {
+            entry.elements = count;
+            entry.not_counted = last.saturating_sub(seq);
+        }
+    }
+    report.vectors_without_rule = found;
+    finish_journal(dir, report, &state)
+}
+
+/// The models the schema needs (a vector property's `embedder`) that `definitions` lack.
+pub(super) fn missing_models(
+    schema: Option<&crate::graph::schema::GraphSchema>,
+    definitions: &[crate::graph::Definition],
+) -> Vec<MissingModel> {
+    let mut out = Vec::new();
+    for (identity, places) in super::model_catalog::needed_models(schema) {
+        let base = super::model_catalog::base_identity(&identity);
+        if !definitions.iter().any(|d| d.name() == base) {
+            out.push(MissingModel {
                 repo: crate::value::vector::embed::identity::parse_identity(&identity)
                     .and_then(|parsed| parsed.repo.map(str::to_string)),
                 identity,
@@ -677,10 +702,22 @@ fn finish(
             });
         }
     }
-    // The vector properties with a model but no rule, counted in the newest snapshot.
+    out
+}
+
+/// The vector properties of `schema` with a model (`embedder`) but no rule (`from`), not yet
+/// counted, with the `(edge, label, key)` of each for a count.
+pub(super) fn vectors_without_rule(
+    schema: Option<&crate::graph::schema::GraphSchema>,
+    definitions: &[crate::graph::Definition],
+) -> (Vec<(bool, String, String)>, Vec<VectorWithoutRule>) {
+    let defined = |identity: &str| {
+        let base = super::model_catalog::base_identity(identity);
+        definitions.iter().find(|d| d.name() == base)
+    };
     let mut wanted: Vec<(bool, String, String)> = Vec::new();
     let mut found: Vec<VectorWithoutRule> = Vec::new();
-    if let Some(schema) = &schema {
+    if let Some(schema) = schema {
         let roots = schema
             .vertices
             .iter()
@@ -720,23 +757,16 @@ fn finish(
             }
         }
     }
-    if !wanted.is_empty()
-        && let Some((seq, path)) = files::list_snapshots(dir)?.pop()
-    {
-        let depth = crate::persist::snapshot::ReadOptions::default().max_value_depth();
-        let counts = super::merge::count_vectors(seq, path, depth, &wanted)?;
-        // The data's last commit: the migration commit holds no data.
-        let last = match migrated.commit_seq {
-            Some(commit) => commit.saturating_sub(1),
-            None => state.last_commit_seq(),
-        };
-        for (entry, count) in found.iter_mut().zip(counts) {
-            entry.elements = count;
-            entry.not_counted = last.saturating_sub(seq);
-        }
-    }
-    report.vectors_without_rule = found;
-    report.saved_queries_using_removed = saved_queries_using_removed(&state)?;
+    (wanted, found)
+}
+
+/// The end of [`finish`]: the saved queries calling removed functions and the journal record.
+fn finish_journal(
+    dir: &DirPath,
+    mut report: UpgradeReport,
+    state: &crate::graph::TraversalGraph,
+) -> Result<UpgradeReport, PersistError> {
+    report.saved_queries_using_removed = saved_queries_using_removed(state)?;
     // The journal record only when the models were migrated (the migration commit wrote the
     // journal already): an upgrade by the version word writes nothing but `GRAPH`.
     if report.models_converted.is_empty() {

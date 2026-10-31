@@ -380,18 +380,20 @@ pub fn run(cli: &Cli) -> i32 {
     // The load time printed at start: Store open (snapshot load + WAL replay), file import
     // (with --schema) or sample build, up to the session holding the graph.
     let load_started = std::time::Instant::now();
-    // A Store directory is opened here (its lock held for the life of the server); the open
-    // registers the embedding models the store keeps and its schema names, so the presets
-    // are built after it.
-    // The models the open loads (and the ones the schema names that nobody provides) are
-    // listed in the start banner's own section, not as `note:` lines before it.
+    // A Store directory is opened here (its lock held for the life of the server); a `.gsnap`
+    // is loaded here too, so the graph serves the embedding models the file carries.
+    // The models (and the notes about them) are listed in the start banner's own section,
+    // not as `note:` lines before it.
     crate::cli::defer_model_notes();
     // With --schema the graph is loaded here, like the one-shot runner does (schema first,
     // then the data as one unit), so a violation stops the start with exit code 1; with
     // --read-only too (the graph gets the hook that refuses writes), and a Store opened
     // read-only (--read-only, or a store this process may not write) is a loaded graph
     // without a Store.
-    let opens = matches!(cli.graph, GraphSpec::Store(_)) || cli.schema.is_some() || cli.read_only;
+    let opens = matches!(cli.graph, GraphSpec::Store(_))
+        || matches!(&cli.graph, GraphSpec::File(path) if graphersal::prelude::GraphSource::is_snapshot_path(path))
+        || cli.schema.is_some()
+        || cli.read_only;
     let (store, preloaded) = if opens {
         match cli.graph.open(
             cli.create_store,
@@ -516,26 +518,35 @@ pub fn run(cli: &Cli) -> i32 {
         graphersal::alloc_tracking::global_live_bytes(),
     ));
     let mut models_section = start_banner::Section::new("Embedding models");
-    let (models, notes) = crate::cli::served_models();
-    for model in models {
-        // The registry name queries call it by, when it is not the repository itself.
-        let name = if model.name == model.label {
-            String::new()
-        } else {
-            format!("{} = ", model.name)
+    let served = crate::cli::served_models();
+    for model in &served.models {
+        let state = match &model.state {
+            graphersal::persist::ModelState::Loaded => "loaded".to_string(),
+            graphersal::persist::ModelState::NotLoaded => "loaded at its first use".to_string(),
+            graphersal::persist::ModelState::Missing => {
+                "not served: its blob is missing".to_string()
+            }
+            graphersal::persist::ModelState::Damaged { reason }
+            | graphersal::persist::ModelState::Unsupported { reason } => {
+                format!("not served: {reason}")
+            }
+            _ => model.state.name().to_string(),
         };
         models_section.row(
             "model",
             format!(
-                "{name}{}, licence {}\n{}",
-                model.label,
+                "{}{}, licence {}\n{}; {}\n{}",
+                model.repo,
+                if model.default { " (the default)" } else { "" },
                 crate::cli::license_text(&model.license),
-                model.source
+                served.source,
+                state,
+                model.identity
             ),
         );
     }
-    for note in notes {
-        models_section.row("missing", note);
+    for note in &served.notes {
+        models_section.row("note", note.clone());
     }
     let mcp = cli.mcp.then(|| {
         mcp::Mcp::new(
@@ -684,8 +695,7 @@ pub fn session_presets(cli: &Cli) -> SessionPresets {
     }
     let mut presets = SessionPresets::new()
         .with_limits(cli.script_limits())
-        .with_script_timeout_ms(cli.timeout_ms)
-        .with_embedders(crate::cli::embedders());
+        .with_script_timeout_ms(cli.timeout_ms);
     for (key, value) in budget.traversal_options() {
         presets = presets.with_option(key, value);
     }
@@ -1560,27 +1570,59 @@ fn info(context: &Context) -> Value {
         // The AI Chat (`--ai`): `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}`
         // (never the key), or null.
         "ai": ai_status(context),
-        // The embedders queries can call (the built-in hash-ngram/1 and every --embedder):
-        // `[{name, model, dimension, default}]`.
-        "embedders": embedders_value(),
+        // The embedders queries can call: the built-in hash-ngram/1 and the models of the
+        // served database (`[{name, model, dimension, default, license, state}]`), with the
+        // note when it holds models but none is the default (`modelsNote`).
+        "embedders": embedders_value(context),
+        "modelsNote": models_of(context)
+            .and_then(|(models, place)| crate::cli::no_default_note(&models, &place)),
     })
 }
 
-/// The registry of [`crate::cli::embedders`] for `GET /api/info`.
-fn embedders_value() -> Value {
-    let registry = crate::cli::embedders();
-    let default = registry.default_embedder().info().name.clone();
-    registry
-        .infos()
-        .map(|info| {
-            json!({
-                "name": info.name.as_str(),
-                "model": info.model.as_str(),
-                "dimension": info.dimension,
-                "default": info.name == default,
-            })
+/// The embedding models of the served database (the open Store's current ones, else those the
+/// start found: a read-only store, a `.gsnap`), with where they are kept.
+fn models_of(context: &Context) -> Option<(Vec<graphersal::persist::ModelInfo>, String)> {
+    match &context.store {
+        Some(store) => store.models().ok().map(|models| (models, store.location())),
+        None => {
+            let served = crate::cli::served_models();
+            let place = served
+                .source
+                .split_once(' ')
+                .map(|(_, rest)| rest.trim_start_matches("in ").trim_start_matches("by "))
+                .unwrap_or_default()
+                .to_string();
+            (!served.models.is_empty()).then_some((served.models, place))
+        }
+    }
+}
+
+/// The embedders queries can call, for `GET /api/info`: the built-in `hash-ngram/1` (the
+/// default unless the database names one) and the database's models by their repository.
+fn embedders_value(context: &Context) -> Value {
+    let models = models_of(context)
+        .map(|(models, _)| models)
+        .unwrap_or_default();
+    let any_default = models.iter().any(|m| m.default);
+    let mut out = vec![json!({
+        "name": "hash-ngram/1",
+        "model": "hash-ngram/1",
+        "dimension": 256,
+        "default": !any_default,
+        "license": "built-in",
+        "state": "loaded",
+    })];
+    out.extend(models.iter().map(|model| {
+        json!({
+            "name": model.repo,
+            "model": model.identity,
+            "dimension": model.dimension,
+            "default": model.default,
+            "license": crate::cli::license_text(&model.license),
+            "state": model.state.name(),
         })
-        .collect()
+    }));
+    Value::Array(out)
 }
 
 /// [`ai::status`], or null in a build without the `ai` feature.

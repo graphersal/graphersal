@@ -9476,14 +9476,13 @@ mod tests {
             ),
             (
                 EmbedError::unavailable("the model file is missing"),
-                "Retry later",
+                "embed-model import <repo> --into <store> --replace",
             ),
             (EmbedError::failed("CUDA out of memory"), "its message"),
             (
                 EmbedError::Cancelled,
                 "g.with(\"evaluationTimeout\", 60000)",
             ),
-            (EmbedError::registry("a duplicate"), "registered once"),
         ] {
             let err = TraverserError::Embed(error);
             let help = err.help().expect("help");

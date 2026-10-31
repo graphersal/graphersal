@@ -41,6 +41,7 @@ mod merge;
 mod migrate_models;
 mod model_catalog;
 mod models;
+mod packed_load;
 mod rollback;
 mod snapshot_dir;
 pub(crate) mod system_journal;
@@ -82,6 +83,9 @@ pub use model_catalog::{
 };
 pub(crate) use models::StoredModel;
 pub use models::{ModelCopy, ModelRole, NewModel};
+pub use packed_load::SnapshotLoadReport;
+#[cfg(not(target_arch = "wasm32"))]
+pub use packed_load::read_snapshot_file;
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
 pub(crate) use upgrade::upgradable_from;
 pub use upgrade::{ConvertedModel, MissingModel, UpgradeReport, VectorWithoutRule};
@@ -764,7 +768,7 @@ impl Store {
     ) -> Result<Recovered, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         let mut recovered = StoreCore::load_at(&dir, target, &ReadOptions::default())?;
-        recovered.embedders = model_catalog::embedders_of_view(&dir, &recovered.graph)?;
+        recovered.models = model_catalog::models_of_view(&dir, &recovered.graph)?;
         Ok(recovered)
     }
 
@@ -1225,7 +1229,7 @@ impl<S: PersistentStorage + Default> Store<S> {
         let dir = DirPath::root(dir.into_store_dir());
         let mut recovered =
             StoreCore::load_plan_at(&dir, target, &ReadOptions::default())?.run_in(empty)?;
-        recovered.embedders = model_catalog::embedders_of_view(&dir, &recovered.graph)?;
+        recovered.models = model_catalog::models_of_view(&dir, &recovered.graph)?;
         Ok(recovered)
     }
 
@@ -2507,7 +2511,7 @@ impl StoreCore {
         let mut recovered =
             Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?
                 .run_in(empty)?;
-        recovered.embedders = model_catalog::embedders_of_view(&self.shared.dir, &recovered.graph)?;
+        recovered.models = model_catalog::models_of_view(&self.shared.dir, &recovered.graph)?;
         // A view of the past keeps the instance floor (every time the files and this instance
         // wrote), not the target's commit time.
         if let Some(clock) = recovered.graph.commit_clock()? {

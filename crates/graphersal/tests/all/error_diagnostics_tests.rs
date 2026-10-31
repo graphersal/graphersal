@@ -6920,8 +6920,8 @@ fn embed_errors_carry_their_help() {
     );
     assert!(
         report.contains(
-            "g.embedders() lists the embedders this host registered (the built-in \
-             \"hash-ngram/1\" is always there)"
+            "g.embedders() lists the embedders of this database: the built-in \
+             \"hash-ngram/1\" and the models imported into it"
         ),
         "{report}"
     );
@@ -7076,9 +7076,12 @@ fn text_query_errors_name_the_vector_rule() {
             report.contains("no registered embedder has the model \"acme/other@2\""),
             "{report}"
         );
-        assert!(report.contains("--embedder NAME=REPO"), "{report}");
         assert!(
-            report.contains("g.embedders() lists the registered ones"),
+            report.contains("graphersal embed-model import <repo> --into <store>"),
+            "{report}"
+        );
+        assert!(
+            report.contains("g.embedders() lists the ones it keeps"),
             "{report}"
         );
     }
@@ -12592,4 +12595,41 @@ fn a_removed_function_names_its_replacement_also_in_a_saved_query() {
         .find(|d| d.name() == "fill")
         .unwrap();
     assert_eq!(stored.as_query().unwrap().source(), body);
+}
+
+/// A model of the database that cannot run (its blob is gone; nothing needs it at open) is
+/// `Unavailable` at the `embed` step, and its help names the commands that bring it back
+/// (P11: no registration API is named).
+#[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+#[test]
+fn an_unavailable_database_model_names_the_restore_commands() {
+    use crate::model_fixture::{Temp, blob_path, import, options};
+    use graphersal::persist::Store;
+    let temp = Temp::new("unavailable-help");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let identity = import(&store, 1, "acme/tiny").model.identity;
+    let blob = blob_path(&path, &store, &identity);
+    store.close().unwrap();
+    std::fs::remove_file(&blob).unwrap();
+    let store = Store::open(&path, options()).unwrap();
+    let err = store
+        .graph()
+        .read()
+        .traversal()
+        .inject(vec![ElementProperty::from("graph")])
+        .embed_value(Some("acme/tiny"))
+        .to_list()
+        .expect_err("the model's blob is gone");
+    let report = format_diagnostic(&err);
+    assert!(report.contains("the embedder is unavailable"), "{report}");
+    assert!(
+        report.contains(
+            "graphersal embed-model import <repo> --into <store> --replace; or restore the \
+             store from a backup"
+        ),
+        "{report}"
+    );
+    assert!(!report.contains("with_embedders"), "{report}");
+    store.close().unwrap();
 }

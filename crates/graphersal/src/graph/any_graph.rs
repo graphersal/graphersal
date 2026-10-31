@@ -29,9 +29,15 @@ use crate::persist::{PersistError, SnapshotInfo};
 #[cfg(feature = "script")]
 use crate::script::plan::{ScriptPlan, Terminal, TerminalOutput, UnitBody, UnitKind, UnitResult};
 
-mod sealed {
+pub(crate) mod sealed {
     /// Seals [`AnyGraph`](super::AnyGraph): only [`Graph`](crate::graph::Graph) implements it.
-    pub trait Sealed {}
+    /// Its methods are the crate's own reach into a type-erased graph.
+    pub trait Sealed {
+        /// The embedders of the graph: the built-in `hash-ngram/1` plus the models of its
+        /// database (its model registry), else the default registry.
+        #[allow(private_interfaces)]
+        fn model_embedders(&self) -> std::sync::Arc<crate::value::Embedders>;
+    }
 }
 
 /// A shared graph of ANY storage type, as one object-safe type: what the front ends (the
@@ -285,7 +291,18 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     fn run_unit(&self, kind: UnitKind, body: &mut dyn FnMut() -> UnitBody) -> UnitResult;
 }
 
-impl<S> sealed::Sealed for Graph<S> where S: GraphStorage + Default + Send + Sync + 'static {}
+impl<S> sealed::Sealed for Graph<S>
+where
+    S: GraphStorage + Default + Send + Sync + 'static,
+{
+    #[allow(private_interfaces)]
+    fn model_embedders(&self) -> std::sync::Arc<crate::value::Embedders> {
+        match self.model_registry() {
+            Some(registry) => registry.embedders(),
+            None => crate::value::Embedders::default_registry(),
+        }
+    }
+}
 
 impl<S> AnyGraph for Graph<S>
 where

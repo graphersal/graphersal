@@ -31,7 +31,7 @@ Every step and every file or schema operation of a query makes one or more
 | `Definition { kind, name }` | a definition of the graph's catalog (a saved query, ...); `kind` and `name` are `None` for a request about all of them (listing) |
 | `File { path }` | a file, with the path as the script wrote it |
 | `Option { key }` | an administrative `g.with()` option ([below](#administrative-gwith-options)) |
-| `Embedder { name }` | an embedder of the registry the host gave its traversals, by its registry name (`"hash-ngram/1"`; [Vectors](vectors.md#embeddings)) |
+| `Embedder { name }` | an embedder of the graph: the built-in `"hash-ngram/1"` or a model of its database, by its repository ([Vectors](vectors.md#embeddings)) |
 | `Journal` | the [system journal](../persistence/system_journal.md): `Read` to query or follow it, asked by the session, the dev server (`GET /api/journal`) and MCP (the Rust API itself asks nothing); a denial of any request is recorded there as `auth.denied` (action, resource kind and channel only) |
 | `Custom { kind, name }` | a resource of an embedding server (a database, a tenant, ...), never produced by the library |
 
@@ -59,7 +59,7 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | `g.statistics()`, `g.memory_usage()` | `Read` on `Data` |
 | `embed(..)` (the step) and `embed(text)` (the function) | `Execute` on `Embedder("name")`, the embedder that runs (the default resolved to its name), for every embedder including the built-in `hash-ngram/1` |
 | a [vector rule](vector_rules.md) | setting the schema asks `Update` on the schema; the vectors it writes at the end of a unit ask nothing of their own (like create-time defaults), and its model runs without `Execute` on the embedder |
-| `g.embedders()` | nothing (it lists what the host registered and runs none of them) |
+| `g.embedders()` | nothing (it lists the embedders of the database and runs none of them) |
 | `nearest(key, "text", k)`, `similarity(key, "text")` (a text query) | `Execute` on the embedder of the model the schema declares for the property (on each one when labels declare different models) |
 | `g.set_schema(..)`, `g.patch_schema(..)` | `Update` on `Schema` (a schema is never read from a file) |
 | `list_definitions(kind)` (Rust) | `Read` on `Definition(kind)` (`Definition` for every kind) |

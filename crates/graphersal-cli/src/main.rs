@@ -97,15 +97,6 @@ fn run() -> Result<()> {
         errln!("{err}");
         exit(cli::EXIT_USAGE_ERROR);
     }
-    // The embedding models of --embedder are loaded once, before any graph or script: every
-    // mode (one-shot, REPL, --server and its MCP tools) calls the same registry.
-    if !matches!(options.mode, Mode::Help | Mode::Version)
-        && let Err(err) = cli::install_embedders(&options)
-    {
-        errln!("{err}");
-        exit(cli::EXIT_USAGE_ERROR);
-    }
-
     // Every mode that opens a Store (`-e`, `--in`, a script file, the REPL) prints the
     // library's store warnings (a failed automatic checkpoint, damage found, a read-only open)
     // on stderr; stdout stays the result only.

@@ -6,6 +6,7 @@ import warnings
 import pytest
 
 import graphersal
+from graphersal import Graph
 
 RULE = {
     "vertices": {
@@ -90,3 +91,34 @@ def test_writing_the_vector_directly_is_refused():
     with pytest.raises(graphersal.GraphersalError) as raised:
         graph.execute('g.add_v("doc").property("emb", vector([1.0])).next()')
     assert "write text instead" in (raised.value.help or "")
+
+
+# Moved unchanged from the deleted tests/test_embedders.py (0.5.0 removed the host embedder API;
+# this test needs none of it), with its two helpers.
+
+
+def docs_graph(**kwargs):
+    g = Graph(**kwargs)
+    g.execute(
+        """
+        for t in ["a graph database", "vector search", "hello world", "banana"] {
+            g.add_v("doc").property("text", t).iterate();
+        }
+        """
+    )
+    return g
+
+
+def attach_schema(g):
+    g.execute("g.set_schema(g.infer_schema(), SchemaMode.open)")
+
+
+def test_embed_property_was_removed():
+    assert not hasattr(Graph, "embed_property")
+    assert not hasattr(graphersal, "EmbedPropertyError")
+    g = docs_graph()
+    attach_schema(g)
+    with pytest.raises(graphersal.GraphersalError, match="Function not found: embed_property") as info:
+        g.execute('g.embed_property(#{label: "doc", from: "text", to: "emb"})')
+    assert "embed_property was removed in 0.5.0" in info.value.help
+    assert "Vector Rules" in info.value.help

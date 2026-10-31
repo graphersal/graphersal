@@ -1,6 +1,6 @@
-//! `graphersal embed-model download|import|list` and the `--embedder NAME=PATH|REPO`
-//! resolution (feature `model2vec`; book pages "Embeddings", "Embedding Models in a Store" and
-//! "Command line").
+//! `graphersal embed-model download|import|list` (feature `model2vec`; book pages
+//! "Embeddings", "Embedding Models in a Store" and "Command line"). The download cache is the
+//! library's [`ModelCache`]; a model serves a database only once it is imported into it.
 //!
 //! The only network access of the binary besides the AI Chat: `download` fetches the three
 //! files of a Model2Vec model (`config.json`, `tokenizer.json`, `model.safetensors`) from
@@ -9,7 +9,7 @@
 //! endpoint's host only, never logged). Each file streams into a `.part` file of a hidden
 //! staging directory while its SHA-256 is computed; the hash Hugging Face states for an LFS
 //! file (`X-Linked-Etag`) and the size are checked, the file renamed; the manifest
-//! [`Model2Vec::MANIFEST_FILE`] is written, the model loaded once as a check, and only then the
+//! [`ModelCache::MANIFEST_FILE`] is written, the model loaded once as a check, and only then the
 //! staging directory renamed to `<models-dir>/<repo>`. A failure (or a kill) leaves no model
 //! behind: at most a hidden staging directory, which the next download removes.
 //!
@@ -17,8 +17,8 @@
 //! (`README.md`), the repository's `LICENSE*`/`NOTICE*` files and its metadata
 //! (`<endpoint>/api/models/<repo>/revision/<revision>`: `cardData.license`,
 //! `cardData.base_model`, `gated`), all recorded in the manifest. With `--into <store>` the
-//! model goes into that Store (`models/<id>/`) instead of the models directory; `import`
-//! puts a local model directory into a Store.
+//! model goes into that Store (one blob and one catalog definition) instead of the models
+//! directory; `import` puts a downloaded model or a local model directory into a Store.
 
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -26,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use graphersal::catalog::BaseModel;
-use graphersal::persist::{ImportModelOptions, ModelInfo, ModelRole, ModelSource, NewModel, Store};
-use graphersal::vector::{Embedder, Model2Vec};
+use graphersal::persist::{
+    ImportModelOptions, ModelCache, ModelInfo, ModelRole, ModelSource, NewModel, Store,
+};
 use serde_json::{Value, json};
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR};
@@ -55,6 +56,7 @@ USAGE:
                                            [--into <STORE>]
     graphersal embed-model import <REPO|MODEL-DIR> --into <STORE> [--dir <MODELS-DIR>]
                                            [--repo <REPO>] [--license <SPDX>]
+                                           [--replace] [--default]
     graphersal embed-model list [--dir <MODELS-DIR>]
 
 COMMANDS:
@@ -66,8 +68,8 @@ COMMANDS:
                Hugging Face states for a large file is checked; nothing is left behind when the
                download fails. --revision: a branch, tag or commit (default main).
                --into STORE: put the model into that Store (a closed store directory or
-               .gstore file) instead of the models directory; the store's models are loaded
-               whenever the store is opened, and every copy of the store carries them.
+               .gstore file) instead of the models directory; the store's models serve its
+               queries whenever the store is opened, and every copy of the store carries them.
     import     Put a Model2Vec model into the Store STORE, with its README.md and
                LICENSE*/NOTICE* files: REPO, a repository downloaded into the models directory
                (for example minishlab/potion-base-8M, no network), else MODEL-DIR, any
@@ -75,15 +77,21 @@ COMMANDS:
                for a directory that looks like a repository name). --repo names its Hugging Face
                repository (part of the model identity) when MODEL-DIR has no manifest;
                --license its SPDX licence id when the manifest does not say.
+               --replace: a new revision of a repository the store holds replaces the current
+               one (vector rules naming the old revision are re-embedded: the store is then
+               opened, its graph loaded, and the import says so). --default: the model becomes
+               the store's default (the one embed() uses without a name; also
+               `graphersal store models default <STORE> <REPO>`).
     list       The downloaded models: repository, size, licence and model identity.
 
     The models directory is --dir, else $GRAPHERSAL_EMBED_MODELS, else the user cache:
     $XDG_CACHE_HOME/graphersal/embed-models or ~/.cache/graphersal/embed-models
     (%LOCALAPPDATA%\graphersal\embed-models on Windows).
 
-    Use a model with --embedder NAME=REPO (or NAME=<directory>) on any graphersal command:
-        graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion \
-            -e 'g.v().values("name").embed().to_list()'
+    A model serves a database once it is imported into it (download once, import into
+    any number of stores without the network); queries name it by its repository:
+        graphersal embed-model import minishlab/potion-base-8M --into data/ --default
+        graphersal --graph data/ -e 'g.v().values("name").embed().to_list()'
 
 NETWORK:
     download is the only command that connects anywhere: to https://huggingface.co (or
@@ -119,7 +127,11 @@ pub fn run(args: &[String]) -> i32 {
         out!("{EMBED_MODEL_HELP}");
         return EXIT_OK;
     }
-    let parsed = match parse_flags(rest, &["revision", "dir", "into", "repo", "license"]) {
+    let parsed = match parse_flags(
+        rest,
+        &["revision", "dir", "into", "repo", "license"],
+        &["replace", "default"],
+    ) {
         Ok(parsed) => parsed,
         Err(message) => return usage(&message),
     };
@@ -132,8 +144,14 @@ pub fn run(args: &[String]) -> i32 {
                 Ok(dir) => dir,
                 Err(message) => return usage(&message),
             };
-            if parsed.flag("repo").is_some() || parsed.flag("license").is_some() {
-                return usage("--repo and --license belong to `embed-model import`");
+            if parsed.flag("repo").is_some()
+                || parsed.flag("license").is_some()
+                || parsed.switch("replace")
+                || parsed.switch("default")
+            {
+                return usage(
+                    "--repo, --license, --replace and --default belong to `embed-model import`",
+                );
             }
             let revision = parsed.flag("revision").unwrap_or("main");
             match download(repo, revision, &dir, parsed.flag("into")) {
@@ -163,7 +181,13 @@ pub fn run(args: &[String]) -> i32 {
                 Ok(dir) => dir,
                 Err(message) => return usage(&message),
             };
-            match import(&dir, store, parsed.flag("repo"), parsed.flag("license")) {
+            let options = ImportFlags {
+                repo: parsed.flag("repo"),
+                license: parsed.flag("license"),
+                replace: parsed.switch("replace"),
+                default: parsed.switch("default"),
+            };
+            match import(&dir, store, &options) {
                 Ok(()) => EXIT_OK,
                 Err(DownloadError::Usage(message)) => usage(&message),
                 Err(DownloadError::Failed(message)) => {
@@ -177,6 +201,8 @@ pub fn run(args: &[String]) -> i32 {
                 || parsed.flag("into").is_some()
                 || parsed.flag("repo").is_some()
                 || parsed.flag("license").is_some()
+                || parsed.switch("replace")
+                || parsed.switch("default")
                 || !parsed.positional.is_empty()
             {
                 return usage("embed-model list takes only --dir");
@@ -199,9 +225,14 @@ fn usage(message: &str) -> i32 {
 struct Parsed {
     positional: Vec<String>,
     flags: Vec<(String, String)>,
+    switches: Vec<String>,
 }
 
 impl Parsed {
+    fn switch(&self, name: &str) -> bool {
+        self.switches.iter().any(|s| s == name)
+    }
+
     fn flag(&self, name: &str) -> Option<&str> {
         self.flags
             .iter()
@@ -211,10 +242,11 @@ impl Parsed {
     }
 }
 
-fn parse_flags(args: &[String], known: &[&str]) -> Result<Parsed, String> {
+fn parse_flags(args: &[String], known: &[&str], switches: &[&str]) -> Result<Parsed, String> {
     let mut parsed = Parsed {
         positional: Vec::new(),
         flags: Vec::new(),
+        switches: Vec::new(),
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -223,6 +255,10 @@ fn parse_flags(args: &[String], known: &[&str]) -> Result<Parsed, String> {
                 Some((name, value)) => (name, Some(value.to_string())),
                 None => (flag, None),
             };
+            if switches.contains(&name) && inline.is_none() {
+                parsed.switches.push(name.to_string());
+                continue;
+            }
             if !known.contains(&name) {
                 return Err(format!("Unknown option: --{name}"));
             }
@@ -242,7 +278,7 @@ fn parse_flags(args: &[String], known: &[&str]) -> Result<Parsed, String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The models directory and --embedder
+// The models directory (the library's download cache)
 // ---------------------------------------------------------------------------------------------
 
 /// A non-empty environment variable.
@@ -250,33 +286,19 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// The models directory: `explicit`, else `$GRAPHERSAL_EMBED_MODELS`, else the user cache.
+/// The models directory: `explicit` (`--dir`), else the user's download cache
+/// ([`ModelCache::new`]: `$GRAPHERSAL_EMBED_MODELS`, else the user cache).
 pub fn models_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(dir) = explicit {
-        return Ok(PathBuf::from(dir));
+    match explicit {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => ModelCache::new()
+            .map(|cache| cache.dir().to_path_buf())
+            .map_err(|_| {
+                "No models directory: set GRAPHERSAL_EMBED_MODELS (or pass --dir); neither HOME \
+                 nor XDG_CACHE_HOME is set"
+                    .to_string()
+            }),
     }
-    if let Some(dir) = env("GRAPHERSAL_EMBED_MODELS") {
-        return Ok(PathBuf::from(dir));
-    }
-    if cfg!(windows)
-        && let Some(local) = env("LOCALAPPDATA")
-    {
-        return Ok(PathBuf::from(local).join("graphersal").join("embed-models"));
-    }
-    if let Some(cache) = env("XDG_CACHE_HOME").filter(|c| Path::new(c).is_absolute()) {
-        return Ok(PathBuf::from(cache).join("graphersal").join("embed-models"));
-    }
-    if let Some(home) = env("HOME").or_else(|| env("USERPROFILE")) {
-        return Ok(PathBuf::from(home)
-            .join(".cache")
-            .join("graphersal")
-            .join("embed-models"));
-    }
-    Err(
-        "No models directory: set GRAPHERSAL_EMBED_MODELS (or pass --dir); neither HOME nor \
-         XDG_CACHE_HOME is set"
-            .to_string(),
-    )
 }
 
 /// Whether `repo` is a Hugging Face repository name: `owner/name` (or a bare `name`), each part
@@ -296,71 +318,6 @@ pub fn is_repo_name(repo: &str) -> bool {
         (Some(owner), Some(name), None) => part_ok(owner) && part_ok(name),
         _ => false,
     }
-}
-
-/// The repository and the licence the manifest of the model `--embedder NAME=SPEC` names (a
-/// directory, or a repository downloaded into the models directory): `(None, "unknown")` when
-/// there is no manifest or it does not say.
-pub fn embedder_license(spec: &str) -> (Option<String>, String) {
-    let path = Path::new(spec);
-    let dir = if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        match models_dir(None) {
-            Ok(models) => models.join(spec),
-            Err(_) => return (None, "unknown".to_string()),
-        }
-    };
-    let value: Value = fs::read_to_string(dir.join(Model2Vec::MANIFEST_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(Value::Null);
-    let repo = value
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let license = value
-        .get("license")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    (repo, license)
-}
-
-/// Loads the model of `--embedder NAME=SPEC`: SPEC is a model directory, or a repository
-/// downloaded into the models directory.
-pub fn load_embedder(name: &str, spec: &str) -> Result<Model2Vec, String> {
-    let path = Path::new(spec);
-    let dir = if path.is_dir() {
-        path.to_path_buf()
-    } else if is_repo_name(spec) {
-        let models = models_dir(None)?;
-        let dir = models.join(spec);
-        if !dir.is_dir() {
-            return Err(format!(
-                "--embedder {name}={spec}: '{spec}' is neither a model directory nor a \
-                 downloaded model (looked in {})\nHelp: run `graphersal embed-model download \
-                 {spec}`, or pass the directory of a Model2Vec model",
-                dir.display()
-            ));
-        }
-        dir
-    } else {
-        return Err(format!(
-            "--embedder {name}={spec}: no such directory, and '{spec}' is not a Hugging Face \
-             repository name (owner/name)\nHelp: pass the directory of a Model2Vec model, or \
-             a repository downloaded with `graphersal embed-model download <owner/name>`"
-        ));
-    };
-    Model2Vec::load(name, &dir).map_err(|err| {
-        format!(
-            "--embedder {name}={spec}: {err}\nHelp: {}",
-            err.help()
-                .lines()
-                .next()
-                .unwrap_or("check the model directory")
-        )
-    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -394,7 +351,7 @@ fn find_models(dir: &Path) -> Vec<Listed> {
         dirs
     };
     let mut visit = |repo: String, path: PathBuf| {
-        let manifest = path.join(Model2Vec::MANIFEST_FILE);
+        let manifest = path.join(ModelCache::MANIFEST_FILE);
         let Ok(text) = fs::read_to_string(&manifest) else {
             return false;
         };
@@ -413,7 +370,7 @@ fn find_models(dir: &Path) -> Vec<Listed> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let identity = Model2Vec::model_identity(&path).map_err(|err| err.to_string());
+        let identity = ModelCache::identity(&path).map_err(|err| reason_of(&err));
         found.push(Listed {
             repo,
             bytes,
@@ -653,7 +610,7 @@ fn download(
         })).collect::<Vec<_>>(),
         "downloaded_at": now_text(),
     });
-    let manifest_path = staging.path.join(Model2Vec::MANIFEST_FILE);
+    let manifest_path = staging.path.join(ModelCache::MANIFEST_FILE);
     write_synced(
         &manifest_path,
         format!(
@@ -665,11 +622,13 @@ fn download(
     .map_err(|err| failed(format!("cannot write {}: {err}", manifest_path.display())))?;
 
     // Load it once: a repository that is not a Model2Vec model fails here, not later.
-    let model = Model2Vec::load("check", &staging.path).map_err(|err| {
+    let identity = ModelCache::check(&staging.path).map_err(|err| {
         failed(format!(
-            "{repo} was downloaded but does not load as a Model2Vec model: {err}"
+            "{repo} was downloaded but does not load as a Model2Vec model: {}",
+            reason_of(&err)
         ))
     })?;
+    let dimension = safetensors_dimension(&staging.path.join("model.safetensors"));
     licence_warnings(repo, &license, meta.gated);
 
     if let Some(store) = into {
@@ -692,12 +651,16 @@ fn download(
             })?;
             new = new.with_file(file.name.as_str(), role, reader);
         }
-        let stored = add_to_store(store, new)?;
+        let stored = add_to_store(
+            store,
+            ModelSource::Files(new),
+            ImportModelOptions::new().with_principal("cli"),
+        )?;
         outln!("{repo} -> the store {store} ({})", stored.identity);
         outln!(
             "identity {}, dimension {}",
             stored.identity,
-            model.info().dimension
+            stored.dimension
         );
         return Ok(());
     }
@@ -705,11 +668,10 @@ fn download(
     install(&staging, &target)?;
     staging.done = true;
     outln!("{repo} -> {}", target.display());
-    outln!(
-        "identity {}, dimension {}",
-        model.info().model,
-        model.info().dimension
-    );
+    match dimension {
+        Some(dimension) => outln!("identity {identity}, dimension {dimension}"),
+        None => outln!("identity {identity}"),
+    }
     Ok(())
 }
 
@@ -755,7 +717,7 @@ fn is_plain_file_name(name: &str) -> bool {
         && name.len() <= 40
         && !name.starts_with('.')
         && !name.starts_with("tmp-")
-        && name != Model2Vec::MANIFEST_FILE
+        && name != ModelCache::MANIFEST_FILE
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
@@ -793,17 +755,26 @@ fn licence_warnings(repo: &str, license: &str, gated: bool) {
     }
 }
 
-/// Imports `model` into the closed store at `store`: one commit appended to its WAL without
-/// loading the graph (`Store::import_model_dir`).
-fn add_to_store(store: &str, model: NewModel) -> Result<ModelInfo, DownloadError> {
-    match Store::import_model_dir(
-        store,
-        ModelSource::Files(model),
-        ImportModelOptions::new().with_principal("cli"),
-    ) {
+/// Imports `source` into the closed store at `store`: one commit appended to its WAL without
+/// loading the graph (`Store::import_model_dir`); a replace whose old revision vector rules
+/// name opens the store and re-embeds them (said in a note).
+fn add_to_store(
+    store: &str,
+    source: ModelSource,
+    options: ImportModelOptions,
+) -> Result<ModelInfo, DownloadError> {
+    match Store::import_model_dir(store, source, options) {
         Ok(report) => {
             if report.already_present {
                 errln!("note: the store {store} holds this model already");
+            }
+            if let Some(old) = &report.replaced {
+                errln!(
+                    "note: {} replaced the revision {} of {}",
+                    report.model.identity,
+                    old.identity,
+                    old.repo
+                );
             }
             if !report.reembedded.is_empty() {
                 errln!(
@@ -824,42 +795,63 @@ fn add_to_store(store: &str, model: NewModel) -> Result<ModelInfo, DownloadError
 }
 
 /// The model directory `embed-model import MODEL` reads: a repository downloaded into the
-/// models directory (`models_dir`, so `--dir` too) first, else MODEL as a directory.
+/// models directory (`--dir`, else the user's cache) first, else MODEL as a directory
+/// ([`ModelCache::resolve`]).
 fn import_source(model: &str, models: Option<&str>) -> Result<PathBuf, String> {
-    let mut looked = None;
-    if is_repo_name(model) {
-        let downloaded = models_dir(models)?.join(model);
-        if downloaded.is_dir() {
-            return Ok(downloaded);
-        }
-        looked = Some(downloaded);
-    }
-    let path = Path::new(model);
-    if path.is_dir() {
-        return Ok(path.to_path_buf());
-    }
-    Err(match looked {
-        Some(downloaded) => format!(
-            "'{model}' is neither a downloaded model (looked in {}) nor a directory\nHelp: run \
-             `graphersal embed-model download {model}` first, or pass the directory of a \
-             Model2Vec model",
-            downloaded.display()
-        ),
-        None => format!(
-            "no such directory '{model}', and it is not a Hugging Face repository name \
-             (owner/name)\nHelp: pass a repository downloaded with `graphersal embed-model \
-             download <owner/name>`, or the directory of a Model2Vec model"
-        ),
+    let cache = ModelCache::at(models_dir(models)?);
+    cache.resolve(model).map_err(|err| {
+        format!(
+            "{}\nHelp: run `graphersal embed-model download <owner/name>` first, or pass the \
+             directory of a Model2Vec model",
+            reason_of(&err)
+        )
     })
 }
 
-/// `graphersal embed-model import <dir> --into <store>`.
-fn import(
-    dir: &Path,
-    store: &str,
-    repo: Option<&str>,
-    license: Option<&str>,
-) -> Result<(), DownloadError> {
+/// The reason of a refusal, without the operation it names.
+fn reason_of(err: &graphersal::persist::PersistError) -> String {
+    match err {
+        graphersal::persist::PersistError::Store { reason, .. } => reason.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The dimension of the embedding tensor of a safetensors file (its header: the 2-dimensional
+/// tensor `embeddings`, `0` or `embedding.weight`); `None` when it does not say.
+fn safetensors_dimension(path: &Path) -> Option<u64> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut len = [0u8; 8];
+    file.read_exact(&mut len).ok()?;
+    let len = u64::from_le_bytes(len);
+    if len > 100 << 20 {
+        return None;
+    }
+    let mut header = vec![0u8; usize::try_from(len).ok()?];
+    file.read_exact(&mut header).ok()?;
+    let header: Value = serde_json::from_slice(&header).ok()?;
+    ["embeddings", "0", "embedding.weight"]
+        .iter()
+        .find_map(|name| {
+            let shape = header.get(name)?.get("shape")?.as_array()?;
+            match shape.as_slice() {
+                [_, cols] => cols.as_u64(),
+                _ => None,
+            }
+        })
+}
+
+/// The flags of `embed-model import`.
+struct ImportFlags<'a> {
+    repo: Option<&'a str>,
+    license: Option<&'a str>,
+    replace: bool,
+    default: bool,
+}
+
+/// `graphersal embed-model import <dir> --into <store> [--repo] [--license] [--replace]
+/// [--default]`: the library's directory import ([`ModelSource::Dir`]: the Model2Vec layouts,
+/// the card, the licence files, the download manifest) as one closed-store commit.
+fn import(dir: &Path, store: &str, flags: &ImportFlags<'_>) -> Result<(), DownloadError> {
     if !Store::is_store(store)
         .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
     {
@@ -868,14 +860,14 @@ fn import(
              {store}`)"
         )));
     }
-    if let Some(repo) = repo
+    if let Some(repo) = flags.repo
         && !is_repo_name(repo)
     {
         return Err(DownloadError::Usage(format!(
             "--repo {repo}: not a Hugging Face repository name (owner/name)"
         )));
     }
-    let manifest: Value = fs::read(dir.join(Model2Vec::MANIFEST_FILE))
+    let manifest: Value = fs::read(dir.join(ModelCache::MANIFEST_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(Value::Null);
@@ -885,7 +877,7 @@ fn import(
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let repo = match (repo, text("repo")) {
+    let repo = match (flags.repo, text("repo")) {
         (Some(given), Some(stated)) if given != stated => {
             return Err(DownloadError::Usage(format!(
                 "--repo {given}: the model's manifest names {stated}"
@@ -894,96 +886,48 @@ fn import(
         (Some(given), _) => Some(given.to_string()),
         (None, stated) => stated,
     };
-    // Load it once as a check (the identity is the loader's).
-    let mut options = Model2Vec::options();
-    if let Some(repo) = &repo {
-        options = options.with_repo(repo.as_str());
-    }
-    let model = options
-        .load("check", dir)
-        .map_err(|err| failed(format!("{} is not a Model2Vec model: {err}", dir.display())))?;
-    let files = Model2Vec::model_files(dir).map_err(|err| failed(err.to_string()))?;
-    let license = license
-        .map(str::to_string)
-        .or_else(|| text("license"))
+    // Load it once as a check: a directory that is not a Model2Vec model fails here.
+    ModelCache::check(dir).map_err(|err| {
+        failed(format!(
+            "{} is not a Model2Vec model: {}",
+            dir.display(),
+            reason_of(&err)
+        ))
+    })?;
+    let license = text("license")
+        .or_else(|| flags.license.map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string());
     let gated = manifest
         .get("gated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut new = NewModel::new()
-        .with_license(license.as_str())
-        .with_gated(gated);
-    if let Some(repo) = &repo {
-        new = new.with_repo(repo.as_str());
-    }
-    if let Some(revision) = text("revision") {
-        new = new.with_revision(revision);
-    }
-    if let Some(commit) = text("commit") {
-        new = new.with_commit(commit);
-    }
-    for base in manifest
-        .get("base_models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(base_repo) = base.get("repo").and_then(Value::as_str)
-            && is_repo_name(base_repo)
-        {
-            let base_license = base
-                .get("license")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            new = new.with_base_model(BaseModel::new(base_repo, base_license));
-        }
-    }
-    let open = |path: &Path| {
-        fs::File::open(path).map_err(|err| failed(format!("cannot read {}: {err}", path.display())))
-    };
-    for (path, role) in
-        files
-            .iter()
-            .zip([ModelRole::Config, ModelRole::Tokenizer, ModelRole::Weights])
-    {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        new = new.with_file(name, role, open(path)?);
-    }
-    let card = dir.join(CARD_FILE);
-    if card.is_file() {
-        new = new.with_file(CARD_FILE, ModelRole::Card, open(&card)?);
-    }
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.path().is_file())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect();
-    names.sort();
-    for (name, role) in licence_files(&names) {
-        new = new.with_file(name.as_str(), role, open(&dir.join(&name))?);
-    }
     licence_warnings(
         repo.as_deref().unwrap_or(&dir.display().to_string()),
         &license,
         gated,
     );
-    let stored = add_to_store(store, new)?;
+    let mut options = ImportModelOptions::new()
+        .with_principal("cli")
+        .with_replace(flags.replace)
+        .with_default(flags.default);
+    if let Some(repo) = flags.repo {
+        options = options.with_repo(repo);
+    }
+    if let Some(license) = flags.license {
+        options = options.with_license(license);
+    }
+    let stored = add_to_store(store, ModelSource::Dir(dir.to_path_buf()), options)?;
     outln!(
         "{} -> the store {store} ({})",
         dir.display(),
         stored.identity
     );
     outln!(
-        "identity {}, dimension {}, licence {}",
+        "identity {}, dimension {}, licence {}{}",
         stored.identity,
-        model.info().dimension,
-        stored.license
+        stored.dimension,
+        stored.license,
+        if stored.default { ", the default" } else { "" }
     );
     Ok(())
 }

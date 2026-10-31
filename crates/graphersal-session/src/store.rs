@@ -507,8 +507,9 @@ impl Session {
     }
 
     /// The embedding models of the active store (format spec 4.5), as the Store menu lists
-    /// them: `{models: [model_value...], missing: [identity...]}` (`missing`: the identities
-    /// the schema names that the store does not keep).
+    /// them: `{models: [model_value...], missing: [identity...], note}` (`missing`: the
+    /// identities the schema names that the store does not keep; `note`: [`models_note`] or
+    /// `null`).
     pub fn store_models(&self) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
         let info = store
@@ -517,6 +518,7 @@ impl Session {
         Ok(json!({
             "models": models_value(&info),
             "missing": missing_models(&info),
+            "note": models_note(&info),
         }))
     }
 
@@ -1144,6 +1146,8 @@ pub fn store_value(info: &StoreInfo) -> Value {
         // identities the schema names that it does not keep.
         "models": models_value(info),
         "missingModels": missing_models(info),
+        // The store holds models but none is the default (`null` otherwise).
+        "modelsNote": models_note(info),
         "attic": info.attic.iter().map(|a| json!({
             "id": a.id,
             "target": a.target,
@@ -1214,6 +1218,22 @@ fn models_value(info: &StoreInfo) -> Vec<Value> {
             model_value(model, used)
         })
         .collect()
+}
+
+/// The note of a store that holds embedding models but none is the default: `embed` without a
+/// model name uses `hash-ngram/1` (`None` otherwise, also without models).
+pub fn models_note(info: &StoreInfo) -> Option<String> {
+    let first = info.models.first()?;
+    (!info.models.iter().any(|m| m.default)).then(|| {
+        format!(
+            "The store holds {} embedding model(s) but none is the default: embed() without a \
+             model name uses hash-ngram/1. Name the model (#{{embedder: \"{}\"}}) or make one \
+             the default (graphersal store models default <dir> {}).",
+            info.models.len(),
+            first.repo,
+            first.repo
+        )
+    })
 }
 
 /// The model identities the schema of `info` names that the store does not keep.
@@ -1690,6 +1710,32 @@ mod tests {
         s.load_snapshot(&without, "bare.gsnap").unwrap();
         // Without the blobs: the definition stays, its blob is missing.
         assert_eq!(s.store_info().unwrap()["models"][0]["state"], "missing");
+    }
+
+    /// A store holding models but no default says so (the CLI's note), and its graph's runs
+    /// list the model beside the built-in.
+    #[test]
+    fn a_store_with_models_but_no_default_carries_the_note() {
+        let (packed, model) = packed_with_a_model();
+        let mut s = memory_session();
+        assert_eq!(s.store_info().unwrap()["modelsNote"], Value::Null);
+        s.load_snapshot(&packed, "with-model.gsnap").unwrap();
+        let info = s.store_info().unwrap();
+        assert_eq!(info["models"][0]["default"], false, "{info}");
+        let note = info["modelsNote"].as_str().unwrap_or_default().to_string();
+        assert!(note.contains("none is the default"), "{info}");
+        assert!(note.contains(&model.repo), "{note}");
+        assert_eq!(s.store_models().unwrap()["note"], json!(note));
+        let listed: Value = serde_json::from_str(&s.execute(
+            r#"g.embedders().map(|e| e.name)"#,
+            &crate::RunOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            listed["execution"]["results"],
+            json!(["hash-ngram/1", model.repo]),
+            "{listed}"
+        );
     }
 
     #[test]

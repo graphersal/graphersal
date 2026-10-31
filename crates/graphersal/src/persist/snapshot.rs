@@ -515,8 +515,8 @@ impl<R: Read> CrcReader<R> {
     /// Checks the named extra file of the segment-table row `entry` (section kind 5): its name
     /// must be the row's path, its bytes the row's length and CRC. The bytes are streamed
     /// through a bounded buffer, never held (a model file of a packed snapshot, format spec
-    /// 4.5, can be large).
-    fn extra_file(&mut self, entry: &SegmentEntry) -> Result<(), PersistError> {
+    /// 4.5, can be large). Returns the offset of the file's bytes in the stream.
+    fn extra_file(&mut self, entry: &SegmentEntry) -> Result<u64, PersistError> {
         let prefix = extra_file_prefix(&entry.path);
         let at = self.offset;
         let [found] = self.fixed::<1>("section header")?;
@@ -553,6 +553,7 @@ impl<R: Read> CrcReader<R> {
                 ),
             ));
         }
+        let content_at = self.offset;
         let file_crc = self.copy(entry.byte_len, &mut std::io::sink(), "named extra file")?;
         if file_crc != entry.crc {
             return Err(PersistError::corrupt(
@@ -564,7 +565,7 @@ impl<R: Read> CrcReader<R> {
                 ),
             ));
         }
-        Ok(())
+        Ok(content_at)
     }
 }
 
@@ -1248,6 +1249,18 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
     options: &ReadOptions,
     graph: &mut S,
 ) -> Result<(), PersistError> {
+    load_snapshot_with(reader, options, graph, &mut |_, _, _| Ok(()))
+}
+
+/// [`load_snapshot`] that hands every checked named extra file (format spec 7.5, 8: a blob or
+/// a 0.4.0 model row) with the offset of its bytes in the stream to `extra` (a `.gsnap` served
+/// without a Store reads its model blobs from the file later, `store/packed_load.rs`).
+pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
+    reader: R,
+    options: &ReadOptions,
+    graph: &mut S,
+    extra: &mut dyn FnMut(&Manifest, &SegmentEntry, u64) -> Result<(), PersistError>,
+) -> Result<(), PersistError> {
     if graph.vertex_count()? != 0 || graph.edge_count()? != 0 {
         return Err(PersistError::Graph(crate::error::GraphError::unsupported(
             "loading a snapshot into a storage that holds elements",
@@ -1312,7 +1325,8 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         let entry = &manifest.segments[number];
         if !is_element_kind(entry.kind) {
             // A file of another kind (format spec 7.5): checked, not interpreted here.
-            source.extra_file(entry)?;
+            let at = source.extra_file(entry)?;
+            extra(&manifest, entry, at)?;
             continue;
         }
         let (section, kind_name) = if entry.kind == KIND_VERTEX {

@@ -16,8 +16,6 @@ __all__ = [
     "Edge",
     "Interval",
     "Vector",
-    "Embedder",
-    "Model2Vec",
     "GraphersalError",
     "PermissionDeniedError",
     "CommitRejectedError",
@@ -114,117 +112,6 @@ class Vector:
     def __len__(self) -> int: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
-
-#: What an ``Embedder``'s callable returns for N texts: N rows (each a list of floats, a
-#: one-dimensional ``float32``/``float64`` buffer or a ``Vector``) or ONE two-dimensional
-#: ``float32``/``float64`` buffer of shape ``(N, dimension)`` (a ``numpy.ndarray``).
-_EmbedOutput = Any
-
-class Embedder:
-    """An embedder: turns texts into vectors for the ``embed`` step, ``embed(text)``
-    and text queries (``nearest("emb", "a question", 5)``). Register it with
-    ``Graph(embedders=[..])`` or ``graph.register_embedder``. Immutable."""
-
-    def __init__(
-        self,
-        name: str,
-        fn: Callable[[list[str]], _EmbedOutput],
-        *,
-        dimension: int,
-        element: Literal["f32", "f16", "i8", "bit"] = "f32",
-        metric: Literal["cosine", "dot", "l2", "hamming"] = "cosine",
-        max_batch: int = 64,
-        deterministic: bool = False,
-        local: bool = True,
-        model: Optional[str] = None,
-    ) -> None:
-        """``fn(texts)`` gets a ``list[str]`` of at most ``max_batch`` texts and returns one row
-        per text (see ``_EmbedOutput``). A wrong number of rows or of values per row raises
-        ``GraphersalError`` ("returned a wrong answer"); an exception ``fn`` raises (also
-        ``KeyboardInterrupt``) fails the call with its type and message. ``model`` (default:
-        ``name``) is the model identity the schema records for the vectors the embedder
-        produces: keep it stable across runs and hosts and change it whenever the model
-        changes. An invalid name, a reserved one (``"hash-ngram"``, ``"hash-ngram/*"``), a
-        dimension outside 1..65536 or ``max_batch`` 0 raise ``ValueError``."""
-    @property
-    def name(self) -> str:
-        """The registry name."""
-    @property
-    def model(self) -> str:
-        """The model identity the schema records."""
-    @property
-    def dimension(self) -> int:
-        """The number of components of every vector."""
-    @property
-    def element(self) -> str:
-        """The element kind of the vectors."""
-    @property
-    def metric(self) -> str:
-        """The metric the vectors are meant for."""
-    @property
-    def max_batch(self) -> int:
-        """The most texts per call."""
-    @property
-    def deterministic(self) -> bool:
-        """Whether the same text always gives the same bits."""
-    @property
-    def local(self) -> bool:
-        """Whether the embedder runs locally (sends no text anywhere)."""
-    def embed(self, texts: Sequence[str]) -> list[Vector]:
-        """The vectors of ``texts``, checked like inside the engine; raises
-        ``GraphersalError``."""
-
-class Model2Vec(Embedder):
-    """A Model2Vec static embedding model loaded from a LOCAL directory; the library never
-    downloads (fetch the files first, e.g. ``huggingface_hub.snapshot_download``)."""
-
-    def __init__(
-        self,
-        name: str,
-        path: Union[str, os.PathLike[str]],
-        *,
-        model: Optional[str] = None,
-        max_tokens: int = 512,
-        normalize: Optional[bool] = None,
-        max_batch: int = 256,
-    ) -> None:
-        """``path`` holds ``config.json``, ``tokenizer.json`` and ``model.safetensors`` (or the
-        sentence-transformers layout). ``model`` is the Hugging Face repository the files come
-        from (``"minishlab/potion-base-8M"``): the model identity becomes
-        ``model2vec/<model>@<12 hex>``, the same as ``graphersal embed-model download`` of the
-        same files. Without it the directory's ``graphersal-embed-model.json`` names it, else
-        the identity is ``model2vec@<12 hex>``; a ``model`` differing from that file raises
-        ``GraphersalError``, as does a directory holding no readable model. ``normalize``
-        overrides the config's L2 normalization (and becomes part of the identity). Loading
-        releases the GIL."""
-    # The members of ``Embedder``, with what they are for a Model2Vec.
-    @property
-    def name(self) -> str:
-        """The registry name."""
-    @property
-    def model(self) -> str:
-        """``model2vec/<repo>@<12 hex>`` or ``model2vec@<12 hex>`` (a hash of the three model
-        files, never a path: a copied directory keeps it)."""
-    @property
-    def dimension(self) -> int:
-        """The model's dimension."""
-    @property
-    def element(self) -> str:
-        """``"f32"``."""
-    @property
-    def metric(self) -> str:
-        """``"cosine"``."""
-    @property
-    def max_batch(self) -> int:
-        """The most texts per call (``max_batch=``)."""
-    @property
-    def deterministic(self) -> bool:
-        """``False``: the bits may differ between Graphersal builds."""
-    @property
-    def local(self) -> bool:
-        """``True``: the model runs in the process."""
-    def embed(self, texts: Sequence[str]) -> list[Vector]:
-        """The vectors of ``texts``."""
 
 class Vertex:
     """A vertex a query returned (detached: id, labels and a snapshot of its properties), like
@@ -372,58 +259,40 @@ class Graph:
     ``execute``/``query`` (and ``dry_run`` to preview their changes); results come back as
     native Python values."""
 
-    def __init__(
-        self,
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> None:
-        """A new, empty graph.
-
-        ``embedders``: the ``Embedder``s (also ``Model2Vec``) its scripts call,
-        beside the built-in ``"hash-ngram/1"``; ``default_embedder`` names the one used when a
-        call names none (default ``"hash-ngram/1"``). A duplicate or
-        reserved name raises ``ValueError``. Every constructor and loader takes both keywords.
+    def __init__(self) -> None:
+        """A new, empty graph. Its scripts embed with the built-in ``"hash-ngram/1"``;
+        embedding models serve a graph only from its database (a ``Store``:
+        ``store.import_model``; a ``.gsnap`` that carries them: ``Graph.load``).
 
         The process memory ceiling is not a keyword of a graph: it is one setting of the whole
         process, ``set_memory_limit``."""
     @staticmethod
-    def tinkerpop_modern(
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> Graph:
-        """The standard TinkerPop "modern" toy graph (6 vertices, 6 edges); the keywords are
-        those of ``Graph()``."""
+    def tinkerpop_modern() -> Graph:
+        """The standard TinkerPop "modern" toy graph (6 vertices, 6 edges)."""
     @staticmethod
     def from_graphml(
         path: str,
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
     ) -> Graph:
         """Loads a graph from a GraphML file (see also ``from_graphson``). GraphML carries no
         schema: ``schema`` (a mapping or JSON text in the schema format; ``mode`` replaces its
         own mode) is set on the new graph first, then the file is imported as one unit, so
         declared ``uuid``/``array``/``object`` properties come back typed and in
         ``open``/``closed`` a violation fails the load. ``mode`` without ``schema`` raises
-        ``ValueError``. The other keywords are those of ``Graph()``."""
+        ``ValueError``."""
     @staticmethod
     def from_graphson(
         path: str,
         *,
         schema: Union[Mapping[str, Any], str, None] = None,
         mode: Optional[Literal["none", "open", "closed"]] = None,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
     ) -> Graph:
         """Loads a graph from a GraphSON 3.0 file (one vertex per line, TinkerPop's default, or
         one ``{"vertices": [...]}`` document; 2.0 and untyped 1.0 read too). Skipped data
         (dates, types Graphersal cannot hold, edges to missing vertices) is reported in one
-        ``UserWarning``. ``schema``/``mode`` as in ``from_graphml``; the other keywords are
-        those of ``Graph()``."""
+        ``UserWarning``. ``schema``/``mode`` as in ``from_graphml``."""
     def import_graphml(self, path: str) -> None:
         """Imports a GraphML file into this live graph as one unit (all or nothing); the stored
         schema restores declared ``uuid``/``array``/``object`` properties."""
@@ -441,16 +310,13 @@ class Graph:
         lineage id, commit position and auto-id sequences. Returns ``{"commit_seq",
         "vertex_count", "edge_count"}``."""
     @staticmethod
-    def load(
-        path: str,
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> Graph:
-        """Reads a packed snapshot written by ``save`` (no schema validation; damage raises
-        ``GraphersalError``). A snapshot whose size estimate exceeds the process memory ceiling
-        (``set_memory_limit``) is refused before any element is read; the keywords are those of
-        ``Graph()``."""
+    def load(path: str) -> Graph:
+        """Reads a packed snapshot (``save``, ``Store.export``; no schema validation; damage
+        raises ``GraphersalError``). A snapshot whose size estimate exceeds the process memory
+        ceiling (``set_memory_limit``) is refused before any element is read. The embedding
+        models the file carries serve the graph (kept in memory; a Graphersal 0.4.0 file's
+        converted in memory); what an earlier release left that this version does not keep
+        current is one ``UserWarning`` per note."""
     def start_journal(
         self, path: str, *, durability: Union[Literal["every_commit", "os"], float, None] = None
     ) -> None:
@@ -468,8 +334,6 @@ class Graph:
         commit_seq: Optional[int] = None,
         time: Optional[int] = None,
         mark: Optional[str] = None,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
     ) -> tuple[Graph, dict[str, Any]]:
         """Loads ``snapshot`` (or an empty graph) and replays ``journals`` up to the end or the
         one given target; returns ``(graph, report)``. The graph has no journal attached."""
@@ -634,13 +498,11 @@ class Graph:
         not) and their current stats."""
     def drop_index(self, name: str, *, policy: Optional[AccessPolicy] = None) -> bool:
         """Drops the property index; ``False`` when there is none."""
-    def register_embedder(self, embedder: Embedder, *, default: bool = False) -> None:
-        """Adds ``embedder`` to this graph's embedders (``default=True`` makes it the default).
-        A running execution keeps the embedders it started with. A name already registered,
-        or a reserved one, raises ``ValueError``."""
     def embedders(self) -> list[dict[str, Any]]:
-        """This graph's embedders, the default first: ``name``, ``model``, ``dimension``,
-        ``element``, ``metric``, ``max_batch``, ``deterministic``, ``local``, ``default``."""
+        """This graph's embedders, the default first: the built-in ``"hash-ngram/1"`` and the
+        embedding models of its database (named by their repository); ``name``, ``model``,
+        ``dimension``, ``element``, ``metric``, ``max_batch``, ``deterministic``, ``local``,
+        ``default``."""
     def call_query(
         self,
         name: str,
@@ -706,46 +568,32 @@ class DryRunResult:
 class Store:
     """One graph kept in one directory (the Store of the book's "Persistence" part): every commit
     of ``store.graph`` is written to the store's write-ahead log before it returns. Open
-    read-write with its lock until ``close()`` (also a context manager). The
-    ``embedders``/``default_embedder`` keywords of every opener give ``store.graph`` its
-    embedders (as ``Graph()``); every ``store.graph`` shares them."""
+    read-write with its lock until ``close()`` (also a context manager). ``store.graph`` serves
+    the embedding models the store keeps (``import_model``); an open of a store holding models
+    but none the default is a ``UserWarning``."""
 
     @staticmethod
     def create(
         path: str,
         *,
         on_damage: str = "maintenance",
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
     ) -> Store:
         """Creates a store for an empty graph in ``path`` (missing or empty) and opens it.
         ``on_damage`` (``"maintenance"`` or ``"continue"``) is the damage policy, fixed for the
         store's life."""
     @staticmethod
-    def open(
-        path: str,
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> Store:
+    def open(path: str) -> Store:
         """Opens the store in ``path`` read-write and runs its recovery; a second writer raises."""
     @staticmethod
     def create_file(
         path: str,
         *,
         on_damage: str = "maintenance",
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
     ) -> Store:
         """Creates a single-file store (the whole store in the one file ``path``) and opens it;
         ``Store.create`` of a path ending in ``.gstore`` does the same."""
     @staticmethod
-    def open_file(
-        path: str,
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> Store:
+    def open_file(path: str) -> Store:
         """Opens the single-file store ``path`` read-write (``Store.open`` of an existing file
         does the same)."""
     @staticmethod
@@ -833,15 +681,32 @@ class Store:
         on redistributes them."""
     def import_model(
         self,
-        directory: str,
+        source: str,
         *,
         repo: str | None = None,
         license: str | None = None,
         replace: bool = False,
         default: bool = False,
     ) -> dict[str, Any]:
-        """Imports the Model2Vec model in ``directory`` as one commit; returns ``{"model",
-        "already_present", "commit_seq", "replaced", "warnings"}``."""
+        """Imports a Model2Vec model as one commit: ``source`` is a repository downloaded into
+        the download cache (``graphersal embed-model download <repo>``; looked up first) or a
+        model directory. Returns ``{"model", "already_present", "commit_seq", "replaced",
+        "reembedded", "warnings"}``."""
+    @staticmethod
+    def import_model_into(
+        path: str,
+        source: str,
+        *,
+        repo: str | None = None,
+        license: str | None = None,
+        replace: bool = False,
+        default: bool = False,
+    ) -> dict[str, Any]:
+        """``import_model`` into the CLOSED store in ``path`` (one commit appended without
+        loading the graph unless a replace must re-embed); same result."""
+    def set_default_model(self, repo: Optional[str]) -> Optional[int]:
+        """Makes the model of ``repo`` the default (``None``: none, ``hash-ngram/1``); returns
+        the commit, ``None`` when nothing changed."""
     def export(
         self,
         path: str,
@@ -889,12 +754,7 @@ class Store:
     def frozen_by_damage(self) -> bool:
         """Whether the store turned read-only because damage was found while it is open."""
     @staticmethod
-    def open_backup(
-        path: str,
-        *,
-        embedders: Optional[Sequence[Embedder]] = None,
-        default_embedder: Optional[str] = None,
-    ) -> Store:
+    def open_backup(path: str) -> Store:
         """Opens a backup read-only (listing, verify, fork work; writes raise)."""
     @staticmethod
     def restore_backup(path: str) -> dict[str, Any]:

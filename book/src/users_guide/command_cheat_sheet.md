@@ -53,11 +53,14 @@ graphersal embed-model download minishlab/potion-base-8M          # into $GRAPHE
 graphersal embed-model download minishlab/potion-multilingual-128M   # 101 languages: questions in another language than the texts
 graphersal embed-model download minishlab/potion-base-8M --revision v1.0 --dir ./models   # a pinned revision, another directory
 graphersal embed-model list                                        # repository, size, licence, model identity
-graphersal embed-model download minishlab/potion-base-8M --into data/   # into the Store data/ (loaded whenever it opens)
-graphersal embed-model import minishlab/potion-base-8M --into data/   # a downloaded model into a Store (no network)
+graphersal embed-model download minishlab/potion-base-8M --into data/   # download and import into the Store data/
+graphersal embed-model import minishlab/potion-base-8M --into data/ --default   # from the download cache (no network), the default model
 graphersal embed-model import ./my-model --into data/ --repo acme/my-model   # a local model directory into a Store
-graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion -e 'embed("graph databases")'
-graphersal --embedder mine=./models/my-model -e 'g.v().embed("name", #{embedder: "mine"}).to_list()'   # a model directory
+graphersal embed-model import minishlab/potion-base-8M --into data/ --replace   # a new revision replaces the old one
+graphersal store models default data/ minishlab/potion-base-8M     # the model embed() uses without a name (--none clears it)
+graphersal --graph data/ -e 'embed("graph databases")'              # the store's default model
+graphersal --graph data/ -e 'g.v().embed("name", #{embedder: "acme/my-model"}).to_list()'   # a model by its repository
+graphersal --graph export.gsnap -e 'g.embedders()'                  # a .gsnap serves the models it carries
 ```
 
 In the REPL a script runs when its input ends with `;`. Commands start with `/` (an input starting
@@ -162,7 +165,7 @@ graphersal --graph new/ --create-store --server          # create the store when
 graphersal --graph g.graphml --schema schema.json --server   # a graph file loaded against its schema
 graphersal --graph large --server --timeout 5000 --memory-limit auto   # limits apply to every query
 graphersal --graph modern --server --ui-dir ~/src/graphersal/playground # its files win over the embedded UI
-graphersal --graph modern --server --embedder potion=minishlab/potion-base-8M   # a Model2Vec model for every query
+graphersal --graph export.gsnap --server                  # a .gsnap: the models it carries serve every query (in memory)
 graphersal --graph db.gstore --read-only --server --mcp --mcp-read-only   # every write refused; the store is not written
 graphersal health                                        # exit 0 when http://127.0.0.1:8080/healthz answers 200
 graphersal health --ready --port 9000                    # /readyz: 503 while loading or stopping
@@ -240,6 +243,7 @@ graphersal store backup data/ data.zip --zip --without-models   # ... without th
 graphersal store export data/ data.gsnap             # the latest snapshot as a .gsnap (--commit N: another)
 graphersal store export data/ data.gsnap --without-models   # ... without the store's embedding models
 graphersal store models data/                        # the embedding models the store keeps, with licences
+graphersal store models default data/ <repo>         # the default model (--none clears it; a commit)
 graphersal store models remove data/ <repo>          # remove one (a commit)
 graphersal store rollback data/ --at-mark before-import   # back IN PLACE; the rest goes to the attic
 graphersal store attic data/                         # the attic entries (rolled-back history), with their <ID>

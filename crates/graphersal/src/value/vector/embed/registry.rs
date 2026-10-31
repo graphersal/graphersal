@@ -531,6 +531,33 @@ impl ModelRegistry {
         registry
     }
 
+    /// A registry serving `embedders` as they are (crate unit tests: a mock embedder attached to
+    /// a graph like a database's model).
+    #[cfg(test)]
+    pub(crate) fn of_embedders(embedders: Embedders) -> Arc<Self> {
+        struct NoBytes;
+        impl ModelBytes for NoBytes {
+            fn read(&self, _: &BlobRef) -> Result<Vec<u8>, LoadFailure> {
+                Err(LoadFailure::Missing)
+            }
+            fn check(&self, _: &BlobRef) -> Result<(), LoadFailure> {
+                Err(LoadFailure::Missing)
+            }
+            fn journal(&self) -> Option<Arc<SystemJournal>> {
+                None
+            }
+        }
+        let registry = ModelRegistry::new(Arc::new(NoBytes), Vec::new());
+        registry.serve_for_test(embedders);
+        registry
+    }
+
+    /// Serves `embedders` as they are until the next rebuild (crate unit tests).
+    #[cfg(test)]
+    pub(crate) fn serve_for_test(&self, embedders: Embedders) {
+        self.state.write().embedders = Arc::new(embedders);
+    }
+
     /// The embedders the graph's traversals use.
     pub(crate) fn embedders(&self) -> Arc<Embedders> {
         self.state.read().embedders.clone()

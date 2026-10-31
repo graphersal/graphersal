@@ -10,7 +10,7 @@ use crate::value::{ElementProperty, PropertyMap};
 /// The storage advisor: recommendations from the memory report and the workload statistics.
 pub mod advisor;
 /// The sealed dyn boundary the front ends hold ([`AnyGraph`]).
-mod any_graph;
+pub(crate) mod any_graph;
 /// Authorization: the [`Authorizer`] hook and the ready-made [`AccessPolicy`].
 pub mod authorization;
 /// What a storage can do ([`StorageCapabilities`]).

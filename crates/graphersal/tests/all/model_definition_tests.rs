@@ -17,6 +17,29 @@ use graphersal::system_journal::JournalQuery;
 
 use crate::model_fixture::*;
 
+/// The dimension of `embed(text)` with `embedder` on the store's graph (`None`: its default):
+/// how a test sees which embedders the graph's registry serves (0.5.0 removed
+/// `Store::embedders`).
+fn embed_with(store: &Store, embedder: Option<&str>) -> Result<usize, TraverserError> {
+    let graph = store.graph().read();
+    let vectors = graph
+        .traversal()
+        .inject(vec![ElementProperty::from("graph")])
+        .embed_value(embedder)
+        .to_list()
+        .map_err(|err| *err)?;
+    Ok(vectors[0].as_vector().map_or(0, |v| v.dimension()))
+}
+
+/// Whether the store's graph serves an embedder `name` (in a build without the model loader it
+/// is unavailable, never unknown).
+fn serves(store: &Store, name: &str) -> bool {
+    match embed_with(store, Some(name)) {
+        Ok(_) => true,
+        Err(err) => !graphersal::error::format_diagnostic(&err).contains("there is no embedder"),
+    }
+}
+
 #[test]
 fn the_schema_accepts_the_repository_and_stores_the_identity() {
     let store = Store::create(graphersal::persist::MemDir::new(), options()).unwrap();
@@ -268,13 +291,11 @@ fn every_position_has_the_models_and_the_default_of_its_moment() {
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].repo, "acme/a");
     assert_eq!(store.info().unwrap().default_model, None);
-    assert_eq!(
-        store.embedders().unwrap().default_embedder().info().name,
-        "hash-ngram/1"
-    );
+    // The default embedder is the built-in (256 components), not a model.
+    assert_eq!(embed_with(&store, None).unwrap(), 256);
     // The registry follows the rollback: acme/b is no embedder any more.
-    assert!(store.embedders().unwrap().get("acme/b").is_none());
-    assert!(store.embedders().unwrap().get("acme/a").is_some());
+    assert!(!serves(&store, "acme/b"));
+    assert!(serves(&store, "acme/a"));
     store.close().unwrap();
     let store = Store::open(&path, options()).unwrap();
     assert_eq!(store.models().unwrap().len(), 1);
@@ -339,12 +360,7 @@ fn a_model_definition_of_a_newer_version_is_kept_and_written_back() {
         .find(|m| m.identity == "future/model@1")
         .unwrap();
     assert!(matches!(foreign_info.state, ModelState::Unsupported { .. }));
-    // Not served: no embedder of it.
-    assert!(
-        store
-            .embedders()
-            .unwrap()
-            .by_model("future/model@1")
-            .is_none()
-    );
+    // Not served: no embedder of it (an unknown name, and the registry has only the
+    // built-in besides the served model).
+    assert!(!serves(&store, "future/model"));
 }

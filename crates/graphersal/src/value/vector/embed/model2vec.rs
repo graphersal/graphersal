@@ -42,18 +42,10 @@ const CHUNK_TEXTS: usize = 64;
 const DOWNLOAD_HINT: &str = "Download a model with `graphersal embed-model download <repo>` \
      (for example minishlab/potion-base-8M) and pass its directory";
 
-/// A Model2Vec static embedding model loaded from a local directory: tokenize, look up one
-/// vector per token, mean-pool (and L2-normalize when the model's config says so).
-///
-/// ```no_run
-/// use std::sync::Arc;
-/// use graphersal::vector::{Embedder, Embedders, Model2Vec};
-///
-/// let model = Model2Vec::load("potion", "models/minishlab/potion-base-8M").unwrap();
-/// assert_eq!(model.info().dimension, 256);
-/// let embedders = Embedders::builder().with(Arc::new(model)).unwrap().build();
-/// # let _ = embedders;
-/// ```
+/// A Model2Vec static embedding model (crate-internal: a model of a database is loaded from its
+/// blob, `registry.rs`; [`ModelCache::check`](crate::persist::ModelCache::check) loads a
+/// downloaded directory as a check): tokenize, look up one vector per token, mean-pool (and
+/// L2-normalize when the model's config says so).
 ///
 /// The directory holds one of the layouts `model2vec-rs` reads: `config.json`,
 /// `tokenizer.json` and `model.safetensors` (the Model2Vec layout), or
@@ -64,7 +56,7 @@ const DOWNLOAD_HINT: &str = "Download a model with `graphersal embed-model downl
 /// depends on the versions of `model2vec-rs` and `tokenizers` it was built with, so two
 /// Graphersal builds are not promised the same bits. The model identity is described in the
 /// module docs and on [`Self::model_identity`].
-pub struct Model2Vec {
+pub(crate) struct Model2Vec {
     info: EmbedderInfo,
     model: StaticModel,
     max_tokens: usize,
@@ -85,7 +77,7 @@ impl fmt::Debug for Model2Vec {
 
 /// The options of a [`Model2Vec`] load ([`Model2Vec::options`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Model2VecOptions {
+pub(crate) struct Model2VecOptions {
     max_tokens: usize,
     normalize: Option<bool>,
     max_batch: usize,
@@ -103,6 +95,7 @@ impl Default for Model2VecOptions {
     }
 }
 
+#[allow(dead_code)]
 impl Model2VecOptions {
     /// The most tokens of one text that are pooled (at least 1; default
     /// [`Model2Vec::DEFAULT_MAX_TOKENS`]): a longer text is cut. Not part of the model
@@ -174,6 +167,7 @@ struct ModelFiles {
     identity: String,
 }
 
+#[allow(dead_code)]
 impl Model2Vec {
     /// The file `graphersal embed-model download` writes into a model directory: the Hugging
     /// Face repository, the revision and the files with their sizes and SHA-256. A load reads
@@ -651,3 +645,7 @@ fn check_model(
     }
     Ok((rows, cols))
 }
+
+#[cfg(test)]
+#[path = "model2vec_tests.rs"]
+mod tests;

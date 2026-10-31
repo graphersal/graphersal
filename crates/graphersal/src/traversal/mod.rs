@@ -96,9 +96,6 @@ pub struct GraphTraversalSource<'g, S: GraphStorage + 'g> {
     /// Set by [`Self::with_now`] (and the script DSL's creating steps carry the evaluation's
     /// `now()`): the time of `defaultFunction` `now`/`today`. `None`: the unit's start.
     pub(crate) create_time: Option<crate::value::temporal::DateTime>,
-    /// Set by [`Self::with_embedders`] (and the script DSL): the embedders the `embed` step
-    /// calls. `None`: the default registry (`hash-ngram/1` only).
-    pub(crate) embedders: Option<std::sync::Arc<crate::value::Embedders>>,
 }
 
 /// Anonymous-traversal token (`__`): starts a child traversal inside a step argument (e.g.

@@ -12,15 +12,40 @@ and text queries use. Inside, the schema records the model's **identity**
 (`model2vec/<repo>@<12 hex>`, a hash of its files), so the vectors stay tied to the exact model
 that made them.
 
+An import is the ONLY way a model serves a database: the step `embed()`, the function
+`embed(text)`, text queries, vector rules and `g.embedders()` use the built-in `hash-ngram/1`
+and the models of the database, nothing else. (Graphersal 0.4.0 also served models given on the
+command line, `--embedder`, or registered by a host; 0.5.0 removed that. A host with a model of
+its own computes the vectors itself and writes them as values.)
+
 ## Importing a model
 
 ```text
-graphersal embed-model download minishlab/potion-base-8M
-graphersal embed-model import minishlab/potion-base-8M --into data/
+graphersal embed-model download minishlab/potion-base-8M          # once, into the download cache
+graphersal embed-model import minishlab/potion-base-8M --into data/ --default
+graphersal embed-model import minishlab/potion-base-8M --into data/ --replace   # a new revision
 ```
 
-The import writes the model's files (config, tokenizer, weights, model card, licence files) as
-one blob and commits one definition. In Rust:
+The download fills the **download cache** (`$GRAPHERSAL_EMBED_MODELS`, else
+`%LOCALAPPDATA%\graphersal\embed-models` on Windows, `$XDG_CACHE_HOME/graphersal/embed-models`,
+else `~/.cache/graphersal/embed-models`; `--dir` for another one): one download, imported into
+any number of databases without the network. The import takes a repository from the cache
+first, else the argument as a model directory (`--repo`, `--license` fill what a directory does
+not say). `--default` makes the model the default, `--replace` replaces another revision of the
+same repository (below). The import writes the model's files (config, tokenizer, weights, model
+card, licence files) as one blob and commits one definition.
+
+From Python:
+
+```python
+store.import_model("minishlab/potion-base-8M", default=True)          # an open store
+graphersal.Store.import_model_into("data", "minishlab/potion-base-8M")  # a closed store
+```
+
+`import_model(source, *, repo=None, license=None, replace=False, default=False)` returns the
+report as a dict; the wheel has no download client, so the cache is filled by the command line.
+In Rust (the cache lookup is `persist::ModelCache`: `ModelCache::new()?.source("minishlab/potion-base-8M")`
+gives the `ModelSource`):
 
 ```rust,ignore
 use graphersal::persist::{ImportModelOptions, ModelSource, Store, StoreOptions};
@@ -36,8 +61,9 @@ println!("{} ({}), commit {:?}", report.model.repo, report.model.identity, repor
 - The same model again commits nothing (`already_present`).
 - Another revision of a repository the store holds is refused (`ModelRevisionExists`) unless
   `with_replace(true)`: then the new revision replaces the old one in ONE commit (and becomes
-  the default if the old one was). While vectors of the old revision are in the data, a replace
-  needs vector rules, which a later release adds.
+  the default if the old one was). [Vector rules](../users_guide/vector_rules.md) naming the old
+  revision are switched to the new one and their properties re-embedded in the same commit;
+  vectors of the old revision without a rule refuse the replace (`ModelInUse`).
 - `ModelSource::Files(NewModel)` imports files given as streams (a host without a file system,
   such as the browser).
 - A closed store: `Store::import_model_dir` (what the CLI does). See the next section.
@@ -45,7 +71,8 @@ println!("{} ({}), commit {:?}", report.model.repo, report.model.identity, repor
 ## Changing the models of a closed store
 
 `Store::import_model_dir`, `Store::set_default_model_dir` and `Store::remove_model_dir` (CLI
-`embed-model import|download --into <dir>`, `store models remove <dir> <repo>`) change the
+`embed-model import|download --into <dir>`, `store models default <dir> [<repo>|--none]`,
+`store models remove <dir> <repo>`; Python `Store.import_model_into`) change the
 catalog of a CLOSED store WITHOUT loading its graph: seconds on a store of any size. Each takes
 the writer lock (a store open elsewhere is refused with `Locked`: make the change on the open
 store, or close it), reads the catalog of the latest position from the newest snapshot's
@@ -76,8 +103,11 @@ store with a very long WAL tail run `graphersal store checkpoint <dir>` first.
 ## The default model
 
 `Store::set_default_model(Some(repo))` makes a model the one `embed` uses without a model name
-(one commit; `None` clears it). At most one model is the default. Without one, `embed` uses the
-built-in `hash-ngram/1`, and the CLI notes that the store holds models but none is the default.
+(one commit; `None` clears it; on a closed store `Store::set_default_model_dir`, CLI
+`graphersal store models default <dir> <repo>` or `--none`, or `embed-model import --default`).
+At most one model is the default. Without one, `embed` uses the built-in `hash-ngram/1`, and the
+front ends (CLI, dev server banner, playground, Python) note that the store holds models but none
+is the default.
 
 ## Removing a model
 
@@ -125,6 +155,36 @@ Every copy: full and incremental backups, the ZIP backup, fork, attic fork, repa
 and upgrade, a packed snapshot (`.gsnap`; `--without-models` leaves the blobs out, the
 definitions stay and the models are then missing in the copy). Prune, checkpoint and compact
 keep the blobs the retained history references.
+
+## A `.gsnap` without a store
+
+A packed snapshot exported from a store (`graphersal store export`, the playground's "Save
+graph") carries the blobs of its models. Loaded WITHOUT a store (`graphersal --graph
+file.gsnap`, `GraphSource::from_file`, Python `Graph.load`; in Rust
+`persist::read_snapshot_file`, which also returns a `SnapshotLoadReport`) the graph serves those
+models: `embed()`, `embed(text)`, text queries, vector rules and `g.embedders()` use them as a
+store's graph does. The load only notes where each model's blob lies in the file; a model is
+loaded at its first use by reading its blob from the file (checked by length, CRC-32C and
+SHA-256), so no copy of a blob stays in memory, only the loaded model. The file must therefore
+stay as it was while the graph serves its models: a file changed, truncated or removed after the
+load makes a model that was not loaded yet unavailable, with an error naming the file (a model
+loaded before keeps running). A graph with no packed models has the built-in `hash-ngram/1` only.
+Changes stay in memory: the file is never written.
+
+- A `.gsnap` of Graphersal 0.4.0 holds its models as model rows: they are converted as the
+  store upgrade converts them (one blob and definition each; a model without a repository
+  becomes `local/<12 hex>` and the schema's `embedder` naming it is rewritten in memory), the
+  file stays as it is. The load reads the rows once to convert them (briefly holding a model's
+  files in memory) and keeps only how to build each model's tar; the tar is built again from the
+  rows when the model loads. `graphersal store create <dir> --from file.gsnap` keeps them
+  converted (the documented route for a 0.4.0 file).
+- A `.gsnap` exported `--without-models` keeps the definitions but not the blobs: the models
+  are listed as `missing`, and a query that needs one fails with the import command.
+- The CLI prints what the load found as `note:` lines on stderr (`SnapshotLoadReport::notes`,
+  the same text in Python as a `UserWarning`, in Rust from the report; `GraphSource::from_file`
+  logs them as `tracing` warnings): converted models, models stored but none the default, models
+  the schema names that the file lacks, vector properties without a rule, saved queries calling
+  a removed function.
 
 ## Older Graphersal versions
 

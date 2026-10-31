@@ -165,7 +165,7 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   a second revision of a repository another model of the store takes (the catalog keeps one
   model per repository).
 - **Models the schema needs that the store does not keep** (0.4.0 served them through
-  `--embedder`) are listed (`UpgradeReport::models_missing`, a CLI `warning:` with the
+  its `--embedder` flag, removed in 0.5.0) are listed (`UpgradeReport::models_missing`, a CLI `warning:` with the
   commands): such a store opens once they are imported (`graphersal embed-model download
   <repo>`, `graphersal embed-model import <repo> --into <store>`). The upgrade itself succeeds.
 - **Vector properties without a rule.** 0.4.0's `embed_property` recorded only the model

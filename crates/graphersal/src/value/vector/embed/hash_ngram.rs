@@ -1,6 +1,6 @@
 //! `hash-ngram/1`: the built-in embedder of hashed words and character n-grams (book page
 //! "Vectors", section "Embeddings"). The algorithm is FROZEN: any change of the output bits is a
-//! new name (`hash-ngram/2`); golden tests (`tests/all/embed_tests.rs`, and the wasm32 parity
+//! new name (`hash-ngram/2`); golden tests (the unit tests below, and the wasm32 parity
 //! test of `graphersal-wasm`) pin the bits.
 //!
 //! For one text:
@@ -36,19 +36,10 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// matching, deduplication and as a baseline before a semantic model.
 ///
 /// [`Embedders::default`](super::Embedders) holds it as `hash-ngram/1` (256 f32 components,
-/// metric cosine, 256 texts per call, deterministic, local). A host registers other dimensions
-/// under its own name with [`Self::with_dimension`].
-///
-/// ```rust
-/// use graphersal::vector::{EmbedContext, Embedder, HashNgram};
-///
-/// let embedder = HashNgram::new();
-/// let vectors = embedder.embed(&["Graph", "graph", "grahp"], &EmbedContext::new()).unwrap();
-/// assert_eq!(vectors[0], vectors[1]); // case-insensitive
-/// assert_eq!(vectors[0].dimension(), 256);
-/// ```
+/// metric cosine, 256 texts per call, deterministic, local); the DSL function `embed(text)`
+/// computes it outside the engine.
 #[derive(Debug, Clone)]
-pub struct HashNgram {
+pub(crate) struct HashNgram {
     info: EmbedderInfo,
 }
 
@@ -60,30 +51,30 @@ impl Default for HashNgram {
 
 impl HashNgram {
     /// The registry name and model identity of the built-in instance.
-    pub const NAME: &'static str = "hash-ngram/1";
+    pub(crate) const NAME: &'static str = "hash-ngram/1";
 
     /// The dimension of the built-in instance.
-    pub const DEFAULT_DIMENSION: usize = 256;
+    pub(crate) const DEFAULT_DIMENSION: usize = 256;
 
     /// The built-in instance: `hash-ngram/1`, 256 f32 components.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         HashNgram {
             info: Self::info_of(Self::NAME, Self::DEFAULT_DIMENSION).with_model(Self::NAME),
         }
     }
 
     /// The same algorithm with `dimension` components (1 to
-    /// [`MAX_VECTOR_DIMENSION`](crate::vector::MAX_VECTOR_DIMENSION)), registered under the
-    /// host's own `name` (never `hash-ngram/*`, which the registry reserves). Its model identity
-    /// is `hash-ngram/1?dim=<dimension>`.
-    pub fn with_dimension(
+    /// [`MAX_VECTOR_DIMENSION`](crate::vector::MAX_VECTOR_DIMENSION)) under `name` (tests). Its
+    /// model identity is `hash-ngram/1?dim=<dimension>`.
+    #[allow(dead_code)]
+    pub(crate) fn with_dimension(
         name: impl Into<CompactString>,
         dimension: usize,
-    ) -> Result<Self, EmbedError> {
+    ) -> Result<Self, String> {
         if dimension == 0 || dimension > MAX_VECTOR_DIMENSION {
-            return Err(EmbedError::registry(format!(
+            return Err(format!(
                 "hash-ngram has 1 to {MAX_VECTOR_DIMENSION} components, not {dimension}"
-            )));
+            ));
         }
         let model = format!("{}?dim={dimension}", Self::NAME);
         Ok(HashNgram {
@@ -229,4 +220,160 @@ fn normalize(counts: &[i64]) -> Option<Vec<f32>> {
             .map(|count| (*count as f64 / norm) as f32)
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! The frozen bits (golden vectors shared with the wasm32 parity test of `graphersal-wasm`),
+    //! a literal reference implementation of the algorithm, and its properties.
+
+    use super::*;
+    use crate::value::vector::embed::EmbedContext;
+
+    include!("../../../../tests/data/hash_ngram_golden.rs");
+
+    fn f32s(vector: &Vector) -> Vec<f32> {
+        vector.to_f32_vec()
+    }
+
+    fn hash_ngram(texts: &[&str]) -> Result<Vec<Vector>, EmbedError> {
+        HashNgram::new().embed(texts, &EmbedContext::new())
+    }
+
+    /// The algorithm of the spec, written literally (strings and concatenation), against which the
+    /// allocation-free implementation is checked.
+    fn reference(text: &str, dimension: usize) -> Option<Vec<f32>> {
+        fn hash(bytes: &[u8]) -> u64 {
+            let mut x = 0xcbf2_9ce4_8422_2325u64;
+            for byte in bytes {
+                x = (x ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+            x ^= x >> 31;
+            x
+        }
+        let lower: String = text.chars().flat_map(char::to_lowercase).collect();
+        let mut counts = vec![0i64; dimension];
+        let mut add = |feature: Vec<u8>| {
+            let x = hash(&feature);
+            let index = (x % dimension as u64) as usize;
+            counts[index] += if x >> 63 == 0 { 1 } else { -1 };
+        };
+        for word in lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+        {
+            let mut feature = b"W".to_vec();
+            feature.extend_from_slice(word.as_bytes());
+            add(feature);
+            let bracketed: Vec<char> = format!("<{word}>").chars().collect();
+            for n in 3..=5 {
+                if bracketed.len() < n {
+                    continue;
+                }
+                for window in bracketed.windows(n) {
+                    let gram: String = window.iter().collect();
+                    let mut feature = b"N".to_vec();
+                    feature.extend_from_slice(gram.as_bytes());
+                    add(feature);
+                }
+            }
+        }
+        let sum: f64 = counts.iter().map(|c| (*c as f64) * (*c as f64)).sum();
+        if sum == 0.0 {
+            return None;
+        }
+        let norm = sum.sqrt();
+        Some(counts.iter().map(|c| (*c as f64 / norm) as f32).collect())
+    }
+
+    #[test]
+    fn hash_ngram_golden_vectors_are_frozen() {
+        let texts: Vec<&str> = HASH_NGRAM_GOLDEN.iter().map(|(text, _)| *text).collect();
+        let vectors = hash_ngram(&texts).unwrap();
+        let actual: Vec<(&str, u64)> = texts
+            .iter()
+            .zip(&vectors)
+            .map(|(text, vector)| (*text, hash_ngram_bits_hash(&f32s(vector))))
+            .collect();
+        assert_eq!(actual, HASH_NGRAM_GOLDEN.to_vec());
+    }
+
+    #[test]
+    fn hash_ngram_matches_the_literal_algorithm() {
+        let texts = [
+            "graph",
+            "Graph Database",
+            "a",
+            "ab",
+            "abc",
+            "Привет, мир",
+            "İstanbul ẞtraße ǅungla",
+            "emoji 🚀 rocket 👩‍👩‍👧",
+            "e\u{301}cole école",
+            "x1 y2 z3 4 55 666",
+            "tab\tnew\nline--dash__under",
+            "日本語のテキスト",
+        ];
+        for dimension in [1, 2, 7, 256, 1000] {
+            let embedder = HashNgram::with_dimension("test/hash", dimension).unwrap();
+            let vectors = embedder.embed(&texts, &EmbedContext::new()).unwrap();
+            for (text, vector) in texts.iter().zip(&vectors) {
+                let expected = reference(text, dimension);
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                match expected {
+                    Some(expected) => assert_eq!(
+                        bits(&f32s(vector)),
+                        bits(&expected),
+                        "{text:?} at dimension {dimension}"
+                    ),
+                    None => panic!("{text:?}: the reference has no features"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hash_ngram_properties() {
+        let v = hash_ngram(&["Graphersal", "graphersal", "grahpersal", "pineapple"]).unwrap();
+        // Case-insensitive.
+        assert_eq!(v[0], v[1]);
+        // Unit length within f32 rounding.
+        let norm: f64 = f32s(&v[0])
+            .iter()
+            .map(|x| f64::from(*x) * f64::from(*x))
+            .sum::<f64>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "{norm}");
+        // A typo is closer than an unrelated word.
+        let typo = v[0].similarity(&v[2], VectorMetric::Cosine).unwrap();
+        let other = v[0].similarity(&v[3], VectorMetric::Cosine).unwrap();
+        assert!(typo > other, "{typo} <= {other}");
+        // The built-in's info.
+        let info = HashNgram::new().info().clone();
+        assert_eq!(info.name, "hash-ngram/1");
+        assert_eq!(info.model, "hash-ngram/1");
+        assert_eq!(
+            (info.dimension, info.element, info.metric, info.max_batch),
+            (256, VectorElement::F32, VectorMetric::Cosine, 256)
+        );
+        assert!(info.deterministic && info.local);
+        let host = HashNgram::with_dimension("acme/hash", 64).unwrap();
+        assert_eq!(host.info().model, "hash-ngram/1?dim=64");
+        assert!(HashNgram::with_dimension("acme/hash", 0).is_err());
+    }
+
+    #[test]
+    fn hash_ngram_has_no_features_for_empty_and_separator_texts() {
+        for text in ["", "   ", "...!!!", "— – ·"] {
+            assert_eq!(
+                hash_ngram(&["ok", text]).unwrap_err(),
+                EmbedError::no_features(1),
+                "{text:?}"
+            );
+        }
+    }
 }

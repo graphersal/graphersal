@@ -5,65 +5,15 @@
 
 #![cfg(feature = "script")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use graphersal::prelude::*;
 use graphersal::schema::SchemaChangeKind;
 use graphersal::script::rhai::{Dynamic, EvalAltResult};
-use graphersal::vector::{
-    EmbedContext, EmbedError, Embedder, EmbedderInfo, Embedders, Vector, VectorElement,
-};
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
-
-/// A host embedder that counts its calls (the only test that needs to count calls; every
-/// other test uses the built-in `hash-ngram/1`).
-struct Counting {
-    info: EmbedderInfo,
-    calls: AtomicUsize,
-    seen: Mutex<Vec<Vec<String>>>,
-}
-
-impl Counting {
-    fn new() -> Arc<Counting> {
-        Arc::new(Counting {
-            info: EmbedderInfo::new("mock", 3, VectorElement::F32)
-                .with_model("mock@1")
-                .with_max_batch(2),
-            calls: AtomicUsize::new(0),
-            seen: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl Embedder for Counting {
-    fn info(&self) -> &EmbedderInfo {
-        &self.info
-    }
-
-    fn embed(&self, texts: &[&str], ctx: &EmbedContext<'_>) -> Result<Vec<Vector>, EmbedError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.seen
-            .lock()
-            .unwrap()
-            .push(texts.iter().map(|t| t.to_string()).collect());
-        ctx.check()?;
-        Ok(texts
-            .iter()
-            .map(|t| {
-                let sum: u32 = t.chars().map(|c| c as u32).sum();
-                Vector::from_f32(vec![t.chars().count() as f32, (sum % 1000) as f32, 1.0]).unwrap()
-            })
-            .collect())
-    }
-}
 
 /// `n` vertices `doc` with `text` "text 0", "text 1", ... and an open schema of that.
 fn docs(n: usize) -> Arc<Graph> {
@@ -84,23 +34,19 @@ fn docs(n: usize) -> Arc<Graph> {
     graph
 }
 
-/// `script` on `graph` with `embedders` given to the engine and the scope.
-fn script(
-    graph: &Arc<Graph>,
-    embedders: &Arc<Embedders>,
-    script: &str,
-) -> Result<Dynamic, Box<EvalAltResult>> {
+/// `script` on `graph`: the engine's host graph is `graph` (its embedders: the built-in
+/// `hash-ngram/1`).
+fn script(graph: &Arc<Graph>, script: &str) -> Result<Dynamic, Box<EvalAltResult>> {
     let mut engine = graphersal::script::engine();
-    graphersal::script::set_engine_embedders(&mut engine, embedders.clone());
+    graphersal::script::set_engine_graph(&mut engine, graph.clone());
     let mut scope = graphersal::script::graph_scope(graph.clone());
-    graphersal::script::set_scope_embedders(&mut scope, embedders.clone());
     engine
         .eval_with_scope::<Dynamic>(&mut scope, script)
         .map_err(|err| graphersal::script::map_eval_error(err, &Default::default()))
 }
 
-fn script_err(graph: &Arc<Graph>, embedders: &Arc<Embedders>, text: &str) -> String {
-    match script(graph, embedders, text) {
+fn script_err(graph: &Arc<Graph>, text: &str) -> String {
+    match script(graph, text) {
         Ok(value) => panic!("{text} should fail, gave {value:?}"),
         Err(err) => err.to_string(),
     }
@@ -113,7 +59,6 @@ fn embedded_modern() -> Arc<Graph> {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
     let _ = script(
         &graph,
-        &Arc::new(Embedders::default()),
         r#"g.v().property("emb", __.embed("name")).iterate();
            g.set_schema(g.infer_schema(), SchemaMode.open);
            g.patch_schema(#{vertices: #{
@@ -130,7 +75,6 @@ fn ruled_modern() -> Arc<Graph> {
     let rule = r#"#{schema: #{properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "name"}}}}"#;
     let _ = script(
         &graph,
-        &Arc::new(Embedders::default()),
         &format!(
             r#"g.set_schema(g.infer_schema(), SchemaMode.open);
                g.patch_schema(#{{vertices: #{{person: {rule}, software: {rule}}}}})"#
@@ -147,7 +91,6 @@ fn ruled_modern() -> Arc<Graph> {
 #[test]
 fn a_text_query_equals_the_query_with_its_embedded_vector() {
     for graph in [embedded_modern(), ruled_modern()] {
-        let embedders = Arc::new(Embedders::default());
         for (text, vector) in [
             (
                 r#"g.v().nearest("emb", "marco", 3).values("name").to_list()"#,
@@ -166,13 +109,12 @@ fn a_text_query_equals_the_query_with_its_embedded_vector() {
                 r#"g.v().nearest("emb", embed("lop"), 1, #{metric: "dot"}).values("name").to_list()"#,
             ),
         ] {
-            let a = script(&graph, &embedders, text).unwrap().to_string();
-            let b = script(&graph, &embedders, vector).unwrap().to_string();
+            let a = script(&graph, text).unwrap().to_string();
+            let b = script(&graph, vector).unwrap().to_string();
             assert_eq!(a, b, "{text}");
         }
         let best = script(
             &graph,
-            &embedders,
             r#"g.v().nearest("emb", "marco", 1).values("name").next()"#,
         )
         .unwrap()
@@ -183,53 +125,10 @@ fn a_text_query_equals_the_query_with_its_embedded_vector() {
 }
 
 #[test]
-fn the_query_text_is_embedded_once_per_execution() {
-    let graph = docs(6);
-    let mock = Counting::new();
-    let embedder: Arc<dyn Embedder> = mock.clone();
-    let embedders = Arc::new(
-        Embedders::builder()
-            .with(embedder)
-            .unwrap()
-            .default_name("mock")
-            .unwrap()
-            .build(),
-    );
-    let _ = script(
-        &graph,
-        &embedders,
-        r#"g.v().property("emb", __.embed("text")).iterate();
-           g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{type: "array", format: "vector", dimension: 3, embedder: "mock@1"}}}}}})"#,
-    )
-    .unwrap();
-    let before = mock.calls();
-    let _ = script(
-        &graph,
-        &embedders,
-        r#"g.v().similarity("emb", "text 1").to_list()"#,
-    )
-    .unwrap();
-    assert_eq!(mock.calls(), before + 1);
-    let _ = script(
-        &graph,
-        &embedders,
-        r#"g.v().nearest("emb", "text 1", 2).to_list()"#,
-    )
-    .unwrap();
-    assert_eq!(mock.calls(), before + 2);
-    assert_eq!(
-        mock.seen.lock().unwrap().last().unwrap(),
-        &vec!["text 1".to_string()]
-    );
-}
-
-#[test]
 fn the_profile_names_the_resolved_embedder() {
     let graph = ruled_modern();
-    let embedders = Arc::new(Embedders::default());
     let profile = script(
         &graph,
-        &embedders,
         r#"g.v().nearest("emb", "marco", 2).similarity("emb", "marco", "l2").profile().to_string()"#,
     )
     .unwrap()
@@ -246,28 +145,14 @@ fn the_profile_names_the_resolved_embedder() {
 
 #[test]
 fn text_query_refusals() {
-    let embedders = Arc::new(Embedders::default());
     // No schema; mode none.
     let modern = Arc::new(GraphSource::tinkerpop_modern());
-    let err = script_err(
-        &modern,
-        &embedders,
-        r#"g.v().nearest("emb", "marco", 2).to_list()"#,
-    );
+    let err = script_err(&modern, r#"g.v().nearest("emb", "marco", 2).to_list()"#);
     assert!(err.contains("nearest needs a schema attached"), "{err}");
     // No embedder declared.
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    let _ = script(
-        &graph,
-        &embedders,
-        r#"g.set_schema(g.infer_schema(), SchemaMode.open)"#,
-    )
-    .unwrap();
-    let err = script_err(
-        &graph,
-        &embedders,
-        r#"g.v().similarity("emb", "marco").to_list()"#,
-    );
+    let _ = script(&graph, r#"g.set_schema(g.infer_schema(), SchemaMode.open)"#).unwrap();
+    let err = script_err(&graph, r#"g.v().similarity("emb", "marco").to_list()"#);
     assert!(
         err.contains(r#"declares no embedder for the vector property "emb""#),
         "{err}"
@@ -276,26 +161,22 @@ fn text_query_refusals() {
     let graph = embedded_modern();
     let err = script_err(
         &graph,
-        &embedders,
         r#"g.v().similarity(jpath("emb"), "marco").to_list()"#,
     );
     assert!(err.contains("needs a top-level property name"), "{err}");
     let err = script_err(
         &graph,
-        &embedders,
         r#"g.v().values("emb").similarity("marco").to_list()"#,
     );
     assert!(err.contains("needs a top-level property name"), "{err}");
     // A model nobody registered.
     let _ = script(
         &graph,
-        &embedders,
         r#"g.patch_schema(#{vertices: #{software: #{schema: #{properties: #{emb: #{embedder: "acme/other@2"}}}}}})"#,
     )
     .unwrap();
     let err = script_err(
         &graph,
-        &embedders,
         r#"g.v().has_label("software").nearest("emb", "lop", 1).to_list()"#,
     );
     assert!(
@@ -303,16 +184,11 @@ fn text_query_refusals() {
         "{err}"
     );
     // Two models met.
-    let err = script_err(
-        &graph,
-        &embedders,
-        r#"g.v().nearest("emb", "lop", 1).to_list()"#,
-    );
+    let err = script_err(&graph, r#"g.v().nearest("emb", "lop", 1).to_list()"#);
     assert!(err.contains("one text query cannot search both"), "{err}");
     // Only labels of one model: fine.
     let best = script(
         &graph,
-        &embedders,
         r#"g.v().has_label("person").nearest("emb", "josh", 1).values("name").next()"#,
     )
     .unwrap()
@@ -323,13 +199,11 @@ fn text_query_refusals() {
     let graph = embedded_modern();
     let _ = script(
         &graph,
-        &embedders,
         r#"g.patch_schema(#{vertices: #{software: #{schema: #{properties: #{emb: #{embedder: "x/1"}}}}, person: #{schema: #{properties: #{emb: #{embedder: "x/1"}}}}}})"#,
     )
     .unwrap();
     let err = script_err(
         &graph,
-        &embedders,
         r#"g.v().has_label("nothing").nearest("emb", "lop", 1).to_list()"#,
     );
     assert!(
@@ -341,10 +215,8 @@ fn text_query_refusals() {
 #[test]
 fn vector_queries_keep_working_without_a_schema() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    let embedders = Arc::new(Embedders::default());
     let best = script(
         &graph,
-        &embedders,
         r#"g.v().has_label("person").property("emb", __.embed("name")).iterate();
            g.v().nearest("emb", embed("vadas"), 1).values("name").next()"#,
     )
@@ -357,17 +229,14 @@ fn vector_queries_keep_working_without_a_schema() {
 #[test]
 fn a_plain_write_checks_only_element_and_dimension() {
     let graph = embedded_modern();
-    let embedders = Arc::new(Embedders::default());
     // A vector of the declared shape from anywhere is stored, whatever its provenance.
     let _ = script(
         &graph,
-        &embedders,
         r#"g.v().has("name", "marko").property("emb", embed("anything")).iterate()"#,
     )
     .unwrap();
     let err = script_err(
         &graph,
-        &embedders,
         r#"g.v().has("name", "marko").property("emb", vector([1.0, 2.0])).iterate()"#,
     );
     assert!(err.contains("vector<f32, 256>"), "{err}");
@@ -508,7 +377,6 @@ fn stored_elements(graph: &Graph) -> Vec<String> {
 
 #[test]
 fn a_text_query_works_on_i8_and_bit_properties() {
-    let embedders = Arc::new(Embedders::default());
     for (element, query) in [
         // i8: the f32 query compares with the stored i8 vectors, as a vector query does.
         ("i8", r#"let q = embed("text 4");"#),
@@ -521,7 +389,6 @@ fn a_text_query_works_on_i8_and_bit_properties() {
         let graph = docs(6);
         let _ = script(
             &graph,
-            &embedders,
             &format!(
                 r#"g.patch_schema(#{{vertices: #{{doc: #{{schema: #{{properties: #{{emb: #{{type: "array", format: "vector", element: "{element}", dimension: 256, embedder: "hash-ngram/1", from: "text"}}}}}}}}}}}})"#
             ),
@@ -538,15 +405,14 @@ fn a_text_query_works_on_i8_and_bit_properties() {
                 r#"g.v().similarity("emb", q).to_list()"#,
             ),
         ] {
-            let a = script(&graph, &embedders, text).unwrap().to_string();
-            let b = script(&graph, &embedders, &format!("{query} {vector}"))
+            let a = script(&graph, text).unwrap().to_string();
+            let b = script(&graph, &format!("{query} {vector}"))
                 .unwrap()
                 .to_string();
             assert_eq!(a, b, "{element}: {text}");
         }
         let best = script(
             &graph,
-            &embedders,
             r#"g.v().nearest("emb", "text 4", 1).values("text").next()"#,
         )
         .unwrap()
@@ -563,12 +429,11 @@ fn a_text_query_works_on_i8_and_bit_properties() {
 #[test]
 fn embed_property_was_removed_and_the_error_names_the_vector_rule() {
     let graph = docs(2);
-    let embedders = Arc::new(Embedders::default());
     for call in [
         r#"g.embed_property(#{label: "doc", from: "text", to: "emb"})"#,
         r#"g.embedProperty(#{label: "doc", from: "text", to: "emb"})"#,
     ] {
-        let err = script_err(&graph, &embedders, call);
+        let err = script_err(&graph, call);
         assert!(err.contains("Function not found"), "{err}");
         assert!(err.contains("embed_property was removed in 0.5.0"), "{err}");
         assert!(
@@ -659,6 +524,6 @@ fn the_scan_lists_saved_queries_calling_a_removed_function_with_the_rule_to_decl
         .replace("edges: #{cites", "vertices: #{doc")
         .replace("note_emb", "emb")
         .replace(r#"from: "note""#, r#"from: "text""#);
-    let _ = script(&graph, &Arc::new(Embedders::default()), &patch).unwrap();
+    let _ = script(&graph, &patch).unwrap();
     assert_eq!(stored_elements(&graph).len(), 2);
 }

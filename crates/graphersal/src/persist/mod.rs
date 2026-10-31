@@ -51,6 +51,8 @@ mod encoder;
 mod error;
 mod journal;
 mod manifest;
+#[cfg(not(target_arch = "wasm32"))]
+mod model_cache;
 pub(crate) mod model_tar;
 mod recover;
 mod segment;
@@ -70,6 +72,8 @@ pub use dir::{
 pub use dir::{FsDir, store_dir_at};
 pub use error::{BackupDamage, DamageSide, PersistError, StoreFailure};
 pub use journal::{Durability, DurableEnd, DurablePosition, Journal, SharedBuffer};
+#[cfg(not(target_arch = "wasm32"))]
+pub use model_cache::ModelCache;
 pub use recover::{Recovered, Recovery, RecoveryReport, RecoveryTarget, recover};
 pub use segment::{DEFAULT_CHUNK_BYTES, DEFAULT_SEGMENT_BYTES};
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,6 +84,8 @@ pub use snapshot::{
 };
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::read_snapshot_file;
 pub use store::{
     AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BlobSource, ChangesSince,
     CheckpointReport, ClosedCommitOptions, CompactReport, CompactionAdvice, CompactionPolicy,
@@ -88,8 +94,8 @@ pub use store::{
     DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange, ImportModelOptions,
     ImportModelReport, LineageEntry, MissingModel, ModelChangeReport, ModelCopy, ModelInfo,
     ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions,
-    RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport, Store, StoreInfo, StoreOptions,
-    UpgradeReport, VectorWithoutRule, VerifyProblem, VerifyReport,
+    RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport, SnapshotLoadReport, Store,
+    StoreInfo, StoreOptions, UpgradeReport, VectorWithoutRule, VerifyProblem, VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
 

@@ -40,9 +40,7 @@ impl ScriptGraphTraversalSource {
         &self,
         storage: S,
     ) -> GraphTraversalSource<'g, S> {
-        let mut graph = GraphTraversalSource::new(storage)
-            .restricted(self.restrictions())
-            .with_embedders(self.access.embedders.clone());
+        let mut graph = GraphTraversalSource::new(storage).restricted(self.restrictions());
         // The host's presets reach every source of the session (`g`, `_g`, `__`, the
         // `GraphSource::x()` constructors), whichever way the source was created; the query's own
         // `with(..)` of a key replaces the preset.

@@ -152,6 +152,7 @@ mod operator_tests;
 mod optimizer_differential_tests;
 mod optimizer_rule_toggle_tests;
 mod overload_forms_tests;
+mod packed_models_tests;
 mod path_tests;
 mod path_window_tests;
 mod permission_tests;

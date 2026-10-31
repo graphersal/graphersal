@@ -41,9 +41,10 @@ pyo3 = { workspace = true, features = ["auto-initialize"] }
 # the actual wheel with `--features extension-module` (see pyproject.toml), which is what a
 # Python interpreter loads: `cargo test -p py-graphersal` runs with this feature off.
 extension-module = ["pyo3/extension-module"]
-# `graphersal.Model2Vec` (on by default): a static embedding model loaded from a local directory
-# (`model2vec-rs` + `tokenizers`, pure Rust; the binding never downloads). It adds about 0.8 MB
-# to the wheel (measured on macOS arm64: 8.6 MB against 7.8 MB);
-# `maturin build --no-default-features --features extension-module` builds without it.
+# The engine can load the Model2Vec embedding models kept in a database (a Store, a `.gsnap`)
+# (on by default; `model2vec-rs` + `tokenizers`, pure Rust; the binding never downloads). It adds
+# about 0.8 MB to the wheel (measured on macOS arm64: 8.6 MB against 7.8 MB);
+# `maturin build --no-default-features --features extension-module` builds without it (such a
+# build opens a store whose schema needs a model read-only, without text queries).
 default = ["model2vec"]
 model2vec = ["graphersal/model2vec"]

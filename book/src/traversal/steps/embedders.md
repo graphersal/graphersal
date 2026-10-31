@@ -3,7 +3,7 @@
 
 `embedders` · category: [Vectors](../../traversal/step_reference.md#vectors)
 
-Lists the registered embedders (name, model, dimension, element, metric, ...), the default first.
+Lists the embedders of the database, the built-in hash-ngram/1 and its imported models (name, model, dimension, element, metric, ...), the default first.
 
 ## Forms
 

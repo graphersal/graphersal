@@ -25,86 +25,124 @@ pub fn authorizer() -> Arc<dyn graphersal::auth::Authorizer> {
     Arc::new(graphersal::auth::AllowAll)
 }
 
-/// The registry [`install_embedders`] built at start, with the models of an opened Store added
-/// ([`GraphSpec::open`]).
-static EMBEDDERS: std::sync::RwLock<Option<Arc<graphersal::vector::Embedders>>> =
-    std::sync::RwLock::new(None);
-
-/// The embedders the CLI's scripts and its dev server call: the registry of the command line's
-/// `--embedder`/`--default-embedder` ([`install_embedders`]) plus the models an opened Store
-/// keeps for its schema, else the default registry, which holds the built-in `hash-ngram/1`.
-pub fn embedders() -> Arc<graphersal::vector::Embedders> {
-    EMBEDDERS
-        .read()
-        .ok()
-        .and_then(|current| current.clone())
-        .unwrap_or_else(|| Arc::new(graphersal::vector::Embedders::default()))
-}
-
-/// Replaces the registry [`embedders`] answers.
-fn set_embedders(embedders: Arc<graphersal::vector::Embedders>) {
-    if let Ok(mut current) = EMBEDDERS.write() {
-        *current = Some(embedders);
-    }
-}
-
-/// An embedding model the CLI serves besides the built-in `hash-ngram/1`: an `--embedder` model
-/// or one an opened Store keeps. The start banners name it with its licence.
-#[cfg_attr(
-    not(any(feature = "dev-server", feature = "model2vec")),
-    allow(dead_code)
-)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServedModel {
-    /// The registry name queries call it by (`embed(text, name)`).
-    pub name: String,
-    /// The model identity (`model2vec/<repo>@<12 hex>`).
-    pub identity: String,
-    /// The repository (`owner/name`) when known, else the model identity.
-    pub label: String,
-    /// The licence: an SPDX id as the repository states it, or `unknown`.
-    pub license: String,
-    /// Where it comes from: `--embedder`, `stored in <store>`, or both (`--embedder; also
-    /// stored in <store>`).
+/// The embedding models of the database the CLI serves (an opened Store's catalog, or the
+/// models a `.gsnap` carries), with where they come from and the notes about them, for the
+/// dev server's start banner. Filled by [`GraphSpec::open`] / [`GraphSpec::load`].
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
+pub struct ServedModels {
+    /// The models (catalog kind 5), each with its licence and state.
+    pub models: Vec<graphersal::persist::ModelInfo>,
+    /// Where they are kept: `stored in <store>` or `carried by <file>`.
     pub source: String,
+    /// The notes about them (models stored but none the default, models the schema names that
+    /// the database does not keep, ...).
+    pub notes: Vec<String>,
 }
 
-/// The models [`served_models`] lists, in the order they were registered.
-#[cfg_attr(
-    not(any(feature = "dev-server", feature = "model2vec")),
-    allow(dead_code)
-)]
-static SERVED_MODELS: Mutex<Vec<ServedModel>> = Mutex::new(Vec::new());
+/// The models [`served_models`] answers.
+static SERVED: Mutex<Option<ServedModels>> = Mutex::new(None);
 
-/// The notes about models a Store's schema names that nobody provides.
-static MODEL_NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// Set by the dev server: the model notes of a Store open are kept for its start banner
-/// instead of being printed at once.
+/// Set by the dev server: the model notes of an open are kept for its start banner instead of
+/// being printed at once.
 static DEFER_MODEL_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The embedding models the CLI serves besides the built-in one, and the notes about models
-/// the opened Store's schema names that nobody provides.
+/// The embedding models of the database the CLI serves (empty: only the built-in
+/// `hash-ngram/1`), with the notes about them.
 #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
-pub fn served_models() -> (Vec<ServedModel>, Vec<String>) {
-    let models = SERVED_MODELS.lock().map(|m| m.clone()).unwrap_or_default();
-    let notes = MODEL_NOTES.lock().map(|n| n.clone()).unwrap_or_default();
-    (models, notes)
+pub fn served_models() -> ServedModels {
+    SERVED
+        .lock()
+        .ok()
+        .and_then(|served| served.clone())
+        .unwrap_or_default()
 }
 
-/// Keeps the model notes of the next Store open for the caller's own output (the dev server's
-/// start banner) instead of printing them as `note:` lines.
+/// Keeps the model notes of the next open for the caller's own output (the dev server's start
+/// banner) instead of printing them as `note:` lines.
 #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
 pub fn defer_model_notes() {
     DEFER_MODEL_NOTES.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Records the models of the opened database (`source`: `stored in <store>` / `carried by
+/// <file>`) and prints one line per served model and the notes (unless deferred).
+fn serve_models(models: Vec<graphersal::persist::ModelInfo>, source: String, notes: Vec<String>) {
+    use graphersal::persist::ModelState;
+    if !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+        let place = source
+            .strip_prefix("stored in ")
+            .map(|store| format!("the store {store}"))
+            .or_else(|| source.strip_prefix("carried by ").map(str::to_string))
+            .unwrap_or_else(|| source.clone());
+        for model in &models {
+            match model.state {
+                ModelState::Loaded => errln!(
+                    "note: loaded the embedding model {} from {place} as {} (licence {})",
+                    model.identity,
+                    model.repo,
+                    license_text(&model.license)
+                ),
+                ModelState::NotLoaded => errln!(
+                    "note: the embedding model {} of {place} is served as {}, loaded at its \
+                     first use (licence {})",
+                    model.identity,
+                    model.repo,
+                    license_text(&model.license)
+                ),
+                _ => {}
+            }
+        }
+        for note in &notes {
+            errln!("note: {note}");
+        }
+    }
+    if let Ok(mut served) = SERVED.lock() {
+        *served = Some(ServedModels {
+            models,
+            source,
+            notes,
+        });
+    }
+}
+
+/// The Q5.5 note of a database that holds models but none is the default (`None` otherwise).
+pub fn no_default_note(models: &[graphersal::persist::ModelInfo], store: &str) -> Option<String> {
+    (!models.is_empty() && !models.iter().any(|m| m.default)).then(|| {
+        format!(
+            "the store {store} holds embedding models but none is the default: `embed` without \
+             a model name uses hash-ngram/1 (name the model, e.g. #{{embedder: \"{}\"}}, or make \
+             one the default: graphersal store models default {store} <repo>)",
+            models[0].repo
+        )
+    })
+}
+
+/// The notes about the models of the Store at `path` (holding `models` for a schema that names
+/// `schema_models`): none the default, models the schema names that the store does not keep.
+fn store_model_notes(path: &str, models: &[graphersal::persist::ModelInfo]) -> Vec<String> {
+    let mut notes: Vec<String> = no_default_note(models, path).into_iter().collect();
+    for model in models {
+        match &model.state {
+            graphersal::persist::ModelState::Damaged { reason }
+            | graphersal::persist::ModelState::Unsupported { reason } => notes.push(format!(
+                "the embedding model {} of the store {path} is not served: {reason}",
+                model.repo
+            )),
+            graphersal::persist::ModelState::Missing => notes.push(format!(
+                "the embedding model {} of the store {path} is not served: its blob is missing \
+                 (graphersal embed-model download {}, then graphersal embed-model import {} \
+                 --into {path} --replace)",
+                model.repo, model.repo, model.repo
+            )),
+            _ => {}
+        }
+    }
+    notes
+}
+
 /// An SPDX licence id as people write it (the Hub states ids in lower case: `mit`,
 /// `apache-2.0`); an id it does not know stays as it is.
-#[cfg_attr(
-    not(any(feature = "dev-server", feature = "model2vec")),
-    allow(dead_code)
-)]
 pub fn license_text(id: &str) -> String {
     match id.to_ascii_lowercase().as_str() {
         "mit" => "MIT".to_string(),
@@ -120,240 +158,14 @@ pub fn license_text(id: &str) -> String {
     }
 }
 
-/// Records a served model.
-#[cfg_attr(not(feature = "model2vec"), allow(dead_code))]
-fn serve_model(model: ServedModel) {
-    if let Ok(mut models) = SERVED_MODELS.lock() {
-        models.push(model);
-    }
-}
-
-/// Records a model note, and prints it unless the notes are deferred ([`defer_model_notes`]).
-fn model_note(note: String) {
-    if !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
-        errln!("note: {note}");
-    }
-    if let Ok(mut notes) = MODEL_NOTES.lock() {
-        notes.push(note);
-    }
-}
-
-/// Loads the models of `--embedder NAME=PATH|REPO` (once, at start) and registers them with
-/// `--default-embedder` as the default; [`embedders`] answers this registry from then on. A
-/// model that does not load is the error (with its help); the process then exits with
-/// [`EXIT_USAGE_ERROR`].
-pub fn install_embedders(cli: &Cli) -> Result<(), String> {
-    if cli.embedders.is_empty() && cli.default_embedder.is_none() {
-        return Ok(());
-    }
-    let registry_error =
-        |err: graphersal::vector::EmbedError| format!("{err}\nHelp: {}", err.help());
-    #[allow(unused_mut)]
-    let mut builder = graphersal::vector::Embedders::builder();
-    #[cfg(feature = "model2vec")]
-    for (name, spec) in &cli.embedders {
-        let model = crate::embed_model::load_embedder(name, spec)?;
-        let (repo, license) = crate::embed_model::embedder_license(spec);
-        serve_model(ServedModel {
-            name: name.clone(),
-            identity: graphersal::vector::Embedder::info(&model).model.to_string(),
-            label: repo.unwrap_or_else(|| spec.clone()),
-            license,
-            source: "--embedder".to_string(),
-        });
-        builder = builder
-            .with(Arc::new(model))
-            .map_err(|err| format!("--embedder {name}={spec}: {}", registry_error(err)))?;
-    }
-    #[cfg(not(feature = "model2vec"))]
-    if let Some((name, spec)) = cli.embedders.first() {
-        return Err(format!(
-            "--embedder {name}={spec}: this graphersal was built without the `model2vec` \
-             feature (real embedding models); only the built-in hash-ngram/1 is available"
-        ));
-    }
-    let mut registry = builder.build();
-    if let Some(name) = &cli.default_embedder {
-        registry = match (registry.to_builder().default_name(name), &cli.graph) {
-            (Ok(builder), _) => builder.build(),
-            // A model the Store keeps is registered only when the store is opened: the
-            // default is chosen then ([`apply_deferred_default`]).
-            (Err(_), GraphSpec::Store(_)) => {
-                if let Ok(mut deferred) = DEFERRED_DEFAULT.lock() {
-                    *deferred = Some(name.clone());
-                }
-                registry
-            }
-            (Err(err), _) => {
-                return Err(format!(
-                    "--default-embedder {name}: {}",
-                    registry_error(err)
-                ));
-            }
-        };
-    }
-    set_embedders(Arc::new(registry));
-    Ok(())
-}
-
-/// The `--default-embedder` name that no `--embedder` registers: a model the opened Store
-/// keeps, chosen by [`apply_deferred_default`] once the store's models are registered.
-static DEFERRED_DEFAULT: Mutex<Option<String>> = Mutex::new(None);
-
-/// Makes the deferred `--default-embedder` ([`DEFERRED_DEFAULT`]) the default of the registry
-/// now that the opened Store's models are in it; a name neither registers is the error
-/// ([`EXIT_USAGE_ERROR`], as at start).
-fn apply_deferred_default(path: &str) -> Result<(), StartError> {
-    let Some(name) = DEFERRED_DEFAULT.lock().ok().and_then(|mut d| d.take()) else {
-        return Ok(());
-    };
-    let registry = embedders();
-    match registry.to_builder().default_name(&name) {
-        Ok(builder) => {
-            set_embedders(Arc::new(builder.build()));
-            Ok(())
-        }
-        Err(err) => {
-            let names: Vec<String> = registry.infos().map(|info| info.name.to_string()).collect();
-            Err(StartError::usage(format!(
-                "--default-embedder {name}: {err}: neither an --embedder nor a model the store \
-                 {path} keeps is registered under that name (registered: {})\nHelp: {}",
-                names.join(", "),
-                err.help()
-            )))
-        }
-    }
-}
-
-/// Registers the embedding models of the opened `store`'s catalog (format spec 4.5, catalog
-/// kind 5) beside the `--embedder` ones, which win; prints what it loaded and a note when the
-/// store holds models but none is the default.
-fn register_stored_models(
-    path: &str,
-    store: &graphersal::persist::Store,
-) -> Result<(), graphersal::persist::PersistError> {
-    let stored = store.embedders()?;
-    register_found_models(path, &stored, store.models()?);
-    Ok(())
-}
-
-/// [`register_stored_models`] of a Store loaded read-only (`--read-only`): the models of the
-/// recovered position (`embedders`, those its schema needs loaded) and their list from the
-/// files.
-fn register_stored_models_read_only(
-    path: &str,
-    embedders: Option<Arc<graphersal::vector::Embedders>>,
-) -> Result<(), String> {
-    let models = graphersal::persist::Store::models_dir(path)
-        .map_err(|err| graphersal::error::format_diagnostic(&err))?;
-    let embedders = embedders.unwrap_or_default();
-    register_found_models(path, &embedders, models);
-    Ok(())
-}
-
-/// Merges the store's model embedders `stored` into the CLI registry ([`embedders`]): an
-/// embedder of the same model or name given with `--embedder` wins; the store's default model
-/// is the default unless `--default-embedder` names one. Lists the models for the banners.
-fn register_found_models(
-    path: &str,
-    stored: &graphersal::vector::Embedders,
-    models: Vec<graphersal::persist::ModelInfo>,
-) {
-    use graphersal::persist::ModelState;
-    let host = embedders();
-    let mut builder = host.to_builder();
-    let mut added = false;
-    for model in &models {
-        let label = model.repo.clone();
-        if host.by_model(&model.identity).is_some() {
-            if let Ok(mut served) = SERVED_MODELS.lock()
-                && let Some(served) = served
-                    .iter_mut()
-                    .find(|served| served.identity == model.identity)
-            {
-                served.source = format!("{}; also stored in {path}", served.source);
-            }
-            continue;
-        }
-        let embedder = stored.by_model(&model.identity).cloned();
-        let registered = match embedder {
-            Some(embedder) if host.get(&embedder.info().name).is_none() => {
-                match builder.with(embedder) {
-                    Ok(next) => {
-                        builder = next;
-                        added = true;
-                        true
-                    }
-                    Err(err) => {
-                        model_note(format!(
-                            "the stored model {} could not be registered: {err}",
-                            model.identity
-                        ));
-                        builder = host.to_builder();
-                        added = false;
-                        false
-                    }
-                }
-            }
-            _ => false,
-        };
-        if registered && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
-            if model.state == ModelState::Loaded {
-                errln!(
-                    "note: loaded the embedding model {} from the store {path} as {} (licence {})",
-                    model.identity,
-                    model.repo,
-                    license_text(&model.license)
-                );
-            } else {
-                errln!(
-                    "note: the embedding model {} of the store {path} is served as {}, loaded at \
-                     its first use (licence {})",
-                    model.identity,
-                    model.repo,
-                    license_text(&model.license)
-                );
-            }
-        }
-        serve_model(ServedModel {
-            name: if registered {
-                model.repo.clone()
-            } else {
-                "(unused)".to_string()
-            },
-            identity: model.identity.clone(),
-            label,
-            license: model.license.clone(),
-            source: match &model.state {
-                ModelState::Damaged { reason } | ModelState::Unsupported { reason } => {
-                    format!("stored in {path}; not loaded: {reason}")
-                }
-                ModelState::Missing => format!("stored in {path}; not loaded: its blob is missing"),
-                _ => format!("stored in {path}"),
-            },
-        });
-    }
-    let host_default = host.default_embedder().info().name.to_string();
-    let stored_default = stored.default_embedder().info().name.to_string();
-    if added && host_default.starts_with("hash-ngram") && !stored_default.starts_with("hash-ngram")
-    {
-        if let Ok(next) = builder.default_name(&stored_default) {
-            builder = next;
-        } else {
-            builder = host.to_builder();
-        }
-    }
-    if !models.is_empty()
-        && !models.iter().any(|m| m.default)
-        && host_default.starts_with("hash-ngram")
-    {
-        model_note(format!(
-            "the store {path} holds embedding models but none is the default: `embed` without a              model name uses hash-ngram/1 (name the model, or make one the default with              Store::set_default_model)"
-        ));
-    }
-    if added {
-        set_embedders(Arc::new(builder.build()));
-    }
+/// The usage error of a flag or args-file key 0.5.0 removed (`--embedder`,
+/// `--default-embedder`): the models a database uses are imported into it.
+pub fn removed_embedder_flag(flag: &str) -> String {
+    format!(
+        "{flag} was removed in 0.5.0: the models a database uses are imported into it: \
+         graphersal embed-model import <repo> --into <store>; queries name the model by its \
+         repository or use the database's default"
+    )
 }
 
 /// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
@@ -562,26 +374,14 @@ OPTIONS:
                            compatible servers: Azure, OpenRouter, Groq, Ollama, LM Studio,
                            vLLM through base_url). The key is read from the environment
                            variable api_key_env names and stays in this process.
-        --embedder <NAME=PATH|REPO>
-                           Register a Model2Vec embedding model under NAME for the scripts
-                           (embed(), the embed step) of every mode, the --server and its MCP
-                           tools: PATH is a model directory (config.json, tokenizer.json,
-                           model.safetensors), REPO a model fetched with `graphersal
-                           embed-model download REPO` (looked up in $GRAPHERSAL_EMBED_MODELS or
-                           ~/.cache/graphersal/embed-models). May be repeated. Loaded once at
-                           start, locally (no network); a model that does not load exits 2.
-                           The built-in hash-ngram/1 is always registered.
-        --default-embedder <NAME>
-                           The embedder embed() uses without #{embedder: ..}: a --embedder NAME
-                           or hash-ngram/1 (the default).
         --repl             Start the REPL even when stdin is not a terminal: lines are read
                            without editing, commands (/help, /set ...) work, no history file
                            (for scripted sessions of the shell).
         --args-file <FILE> Read arguments from FILE (also written @FILE), once: a JSON object
                            whose keys are the long flag names without dashes, e.g.
                            {"graph": "data.gstore", "server": true, "port": 8080, "mcp": true,
-                           "embedder": ["a=/models/a"], "_comment": "ignored"}. A switch is
-                           true (false = absent), a repeatable flag (eval, embedder) takes a
+                           "eval": ["g.v().count()"], "_comment": "ignored"}. A switch is
+                           true (false = absent), a repeatable flag (eval) takes a
                            string or an array, numbers are written as numbers. Relative paths
                            resolve against the file's directory. The command line wins: a flag
                            given there replaces the file's, a repeatable one adds to it. An
@@ -636,8 +436,8 @@ EXAMPLES:
     graphersal store create data/ --from modern && graphersal --graph data/ --server
     graphersal --args-file args-dev-server.json --port 9000     # the file, with the port replaced
     graphersal embed-model download minishlab/potion-base-8M
-    graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion \
-        -e 'g.v().values("name").embed().to_list()'
+    graphersal embed-model import minishlab/potion-base-8M --into data/ --default
+    graphersal --graph data/ -e 'g.v().values("name").embed().to_list()'
 "#;
 
 /// What the process should do once the command line has been parsed.
@@ -828,9 +628,11 @@ fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
         )));
     }
     let recovered = Store::open_read_only(path, RecoveryTarget::Latest).map_err(format)?;
-    let embedders = recovered.embedders.clone();
-    let graph = Graph::new(recovered.graph);
-    register_stored_models_read_only(path, embedders).map_err(StartError::failed)?;
+    // The models of the recovered position serve its queries.
+    let graph = recovered.into_graph();
+    let models = Store::models_dir(path).map_err(format)?;
+    let notes = store_model_notes(path, &models);
+    serve_models(models, format!("stored in {path}"), notes);
     refuse_writes(&graph)?;
     Ok(Opened {
         graph: Arc::new(graph),
@@ -910,6 +712,24 @@ impl GraphSpec {
                 // Skipped data is not a failure, but the user must see it: a note on stderr.
                 if report.has_skips() {
                     errln!("note: GraphSON import of '{path}': {report}");
+                }
+                Ok(graph)
+            }
+            // A packed snapshot serves the embedding models it carries; what an earlier
+            // release left (0.4.0 model rows, vectors without a rule, saved queries calling a
+            // removed function) is a note, as `store create --from` prints it.
+            GraphSpec::File(path) if GraphSource::is_snapshot_path(path) => {
+                let (graph, report) = graphersal::persist::read_snapshot_file(
+                    path,
+                    &graphersal::persist::ReadOptions::new(),
+                )
+                .map_err(|err| graphersal::error::format_diagnostic(&err))?;
+                if !report.models.is_empty() || !report.notes(path).is_empty() {
+                    serve_models(
+                        report.models.clone(),
+                        format!("carried by {path}"),
+                        report.notes(path),
+                    );
                 }
                 Ok(graph)
             }
@@ -1021,13 +841,11 @@ impl GraphSpec {
         if schema.is_some() {
             return Err(StartError::usage(schema_refused(path, "a Store")));
         }
-        let opened = if read_only {
+        if read_only {
             open_store_read_only(path)
         } else {
             self.open_store_writable(path, create, on_damage)
-        }?;
-        apply_deferred_default(path)?;
-        Ok(opened)
+        }
     }
 
     /// [`Self::open`] of a Store read-write, falling back to read-only when this process may
@@ -1156,7 +974,9 @@ impl GraphSpec {
         for warning in &report.warnings {
             errln!("warning: {warning}");
         }
-        register_stored_models(path, &store).map_err(format)?;
+        let models = store.models().map_err(format)?;
+        let notes = store_model_notes(path, &models);
+        serve_models(models, format!("stored in {path}"), notes);
         Ok(Opened {
             graph: store.graph().clone(),
             store: Some(Arc::new(store)),
@@ -1244,10 +1064,6 @@ pub struct Cli {
     /// `--mcp-instructions`: the TEXT of the operator's file, appended to the MCP server
     /// instructions (read and checked while parsing).
     pub mcp_instructions: Option<String>,
-    /// `--embedder NAME=PATH|REPO` (repeatable, in order): Model2Vec models to register.
-    pub embedders: Vec<(String, String)>,
-    /// `--default-embedder NAME`: the default of the registry.
-    pub default_embedder: Option<String>,
 }
 
 /// Default port of `--server`.
@@ -1312,8 +1128,6 @@ impl Default for Cli {
             mcp_max_chars: None,
             ai: None,
             mcp_instructions: None,
-            embedders: Vec::new(),
-            default_embedder: None,
         }
     }
 }
@@ -1440,24 +1254,9 @@ impl Cli {
                 "--mcp-instructions" => {
                     cli.mcp_instructions = Some(read_mcp_instructions(&value(&mut args)?)?)
                 }
-                "--embedder" => {
-                    let raw = value(&mut args)?;
-                    match raw.split_once('=') {
-                        Some((name, spec)) if !name.is_empty() && !spec.is_empty() => {
-                            if cli.embedders.iter().any(|(n, _)| n == name) {
-                                return Err(format!("--embedder {name} is given twice"));
-                            }
-                            cli.embedders.push((name.to_string(), spec.to_string()));
-                        }
-                        _ => {
-                            return Err(format!(
-                                "Invalid --embedder value: {raw}. Expected NAME=PATH or \
-                                 NAME=REPO (for example potion=minishlab/potion-base-8M)"
-                            ));
-                        }
-                    }
+                "--embedder" | "--default-embedder" => {
+                    return Err(removed_embedder_flag(&flag));
                 }
-                "--default-embedder" => cli.default_embedder = Some(value(&mut args)?),
                 "--mcp-token" => {
                     let token = value(&mut args)?;
                     if token.trim().is_empty() || !token.chars().all(|c| c.is_ascii_graphic()) {
@@ -1941,13 +1740,14 @@ impl ScriptBudget {
 
     /// Builds the engine of a session under `limits`, with the budget's options preset on the
     /// traversal sources a script creates itself and the budget installed.
-    pub fn engine(&self, limits: &ScriptLimits) -> Engine {
+    /// `graph` is the host graph of the global `embed(text)` (its database's models).
+    pub fn engine(&self, limits: &ScriptLimits, graph: Arc<Graph>) -> Engine {
         let mut engine = graphersal::script::engine_with_options(
             limits,
             authorizer(),
             &self.traversal_options(),
         );
-        graphersal::script::set_engine_embedders(&mut engine, embedders());
+        graphersal::script::set_engine_graph(&mut engine, graph);
         self.install(&mut engine);
         engine
     }
@@ -1958,9 +1758,7 @@ impl ScriptBudget {
     pub fn scope(&self, graph: Arc<Graph>, render: &RenderOptions) -> Scope<'static> {
         let mut options = self.traversal_options();
         options.extend(graphersal::script::render_scope_options(render));
-        let mut scope = graphersal::script::graph_scope_with_options(graph, &options, authorizer());
-        graphersal::script::set_scope_embedders(&mut scope, embedders());
-        scope
+        graphersal::script::graph_scope_with_options(graph, &options, authorizer())
     }
 
     /// Replaces the traversal sources `g`, `_g` and `__` of a session scope by fresh ones carrying
@@ -2059,7 +1857,7 @@ pub fn run_eval(cli: &Cli) -> i32 {
 fn eval_scripts(cli: &Cli, scripts: Vec<String>, graph: Arc<Graph>) -> i32 {
     let limits = cli.script_limits();
     let budget = cli.budget();
-    let engine = budget.engine(&limits);
+    let engine = budget.engine(&limits, graph.clone());
     let render = cli.render_options();
     let mut scope = budget.scope(graph, &render);
 
@@ -2272,31 +2070,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_embedder_flags() {
-        let cli = Cli::parse([
-            "--embedder",
-            "a=minishlab/potion-base-8M",
-            "--embedder=b=./models/x=y",
-            "--default-embedder",
-            "a",
-            "--server",
-        ])
-        .unwrap();
-        assert_eq!(
-            cli.embedders,
-            vec![
-                ("a".to_string(), "minishlab/potion-base-8M".to_string()),
-                ("b".to_string(), "./models/x=y".to_string()),
-            ]
-        );
-        assert_eq!(cli.default_embedder.as_deref(), Some("a"));
-        assert_eq!(cli.mode, Mode::Server);
-        assert!(Cli::parse(["--embedder", "a"]).is_err());
-        assert!(Cli::parse(["--embedder", "a="]).is_err());
-        assert!(Cli::parse(["--embedder", "a=x", "--embedder", "a=y"]).is_err());
-        assert!(Cli::parse(["--embedder"]).is_err());
-        let plain = Cli::parse(["-e", "1"]).unwrap();
-        assert!(plain.embedders.is_empty() && plain.default_embedder.is_none());
+    fn the_removed_embedder_flags_are_usage_errors() {
+        for args in [
+            vec!["--embedder", "a=minishlab/potion-base-8M"],
+            vec!["--embedder=b=./models/x"],
+            vec!["--default-embedder", "a"],
+            vec!["--server", "--default-embedder=a"],
+        ] {
+            let err = Cli::parse(args.clone()).unwrap_err();
+            assert!(err.contains("was removed in 0.5.0"), "{args:?}: {err}");
+            assert!(
+                err.contains("graphersal embed-model import <repo> --into <store>"),
+                "{err}"
+            );
+        }
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -2313,7 +2100,7 @@ mod tests {
         std::fs::write(
             &file,
             r#"{"_c": "comment", "graph": "empty", "server": true, "port": 8080,
-                "mcp": true, "embedder": ["a=./m"], "schema-mode": "open"}"#,
+                "mcp": true, "schema-mode": "open"}"#,
         )
         .unwrap();
         let path = file.to_str().unwrap();
@@ -2323,17 +2110,10 @@ mod tests {
         std::fs::write(
             &file,
             r#"{"graph": "empty", "server": true, "port": 8080, "mcp": true,
-                "embedder": ["a=./m"], "ui-dir": "ui"}"#,
+                "ui-dir": "ui"}"#,
         )
         .unwrap();
-        let cli = Cli::parse([
-            format!("@{path}"),
-            "--port".into(),
-            "0".into(),
-            "--embedder".into(),
-            "b=repo/x".into(),
-        ])
-        .unwrap();
+        let cli = Cli::parse([format!("@{path}"), "--port".into(), "0".into()]).unwrap();
         assert_eq!(cli.mode, Mode::Server);
         assert_eq!(cli.graph, GraphSpec::Empty);
         assert_eq!(cli.port, 0, "the command line wins");
@@ -2342,9 +2122,11 @@ mod tests {
             cli.ui_dir.as_deref(),
             Some(dir.join("ui").to_str().unwrap())
         );
-        assert_eq!(cli.embedders.len(), 2);
-        assert_eq!(cli.embedders[0].0, "a");
-        assert_eq!(cli.embedders[1], ("b".to_string(), "repo/x".to_string()));
+        // A repeatable flag concatenates: the file's first, then the command line's.
+        let repeat = dir.join("r.json");
+        std::fs::write(&repeat, r#"{"eval": ["1", "2"]}"#).unwrap();
+        let cli = Cli::parse([format!("@{}", repeat.display()), "-e".into(), "3".into()]).unwrap();
+        assert_eq!(cli.scripts, ["1", "2", "3"]);
 
         // the existing validation runs on the merged list
         let err = Cli::parse([format!("--args-file={path}"), "-e".into(), "1".into()]).unwrap_err();
