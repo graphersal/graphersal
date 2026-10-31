@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use graphersal::persist::{
     BackupMode, BackupReport, CompactionAdvice, CompactionPolicy, DamagePolicy, ModelCopy,
-    PersistError, RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions,
-    ModelInfo, store_dir_at,
+    ModelInfo, PersistError, RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir,
+    StoreOptions, store_dir_at,
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
@@ -1082,7 +1082,9 @@ pub fn run(args: &[String]) -> i32 {
         "models" => {
             if positional.first().map(String::as_str) == Some("remove") {
                 if positional.len() != 3 {
-                    return usage("`store models remove` takes the store and the model's repository");
+                    return usage(
+                        "`store models remove` takes the store and the model's repository",
+                    );
                 }
                 return match Store::remove_model_dir(positional[1].as_str(), &positional[2]) {
                     Ok(report) => {

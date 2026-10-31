@@ -26,9 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use graphersal::catalog::BaseModel;
-use graphersal::persist::{
-    ImportModelOptions, ModelInfo, ModelRole, ModelSource, NewModel, Store,
-};
+use graphersal::persist::{ImportModelOptions, ModelInfo, ModelRole, ModelSource, NewModel, Store};
 use graphersal::vector::{Embedder, Model2Vec};
 use serde_json::{Value, json};
 

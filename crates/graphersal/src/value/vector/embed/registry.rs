@@ -50,6 +50,9 @@ pub(crate) trait ModelBytes: Send + Sync {
         allow(dead_code)
     )]
     fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, LoadFailure>;
+    /// Checks the blob's length and CRC-32C by streaming it (no allocation): a load another
+    /// graph made of the same hash is used only when this store's copy is intact too.
+    fn check(&self, blob: &BlobRef) -> Result<(), LoadFailure>;
     /// The journal the load events go to.
     fn journal(&self) -> Option<Arc<SystemJournal>>;
 }
@@ -177,7 +180,9 @@ fn load(
         return Err(LoadFailure::Unsupported(reason));
     }
     let key = model.blob().hash().to_vec();
-    if let Some(loaded) = cache().lock().get(&key).and_then(Weak::upgrade) {
+    let cached = cache().lock().get(&key).and_then(Weak::upgrade);
+    if let Some(loaded) = cached {
+        source.check(model.blob())?;
         return Ok(loaded);
     }
     let loaded = Arc::new(load_uncached(identity, model, source)?);
@@ -299,9 +304,9 @@ pub(crate) fn check_load(source: &Arc<dyn ModelBytes>, definition: &Definition) 
     }
     match load(definition.name(), model, source) {
         Ok(_) => CheckLoad::Loaded,
-        Err(LoadFailure::DoesNotFit { message, .. }) => CheckLoad::Skipped(format!(
-            "the model was not loaded as a check: {message}"
-        )),
+        Err(LoadFailure::DoesNotFit { message, .. }) => {
+            CheckLoad::Skipped(format!("the model was not loaded as a check: {message}"))
+        }
         Err(LoadFailure::Unsupported(_)) => CheckLoad::NotAvailable,
         Err(failure) => CheckLoad::Failed(failure.reason()),
     }
@@ -427,7 +432,9 @@ impl Embedder for StoredModelEmbedder {
         #[cfg(not(all(feature = "model2vec", not(target_arch = "wasm32"))))]
         {
             let _ = (loaded, texts, ctx);
-            Err(EmbedError::unavailable(unsupported_build(self.model.repo())))
+            Err(EmbedError::unavailable(unsupported_build(
+                self.model.repo(),
+            )))
         }
     }
 }

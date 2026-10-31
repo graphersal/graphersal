@@ -80,10 +80,7 @@ fn marks_list<'py>(py: Python<'py>, marks: &[Mark]) -> PyResult<Bound<'py, PyLis
 }
 
 /// One model of the store as ``store.models()`` returns it.
-fn model_dict<'py>(
-    py: Python<'py>,
-    model: &persist::ModelInfo,
-) -> PyResult<Bound<'py, PyDict>> {
+fn model_dict<'py>(py: Python<'py>, model: &persist::ModelInfo) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("identity", &model.identity)?;
     dict.set_item("repo", &model.repo)?;

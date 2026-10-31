@@ -528,10 +528,7 @@ pub(crate) static MODEL_REMOVED: EventKind = event(
     "model",
     Level::Notice,
     "An embedding model was removed from the store's current state (one commit).",
-    &[
-        f("repo", "its repository"),
-        f("identity", "its identity"),
-    ],
+    &[f("repo", "its repository"), f("identity", "its identity")],
     Collapse::Never,
 );
 
@@ -541,7 +538,10 @@ pub(crate) static MODEL_DEFAULT_CHANGED: EventKind = event(
     Level::Notice,
     "The default embedding model changed (one commit).",
     &[
-        f("from", "the repository of the previous default (empty: none)"),
+        f(
+            "from",
+            "the repository of the previous default (empty: none)",
+        ),
         f("to", "the repository of the new default (empty: none)"),
     ],
     Collapse::Never,
@@ -566,10 +566,7 @@ pub(crate) static MODEL_UNLOADED: EventKind = event(
     "model",
     Level::Info,
     "An embedding model no open position uses was unloaded.",
-    &[
-        f("repo", "its repository"),
-        f("identity", "its identity"),
-    ],
+    &[f("repo", "its repository"), f("identity", "its identity")],
     Collapse::By(&["identity"]),
 );
 

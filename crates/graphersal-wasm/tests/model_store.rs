@@ -13,7 +13,9 @@ use graphersal::prelude::*;
 
 /// The weights of a tiny model (a 4 x 3 f32 embedding matrix).
 fn safetensors() -> Vec<u8> {
-    let data: Vec<u8> = (0..12).flat_map(|i| (1.0f32 + i as f32).to_le_bytes()).collect();
+    let data: Vec<u8> = (0..12)
+        .flat_map(|i| (1.0f32 + i as f32).to_le_bytes())
+        .collect();
     let mut header = format!(
         r#"{{"embeddings": {{"dtype": "F32", "shape": [4, 3], "data_offsets": [0, {}]}}}}"#,
         data.len()
@@ -43,7 +45,11 @@ fn a_store_needing_a_model_opens_read_only_without_text_queries() {
             ModelRole::Tokenizer,
             Cursor::new(b"{}".to_vec()),
         )
-        .with_file("model.safetensors", ModelRole::Weights, Cursor::new(safetensors()))
+        .with_file(
+            "model.safetensors",
+            ModelRole::Weights,
+            Cursor::new(safetensors()),
+        )
         .with_repo("acme/tiny")
         .with_license("mit");
     let report = store
@@ -64,7 +70,10 @@ fn a_store_needing_a_model_opens_read_only_without_text_queries() {
 
     let store = Store::open(dir, StoreOptions::new()).unwrap();
     let reason = store.read_only_reason().unwrap().expect("read-only");
-    assert!(reason.contains("cannot run the model acme/tiny"), "{reason}");
+    assert!(
+        reason.contains("cannot run the model acme/tiny"),
+        "{reason}"
+    );
     let models = store.models().unwrap();
     assert_eq!(models[0].state, ModelState::NotLoaded);
     assert_eq!(models[0].needed_by, ["doc.emb"]);
@@ -76,5 +85,6 @@ fn a_store_needing_a_model_opens_read_only_without_text_queries() {
         .embed_value(Some("acme/tiny"))
         .to_list()
         .unwrap_err();
-    assert!(err.to_string().contains("cannot run the model"), "{err}");
+    let text = graphersal::error::format_diagnostic(&*err);
+    assert!(text.contains("cannot run the model"), "{text}");
 }

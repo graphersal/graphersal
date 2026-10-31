@@ -15,8 +15,8 @@
 use crate::error::{DefinitionError, GraphError};
 use crate::graph::TraversalGraph;
 use crate::graph::definition::{Definition, DefinitionBody, DefinitionFlags, DefinitionKind};
-use crate::value::vector::embed::identity::{FAMILY, is_repo_name, parse_identity};
 use crate::value::blob::BlobHashAlgo;
+use crate::value::vector::embed::identity::{FAMILY, is_repo_name, parse_identity};
 use crate::value::{BlobRef, ElementProperty, PropertyMap};
 
 /// The longest model definition name (an identity).
@@ -386,7 +386,12 @@ impl ModelDefinition {
                     let Some(entry) = item.as_object() else {
                         return Err(malformed("base_models", "an entry is not an object"));
                     };
-                    let field = |key: &str| entry.get(key).and_then(|v| v.text()).map(|t| t.into_owned());
+                    let field = |key: &str| {
+                        entry
+                            .get(key)
+                            .and_then(|v| v.text())
+                            .map(|t| t.into_owned())
+                    };
                     let Some(repo) = field("repo") else {
                         return Err(malformed("base_models", "an entry has no repo"));
                     };
@@ -500,9 +505,13 @@ impl ModelDefinition {
                 format!("{:?} is not a repository name (owner/name)", self.repo),
             ));
         }
-        let label_ok =
-            |text: &str| text.len() <= MAX_LICENSE_BYTES && text.chars().all(|c| c.is_ascii_graphic());
-        for (key, value) in [("license", &self.license), ("license_text", &self.license_text)] {
+        let label_ok = |text: &str| {
+            text.len() <= MAX_LICENSE_BYTES && text.chars().all(|c| c.is_ascii_graphic())
+        };
+        for (key, value) in [
+            ("license", &self.license),
+            ("license_text", &self.license_text),
+        ] {
             if let Some(value) = value
                 && !label_ok(value)
             {
@@ -513,7 +522,10 @@ impl ModelDefinition {
             if let Some(value) = value
                 && (value.len() > MAX_REVISION_BYTES || value.chars().any(char::is_control))
             {
-                return Err(field(key, "it is not plain text of at most 255 bytes".into()));
+                return Err(field(
+                    key,
+                    "it is not plain text of at most 255 bytes".into(),
+                ));
             }
         }
         if self.base_models.len() > MAX_BASE_MODELS {
@@ -673,7 +685,10 @@ mod tests {
             "model2vec/acme/other@0123456789ab",
             "model2vec/acme/tiny@0123456789ab?normalize=false",
         ] {
-            assert!(Definition::model(bad, model.clone()).validate().is_err(), "{bad}");
+            assert!(
+                Definition::model(bad, model.clone()).validate().is_err(),
+                "{bad}"
+            );
         }
     }
 

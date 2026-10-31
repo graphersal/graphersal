@@ -94,8 +94,8 @@ fn a_damaged_needed_model_refuses_every_open_with_the_restore_commands() {
         let (cause, _) = cause_of(Store::open_backup(temp.join("backup"), options()));
         assert_eq!(cause, StoreFailure::ModelUnavailable);
         // The refused open is in the store's journal (best effort, written while closed).
-        let page = Store::journal_dir(&path, &JournalQuery::new().kind("model.load_failed"))
-            .unwrap();
+        let page =
+            Store::journal_dir(&path, &JournalQuery::new().kind("model.load_failed")).unwrap();
         assert!(!page.records.is_empty(), "no model.load_failed record");
     }
 }
@@ -127,13 +127,20 @@ fn a_damaged_model_nothing_needs_leaves_the_store_working() {
     let store = Store::create(&path, options()).unwrap();
     import(&store, 1, "acme/tiny");
     store.close().unwrap();
-    flip_byte(&only_blob(&path));
+    // A blob of another length (a flipped byte of the same length is found by a load or a
+    // verify, not at the open: the open reads no blob nothing needs).
+    let blob = only_blob(&path);
+    let bytes = std::fs::read(&blob).unwrap();
+    std::fs::write(&blob, &bytes[..bytes.len() - 1]).unwrap();
     let store = Store::open(&path, options()).unwrap();
     assert!(store.read_only_reason().unwrap().is_none());
     add_person(&store, "ann");
     let models = store.models().unwrap();
     assert!(
-        matches!(models[0].state, graphersal::persist::ModelState::Damaged { .. }),
+        matches!(
+            models[0].state,
+            graphersal::persist::ModelState::Damaged { .. }
+        ),
         "{models:?}"
     );
     let page = store
@@ -153,7 +160,10 @@ fn a_build_without_a_model_loader_opens_read_only_without_text_queries() {
     store_needing_a_model(&path);
     let store = Store::open(&path, options()).unwrap();
     let reason = store.read_only_reason().unwrap().unwrap();
-    assert!(reason.contains("cannot run the model acme/tiny"), "{reason}");
+    assert!(
+        reason.contains("cannot run the model acme/tiny"),
+        "{reason}"
+    );
     let err = store
         .graph()
         .read()
@@ -162,7 +172,8 @@ fn a_build_without_a_model_loader_opens_read_only_without_text_queries() {
         .embed_value(Some("acme/tiny"))
         .to_list()
         .unwrap_err();
-    assert!(err.to_string().contains("cannot run the model"), "{err}");
+    let text = graphersal::error::format_diagnostic(&*err);
+    assert!(text.contains("cannot run the model"), "{text}");
     assert!(matches!(
         Store::open(&path, options()).map(|_| ()),
         Err(PersistError::Locked { .. })
@@ -184,7 +195,9 @@ mod loading {
         let models = store.models().unwrap();
         assert_eq!(models[0].identity, identity);
         assert_eq!(models[0].state, ModelState::Loaded);
-        let memory = graphersal::storage::AnyGraph::memory_usage(&**store.graph()).unwrap().unwrap();
+        let memory = graphersal::storage::AnyGraph::memory_usage(&**store.graph())
+            .unwrap()
+            .unwrap();
         assert_eq!(memory.model_bytes, models[0].load_bytes);
         assert!(memory.model_bytes > 0);
         // A text query embeds with it.
@@ -251,11 +264,23 @@ mod loading {
             .embed_value(None)
             .to_list()
             .unwrap();
-        assert!(graphersal::storage::AnyGraph::memory_usage(&**store.graph()).unwrap().unwrap().model_bytes > 0);
+        assert!(
+            graphersal::storage::AnyGraph::memory_usage(&**store.graph())
+                .unwrap()
+                .unwrap()
+                .model_bytes
+                > 0
+        );
         store
             .rollback_to(RecoveryTarget::Mark("before".into()), RollbackMode::Move)
             .unwrap();
-        assert_eq!(graphersal::storage::AnyGraph::memory_usage(&**store.graph()).unwrap().unwrap().model_bytes, 0);
+        assert_eq!(
+            graphersal::storage::AnyGraph::memory_usage(&**store.graph())
+                .unwrap()
+                .unwrap()
+                .model_bytes,
+            0
+        );
         assert!(store.models().unwrap().is_empty());
         let page = store
             .journal()

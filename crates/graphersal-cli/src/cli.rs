@@ -297,7 +297,10 @@ fn register_found_models(
             }
             _ => false,
         };
-        if registered && model.state == ModelState::Loaded && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+        if registered
+            && model.state == ModelState::Loaded
+            && !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed)
+        {
             errln!(
                 "note: loaded the embedding model {} from the store {path} as {} (licence {})",
                 model.identity,
@@ -333,7 +336,10 @@ fn register_found_models(
             builder = host.to_builder();
         }
     }
-    if !models.is_empty() && !models.iter().any(|m| m.default) && host_default.starts_with("hash-ngram") {
+    if !models.is_empty()
+        && !models.iter().any(|m| m.default)
+        && host_default.starts_with("hash-ngram")
+    {
         model_note(format!(
             "the store {path} holds embedding models but none is the default: `embed` without a              model name uses hash-ngram/1 (name the model, or make one the default with              Store::set_default_model)"
         ));

@@ -73,8 +73,8 @@ pub use maintenance::{BackupReport, ChangesSince, PruneReport, VerifyProblem, Ve
 pub use model_catalog::{
     ImportModelOptions, ImportModelReport, ModelChangeReport, ModelInfo, ModelSource, ModelState,
 };
-pub use models::{ModelCopy, ModelRole, NewModel};
 pub(crate) use models::StoredModel;
+pub use models::{ModelCopy, ModelRole, NewModel};
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
 pub use upgrade::UpgradeReport;
 pub(crate) use upgrade::upgradable_from;
@@ -2041,7 +2041,11 @@ impl StoreCore {
                 instance_name: options.instance_name.as_deref(),
             },
         )?;
-        if let Some(reason) = loaded.read_only.clone().or_else(|| models.read_only.clone()) {
+        if let Some(reason) = loaded
+            .read_only
+            .clone()
+            .or_else(|| models.read_only.clone())
+        {
             return Self::open_read_only_mode(
                 dir, lock, options, graph_file, report, graph, reason, started, models,
             );
@@ -2370,7 +2374,10 @@ impl StoreCore {
         let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
         let models = model_catalog::infos_in_files(new_dir)?;
         for model in &models {
-            if matches!(model.state, ModelState::Missing | ModelState::Damaged { .. }) {
+            if matches!(
+                model.state,
+                ModelState::Missing | ModelState::Damaged { .. }
+            ) {
                 models_not_carried.push(format!(
                     "{} ({}): its blob is missing or damaged in the damaged store",
                     model.repo, model.identity
@@ -2987,9 +2994,8 @@ impl StoreCore {
         )
         .map(|mut report| {
             if models == ModelCopy::Include {
-                report.models =
-                    model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
-                        .unwrap_or_default();
+                report.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
+                    .unwrap_or_default();
             }
             report
         });

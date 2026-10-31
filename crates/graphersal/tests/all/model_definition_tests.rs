@@ -90,10 +90,7 @@ fn an_import_is_one_commit_defining_the_model() {
     }
     // The same identity again: no commit.
     assert!(import(&store, 1, "acme/tiny").already_present);
-    assert_eq!(
-        store.graph().read().last_commit_seq(),
-        seq + 1
-    );
+    assert_eq!(store.graph().read().last_commit_seq(), seq + 1);
     assert_eq!(kinds(&store, "model.imported"), 1);
 }
 
@@ -122,14 +119,22 @@ fn another_revision_is_refused_without_replace_and_switches_with_it() {
     // The default follows the replace; the old definition is gone, its blob kept.
     assert!(report.model.default);
     assert_eq!(model_names(&store), [report.model.identity.clone()]);
-    assert_eq!(store.info().unwrap().default_model.as_deref(), Some("acme/tiny"));
+    assert_eq!(
+        store.info().unwrap().default_model.as_deref(),
+        Some("acme/tiny")
+    );
     assert_eq!(store.info().unwrap().blobs.count, 2);
     assert_eq!(kinds(&store, "model.replaced"), 1);
-    // A prune of the history before the replace drops the old blob.
-    store.checkpoint(None).unwrap();
-    let seq = store.graph().read().last_commit_seq();
-    let pruned = store.prune(seq).unwrap();
-    assert_eq!(pruned.blobs_removed, 1);
+    // Prunes of the history before the replace drop the old blob (the snapshot before the
+    // newest is kept as the donor of the newest, so it takes two checkpoints).
+    let mut removed = 0;
+    for round in 0..3 {
+        add_person(&store, &format!("p{round}"));
+        store.checkpoint(None).unwrap();
+        let seq = store.graph().read().last_commit_seq();
+        removed += store.prune(seq).unwrap().blobs_removed;
+    }
+    assert_eq!(removed, 1);
     assert_eq!(store.info().unwrap().blobs.count, 1);
 }
 
@@ -178,7 +183,10 @@ fn at_most_one_model_is_the_default() {
         .collect();
     assert_eq!(defaults, ["acme/a"]);
     // Setting the same default again commits nothing; clearing it does.
-    assert_eq!(store.set_default_model(Some("acme/a")).unwrap().commit_seq, None);
+    assert_eq!(
+        store.set_default_model(Some("acme/a")).unwrap().commit_seq,
+        None
+    );
     assert!(store.set_default_model(None).unwrap().commit_seq.is_some());
     assert!(store.models().unwrap().iter().all(|m| !m.default));
     // The catalog itself refuses a second default and a second revision of a repository.
@@ -191,17 +199,30 @@ fn at_most_one_model_is_the_default() {
         .find(|d| d.as_model().is_some_and(|m| m.repo() == "acme/b"))
         .unwrap()
         .clone();
-    let second_default = Definition::model(
-        b.name(),
-        b.as_model().unwrap().clone().with_default(true),
+    let second_default =
+        Definition::model(b.name(), b.as_model().unwrap().clone().with_default(true));
+    assert!(
+        store
+            .graph()
+            .write()
+            .set_definition(second_default)
+            .is_err()
     );
-    assert!(store.graph().write().set_definition(second_default).is_err());
     let other_revision = Definition::model(
         "model2vec/acme/b@000000000000",
         ModelDefinition::new(b.as_model().unwrap().blob().clone(), "acme/b").with_dimension(3),
     );
-    assert!(store.graph().write().set_definition(other_revision).is_err());
-    assert_eq!(store.models().unwrap().iter().filter(|m| m.default).count(), 1);
+    assert!(
+        store
+            .graph()
+            .write()
+            .set_definition(other_revision)
+            .is_err()
+    );
+    assert_eq!(
+        store.models().unwrap().iter().filter(|m| m.default).count(),
+        1
+    );
 }
 
 #[test]
@@ -228,7 +249,10 @@ fn every_position_has_the_models_and_the_default_of_its_moment() {
         names
     };
     assert!(at(RecoveryTarget::Mark("before".into())).is_empty());
-    assert_eq!(at(RecoveryTarget::Mark("one".into())), [("acme/a".to_string(), false)]);
+    assert_eq!(
+        at(RecoveryTarget::Mark("one".into())),
+        [("acme/a".to_string(), false)]
+    );
     assert_eq!(
         at(RecoveryTarget::Latest),
         [("acme/a".to_string(), false), ("acme/b".to_string(), true)]
@@ -293,7 +317,10 @@ fn a_model_definition_of_a_newer_version_is_kept_and_written_back() {
         .unwrap()
         .clone();
     assert_eq!(read_known.to_payload(), known.to_payload());
-    assert_eq!(read_known.extra().get("future_key"), Some(&ElementProperty::from(42i64)));
+    assert_eq!(
+        read_known.extra().get("future_key"),
+        Some(&ElementProperty::from(42i64))
+    );
     let read_foreign = graph
         .definition(DefinitionKind::MODEL, "future/model@1")
         .unwrap()
@@ -304,8 +331,17 @@ fn a_model_definition_of_a_newer_version_is_kept_and_written_back() {
     assert_eq!(read_foreign.to_payload(), payload);
     drop(graph);
     let models = store.models().unwrap();
-    let foreign_info = models.iter().find(|m| m.identity == "future/model@1").unwrap();
+    let foreign_info = models
+        .iter()
+        .find(|m| m.identity == "future/model@1")
+        .unwrap();
     assert!(matches!(foreign_info.state, ModelState::Unsupported { .. }));
     // Not served: no embedder of it.
-    assert!(store.embedders().unwrap().by_model("future/model@1").is_none());
+    assert!(
+        store
+            .embedders()
+            .unwrap()
+            .by_model("future/model@1")
+            .is_none()
+    );
 }

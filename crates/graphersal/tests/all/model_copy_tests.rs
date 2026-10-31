@@ -99,7 +99,9 @@ fn every_copy_path_carries_the_model_and_the_copy_opens_with_it() {
         .rollback_to(RecoveryTarget::Mark("start".into()), RollbackMode::Move)
         .unwrap();
     let entry = store.attic_list().unwrap().pop().unwrap();
-    let attic_fork = store.attic_fork(&entry.id, temp.join("attic-fork")).unwrap();
+    let attic_fork = store
+        .attic_fork(&entry.id, temp.join("attic-fork"))
+        .unwrap();
     assert_eq!(attic_fork.models.len(), 1);
     copies.push((temp.join("attic-fork"), "attic fork"));
     store.close().unwrap();
@@ -134,7 +136,11 @@ fn the_same_files_give_the_same_blob_in_every_store() {
     let one = import(&a, 1, "acme/tiny").model;
     // The same files in another order and from a directory: the same tar, the same blob.
     let dir = tiny_model_dir(&temp, "dir", 1, "acme/tiny");
-    std::fs::write(dir.join("README.md"), "---\nlicense: mit\n---\n# A tiny model\n").unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "---\nlicense: mit\n---\n# A tiny model\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("graphersal-embed-model.json"),
         r#"{"format": 2, "repo": "acme/tiny", "license": "mit", "files": []}"#,

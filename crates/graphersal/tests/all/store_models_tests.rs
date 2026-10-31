@@ -52,7 +52,11 @@ fn an_added_model_is_listed_with_its_identity_licence_and_files() {
     assert_eq!(report.commit_seq, Some(before + 1), "one commit");
     let model = &report.model;
     assert_eq!(model.repo, "acme/tiny");
-    assert!(model.identity.starts_with("model2vec/acme/tiny@"), "{}", model.identity);
+    assert!(
+        model.identity.starts_with("model2vec/acme/tiny@"),
+        "{}",
+        model.identity
+    );
     assert_eq!(model.license, "mit");
     assert_eq!(model.license_text, "template");
     assert_eq!(model.dimension, DIMENSION as u64);
@@ -71,10 +75,7 @@ fn an_added_model_is_listed_with_its_identity_licence_and_files() {
     let again = import(&store, 1, "acme/tiny");
     assert!(again.already_present);
     assert_eq!(again.commit_seq, None);
-    assert_eq!(
-        store.graph().read().last_commit_seq(),
-        before + 1
-    );
+    assert_eq!(store.graph().read().last_commit_seq(), before + 1);
     assert_eq!(blob_files(&path).len(), 1);
     // The licence warning of a template; the model is in the catalog as kind 5.
     assert!(report.warnings.iter().any(|w| w.contains("template")));
@@ -104,20 +105,31 @@ fn the_licence_text_comes_from_a_file_a_template_or_nowhere() {
         .import_model(ModelSource::Files(apache), ImportModelOptions::new())
         .unwrap()
         .model;
-    assert_eq!((model.license.as_str(), model.license_text.as_str()), ("apache-2.0", "template"));
+    assert_eq!(
+        (model.license.as_str(), model.license_text.as_str()),
+        ("apache-2.0", "template")
+    );
     let other = tiny_model(3, "acme/c").with_license("other");
     let report = store
         .import_model(ModelSource::Files(other), ImportModelOptions::new())
         .unwrap();
     assert_eq!(report.model.license_text, "none");
     let unknown = NewModel::new()
-        .with_file("config.json", ModelRole::Config, Cursor::new(CONFIG.as_bytes().to_vec()))
+        .with_file(
+            "config.json",
+            ModelRole::Config,
+            Cursor::new(CONFIG.as_bytes().to_vec()),
+        )
         .with_file(
             "tokenizer.json",
             ModelRole::Tokenizer,
             Cursor::new(tokenizer_json().into_bytes()),
         )
-        .with_file("model.safetensors", ModelRole::Weights, Cursor::new(safetensors(4)));
+        .with_file(
+            "model.safetensors",
+            ModelRole::Weights,
+            Cursor::new(safetensors(4)),
+        );
     let report = store
         .import_model(
             ModelSource::Files(unknown),
@@ -150,25 +162,45 @@ fn an_invalid_model_is_refused_and_leaves_nothing() {
     let path = temp.join("s");
     let store = Store::create(&path, options()).unwrap();
     let seq = store.graph().read().last_commit_seq();
-    let refused = |model: NewModel, options: ImportModelOptions| {
-        match store.import_model(ModelSource::Files(model), options) {
-            Err(PersistError::Store { cause, .. }) => assert_eq!(cause, StoreFailure::InvalidModel),
-            other => panic!("not refused: {other:?}"),
-        }
+    let refused = |model: NewModel, options: ImportModelOptions| match store
+        .import_model(ModelSource::Files(model), options)
+    {
+        Err(PersistError::Store { cause, .. }) => assert_eq!(cause, StoreFailure::InvalidModel),
+        other => panic!("not refused: {other:?}"),
     };
     // No weights.
     refused(
         NewModel::new()
-            .with_file("config.json", ModelRole::Config, Cursor::new(b"{}".to_vec()))
-            .with_file("tokenizer.json", ModelRole::Tokenizer, Cursor::new(b"{}".to_vec())),
+            .with_file(
+                "config.json",
+                ModelRole::Config,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "tokenizer.json",
+                ModelRole::Tokenizer,
+                Cursor::new(b"{}".to_vec()),
+            ),
         ImportModelOptions::new().with_repo("acme/x"),
     );
     // No repository.
     refused(
         NewModel::new()
-            .with_file("config.json", ModelRole::Config, Cursor::new(b"{}".to_vec()))
-            .with_file("tokenizer.json", ModelRole::Tokenizer, Cursor::new(b"{}".to_vec()))
-            .with_file("model.safetensors", ModelRole::Weights, Cursor::new(safetensors(1))),
+            .with_file(
+                "config.json",
+                ModelRole::Config,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "tokenizer.json",
+                ModelRole::Tokenizer,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "model.safetensors",
+                ModelRole::Weights,
+                Cursor::new(safetensors(1)),
+            ),
         ImportModelOptions::new(),
     );
     // A name that is not allowed, weights that are no safetensors file, a repository that
@@ -179,12 +211,27 @@ fn an_invalid_model_is_refused_and_leaves_nothing() {
     );
     refused(
         NewModel::new()
-            .with_file("config.json", ModelRole::Config, Cursor::new(b"{}".to_vec()))
-            .with_file("tokenizer.json", ModelRole::Tokenizer, Cursor::new(b"{}".to_vec()))
-            .with_file("model.safetensors", ModelRole::Weights, Cursor::new(vec![9u8; 64])),
+            .with_file(
+                "config.json",
+                ModelRole::Config,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "tokenizer.json",
+                ModelRole::Tokenizer,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "model.safetensors",
+                ModelRole::Weights,
+                Cursor::new(vec![9u8; 64]),
+            ),
         ImportModelOptions::new().with_repo("acme/x"),
     );
-    refused(tiny_model(1, "acme/x"), ImportModelOptions::new().with_repo("acme/y"));
+    refused(
+        tiny_model(1, "acme/x"),
+        ImportModelOptions::new().with_repo("acme/y"),
+    );
     assert_eq!(store.graph().read().last_commit_seq(), seq);
     assert!(store.models().unwrap().is_empty());
     assert!(blob_files(&path).is_empty(), "no blob was written");
@@ -264,9 +311,12 @@ fn every_copy_carries_the_models() {
     let mut packed = Vec::new();
     store.export_packed(None, &mut packed).unwrap();
     store.close().unwrap();
-    let from_packed = Store::create_from_packed(temp.join("packed"), packed.as_slice(), options())
-        .unwrap();
-    assert_eq!(repos(&from_packed.models().unwrap()), ["acme/other", "acme/tiny"]);
+    let from_packed =
+        Store::create_from_packed(temp.join("packed"), packed.as_slice(), options()).unwrap();
+    assert_eq!(
+        repos(&from_packed.models().unwrap()),
+        ["acme/other", "acme/tiny"]
+    );
     assert!(from_packed.verify().unwrap().is_ok());
     from_packed.close().unwrap();
     // Without the models: the definitions stay, the blobs are missing.
@@ -331,15 +381,34 @@ fn hostile_model_files_never_panic() {
     ];
     for weights in headers {
         let model = NewModel::new()
-            .with_file("config.json", ModelRole::Config, Cursor::new(b"{}".to_vec()))
-            .with_file("tokenizer.json", ModelRole::Tokenizer, Cursor::new(b"{}".to_vec()))
-            .with_file("model.safetensors", ModelRole::Weights, Cursor::new(weights));
+            .with_file(
+                "config.json",
+                ModelRole::Config,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "tokenizer.json",
+                ModelRole::Tokenizer,
+                Cursor::new(b"{}".to_vec()),
+            )
+            .with_file(
+                "model.safetensors",
+                ModelRole::Weights,
+                Cursor::new(weights),
+            );
         let _ = store.import_model(
             ModelSource::Files(model),
             ImportModelOptions::new().with_repo("acme/x"),
         );
     }
-    for name in ["", ".x", "graphersal-model.json", &"a".repeat(41), "a/b", "x\u{0}"] {
+    for name in [
+        "",
+        ".x",
+        "graphersal-model.json",
+        &"a".repeat(41),
+        "a/b",
+        "x\u{0}",
+    ] {
         let model = tiny_model(1, "acme/x").with_file(name, ModelRole::Notice, Cursor::new(vec![]));
         assert!(
             store
@@ -350,7 +419,11 @@ fn hostile_model_files_never_panic() {
     }
     let mut many = tiny_model(1, "acme/x");
     for i in 0..64 {
-        many = many.with_file(format!("NOTICE{i}"), ModelRole::Notice, Cursor::new(vec![1]));
+        many = many.with_file(
+            format!("NOTICE{i}"),
+            ModelRole::Notice,
+            Cursor::new(vec![1]),
+        );
     }
     assert!(
         store
@@ -415,7 +488,9 @@ mod auto_load {
             let store = Store::open(&path, options()).unwrap();
             let models = store.models().unwrap();
             assert_eq!(models[0].state, ModelState::Loaded);
-            let memory = graphersal::storage::AnyGraph::memory_usage(&**store.graph()).unwrap().unwrap();
+            let memory = graphersal::storage::AnyGraph::memory_usage(&**store.graph())
+                .unwrap()
+                .unwrap();
             assert_eq!(memory.model_bytes, model.load_bytes);
             // The model serves `embed` by its repository name without any host embedder.
             let vector = store
@@ -438,9 +513,7 @@ mod auto_load {
         let path = temp.join("s");
         let store = Store::create(&path, options()).unwrap();
         import(&store, 1, "acme/tiny");
-        store
-            .set_default_model(Some("acme/tiny"))
-            .unwrap();
+        store.set_default_model(Some("acme/tiny")).unwrap();
         store.close().unwrap();
         let store = Store::open(&path, options()).unwrap();
         // Not needed by the schema: not loaded until a query uses it.

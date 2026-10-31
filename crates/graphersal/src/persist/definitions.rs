@@ -53,7 +53,7 @@ impl DefinitionRecord {
                 | DefinitionBody::Compression(_)
                 | DefinitionBody::PropertyIndex(_)
                 | DefinitionBody::Job(_)
-            | DefinitionBody::Model(_),
+                | DefinitionBody::Model(_),
             ) => Vec::new(),
         };
         Ok(Self {

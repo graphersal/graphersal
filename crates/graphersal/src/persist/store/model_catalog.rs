@@ -424,9 +424,8 @@ fn read_in_memory(name: &str, reader: &mut dyn Read) -> Result<Vec<u8>, PersistE
 /// Hashes a file of the local file system (first pass of a directory import).
 #[cfg(not(target_arch = "wasm32"))]
 fn hash_path(path: &std::path::Path) -> Result<(u64, String, Vec<u8>), PersistError> {
-    let mut file = std::fs::File::open(path).map_err(|err| {
-        invalid(format!("cannot read '{}': {err}", path.display()))
-    })?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| invalid(format!("cannot read '{}': {err}", path.display())))?;
     let mut hash = Sha256::new();
     let mut head = Vec::new();
     let mut size = 0u64;
@@ -498,7 +497,10 @@ fn dir_source(dir: &std::path::Path) -> Result<(Vec<SourceFile>, Meta), PersistE
         let bytes = std::fs::read(&manifest_path)
             .map_err(|err| invalid(format!("cannot read '{}': {err}", manifest_path.display())))?;
         let text = String::from_utf8(bytes).map_err(|_| {
-            invalid(format!("the manifest '{}' is not UTF-8", manifest_path.display()))
+            invalid(format!(
+                "the manifest '{}' is not UTF-8",
+                manifest_path.display()
+            ))
         })?;
         let PhysicalValue::Object(fields) = read_json(&text, 8).map_err(|err| {
             invalid(format!(
@@ -539,7 +541,8 @@ fn dir_source(dir: &std::path::Path) -> Result<(Vec<SourceFile>, Meta), PersistE
                     if let Some(repo) = field("repo")
                         && is_repo_name(&repo)
                     {
-                        meta.base_models.push(BaseModel::new(repo, field("license")));
+                        meta.base_models
+                            .push(BaseModel::new(repo, field("license")));
                     }
                 }
             }
@@ -549,7 +552,10 @@ fn dir_source(dir: &std::path::Path) -> Result<(Vec<SourceFile>, Meta), PersistE
     let sub = dir.join("0_StaticEmbedding");
     let layouts = [
         (dir.join("config.json"), dir.to_path_buf()),
-        (dir.join("config_sentence_transformers.json"), dir.to_path_buf()),
+        (
+            dir.join("config_sentence_transformers.json"),
+            dir.to_path_buf(),
+        ),
         (dir.join("config_sentence_transformers.json"), sub),
     ];
     let Some((config, base)) = layouts.into_iter().find(|(config, base)| {
@@ -688,7 +694,9 @@ pub(crate) fn prepare(
         .unwrap_or_else(|| "unknown".to_string());
     let label_ok = |text: &str| text.len() <= 64 && text.chars().all(|c| c.is_ascii_graphic());
     if !label_ok(&license) {
-        return Err(invalid(format!("the licence {license:?} is not an SPDX id")));
+        return Err(invalid(format!(
+            "the licence {license:?} is not an SPDX id"
+        )));
     }
     for base in &meta.base_models {
         if !is_repo_name(&base.repo) || !base.license.as_deref().is_none_or(label_ok) {
@@ -962,10 +970,10 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// thread's, so a host needs this only to merge them with embedders of its own (the
     /// answer is a snapshot: a later import or rollback changes the graph's, not this one).
     pub fn embedders(&self) -> Result<Arc<crate::value::Embedders>, PersistError> {
-        Ok(self
-            .graph
-            .model_registry()
-            .map_or_else(|| Arc::new(crate::value::Embedders::default()), |r| r.embedders()))
+        Ok(self.graph.model_registry().map_or_else(
+            || Arc::new(crate::value::Embedders::default()),
+            |r| r.embedders(),
+        ))
     }
 
     /// Imports an embedding model into this open store (the explicit command a model enters a
@@ -1058,7 +1066,10 @@ impl<S: PersistentStorage + Default> Store<S> {
         // A check load where the build can run the model and it fits.
         let blob_length = prepared.tar_length();
         let manifest = prepared.manifest.clone();
-        let default = options.default || old.as_ref().is_some_and(|o| o.as_model().is_some_and(ModelDefinition::is_default));
+        let default = options.default
+            || old
+                .as_ref()
+                .is_some_and(|o| o.as_model().is_some_and(ModelDefinition::is_default));
         let files = std::mem::take(&mut { prepared.files });
         let mut stream = TarStream::new(files);
         let pending = self.write_blob(&mut stream)?;
@@ -1200,9 +1211,11 @@ impl<S: PersistentStorage + Default> Store<S> {
         principal: Option<String>,
     ) -> Result<u64, PersistError> {
         let (definitions, _) = catalog_of(&self.graph)?;
-        let from = definitions
-            .iter()
-            .find_map(|d| d.as_model().filter(|m| m.is_default()).map(|m| m.repo().to_string()));
+        let from = definitions.iter().find_map(|d| {
+            d.as_model()
+                .filter(|m| m.is_default())
+                .map(|m| m.repo().to_string())
+        });
         let target = repo.and_then(|repo| {
             definitions
                 .iter()
@@ -1217,7 +1230,10 @@ impl<S: PersistentStorage + Default> Store<S> {
             let mut write = self.graph.write_checked().map_err(PersistError::Graph)?;
             write
                 .transaction_with(metadata, |g| -> Result<(), GraphError> {
-                    let keep = target.as_ref().map(|t| t.name().to_string()).unwrap_or_default();
+                    let keep = target
+                        .as_ref()
+                        .map(|t| t.name().to_string())
+                        .unwrap_or_default();
                     clear_default(g, &keep)?;
                     if let Some(target) = &target
                         && let Some(model) = target.as_model()
@@ -1338,7 +1354,8 @@ pub(crate) fn infos_in_files(dir: &DirPath) -> Result<Vec<ModelInfo>, PersistErr
 pub(crate) struct StoreModelBytes {
     pub(crate) dir: DirPath,
     /// Set once the store's system journal exists (after the open's checks).
-    pub(crate) journal: std::sync::OnceLock<std::sync::Weak<crate::graph::system_journal::SystemJournal>>,
+    pub(crate) journal:
+        std::sync::OnceLock<std::sync::Weak<crate::graph::system_journal::SystemJournal>>,
 }
 
 impl StoreModelBytes {
@@ -1354,10 +1371,25 @@ impl registry::ModelBytes for StoreModelBytes {
     fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, registry::LoadFailure> {
         blobs::read_blob(&self.dir, blob).map_err(|err| match err {
             blobs::BlobError::Fault(blobs::BlobFault::Missing) => registry::LoadFailure::Missing,
-            blobs::BlobError::Fault(fault) => registry::LoadFailure::Damaged(format!(
-                "its blob is damaged ({})",
-                fault.name()
-            )),
+            blobs::BlobError::Fault(fault) => {
+                registry::LoadFailure::Damaged(format!("its blob is damaged ({})", fault.name()))
+            }
+            blobs::BlobError::Unsupported => registry::LoadFailure::Unsupported(
+                "its blob uses a hash algorithm this version does not know".to_string(),
+            ),
+            blobs::BlobError::DoesNotFit(err) => registry::LoadFailure::does_not_fit(err),
+            blobs::BlobError::Io(err) => {
+                registry::LoadFailure::Damaged(format!("its blob cannot be read: {err}"))
+            }
+        })
+    }
+
+    fn check(&self, blob: &BlobRef) -> Result<(), registry::LoadFailure> {
+        blobs::check_blob(&self.dir, blob, false).map_err(|err| match err {
+            blobs::BlobError::Fault(blobs::BlobFault::Missing) => registry::LoadFailure::Missing,
+            blobs::BlobError::Fault(fault) => {
+                registry::LoadFailure::Damaged(format!("its blob is damaged ({})", fault.name()))
+            }
             blobs::BlobError::Unsupported => registry::LoadFailure::Unsupported(
                 "its blob uses a hash algorithm this version does not know".to_string(),
             ),
@@ -1416,7 +1448,10 @@ pub(crate) struct ModelsAtOpen {
     /// cannot run, or of a newer family).
     pub(crate) read_only: Option<String>,
     /// The journal records to write once the store's journal exists.
-    pub(crate) events: Vec<(&'static crate::graph::system_journal::catalogue::EventKind, Event)>,
+    pub(crate) events: Vec<(
+        &'static crate::graph::system_journal::catalogue::EventKind,
+        Event,
+    )>,
 }
 
 impl ModelsAtOpen {
@@ -1530,7 +1565,9 @@ pub(crate) fn check_at_open(
                 let Some(model) = model else {
                     return Err(refuse(&registry::NeededFailure {
                         identity: base.to_string(),
-                        repo: parse_identity(base).and_then(|p| p.repo).map(str::to_string),
+                        repo: parse_identity(base)
+                            .and_then(|p| p.repo)
+                            .map(str::to_string),
                         places: places.clone(),
                         failure: registry::LoadFailure::Missing,
                         needed: 0,
@@ -1551,10 +1588,13 @@ pub(crate) fn check_at_open(
                         blobs::BlobError::Fault(blobs::BlobFault::Missing) => {
                             registry::LoadFailure::Missing
                         }
-                        blobs::BlobError::Fault(fault) => registry::LoadFailure::Damaged(
-                            format!("its blob is damaged ({})", fault.name()),
-                        ),
-                        blobs::BlobError::DoesNotFit(err) => registry::LoadFailure::does_not_fit(err),
+                        blobs::BlobError::Fault(fault) => registry::LoadFailure::Damaged(format!(
+                            "its blob is damaged ({})",
+                            fault.name()
+                        )),
+                        blobs::BlobError::DoesNotFit(err) => {
+                            registry::LoadFailure::does_not_fit(err)
+                        }
                         blobs::BlobError::Unsupported => registry::LoadFailure::Unsupported(
                             "its blob uses a hash algorithm this version does not know".into(),
                         ),

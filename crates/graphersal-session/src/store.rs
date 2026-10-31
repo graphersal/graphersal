@@ -19,8 +19,8 @@ use std::sync::Arc;
 use graphersal::changes::{ChangeSet, CommitHook, HookError, HookRefusal, Mutation};
 use graphersal::persist::{
     BackupMarker, BackupMode, CompactionAdvice, DamageReport, ForkReport, FoundDamage, MemDir,
-    ModelCopy, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir, StoreInfo,
-    ModelInfo, StoreOptions,
+    ModelCopy, ModelInfo, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir,
+    StoreInfo, StoreOptions,
 };
 use serde_json::{Value, json};
 
@@ -1620,7 +1620,8 @@ mod tests {
     fn packed_with_a_model() -> (Vec<u8>, graphersal::persist::ModelInfo) {
         use graphersal::persist::{ImportModelOptions, ModelRole, ModelSource, NewModel, Store};
         use std::io::Cursor;
-        let header = r#"{"embeddings": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}"#;
+        let header =
+            r#"{"embeddings": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}"#;
         let mut weights = (header.len() as u64).to_le_bytes().to_vec();
         weights.extend_from_slice(header.as_bytes());
         weights.extend_from_slice(&[0u8; 16]);
@@ -1639,7 +1640,11 @@ mod tests {
                             ModelRole::Tokenizer,
                             Cursor::new(vec![1; 50]),
                         )
-                        .with_file("model.safetensors", ModelRole::Weights, Cursor::new(weights))
+                        .with_file(
+                            "model.safetensors",
+                            ModelRole::Weights,
+                            Cursor::new(weights),
+                        )
                         .with_file("README.md", ModelRole::Card, Cursor::new(vec![b'x'; 4000]))
                         .with_repo("acme/tiny")
                         .with_license("mit"),

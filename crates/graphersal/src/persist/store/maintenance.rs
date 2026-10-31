@@ -752,9 +752,9 @@ fn verify_models(dir: &DirPath, report: &mut VerifyReport) {
                 .collect()
         }
         Err(err) => {
-            report
-                .notes
-                .push(format!("the models of the latest state cannot be read: {err}"));
+            report.notes.push(format!(
+                "the models of the latest state cannot be read: {err}"
+            ));
             Vec::new()
         }
     };
@@ -795,7 +795,9 @@ fn check_model_blob(
         if let Some(file) = manifest.files.iter().find(|f| f.name == name)
             && crate::persist::model_tar::sha256_hex(data) != file.sha256
         {
-            return Err(format!("holds the file {name} with another SHA-256 than listed"));
+            return Err(format!(
+                "holds the file {name} with another SHA-256 than listed"
+            ));
         }
     }
     Ok(())

@@ -311,7 +311,13 @@ fn checksum(block: &[u8; BLOCK]) -> u64 {
     block
         .iter()
         .enumerate()
-        .map(|(i, b)| if (148..156).contains(&i) { 32 } else { *b as u64 })
+        .map(|(i, b)| {
+            if (148..156).contains(&i) {
+                32
+            } else {
+                *b as u64
+            }
+        })
         .sum()
 }
 
@@ -434,7 +440,9 @@ impl Read for TarStream {
             }
             if let Some(data) = &mut self.data {
                 if data.remaining > 0 {
-                    let want = buf.len().min(usize::try_from(data.remaining).unwrap_or(usize::MAX));
+                    let want = buf
+                        .len()
+                        .min(usize::try_from(data.remaining).unwrap_or(usize::MAX));
                     let n = data.reader.read(&mut buf[..want])?;
                     if n == 0 {
                         return Err(io::Error::new(
@@ -761,17 +769,29 @@ mod tests {
             (MODEL_MANIFEST, b'0', &manifest),
         ]);
         // The tar sorted wrongly: the manifest before the config would be unsorted.
-        assert!(read_tar(&ok).is_err(), "a manifest that lists another order");
+        assert!(
+            read_tar(&ok).is_err(),
+            "a manifest that lists another order"
+        );
         let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("duplicate", raw_tar(&[("a.txt", b'0', b"1"), ("a.txt", b'0', b"2")])),
-            ("unsorted", raw_tar(&[("b.txt", b'0', b"1"), ("a.txt", b'0', b"2")])),
+            (
+                "duplicate",
+                raw_tar(&[("a.txt", b'0', b"1"), ("a.txt", b'0', b"2")]),
+            ),
+            (
+                "unsorted",
+                raw_tar(&[("b.txt", b'0', b"1"), ("a.txt", b'0', b"2")]),
+            ),
             ("link", raw_tar(&[("a.txt", b'2', b"")])),
             ("directory", raw_tar(&[("a", b'5', b"")])),
             ("pax", raw_tar(&[("a.txt", b'x', b"")])),
             ("long name", raw_tar(&[(&"a".repeat(41), b'0', b"1")])),
             ("path", raw_tar(&[("a/b", b'0', b"1")])),
             ("no manifest", raw_tar(&[("a.txt", b'0', b"1")])),
-            ("no end", raw_tar(&[("a.txt", b'0', b"1")])[..BLOCK * 2].to_vec()),
+            (
+                "no end",
+                raw_tar(&[("a.txt", b'0', b"1")])[..BLOCK * 2].to_vec(),
+            ),
             ("junk after the end", {
                 let mut t = raw_tar(&[("a.txt", b'0', b"1")]);
                 t.push(1);
@@ -783,8 +803,10 @@ mod tests {
         }
         // 65 files besides the manifest.
         let names: Vec<String> = (0..65).map(|i| format!("f{i:03}")).collect();
-        let entries: Vec<(&str, u8, &[u8])> =
-            names.iter().map(|n| (n.as_str(), b'0', &b"x"[..])).collect();
+        let entries: Vec<(&str, u8, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b'0', &b"x"[..]))
+            .collect();
         let err = read_tar(&raw_tar(&entries)).unwrap_err();
         assert!(err.contains("more than"), "{err}");
         // A size beyond the archive.
