@@ -208,3 +208,99 @@ fn a_hostile_packed_blob_is_refused() {
     let _ = b;
     let _: &dyn StoreDir = &target;
 }
+
+/// A blob of a newer version's hash algorithm (format spec 3 tag 21, 4.6): never read nor
+/// hashed by this version, but carried BY NAME (`blobs/algo-<n>/<2 hex>/<hash>`) by every copy,
+/// checked by length and CRC-32C.
+#[test]
+fn every_copy_path_carries_a_blob_of_an_unknown_algorithm_by_name() {
+    use graphersal::blob::BlobHashAlgo;
+    let (dir, store) = new_store();
+    let content = b"bytes named by a newer hash algorithm".to_vec();
+    let foreign = BlobRef::new(
+        BlobHashAlgo::Unknown(7),
+        &[0xc4, 0x01, 0x02, 0x03, 0x04, 0x05],
+        content.len() as u64,
+        crate::store_tests::crc32c(&content),
+    )
+    .unwrap();
+    let name = format!("blobs/{}", foreign.relative_path());
+    assert_eq!(name, "blobs/algo-7/c4/c40102030405");
+    dir.create_dir_all("blobs/algo-7/c4").unwrap();
+    dir.write_atomic(&name, &content).unwrap();
+    let known = write(&store, b"a known one").blob().clone();
+    define(&store, "m", &[&foreign, &known]);
+    store.checkpoint(None).unwrap();
+    // Never read: unsupported, not damage; verify checks its length and CRC-32C.
+    assert!(store.read_blob(&foreign).is_err());
+    let report = store.verify().unwrap();
+    assert!(report.is_ok(), "{:?}", report.problems);
+    assert_eq!(report.blobs_checked, 2);
+
+    let carries = |copy: &MemDir, what: &str| {
+        assert_eq!(
+            copy.read(&name, u64::MAX)
+                .unwrap_or_else(|err| panic!("{what}: {err}")),
+            content,
+            "{what}"
+        );
+        assert!(blob_files(copy).contains(&name_of(&known)), "{what}");
+    };
+
+    let fork = MemDir::new();
+    let report = store.fork(RecoveryTarget::Latest, &fork).unwrap();
+    assert!(report.blobs_not_carried.is_empty(), "{report:?}");
+    carries(&fork, "fork");
+
+    let backup = MemDir::new();
+    let report = store.backup(&backup).unwrap();
+    assert!(report.blobs_not_carried.is_empty(), "{report:?}");
+    carries(&backup, "backup");
+    assert!(
+        Store::open_backup(&backup, StoreOptions::new())
+            .unwrap()
+            .verify()
+            .unwrap()
+            .is_ok()
+    );
+
+    #[cfg(feature = "persist-zip")]
+    {
+        let mut zip = std::io::Cursor::new(Vec::new());
+        let report = store.backup_zip(&mut zip).unwrap();
+        assert!(report.blobs.contains(&name), "{report:?}");
+        let unpacked = MemDir::new();
+        Store::restore_zip(zip.into_inner().as_slice(), &unpacked).unwrap();
+        carries(&unpacked, "zip");
+    }
+
+    let mut packed = Vec::new();
+    store.export_packed(None, &mut packed).unwrap();
+    let from_packed = MemDir::new();
+    Store::create_from_packed(&from_packed, packed.as_slice(), StoreOptions::new())
+        .unwrap()
+        .close()
+        .unwrap();
+    carries(&from_packed, "gsnap");
+
+    touch(&store, "after");
+    let latest = store.graph().read().last_commit_seq();
+    store
+        .rollback_to(RecoveryTarget::CommitSeq(latest - 1), RollbackMode::Move)
+        .unwrap();
+    let entry = store.attic_list().unwrap()[0].id.clone();
+    let attic_fork = MemDir::new();
+    let report = store.attic_fork(&entry, &attic_fork).unwrap();
+    assert!(report.blobs_not_carried.is_empty(), "{report:?}");
+    carries(&attic_fork, "attic fork");
+    store.close().unwrap();
+
+    let repaired = MemDir::new();
+    let report = Store::repair_dir(&dir, &repaired).unwrap();
+    assert!(report.blobs_not_carried.is_empty(), "{report:?}");
+    carries(&repaired, "repair");
+
+    let converted = MemDir::new();
+    Store::convert(&dir, &converted).unwrap();
+    carries(&converted, "convert");
+}

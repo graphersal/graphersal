@@ -683,10 +683,10 @@ fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport)
         let name = blobs::blob_name(blob);
         if blob.hash_algo() != crate::value::blob::BlobHashAlgo::Sha256 {
             report.notes.push(format!(
-                "{name}: named by the hash algorithm {} of a newer version: not checked",
+                "{name}: named by the hash algorithm {} of a newer version: its hash is not \
+                 checked (its length and CRC-32C are)",
                 blob.hash_algo().code()
             ));
-            continue;
         }
         report.blobs_checked += 1;
         let result = if present.contains(key) {

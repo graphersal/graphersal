@@ -180,7 +180,11 @@ pub(crate) fn check_stream(blob: &BlobRef, data: &mut dyn Read) -> Vec<String> {
             vec![format!("{len} bytes, the blob has {}", blob.length())]
         }
         Ok((_, check, _)) if check != blob.crc32c() => vec!["CRC-32C mismatch".into()],
-        Ok((_, _, sha)) if sha.as_slice() != blob.hash() => vec!["hash mismatch".into()],
+        Ok((_, _, sha))
+            if blob.hash_algo() == BlobHashAlgo::Sha256 && sha.as_slice() != blob.hash() =>
+        {
+            vec!["hash mismatch".into()]
+        }
         Ok(_) => Vec::new(),
         Err(err) => vec![err.to_string()],
     }
@@ -333,11 +337,10 @@ pub(crate) fn read_blob(root: &DirPath, blob: &BlobRef) -> Result<Vec<u8>, BlobE
 }
 
 /// Checks `blob` in the store at `root` by streaming it: length and CRC-32C, plus the SHA-256
-/// when `hash` (verify, foreign input). An unknown algorithm is not checked (`Unsupported`).
+/// when `hash` (verify, foreign input). A blob of a newer version's algorithm is checked by
+/// length and CRC-32C only (its hash is never computed).
 pub(crate) fn check_blob(root: &DirPath, blob: &BlobRef, hash: bool) -> Result<(), BlobError> {
-    if blob.hash_algo() != BlobHashAlgo::Sha256 {
-        return Err(BlobError::Unsupported);
-    }
+    let hash = hash && blob.hash_algo() == BlobHashAlgo::Sha256;
     let path = blob_path(root, blob);
     let (len, check, sha) = measure(&path, hash)?;
     if len != blob.length() {
@@ -367,7 +370,34 @@ pub(crate) fn copy_blob(
         return Ok(false);
     }
     if blob.hash_algo() != BlobHashAlgo::Sha256 {
-        return Err(BlobError::Unsupported);
+        // A newer version's algorithm: copied BY NAME (format spec 4.6), checked by length and
+        // CRC-32C on both sides, never hashed.
+        check_blob(from, blob, false)?;
+        let staged =
+            stage(to).map_err(|err| BlobError::Io(std::io::Error::other(err.to_string())))?;
+        let mut tmp = TmpBlob {
+            path: staged,
+            done: false,
+        };
+        let mut reader = blob_path(from, blob).open_read()?;
+        let mut out = tmp.path.create(true)?;
+        copy_measured(&mut reader, &mut out)?;
+        out.sync()?;
+        drop(out);
+        let target = blob_path(to, blob);
+        let parent = target.parent().unwrap_or_else(|| to.join(BLOBS_DIR));
+        parent.create_dir_all()?;
+        let _ = target.remove_file();
+        tmp.path.rename_to(&target)?;
+        tmp.done = true;
+        let sync = |dir: &DirPath| {
+            files::sync_dir(dir)
+                .map_err(|err| BlobError::Io(std::io::Error::other(err.to_string())))
+        };
+        sync(&parent)?;
+        sync(&to.join(BLOBS_DIR))?;
+        check_blob(to, blob, false)?;
+        return Ok(true);
     }
     let mut reader = blob_path(from, blob).open_read()?;
     let written = write_blob(to, &mut reader, &mut |_| {}).map_err(|err| match err {
@@ -1128,10 +1158,7 @@ pub(crate) fn packed_files(
     let (_, manifest) = super::snapshot_dir::read_manifest(snapshot)?;
     let mut out = Vec::new();
     for (blob, _) in &manifest.blobs {
-        if blob.hash_algo() != BlobHashAlgo::Sha256 {
-            // A newer version's algorithm: not carried (never read).
-            continue;
-        }
+        // A newer version's algorithm is carried by name too (checked by length and CRC-32C).
         check_blob(root, blob, false)
             .map_err(|err| err.into_persist("export the snapshot", blob))?;
         out.push(super::models::PackedModelFile {
@@ -1160,14 +1187,14 @@ pub(crate) fn packed_blob_ref(
             format!("blob row {:?}: {reason}", entry.path),
         )
     };
-    if entry.first_id != "sha256" || !entry.last_id.is_empty() || entry.count != 0 {
-        return Err(bad("not a SHA-256 blob row"));
+    if !entry.last_id.is_empty() || entry.count != 0 {
+        return Err(bad("not a blob row"));
     }
     let hash = BlobRef::parse_hex(&entry.path).map_err(|_| bad("its name is not a hash"))?;
     let blob = table
         .iter()
         .map(|(blob, _)| blob)
-        .find(|blob| blob.hash_algo() == BlobHashAlgo::Sha256 && blob.hash() == hash.as_slice())
+        .find(|blob| blob.hash_algo().name() == entry.first_id && blob.hash() == hash.as_slice())
         .ok_or_else(|| bad("the snapshot's blob table does not name it"))?;
     if blob.length() != entry.byte_len || blob.crc32c() != entry.crc {
         return Err(bad("its length or CRC-32C is not the blob table's"));
@@ -1196,11 +1223,13 @@ pub(crate) fn install_staged(
         path: staged.clone(),
         done: false,
     };
+    let known = blob.hash_algo() == BlobHashAlgo::Sha256;
     let (len, check, sha) =
-        measure(staged, true).map_err(|err| err.into_persist("import a blob", blob))?;
+        measure(staged, known).map_err(|err| err.into_persist("import a blob", blob))?;
+    // A newer version's algorithm is checked by length and CRC-32C only.
     if len != blob.length()
         || check != blob.crc32c()
-        || sha.as_ref().map(|s| s.as_slice()) != Some(blob.hash())
+        || (known && sha.as_ref().map(|s| s.as_slice()) != Some(blob.hash()))
     {
         return Err(PersistError::corrupt(
             "packed snapshot",

@@ -173,8 +173,9 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   before it allocates.
 - **Blob references** (tag 21): a `hash_algo` of 0, a `hash_len` outside 1..=64 and a SHA-256
   hash that is not 32 bytes are invalid (damage). An algorithm 2..255 is a newer writer's: the
-  value is decoded and kept, its blob is copied by name (4.6) and never verified nor read
-  (unsupported content, 16 rule 9). In this version a `blobref` appears only in catalog
+  value is decoded and kept, and its blob is carried BY NAME (4.6) by every copy (backups,
+  ZIP archives, forks, repairs, packed snapshots), checked by its length and CRC-32C; it is
+  never read and its hash never computed (unsupported content, 16 rule 9). In this version a `blobref` appears only in catalog
   definition payloads (6.3); a writer MUST NOT store one as an element property value.
 - Tags 9 to 14 are **invalid in a file of format version 1**, tags 15 to 20 **in a file of
   format version 1 or 2**, tag 21 **in a file of a format version before 4** (15): a reader MUST report such a value as damage, never decode it. A reader takes the version from the header of the file the
@@ -1491,8 +1492,8 @@ every segment of the system journal (4.7): a damaged record or segment is a note
 problem. It reads every blob of the referenced set (12.4) whole: SHA-256, CRC-32C and length; a
 missing or damaged blob, and an entry under `blobs/` that is not a blob's name or `tmp-*`, is a
 problem with its path under `blobs/` (never damage of the store, 13); a blob file outside the
-referenced set is a note (an orphan the next prune removes); a blob of an unknown algorithm is a
-note, never verified.
+referenced set is a note (an orphan the next prune removes); a blob of an unknown algorithm is
+checked by length and CRC-32C only, with a note that its hash was not checked.
 
 ### 12.10 Locks and pins
 
