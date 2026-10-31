@@ -49,6 +49,18 @@ pub(crate) const UNSUPPORTED_OPERATION: &str = "vector rules";
 /// the estimate of a fill's time.
 const HASH_NGRAM_TEXTS_PER_SECOND: f64 = 200_000.0;
 
+/// The factor on the embedding time computed from a model's speed (user decision for 0.5.0):
+/// the speed is measured on short sentences (the load calibration of a catalog model, the
+/// built-in's constant), real fills embed longer texts and ran about 3x slower than the plain
+/// estimate (42,777 symbol texts: estimated 2 s, took 6.3-6.8 s).
+pub(crate) const FILL_ESTIMATE_FACTOR: f64 = 3.0;
+
+/// The estimated milliseconds of embedding `texts` texts at `texts_per_second`, with
+/// [`FILL_ESTIMATE_FACTOR`] applied: the one formula of the preview and the journal record.
+pub(crate) fn embedding_estimate_ms(texts: u64, texts_per_second: f64) -> u64 {
+    ((texts as f64) / texts_per_second * 1000.0 * FILL_ESTIMATE_FACTOR).ceil() as u64
+}
+
 /// The estimate from which a fill asks for a confirmation (MCP `confirm_lock`, the playground
 /// dialog).
 const CONFIRM_ESTIMATE_MS: u64 = 1_000;
@@ -201,7 +213,7 @@ impl VectorRules {
             if let Some(positions) = map.get(label) {
                 for &position in positions {
                     let to = &self.rules[position].to;
-                    if !out.iter().any(|&p| &self.rules[p].to == to) {
+                    if !out.iter().any(|&p| self.rules[p].to == to) {
                         out.push(position);
                     }
                 }
@@ -839,7 +851,7 @@ fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -931,7 +943,7 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
         };
         let estimate_ms = texts_per_second(&rule.model)
             .filter(|tps| *tps > 0.0)
-            .map(|tps| ((elements as f64) / tps * 1000.0).ceil() as u64);
+            .map(|tps| embedding_estimate_ms(elements, tps));
         // The label's elements the schema check reads (its declaration changed with the rule).
         let label_elements = match storage.statistics()? {
             Some(s) => match rule.kind {
@@ -1307,6 +1319,8 @@ impl TraversalGraph {
     /// The rule pass of the outermost unit (module docs). `journal`: a commit (a dry run
     /// journals nothing). Returns the open fill whose end record the commit writes, if the unit
     /// ran a first fill or a model replacement.
+    // The failure carries the open fill to end it: a cold path (the unit rolls back).
+    #[allow(clippy::result_large_err)]
     pub(crate) fn run_vector_rules(
         &mut self,
         journal: bool,
@@ -1515,13 +1529,15 @@ impl TraversalGraph {
                     .iter()
                     .map(|(index, _)| {
                         let rule = &rules.all()[*index];
-                        texts_per_second(&rule.model).map(|tps| {
-                            let n = items[..full_count]
-                                .iter()
-                                .filter(|i| i.rule == *index && i.text.is_some())
-                                .count();
-                            ((n as f64) / tps * 1000.0).ceil() as u64
-                        })
+                        texts_per_second(&rule.model)
+                            .filter(|tps| *tps > 0.0)
+                            .map(|tps| {
+                                let n = items[..full_count]
+                                    .iter()
+                                    .filter(|i| i.rule == *index && i.text.is_some())
+                                    .count();
+                                embedding_estimate_ms(n as u64, tps)
+                            })
                     })
                     .try_fold(0u64, |sum, ms| ms.map(|ms| sum + ms));
                 let mut event = Event::new(format!(
@@ -1890,6 +1906,17 @@ mod tests {
             approximate: false,
             direct_writes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_embedding_estimate_is_three_times_the_model_speed() {
+        // 2,000 texts at 1,000 texts/s embed in 2 s by the speed alone; the estimate says 6 s.
+        assert_eq!(FILL_ESTIMATE_FACTOR, 3.0);
+        assert_eq!(embedding_estimate_ms(2_000, 1_000.0), 6_000);
+        assert_eq!(embedding_estimate_ms(0, 1_000.0), 0);
+        // The built-in's constant gets the same factor: 200,000 texts -> 3 s, not 1 s.
+        let tps = texts_per_second(HashNgram::NAME).unwrap();
+        assert_eq!(embedding_estimate_ms(200_000, tps), 3_000);
     }
 
     #[test]

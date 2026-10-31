@@ -836,11 +836,11 @@ mod tests {
     fn every_header_field_is_fixed() {
         let block = header("config.json", 5);
         assert_eq!(&block[100..108], b"0000644\0");
-        assert_eq!(&block[108..124], b"0000000\00000000\0");
+        assert_eq!(&block[108..124], b"0000000\x000000000\0");
         assert_eq!(&block[124..136], b"00000000005\0");
         assert_eq!(&block[136..148], b"00000000000\0");
         assert_eq!(block[156], b'0');
-        assert_eq!(&block[257..265], b"ustar\000");
+        assert_eq!(&block[257..265], b"ustar\x0000");
         assert!(block[265..329].iter().all(|b| *b == 0), "uname/gname empty");
         assert!(block[345..].iter().all(|b| *b == 0), "prefix empty");
         assert_eq!(octal(&block[148..156]), Some(checksum(&block)));

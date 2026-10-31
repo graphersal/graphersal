@@ -263,11 +263,10 @@ fn the_view_matches_recovery() {
                 assert_eq!(seq, expected_seq, "step {step}");
             }
             Ok(None) => {}
-            Err(PersistError::Store { cause, .. })
-                if matches!(
-                    cause,
-                    StoreFailure::UnknownModel | StoreFailure::ModelRevisionExists
-                ) => {}
+            Err(PersistError::Store {
+                cause: StoreFailure::UnknownModel | StoreFailure::ModelRevisionExists,
+                ..
+            }) => {}
             Err(err) => panic!("step {step}: {err}"),
         }
         // The closed view (models_dir reads the same files) equals the recovered catalog.
@@ -551,8 +550,11 @@ struct Crashing {
     budget: Arc<AtomicI64>,
     /// Runs once at the first write into a WAL segment, after half of that write's bytes are
     /// in the file (a reader then sees an unfinished last record).
-    spy: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>>,
+    spy: Option<Spy>,
 }
+
+/// The action a [`Crashing`]-style directory runs once, at its first WAL write.
+type Spy = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
 impl std::fmt::Debug for Crashing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -950,6 +952,7 @@ fn an_older_version_segment_gets_a_new_segment() {
 // ---------------------------------------------------------------------------------------------
 
 /// A schema whose `doc.emb` vectors are made by `model` from `doc.text` (a vector rule).
+#[cfg(feature = "model2vec")]
 fn rule_naming(model: &str) -> GraphSchema {
     GraphSchema::from_json(&format!(
         r#"{{"vertices": {{"doc": {{"schema": {{"type": "object", "properties": {{

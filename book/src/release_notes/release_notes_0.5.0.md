@@ -98,8 +98,11 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   source, in the same unit; adding a rule (or replacing its model) fills every element of the
   label while the database is locked. Previews (`validate_schema`, `validate_schema_patch`,
   `diff_schema`) report the planned fill and one warning text; MCP `set_schema`/`patch_schema`
-  take `confirm_lock` above the threshold; the playground asks "Apply and lock"; Python issues
-  `graphersal.VectorFillWarning`. The estimate of the locked time includes the schema check
+  take `confirm_lock` above the threshold (refused without it as a tool error, `isError: true`,
+  nothing applied); the playground asks "Apply and lock"; Python issues
+  `graphersal.VectorFillWarning`. The embedding part of the estimate is three times what the
+  model's measured speed gives (that speed is measured on short sentences). The estimate of the
+  locked time includes the schema check
   (`PlannedFill::scan_elements`/`scan_ms`; `validate_schema` measures it), and the preview names
   the saved queries writing the filled property directly (`PlannedFill::direct_writes`, a line
   of the warning). A direct write of a rule's vector is refused
@@ -128,7 +131,12 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   a click opens the journal at the record; the level is a setting, default notice); a newest-first page
   (`JournalQuery::newest_first`/`before`, `newest_first=true&before=N`, `--last N`) reads a
   stored journal from its end; reading needs `Read` on the new
-  `Resource::Journal` (`AccessPolicy::read_only()` allows it; Python `policy=`).
+  `Resource::Journal` (`AccessPolicy::read_only()` allows it; Python `policy=`). A record is
+  read at once in the process; a store on a file system writes it to disk within about a second
+  (a thread of its own, never in the middle of another store operation), other hosts call
+  `Store::flush_journal` (the playground every second). A record names who caused it
+  (`principal`: the channel, e.g. `playground`, `mcp`, `cli`, `python`) and its instance by the
+  host name (the OS host name when no `HOSTNAME` is exported).
 - **One clock per instance** (format spec 18): commit, mark and checkpoint times and journal
   times never go backwards, also when the system clock steps back; the floor is restored from
   the files at open (`storage::CommitClock`, `GraphStorage::commit_clock`).
@@ -175,7 +183,14 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   directory of that name.
 - **`--license`** of `embed-model import` now applies only when the model's manifest states no
   licence (the library's rule); before, it overrode the manifest.
-- A ceiling `help()` no longer names a Rust crate path to a script user.
+- A ceiling `help()` no longer names a Rust crate path to a script user; nor do the helps of
+  the script limits (`script.max_*`): they name the command line flag and the Python call,
+  and the `ScriptLimits` builder as the Rust host's.
+- **A store opened read-only** (a model this build cannot load, newer critical content) or in
+  maintenance mode listed no commit in `changes_since` and backed up no WAL commit: it used a
+  durable end no journal had set. It now reads the WAL to its last complete record.
+- **Backups of a closed store** (`Store::backup_dir`, `Store::backup_zip_dir`) fill
+  `BackupReport::models` like the open store's backups.
 - **A closure using `g` inside a chain on `g`** (`g.queries().map(|q| g.get_query(q.name))`)
   failed with Rhai's bare "Data race detected": the error now explains it and its help names the
   forms that work (`let qs = g.queries(); qs.map(..)`, or a `for` loop).

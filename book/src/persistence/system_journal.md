@@ -66,11 +66,10 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   is skipped by resyncing on the next frame). A new segment starts past 4 MiB
   (`StoreOptions::with_journal_segment_bytes`), at an open by another instance, and after a
   failed write. There is no retention limit.
-- `error` records are written and synced at once. The others are kept in memory and written in
-  batches: before every checkpoint, by the system job `stats_flush` (every minute, when the
-  host runs the [scheduled jobs](scheduled_jobs.md)), by `SystemJournal::flush`, and at close.
-  So the journal never writes in the middle of another operation of the store; a crash loses
-  at most the records since the last batch.
+- `error` records are written and synced at once. The others are batched in memory and
+  written as described in [When records appear](#when-records-appear), so the journal never
+  writes in the middle of another operation of the store; a crash loses at most about the last
+  second of records.
 - A store opened read-only (a backup, maintenance mode, a store holding something critical of
   a newer version) reads its stored journal; its new records stay in memory. Once damage is
   found while a store is open (either damage policy), its journal writes nothing more to the
@@ -81,6 +80,26 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   a new segment.
 - The journal is never store damage: `verify` lists its problems as notes
   (`VerifyReport::journal_notes`), and its files are left out of the damage found while open.
+
+## When records appear
+
+- **In the process that holds the graph or the store** a record is visible at once: every read
+  (`Graph::system_journal()`, `Store::journal()`, the session, `GET /api/journal`, the MCP
+  tool `journal`, the playground, Python's `graph.journal`/`store.journal`, the REPL) answers
+  from the records in memory, written or not, and reads only older records from the segments,
+  so a page never has a gap or a duplicate, before or after the batch is written.
+- **On disk, and so for another process** (`graphersal store journal` or
+  `Store::journal_dir` on a store a server holds open), a record appears within about a second:
+  a store on a file system writes the batch half a second after its first record, from a
+  thread of its own, independent of the statistics job `stats_flush`. The thread writes only
+  while no other operation of the store runs (a checkpoint, prune, compaction, rollback,
+  attic change, verify, backup, fork, export or close; commits are not waited for, they write
+  other files); during a long checkpoint the batch waits for its end.
+- Without threads (wasm32), and for a store in memory or in a host's own `StoreDir`, the host
+  calls `Store::flush_journal()`: the playground does on its every-second tick
+  (`Session::tick_jobs`). The system job `stats_flush`, `SystemJournal::flush` (which also
+  closes the groups of repeats), the close and the next `error` record write the batch too,
+  as does a batch of 1000 records or 1 MiB.
 
 ## Copies
 

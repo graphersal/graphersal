@@ -115,6 +115,73 @@ fn every_copy_path_carries_the_model_and_the_copy_opens_with_it() {
     }
 }
 
+/// A backup of a closed store (`Store::backup_dir`, its increment, `Store::backup_zip_dir`)
+/// reports the models it carries in `BackupReport::models`, as the open store's backups do.
+#[test]
+fn a_closed_store_backup_reports_its_models() {
+    let temp = Temp::new("closed-backup-models");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    add_person(&store, "ann");
+    let model = import(&store, 1, "acme/tiny").model;
+    set_schema(&store, &model.identity);
+    store.close().unwrap();
+
+    let full = Store::backup_dir(&path, temp.join("backup")).unwrap();
+    assert!(!full.incremental);
+    assert_eq!(full.models.len(), 1, "{:?}", full.models);
+    assert_eq!(full.models[0].repo, "acme/tiny");
+    let increment = Store::backup_dir(&path, temp.join("backup")).unwrap();
+    assert!(increment.incremental);
+    assert_eq!(increment.models.len(), 1, "{:?}", increment.models);
+    #[cfg(feature = "persist-zip")]
+    {
+        let mut archive = std::io::Cursor::new(Vec::new());
+        let zip = Store::backup_zip_dir(&path, &mut archive).unwrap();
+        assert_eq!(zip.models.len(), 1, "{:?}", zip.models);
+    }
+}
+
+/// A store opened read-only (here: a build without the Model2Vec loader opening a store whose
+/// schema needs a model; with the loader it opens writable and the same holds) lists every
+/// commit in `changes_since` and carries them into a backup. Found after the 0.4.0 upgrade:
+/// such an open never set the WAL's durable end, and its default hid every commit.
+#[test]
+fn a_read_only_open_lists_its_commits_and_backs_them_up() {
+    let temp = Temp::new("read-only-changes");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    add_person(&store, "ann");
+    let model = import(&store, 1, "acme/tiny").model;
+    set_schema(&store, &model.identity);
+    add_person(&store, "bob");
+    let last = store.graph().read().last_commit_seq();
+    store.close().unwrap();
+
+    let store = Store::open(&path, options()).unwrap();
+    #[cfg(not(feature = "model2vec"))]
+    assert!(store.read_only_reason().unwrap().is_some());
+    let seqs: Vec<u64> = store
+        .changes_since(0)
+        .unwrap()
+        .map(|changes| changes.unwrap().commit_seq())
+        .collect();
+    assert_eq!(seqs, (1..=last).collect::<Vec<_>>());
+    let after: Vec<u64> = store
+        .changes_since(last - 1)
+        .unwrap()
+        .map(|changes| changes.unwrap().commit_seq())
+        .collect();
+    assert_eq!(after, [last]);
+    let backup = store.backup(temp.join("backup")).unwrap();
+    assert_eq!(backup.commit_seq, last);
+    store.close().unwrap();
+    Store::restore_backup(temp.join("backup")).unwrap();
+    let restored = Store::open(temp.join("backup"), options()).unwrap();
+    assert_eq!(restored.graph().read().last_commit_seq(), last);
+    restored.close().unwrap();
+}
+
 /// Copies a directory tree.
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();

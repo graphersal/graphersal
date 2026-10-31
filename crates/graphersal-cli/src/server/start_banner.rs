@@ -82,6 +82,10 @@ fn heading(title: &str) -> String {
     format!("── {title} {}", "─".repeat(WIDTH.saturating_sub(used)))
 }
 
+/// The most words an item of a comma-separated list has (`Label 1,000`, `part 1.2 KiB`); a
+/// paragraph with a longer item is prose.
+const LIST_ITEM_WORDS: usize = 3;
+
 /// The size units [`wrap`] keeps on the line of their number (`1.2 KiB`).
 const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
@@ -94,7 +98,16 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     for paragraph in text.split('\n') {
         let mut pieces: Vec<String> = Vec::new();
         let items: Vec<&str> = paragraph.split(", ").collect();
-        for (i, item) in items.iter().enumerate() {
+        // A list (`person 4, software 2`: short items) keeps each item on one line; prose
+        // (a note with commas in its sentences) wraps word by word, so a line is never cut
+        // early at a comma.
+        let is_list = items
+            .iter()
+            .all(|item| item.split_whitespace().count() <= LIST_ITEM_WORDS);
+        if !is_list {
+            pieces.extend(words(paragraph));
+        }
+        for (i, item) in items.iter().enumerate().filter(|_| is_list) {
             let item = if i + 1 < items.len() {
                 format!("{item},")
             } else {
@@ -202,5 +215,36 @@ mod tests {
             .unwrap();
         assert_eq!(lines[memory], "  memory:   graph 1 KiB");
         assert_eq!(lines[memory + 1], "            process heap 2 MiB");
+    }
+
+    /// A note in sentences (the no-default-model note) fills its lines: a comma inside a
+    /// sentence never ends a line early.
+    #[test]
+    fn prose_wraps_word_by_word() {
+        let mut models = Section::new("Embedding models");
+        models.row(
+            "note",
+            "the store kb.gstore holds embedding models but none is the default: `embed` \
+             without a model name uses hash-ngram/1 (name the model, e.g. #{embedder: \
+             \"minishlab/potion-base-8M\"}, or make one the default: graphersal store models \
+             default kb.gstore <repo>)",
+        );
+        let text = render(&[models]);
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert!(lines.iter().all(|l| l.chars().count() <= WIDTH), "{text}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.trim_end().ends_with("(name the model,")),
+            "{text}"
+        );
+        // Every line but the last is filled: the next word would not have fit.
+        for pair in lines.windows(2) {
+            let next = pair[1].split_whitespace().next().unwrap();
+            assert!(
+                pair[0].chars().count() + 1 + next.chars().count() > WIDTH,
+                "{text}"
+            );
+        }
     }
 }

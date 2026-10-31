@@ -66,11 +66,10 @@ fn closed_change(dir: &MemDir, rng: &mut Rng) {
     };
     match result {
         Ok(()) => {}
-        Err(PersistError::Store { cause, .. })
-            if matches!(
-                cause,
-                StoreFailure::UnknownModel | StoreFailure::ModelRevisionExists
-            ) => {}
+        Err(PersistError::Store {
+            cause: StoreFailure::UnknownModel | StoreFailure::ModelRevisionExists,
+            ..
+        }) => {}
         Err(err) => panic!("closed change: {err}"),
     }
 }

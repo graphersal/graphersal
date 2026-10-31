@@ -108,9 +108,10 @@ impl SnapshotLoadReport {
         }
         // ONE note per model; its command runs in a store: a schema change of the loaded file
         // stays in memory.
-        notes.extend(upgrade::vector_notes(&self.vectors_without_rule, |patch| {
-            VectorWithoutRule::packed_command(file, patch)
-        }));
+        notes.extend(upgrade::vector_notes(
+            &self.vectors_without_rule,
+            |_, patch| VectorWithoutRule::packed_command(file, patch),
+        ));
         for removed in &self.saved_queries_using_removed {
             notes.push(removed.note_for_packed(file));
         }

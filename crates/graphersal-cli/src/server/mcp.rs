@@ -1729,7 +1729,7 @@ fn run_tool(
                     .map_err(http_failed)?
                     .map_err(|err| err.to_string())?;
                 match fill_gate(&validation, confirm_lock(args)) {
-                    FillGate::Refused(text) => return Ok(text),
+                    FillGate::Refused(text) => return Err(text),
                     FillGate::Note(note) => note,
                 }
             } else {
@@ -1749,7 +1749,7 @@ fn run_tool(
                     .map_err(http_failed)?
                     .map_err(|err| err.to_string())?;
                 match fill_gate(&validation, confirm_lock(args)) {
-                    FillGate::Refused(text) => return Ok(text),
+                    FillGate::Refused(text) => return Err(text),
                     FillGate::Note(note) => note,
                 }
             } else {

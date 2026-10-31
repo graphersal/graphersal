@@ -69,8 +69,9 @@ fn restore_from_every_source_kind() {
         store.close().unwrap();
         zip.into_inner()
     };
+    type Source<'a> = Box<dyn Fn() -> BlobSource + 'a>;
     #[allow(unused_mut)]
-    let mut sources: Vec<(&str, Box<dyn Fn() -> BlobSource>)> = vec![
+    let mut sources: Vec<(&str, Source<'_>)> = vec![
         ("backup", Box::new(|| BlobSource::store(backup.clone()))),
         ("other store", Box::new(|| BlobSource::store(other.clone()))),
         (

@@ -943,6 +943,8 @@ pub trait SessionStore: Send + Sync {
     fn last_auto_checkpoint_error(&self) -> Result<Option<Arc<PersistError>>, PersistError>;
     /// [`Store::run_due_checkpoint`].
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError>;
+    /// [`Store::flush_journal`].
+    fn flush_journal(&self) -> Result<bool, PersistError>;
     /// [`Store::system_jobs`].
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job>;
     /// [`Store::user_jobs`].
@@ -1066,6 +1068,9 @@ where
     }
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError> {
         Store::<S>::run_due_checkpoint(self)
+    }
+    fn flush_journal(&self) -> Result<bool, PersistError> {
+        Store::<S>::flush_journal(self)
     }
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job> {
         Store::<S>::system_jobs(self)
