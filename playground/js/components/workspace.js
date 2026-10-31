@@ -23,6 +23,7 @@ import { CatalogMenu, CatalogDialogs } from './catalog.js';
 import { OptimizePanel } from './optimize.js';
 import { ShareDialog } from './share-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
+import { JournalToasts } from './journal-toasts.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -67,7 +68,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner, JournalToasts },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -435,6 +436,7 @@ export const Workspace = {
       <button class="btn" @click="showAll">Show all panels</button>
     </div>
     <catalog-dialogs></catalog-dialogs>
+    <journal-toasts></journal-toasts>
     <optimize-panel></optimize-panel>
     <share-dialog ref="shareDialog"></share-dialog>
   </div>

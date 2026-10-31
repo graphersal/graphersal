@@ -123,7 +123,9 @@ API, with its replacement, is in "Breaking changes in detail" at the end of this
   `Graph::system_journal`, in Python with `graph.journal(...)`, `store.journal(...)` and
   `Store.journal_dir(path, ...)` (pages of dicts with the keys of `--json`), and in the
   playground under **Catalog ▸ System journal…** (newest first, level and source filters,
-  incremental refresh; WebAssembly and dev server); a newest-first page
+  incremental refresh; WebAssembly and dev server), where new records also pop up as
+  notifications in the top-right corner (coloured by level; warn and error stay until closed;
+  a click opens the journal at the record; the level is a setting, default notice); a newest-first page
   (`JournalQuery::newest_first`/`before`, `newest_first=true&before=N`, `--last N`) reads a
   stored journal from its end; reading needs `Read` on the new
   `Resource::Journal` (`AccessPolicy::read_only()` allows it; Python `policy=`).

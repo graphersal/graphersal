@@ -3,16 +3,23 @@
 // playground's graph or store in memory, the dev server's `GET /api/journal`). Filters by level
 // (that level and the more severe ones) and source (a prefix). Opening reads the NEWEST page
 // (`newest_first`: a long stored journal is read from its end); while open it reads new records
-// every 5 s from its cursor (`after`), never the whole journal again; "Show more" renders the
-// held records, then reads the next older page (`before`). At most a few hundred rows are
-// rendered. Model js/journal.js.
+// through the shared journal follower (js/journal-toasts.js, the poller the journal
+// notifications use too: 5 s on the dev server, 2 s in the WebAssembly playground) from its
+// cursor (`after`), never the whole journal again; "Show more" renders the held records, then
+// reads the next older page (`before`). At most a few hundred rows are rendered. `open(record)`
+// (a notification's click) opens at that record: it is scrolled into view and highlighted.
+// Model js/journal.js.
 
-import { ref, reactive, computed } from 'vue';
-import { journalPage } from '../store.js';
+import { ref, reactive, computed, nextTick } from 'vue';
+import { journalPage, journalFollower } from '../store.js';
+import { batchAsPage, matchesJournalFilters } from '../journal-toasts.js';
 import {
   emptyJournal, openJournal, readJournal, showMoreJournal, journalRows, journalFooter,
-  sourceChoices, JOURNAL_LEVELS, JOURNAL_PAGE_ROWS,
+  sourceChoices, addJournalPage, JOURNAL_LEVELS, JOURNAL_PAGE_ROWS,
 } from '../journal.js';
+
+/** "Show more" pages read at most to reach a record a notification opened. */
+const SEEK_PAGES = 10;
 
 const message = (err) => (err && err.message ? err.message : String(err));
 
@@ -22,12 +29,12 @@ export const JournalPanel = {
     const dlg = ref(null);
     const d = reactive({
       view: emptyJournal(), level: '', source: '', shown: JOURNAL_PAGE_ROWS,
-      loading: false, error: null, auto: true, epoch: 0, opened: false,
+      loading: false, error: null, auto: true, epoch: 0, opened: false, highlight: null,
     });
     const rows = computed(() => journalRows(d.view, d.shown));
     const footer = computed(() => journalFooter(d.view, d.shown));
     const sources = computed(() => sourceChoices(d.view));
-    let timer = null;
+    let unsubscribe = null;
 
     const filters = () => ({ level: d.level, source: d.source });
 
@@ -73,19 +80,49 @@ export const JournalPanel = {
       d.loading = false;
       await refresh();
     }
-    async function open() {
-      if (dlg.value && !dlg.value.open) dlg.value.showModal();
-      await restart();
-      if (!timer) {
-        timer = setInterval(async () => {
-          if (!dlg.value || !dlg.value.open) {
-            clearInterval(timer);
-            timer = null;
-            return;
-          }
-          if (d.auto) await refresh();
-        }, 5000);
+    /** A follower batch: applied in memory when it continues the view, else read by itself. */
+    function onBatch(batch) {
+      if (!dlg.value || !dlg.value.open) {
+        stopFollowing();
+        return;
       }
+      if (!d.auto || d.loading || !d.opened) return;
+      const page = batchAsPage(d.view, batch, filters());
+      if (page) d.view = addJournalPage(d.view, page);
+      else refresh();
+    }
+    function stopFollowing() {
+      if (unsubscribe) unsubscribe();
+      unsubscribe = null;
+    }
+    /** Shows more rows until the record `seq` is rendered (bounded), then scrolls to it. */
+    async function seek(seq) {
+      for (let i = 0; i < SEEK_PAGES; i++) {
+        const index = d.view.records.findIndex((r) => r.seq === seq);
+        if (index >= 0 && index < d.shown) break;
+        if (index < 0 && !(d.view.older && d.view.before != null && d.view.before > seq)) break;
+        await showMore();
+        if (d.error) break;
+      }
+      await nextTick();
+      const row = dlg.value && dlg.value.querySelector(`tr[data-seq="${seq}"]`);
+      if (row && row.scrollIntoView) {
+        const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        row.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
+      }
+    }
+    /** Opens the dialog; with `target` (`{seq, level, source}`) at that record. */
+    async function open(target) {
+      if (dlg.value && !dlg.value.open) dlg.value.showModal();
+      d.highlight = target && typeof target.seq === 'number' ? target.seq : null;
+      // A filter that would hide the record is cleared.
+      if (d.highlight != null && !matchesJournalFilters(target, filters())) {
+        d.level = '';
+        d.source = '';
+      }
+      await restart();
+      if (!unsubscribe) unsubscribe = journalFollower().subscribe(onBatch);
+      if (d.highlight != null) await seek(d.highlight);
     }
     function close() {
       if (dlg.value && dlg.value.open) dlg.value.close();
@@ -94,10 +131,12 @@ export const JournalPanel = {
       await run((view) => showMoreJournal(view, d.shown, filters(), journalPage));
     }
     expose({ open, close });
-    return { dlg, d, rows, footer, sources, levels: JOURNAL_LEVELS, refresh, restart, close, showMore };
+    return {
+      dlg, d, rows, footer, sources, levels: JOURNAL_LEVELS, refresh, restart, close, showMore, stopFollowing,
+    };
   },
   template: `
-  <dialog ref="dlg" class="catalog-dialog wide" aria-labelledby="jl-title">
+  <dialog ref="dlg" class="catalog-dialog wide" aria-labelledby="jl-title" @close="stopFollowing">
     <div class="dialog-head">
       <h2 id="jl-title">System journal</h2><span class="spacer"></span>
       <button type="button" class="icon-btn" @click="close" aria-label="Close">×</button>
@@ -114,7 +153,7 @@ export const JournalPanel = {
                autocomplete="off" spellcheck="false" @change="restart" @keydown.enter.prevent="restart">
         <datalist id="jl-sources"><option v-for="s in sources" :key="s" :value="s"></option></datalist>
         <span class="spacer"></span>
-        <label class="muted"><input type="checkbox" v-model="d.auto"> refresh every 5 s</label>
+        <label class="muted" title="Show new records as they are written"><input type="checkbox" v-model="d.auto"> follow new records</label>
         <button type="button" class="btn small" :disabled="d.loading" @click="refresh" title="Read the records written since the last read">{{ d.loading ? 'Reading…' : 'Refresh' }}</button>
       </div>
       <div v-if="d.error" class="field-error" role="alert">{{ d.error }}</div>
@@ -125,7 +164,7 @@ export const JournalPanel = {
             <th>Time</th><th>Level</th><th>Source</th><th>Kind</th><th>Message</th><th class="num">Seq</th>
           </tr></thead>
           <tbody>
-            <tr v-for="row in rows" :key="row.seq">
+            <tr v-for="row in rows" :key="row.seq" :data-seq="row.seq" :class="{ 'jl-highlight': row.seq === d.highlight }">
               <td class="jl-time" :title="row.iso + ' (UTC)'">{{ row.time }}</td>
               <td><span :class="row.levelClass">{{ row.level }}</span></td>
               <td class="code">{{ row.source }}</td>

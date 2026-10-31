@@ -19,6 +19,9 @@ import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
 import { taskStartText, taskEndText, snapshotFileName } from './store-model.js';
 import { VALUE_MAX_CHARS } from './value-view.js';
+import {
+  createJournalFollower, DEFAULT_TOAST_MIN_LEVEL, FOLLOW_INTERVAL_SERVER_MS, FOLLOW_INTERVAL_WASM_MS,
+} from './journal-toasts.js';
 import { MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
 import {
   GQL_TAB_TEMPLATE, gqlCallText, gqlErrorSpan, switchTabLanguage, withQueryParams, tabLanguage,
@@ -42,6 +45,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   graphResultMax: 50000, // the result subgraph: vertices + edges (subgraph_max_elements; at most 200 000)
   graphTier: 'auto', // the Graph panel's tier switch: 'auto' | 'detailed' | 'fast' (js/graph/tiers.js)
   valueMaxChars: VALUE_MAX_CHARS.default, // element views collapse longer values (js/value-view.js); 0 = off
+  // Journal notifications (js/journal-toasts.js): the least severe level that pops up:
+  // 'notice' | 'warn' | 'error' | 'off'.
+  journalToasts: DEFAULT_TOAST_MIN_LEVEL,
 });
 
 const media = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -131,6 +137,7 @@ export const state = reactive({
   optimizeN: 0, // bumped by every openOptimize: the Optimize panel opens
   catalogDialogN: 0, // bumped by every openCatalog, so opening the same manager again reopens it
   catalogDialogScript: null, // the tab text "Save as query…" hands to the saved-query editor
+  catalogDialogJournal: null, // {seq, level, source}: the record the System journal opens at (a toast's click)
   focusPanel: null, // {panel, tab, n}: a request to reveal a panel/tab
   graphRequest: null, // {source, ids, n}: a request to the Graph panel (showNeighbourhood)
   jumpTo: null, // {line, column, n}: a request to move the editor cursor
@@ -1467,6 +1474,35 @@ export async function journalPage(spec) {
     throw new Error('This engine has no system journal (an older build: reload the page).');
   }
   return state.engine.journal(spec);
+}
+
+let follower = null;
+
+/**
+ * The one follower of the served graph's system journal (js/journal-toasts.js), shared by the
+ * journal notifications and the open System journal panel: polls every 5 s on the dev server,
+ * every 2 s in the WebAssembly playground, only while the page is visible and something
+ * subscribes. Created on first use (the engine is known then).
+ */
+export function journalFollower() {
+  if (!follower) {
+    const doc = typeof document !== 'undefined' ? document : null;
+    follower = createJournalFollower({
+      fetchPage: journalPage,
+      intervalMs: isServerMode() ? FOLLOW_INTERVAL_SERVER_MS : FOLLOW_INTERVAL_WASM_MS,
+      isVisible: () => !doc || doc.visibilityState !== 'hidden',
+    });
+    if (doc) doc.addEventListener('visibilitychange', () => follower.poke());
+  }
+  return follower;
+}
+
+/** Opens the System journal panel at one record (a journal notification's click). */
+export function openJournalAt(record) {
+  state.catalogDialogJournal = record
+    ? { seq: record.seq, level: record.level || '', source: record.source || '' }
+    : null;
+  openCatalog('journal');
 }
 
 /** Reloads the scheduled jobs (`state.jobs`). */
