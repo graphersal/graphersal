@@ -274,6 +274,7 @@ export function createJournalFollower({
   const subscribers = new Set();
   let cursor = null; // null: take the journal's end first
   let rebaseSince = null; // µs: after a rebase, records from then on are still announced
+  let rebaseFrom = null; // the cursor before the rebase: records up to it were announced already
   let timer = null;
   let inFlight = false;
   let failures = 0;
@@ -300,11 +301,17 @@ export function createJournalFollower({
       const page = await fetchPage(since == null ? { newest_first: true, limit: 1 } : { newest_first: true, limit: 50 });
       if (my !== epoch) return;
       const end = cursorOf(page, 0);
+      const before = rebaseFrom;
       cursor = end;
       rebaseSince = null;
+      rebaseFrom = null;
       if (since != null) {
+        // The same journal (its end not below the old cursor): only records after the old
+        // cursor are new; another (shorter) journal: every recent record is.
+        const sameJournal = before != null && end >= before;
         const records = ((page && page.records) || [])
-          .filter((r) => seqOk(r) && typeof r.time === 'number' && r.time >= since)
+          .filter((r) => seqOk(r) && typeof r.time === 'number' && r.time >= since
+            && (!sameJournal || r.seq > before))
           .reverse();
         if (records.length) emit({ records, from: null, to: end });
       }
@@ -352,6 +359,7 @@ export function createJournalFollower({
         timer = null;
         cursor = null; // the next start takes the journal's end again
         rebaseSince = null;
+        rebaseFrom = null;
         epoch++;
       }
     };
@@ -364,6 +372,7 @@ export function createJournalFollower({
   function rebase() {
     if (!subscribers.size) return;
     epoch++;
+    if (cursor != null) rebaseFrom = cursor;
     cursor = null;
     rebaseSince = (nowMs() - rebaseWindowMs) * 1000;
     if (!inFlight) schedule(0);

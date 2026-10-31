@@ -401,3 +401,24 @@ test('a follower batch continues the panel view in memory, or asks for a read', 
   const overlap = batchAsPage(next, { records: [rec(6), rec(7), rec(8)], from: 5, to: 8 }, {});
   assert.deepEqual(overlap.records.map((r) => r.seq), [8]);
 });
+
+test('rebase on the same journal does not announce delivered records again', async () => {
+  const nowMs = 100_000;
+  const recent = (seq) => ({ ...rec(seq), time: 99_000 * 1000 });
+  const j = journalOf([recent(1)]);
+  const t = timers();
+  const f = createJournalFollower({ fetchPage: j.fetchPage, setTimer: t.setTimer, clearTimer: t.clearTimer, nowMs: () => nowMs });
+  const seen = [];
+  f.subscribe((b) => seen.push(...b.records.map((r) => r.seq)));
+  await t.run();
+  j.records.push(recent(2), recent(3));
+  await t.run();
+  assert.deepEqual(seen, [2, 3]);
+  // The graph is replaced but the journal stays (a rollback on the dev server): one more record.
+  j.records.push(recent(4));
+  f.rebase();
+  f.rebase(); // twice before the poll: still the old cursor
+  await t.run();
+  assert.deepEqual(seen, [2, 3, 4], 'records 2 and 3 are not announced twice');
+  assert.equal(f.status().cursor, 4);
+});
