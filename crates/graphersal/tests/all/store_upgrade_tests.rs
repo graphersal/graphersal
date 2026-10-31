@@ -1056,6 +1056,14 @@ mod v040 {
         to
     }
 
+    /// Every file below `dir` but the lock files (an operation creates `LOCK`).
+    fn data_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        files_of(dir)
+            .into_iter()
+            .filter(|(name, _)| name != "LOCK" && name != "BACKUP")
+            .collect()
+    }
+
     /// The fixture directory `name` in memory.
     fn in_memory(name: &str) -> MemDir {
         let dir = MemDir::named(name);
@@ -1295,11 +1303,11 @@ mod v040 {
     fn an_upgrade_into_a_copy_converts_the_copy_only() {
         let temp = Temp::new("v040-copy");
         let dir = copy(&temp, "store");
-        let before = files_of(&dir);
+        let before = data_files(&dir);
         let to = temp.join("upgraded");
         let report = Store::upgrade(&dir, &to).unwrap();
         assert!(!report.in_place);
-        assert_eq!(files_of(&dir), before, "the source is not changed");
+        assert_eq!(data_files(&dir), before, "the source is not changed");
         assert!(dir.join("models").is_dir());
         assert!(!to.join("models").exists());
         assert!(!to.join("upgrade-in-progress.tmp").exists());
@@ -1381,7 +1389,7 @@ mod v040 {
         let last = bytes.len() - 1;
         bytes[last] ^= 0x55;
         fs::write(&weights, bytes).unwrap();
-        let before = files_of(&dir);
+        let before = data_files(&dir);
         for result in [
             Store::upgrade_in_place(&dir),
             Store::upgrade(&dir, temp.join("copy")),
@@ -1401,7 +1409,7 @@ mod v040 {
                 other => panic!("{other:?}"),
             }
         }
-        assert_eq!(files_of(&dir), before, "nothing was written");
+        assert_eq!(data_files(&dir), before, "nothing was written");
         assert!(!temp.join("copy").join("GRAPH").exists());
     }
 
@@ -1416,13 +1424,13 @@ mod v040 {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
         }
-        let before = files_of(&dir);
+        let before = data_files(&dir);
         let report = Store::upgrade_in_place(&dir).unwrap();
         assert_eq!((report.from_version, report.to_version), (3, 4));
         assert!(report.models_converted.is_empty());
         assert_eq!(report.migration_commit, None);
         assert!(report.vectors_without_rule.is_empty());
-        let after = files_of(&dir);
+        let after = data_files(&dir);
         // GRAPH and GRAPH.copy rewritten (the version word and its checksum); every other file
         // byte for byte, nothing added (no blob, no journal record, no INTENT).
         let others = |files: &[(String, Vec<u8>)]| -> Vec<(String, Vec<u8>)> {
