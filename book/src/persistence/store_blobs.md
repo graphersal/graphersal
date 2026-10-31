@@ -55,5 +55,33 @@ A missing or damaged blob is **not** damage of the store: the damage policy does
 nothing turns read-only, and only what needs the blob's bytes fails
 (`StoreFailure::BlobUnavailable` or `BlobDamaged`). The system journal gets one `blob.damaged`
 error per blob and failure, with a recommendation; `graphersal store verify` lists every missing
-or damaged blob. Any copy with the same hash is the same bytes: copy the file back from a backup
-or another copy of the store, or write the content again (a write replaces a damaged blob).
+or damaged blob. Any copy with the same hash is the same bytes, so two tools bring a store back
+to a healthy state:
+
+- **Restore the blobs** from any copy that still has them: a backup directory (full or with its
+  increments), a ZIP backup, a packed snapshot (`.gsnap`) or another store (a fork, a repaired
+  copy, a `.gstore`). The store must be closed (the writer lock):
+
+  ```text
+  graphersal store restore-blobs <dir> --from <backup_dir|file.zip|file.gsnap|other_store> [--json]
+  ```
+
+  In Rust `Store::restore_blobs_from(dir, BlobSource::store(..) | BlobSource::zip(..) |
+  BlobSource::packed(..))`. Every blob the store's retained history references is checked
+  (length, CRC-32C, hash); each missing or damaged one is looked up in the source by its
+  algorithm and hash (a blob of an unknown algorithm by its name), streamed into
+  `blobs/tmp-*`, checked the same way, synced and renamed into place. A healthy blob is never
+  touched. The report (`RestoreBlobsReport`) lists what was restored, what the source does not
+  hold and what it holds damaged too; the command exits 1 unless every referenced blob is intact
+  afterwards. Each restored blob is a `blob.repaired` record (`how` = `restored`, `source`).
+- **Leave them out** when no copy exists: `graphersal store repair <dir> --to <new_dir>
+  --drop-damaged-blobs` (`RepairOptions::with_drop_damaged_blobs`) builds a repaired store
+  without every catalog definition that references a missing or damaged blob (and without the
+  blob): `RepairReport::blobs_dropped` and `definitions_dropped`, one `blob.dropped` record per
+  blob in the new store's journal. It is refused, before anything is written, while the schema
+  needs such a definition (a model a vector property's `embedder` names); the error names the
+  properties: restore the blob first, or change the schema. Without the flag a repair carries the
+  definitions and reports their blobs as not carried.
+
+By hand, copying the file `blobs/<2 hex>/<hash>` from another copy works too, and writing the
+content again (`Store::write_blob`) replaces a damaged blob.

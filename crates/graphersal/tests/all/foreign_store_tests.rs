@@ -417,6 +417,31 @@ fn damage_opens_a_forwarding_store_in_maintenance_mode_with_the_salvaged_state()
     }
 }
 
+/// A catalog commit on a CLOSED store (format spec 12.12) is storage-independent: a store
+/// written through `Store<Forwarding>` takes it without being loaded, and opens as
+/// `Store<Forwarding>` with the model.
+#[test]
+fn a_closed_catalog_commit_on_a_forwarding_store_opens_as_forwarding() {
+    let dir: Arc<dyn StoreDir> = Arc::new(MemDir::new());
+    with_history(&dir).close().unwrap();
+    let report = Store::import_model_dir(
+        dir.clone(),
+        persist::ModelSource::Files(crate::model_fixture::tiny_model(1, "acme/tiny")),
+        persist::ImportModelOptions::new().with_default(true),
+    )
+    .unwrap();
+    let store = open(&dir);
+    assert_eq!(
+        store.graph().read().last_commit_seq().unwrap(),
+        report.commit_seq.unwrap()
+    );
+    let models = store.models().unwrap();
+    assert_eq!(models.len(), 1);
+    assert!(models[0].default);
+    assert!(names(&*store.graph().read()).contains(&"bob".to_string()));
+    store.close().unwrap();
+}
+
 #[test]
 fn a_store_written_as_forwarding_opens_as_traversal_graph_and_vice_versa() {
     for backend in BACKENDS {

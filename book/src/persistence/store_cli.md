@@ -73,6 +73,7 @@ graphersal store rollback --help      # the same (-h works too)
 | [`convert`](#convert) | a directory into a single file, or back |
 | [`upgrade`](#upgrade) | a store of an older Graphersal, converted to the current format |
 | [`repair`](#repair) | a damaged store, repaired into a new directory |
+| [`restore-blobs`](#restore-blobs) | missing or damaged blobs copied back from another copy |
 
 ### create
 
@@ -391,8 +392,9 @@ $ graphersal store models data/
 minishlab/potion-base-8M  model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
 ```
 
-`remove` removes one model by its repository as one commit (earlier positions keep it; its blob
-goes with the prune that drops the last history referencing it). It is refused while a writer has
+`remove` removes one model by its repository as one commit appended to the WAL WITHOUT loading
+the graph (format spec 12.12; earlier positions keep it; its blob goes with the prune that drops
+the last history referencing it). It is refused while a writer has
 the store open, on a backup, while the schema needs the model (its properties are named), and for
 an unknown repository (exit 1). Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
 `graphersal embed-model import <REPO|MODEL_DIR> --into <DIR>` (see
@@ -565,7 +567,7 @@ Use it: graphersal --graph old/
 ### repair
 
 ```text
-graphersal store repair <DIR> --to <NEW_DIR>
+graphersal store repair <DIR> --to <NEW_DIR> [--drop-damaged-blobs]
 ```
 
 Builds a repaired copy of a damaged store in `NEW_DIR` (never in place; the damaged files are not
@@ -577,3 +579,26 @@ commit N` line per mark of the damaged store at or before the repaired position.
 `GRAPH` copies are damaged, `repair` and `verify` print the note `lineage before commit N is
 approximate (both GRAPH copies damaged)` (`verify` then exits 1 with the damage report instead of
 "not a store"). See [Damage, Maintenance and Repair](store_damage.md).
+
+A blob (an embedding model) missing or damaged in `DIR` is not carried and is reported; the
+repaired catalog still references it. Restore it first with [`restore-blobs`](#restore-blobs),
+or give `--drop-damaged-blobs`: the repaired store leaves out every definition referencing such
+a blob (stderr `note: left out ...` lines; journal `blob.dropped`). It is refused, with nothing
+written (exit 1), while the schema needs one of them (the message names the properties).
+
+### restore-blobs
+
+```text
+graphersal store restore-blobs <DIR> --from <SOURCE> [--json]
+```
+
+Copies the [blobs](store_blobs.md) the store references that are missing or damaged back from
+`SOURCE`: a backup directory (full or incremental), a ZIP backup (`.zip`), a packed snapshot
+(`.gsnap`) or another store (a directory or `.gstore`). Each blob is checked (length, CRC-32C,
+hash) before it is moved into place; a healthy blob is never touched. The store must be closed
+(exit 1 "in use" otherwise). Prints one summary line and one line per blob (`restored`, `not in
+the source`, `damaged there too`); `--json` prints the report as one JSON object (`source`,
+`referenced`, `wanted`, `restored`, `bytesRestored`, `notFound`, `damagedInSource`,
+`complete`). Exit **0** when every blob the store references is intact afterwards, else **1**
+with the list.
+

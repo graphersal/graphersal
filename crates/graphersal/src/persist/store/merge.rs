@@ -661,22 +661,42 @@ fn rows_holding<'m>(
         .collect()
 }
 
-/// Pass 2: the delta graph with the base's identity, position, schema and catalog, holding the
-/// base's elements the WAL touches and the endpoints of the touched edges.
-fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGraph, PersistError> {
+/// An element-less graph with the base snapshot's identity, position, time, id sequences,
+/// schema and catalog (the start of a merge's delta graph and of a closed-store catalog view).
+fn base_state(base: &Base, depth: usize) -> Result<TraversalGraph, PersistError> {
     let fixed = &base.manifest.fixed;
-    let mut delta = TraversalGraph::new()
+    let mut state = TraversalGraph::new()
         .with_graph_id(fixed.graph_id)
         .with_last_commit_seq(fixed.commit_seq)
         .with_last_committed_at(fixed.last_commit_at)
         .with_sequences(fixed.node_sequence, fixed.edge_sequence);
     let schema_location = format!("{}/{SCHEMA_FILE}", base.path.display());
     // A schema this version cannot parse was written by a newer one (format spec 16): the
-    // merge is refused, never damage.
-    *delta.schema.write() = super::super::snapshot::parse_stored_schema(&base.schema, 0, None)
+    // merge (or catalog commit) is refused, never damage.
+    *state.schema.write() = super::super::snapshot::parse_stored_schema(&base.schema, 0, None)
         .map_err(|err| err.at(schema_location, 0))?;
-    delta.refresh_vector_rules();
-    restore_definitions(&mut delta, &base.manifest, depth)?;
+    state.refresh_vector_rules();
+    restore_definitions(&mut state, &base.manifest, depth)?;
+    Ok(state)
+}
+
+/// The catalog state of the snapshot `seq` in `path` (no element read): an element-less graph
+/// with its identity, position, time, id sequences, schema and catalog, and its manifest
+/// (format spec 12.12).
+pub(super) fn base_catalog(
+    seq: u64,
+    path: DirPath,
+    depth: usize,
+) -> Result<(TraversalGraph, Manifest), PersistError> {
+    let base = Base::open(seq, path)?;
+    let state = base_state(&base, depth)?;
+    Ok((state, base.manifest))
+}
+
+/// Pass 2: the delta graph with the base's identity, position, schema and catalog, holding the
+/// base's elements the WAL touches and the endpoints of the touched edges.
+fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGraph, PersistError> {
+    let mut delta = base_state(base, depth)?;
     // The delta grows with what the WAL touched: checked against the memory ceiling every
     // 4096 elements and at the end (a failure stops the merge before anything is written).
     let mut budget = UnitBudget::start(&delta, CHECKPOINT_OPERATION)?;

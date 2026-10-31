@@ -1174,7 +1174,8 @@ be: it would silently open the store at an earlier commit. Without a metadata wr
   (rotation, the first segment of an open, the segment `target + 1` of a rollback together with
   its lineage entry), and after an attic restore (the newest restored segment); a recorded WAL
   cut lowers it to the cut segment. A failed write leaves the older value.
-- **`closed_at`** (flag bit 4, offset 92): the last commit at a clean close (state 0).
+- **`closed_at`** (flag bit 4, offset 92): the last commit at a clean close (state 0). A
+  catalog commit on a closed store (12.12) moves it forward to that commit; it never lowers it.
 
 At every read-write open (before the torn-tail rules), in the damage scan and in verification it
 is **damage** when: a segment's header names another first commit than its file name; the
@@ -1612,6 +1613,37 @@ the source it continues and is refused: a full backup is needed.
 The blobs the graph's state references (the new snapshot's blob table) are copied from the
 store's `blobs/` leniently: the one exception to "reads nothing in the store's directory", since
 blobs live only there; one that is missing or damaged is listed as not carried.
+
+### 12.12 Catalog commits on a closed store
+
+A writer holding the writer lock of a CLOSED store MAY append one commit that changes only the
+schema (op 9) and the catalog (op 10), computed WITHOUT loading the elements (book page
+"Embedding Models in a Store"). No byte changes: the record is an ordinary Commit (9.3, a
+single record: such a commit is small) and the next open replays it like any commit.
+
+1. The catalog view: the newest snapshot's definitions table (6.3, with the forward-compatibility
+   rules of 16: opaque definitions kept) and `schema.json`, then every record of the WAL after
+   it in the replay set (12.1) up to the last complete record: a Commit's ops 9 and 10 applied
+   with their before images VERIFIED against the view (a mismatch is damage), its data ops read
+   (frames and checksums checked) and skipped; continuity, lineage (5.4) and 9.8 as for a
+   recovery. The last commit's position, time and id sequences are the new commit's base (the
+   manifest's without WAL commits). Damage refuses the commit with nothing written.
+2. A store this version may only read (a critical opaque definition or segment kind, 16 rule 3;
+   a schema it cannot parse) is refused.
+3. Before appending, the writer MUST do what an open does to the WAL: apply a recorded `wal_cut`
+   (9.7) and write `GRAPH` without it, remove an unstarted last segment and cut a torn tail
+   (9.6), complete the `marks` file (10) and the blob ledger (10.1).
+4. The commit continues the last segment unless it is of an older file format version (never
+   continued, 15) or past the segment size: then a new segment (9.7, `wal_head`). Its time is
+   at least every time the files hold (commits, marks, checkpoint records, the system journal's
+   tail). It is synced before anything follows; a failed write is cut off again or its cut
+   recorded (9.7). Then its ledger frames.
+5. `GRAPH`: a store closed cleanly records the new commit as `closed_at` (it MUST NOT be
+   lowered); a crashed store (state 1) stays as it is. A crash between the commit and this
+   write leaves a WAL ending later than `closed_at`, which is valid (9.8).
+
+A reader without the lock (`--read-only`) sees at most an unfinished last record, which it
+ignores (9.6). No snapshot is written.
 
 ## 13. Damage handling
 
