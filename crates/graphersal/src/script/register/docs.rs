@@ -553,7 +553,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted).",
         "g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)" => "[4, 2]";
     "traversal" "memory_usage":
-        "Returns the graph's own memory footprint in bytes (structure, indexes, properties).",
+        "Returns the graph's own memory footprint in bytes (structure, indexes, properties), with its workload statistics and loaded embedding models beside the total (workload_bytes, model_bytes).",
         "g.memory_usage().total_bytes > 0" => "true";
     "traversal" "merge":
         "Merges the given list (union without duplicates) or map (keys of the argument win) into the incoming one.",

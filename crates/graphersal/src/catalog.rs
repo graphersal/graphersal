@@ -96,7 +96,7 @@ pub use crate::graph::definition::{
     MAX_DIALECT_BYTES, MAX_FOLDER_BYTES, MAX_FOLDER_SEGMENTS, MAX_META_BYTES,
     MAX_OPAQUE_PAYLOAD_BYTES, MAX_PARAMETERS, MAX_QUERY_NAME_BYTES, MAX_SOURCE_BYTES,
     QUERY_DIALECT, QueryDefinition, QueryParam, RESERVED_PAYLOAD_KEYS, RemovedFunctionUse,
-    WRITING_QUERY_DIALECT, catalog_from_json, catalog_to_json,
+    VectorPropertyWrite, WRITING_QUERY_DIALECT, catalog_from_json, catalog_to_json,
 };
 #[cfg(feature = "persist")]
 pub use crate::graph::definition::{decode_payload, encode_payload};

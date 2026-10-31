@@ -44,6 +44,9 @@ pub struct SnapshotLoadReport {
     pub vectors_without_rule: Vec<VectorWithoutRule>,
     /// The saved queries calling a DSL function this version removed (feature `script`).
     pub saved_queries_using_removed: Vec<crate::graph::definition::RemovedFunctionUse>,
+    /// The saved queries writing a vector property directly where a vector rule refuses it, or
+    /// will once the rule [`Self::vectors_without_rule`] suggests exists (feature `script`).
+    pub saved_queries_writing_vectors: Vec<crate::graph::definition::VectorPropertyWrite>,
 }
 
 impl SnapshotLoadReport {
@@ -103,13 +106,19 @@ impl SnapshotLoadReport {
                 missing.needed_by().join(", ")
             ));
         }
-        // Their commands run in a store: a schema change of the loaded file stays in memory.
-        for vector in &self.vectors_without_rule {
-            notes.push(vector.note_for_packed(file));
-        }
+        // ONE note per model; its command runs in a store: a schema change of the loaded file
+        // stays in memory.
+        notes.extend(upgrade::vector_notes(&self.vectors_without_rule, |patch| {
+            VectorWithoutRule::packed_command(file, patch)
+        }));
         for removed in &self.saved_queries_using_removed {
             notes.push(removed.note_for_packed(file));
         }
+        notes.extend(
+            self.saved_queries_writing_vectors
+                .iter()
+                .map(crate::catalog::VectorPropertyWrite::note),
+        );
         notes
     }
 }
@@ -412,6 +421,7 @@ fn fill_report(
     }
     report.vectors_without_rule = found;
     report.saved_queries_using_removed = upgrade::saved_queries_using_removed(graph)?;
+    report.saved_queries_writing_vectors = upgrade::saved_queries_writing_vectors(graph)?;
     report.default_model = definitions
         .iter()
         .filter_map(|d| d.as_model())

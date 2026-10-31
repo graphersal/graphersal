@@ -341,13 +341,18 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
 /// `g.memory_usage()` as data: `{structure_bytes, index_bytes, property_bytes, total_bytes,
 /// total_mb, compressed_values, compressed_plain_bytes, compressed_stored_bytes,
 /// compression_dictionary_bytes, property_index_bytes, deduped_values, deduped_plain_bytes,
-/// dedup_table_bytes, shape_bytes, workload_bytes}`, or `null`. `shape_bytes` and
+/// dedup_table_bytes, shape_bytes, workload_bytes, model_bytes}`, or `null`. `shape_bytes` and
 /// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
-/// `workload_bytes` (the graph's workload statistics, held beside the storage) is not part of the
-/// total either and is `0` from a storage alone
-/// ([`crate::storage::SessionGraph::memory_view`] fills it in).
+/// `workload_bytes` (the graph's workload statistics, held beside the storage) and `model_bytes`
+/// (its loaded embedding models) are not part of the total either and are `0` from a storage
+/// alone ([`crate::storage::SessionGraph::memory_view`] fills them in).
 pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
-    Ok(match g.memory_usage()? {
+    Ok(memory_stats_view(g.memory_usage()?))
+}
+
+/// [`memory_usage`] of figures already read (`None`: `null`).
+pub fn memory_stats_view(stats: Option<graphersal::storage::MemoryStats>) -> Value {
+    match stats {
         Some(stats) => json!({
             "structure_bytes": stats.structure_bytes,
             "index_bytes": stats.index_bytes,
@@ -364,9 +369,10 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
             "dedup_table_bytes": stats.dedup_table_bytes,
             "shape_bytes": stats.shape_bytes,
             "workload_bytes": stats.workload_bytes,
+            "model_bytes": stats.model_bytes,
         }),
         None => Value::Null,
-    })
+    }
 }
 
 /// The request of a memory report spec `{sample_every?, max_elements?, limit?, max_rows?,
