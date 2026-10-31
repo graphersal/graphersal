@@ -44,6 +44,7 @@ import { formatValue, debounce } from '../util.js';
 import { legendLabels, inspectorRows, neighbourhood, idsOfIndices } from '../graph-data.js';
 import { rendererFactory } from '../graph/renderer.js';
 import { GraphController } from '../graph/controller.js';
+import { createResizeGuard } from '../graph/resize-guard.js';
 import { TIER_TUNING } from '../graph/tiers.js';
 import { labelPalette, paletteLabels, OTHER_SLOT, PALETTE_SIZE } from '../graph/palette.js';
 import { ElementEditor } from './element-editor.js';
@@ -591,12 +592,18 @@ export const GraphCanvas = {
       }
       controller = markRaw(new GraphController({ renderer, engine: state.engine, isHidden, onState: onControllerState }));
       let wasHidden = isHidden();
+      // Only a whole-pixel change resizes the renderer (js/graph/resize-guard.js: no sub-pixel
+      // resize loop with classic scrollbars).
+      const sizeGuard = createResizeGuard();
+      if (!wasHidden) sizeGuard.changed(host.value.getBoundingClientRect());
       const onResize = debounce(() => {
-        if (!renderer) return;
+        if (!renderer || !host.value) return;
         if (isHidden()) {
           wasHidden = true;
+          sizeGuard.reset();
           return;
         }
+        if (!sizeGuard.changed(host.value.getBoundingClientRect()) && !wasHidden && controller.pending === null) return;
         renderer.resize();
         if (controller.pending !== null) controller.resume(); // skipped while the canvas had no size
         else if (wasHidden || !userMoved) fitView(); // keep a view the user zoomed/panned by hand
