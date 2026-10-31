@@ -2357,7 +2357,6 @@ mod tests {
 
     #[test]
     fn the_memory_report_of_many_labels_is_bounded_and_counts_the_rest() {
-        use graphersal::storage::GraphStorage;
         // 20 000 vertices, each with its own label and one property.
         let mut graph = TraversalGraph::new();
         for i in 0..20_000 {
@@ -3381,9 +3380,19 @@ mod tests {
             .collect();
         assert_eq!(&names[..2], ["structure", "properties"], "{memory}");
         let graph = &stats["memory"];
+        // The Memory row's figures: structure alone, the id and label indexes in `indexes`.
         assert_eq!(
             segments[0]["bytes"].as_u64().unwrap(),
-            graph["structure_bytes"].as_u64().unwrap() + graph["index_bytes"].as_u64().unwrap()
+            graph["structure_bytes"].as_u64().unwrap()
+        );
+        let indexes = segments
+            .iter()
+            .find(|s| s["name"] == "indexes")
+            .unwrap_or_else(|| panic!("an indexes segment: {memory}"));
+        assert_eq!(
+            indexes["bytes"].as_u64().unwrap(),
+            graph["index_bytes"].as_u64().unwrap()
+                + graph["property_index_bytes"].as_u64().unwrap_or(0)
         );
         // Without a tracking allocator (this test binary) the used figure is the known part.
         if memory["usedTracked"] == json!(false) {

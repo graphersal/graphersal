@@ -1190,7 +1190,6 @@ mod tests {
 
     #[test]
     fn memory_of_many_labels_counts_the_labels_left_out() {
-        use graphersal::storage::GraphStorage;
         let mut inner = graphersal::TraversalGraph::new();
         for i in 0..600 {
             let mut map = graphersal::prelude::PropertyMap::default();
