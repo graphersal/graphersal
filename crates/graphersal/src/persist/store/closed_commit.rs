@@ -589,7 +589,56 @@ impl Store {
                 &identity,
                 &repo,
                 options.replace(),
+                &|model| {
+                    super::model_catalog::blob_state(dir, model.blob())
+                        == super::ModelState::NotLoaded
+                },
             )? {
+                ImportPlan::Restore { existing } => {
+                    // The definition stays; its blob is written again. A tar that differs (another
+                    // card or licence text) redefines the model under the same name with it.
+                    let was_default = existing
+                        .as_model()
+                        .is_some_and(crate::graph::model_definition::ModelDefinition::is_default);
+                    let default = options.default_model() || was_default;
+                    let Some(prepared) = prepared.take() else {
+                        return Err(unknown(OP, &repo));
+                    };
+                    let (definition, checked) = write_model_blob(
+                        prepared,
+                        default,
+                        &mut |reader| {
+                            super::blobs::write_blob(dir, reader, &mut |_| {})
+                                .map(|written| written.blob)
+                        },
+                        dir,
+                        None,
+                    )?;
+                    check_warnings = checked;
+                    outcome = Some((false, None));
+                    if definition == existing {
+                        return Ok(CatalogPlan {
+                            mutations: Vec::new(),
+                            events: Vec::new(),
+                        });
+                    }
+                    let mut mutations = Vec::new();
+                    if default && !was_default {
+                        // The other model that was the default stops being it.
+                        mutations.extend(super::model_catalog::default_changes(&definitions, None));
+                    }
+                    let event = import_event(&definition, None);
+                    mutations.push(Mutation::set_definition(
+                        crate::graph::DefinitionKind::MODEL,
+                        identity.clone(),
+                        Some(existing),
+                        Some(definition),
+                    ));
+                    Ok(CatalogPlan {
+                        mutations,
+                        events: vec![event],
+                    })
+                }
                 ImportPlan::Present => {
                     outcome = Some((true, None));
                     if !options.default_model() {

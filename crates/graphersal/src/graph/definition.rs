@@ -1774,11 +1774,30 @@ impl RemovedFunctionUse {
     /// The text every front end shows for it (one line: the CLI prints it as a `note:`), with
     /// the ready command for the store at `store` when [`Self::schema_patch`] is known.
     pub fn note(&self, store: &str) -> String {
+        self.note_with(|patch| format!("graphersal --graph {store} -e '{patch}'"))
+    }
+
+    /// [`Self::note`] for a graph loaded from the packed snapshot `file` without a store: a
+    /// schema change of such a graph lives only in memory, so the command puts the graph into
+    /// a store first.
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn note_for_packed(&self, file: &str) -> String {
+        self.note_with(|patch| {
+            format!(
+                "in a store, as the change of a .gsnap loaded without one stays in memory: \
+                 graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e \
+                 '{patch}'"
+            )
+        })
+    }
+
+    /// The note with the ready command `command(patch)` running the schema patch.
+    fn note_with(&self, command: impl Fn(&str) -> String) -> String {
         let fix = match &self.schema_patch {
             Some(patch) => format!(
-                "replace the call by the vector rule (graphersal --graph {store} -e '{patch}'); \
-                 its first fill embeds every element of the label (the whole database is locked \
-                 while it runs)"
+                "replace the call by the vector rule ({}); its first fill embeds every element \
+                 of the label (the whole database is locked while it runs)",
+                command(patch)
             ),
             None => self.replacement.clone(),
         };

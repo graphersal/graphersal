@@ -370,24 +370,50 @@ impl VectorWithoutRule {
     /// The text every front end shows for it (one line: the CLI prints it as a `note:`), with
     /// the ready command for the store at `store`.
     pub fn note(&self, store: &str) -> String {
-        let count = if self.exact() {
-            format!("{} element(s)", self.elements)
-        } else {
+        self.note_with(&format!(
+            "graphersal --graph {store} -e '{}'",
+            self.schema_patch()
+        ))
+    }
+
+    /// [`Self::note`] for a graph loaded from the packed snapshot `file` without a store: a
+    /// schema change of such a graph lives only in memory, so the command puts the graph into
+    /// a store first.
+    pub(crate) fn note_for_packed(&self, file: &str) -> String {
+        self.note_with(&format!(
+            "in a store, as the change of a .gsnap loaded without one stays in memory: \
+             graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e '{}'",
+            self.schema_patch()
+        ))
+    }
+
+    /// The note with `command`, the ready command that adds the source property.
+    fn note_with(&self, command: &str) -> String {
+        let holds = if self.exact() && self.elements == 0 {
             format!(
-                "{} element(s) in the newest snapshot, {} later commit(s) not counted",
-                self.elements, self.not_counted
+                "{}.{} is declared with vectors of {} (no element holds one yet)",
+                self.label, self.property, self.model
+            )
+        } else {
+            let count = if self.exact() {
+                format!("{} element(s)", self.elements)
+            } else {
+                format!(
+                    "{} element(s) in the newest snapshot, {} later commit(s) not counted",
+                    self.elements, self.not_counted
+                )
+            };
+            format!(
+                "{}.{} has vectors of {} ({count})",
+                self.label, self.property, self.model
             )
         };
         format!(
-            "{}.{} has vectors of {} ({count}) but no source property; to keep it current add \
-             \"from\": \"<source property>\" to its schema declaration (graphersal --graph \
-             {store} -e '{}'); the first fill re-embeds every {} (the whole database is locked \
-             while it runs)",
-            self.label,
-            self.property,
-            self.model,
-            self.schema_patch(),
-            self.label
+            "{holds} but no source property; to keep it current add \"from\": \"<source \
+             property>\" to its schema declaration ({command}); the first fill re-embeds every \
+             {} (the whole database is locked while it runs), and from then on {} itself is not \
+             written directly (write the source property)",
+            self.label, self.property
         )
     }
 }
@@ -639,9 +665,66 @@ fn has_models_dir(dir: &DirPath) -> Result<bool, PersistError> {
 /// without a rule; the journal record `store.upgraded`.
 fn finish(
     dir: &DirPath,
-    mut report: UpgradeReport,
+    report: UpgradeReport,
     migrated: migrate_models::Migrated,
 ) -> Result<UpgradeReport, PersistError> {
+    let (report, state) = fill_models(dir, report, migrated)?;
+    finish_journal(dir, report, &state)
+}
+
+/// [`Store::create_from_packed_dir`]: the report of a store just created from a packed
+/// snapshot in `dir` (closed), in the fields of an upgrade; no journal record of its own (the
+/// creation and the migration commit wrote theirs).
+pub(super) fn report_new_store(
+    dir: &DirPath,
+    migrated: migrate_models::Migrated,
+) -> Result<UpgradeReport, PersistError> {
+    let report = UpgradeReport {
+        // The model rows of a Graphersal 0.4.0 file (store format version 3) were migrated.
+        from_version: if migrated.converted.is_empty() {
+            STORE_VERSION
+        } else {
+            3
+        },
+        to_version: STORE_VERSION,
+        already_current: false,
+        in_place: true,
+        ..UpgradeReport::default()
+    };
+    let (mut report, state) = fill_models(dir, report, migrated)?;
+    // A file exported without its models (`--without-models`) keeps their definitions but not
+    // their blobs: a model the schema needs is then missing too.
+    let schema = state.get_schema().map_err(PersistError::Graph)?;
+    let definitions =
+        super::model_catalog::model_definitions(&state).map_err(PersistError::Graph)?;
+    for (identity, places) in super::model_catalog::needed_models(schema.as_ref()) {
+        let base = super::model_catalog::base_identity(&identity);
+        let blob_missing = definitions
+            .iter()
+            .filter(|d| d.name() == base)
+            .filter_map(|d| d.as_model())
+            .any(|m| super::model_catalog::blob_state(dir, m.blob()) == super::ModelState::Missing);
+        if blob_missing && report.models_missing.iter().all(|m| m.identity != identity) {
+            report.models_missing.push(MissingModel {
+                repo: crate::value::vector::embed::identity::parse_identity(&identity)
+                    .and_then(|parsed| parsed.repo.map(str::to_string)),
+                identity,
+                needed_by: places,
+            });
+        }
+    }
+    report.saved_queries_using_removed = saved_queries_using_removed(&state)?;
+    Ok(report)
+}
+
+/// The model parts of a report of the store in `dir` (of the current version): the migrated
+/// models, the models the schema needs but the store lacks, the vector properties without a
+/// rule (counted in the newest snapshot); with the catalog state it read.
+fn fill_models(
+    dir: &DirPath,
+    mut report: UpgradeReport,
+    migrated: migrate_models::Migrated,
+) -> Result<(UpgradeReport, crate::graph::TraversalGraph), PersistError> {
     report.models_converted = migrated
         .converted
         .iter()
@@ -682,7 +765,7 @@ fn finish(
         }
     }
     report.vectors_without_rule = found;
-    finish_journal(dir, report, &state)
+    Ok((report, state))
 }
 
 /// The models the schema needs (a vector property's `embedder`) that `definitions` lack.

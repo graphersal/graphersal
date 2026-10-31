@@ -100,6 +100,22 @@ $ graphersal store create graph.gstore --from modern --on-damage continue
 Created the single-file store graph.gstore: graph 01a11a54-8ca5-7fd3-8ed5-fcd7729f0e80, commit 0, 1 snapshot(s); damage policy continue (fixed for its life).
 ```
 
+A packed snapshot makes the store without opening it (`Store::create_from_packed_dir`), and what
+the file brought that still needs your decision is printed as `store upgrade` prints it (exit
+code **0**): the converted models of a Graphersal 0.4.0 file, a `warning:` for every model the
+schema needs that the file does not carry (a 0.4.0 file whose model came from `--embedder`, or an
+export `--without-models`; the store is created and opens once the model is imported, with the
+commands named), a `note:` for every vector property without a source property and for every
+saved query calling a removed function:
+
+```text
+$ graphersal store create data/ --from old.gsnap
+Created the store data/: graph 01a11a54-9f3c-7b21-8e0d-5a2c9e41d7b3, commit 3120, 1 snapshot(s); damage policy maintenance (fixed for its life).
+warning: the schema needs the model model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (doc.emb), which the store does not keep (0.4.0 served it through a command-line embedder); the store does not open until it is imported: graphersal embed-model download minishlab/potion-multilingual-128M then graphersal embed-model import minishlab/potion-multilingual-128M --into data/
+note: doc.emb has vectors of model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (250 element(s)) but no source property; ...
+Use it: graphersal --graph data/ (or --server)
+```
+
 Exit 2 when the source cannot be loaded or `--on-damage` names no policy; 1 when `DIR` is a
 directory that is not empty (`cannot create a store in data/: the directory is not empty`, with
 the help to choose an empty or new directory, or to look at it with `graphersal store info
@@ -368,7 +384,8 @@ with `--graph FILE.gsnap`, `store create --from FILE.gsnap`, or the playground.
 
 The file carries the store's [embedding models](store_models.md) with their cards and licences
 (listed after the first line) as blobs, unless `--without-models` (the definitions stay; the
-models are missing in what is made from the file). `store create --from FILE.gsnap` and the
+models are missing in what is made from the file: `graphersal embed-model import <repo> --into
+<store>` writes a missing model's blob back). `store create --from FILE.gsnap` and the
 playground put them back into a store. A damaged model blob stops the export (exit 1; export
 `--without-models`).
 
@@ -558,7 +575,7 @@ Verified the store store/ (store format version 3): 2 snapshot(s), 1 WAL segment
 Upgraded store/ in place to store format version 4: GRAPH rewritten, the models/ directory migrated (below), every other file kept. The older Graphersal no longer opens it.
 Converted the embedding model model2vec/acme/tiny@70c61d0ed332 into a blob with its catalog definition: model2vec/acme/tiny@70c61d0ed332 (8.5 KiB).
 The models were defined by commit 12; the history before it has no models. Take a full backup now (graphersal store backup store/ <new_dir>): a backup taken before the upgrade does not take increments of the upgraded store.
-note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs)
+note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs), and from then on emb itself is not written directly (write the source property)
 Use it: graphersal --graph store/
 ```
 

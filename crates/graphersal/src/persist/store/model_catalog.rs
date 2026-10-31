@@ -972,8 +972,14 @@ fn default_of(definitions: &[Definition]) -> Option<&Definition> {
 
 /// What an import of the model `identity` of `repo` finds in the catalog.
 pub(crate) enum ImportPlan {
-    /// The same identity is defined already: nothing is imported (at most the default changes).
+    /// The same identity is defined already with its blob: nothing is imported (at most the
+    /// default changes).
     Present,
+    /// The same identity is defined already, but its blob is missing or damaged (a copy made
+    /// `--without-models`, a lost file): the import writes the blob again and, when its tar
+    /// differs, redefines the model under the same name with it (`existing` is the definition
+    /// as it is; its default flag is kept).
+    Restore { existing: Definition },
     /// A new definition; `old` is the revision of the same repository it replaces;
     /// `replaces_rules`: vector rules name `old`, so the replacing unit re-embeds their
     /// properties (it needs the data: book page "Vector Rules").
@@ -983,23 +989,30 @@ pub(crate) enum ImportPlan {
     },
 }
 
-/// Plans an import (format spec 4.5): the same identity present, or a new revision, refused
-/// while the store holds another revision of the repository and `replace` is not set
-/// ([`StoreFailure::ModelRevisionExists`]), and while a schema property's vectors were made by
-/// the revision it would replace without a vector rule ([`StoreFailure::ModelInUse`], K3).
+/// Plans an import (format spec 4.5): the same identity present (or present without its blob,
+/// `blob_present` false: restored), or a new revision, refused while the store holds another
+/// revision of the repository and `replace` is not set ([`StoreFailure::ModelRevisionExists`]),
+/// and while a schema property's vectors were made by the revision it would replace without a
+/// vector rule ([`StoreFailure::ModelInUse`], K3).
 pub(crate) fn plan_import(
     definitions: &[Definition],
     schema: Option<&GraphSchema>,
     identity: &str,
     repo: &str,
     replace: bool,
+    blob_present: &dyn Fn(&ModelDefinition) -> bool,
 ) -> Result<ImportPlan, PersistError> {
     const OP: &str = "import a model";
-    if definitions
+    if let Some(existing) = definitions
         .iter()
-        .any(|d| d.name() == identity && d.as_model().is_some())
+        .find(|d| d.name() == identity && d.as_model().is_some())
     {
-        return Ok(ImportPlan::Present);
+        if existing.as_model().is_some_and(blob_present) {
+            return Ok(ImportPlan::Present);
+        }
+        return Ok(ImportPlan::Restore {
+            existing: existing.clone(),
+        });
     }
     let old = of_repo(definitions, repo).cloned();
     if let Some(old) = &old {
@@ -1367,7 +1380,10 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// deterministic tar with a manifest, format spec 4.5), then one commit defines it (catalog
     /// kind 5, named by its identity `model2vec/<repo>@<12 hex>`). The same identity defined
     /// already commits nothing ([`ImportModelReport::already_present`]; with
-    /// [`ImportModelOptions::with_default`] only the default changes). Another revision of the
+    /// [`ImportModelOptions::with_default`] only the default changes), unless its blob is
+    /// missing or damaged (a store made from an export without models): then the import writes
+    /// the blob back (and redefines the model under the same name when its tar differs, the
+    /// default flag kept). Another revision of the
     /// same repository is refused ([`StoreFailure::ModelRevisionExists`]) unless
     /// [`ImportModelOptions::with_replace`]: then the new revision replaces the old one in the
     /// same commit (and becomes the default if the old one was); the vector rules naming the old
@@ -1402,13 +1418,20 @@ impl<S: PersistentStorage + Default> Store<S> {
         let identity = prepared.identity.clone();
         let repo = prepared.manifest.repo.clone();
         let dir = self.core.shared.dir.clone();
+        let mut keep_default = false;
         let (old, replaces_rules) = match plan_import(
             &definitions,
             schema.as_ref(),
             &identity,
             &repo,
             options.replace,
+            &|model| blob_state(&dir, model.blob()) == ModelState::NotLoaded,
         )? {
+            // The blob back (its definition rewritten under the same name in the unit).
+            ImportPlan::Restore { existing } => {
+                keep_default = existing.as_model().is_some_and(ModelDefinition::is_default);
+                (None, false)
+            }
             ImportPlan::Present => {
                 // The same model: at most the default changes.
                 let mut commit_seq = None;
@@ -1439,6 +1462,7 @@ impl<S: PersistentStorage + Default> Store<S> {
             } => (old, replaces_rules),
         };
         let default = options.default
+            || keep_default
             || old
                 .as_ref()
                 .is_some_and(|o| o.as_model().is_some_and(ModelDefinition::is_default));
@@ -2001,10 +2025,12 @@ fn refusal(
             ),
         );
     }
+    // A model the catalog does not define comes in by a plain import; a defined one whose blob
+    // is missing or damaged by a replace of the same revision.
+    let undefined = matches!(failure.failure, registry::LoadFailure::Missing)
+        && definitions.iter().all(|d| d.name() != failure.identity);
     let what = match &failure.failure {
-        registry::LoadFailure::Missing
-            if definitions.iter().all(|d| d.name() != failure.identity) =>
-        {
+        registry::LoadFailure::Missing if undefined => {
             "is not in the database at this position".to_string()
         }
         registry::LoadFailure::Missing => "is damaged (missing)".to_string(),
@@ -2019,9 +2045,10 @@ fn refusal(
         StoreFailure::ModelUnavailable,
         format!(
             "the model {repo} (needed by {places}) {what}: run `graphersal embed-model download \
-             {repo}` then `graphersal embed-model import {repo} --into {} --replace`, or \
-             restore the store from a backup or replica",
-            dir.display()
+             {repo}` then `graphersal embed-model import {repo} --into {}{}`, or restore the \
+             store from a backup or replica",
+            dir.display(),
+            if undefined { "" } else { " --replace" }
         ),
     )
 }

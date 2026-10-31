@@ -4529,6 +4529,88 @@ mod embed_models {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// `store create <dir> --from file.gsnap` of a file that lacks the model its schema needs
+    /// (a 0.4.0 file whose model came from `--embedder`, or an export `--without-models`)
+    /// creates the store, exits 0 and says how to bring the model in; it opens after the
+    /// import.
+    #[test]
+    fn a_store_made_from_a_gsnap_lacking_its_model_says_how_to_import_it() {
+        let base = fresh_dir("m2v_gsnap_create");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let import = |into: &str| {
+            run_env(
+                &[
+                    "embed-model",
+                    "import",
+                    &model_text,
+                    "--into",
+                    into,
+                    "--repo",
+                    "acme/tiny",
+                ],
+                &[],
+            )
+        };
+        let res = import(&store_text);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "-e",
+                r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "acme/tiny"}}}}}}); 1"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_eq!(run_env(&["store", "checkpoint", &store_text], &[]).code, 0);
+        let bare = base.join("bare.gsnap");
+        let bare_text = bare.display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "export",
+                &store_text,
+                &bare_text,
+                "--without-models",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let made = base.join("made");
+        let made_text = made.display().to_string();
+        let res = run_env(&["store", "create", &made_text, "--from", &bare_text], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(res.stdout.contains("Created the store"), "{}", res.stdout);
+        assert!(
+            res.stderr.contains("warning: the schema needs the model")
+                && res.stderr.contains(&format!(
+                    "graphersal embed-model import acme/tiny --into {made_text}"
+                )),
+            "{}",
+            res.stderr
+        );
+        assert!(
+            res.stderr.contains(
+                "note: doc.emb is declared with vectors of acme/tiny (no element holds one yet)"
+            ),
+            "{}",
+            res.stderr
+        );
+        // It does not open until the model is imported; then it does.
+        assert_eq!(run_env(&["--graph", &made_text, "-e", "1"], &[]).code, 1);
+        let res = import(&made_text);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(&["--graph", &made_text, "-e", "g.embedders().len()"], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_eq!(res.stdout.trim(), "2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // -----------------------------------------------------------------------------------------
     // A mock Hugging Face endpoint
     // -----------------------------------------------------------------------------------------

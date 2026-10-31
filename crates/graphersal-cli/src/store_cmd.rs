@@ -909,21 +909,34 @@ pub fn run(args: &[String]) -> i32 {
                     Err(why) => return usage(&format!("--on-damage: {why}")),
                 }
             }
+            // A `.gsnap` makes the store WITHOUT opening it: one of an earlier release may name
+            // a model it does not carry (the store opens once it is imported), and the report
+            // says what still needs a decision (as `store upgrade` does).
+            if let Some(source) =
+                flag("from").filter(|s| s.to_ascii_lowercase().ends_with(".gsnap"))
+            {
+                let file = match std::fs::File::open(&source) {
+                    Ok(file) => file,
+                    Err(err) => {
+                        errln!("Error: cannot open '{source}': {err}");
+                        return EXIT_USAGE_ERROR;
+                    }
+                };
+                let created =
+                    Store::create_from_packed_dir(&backend, std::io::BufReader::new(file), options)
+                        .and_then(|report| Ok((Store::inspect(&backend)?, report)));
+                return match created {
+                    Ok((info, report)) => {
+                        print_created(&info, dir);
+                        print_upgrade_models(&report, dir);
+                        outln!("Use it: graphersal --graph {dir} (or --server)");
+                        EXIT_OK
+                    }
+                    Err(err) => fail(err),
+                };
+            }
             let created = match flag("from") {
                 None => Store::create(&backend, options),
-                Some(source) if source.to_ascii_lowercase().ends_with(".gsnap") => {
-                    match std::fs::File::open(&source) {
-                        Ok(file) => Store::create_from_packed(
-                            &backend,
-                            std::io::BufReader::new(file),
-                            options,
-                        ),
-                        Err(err) => {
-                            errln!("Error: cannot open '{source}': {err}");
-                            return EXIT_USAGE_ERROR;
-                        }
-                    }
-                }
                 Some(source) => {
                     let graph = match GraphSpec::parse(&source).load() {
                         Ok(graph) => graph.into_inner(),
@@ -937,7 +950,7 @@ pub fn run(args: &[String]) -> i32 {
             };
             match created.and_then(|store| {
                 let info = store.info();
-                // A `.gsnap` of an earlier release may hold saved queries calling a removed
+                // A graph file of an earlier release may hold saved queries calling a removed
                 // function.
                 let removed = store
                     .graph()
@@ -959,19 +972,7 @@ pub fn run(args: &[String]) -> i32 {
             }) {
                 Ok((info, removed)) => {
                     print_removed_function_uses(&removed, dir);
-                    outln!(
-                        "Created the {} {dir}: graph {}, commit {}, {} snapshot(s); damage \
-                         policy {} (fixed for its life).",
-                        if info.space.is_some() {
-                            "single-file store"
-                        } else {
-                            "store"
-                        },
-                        uuid_text(info.graph_id),
-                        info.commit_seq,
-                        info.snapshots.len(),
-                        info.damage_policy
-                    );
+                    print_created(&info, dir);
                     outln!("Use it: graphersal --graph {dir} (or --server)");
                     EXIT_OK
                 }
@@ -2104,6 +2105,23 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
         errln!("note: {}", vector.note(target));
     }
     print_removed_function_uses(&report.saved_queries_using_removed, target);
+}
+
+/// The line `store create` prints for the new store at `dir`.
+fn print_created(info: &graphersal::persist::StoreInfo, dir: &str) {
+    outln!(
+        "Created the {} {dir}: graph {}, commit {}, {} snapshot(s); damage policy {} (fixed for \
+         its life).",
+        if info.space.is_some() {
+            "single-file store"
+        } else {
+            "store"
+        },
+        uuid_text(info.graph_id),
+        info.commit_seq,
+        info.snapshots.len(),
+        info.damage_policy
+    );
 }
 
 /// The saved queries calling a DSL function this version removed (`note:` lines with the

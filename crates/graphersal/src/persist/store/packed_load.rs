@@ -103,11 +103,12 @@ impl SnapshotLoadReport {
                 missing.needed_by().join(", ")
             ));
         }
+        // Their commands run in a store: a schema change of the loaded file stays in memory.
         for vector in &self.vectors_without_rule {
-            notes.push(vector.note(file));
+            notes.push(vector.note_for_packed(file));
         }
         for removed in &self.saved_queries_using_removed {
-            notes.push(removed.note(file));
+            notes.push(removed.note_for_packed(file));
         }
         notes
     }
