@@ -205,7 +205,7 @@ pub struct MemorySegment {
 /// | `properties` | `property_bytes - compressed_stored_bytes - dedup_table_bytes` |
 /// | `compressed` | `compressed_stored_bytes + compression_dictionary_bytes + dedup_table_bytes` (left out at 0) |
 /// | `indexes` | `index_bytes + property_index_bytes`: the id and label indexes plus the property indexes (left out at 0) |
-/// | `models` | `model_bytes` when the graph reports it, else the loaded embedders (left out at 0) |
+/// | `models` | `model_bytes` when the graph reports models it loaded (non-zero), else the loaded embedders (left out at 0) |
 /// | `other` | tracked only: the live heap minus the known segments (0 when the estimate is above the heap) |
 ///
 /// With a tracking allocator the used figure is the process's live heap; without one it is the
@@ -307,7 +307,11 @@ fn bar_from(
             });
         }
     }
-    let models = graph_memory["model_bytes"].as_u64().unwrap_or(models_bytes);
+    // `0` from a graph that loaded none of its own (a host's embedders are the process's).
+    let models = graph_memory["model_bytes"]
+        .as_u64()
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(models_bytes);
     if models > 0 {
         segments.push(MemorySegment {
             name: "models",

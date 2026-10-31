@@ -56,6 +56,30 @@ const CONFIRM_ESTIMATE_MS: u64 = 1_000;
 /// The elements from which a fill without an estimate asks for a confirmation.
 const CONFIRM_ELEMENTS: u64 = 10_000;
 
+/// Elements per second the schema check of an apply reads, when it was not measured (a
+/// `diff_schema` preview; measured: 2.5M elements of 4-11 properties in 0.6 s on a laptop, the
+/// real 0.4.0 graph of 2.8M elements in about 1 s): the check's share of a fill estimate.
+const SCHEMA_SCAN_ELEMENTS_PER_SECOND: f64 = 2_000_000.0;
+
+/// The schema check a schema change runs before its fills, under the same lock
+/// ([`plan_fills`]): the elements it reads and, when the preview ran the same check, how long it
+/// took.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SchemaScan {
+    pub(crate) elements: u64,
+    pub(crate) measured_ms: Option<u64>,
+}
+
+impl SchemaScan {
+    /// The check's estimated time: the measured one, else from
+    /// [`SCHEMA_SCAN_ELEMENTS_PER_SECOND`].
+    fn estimate_ms(&self) -> u64 {
+        self.measured_ms.unwrap_or_else(|| {
+            ((self.elements as f64) / SCHEMA_SCAN_ELEMENTS_PER_SECOND * 1000.0).ceil() as u64
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Compiled rules
 // ---------------------------------------------------------------------------------------------
@@ -598,8 +622,11 @@ pub struct PlannedFill {
     reason: FillReason,
     elements: u64,
     removals: u64,
+    scan_elements: u64,
+    scan_ms: u64,
     estimate_ms: Option<u64>,
     approximate: bool,
+    direct_writes: Vec<String>,
 }
 
 impl PlannedFill {
@@ -646,9 +673,28 @@ impl PlannedFill {
         self.removals
     }
 
-    /// The estimated time in milliseconds, when the model's speed is known.
+    /// The estimated time in milliseconds the fill holds the lock, when the model's speed is
+    /// known: the embedding plus [`Self::scan_ms`], the schema check of the apply. The sum over
+    /// the fills of one schema change is the whole estimate (the first fill also carries the
+    /// check of labels no fill writes).
     pub fn estimate_ms(&self) -> Option<u64> {
         self.estimate_ms
+    }
+
+    /// The elements the schema check of the apply reads on this fill's account: the label's
+    /// elements (only the labels whose declaration changed are checked when the schema mode
+    /// stays `open` or `closed`, every element when the mode changes, none in mode `none`); the
+    /// first fill also counts the other elements the change checks.
+    pub fn scan_elements(&self) -> u64 {
+        self.scan_elements
+    }
+
+    /// The time in milliseconds of that check: measured by a
+    /// [`validate_schema`](crate::GraphTraversalSource::validate_schema) preview (which runs the
+    /// same check), estimated in a [`diff_schema`](crate::GraphTraversalSource::diff_schema)
+    /// one. Part of [`Self::estimate_ms`]; known also when the model's speed is not.
+    pub fn scan_ms(&self) -> u64 {
+        self.scan_ms
     }
 
     /// Whether the counts come from the label statistics only (no data read).
@@ -656,17 +702,31 @@ impl PlannedFill {
         self.approximate
     }
 
-    /// Whether a front end asks before applying: an estimate of 1 s or more, or no estimate
-    /// and 10,000 elements or more (book page "Vector Rules").
+    /// The saved queries whose body writes [`Self::to`] directly (a literal
+    /// `.property("emb", ..)`) on this label: once the rule exists such a write is refused, so
+    /// the write has to go (feature `script`; a saved query is never rewritten).
+    pub fn direct_writes(&self) -> &[String] {
+        &self.direct_writes
+    }
+
+    /// Sets [`Self::direct_writes`].
+    pub(crate) fn set_direct_writes(&mut self, queries: Vec<String>) {
+        self.direct_writes = queries;
+    }
+
+    /// Whether a front end asks before applying: an estimate of 1 s or more (the schema check
+    /// included), or no estimate and 10,000 elements or more or a schema check of 1 s or more
+    /// (book page "Vector Rules").
     pub fn needs_confirmation(&self) -> bool {
         match self.estimate_ms {
             Some(ms) => ms >= CONFIRM_ESTIMATE_MS,
-            None => self.elements >= CONFIRM_ELEMENTS,
+            None => self.elements >= CONFIRM_ELEMENTS || self.scan_ms >= CONFIRM_ESTIMATE_MS,
         }
     }
 
     /// The fill as data: `{element, label, from, to, model, reason, elements, removals,
-    /// estimate_ms, approximate, needs_confirmation}` (`estimate_ms` `null` when unknown).
+    /// scan_elements, scan_ms, estimate_ms, approximate, needs_confirmation, direct_writes}`
+    /// (`estimate_ms` `null` when unknown).
     pub fn to_value(&self) -> ElementProperty {
         let mut map = crate::value::PropertyMap::default();
         map.insert("element", ElementProperty::from(self.element.as_str()));
@@ -677,6 +737,8 @@ impl PlannedFill {
         map.insert("reason", ElementProperty::from(self.reason.as_str()));
         map.insert("elements", count(self.elements));
         map.insert("removals", count(self.removals));
+        map.insert("scan_elements", count(self.scan_elements));
+        map.insert("scan_ms", count(self.scan_ms));
         map.insert(
             "estimate_ms",
             self.estimate_ms.map_or(ElementProperty::Null, count),
@@ -685,6 +747,15 @@ impl PlannedFill {
         map.insert(
             "needs_confirmation",
             ElementProperty::Boolean(self.needs_confirmation()),
+        );
+        map.insert(
+            "direct_writes",
+            ElementProperty::Array(
+                self.direct_writes
+                    .iter()
+                    .map(|q| ElementProperty::from(q.as_str()))
+                    .collect(),
+            ),
         );
         ElementProperty::Object(Box::new(map))
     }
@@ -713,7 +784,7 @@ pub(crate) fn fills_value(fills: &[PlannedFill]) -> ElementProperty {
 pub fn fill_warning(fills: &[PlannedFill]) -> Option<String> {
     let fills: Vec<&PlannedFill> = fills
         .iter()
-        .filter(|f| f.elements > 0 || f.removals > 0)
+        .filter(|f| f.elements > 0 || f.removals > 0 || !f.direct_writes.is_empty())
         .collect();
     if fills.is_empty() {
         return None;
@@ -744,10 +815,21 @@ pub fn fill_warning(fills: &[PlannedFill]) -> Option<String> {
     } else {
         "time depends on the model".to_string()
     };
+    // The saved queries a new rule breaks: they write its property directly.
+    let mut writers = String::new();
+    for fill in fills.iter().filter(|f| !f.direct_writes.is_empty()) {
+        writers.push_str(&format!(
+            "\nSaved queries writing {}.{} directly fail once the rule exists (remove that \
+             write; they are not rewritten): {}.",
+            fill.label,
+            fill.to,
+            fill.direct_writes.join(", ")
+        ));
+    }
     Some(format!(
         "Applying this schema fills vectors: {} ({estimate}).\nThe whole database is LOCKED \
          while this runs: every write and every read waits until it ends.\nRun it at a quiet \
-         time. If it fails, nothing is written.",
+         time. If it fails, nothing is written.{writers}",
         parts.join("; ")
     ))
 }
@@ -809,12 +891,15 @@ fn compile_resolved<S: GraphStorage + ?Sized>(
 
 /// The fills that storing `after` over `before` starts on `storage`. `exact`: count the
 /// elements with a text (a data read, `validate_schema`); else the label statistics
-/// (`diff_schema`, approximate).
+/// (`diff_schema`, approximate). `scan`: the schema check the apply runs first, under the same
+/// lock; its time goes into the estimates (each fill's label on its own account, the rest on
+/// the first fill's).
 pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
     storage: &S,
     before: Option<&GraphSchema>,
     after: &GraphSchema,
     exact: bool,
+    scan: SchemaScan,
 ) -> Result<Vec<PlannedFill>, GraphError> {
     let Some(new) = compile_resolved(storage, after)? else {
         return Ok(Vec::new());
@@ -847,6 +932,16 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
         let estimate_ms = texts_per_second(&rule.model)
             .filter(|tps| *tps > 0.0)
             .map(|tps| ((elements as f64) / tps * 1000.0).ceil() as u64);
+        // The label's elements the schema check reads (its declaration changed with the rule).
+        let label_elements = match storage.statistics()? {
+            Some(s) => match rule.kind {
+                ElementKind::Vertex => s.vertex_label_count(&rule.label) as u64,
+                ElementKind::Edge => s.edge_label_count(&rule.label) as u64,
+            },
+            None => 0,
+        };
+        let accounted: u64 = fills.iter().map(|f: &PlannedFill| f.scan_elements).sum();
+        let scan_elements = label_elements.min(scan.elements.saturating_sub(accounted));
         fills.push(PlannedFill {
             element: rule.kind,
             label: rule.label.to_string(),
@@ -856,9 +951,26 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
             reason,
             elements,
             removals,
+            scan_elements,
+            scan_ms: 0,
             estimate_ms,
             approximate: !exact,
+            direct_writes: Vec::new(),
         });
+    }
+    // The check's time by elements: each fill its label's share, the first one the rest.
+    let accounted: u64 = fills.iter().map(|f| f.scan_elements).sum();
+    if let Some(first) = fills.first_mut() {
+        first.scan_elements += scan.elements.saturating_sub(accounted);
+    }
+    let total_ms = scan.estimate_ms();
+    for fill in &mut fills {
+        fill.scan_ms = if scan.elements == 0 {
+            0
+        } else {
+            ((total_ms as f64) * (fill.scan_elements as f64) / (scan.elements as f64)).ceil() as u64
+        };
+        fill.estimate_ms = fill.estimate_ms.map(|ms| ms + fill.scan_ms);
     }
     Ok(fills)
 }
@@ -1772,8 +1884,11 @@ mod tests {
             reason: FillReason::RuleAdded,
             elements,
             removals: 0,
+            scan_elements: 0,
+            scan_ms: 0,
             estimate_ms,
             approximate: false,
+            direct_writes: Vec::new(),
         }
     }
 

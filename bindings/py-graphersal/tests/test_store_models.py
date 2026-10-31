@@ -138,6 +138,22 @@ def test_upgrade_converts_models(tmp_path):
     assert needed["commands"][1] == f"graphersal embed-model import acme/gone --into {missing}"
 
 
+def test_upgrade_gives_one_vector_note_per_model(tmp_path):
+    """The report's ``vector_notes``: one note per model (the fixture's three properties have
+    three models, so each keeps its own note); no saved query writes a vector directly."""
+    import pathlib
+    import shutil
+
+    fixtures = pathlib.Path(__file__).resolve().parents[3] / "crates/graphersal/tests/data/v0.4.0"
+    path = tmp_path / "store"
+    shutil.copytree(fixtures / "store", path)
+    report = graphersal.Store.upgrade(str(path), in_place=True)
+    notes = report["vector_notes"]
+    assert len(notes) == 3
+    assert notes == [v["note"] for v in report["vectors_without_rule"]]
+    assert report["saved_queries_writing_vectors"] == []
+
+
 def test_upgrade_lists_saved_queries_calling_a_removed_function(tmp_path):
     """A 0.4.0 store whose saved queries call embed_property (removed in 0.5.0): the report
     names each with the vector rule replacing the call; the query is not rewritten."""

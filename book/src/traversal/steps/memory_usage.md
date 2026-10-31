@@ -3,7 +3,7 @@
 
 `memory_usage` · category: [Graph information and files](../../traversal/step_reference.md#graph-information-and-files)
 
-Returns the graph's own memory footprint in bytes (structure, indexes, properties).
+Returns the graph's own memory footprint in bytes (structure, indexes, properties), with its workload statistics and loaded embedding models beside the total (workload_bytes, model_bytes).
 
 ## Forms
 

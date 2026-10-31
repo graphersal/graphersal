@@ -617,7 +617,8 @@ class Store:
         "upgrade_model_damaged"``, nothing written). ``{"from_version", "to_version",
         "already_current", "in_place", "backup", "files", "bytes", "models_converted",
         "migration_commit", "models_missing", "vectors_without_rule",
-        "saved_queries_using_removed"}``: ``models_converted``
+        "saved_queries_using_removed", "saved_queries_writing_vectors", "vector_notes"}``:
+        ``models_converted``
         lists ``{"repo", "identity", "former_identity", "bytes"}``, ``models_missing``
         ``{"identity", "repo", "needed_by", "commands"}`` (models the schema needs that the store
         lacks: it opens once they are imported), ``vectors_without_rule`` ``{"element",
@@ -627,7 +628,12 @@ class Store:
         ``saved_queries_using_removed`` ``{"query", "function", "removed_in", "replacement",
         "schema_patch", "note"}`` (saved queries calling a function this version removed, such
         as 0.4.0's ``embed_property``; ``schema_patch`` is the vector rule replacing the call, or
-        ``None``; a saved query is never rewritten)."""
+        ``None``; a saved query is never rewritten), ``saved_queries_writing_vectors``
+        ``{"query", "element", "property", "labels", "rule_exists", "note"}`` (saved queries
+        writing a vector property directly, which a vector rule refuses: remove that write;
+        never rewritten) and ``vector_notes`` (the notes to show: ONE per model, its
+        properties with one combined schema patch, then one per saved query writing a vector
+        property)."""
     def prune(self, up_to: int) -> dict[str, Any]:
         """Removes snapshots and WAL only needed for targets before ``up_to`` (the last two
         snapshots stay): ``{"kept_from", "snapshots_removed", "segments_removed",

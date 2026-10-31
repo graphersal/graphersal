@@ -320,6 +320,9 @@ pub fn map_eval_error(
         EvalAltResult::ErrorIndexingType(type_name, position) => {
             EvalAltResult::ErrorIndexingType(names(&type_name), position)
         }
+        EvalAltResult::ErrorDataRace(_, position) => {
+            EvalAltResult::ErrorRuntime(Dynamic::from(DATA_RACE_HELP.to_string()), position)
+        }
         EvalAltResult::ErrorInFunctionCall(name, source, inner, position) => {
             EvalAltResult::ErrorInFunctionCall(
                 name,
@@ -331,6 +334,16 @@ pub fn map_eval_error(
         other => other,
     })
 }
+
+/// What a script gets instead of Rhai's "Data race detected": a closure using a variable (in
+/// practice `g`) that the method chain the closure is passed to still holds. A closure capturing
+/// `g` makes `g` a shared value, and Rhai locks a shared variable for the whole chain written on
+/// it (`g.queries().map(|q| g.get_query(q.name))`): the closure's own `g.get_query` finds it
+/// locked. The chain's result in a variable, or a `for` loop, ends the chain first.
+const DATA_RACE_HELP: &str = "Data race detected: a closure uses a variable (such as g) that \
+     the method chain it is passed to is still using\nHelp: end the chain on g before the \
+     closure runs: store its result in a variable first (let qs = g.queries(); \
+     qs.map(|q| g.get_query(q.name))), or use a for loop (for q in g.queries() { .. }).";
 
 /// The registered snake_case name of a camelCase call the engine did not find (`createIndex`
 /// -> `create_index`): the camelCase twins of Graphersal's extensions were removed in 0.3.0

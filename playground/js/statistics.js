@@ -162,6 +162,16 @@ export function statisticsModel(raw) {
               },
             ]
           : []),
+        // The loaded embedding models of the graph's catalog: held beside the graph, not in Total.
+        ...(m.model_bytes
+          ? [
+              {
+                name: 'Embedding models (loaded)',
+                text: formatBytes(m.model_bytes),
+                hint: 'The embedding models of this database that are loaded in memory (g.memory_usage().model_bytes). Not part of Total.',
+              },
+            ]
+          : []),
       ]
     : null;
   const processRows = processMemoryRows(r.process);
