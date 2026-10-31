@@ -296,6 +296,7 @@ fn apply_change_set_takes_to_as_given() {
 /// `SetSchema` adding a rule starts no first fill at the outer commit (the change set carries the
 /// vectors of its source); a schema change of the outer unit itself still fills.
 #[test]
+#[allow(clippy::result_large_err)] // `transaction` needs `E: From<GraphError>`
 fn a_change_set_inside_a_unit_starts_no_fill_of_its_own() {
     let mut source = TraversalGraph::new();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -519,7 +520,8 @@ fn writing_to_directly_is_refused_with_help() {
     let mut graph = ruled();
     add_doc(&mut graph, "1", "graph databases".into());
     let before = emb(&graph, "1");
-    let attempts: Vec<Box<dyn Fn(&mut TraversalGraph) -> Result<(), String>>> = vec![
+    type Attempt = Box<dyn Fn(&mut TraversalGraph) -> Result<(), String>>;
+    let attempts: Vec<Attempt> = vec![
         Box::new(|g| {
             g.traversal_mut()
                 .v(None)
@@ -719,6 +721,7 @@ fn removing_a_rule_keeps_the_vectors() {
 }
 
 #[test]
+#[allow(clippy::result_large_err)] // `transaction` needs `E: From<GraphError>`
 fn a_rolled_back_schema_change_leaves_no_vector() {
     let mut graph = TraversalGraph::new();
     add_doc(&mut graph, "1", "graph databases".into());

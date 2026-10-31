@@ -668,6 +668,9 @@ impl JournalWriter for SegmentWriter {
     }
 }
 
+/// What [`sync_into_backup`] did: its warnings, and the files written with their lengths.
+pub(crate) type SyncedJournal = (Vec<String>, Vec<(String, u64)>);
+
 /// Reads a store's journal segments (no lock; a store open elsewhere is read as it is).
 pub(crate) struct StoredReader {
     pub(crate) root: DirPath,
@@ -1132,7 +1135,7 @@ pub(crate) fn restore_lengths(target: &DirPath, before: &[(DirPath, u64)]) {
 pub(crate) fn sync_into_backup(
     dir: &DirPath,
     target: &DirPath,
-) -> Result<(Vec<String>, Vec<(String, u64)>), crate::persist::PersistError> {
+) -> Result<SyncedJournal, crate::persist::PersistError> {
     let io =
         |err| crate::persist::PersistError::io("copying the system journal to the backup", err);
     let (copied, mut warnings) = plan_copy(dir);
@@ -1190,9 +1193,8 @@ pub(crate) fn sync_into_backup(
             }
             Ok(None)
         })();
-        match result.map_err(io)? {
-            Some(warning) => warnings.push(warning),
-            None => {}
+        if let Some(warning) = result.map_err(io)? {
+            warnings.push(warning)
         }
     }
     let journal = target.join(JOURNAL_DIR);

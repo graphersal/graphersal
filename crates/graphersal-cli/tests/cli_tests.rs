@@ -4005,9 +4005,10 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     let res = run(&["store", "upgrade", &missing, "--in-place"], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stderr.contains(&format!(
-            "warning: the schema needs the model model2vec/acme/gone@0123456789ab (doc.emb)"
-        )),
+        res.stderr.contains(
+            &"warning: the schema needs the model model2vec/acme/gone@0123456789ab (doc.emb)"
+                .to_string()
+        ),
         "{}",
         res.stderr
     );

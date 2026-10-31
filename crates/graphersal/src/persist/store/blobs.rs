@@ -494,7 +494,7 @@ pub(crate) fn is_blob_name(code: u8, prefix: &str, hash: &str) -> bool {
         && hash.starts_with(prefix)
         && hash.len() >= 2
         && hash.len() <= 2 * crate::value::blob::MAX_BLOB_HASH_BYTES
-        && hash.len() % 2 == 0
+        && hash.len().is_multiple_of(2)
         && (code != 1 || hash.len() == 64)
         && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -1099,8 +1099,12 @@ fn unreferenced_files<'a>(
 #[derive(Default)]
 pub(crate) struct AtticBlobs {
     /// Entry id -> (its segments' first commits and lengths, the blobs their frames reference).
-    entries: Mutex<BTreeMap<String, (Vec<(u64, u64)>, Vec<BlobRef>)>>,
+    entries: Mutex<BTreeMap<String, AtticEntryBlobs>>,
 }
+
+/// What [`AtticBlobs`] keeps of one attic entry: its WAL segments' first commits and lengths
+/// (the key that tells a changed entry), and the blobs their frames reference.
+type AtticEntryBlobs = (Vec<(u64, u64)>, Vec<BlobRef>);
 
 impl AtticBlobs {
     /// The blobs the frames of attic entry `id` (WAL `segments`) reference: remembered in

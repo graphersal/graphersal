@@ -12559,12 +12559,12 @@ fn a_removed_function_names_its_replacement_also_in_a_saved_query() {
 
     // The help's example runs: the rule fills the vector of a doc from its text.
     let docs = std::sync::Arc::new(GraphSource::empty());
-    eval_value(
+    let _ = eval_value(
         docs.clone(),
         r#"g.set_schema(#{mode: "open"}); g.add_v("doc").property("text", "graph indexes").iterate()"#,
     )
     .unwrap();
-    eval_value(
+    let _ = eval_value(
         docs.clone(),
         r#"g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})"#,
     )

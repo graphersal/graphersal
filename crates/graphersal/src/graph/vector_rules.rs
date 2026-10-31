@@ -213,7 +213,7 @@ impl VectorRules {
             if let Some(positions) = map.get(label) {
                 for &position in positions {
                     let to = &self.rules[position].to;
-                    if !out.iter().any(|&p| &self.rules[p].to == to) {
+                    if !out.iter().any(|&p| self.rules[p].to == to) {
                         out.push(position);
                     }
                 }
@@ -851,7 +851,7 @@ fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -1319,6 +1319,8 @@ impl TraversalGraph {
     /// The rule pass of the outermost unit (module docs). `journal`: a commit (a dry run
     /// journals nothing). Returns the open fill whose end record the commit writes, if the unit
     /// ran a first fill or a model replacement.
+    // The failure carries the open fill to end it: a cold path (the unit rolls back).
+    #[allow(clippy::result_large_err)]
     pub(crate) fn run_vector_rules(
         &mut self,
         journal: bool,

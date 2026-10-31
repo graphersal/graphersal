@@ -2257,6 +2257,7 @@ impl StoreCore {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // the open's state, handed over piecewise
     fn open_read_only_mode(
         dir: DirPath,
         lock: DirLock,
