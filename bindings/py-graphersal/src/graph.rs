@@ -505,8 +505,8 @@ impl Graph {
     /// ``GraphersalError`` whose ``help`` names the field to raise.
     ///
     /// ``max_materialized_bytes`` is the default of the per-query memory limit
-    /// ``traversal.max_materialized_bytes`` of every traversal these scripts run (the estimated
-    /// size of one value or buffer a query materializes; ``None``: the library default, 1 GiB;
+    /// ``traversal.max_materialized_bytes`` of every traversal these scripts run (the memory one
+    /// query holds at once; ``None``: the library default, 1 GiB;
     /// ``0`` means unlimited). A query's own ``g.with("traversal.max_materialized_bytes", n)``
     /// overrides it. The process memory ceiling is ``graphersal.set_memory_limit``.
     #[pyo3(signature = (*, max_operations=None, max_string_size=None, max_array_size=None, max_map_size=None, max_value_depth=None, max_materialized_bytes=None, unlimited=false))]

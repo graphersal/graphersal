@@ -552,13 +552,11 @@ pub(crate) const BULK_MAX_EXPANSION: &str = "bulk.max_expansion";
 /// about 800 MB before the values themselves.
 pub(crate) const DEFAULT_BULK_MAX_EXPANSION: u64 = 10_000_000;
 
-/// Option key of the largest estimated size, in bytes, of one value or buffer a step
-/// materializes: a bulk expansion (a terminal list, `fold()`, `aggregate()`, `group()` value
-/// lists, ...) or a value a `repeat()` loop builds up again on every iteration
-/// (`repeat(__.path())`, `repeat(__.group())`). An integer from 1; see
-/// [`DEFAULT_MAX_MATERIALIZED_BYTES`]. The size is the engine's estimate (the estimator behind
-/// the `Mem` column of `.profile_with(ProfileType::Memory)` without `alloc-tracking`), not a
-/// measurement.
+/// Option key of the per-query memory limit: the bytes one execution holds at once (live
+/// bytes of its buffers and values, freed memory given back; `RunMemory`), checked at step
+/// boundaries, bulk expansions, `repeat()` frontiers and the other check points. An integer
+/// from 1; see [`DEFAULT_MAX_MATERIALIZED_BYTES`]. Measured with the tracking allocator, else
+/// the engine's estimate (book page "Resource Limits").
 pub(crate) const MAX_MATERIALIZED_BYTES: &str = "traversal.max_materialized_bytes";
 
 /// Byte budget when `traversal.max_materialized_bytes` is not set: 1 GiB natively, 256 MiB on

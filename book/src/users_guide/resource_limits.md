@@ -492,7 +492,10 @@ so since 0.5.0 a commit has no practical size limit (up to 2^20 parts, 64 TiB; b
 commit was at most 1 GiB). What bounds it is memory: the unit's changes and its encoded body
 are held while it commits (operation `commit encoding` of the
 [process memory ceiling](#the-process-memory-ceiling)), and a recovery holds one commit's body
-while it replays it.
+while it replays it. Plan for several times the commit's size: while a unit commits, the data it
+added to the graph, its undo log (every before image) and the whole encoded body are in memory at
+once. A single commit of a little over 1 GiB peaked between 4.4 and 5.7 GB of process memory in
+our measurements; more, smaller units (below) keep the peak at the size of one of them.
 
 A commit beyond 2^20 parts, or one whose encoding does not fit under the ceiling, is refused by
 the journal's commit hook: the whole unit is rolled back, nothing is written, and the journal
