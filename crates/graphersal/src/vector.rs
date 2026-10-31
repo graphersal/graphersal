@@ -30,23 +30,15 @@
 //! ```
 
 //!
-//! **Embeddings.** An [`Embedder`] turns texts into vectors; a host registers embedders in an
-//! [`Embedders`] registry and hands it to its traversals
-//! ([`GraphTraversalSource::with_embedders`](crate::GraphTraversalSource::with_embedders), the
-//! script entry points `script::set_engine_embedders` and `script::set_scope_embedders`,
-//! feature `script`). The built-in [`HashNgram`]
-//! (`hash-ngram/1`: hashed words and character n-grams, no model file, the same bits on every
-//! target) is always registered; the DSL step `embed()` and the function `embed(text)` call the
-//! registry's embedders. The engine never calls a model on its own, and a computed vector is
-//! stored as a plain value: replay, recovery and loads never call an embedder.
+//! **Embeddings.** The DSL step `embed()`, the function `embed(text)` and text queries
+//! (`nearest("emb", "text", 5)`) compute vectors with the built-in `hash-ngram/1` (hashed words
+//! and character n-grams, no model file, the same bits on every target) or with an embedding
+//! model kept in the graph's database (book page "Embedding Models in a Store": a model enters
+//! a database only by an import, [`Store::import_model`](crate::persist::Store::import_model),
+//! CLI `graphersal embed-model import`). `g.embedders()` lists them. A computed vector is
+//! stored as a plain value: replay, recovery and loads never call an embedder. Their failures
+//! are [`EmbedError`].
 
+pub use crate::value::EmbedError;
 pub use crate::value::vector::MAX_VECTOR_DIMENSION;
-pub use crate::value::vector::embed::{DEFAULT_MAX_BATCH, MAX_EMBEDDER_NAME_BYTES};
-pub use crate::value::{
-    EmbedContext, EmbedError, Embedder, EmbedderInfo, Embedders, EmbeddersBuilder, HashNgram,
-};
-/// Feature `model2vec` (native targets only): a Model2Vec static embedding model loaded from a
-/// local directory.
-#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
-pub use crate::value::{Model2Vec, Model2VecOptions};
 pub use crate::value::{Vector, VectorElement, VectorError, VectorMetric};

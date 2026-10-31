@@ -1655,7 +1655,7 @@ impl ScriptGraphTraversalSource {
             max_value_depth: self.access.max_value_depth,
             read_only: true,
             query_depth: self.access.query_depth + 1,
-            embedders: self.access.embedders.clone(),
+            graph: self.access.graph.clone(),
         });
         if effects.is_empty() {
             let result =
@@ -1702,7 +1702,7 @@ impl ScriptGraphTraversalSource {
             max_value_depth: self.access.max_value_depth,
             read_only: false,
             query_depth: self.access.query_depth + 1,
-            embedders: self.access.embedders.clone(),
+            graph: self.access.graph.clone(),
         });
         let mut arguments = crate::value::ValueMap::new();
         for (parameter, value) in &bound {

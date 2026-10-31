@@ -89,7 +89,9 @@ fn engine_and_scope<'a>(
         .iter()
         .map(|(key, value)| (key.as_str(), value.clone()))
         .collect();
-    let engine = engine_with_options(limits, authorizer.clone(), &options);
+    let graph = graph.into_any_graph();
+    let mut engine = engine_with_options(limits, authorizer.clone(), &options);
+    crate::script::set_engine_graph(&mut engine, graph.clone());
     let scope = graph_scope_with_options(graph, &options, authorizer);
     (engine, scope)
 }
@@ -799,7 +801,9 @@ pub fn eval_value_with_positional_params(
     validate_positional_indices(&referenced, params.len())?;
 
     let limits = ScriptLimits::default();
-    let engine = engine();
+    let graph = graph.into_any_graph();
+    let mut engine = engine();
+    crate::script::set_engine_graph(&mut engine, graph.clone());
     let mut scope = graph_scope(graph);
     push_positional_params(&mut scope, params, limits.effective_max_value_depth())?;
     engine

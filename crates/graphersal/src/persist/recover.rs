@@ -103,11 +103,26 @@ pub struct Recovered<S: PersistentStorage = TraversalGraph> {
     pub graph: S,
     /// What the recovery did.
     pub report: RecoveryReport,
-    /// The embedding models of the recovered position (catalog kind 5; book page "Embedding
-    /// Models in a Store"), those its schema needs loaded: give them to the view's traversals
-    /// (`GraphTraversalSource::with_embedders`, script `set_engine_embedders`). `None` when
-    /// the position holds no model, and for a recovery outside a Store.
-    pub embedders: Option<std::sync::Arc<crate::value::Embedders>>,
+    /// The registry of the embedding models of the recovered position (catalog kind 5; book
+    /// page "Embedding Models in a Store"), those its schema needs loaded; [`Self::into_graph`]
+    /// attaches it. `None` when the position holds no model, and for a recovery outside a
+    /// Store.
+    pub(crate) models: Option<std::sync::Arc<crate::value::vector::embed::registry::ModelRegistry>>,
+}
+
+impl<S: PersistentStorage> Recovered<S> {
+    /// The recovered graph as a shared [`Graph`](crate::graph::Graph) (with its snapshot
+    /// writer, [`Graph::new_persistent`](crate::graph::Graph::new_persistent)) serving the
+    /// embedding models of the recovered position: its traversals, `embed(text)` and
+    /// `g.embedders()` use them (book page "Embedding Models in a Store"). Taking
+    /// [`Self::graph`] alone serves only the built-in `hash-ngram/1`.
+    pub fn into_graph(self) -> crate::graph::Graph<S> {
+        let graph = crate::graph::Graph::new_persistent(self.graph);
+        if let Some(models) = self.models {
+            graph.attach_model_registry(models);
+        }
+        graph
+    }
 }
 
 /// A recovery: an optional packed snapshot, the journals written since (in order) and a
@@ -287,7 +302,7 @@ impl<'a, S: PersistentStorage> Recovery<'a, S> {
         Ok(Recovered {
             graph,
             report,
-            embedders: None,
+            models: None,
         })
     }
 }

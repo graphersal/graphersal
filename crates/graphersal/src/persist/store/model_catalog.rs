@@ -1362,19 +1362,6 @@ impl<S: PersistentStorage + Default> Store<S> {
         }))
     }
 
-    /// The embedders the store's traversals use when the host passes none (book page
-    /// "Embedding Models in a Store"): the built-in `hash-ngram/1` plus every model of the
-    /// current position, each under its repository name (found by its identity too), the
-    /// default model as the default (else `hash-ngram/1`). The graph's lock guards make them the
-    /// thread's, so a host needs this only to merge them with embedders of its own (the
-    /// answer is a snapshot: a later import or rollback changes the graph's, not this one).
-    pub fn embedders(&self) -> Result<Arc<crate::value::Embedders>, PersistError> {
-        Ok(self.graph.model_registry().map_or_else(
-            || Arc::new(crate::value::Embedders::default()),
-            |r| r.embedders(),
-        ))
-    }
-
     /// Imports an embedding model into this open store (the explicit command a model enters a
     /// store by; book page "Embedding Models in a Store"): its files are written as ONE blob (a
     /// deterministic tar with a manifest, format spec 4.5), then one commit defines it (catalog
@@ -2039,13 +2026,13 @@ fn refusal(
     )
 }
 
-/// The embedders of a recovered past position (a view): its models, the needed ones loaded;
-/// `None` when its catalog holds none. A needed model that is missing, damaged or does not fit
-/// refuses the view like an open.
-pub(crate) fn embedders_of_view<S: PersistentStorage>(
+/// The model registry of a recovered past position (a view): its models, the needed ones
+/// loaded; `None` when its catalog holds none. A needed model that is missing, damaged or does
+/// not fit refuses the view like an open.
+pub(crate) fn models_of_view<S: PersistentStorage>(
     dir: &DirPath,
     graph: &S,
-) -> Result<Option<Arc<crate::value::Embedders>>, PersistError> {
+) -> Result<Option<Arc<registry::ModelRegistry>>, PersistError> {
     let definitions: Vec<Definition> = graph
         .definitions()
         .map_err(PersistError::Graph)?
@@ -2062,5 +2049,5 @@ pub(crate) fn embedders_of_view<S: PersistentStorage>(
         return Ok(None);
     }
     let at_open = check_at_open(dir, definitions, schema.as_ref(), &check)?;
-    Ok(at_open.registry.map(|registry| registry.embedders()))
+    Ok(at_open.registry)
 }

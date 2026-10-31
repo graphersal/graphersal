@@ -515,3 +515,102 @@ pub(crate) fn migrate_new_store(dir: &DirPath) -> Result<Migrated, PersistError>
     let graph_file = files::read_graph_file(dir)?.file;
     complete(dir, graph_file, 3)
 }
+
+/// The 0.4.0 models a packed snapshot carried as model rows (kind 3), staged into `models/` of
+/// the in-memory directory `dir`, converted for a graph loaded WITHOUT a Store
+/// ([`read_snapshot_file`](crate::persist::read_snapshot_file)): every model becomes a blob of
+/// `dir` and a definition loaded into `graph` (outside units, like the rest of the load), the
+/// schema's `embedder` naming a renamed identity rewritten (format spec 15.1, the same rules as
+/// the store migration); then `models/` is removed. A damaged model refuses with
+/// [`StoreFailure::UpgradeModelDamaged`].
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn convert_in_memory(
+    dir: &DirPath,
+    graph: &mut TraversalGraph,
+) -> Result<Vec<Converted>, PersistError> {
+    use crate::graph::PersistentStorage;
+    let legacy = check_legacy(dir)?;
+    let mut definitions = model_catalog::model_definitions(graph).map_err(PersistError::Graph)?;
+    let mut converted = Vec::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut taken: Vec<String> = definitions
+        .iter()
+        .filter_map(|d| d.as_model().map(|m| m.repo().to_string()))
+        .collect();
+    for legacy in &legacy {
+        let former = legacy.model.identity.clone();
+        if let Some(definition) = defined(&definitions, legacy.short()) {
+            if former != definition.name() {
+                renames.push((former.clone(), definition.name().to_string()));
+            }
+            converted.push(Converted {
+                repo: definition
+                    .as_model()
+                    .map(|m| m.repo().to_string())
+                    .unwrap_or_default(),
+                identity: definition.name().to_string(),
+                bytes: definition.as_model().map_or(0, |m| m.blob().length()),
+                former_identity: former,
+            });
+            continue;
+        }
+        let repo = match &legacy.model.repo {
+            Some(repo) if !taken.contains(repo) => repo.clone(),
+            _ => format!("local/{}", legacy.short()),
+        };
+        taken.push(repo.clone());
+        let prepared = prepared(dir, legacy, &repo);
+        let expected = prepared.tar_length();
+        let Prepared {
+            manifest,
+            files,
+            identity,
+            dimension,
+            load_bytes,
+        } = prepared;
+        let mut stream = TarStream::new(files);
+        let blob = blobs::write_blob(dir, &mut stream, &mut |_| {})
+            .map_err(|err| damaged(dir, &legacy.model.id, err))?
+            .blob;
+        if blob.length() != expected {
+            return Err(damaged(
+                dir,
+                &legacy.model.id,
+                format!(
+                    "its tar is {} bytes, {expected} were expected",
+                    blob.length()
+                ),
+            ));
+        }
+        let bytes = blob.length();
+        let definition = Prepared {
+            manifest,
+            files: Vec::new(),
+            identity: identity.clone(),
+            dimension,
+            load_bytes,
+        }
+        .definition(blob, false);
+        graph
+            .load_definition(definition.clone())
+            .map_err(PersistError::Graph)?;
+        definitions.push(definition);
+        if former != identity {
+            renames.push((former.clone(), identity.clone()));
+        }
+        converted.push(Converted {
+            repo,
+            identity,
+            former_identity: former,
+            bytes,
+        });
+    }
+    if !renames.is_empty()
+        && let Some(schema) = graph.get_schema().map_err(PersistError::Graph)?
+        && let Some(after) = renamed_schema(&schema, &renames)
+    {
+        graph.load_schema(after).map_err(PersistError::Graph)?;
+    }
+    remove_models_dir(dir)?;
+    Ok(converted)
+}

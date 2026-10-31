@@ -32,10 +32,10 @@ pub(crate) struct ScriptAccess {
     /// How many saved-query calls are active around this access (0 outside a query); bounded
     /// by [`saved_query::MAX_QUERY_DEPTH`].
     pub(crate) query_depth: usize,
-    /// The embedders the session's `embed` step and `embed(text)` call
-    /// ([`set_engine_embedders`], [`set_scope_embedders`]); the current `Embedders::scope`'s or
-    /// the default registry otherwise.
-    pub(crate) embedders: Arc<crate::value::Embedders>,
+    /// The host graph of the engine ([`set_engine_graph`]): the global `embed(text)` embeds
+    /// with its models when no lock guard of a graph attached them to the thread. Weak: the
+    /// engine never keeps a graph alive.
+    pub(crate) graph: Option<std::sync::Weak<dyn crate::graph::AnyGraph>>,
 }
 
 impl Default for ScriptAccess {
@@ -47,7 +47,7 @@ impl Default for ScriptAccess {
             max_value_depth: 0,
             read_only: false,
             query_depth: 0,
-            embedders: crate::value::Embedders::current(),
+            graph: None,
         }
     }
 }
@@ -63,7 +63,7 @@ impl ScriptAccess {
             max_value_depth: 0,
             read_only: false,
             query_depth: 0,
-            embedders: crate::value::Embedders::current(),
+            graph: None,
             presets: Arc::new(
                 options
                     .iter()
@@ -83,6 +83,19 @@ impl ScriptAccess {
                     .map(|access| access.0.clone())
             })
             .unwrap_or_default()
+    }
+
+    /// The embedders the global `embed(text)` calls: those of the graph whose lock guard this
+    /// thread holds, else those of the engine's host graph ([`set_engine_graph`]), else the
+    /// default registry (`hash-ngram/1`).
+    pub(crate) fn embedders(&self) -> Arc<crate::value::Embedders> {
+        if let Some(attached) = crate::value::vector::embed::registry::attached() {
+            return attached;
+        }
+        match self.graph.as_ref().and_then(std::sync::Weak::upgrade) {
+            Some(graph) => graph.model_embedders(),
+            None => crate::value::Embedders::default_registry(),
+        }
     }
 
     /// The restriction of a source with this access (`private`: the relaxation applies).
@@ -212,39 +225,30 @@ pub fn pin_now(engine: &mut Engine, now: Option<crate::value::temporal::DateTime
     )));
 }
 
-/// Gives the engine built by [`engine_with_options`](crate::script::engine_with_options) (or a
-/// sibling) the `embedders` of the host: the DSL function `embed(text)` and the traversal sources
-/// the engine provides (`GraphSource::empty()`, ...) call them. Pass the same registry to
-/// [`set_scope_embedders`] for the session's `g`, `_g` and `__`. Without it both use the registry
-/// of the current [`Embedders::scope`](crate::vector::Embedders::scope) when the engine is built
-/// in one (the way to give the `eval_*` entry points, which build their own engine, a host's
-/// embedders), else the default registry, which holds only the built-in `hash-ngram/1`.
+/// Makes `graph` the host graph of `engine` (built by
+/// [`engine_with_options`](crate::script::engine_with_options) or a sibling): the global DSL
+/// function `embed(text)` then embeds with the embedding models of `graph`'s database (book page
+/// "Embedding Models in a Store"; `g.embedders()` lists them) also outside a traversal. The
+/// `eval*` entry points that take a graph do this themselves; a host that builds its own engine
+/// and scope ([`graph_scope_with_options`](crate::script::graph_scope_with_options)) calls it
+/// with the scope's graph, and again when it serves another graph. The engine keeps a weak
+/// reference only. Without a host graph `embed(text)` has the built-in `hash-ngram/1`.
 ///
 /// ```rust
 /// use std::sync::Arc;
 /// use graphersal::prelude::*;
-/// use graphersal::vector::{Embedders, HashNgram};
 ///
-/// let small = HashNgram::with_dimension("acme/small", 4).unwrap();
-/// let embedders = Arc::new(
-///     Embedders::builder().with(Arc::new(small)).unwrap().default_name("acme/small").unwrap().build(),
-/// );
+/// let graph = Arc::new(GraphSource::tinkerpop_modern());
 /// let mut engine = graphersal::script::engine();
-/// graphersal::script::set_engine_embedders(&mut engine, embedders.clone());
-/// let mut scope = graphersal::script::graph_scope(Arc::new(GraphSource::tinkerpop_modern()));
-/// graphersal::script::set_scope_embedders(&mut scope, embedders);
-/// let global = engine
+/// graphersal::script::set_engine_graph(&mut engine, graph.clone());
+/// let mut scope = graphersal::script::graph_scope(graph);
+/// let dimension = engine
 ///     .eval_with_scope::<graphersal::script::rhai::INT>(&mut scope, r#"embed("marko").dimension"#)
 ///     .unwrap();
-/// let step = engine
-///     .eval_with_scope::<graphersal::script::rhai::INT>(
-///         &mut scope,
-///         r#"g.v().embed("name").next().dimension"#,
-///     )
-///     .unwrap();
-/// assert_eq!((global, step), (4, 4));
+/// assert_eq!(dimension, 256);
 /// ```
-pub fn set_engine_embedders(engine: &mut Engine, embedders: Arc<crate::value::Embedders>) {
+pub fn set_engine_graph(engine: &mut Engine, graph: impl crate::graph::IntoAnyGraph) {
+    let graph: Arc<dyn crate::graph::AnyGraph> = graph.into_any_graph();
     let (access, clock) = engine
         .default_tag()
         .read_lock::<EngineAccess>()
@@ -256,28 +260,10 @@ pub fn set_engine_embedders(engine: &mut Engine, embedders: Arc<crate::value::Em
             )
         });
     let access = ScriptAccess {
-        embedders,
+        graph: Some(Arc::downgrade(&graph)),
         ..access
     };
     engine.set_default_tag(Dynamic::from(EngineAccess(Arc::new(access), clock)));
-}
-
-/// Gives the session sources of a scope built by
-/// [`graph_scope_with_options`](crate::script::graph_scope_with_options) (`g`, `_g`, `__`) the
-/// host's `embedders` (see [`set_engine_embedders`], which covers the engine's side). Traversals
-/// already stored in script variables keep the registry they were built with.
-pub fn set_scope_embedders(scope: &mut Scope, embedders: Arc<crate::value::Embedders>) {
-    for name in ["g", "_g", "__"] {
-        if let Some(value) = scope.get_mut(name)
-            && let Some(mut source) = value.write_lock::<ScriptGraphTraversalSource>()
-        {
-            let access = ScriptAccess {
-                embedders: embedders.clone(),
-                ..(*source.access).clone()
-            };
-            source.access = Arc::new(access);
-        }
-    }
 }
 
 /// Installs `authorizer` on `engine`: the tag for the source constructors (also carrying the

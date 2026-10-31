@@ -36,19 +36,10 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// matching, deduplication and as a baseline before a semantic model.
 ///
 /// [`Embedders::default`](super::Embedders) holds it as `hash-ngram/1` (256 f32 components,
-/// metric cosine, 256 texts per call, deterministic, local). A host registers other dimensions
-/// under its own name with [`Self::with_dimension`].
-///
-/// ```rust
-/// use graphersal::vector::{EmbedContext, Embedder, HashNgram};
-///
-/// let embedder = HashNgram::new();
-/// let vectors = embedder.embed(&["Graph", "graph", "grahp"], &EmbedContext::new()).unwrap();
-/// assert_eq!(vectors[0], vectors[1]); // case-insensitive
-/// assert_eq!(vectors[0].dimension(), 256);
-/// ```
+/// metric cosine, 256 texts per call, deterministic, local); the DSL function `embed(text)`
+/// computes it outside the engine.
 #[derive(Debug, Clone)]
-pub struct HashNgram {
+pub(crate) struct HashNgram {
     info: EmbedderInfo,
 }
 
@@ -60,30 +51,30 @@ impl Default for HashNgram {
 
 impl HashNgram {
     /// The registry name and model identity of the built-in instance.
-    pub const NAME: &'static str = "hash-ngram/1";
+    pub(crate) const NAME: &'static str = "hash-ngram/1";
 
     /// The dimension of the built-in instance.
-    pub const DEFAULT_DIMENSION: usize = 256;
+    pub(crate) const DEFAULT_DIMENSION: usize = 256;
 
     /// The built-in instance: `hash-ngram/1`, 256 f32 components.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         HashNgram {
             info: Self::info_of(Self::NAME, Self::DEFAULT_DIMENSION).with_model(Self::NAME),
         }
     }
 
     /// The same algorithm with `dimension` components (1 to
-    /// [`MAX_VECTOR_DIMENSION`](crate::vector::MAX_VECTOR_DIMENSION)), registered under the
-    /// host's own `name` (never `hash-ngram/*`, which the registry reserves). Its model identity
-    /// is `hash-ngram/1?dim=<dimension>`.
-    pub fn with_dimension(
+    /// [`MAX_VECTOR_DIMENSION`](crate::vector::MAX_VECTOR_DIMENSION)) under `name` (tests). Its
+    /// model identity is `hash-ngram/1?dim=<dimension>`.
+    #[allow(dead_code)]
+    pub(crate) fn with_dimension(
         name: impl Into<CompactString>,
         dimension: usize,
-    ) -> Result<Self, EmbedError> {
+    ) -> Result<Self, String> {
         if dimension == 0 || dimension > MAX_VECTOR_DIMENSION {
-            return Err(EmbedError::registry(format!(
+            return Err(format!(
                 "hash-ngram has 1 to {MAX_VECTOR_DIMENSION} components, not {dimension}"
-            )));
+            ));
         }
         let model = format!("{}?dim={dimension}", Self::NAME);
         Ok(HashNgram {

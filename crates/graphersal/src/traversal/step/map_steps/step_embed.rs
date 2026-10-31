@@ -227,9 +227,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepEmbed {
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// `embed(key[, #{embedder}])`: the string property `key` (a name or a
     /// [`JsonPath`](crate::value::JsonPath)) of the incoming element embedded as a vector by the
-    /// embedder `embedder` of the traversal's registry
-    /// ([`with_embedders`](Self::with_embedders); `None`: its default, `hash-ngram/1` unless
-    /// the host chose another). A Graphersal extension (book page "Vectors").
+    /// embedder `embedder`: the built-in `hash-ngram/1` or a model of the graph's database, by
+    /// its repository (`None`: the database's default model, else `hash-ngram/1`). A Graphersal
+    /// extension (book pages "Vectors", "Embedding Models in a Store").
     ///
     /// An element without the property is dropped (like `values(key)`); a value that is not a
     /// string fails with [`EmbedError::NotText`]. The step hands the embedder batches of its

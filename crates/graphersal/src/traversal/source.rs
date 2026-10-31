@@ -697,11 +697,35 @@ impl GraphSource {
                 .ends_with(".gsnap")
     }
 
-    /// Loads a packed snapshot file (`persist::read_snapshot`): the graph with its schema,
-    /// lineage id, commit position and auto-id sequences.
+    /// Loads a packed snapshot file: the graph with its schema, lineage id, commit position and
+    /// auto-id sequences, serving the embedding models the file carries
+    /// ([`persist::read_snapshot_file`](crate::persist::read_snapshot_file), which also returns
+    /// the report of what an earlier release left; here its notes go to `tracing` as warnings).
     #[cfg(all(feature = "io", feature = "persist"))]
     pub fn from_snapshot(path: impl AsRef<std::path::Path>) -> Result<Graph, IOError> {
         let path = path.as_ref();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (graph, report) =
+                crate::persist::read_snapshot_file(path, &crate::persist::ReadOptions::new())
+                    .map_err(|source| IOError::Snapshot {
+                        path: path.to_string_lossy().into_owned(),
+                        source: Box::new(source),
+                    })?;
+            for note in report.notes(&path.to_string_lossy()) {
+                tracing::warn!("{note}");
+            }
+            Ok(graph)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::from_snapshot_plain(path)
+        }
+    }
+
+    /// [`Self::from_snapshot`] without the models (wasm32: no second read of a file).
+    #[cfg(all(feature = "io", feature = "persist", target_arch = "wasm32"))]
+    fn from_snapshot_plain(path: &std::path::Path) -> Result<Graph, IOError> {
         let file = std::fs::File::open(path).map_err(|err| IOError::FileRead {
             path: path.to_string_lossy().into_owned(),
             source: err,
@@ -884,41 +908,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             sack: None,
             restrictions: None,
             create_time: None,
-            embedders: None,
         }
-    }
-
-    /// Gives this traversal the embedders its `embed` steps call (book page "Vectors", section
-    /// "Embeddings"). Without it the traversal uses the default registry, which holds only the
-    /// built-in `hash-ngram/1`.
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use graphersal::prelude::*;
-    /// use graphersal::vector::{Embedders, HashNgram};
-    ///
-    /// let small = HashNgram::with_dimension("acme/small", 8).unwrap();
-    /// let embedders = Embedders::builder()
-    ///     .with(Arc::new(small))
-    ///     .unwrap()
-    ///     .default_name("acme/small")
-    ///     .unwrap()
-    ///     .build();
-    /// let graph = GraphSource::tinkerpop_modern();
-    /// let g = graph.read();
-    /// let vector = g
-    ///     .traversal()
-    ///     .with_embedders(Arc::new(embedders))
-    ///     .v(None::<()>)
-    ///     .embed("name", None)
-    ///     .next()
-    ///     .unwrap()
-    ///     .unwrap();
-    /// assert_eq!(vector.as_vector().map(|v| v.dimension()), Some(8));
-    /// ```
-    pub fn with_embedders(mut self, embedders: std::sync::Arc<crate::value::Embedders>) -> Self {
-        self.embedders = Some(embedders);
-        self
     }
 
     /// Pins the time `defaultFunction: "now"` stores (and `"today"` takes its UTC date from) for
@@ -2683,10 +2673,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         };
         // The `embed` steps resolve their embedder first, so the permission check asks for the
         // embedder that runs and the profile names it.
-        let embedders = self
-            .embedders
-            .clone()
-            .unwrap_or_else(crate::value::Embedders::current);
+        // The graph's embedders: the built-in and the models of its database (the lock guard
+        // the storage comes from attached them to this thread).
+        let embedders = crate::value::Embedders::current();
         let storage = &self.storage;
         // The schema is read only when a text query needs it; a storage that cannot read it
         // fails the run with its own error (checked first: a bind error after a failed read

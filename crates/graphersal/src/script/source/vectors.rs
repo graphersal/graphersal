@@ -251,18 +251,23 @@ impl ScriptGraphTraversalSource {
         )))
     }
 
-    /// `g.embedders()`: the embedders of the session, one map each (`name`, `model`,
-    /// `dimension`, `element`, `metric`, `max_batch`, `deterministic`, `local`), the default
-    /// first. Asks nothing: it names what the host registered, it runs none of them.
+    /// `g.embedders()`: the embedders of the graph, one map each (`name`, `model`,
+    /// `dimension`, `element`, `metric`, `max_batch`, `deterministic`, `local`, `default`), the
+    /// default first: the built-in `hash-ngram/1` and the models of its database, named by
+    /// their repository. Asks nothing: it names them, it runs none of them.
     pub fn embedders(&mut self) -> rhai::Array {
-        embedder_list(&self.access.embedders)
+        let registry = match &self.g {
+            Some(graph) => graph.model_embedders(),
+            None => self.access.embedders(),
+        };
+        embedder_list(&registry)
     }
 }
 
 /// The embedders of `registry` as script maps, the default first.
 fn embedder_list(registry: &crate::value::Embedders) -> rhai::Array {
     let default = registry.default_embedder().info().name.clone();
-    let mut infos: Vec<&crate::value::EmbedderInfo> = registry.infos().collect();
+    let mut infos: Vec<&crate::value::vector::embed::EmbedderInfo> = registry.infos().collect();
     infos.sort_by_key(|info| info.name != default);
     infos
         .into_iter()
@@ -347,8 +352,8 @@ pub(crate) fn script_embed(
         None => None,
     };
     let access = crate::script::access::ScriptAccess::of_context(ctx);
-    let embedder = access
-        .embedders
+    let embedders = access.embedders();
+    let embedder = embedders
         .resolve(requested.as_deref())
         .map_err(|err| script_error(Box::new(crate::TraverserError::Embed(err))))?
         .clone();
