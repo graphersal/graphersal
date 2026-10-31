@@ -57,6 +57,8 @@ pub struct ClosedCommitOptions {
     principal: Option<String>,
     codec: Codec,
     wal_segment_bytes: Option<u64>,
+    /// Attributes of the commit's metadata (crate-internal: the migration's `upgrade`).
+    attributes: Vec<(String, String)>,
 }
 
 impl ClosedCommitOptions {
@@ -82,6 +84,12 @@ impl ClosedCommitOptions {
     #[doc(hidden)]
     pub fn with_wal_segment_bytes(mut self, bytes: u64) -> Self {
         self.wal_segment_bytes = Some(bytes);
+        self
+    }
+
+    /// The same options with the metadata attribute `key` = `value` (crate-internal).
+    pub(crate) fn with_attribute(mut self, key: &str, value: &str) -> Self {
+        self.attributes.push((key.to_string(), value.to_string()));
         self
     }
 
@@ -317,12 +325,36 @@ pub(crate) fn commit_catalog_closed(
     options: &ClosedCommitOptions,
     plan: &mut dyn FnMut(&CatalogView, &DirPath) -> Result<CatalogPlan, PersistError>,
 ) -> Result<ClosedCommit, PersistError> {
-    let started = web_time::Instant::now();
     let (lock, graph_file) = closed_store_prelude(dir)?;
+    let committed = commit_catalog_locked(dir, graph_file, operation, options, plan);
+    drop(lock);
+    committed
+}
+
+/// The catalog view of the store in `dir` whose `GRAPH` is `graph_file` (read-only; the
+/// caller holds the writer lock or works on a store nothing else opens).
+pub(crate) fn catalog_view(
+    dir: &DirPath,
+    graph_file: &GraphFile,
+) -> Result<CatalogView, PersistError> {
+    read_view(dir, graph_file).map(|(view, _)| view)
+}
+
+/// [`commit_catalog_closed`] after its preconditions: the caller holds the writer lock (or the
+/// store is a new copy nothing else opens), `graph_file` is the store's current `GRAPH` and no
+/// `INTENT` stands in the way (the store migration of `migrate_models.rs` runs its commit
+/// under its own `INTENT`). A backup directory is not refused here.
+pub(crate) fn commit_catalog_locked(
+    dir: &DirPath,
+    graph_file: GraphFile,
+    operation: &'static str,
+    options: &ClosedCommitOptions,
+    plan: &mut dyn FnMut(&CatalogView, &DirPath) -> Result<CatalogPlan, PersistError>,
+) -> Result<ClosedCommit, PersistError> {
+    let started = web_time::Instant::now();
     let (mut view, tail) = read_view(dir, &graph_file)?;
     let planned = plan(&view, dir)?;
     if planned.mutations.is_empty() {
-        drop(lock);
         return Ok(ClosedCommit {
             commit_seq: None,
             committed_at: None,
@@ -350,9 +382,15 @@ pub(crate) fn commit_catalog_closed(
     let (node_sequence, edge_sequence) = view.state.id_sequences();
     let mut builder = ChangeSet::builder(commit_seq, committed_at)
         .with_sequences(node_sequence, edge_sequence)
-        .with_metadata(match options.principal() {
-            Some(principal) => CommitMetadata::new().with_principal(principal.to_string()),
-            None => CommitMetadata::new(),
+        .with_metadata({
+            let mut metadata = match options.principal() {
+                Some(principal) => CommitMetadata::new().with_principal(principal.to_string()),
+                None => CommitMetadata::new(),
+            };
+            for (key, value) in &options.attributes {
+                metadata = metadata.with_attribute(key, value.as_str());
+            }
+            metadata
         });
     let ops = planned.mutations.len() as u64;
     let mut kinds: Vec<String> = Vec::new();
@@ -480,7 +518,6 @@ pub(crate) fn commit_catalog_closed(
         .count("ms", started.elapsed().as_millis() as u64),
     );
     journal.detach_writer();
-    drop(lock);
     Ok(ClosedCommit {
         commit_seq: Some(commit_seq),
         committed_at: Some(committed_at),

@@ -323,14 +323,22 @@ impl Store {
     }
 
     /// ``Store.upgrade(source, target=None, *, in_place=False, single_file=False)``: converts
-    /// a store (or backup, or ``.gstore`` file) written by an older Graphersal (0.1.x) to the
+    /// a store (or backup, or ``.gstore`` file) written by an older Graphersal (0.1.x to 0.4.x) to the
     /// current format, without the older Graphersal. With ``target``: a new store there (a new
     /// directory, or a single file: a ``.gstore`` path or ``single_file=True``); ``source`` is
     /// not changed. With ``in_place=True``: ``source`` itself (back it up first). Everything
     /// is carried (graph, schema, catalog, history, marks, attic, identity); the source is
     /// verified first and a damaged one raises (``err.cause == "damaged_source"``: repair it
-    /// instead). Returns ``{"from_version", "to_version", "already_current", "in_place",
-    /// "backup", "files", "bytes"}``.
+    /// instead). The embedding models of a 0.4.0 store (``models/``) become blobs defined by
+    /// one commit (``err.cause == "upgrade_model_damaged"`` for a damaged one, nothing
+    /// written). Returns ``{"from_version", "to_version", "already_current", "in_place",
+    /// "backup", "files", "bytes", "models_converted", "migration_commit", "models_missing",
+    /// "vectors_without_rule"}``: ``models_converted`` lists ``{"repo", "identity",
+    /// "former_identity", "bytes"}``, ``models_missing`` ``{"identity", "repo", "needed_by",
+    /// "commands"}`` (the store opens once they are imported), ``vectors_without_rule``
+    /// ``{"element", "label", "property", "embedder", "model", "elements", "exact",
+    /// "commits_not_counted", "schema_patch", "note"}`` (a vector property with a model but no
+    /// source property ``from``: the note says how to add one).
     #[staticmethod]
     #[pyo3(signature = (source, target=None, *, in_place=false, single_file=false))]
     fn upgrade(
@@ -341,6 +349,8 @@ impl Store {
         single_file: bool,
     ) -> PyResult<Py<PyAny>> {
         let source = source.to_string();
+        let source_path = source.clone();
+        let target_path = target.map(str::to_string);
         let target = match (target, in_place) {
             (Some(target), false) => Some(target.to_string()),
             (None, true) => None,
@@ -379,6 +389,44 @@ impl Store {
         }
         dict.set_item("files", report.files_copied)?;
         dict.set_item("bytes", report.bytes_copied)?;
+        let converted = PyList::empty(py);
+        for model in &report.models_converted {
+            let item = PyDict::new(py);
+            item.set_item("repo", model.repo())?;
+            item.set_item("identity", model.identity())?;
+            item.set_item("former_identity", model.former_identity())?;
+            item.set_item("bytes", model.bytes())?;
+            converted.append(item)?;
+        }
+        dict.set_item("models_converted", converted)?;
+        dict.set_item("migration_commit", report.migration_commit)?;
+        let store_path = target_path.as_deref().unwrap_or(source_path.as_str());
+        let missing = PyList::empty(py);
+        for model in &report.models_missing {
+            let item = PyDict::new(py);
+            item.set_item("identity", model.identity())?;
+            item.set_item("repo", model.repo())?;
+            item.set_item("needed_by", model.needed_by().to_vec())?;
+            item.set_item("commands", model.commands(store_path))?;
+            missing.append(item)?;
+        }
+        dict.set_item("models_missing", missing)?;
+        let vectors = PyList::empty(py);
+        for vector in &report.vectors_without_rule {
+            let item = PyDict::new(py);
+            item.set_item("element", vector.element_kind().as_str())?;
+            item.set_item("label", vector.label())?;
+            item.set_item("property", vector.property())?;
+            item.set_item("embedder", vector.embedder())?;
+            item.set_item("model", vector.model())?;
+            item.set_item("elements", vector.elements())?;
+            item.set_item("exact", vector.exact())?;
+            item.set_item("commits_not_counted", vector.commits_not_counted())?;
+            item.set_item("schema_patch", vector.schema_patch())?;
+            item.set_item("note", vector.note(store_path))?;
+            vectors.append(item)?;
+        }
+        dict.set_item("vectors_without_rule", vectors)?;
         Ok(dict.into_any().unbind())
     }
 

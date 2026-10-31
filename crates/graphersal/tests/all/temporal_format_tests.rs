@@ -533,14 +533,14 @@ mod binary {
 
     #[test]
     fn a_store_of_store_format_version_2_is_refused_as_older() {
-        assert_eq!(persist::STORE_FORMAT_VERSION, 3);
+        assert_eq!(persist::STORE_FORMAT_VERSION, 4);
         let dir = MemDir::new();
         let store = Store::create_with(&dir, TraversalGraph::new(), StoreOptions::new()).unwrap();
         add_temporal_vertex(&store, "t", one("d", date("2024-01-01")));
         store.close().unwrap();
         for name in ["GRAPH", "GRAPH.copy"] {
             let mut bytes = dir.read(name, 1 << 20).unwrap();
-            assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+            assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
             bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
             let crc = crc32c(&bytes[..252]);
             bytes[252..256].copy_from_slice(&crc.to_le_bytes());
@@ -558,7 +558,7 @@ mod binary {
                             err,
                             PersistError::OlderFormat {
                                 found: 2,
-                                supported: 3,
+                                supported: 4,
                                 ..
                             }
                         ),

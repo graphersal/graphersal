@@ -548,9 +548,10 @@ every other command does (below):
 <!-- upgrades:begin -->
 | From store format version | Written by | To | Upgrade |
 |---|---|---|---|
-| 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
-| 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
+| 1 | never released (no store id) | 4 | unsupported (packed snapshot) |
+| 2 | Graphersal 0.1.x (no models: the version word only) | 4 | in place or into a copy (migration) |
+| 3 | Graphersal 0.2.x - 0.4.x | 4 | in place or into a copy (migration) |
+| 4 | Graphersal 0.5.x and later | 4 | nothing to do |
 <!-- upgrades:end -->
 
 ```text

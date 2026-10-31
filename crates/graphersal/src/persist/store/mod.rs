@@ -38,6 +38,7 @@ mod graph;
 mod licenses;
 mod maintenance;
 mod merge;
+mod migrate_models;
 mod model_catalog;
 mod models;
 mod rollback;
@@ -82,7 +83,7 @@ pub use model_catalog::{
 pub(crate) use models::StoredModel;
 pub use models::{ModelCopy, ModelRole, NewModel};
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
-pub use upgrade::UpgradeReport;
+pub use upgrade::{ConvertedModel, MissingModel, UpgradeReport, VectorWithoutRule};
 pub(crate) use upgrade::upgradable_from;
 pub use workload::{NotScheduledJob, UserJobs};
 
@@ -1402,7 +1403,39 @@ impl<S: PersistentStorage + Default> Store<S> {
         for blob in &held {
             gate.release(blob);
         }
-        result.map(|(_, blobs)| blobs)
+        let (legacy, blobs) = result?;
+        // The model rows of a Graphersal 0.4.0 file (format spec 4.5, 8) landed in `models/`:
+        // each is imported as a blob with its definition (one unit each), then `models/` goes.
+        if !legacy.is_empty() {
+            let dir = self.core.shared.dir.clone();
+            let definitions = self.models()?;
+            let mut taken: Vec<String> = Vec::new();
+            for model in legacy {
+                let legacy = migrate_models::legacy_of(&dir, model)?;
+                let suffix = format!("@{}", legacy.short());
+                // The catalog keeps one model per repository: a repository another model
+                // takes (in the store or earlier in this file) gives `local/<12 hex>`.
+                let free = |repo: &str| {
+                    !taken.iter().any(|t| t == repo)
+                        && definitions
+                            .iter()
+                            .filter(|m| m.repo == repo)
+                            .all(|m| m.identity.ends_with(&suffix))
+                };
+                let repo = match &legacy.model.repo {
+                    Some(repo) if free(repo) => repo.clone(),
+                    _ => format!("local/{}", legacy.short()),
+                };
+                taken.push(repo.clone());
+                let prepared = migrate_models::prepared(&dir, &legacy, &repo);
+                self.import_prepared(
+                    prepared,
+                    &ImportModelOptions::new().with_principal(migrate_models::UPGRADE_PRINCIPAL),
+                )?;
+            }
+            migrate_models::remove_models_dir(&dir)?;
+        }
+        Ok(blobs)
     }
 
     /// Writes the content `reader` yields as a blob of this open store (format spec 4.6):
@@ -1877,7 +1910,11 @@ impl StoreCore {
                         time: now(),
                     }],
                 },
-            )
+            )?;
+            // The model rows of a Graphersal 0.4.0 `.gsnap` (format spec 4.5, 8) became
+            // `models/`: they are migrated into blobs and definitions by the new store's first
+            // commit (format spec 15.1).
+            migrate_models::migrate_new_store(dir).map(|_| ())
         })();
         if let Err(err) = result {
             undo_create(dir, existed);
@@ -2393,6 +2430,14 @@ impl StoreCore {
         };
         // The intact models are carried; a damaged one is reported (format spec 4.5).
         let (_, mut models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
+        // A repaired Graphersal 0.4.0 store's models become blobs and definitions in the new
+        // store (format spec 15.1); a model that does not convert is reported, it does not
+        // fail the repair.
+        if let Err(err) = migrate_models::migrate_new_store(new_dir) {
+            models_not_carried.push(format!("the models/ directory was not migrated: {err}"));
+            let _ = migrate_models::remove_models_dir(new_dir);
+            let _ = files::Intent::clear(new_dir);
+        }
         // The blobs the repaired state references, each checked by its hash too (the source
         // is damaged); a missing or damaged one is reported, never fails the repair.
         let (blobs_carried, blobs_not_carried) = blobs::carry_state(&models_from, new_dir, true)?;
@@ -4924,6 +4969,13 @@ fn complete_intent(dir: &DirPath, intent: &Intent) -> Result<(), PersistError> {
         "attic_restore" => return rollback::apply_restore(dir, intent, None),
         // Clears the intent itself.
         backup::INCREMENT_OP => return backup::undo_increment(dir, intent),
+        // An interrupted migration of a 0.4.0 store's models (format spec 11.1, 15.1): its
+        // `GRAPH` is of this version already; completed idempotently, clears the intent.
+        migrate_models::UPGRADE_MODELS_OP => {
+            let file = read_graph_file(dir)?.file;
+            migrate_models::complete(dir, file, migrate_models::intent_from(intent))?;
+            return Ok(());
+        }
         // An operation of a newer version: it cannot be completed here, and it is not damage
         // (format spec 16); the store is left as it is.
         other => {

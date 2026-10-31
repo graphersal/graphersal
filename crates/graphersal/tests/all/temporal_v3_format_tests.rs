@@ -379,7 +379,8 @@ fn patch_wal(dir: &MemDir, from: &[u8], to: &[u8]) {
 fn every_file_this_build_writes_is_of_file_format_version_3() {
     // File format version 4 since P4 (blob references); the temporal tags are unchanged.
     assert_eq!(persist::FORMAT_VERSION, 4);
-    assert_eq!(persist::STORE_FORMAT_VERSION, 3, "the store version stays");
+    // Store format version 4 since P10 (the migration of 0.4.0's models/).
+    assert_eq!(persist::STORE_FORMAT_VERSION, 4, "the store version");
     let mut packed = Vec::new();
     persist::write_snapshot(&v3_graph(), &mut packed, &WriteOptions::new()).unwrap();
     assert_eq!(&packed[..8], b"GRSLPACK");
@@ -694,6 +695,9 @@ fn the_store_of_0_2_3_reads_exactly_and_continues_in_version_3() {
     assert!(before.iter().all(|(_, v)| *v == 2), "{before:?}");
     let old_wal = dir.read("wal/00000000000000000001.wal", u64::MAX).unwrap();
     assert!(Store::verify_dir(&shared).unwrap().is_ok());
+    // Store format version 3 -> 4 (P10): the version word only (no models/), every file kept.
+    Store::upgrade_in_place(&shared).unwrap();
+    assert_eq!(file_versions(&dir), before);
 
     let store = Store::open(&shared, StoreOptions::new()).unwrap();
     assert_eq!(store.graph().read().last_commit_seq(), 4);

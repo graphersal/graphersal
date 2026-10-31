@@ -693,6 +693,76 @@ pub(super) fn base_catalog(
     Ok((state, base.manifest))
 }
 
+/// For each `(edge, label, key)` of `wanted`, the number of elements of the snapshot `seq` in
+/// `path` (vertices whose labels include `label`, or edges of `label` when `edge`) holding a
+/// vector under the top-level property `key`. Streams every chunk of the snapshot's element
+/// segments once (each checked; memory: one chunk); nothing is written.
+pub(super) fn count_vectors(
+    seq: u64,
+    path: DirPath,
+    depth: usize,
+    wanted: &[(bool, String, String)],
+) -> Result<Vec<u64>, PersistError> {
+    let base = Base::open(seq, path)?;
+    let mut counts = vec![0u64; wanted.len()];
+    for number in 0..base.manifest.segments.len() {
+        let kind = base.manifest.segments[number].kind;
+        let edge = match kind {
+            KIND_VERTEX => false,
+            KIND_EDGE => true,
+            _ => continue,
+        };
+        if !wanted.iter().any(|(e, _, _)| *e == edge) {
+            continue;
+        }
+        let (entry, segment) = base.segment(number)?;
+        let location = base.location(entry);
+        let mut reader = segment
+            .open_read()
+            .map_err(|err| PersistError::io("reading a snapshot segment", err))?;
+        read_segment_stream(
+            &base.manifest,
+            number,
+            &mut reader,
+            &location,
+            &mut |_, chunk| {
+                let holds = |props: &crate::value::PropertyMap, key: &str| {
+                    matches!(props.get(key), Some(crate::value::ElementProperty::Vector(_)))
+                };
+                if edge {
+                    let records =
+                        decode_edge_chunk(chunk, depth).map_err(|err| err.at(&location, 0))?;
+                    for record in &records {
+                        for (at, (e, label, key)) in wanted.iter().enumerate() {
+                            if *e
+                                && record.label.as_deref() == Some(label.as_str())
+                                && holds(&record.properties, key)
+                            {
+                                counts[at] += 1;
+                            }
+                        }
+                    }
+                } else {
+                    let records =
+                        decode_vertex_chunk(chunk, depth).map_err(|err| err.at(&location, 0))?;
+                    for record in &records {
+                        for (at, (e, label, key)) in wanted.iter().enumerate() {
+                            if !*e
+                                && record.labels.iter().any(|l| l == label)
+                                && holds(&record.properties, key)
+                            {
+                                counts[at] += 1;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )?;
+    }
+    Ok(counts)
+}
+
 /// Pass 2: the delta graph with the base's identity, position, schema and catalog, holding the
 /// base's elements the WAL touches and the endpoints of the touched edges.
 fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGraph, PersistError> {
