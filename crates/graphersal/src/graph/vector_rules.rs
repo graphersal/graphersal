@@ -721,7 +721,8 @@ impl PlannedFill {
         &self.direct_writes
     }
 
-    /// Sets [`Self::direct_writes`].
+    /// Sets [`Self::direct_writes`] (only the script layer finds them).
+    #[cfg(feature = "script")]
     pub(crate) fn set_direct_writes(&mut self, queries: Vec<String>) {
         self.direct_writes = queries;
     }
