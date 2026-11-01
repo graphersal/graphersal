@@ -1,7 +1,12 @@
 # Release 0.5.1
 
-A patch release of the 0.5 line. It changes no format and no API; stores, snapshots and journals
-of 0.5.0 are read and written exactly as before.
+A patch release of the 0.5 line that fixes a performance regression of 0.5.0. It concerns
+scripts, saved-query calls and transactions that run many writing traversals in one unit after
+the graph has shrunk or grown a lot in it, such as a loader that drops most of a graph and writes
+it again: in 0.5.0 each of these traversals walked the whole graph. A real loader of that kind
+took 618 s with 0.5.0 and takes about 33 s with 0.5.1. The release also documents what the
+estimated memory measure reports inside such a unit (see "Fixed"). It changes no format and no API; stores, snapshots and journals of 0.5.0 are read
+and written exactly as before.
 
 ## Fixed
 
@@ -24,3 +29,8 @@ of 0.5.0 are read and written exactly as before.
   is therefore an extrapolation from the last walk and can be off after large changes in it;
   install the tracking allocator for exact figures
   ([Resource Limits](../users_guide/resource_limits.md)).
+
+## Upgrading from 0.5.0
+
+A drop-in replacement: no format change, no API change, no upgrade step. Stores, snapshots,
+journals and backups of 0.5.0 and 0.5.1 are interchangeable.
