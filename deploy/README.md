@@ -17,6 +17,31 @@ DigitalOcean droplet:
    first if you want expiry warnings). It installs nginx, certbot, the firewall (SSH, HTTP,
    HTTPS), automatic security updates, a `deploy` user that owns `/var/www/graphersal` and logs in
    with the same key, and the nginx sites. Its log: `/var/log/cloud-init-output.log`.
+
+   It also hardens the droplet against running out of memory: sshd accepts few unauthenticated
+   connections (`MaxStartups 4:50:10`, `LoginGraceTime 20` in
+   `/etc/ssh/sshd_config.d/10-graphersal.conf`), ufw rate-limits SSH (`ufw limit OpenSSH`), a
+   1 GiB swap file (`/swapfile`), and nginx restarts by itself and is the kernel's last OOM choice
+   (`Restart=on-failure`, `OOMScoreAdjust=-500` in
+   `/etc/systemd/system/nginx.service.d/override.conf`). The reason: on 2026-11-01 at 05:34 UTC a
+   burst of unauthenticated SSH connections (about 15 MB per pre-auth sshd under the default
+   `MaxStartups 10:30:100`) exhausted the 458 MB droplet without swap, and the kernel OOM-killed
+   nginx.
+
+   On an existing droplet, set up before this, as root:
+
+   ```bash
+   printf 'MaxStartups 4:50:10\nLoginGraceTime 20\n' > /etc/ssh/sshd_config.d/10-graphersal.conf
+   sshd -t && systemctl restart ssh
+   ufw limit OpenSSH
+   [ -e /swapfile ] || { fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile; }
+   swapon --show=NAME --noheadings | grep -qx /swapfile || swapon /swapfile
+   grep -q '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+   mkdir -p /etc/systemd/system/nginx.service.d
+   printf '[Service]\nRestart=on-failure\nRestartSec=5s\nOOMScoreAdjust=-500\n' \
+     > /etc/systemd/system/nginx.service.d/override.conf
+   systemctl daemon-reload && systemctl restart nginx
+   ```
 2. DNS (the registrar's DNS, which keeps its e-mail forwarding): A and AAAA records for `@`,
    `www` and `play` of `graphersal.dev`, and for `@` and `www` of `graphersal.com` and
    `graphersal.org`, all pointing at the droplet.
