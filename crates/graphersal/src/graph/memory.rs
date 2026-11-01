@@ -6,8 +6,10 @@
 //! takes `&self` and never touches `TraverserContext`/`ProfileContext`/any query path. The only
 //! callers on the execution path are the estimated memory checks (the process memory ceiling
 //! `memory.limit` without a tracking allocator): once per run they take `footprint_hint` (the
-//! last walk adjusted by the element counts, no walk) and, only near the ceiling or before the
-//! first walk, `footprint_bytes` (cached; walks again only after the graph changed).
+//! last walk adjusted by the element counts, no walk) and, only near the ceiling, before the
+//! first walk or (outside an open unit with changes) once the element count doubled or halved,
+//! `footprint_bytes` (cached; walks again only after the graph changed). Never a walk per check,
+//! nor one per traversal inside an open unit (see [`footprint_hint`]).
 
 /// Snapshot of a graph's approximate in-memory footprint, in bytes, broken down by subsystem.
 ///
@@ -361,6 +363,14 @@ pub(crate) struct FootprintCache {
     pub(crate) walks: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(test)]
+impl FootprintCache {
+    /// Forgets the cached walk, as if the graph had never been walked (tests).
+    pub(crate) fn forget(&self) {
+        *self.entry.lock() = None;
+    }
+}
+
 /// [`compute`]'s total for `graph`, walked again only when the graph changed since the cached
 /// walk (the commit position or the element counts differ). A rolled-back unit restores the
 /// data and leaves the commit position, so the cached figure stays valid. While an open unit
@@ -403,16 +413,24 @@ fn footprint_key(graph: &super::TraversalGraph) -> FootprintKey {
 
 /// A cheap estimate of [`footprint_bytes`] without a walk: the total of the last walk plus the
 /// elements added since (minus those removed) at that walk's average element size (at least 128
-/// bytes). `None` before the first walk, and once the element count has more than doubled
-/// (plus 1024) or halved since it: then the caller walks again, so a growing graph is walked
-/// O(log n) times, amortized a constant per added element. Property values rewritten since the
-/// walk are not seen; the memory checks also walk again when the estimate reaches half of the
-/// ceiling.
+/// bytes). `None` before the first walk.
+///
+/// Outside an open unit with uncommitted changes it is also `None` once the element count has
+/// more than doubled (plus 1024) or halved since the walk: then the caller walks again and the
+/// walk is cached, so a growing graph is walked O(log n) times, amortized a constant per added
+/// element. Inside an open unit with changes a walk would NOT be cached (a rollback could
+/// restore other data under the same commit position), so every later run of the unit would
+/// walk again: O(graph) per traversal (the 0.5.0 regression: a script dropping most of a graph
+/// and then running many small writes). There the hint stays an estimate from the last walk,
+/// whatever the drift; the next run outside the unit walks again if the band is exceeded.
+/// Property values rewritten since the walk are not seen; the memory checks also walk again
+/// when the estimate reaches half of the ceiling.
 pub(crate) fn footprint_hint(graph: &super::TraversalGraph) -> Option<u64> {
     let (key, bytes) = (*graph.footprint.entry.lock())?;
     let walked = key.vertices.saturating_add(key.edges);
     let now = (graph.graph.node_count() as u64).saturating_add(graph.graph.edge_count() as u64);
-    if now > walked.saturating_mul(2).saturating_add(1024) || now < walked / 2 {
+    let refreshable = graph.undo.entries().is_empty();
+    if refreshable && (now > walked.saturating_mul(2).saturating_add(1024) || now < walked / 2) {
         return None;
     }
     let per_element = bytes.checked_div(walked).unwrap_or(0).max(128);

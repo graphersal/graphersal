@@ -26,7 +26,7 @@ use std::cell::Cell;
 
 use crate::error::{GraphError, TraverserResult};
 use crate::graph::GraphStorage;
-use crate::traversal::memory_budget::{MemoryBudget, tracked_live_bytes};
+use crate::traversal::memory_budget::{MIN_ELEMENT_BYTES, MemoryBudget, tracked_live_bytes};
 
 /// The memory of one execution (see the module documentation). Interior mutability: steps
 /// holding a shared borrow of the context still charge and check.
@@ -251,8 +251,14 @@ impl RunMemory {
     }
 
     /// Tracked: the bytes the run added to the graph and to its unit's undo record, at the
-    /// graph's average element size (taken once per run from the storage's footprint hint, else
-    /// its footprint) plus one undo entry per added element.
+    /// graph's average element size (taken once per run from the storage's footprint hint, at
+    /// least [`MIN_ELEMENT_BYTES`]) plus one undo entry per added element. NEVER a walk of the
+    /// graph: this runs at every step boundary of every writing run, and inside an open unit a
+    /// walk is not cached, so a walk here made every writing traversal of a script O(graph)
+    /// (the 0.5.0 regression). The average only splits the run's live heap delta into "the
+    /// graph grew" and "the run holds": a coarse figure (a stale hint, the minimum without one)
+    /// moves a few bytes per added element between the two, while the process ceiling compares
+    /// the exact live heap anyway.
     fn tracked_growth<S: GraphStorage + ?Sized>(&self, storage: &S) -> Result<u64, GraphError> {
         let now = element_count(storage)?;
         let added = now.saturating_sub(self.elements_at_start);
@@ -262,22 +268,35 @@ impl RunMemory {
         let each = match self.element_bytes.get() {
             Some(each) => each,
             None => {
-                let footprint = match storage.memory_footprint_hint()? {
-                    Some(hint) => hint,
-                    None => storage.memory_footprint_bytes()?.unwrap_or(0),
-                };
+                let average = storage
+                    .memory_footprint_hint()?
+                    .and_then(|hint| hint.checked_div(now))
+                    .unwrap_or(0)
+                    .max(MIN_ELEMENT_BYTES);
                 // The element itself, at the graph's average, plus the unit's record of the
                 // write (an undo entry of `TraversalGraph`; for another storage an allowance for
                 // its own record of the unit).
-                let each = footprint
-                    .checked_div(now)
-                    .unwrap_or(0)
+                let each = average
                     .saturating_add(std::mem::size_of::<crate::graph::undo::UndoEntry>() as u64);
                 self.element_bytes.set(Some(each));
                 each
             }
         };
         Ok(added.saturating_mul(each))
+    }
+
+    /// Switches the measure to tracked on `storage` as it is now (tests: the test binary
+    /// installs no tracking allocator).
+    #[cfg(test)]
+    pub(crate) fn force_tracked_for_test<S: GraphStorage + ?Sized>(&mut self, storage: &S) {
+        self.tracked = true;
+        self.elements_at_start = element_count(storage).unwrap_or(0);
+    }
+
+    /// The graph's growth as last estimated (tests).
+    #[cfg(test)]
+    pub(crate) fn grown_for_test(&self) -> u64 {
+        self.grown.get()
     }
 
     /// The run's figures for the profile.

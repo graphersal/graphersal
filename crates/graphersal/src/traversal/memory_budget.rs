@@ -23,7 +23,12 @@
 //! adjusted by the elements added or removed since, at the average element size) and walks the
 //! graph ([`GraphStorage::memory_footprint_bytes`], cached by the commit position) only when
 //! there is no hint yet (the first run on a graph) or the hint is at least half of the ceiling,
-//! where precision matters. Every check is a few loads and one comparison.
+//! where precision matters. `TraversalGraph` also has no hint once its element count doubled or
+//! halved since the last walk, but only outside an open unit with changes, where the walk is
+//! cached: inside such a unit (a script, a transaction) the hint stays an estimate, so the
+//! runs of a unit do not walk the graph one after the other (`graph::memory::footprint_hint`).
+//! The tracked measure never walks (`RunMemory::tracked_growth`). Every check is a few loads
+//! and one comparison.
 //!
 //! Units that are not traversals ([`UnitBudget`]: a GraphML/GraphSON import into a live graph,
 //! `apply_change_set`) check the same ceiling every [`UNIT_CHECK_INTERVAL`] elements and at
@@ -46,7 +51,7 @@ const CGROUP_UNLIMITED_FROM: u64 = 1 << 62;
 
 /// The smallest size the estimate assumes for one element a run adds (an empty graph has no
 /// average to take): a topology slot, a handle generation and an index entry.
-const MIN_ELEMENT_BYTES: u64 = 128;
+pub(crate) const MIN_ELEMENT_BYTES: u64 = 128;
 
 /// The default headroom `auto` keeps below a cgroup limit of `limit` bytes: a tenth of it, at
 /// least [`MIN_DEFAULT_HEADROOM`], but never more than half of the limit.
@@ -888,5 +893,226 @@ mod tests {
                 .unwrap();
         }
         assert!(run.check_boundary(&graph).is_err());
+    }
+
+    /// Regression tests of 0.5.1: no footprint walk per traversal inside an open unit (a
+    /// script, a transaction) once the walked figure is out of date (after a mass drop, after
+    /// growth past twice the walked element count). Before the fix every run of such a unit
+    /// walked the whole graph, uncached because the unit held changes: O(graph) per traversal.
+    mod no_walk_per_traversal {
+        use std::sync::atomic::Ordering;
+
+        use super::*;
+
+        fn walks(graph: &crate::TraversalGraph) -> u64 {
+            graph.footprint.walks.load(Ordering::Relaxed)
+        }
+
+        /// `kept` vertices labelled `kept` and `gone` vertices labelled `gone`, each `gone`
+        /// vertex with an edge to the first `kept` one, inserted directly (no unit).
+        fn thinning_graph(kept: usize, gone: usize) -> crate::TraversalGraph {
+            let mut graph = crate::TraversalGraph::new();
+            let mut first = None;
+            for i in 0..kept {
+                let handle = graph
+                    .insert_vertex(
+                        Some(format!("k{i}").into()),
+                        vec!["kept".into()],
+                        Default::default(),
+                    )
+                    .unwrap();
+                first.get_or_insert(handle);
+            }
+            let first = first.unwrap();
+            for i in 0..gone {
+                let handle = graph
+                    .insert_vertex(
+                        Some(format!("g{i}").into()),
+                        vec!["gone".into()],
+                        Default::default(),
+                    )
+                    .unwrap();
+                graph
+                    .insert_edge(None, Some("to".into()), handle, first, Default::default())
+                    .unwrap();
+            }
+            graph
+        }
+
+        /// Estimated mode, one explicit unit: a mass drop (the element count falls below half
+        /// of the walked one), then 2000 writing traversals: at most one walk in all.
+        #[test]
+        fn writes_after_a_mass_drop_in_one_unit_do_not_walk() {
+            let mut graph = thinning_graph(200, 3000);
+            crate::traversal::memory_limit::memory_limit_scope(1 << 40, || {
+                graph.memory_usage().unwrap();
+                let before = walks(&graph);
+                graph
+                    .transaction(|g| -> Result<(), Box<TraverserError>> {
+                        g.traversal_mut()
+                            .v(None)
+                            .has_label("gone")
+                            .drop()
+                            .iterate()?;
+                        for _ in 0..2000 {
+                            g.traversal_mut().v("k0").add_e("self").to("k1").iterate()?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(graph.edge_count(), 2000);
+                let walked = walks(&graph) - before;
+                assert!(walked <= 1, "{walked} walks for 2000 traversals");
+            });
+        }
+
+        /// Estimated mode, one unit: the graph grows past twice the walked element count
+        /// (plus 1024) through single writing traversals: at most one walk in all.
+        #[test]
+        fn writes_growing_past_twice_the_walked_count_in_one_unit_do_not_walk() {
+            let mut graph = thinning_graph(100, 0);
+            crate::traversal::memory_limit::memory_limit_scope(1 << 40, || {
+                graph.memory_usage().unwrap();
+                let before = walks(&graph);
+                graph
+                    .transaction(|g| -> Result<(), Box<TraverserError>> {
+                        for _ in 0..3000 {
+                            g.traversal_mut().add_v("new").iterate()?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(graph.vertex_count(), 3100);
+                let walked = walks(&graph) - before;
+                assert!(walked <= 1, "{walked} walks for 3000 traversals");
+            });
+        }
+
+        /// Separate top-level traversals (each its own unit, committed): a walk only where its
+        /// figure is cached (between units), never one per traversal.
+        #[test]
+        fn separate_writes_after_a_mass_drop_walk_at_most_once() {
+            let mut graph = thinning_graph(200, 3000);
+            crate::traversal::memory_limit::memory_limit_scope(1 << 40, || {
+                graph.memory_usage().unwrap();
+                let before = walks(&graph);
+                graph
+                    .traversal_mut()
+                    .v(None)
+                    .has_label("gone")
+                    .drop()
+                    .iterate()
+                    .unwrap();
+                for _ in 0..2000 {
+                    graph
+                        .traversal_mut()
+                        .v("k0")
+                        .add_e("self")
+                        .to("k1")
+                        .iterate()
+                        .unwrap();
+                }
+                // One walk after the drop, one more once the 2000 new edges have more than
+                // doubled the walked count (plus 1024): both outside any open unit, so cached
+                // (amortized O(log n) walks), never one per traversal.
+                let walked = walks(&graph) - before;
+                assert!(walked <= 2, "{walked} walks for 2000 traversals");
+            });
+        }
+
+        /// The tracked measure (switched on by hand: the test binary installs no tracking
+        /// allocator) of 2000 writing runs inside one unit after a mass drop: the graph's
+        /// growth is estimated without a walk, whether the hint is stale or missing.
+        #[test]
+        fn tracked_growth_never_walks() {
+            for walked_before in [true, false] {
+                let mut graph = thinning_graph(200, 3000);
+                if walked_before {
+                    graph.memory_usage().unwrap();
+                }
+                let mark = graph.begin_unit().unwrap();
+                // Counted from here: `begin_unit` takes the ESTIMATED starting point of the
+                // process ceiling (this binary has no tracking allocator), which a tracked
+                // process does not.
+                let before = walks(&graph);
+                if !walked_before {
+                    // No hint at all: forget the walk `begin_unit` just made.
+                    graph.footprint.forget();
+                }
+                // Dropped by direct calls: a traversal would take an (estimated) starting
+                // point of its own.
+                for i in 0..3000 {
+                    let gone = GraphStorage::get_vertex_by_id(&graph, &format!("g{i}"))
+                        .unwrap()
+                        .unwrap();
+                    GraphStorage::drop_vertex(&mut graph, gone).unwrap();
+                }
+                for i in 0..2000 {
+                    let mut run = crate::traversal::run_memory::RunMemory::new(u64::MAX, None);
+                    run.force_tracked_for_test(&graph);
+                    run.set_writes(true);
+                    graph
+                        .insert_vertex(
+                            Some(format!("n{i}").into()),
+                            vec!["new".into()],
+                            Default::default(),
+                        )
+                        .unwrap();
+                    run.check_boundary(&graph).unwrap();
+                    assert!(run.grown_for_test() > 0, "the growth is still estimated");
+                }
+                graph.commit_unit(mark).unwrap();
+                assert_eq!(walks(&graph), before, "walked before: {walked_before}");
+            }
+        }
+
+        /// Scripts: a mass drop then 2000 writing traversals, as ONE unit
+        /// (`eval_value_atomic`) and as one unit per statement (`eval_value_with_limits`).
+        #[cfg(feature = "script")]
+        #[test]
+        fn scripts_writing_after_a_mass_drop_do_not_walk_per_traversal() {
+            use crate::script::{ScriptLimits, eval_value_atomic, eval_value_with_limits};
+            use std::sync::Arc;
+            const SCRIPT: &str = r#"
+                g.V().hasLabel("gone").drop().iterate();
+                for i in 0..2000 { g.V("k0").addE("self").to(__.V("k1")).iterate(); }
+            "#;
+            for atomic in [true, false] {
+                let graph = Arc::new(crate::graph::Graph::new(thinning_graph(200, 3000)));
+                crate::traversal::memory_limit::memory_limit_scope(1 << 40, || {
+                    graph.read().memory_usage().unwrap();
+                    let before = walks(&graph.read());
+                    let limits = ScriptLimits::default();
+                    let result = if atomic {
+                        eval_value_atomic(
+                            graph.clone(),
+                            SCRIPT,
+                            Default::default(),
+                            &limits,
+                            Arc::new(crate::graph::AllowAll),
+                        )
+                    } else {
+                        eval_value_with_limits(
+                            graph.clone(),
+                            SCRIPT,
+                            Default::default(),
+                            &limits,
+                            Arc::new(crate::graph::AllowAll),
+                        )
+                    };
+                    result.unwrap();
+                    let graph = graph.read();
+                    assert_eq!(graph.edge_count(), 2000);
+                    // One unit: no walk at all. One unit per statement: walks only between
+                    // units, where they are cached (after the drop, once the new edges have
+                    // doubled the count): amortized, never one per traversal.
+                    let walked = walks(&graph) - before;
+                    assert!(
+                        walked <= if atomic { 1 } else { 2 },
+                        "atomic {atomic}: {walked} walks for 2000 traversals"
+                    );
+                });
+            }
+        }
     }
 }
