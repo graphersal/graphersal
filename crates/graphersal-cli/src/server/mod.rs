@@ -64,7 +64,6 @@ mod ai;
 mod bind;
 mod layout;
 mod mcp;
-mod start_banner;
 mod start_stats;
 mod store;
 mod ui;
@@ -466,8 +465,8 @@ pub fn run(cli: &Cli) -> i32 {
         .as_ref()
         .map(|store| store.open_report().commits_replayed);
     let loaded = start_stats::loaded(load_time, replayed);
-    let mut store_section = start_banner::Section::new("Store");
-    let mut graph_section = start_banner::Section::new("Graph");
+    let mut store_section = crate::sections::Section::new("Store");
+    let mut graph_section = crate::sections::Section::new("Graph");
     if let Some(store) = &store {
         let location = store.location();
         store_section.row("path", location.clone());
@@ -517,7 +516,7 @@ pub fn run(cli: &Cli) -> i32 {
         &statistics,
         graphersal::alloc_tracking::global_live_bytes(),
     ));
-    let mut models_section = start_banner::Section::new("Embedding models");
+    let mut models_section = crate::sections::Section::new("Embedding models");
     let served = crate::cli::served_models();
     for model in &served.models {
         let state = match &model.state {
@@ -546,7 +545,7 @@ pub fn run(cli: &Cli) -> i32 {
         );
     }
     for note in &served.notes {
-        models_section.row("note", note.clone());
+        models_section.note("note", note);
     }
     let mcp = cli.mcp.then(|| {
         mcp::Mcp::new(
@@ -558,7 +557,7 @@ pub fn run(cli: &Cli) -> i32 {
         .with_operator_notes(cli.mcp_instructions.clone())
         .with_max_chars(cli.mcp_max_chars)
     });
-    let mut server_section = start_banner::Section::new("Server");
+    let mut server_section = crate::sections::Section::new("Server");
     server_section.row("limits", presets_summary(&presets_json));
     server_section.unwrapped("UI", ui.banner());
     if let Some(mcp) = &mcp {
@@ -586,7 +585,7 @@ pub fn run(cli: &Cli) -> i32 {
     );
     errln!(
         "\n{}\n",
-        start_banner::render(&[store_section, graph_section, models_section, server_section])
+        crate::sections::render(&[store_section, graph_section, models_section, server_section])
     );
     let url = plan.url(port);
     let context = Arc::new(Context {

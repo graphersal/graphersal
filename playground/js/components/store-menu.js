@@ -409,7 +409,7 @@ export const StoreMenu = {
         <div v-for="m in models" :key="m.id" class="menu-item store-row store-model">
           <div class="store-row-head">
             <span :style="m.missing ? 'color:var(--danger)' : ''">{{ m.identity }}{{ m.isDefault ? ' (the default)' : '' }}</span>
-            <small v-if="!m.missing">{{ m.size }} · licence {{ m.licence }} ({{ m.licenceText }}){{ m.gated ? ' · gated repository' : '' }} · {{ m.used ? 'used by the schema' : 'not used by the schema' }}</small>
+            <small v-if="!m.missing">{{ m.size }} · licence {{ m.licence }} · licence text {{ m.licenceText }}{{ m.gated ? ' · gated repository' : '' }} · {{ m.used ? 'used by the schema' : 'not used by the schema' }}</small>
           </div>
           <div v-if="m.problem"><small style="color:var(--danger)">{{ m.problem }}</small></div>
         </div>

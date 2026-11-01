@@ -100,8 +100,8 @@ NETWORK:
 
 LICENCES:
     A model's licence is the model's own. The licence (from the repository's metadata, else
-    unknown), its text (the repository's LICENSE file; else, for MIT and Apache-2.0, the
-    standard text written beside the model and marked as a template) and the model card stay
+    unknown), its text (the repository's licence file; else, for MIT and Apache-2.0, the
+    unchanged standard text of the licence the model card names) and the model card stay
     with the model, also inside a Store. A store handed on (a backup, a .gsnap, a copied
     store) redistributes its models: `graphersal store info <STORE>` shows them and their
     licences; `store export --without-models` and `store backup --zip --without-models` leave
@@ -769,24 +769,35 @@ fn add_to_store(
                 errln!("note: the store {store} holds this model already");
             }
             if let Some(old) = &report.replaced {
-                errln!(
-                    "note: {} replaced the revision {} of {}",
-                    report.model.identity,
-                    old.identity,
+                let note = crate::out::Note::new(format!(
+                    "the import replaced the revision of {} the store kept",
                     old.repo
-                );
+                ))
+                .detail("new full name", &report.model.identity)
+                .detail("replaced", &old.identity);
+                crate::out::print_note("note", &note.text());
             }
             if !report.reembedded.is_empty() {
-                errln!(
-                    "note: the store was opened (its graph loaded) to re-embed {} with the new \
-                     revision in the replacing commit",
-                    report.reembedded.join(", ")
-                );
+                let note = crate::out::Note::new(
+                    "the store was opened (its graph loaded) to re-embed with the new revision",
+                )
+                .detail("re-embedded", report.reembedded.join(", "))
+                .detail("when", "in the replacing commit");
+                crate::out::print_note("note", &note.text());
             }
-            for warning in &report.warnings {
-                if warning.contains("template") {
-                    errln!("note: {warning}");
+            if report.model.license_text == "template" {
+                let mut note = crate::out::Note::new(format!(
+                    "the repository of {} has no licence file",
+                    report.model.repo
+                ));
+                for (key, value) in crate::store_cmd::licence_rows(&report.model) {
+                    note = note.detail(&key, value);
                 }
+                let note = note.detail(
+                    "kept as",
+                    "LICENSE (its first lines say where the text comes from)",
+                );
+                crate::out::print_note("note", &note.text());
             }
             Ok(report.model)
         }

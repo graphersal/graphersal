@@ -384,7 +384,10 @@ fn a_store_made_from_a_gsnap_lacking_its_model_names_it_and_opens_after_the_impo
     assert_eq!(report.vectors_without_rule.len(), 1);
     let note = report.vectors_without_rule[0].note("made");
     assert!(
-        note.starts_with("doc.emb is declared with vectors of acme/tiny (no element holds one"),
+        note.starts_with(
+            "doc.emb is declared with vectors of acme/tiny but has no source property\n  \
+             vectors: no element holds one"
+        ),
         "{note}"
     );
     // The store is there, closed cleanly, and refuses to open while the model is missing.
@@ -477,8 +480,9 @@ fn the_gsnap_notes_put_the_graph_into_a_store_first() {
     let notes = report.notes("snapshot.gsnap").join("\n");
     assert!(
         notes.contains(
-            "graphersal store create <dir> --from snapshot.gsnap, then graphersal --graph <dir> \
-             -e 'g.patch_schema(#{vertices: #{doc:"
+            "graphersal store create <dir> --from snapshot.gsnap\n  # add the source property \
+             (replace <source property> first)\n  graphersal --graph <dir> -e \
+             'g.patch_schema(#{vertices: #{doc:"
         ),
         "{notes}"
     );

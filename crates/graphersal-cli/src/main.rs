@@ -14,6 +14,7 @@ mod embed_model;
 mod health;
 mod log;
 mod repl;
+mod sections;
 #[cfg(feature = "dev-server")]
 mod server;
 mod signals;

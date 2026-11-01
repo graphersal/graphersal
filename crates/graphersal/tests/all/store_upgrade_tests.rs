@@ -1150,7 +1150,7 @@ mod v040 {
         let text = doc.note("st");
         assert!(
             text.starts_with(
-                "doc.emb has vectors of acme/tiny (3 element(s)) but no source property"
+                "doc.emb has vectors of acme/tiny but no source property\n  vectors: 3 element(s)"
             ),
             "{text}"
         );
@@ -1468,7 +1468,7 @@ mod v040 {
             missing.commands("st"),
             [
                 "graphersal embed-model download acme/gone",
-                "graphersal embed-model import acme/gone --into st"
+                "graphersal embed-model import acme/gone --into st --default"
             ]
         );
         // The store does not open until the model is imported.

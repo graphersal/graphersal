@@ -86,6 +86,7 @@ fn model_dict<'py>(py: Python<'py>, model: &persist::ModelInfo) -> PyResult<Boun
     dict.set_item("dimension", model.dimension)?;
     dict.set_item("license", &model.license)?;
     dict.set_item("license_text", &model.license_text)?;
+    dict.set_item("license_files", &model.license_files)?;
     dict.set_item("gated", model.gated)?;
     let bases = PyList::empty(py);
     for base in &model.base_models {
@@ -184,9 +185,9 @@ impl Store {
             crate::error::warn(
                 py,
                 &format!(
-                    "the store {path} holds embedding models but none is the default: `embed` \
-                     without a model name uses hash-ngram/1 (name the model, or make one the \
-                     default with store.set_default_model)"
+                    "the store {path} holds embedding models but none is the default\n  effect: \
+                     embed() without a model name uses hash-ngram/1\n  fix: name the model, or \
+                     make one the default with store.set_default_model(repo)"
                 ),
             )?;
         }
@@ -292,7 +293,9 @@ impl Store {
     /// "vectors_without_rule", "saved_queries_using_removed", "saved_queries_writing_vectors",
     /// "vector_notes"}``: ``models_converted`` lists ``{"repo", "identity",
     /// "former_identity", "bytes"}``, ``models_missing`` ``{"identity", "repo", "needed_by",
-    /// "commands"}`` (the store opens once they are imported), ``vectors_without_rule``
+    /// "commands", "suggests_default", "note"}`` (the store opens once they are imported;
+    /// ``suggests_default``: the import takes ``--default``, the store has none and this is the
+    /// only model the schema names), ``vectors_without_rule``
     /// ``{"element", "label", "property", "embedder", "model", "elements", "exact",
     /// "commits_not_counted", "schema_patch", "note"}`` (a vector property with a model but no
     /// source property ``from``: the note says how to add one), ``saved_queries_using_removed``
@@ -373,6 +376,8 @@ impl Store {
             item.set_item("repo", model.repo())?;
             item.set_item("needed_by", model.needed_by().to_vec())?;
             item.set_item("commands", model.commands(store_path))?;
+            item.set_item("suggests_default", model.suggests_default())?;
+            item.set_item("note", model.note(store_path))?;
             missing.append(item)?;
         }
         dict.set_item("models_missing", missing)?;
@@ -721,11 +726,12 @@ impl Store {
 
     /// ``store.models()``: the embedding models of the store's current position (format spec
     /// 4.5, catalog kind 5), each ``{"identity", "repo", "revision", "commit", "dimension",
-    /// "license", "license_text", "gated", "base_models": [{"repo", "license"}], "default",
-    /// "bytes", "load_bytes", "state", "needed_by": ["label.key"], "used_by_schema",
-    /// "problem"}``. ``license_text`` says where the licence text
-    /// comes from: ``"file"`` (the repository's), ``"template"`` (the standard text of the
-    /// licence, written beside the model) or ``"none"``. Every copy of the store carries them:
+    /// "license", "license_text", "license_files", "gated", "base_models": [{"repo", "license"}],
+    /// "default", "bytes", "load_bytes", "state", "needed_by": ["label.key"], "used_by_schema",
+    /// "problem"}``. ``license_text`` says where the licence text the store keeps comes from:
+    /// ``"file"`` (the repository's own licence files, named in ``license_files``),
+    /// ``"template"`` (the repository has no licence file: the unchanged standard text of the
+    /// licence the model card names) or ``"none"`` (no standard text for this licence). Every copy of the store carries them:
     /// handing the store on redistributes them.
     fn models(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let models = self.with(py, |store| store.models())?;

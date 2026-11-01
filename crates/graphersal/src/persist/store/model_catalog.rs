@@ -18,6 +18,7 @@ use super::{Store, blobs, licenses};
 use crate::error::GraphError;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::model_definition::{BaseModel, ModelDefinition};
+use crate::graph::note_text::NoteText;
 use crate::graph::schema::GraphSchema;
 use crate::graph::system_journal::{Event, catalogue};
 use crate::graph::{CommitMetadata, GraphStorage, Mutation, PersistentStorage, Transactional};
@@ -160,8 +161,15 @@ pub struct ModelInfo {
     pub dimension: u64,
     /// The licence (an SPDX id), `unknown` when not stated.
     pub license: String,
-    /// Where the licence text comes from: `file`, `template` or `none`.
+    /// Where the licence text comes from: `file` (the repository's own licence files, see
+    /// [`Self::license_files`]), `template` (the repository has no licence file: the unchanged
+    /// standard text of the licence the model card names, which the Store keeps as `LICENSE`)
+    /// or `none` (no standard text for this licence).
     pub license_text: String,
+    /// The names of the licence files the repository holds (`LICENSE`), for a licence text
+    /// `file`; empty otherwise, and for a model imported by 0.5.0 or 0.5.1 (which did not record
+    /// them).
+    pub license_files: Vec<String>,
     /// The models this one was made from.
     pub base_models: Vec<BaseModel>,
     /// Whether the repository is gated.
@@ -258,6 +266,72 @@ pub(crate) fn needed_models(schema: Option<&GraphSchema>) -> Vec<(String, Vec<St
         .collect()
 }
 
+/// Whether the import of the model `identity` should make it the default (`--default`): no
+/// model of `definitions` is the default, and `identity` is the only model the schema needs
+/// (else `embed` without a model name would keep using `hash-ngram/1` after the import).
+pub(crate) fn suggests_default(
+    schema: Option<&GraphSchema>,
+    definitions: &[Definition],
+    identity: &str,
+) -> bool {
+    sole_needed(&needed_models(schema), definitions, identity)
+}
+
+/// [`suggests_default`] over the needed models `needed` already listed.
+fn sole_needed(
+    needed: &[(String, Vec<String>)],
+    definitions: &[Definition],
+    identity: &str,
+) -> bool {
+    let has_default = definitions
+        .iter()
+        .filter_map(Definition::as_model)
+        .any(ModelDefinition::is_default);
+    let base = base_identity(identity);
+    !has_default
+        && !needed.is_empty()
+        && needed.iter().all(|(named, _)| base_identity(named) == base)
+}
+
+/// The commented commands (`(comment, command)` pairs, the layout of every note: one command
+/// per line under a comment saying what it does) that put the model `repo` into the store
+/// `store`: its download into the local models directory, then its import (`--default` when
+/// `default`, `--replace` when `replace`).
+pub(crate) fn model_import_steps(
+    repo: &str,
+    store: &str,
+    default: bool,
+    replace: bool,
+) -> Vec<(String, String)> {
+    let (comment, flags) = match (default, replace) {
+        (true, true) => (
+            "import it into the store in place of the damaged copy, as its default model \
+             (embed() without a model name uses it)",
+            " --replace --default",
+        ),
+        (true, false) => (
+            "import it into the store as its default model (embed() without a model name uses \
+             it)",
+            " --default",
+        ),
+        (false, true) => (
+            "import it into the store in place of the damaged copy",
+            " --replace",
+        ),
+        (false, false) => ("import it into the store", ""),
+    };
+    vec![
+        (
+            "download the model into the local models directory".to_string(),
+            format!("graphersal embed-model download {repo}"),
+        ),
+        (
+            comment.to_string(),
+            format!("graphersal embed-model import {repo} --into {store}{flags}"),
+        ),
+    ]
+}
+
 /// The places (`label.key`) of the schema that need the model `identity`.
 fn needed_by(schema: Option<&GraphSchema>, identity: &str) -> Vec<String> {
     needed_models(schema)
@@ -282,6 +356,7 @@ pub(crate) fn model_info(
         dimension: model.dimension(),
         license: model.license().unwrap_or("unknown").to_string(),
         license_text: model.license_text().unwrap_or("none").to_string(),
+        license_files: model.license_files().to_vec(),
         base_models: model.base_models().to_vec(),
         gated: model.gated(),
         default: model.is_default(),
@@ -353,6 +428,7 @@ impl Prepared {
                     Some(manifest.license.clone()),
                     Some(manifest.license_text.clone()),
                 )
+                .with_license_files(self.repository_license_files())
                 .with_base_models(
                     manifest
                         .base_models
@@ -363,6 +439,23 @@ impl Prepared {
                 .with_gated(manifest.gated)
                 .with_default(default),
         )
+    }
+
+    /// The licence files the model's repository holds (licence text `file`): the files of the
+    /// role `license`, without the standard texts the import adds for base models
+    /// (`LICENSE-BASE-<licence>`); empty for a standard text or none.
+    fn repository_license_files(&self) -> Vec<String> {
+        if self.manifest.license_text != "file" {
+            return Vec::new();
+        }
+        self.manifest
+            .files
+            .iter()
+            .filter(|f| {
+                f.role == ModelRole::License.as_str() && !f.name.starts_with("LICENSE-BASE-")
+            })
+            .map(|f| f.name.clone())
+            .collect()
     }
 
     /// The length of the tar these files make.
@@ -910,8 +1003,9 @@ fn licence_warnings(manifest: &ModelManifest) -> Vec<String> {
     }
     if manifest.license_text == "template" {
         out.push(format!(
-            "the repository has no licence file; the standard {} text was put beside the model \
-             (LICENSE, marked as a template)",
+            "the repository has no licence file: the store keeps the unchanged standard {} text \
+             of the licence the model card names as LICENSE (a template: its first lines say where \
+             the text comes from)",
             manifest.license
         ));
     }
@@ -1855,7 +1949,7 @@ pub(crate) fn check_at_open(
     let source = Arc::new(StoreModelBytes::new(dir.clone()));
     let registry = registry::ModelRegistry::new(source.clone(), definitions.clone());
     let refuse = |failure: &registry::NeededFailure| -> PersistError {
-        refusal(dir, &definitions, failure, check)
+        refusal(dir, &definitions, &needed, failure, check)
     };
     if !needed.is_empty() {
         let mut reasons = Vec::new();
@@ -1990,6 +2084,7 @@ pub(crate) fn check_at_open(
 fn refusal(
     dir: &DirPath,
     definitions: &[Definition],
+    needed: &[(String, Vec<String>)],
     failure: &registry::NeededFailure,
     check: &OpenCheck<'_>,
 ) -> PersistError {
@@ -2040,16 +2135,25 @@ fn refusal(
         registry::LoadFailure::Unsupported(reason) => reason.clone(),
         registry::LoadFailure::DoesNotFit { message, .. } => message.clone(),
     };
+    // The note layout (a headline, indented details, one commented command per line): the
+    // command lines copy as they are.
+    let steps = model_import_steps(
+        &repo,
+        &dir.display(),
+        sole_needed(needed, definitions, &failure.identity),
+        !undefined,
+    );
     PersistError::store(
         "open the store",
         StoreFailure::ModelUnavailable,
-        format!(
-            "the model {repo} (needed by {places}) {what}: run `graphersal embed-model download \
-             {repo}` then `graphersal embed-model import {repo} --into {}{}`, or restore the \
-             store from a backup or replica",
-            dir.display(),
-            if undefined { "" } else { " --replace" }
-        ),
+        NoteText::new(format!("the model {repo} {what}"))
+            .detail("needed by", places)
+            .commands(&steps)
+            .detail(
+                "or",
+                "restore the store from a backup or replica that holds the model",
+            )
+            .finish(),
     )
 }
 
@@ -2077,4 +2181,49 @@ pub(crate) fn models_of_view<S: PersistentStorage>(
     }
     let at_open = check_at_open(dir, definitions, schema.as_ref(), &check)?;
     Ok(at_open.registry)
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn needed(identities: &[&str]) -> Vec<(String, Vec<String>)> {
+        identities
+            .iter()
+            .map(|i| (i.to_string(), vec!["doc.emb".to_string()]))
+            .collect()
+    }
+
+    /// Issue #19: `--default` is suggested only for the one model the schema names, in a store
+    /// without a default.
+    #[test]
+    fn the_default_is_suggested_for_the_only_needed_model() {
+        let a = "model2vec/acme/a@0123456789ab";
+        let b = "model2vec/acme/b@abcdef012345";
+        assert!(sole_needed(&needed(&[a]), &[], a));
+        // The same model with a normalization suffix is still one model.
+        let normalized = format!("{a}?normalize=false");
+        assert!(sole_needed(&needed(&[a, &normalized]), &[], a));
+        assert!(!sole_needed(&needed(&[a, b]), &[], a));
+        assert!(!sole_needed(&needed(&[]), &[], a));
+    }
+
+    #[test]
+    fn the_import_steps_are_commented_one_command_each() {
+        let steps = model_import_steps("acme/a", "kb", false, true);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].1, "graphersal embed-model download acme/a");
+        assert_eq!(
+            steps[1],
+            (
+                "import it into the store in place of the damaged copy".to_string(),
+                "graphersal embed-model import acme/a --into kb --replace".to_string()
+            )
+        );
+        assert!(
+            model_import_steps("acme/a", "kb", true, false)[1]
+                .1
+                .ends_with(" --default")
+        );
+    }
 }

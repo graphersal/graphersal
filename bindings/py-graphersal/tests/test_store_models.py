@@ -135,7 +135,9 @@ def test_upgrade_converts_models(tmp_path):
     [needed] = report["models_missing"]
     assert needed["identity"] == "model2vec/acme/gone@0123456789ab"
     assert needed["needed_by"] == ["doc.emb"]
-    assert needed["commands"][1] == f"graphersal embed-model import acme/gone --into {missing}"
+    assert needed["commands"][1] == f"graphersal embed-model import acme/gone --into {missing} --default"
+    assert needed["suggests_default"] is True
+    assert "\n  # download the model into the local models directory\n" in needed["note"]
 
 
 def test_upgrade_gives_one_vector_note_per_model(tmp_path):

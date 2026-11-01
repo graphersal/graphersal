@@ -323,7 +323,7 @@ test('the live region announces the start and the end', () => {
 });
 
 // Embedding models kept in the store (format spec 4.5).
-import { modelRows, modelsNote, offersWithoutModels, snapshotFileName } from '../js/store-model.js';
+import { modelRows, modelsNote, offersWithoutModels, snapshotFileName, licenceTextOf } from '../js/store-model.js';
 
 test('the menu shows the default model and the note of a store without one', () => {
   const rows = modelRows({ models: [{ id: 'a', identity: 'model2vec/acme/a@0123456789ab', repo: 'acme/a', default: true }] });
@@ -345,8 +345,8 @@ test('the menu lists the store models with their licences and the models the sch
   };
   const rows = modelRows(store);
   assert.equal(rows.length, 3);
-  assert.equal(rows[0].licence, 'mit');
-  assert.match(rows[0].licenceText, /standard licence text/);
+  assert.equal(rows[0].licence, 'mit (named in the model card)');
+  assert.equal(rows[0].licenceText, 'standard MIT text (the repository has no licence file)');
   assert.equal(rows[0].used, true);
   assert.equal(rows[1].gated, true);
   assert.match(rows[1].licenceText, /from the repository/);
@@ -358,4 +358,17 @@ test('the menu lists the store models with their licences and the models the sch
   assert.match(EXPLAIN.model, /redistributes/);
   assert.equal(snapshotFileName(7), 'graph-7.gsnap');
   assert.equal(snapshotFileName(7, false), 'graph-7-without-models.gsnap');
+});
+
+// Issue #19: the licence text says where the text the store keeps comes from, never that
+// Graphersal wrote a licence.
+test('the licence text names its source exactly', () => {
+  assert.equal(licenceTextOf({ licenseText: 'file', licenseFiles: ['LICENSE', 'COPYING'] }),
+    'from the repository (LICENSE, COPYING)');
+  assert.equal(licenceTextOf({ licenseText: 'file' }), 'from the repository');
+  assert.equal(licenceTextOf({ licenseText: 'template', license: 'apache-2.0' }),
+    'standard Apache-2.0 text (the repository has no licence file)');
+  assert.equal(licenceTextOf({ licenseText: 'none', license: 'other' }),
+    'none (no standard text for this licence)');
+  assert.doesNotMatch(licenceTextOf({ licenseText: 'template', license: 'mit' }), /written by/);
 });

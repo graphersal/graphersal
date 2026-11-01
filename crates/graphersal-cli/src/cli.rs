@@ -76,25 +76,23 @@ fn serve_models(models: Vec<graphersal::persist::ModelInfo>, source: String, not
             .or_else(|| source.strip_prefix("carried by ").map(str::to_string))
             .unwrap_or_else(|| source.clone());
         for model in &models {
-            match model.state {
-                ModelState::Loaded => errln!(
-                    "note: loaded the embedding model {} from {place} as {} (licence {})",
-                    model.identity,
-                    model.repo,
-                    license_text(&model.license)
+            let headline = match model.state {
+                ModelState::Loaded => {
+                    format!("loaded the embedding model {} from {place}", model.repo)
+                }
+                ModelState::NotLoaded => format!(
+                    "the embedding model {} of {place} is served, loaded at its first use",
+                    model.repo
                 ),
-                ModelState::NotLoaded => errln!(
-                    "note: the embedding model {} of {place} is served as {}, loaded at its \
-                     first use (licence {})",
-                    model.identity,
-                    model.repo,
-                    license_text(&model.license)
-                ),
-                _ => {}
-            }
+                _ => continue,
+            };
+            let note = crate::out::Note::new(headline)
+                .detail("full name", &model.identity)
+                .detail("licence", license_text(&model.license));
+            crate::out::print_note("note", &note.text());
         }
         for note in &notes {
-            errln!("note: {note}");
+            crate::out::print_note("note", note);
         }
     }
     if let Ok(mut served) = SERVED.lock() {
@@ -109,12 +107,21 @@ fn serve_models(models: Vec<graphersal::persist::ModelInfo>, source: String, not
 /// The Q5.5 note of a database that holds models but none is the default (`None` otherwise).
 pub fn no_default_note(models: &[graphersal::persist::ModelInfo], store: &str) -> Option<String> {
     (!models.is_empty() && !models.iter().any(|m| m.default)).then(|| {
-        format!(
-            "the store {store} holds embedding models but none is the default: `embed` without \
-             a model name uses hash-ngram/1 (name the model, e.g. #{{embedder: \"{}\"}}, or make \
-             one the default: graphersal store models default {store} <repo>)",
-            models[0].repo
+        // The one model by its name; of several, the user picks.
+        let repo = match models {
+            [only] => only.repo.as_str(),
+            _ => "<repo>",
+        };
+        crate::out::Note::new(format!(
+            "the store {store} holds embedding models but none is the default"
+        ))
+        .detail("effect", "embed() without a model name uses hash-ngram/1")
+        .detail("name one", format!("#{{embedder: \"{}\"}}", models[0].repo))
+        .command(
+            "or make one the default, so embed() without a model name uses it",
+            format!("graphersal store models default {store} {repo}"),
         )
+        .text()
     })
 }
 
@@ -125,16 +132,33 @@ fn store_model_notes(path: &str, models: &[graphersal::persist::ModelInfo]) -> V
     for model in models {
         match &model.state {
             graphersal::persist::ModelState::Damaged { reason }
-            | graphersal::persist::ModelState::Unsupported { reason } => notes.push(format!(
-                "the embedding model {} of the store {path} is not served: {reason}",
-                model.repo
-            )),
-            graphersal::persist::ModelState::Missing => notes.push(format!(
-                "the embedding model {} of the store {path} is not served: its blob is missing \
-                 (graphersal embed-model download {}, then graphersal embed-model import {} \
-                 --into {path} --replace)",
-                model.repo, model.repo, model.repo
-            )),
+            | graphersal::persist::ModelState::Unsupported { reason } => notes.push(
+                crate::out::Note::new(format!(
+                    "the embedding model {} of the store {path} is not served",
+                    model.repo
+                ))
+                .detail("why", reason)
+                .text(),
+            ),
+            graphersal::persist::ModelState::Missing => notes.push(
+                crate::out::Note::new(format!(
+                    "the embedding model {} of the store {path} is not served",
+                    model.repo
+                ))
+                .detail("why", "its blob is missing")
+                .command(
+                    "download the model into the local models directory",
+                    format!("graphersal embed-model download {}", model.repo),
+                )
+                .command(
+                    "import it into the store in place of the missing copy",
+                    format!(
+                        "graphersal embed-model import {} --into {path} --replace",
+                        model.repo
+                    ),
+                )
+                .text(),
+            ),
             _ => {}
         }
     }

@@ -365,6 +365,29 @@ export function changesModel(summary) {
   };
 }
 
+/** An SPDX licence id as people write it (`mit` -> `MIT`); an unknown one stays as it is. */
+function licenceName(id) {
+  const known = { mit: 'MIT', 'apache-2.0': 'Apache-2.0' };
+  return known[String(id || '').toLowerCase()] || id || 'unknown';
+}
+
+/**
+ * Where the licence text a store keeps beside a model comes from (the CLI's `licence text`
+ * row): the repository's own licence files (named), the unchanged standard text of the
+ * licence the model card names (the repository has none), or none. Graphersal never writes a
+ * licence.
+ */
+export function licenceTextOf(m) {
+  if (m.licenseText === 'file') {
+    const files = m.licenseFiles || [];
+    return files.length ? `from the repository (${files.join(', ')})` : 'from the repository';
+  }
+  if (m.licenseText === 'template') {
+    return `standard ${licenceName(m.license)} text (the repository has no licence file)`;
+  }
+  return 'none (no standard text for this licence)';
+}
+
 /**
  * The embedding models of the store (`store.models`, format spec 4.5) as the Store menu lists
  * them: `{id, identity, repo, size, licence, licenceText, gated, used, isDefault, problem}`; then
@@ -378,10 +401,9 @@ export function modelRows(store) {
     repo: m.repo || '',
     isDefault: !!m.default,
     size: m.bytesText || '',
-    licence: m.license || 'unknown',
-    licenceText: m.licenseText === 'file' ? 'licence text from the repository'
-      : m.licenseText === 'template' ? 'standard licence text, written by Graphersal'
-        : 'no licence text',
+    licence: m.licenseText === 'template'
+      ? `${m.license || 'unknown'} (named in the model card)` : (m.license || 'unknown'),
+    licenceText: licenceTextOf(m),
     gated: !!m.gated,
     used: !!m.usedBySchema,
     problem: m.problem || null,

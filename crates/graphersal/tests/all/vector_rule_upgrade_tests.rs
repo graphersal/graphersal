@@ -70,12 +70,15 @@ fn a_gsnap_gives_one_vector_note_per_model_and_lists_direct_writers() {
     assert_eq!(vector_notes.len(), 1, "{notes:#?}");
     let note = vector_notes[0];
     for needle in [
-        "3 vector properties are declared with vectors of hash-ngram/1 (3 vector(s) in all)",
-        "a.emb (2), b.emb (1), c.emb (no element holds one yet)",
+        "3 vector properties are declared with vectors of hash-ngram/1 but have no source \
+         property\n",
+        "\n  a.emb: 2 vector(s)\n  b.emb: 1 vector(s)\n  c.emb: no element holds one yet\n  \
+         vectors: 3 in all\n",
         "graphersal store create <dir> --from shape.gsnap",
-        "g.patch_schema(#{vertices: #{a: #{schema: #{properties: #{emb: #{from: \"<source \
-         property>\"}}}}, b: #{schema: #{properties: #{emb: #{from: \"<source property>\"}}}}, \
-         c: #{schema: #{properties: #{emb: #{from: \"<source property>\"}}}}}})",
+        "g.patch_schema(#{\n    vertices: #{\n      a: #{schema: #{properties: #{emb: #{from: \
+         \"<source property>\"}}}},\n      b: #{schema: #{properties: #{emb: #{from: \"<source \
+         property>\"}}}},\n      c: #{schema: #{properties: #{emb: #{from: \"<source \
+         property>\"}}}}\n    }\n  })",
     ] {
         assert!(note.contains(needle), "{needle}\n{note}");
     }
@@ -93,7 +96,8 @@ fn a_gsnap_gives_one_vector_note_per_model_and_lists_direct_writers() {
     assert!(!write.rule_exists);
     assert!(
         notes.iter().any(|n| n.starts_with(
-            "saved query \"loader\" writes emb directly (a.emb): once the vector rule exists"
+            "saved query \"loader\" writes emb directly\n  where: a.emb\n  effect: once the \
+             vector rule exists"
         )),
         "{notes:#?}"
     );
@@ -127,8 +131,8 @@ fn a_single_property_of_a_model_keeps_its_own_note() {
     assert_eq!(notes.len(), 1, "{notes:#?}");
     assert!(
         notes[0].starts_with(
-            "doc.emb is declared with vectors of hash-ngram/1 (no element holds one yet) but no \
-             source property"
+            "doc.emb is declared with vectors of hash-ngram/1 but has no source property\n  \
+             vectors: no element holds one yet"
         ),
         "{}",
         notes[0]

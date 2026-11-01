@@ -1,4 +1,4 @@
-//! The rows of the start banner's Graph section ([`super::start_banner`]), printed on stderr
+//! The rows of the start banner's Graph section ([`crate::sections`]), printed on stderr
 //! after the graph is in memory: the load time and the graph's statistics, from the same data
 //! as the playground's Statistics tab ([`graphersal_session::Session::statistics`]:
 //! `{statistics, memory, limits}`; the limits have their own row in the Server section).

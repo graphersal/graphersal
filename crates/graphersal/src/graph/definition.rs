@@ -1771,41 +1771,62 @@ pub struct RemovedFunctionUse {
 }
 
 impl RemovedFunctionUse {
-    /// The text every front end shows for it (one line: the CLI prints it as a `note:`), with
-    /// the ready command for the store at `store` when [`Self::schema_patch`] is known.
+    /// The text every front end shows for it, with the ready command for the store at `store`
+    /// when [`Self::schema_patch`] is known. Its layout: a short headline, then indented lines
+    /// (one detail `key: value` each; a shell command on a line of its own under a `# comment`
+    /// saying what it does); the CLI prints the headline after `note:`.
     pub fn note(&self, store: &str) -> String {
-        self.note_with(|patch| format!("graphersal --graph {store} -e '{patch}'"))
+        self.note_with(|patch| {
+            vec![(
+                "declare the vector rule that replaces the call".to_string(),
+                format!("graphersal --graph {store} -e '{patch}'"),
+            )]
+        })
     }
 
     /// [`Self::note`] for a graph loaded from the packed snapshot `file` without a store: a
-    /// schema change of such a graph lives only in memory, so the command puts the graph into
+    /// schema change of such a graph lives only in memory, so the commands put the graph into
     /// a store first.
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn note_for_packed(&self, file: &str) -> String {
         self.note_with(|patch| {
-            format!(
-                "in a store, as the change of a .gsnap loaded without one stays in memory: \
-                 graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e \
-                 '{patch}'"
-            )
+            vec![
+                (
+                    "put the graph into a store (a change of a .gsnap loaded without one stays \
+                     in memory)"
+                        .to_string(),
+                    format!("graphersal store create <dir> --from {file}"),
+                ),
+                (
+                    "declare the vector rule that replaces the call".to_string(),
+                    format!("graphersal --graph <dir> -e '{patch}'"),
+                ),
+            ]
         })
     }
 
-    /// The note with the ready command `command(patch)` running the schema patch.
-    fn note_with(&self, command: impl Fn(&str) -> String) -> String {
-        let fix = match &self.schema_patch {
-            Some(patch) => format!(
-                "replace the call by the vector rule ({}); its first fill embeds every element \
-                 of the label (the whole database is locked while it runs)",
-                command(patch)
-            ),
-            None => self.replacement.clone(),
-        };
-        format!(
-            "saved query \"{}\" calls {}, removed in {}: a call of the query fails now, and it \
-             is not rewritten; {fix}",
+    /// The note with the ready commands `commands(patch)` (`(comment, command)` pairs) running
+    /// the schema patch.
+    fn note_with(&self, commands: impl Fn(&str) -> Vec<(String, String)>) -> String {
+        let note = crate::graph::note_text::NoteText::new(format!(
+            "saved query \"{}\" calls {}, removed in {}",
             self.query, self.function, self.removed_in
-        )
+        ))
+        .detail(
+            "effect",
+            "a call of the query fails now; the query is not rewritten",
+        );
+        match &self.schema_patch {
+            Some(patch) => note
+                .detail(
+                    "replacement",
+                    "a vector rule; its first fill embeds every element of the label (the whole \
+                     database is locked while it runs)",
+                )
+                .commands(&commands(patch)),
+            None => note.detail("replacement", &self.replacement),
+        }
+        .finish()
     }
 }
 
@@ -1834,7 +1855,8 @@ pub struct VectorPropertyWrite {
 }
 
 impl VectorPropertyWrite {
-    /// The text every front end shows for it (one line: the CLI prints it as a `note:`).
+    /// The text every front end shows for it: a short headline, then one indented detail line
+    /// (`key: value`) each; the CLI prints the headline after `note:`.
     pub fn note(&self) -> String {
         let element = match self.element {
             crate::graph::ElementKind::Vertex => "",
@@ -1846,16 +1868,26 @@ impl VectorPropertyWrite {
             .map(|label| format!("{element}{label}.{}", self.property))
             .collect::<Vec<_>>()
             .join(", ");
-        let when = if self.rule_exists {
+        let effect = if self.rule_exists {
             "a vector rule fills it, so its direct writes are refused"
         } else {
             "once the vector rule exists, direct writes of it are refused"
         };
-        format!(
-            "saved query \"{}\" writes {} directly ({places}): {when}: remove that write (the \
-             rule computes {} from its source property); the query is not rewritten",
-            self.query, self.property, self.property
+        crate::graph::note_text::NoteText::new(format!(
+            "saved query \"{}\" writes {} directly",
+            self.query, self.property
+        ))
+        .detail("where", places)
+        .detail("effect", effect)
+        .detail(
+            "fix",
+            format!(
+                "remove that write (the rule computes {} from its source property); the query \
+                 is not rewritten",
+                self.property
+            ),
         )
+        .finish()
     }
 }
 

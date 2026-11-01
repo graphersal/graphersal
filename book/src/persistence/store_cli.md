@@ -108,13 +108,26 @@ export `--without-models`; the store is created and opens once the model is impo
 commands named), a `note:` per model for the vector properties without a source property (one
 note listing them with one combined patch), a `note:` for every saved query writing such a
 property directly and for every
-saved query calling a removed function:
+saved query calling a removed function. Each note is a short headline with one detail per line
+below it and every command on a line of its own under a comment saying what it does; notes are
+separated by a blank line. When the store has no default model and the missing model is the
+only one the schema names, its import takes `--default`:
 
 ```text
 $ graphersal store create data/ --from old.gsnap
 Created the store data/: graph 01a11a54-9f3c-7b21-8e0d-5a2c9e41d7b3, commit 3120, 1 snapshot(s); damage policy maintenance (fixed for its life).
-warning: the schema needs the model model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (doc.emb), which the store does not keep (Graphersal 0.4 and earlier served it through a command-line embedder); the store does not open until it is imported: graphersal embed-model download minishlab/potion-multilingual-128M then graphersal embed-model import minishlab/potion-multilingual-128M --into data/
-note: doc.emb has vectors of model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87 (250 element(s)) but no source property; ...
+warning: the schema needs the embedding model acme/tiny, which the store does not keep
+  identity: model2vec/acme/tiny@0123456789ab
+  needed by: doc.emb
+  effect: the store does not open until the model is imported
+  # download the model into the local models directory
+  graphersal embed-model download acme/tiny
+  # import it into the store as its default model (embed() without a model name uses it)
+  graphersal embed-model import acme/tiny --into data/ --default
+
+note: doc.emb has vectors of model2vec/acme/tiny@0123456789ab but no source property
+  vectors: 250 element(s)
+  ...
 Use it: graphersal --graph data/ (or --server)
 ```
 
@@ -154,9 +167,9 @@ fixed at creation (never changed):
 
 Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back store), `backup
 up to commit N, taken T` (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
-(a `models` block: one line per model with its identity, size, licence and where the licence text
-comes from, `used by the schema`; a model the schema names but the store lacks as `missing`, see
-[`models`](#models)), the store's blobs (`blobs  N (size; M unreferenced, removed by the next
+(a `models` block: one block per model under its repository, one field per line: `full name`
+(the identity), `size`, `licence`, `licence text`, `default`, `used by`; a model the schema names
+but the store lacks as `missing model`, see [`models`](#models)), the store's blobs (`blobs  N (size; M unreferenced, removed by the next
 prune)`, by names and lengths only, see [Blobs](store_blobs.md)), and for a single file
 `file  single file, 23.0 KiB (23.0 KiB live, 0 B free space inside: ...)`. `state` is `open (in
 use, or not closed cleanly)` while a writer has it (or after a crash).
@@ -399,17 +412,42 @@ graphersal store models default <DIR> <REPO>|--none
 graphersal store models remove <DIR> <REPO>
 ```
 
-Lists the [embedding models](store_models.md) of the store's latest state, one line each: the
-repository, the identity a schema's `embedder` records (`model2vec/<repo>@<12 hex>`), the size of
-its blob, the licence and where its text
-comes from (`text from the repository`, `standard text, written by Graphersal`, `no licence
-text`), `gated repository`, `the default` and a missing or damaged blob when they apply, and
-whether the schema uses it; then every model the schema names that the store does not keep
-(`missing`). Works while a server has the store open.
+Lists the [embedding models](store_models.md) of the store's latest state, one section per model
+(styled like the sections of the `--server` banner) with one `key: value` per line: `model` (the
+repository), `full name` (the identity a schema's `embedder` records,
+`model2vec/<repo>@<12 hex>`), `size` (of its blob), `licence`, `licence text`, `default`,
+`used by` (the schema places that need it), then `gated` and `problem` (a missing or damaged
+blob) when they apply; then a section for every model the schema names that the store does not
+keep (`Missing embedding model`). Works while a server has the store open.
+
+`licence text` says where the text the store keeps beside the model comes from; Graphersal never
+writes a licence:
+
+- `from the repository (LICENSE)`: the repository's own licence file, named;
+- `standard MIT text (the repository has no licence file)`: the unchanged standard text of the
+  licence the model card names (bundled for MIT and Apache-2.0; the copyright holders are those
+  the model card names), and `licence` says `mit (named in the model card)`;
+- `none (no standard text for this licence)`.
 
 ```text
 $ graphersal store models data/
-minishlab/potion-base-8M  model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
+── Embedding model ───────────────────────────────────────────────────────────
+  model:        acme/tiny
+  full name:    model2vec/acme/tiny@0123456789ab
+  size:         29.5 MiB
+  licence:      mit (named in the model card)
+  licence text: standard MIT text (the repository has no licence file)
+  default:      no
+  used by:      the schema (doc.emb)
+
+── Embedding model ───────────────────────────────────────────────────────────
+  model:        acme/other
+  full name:    model2vec/acme/other@456789abcdef
+  size:         7.6 MiB
+  licence:      apache-2.0
+  licence text: from the repository (LICENSE)
+  default:      yes
+  used by:      nothing (not used by the schema)
 ```
 
 `default` makes the model of `REPO` the default model (the one `embed()` uses without a name;
@@ -571,18 +609,28 @@ upgrade before anything is written (exit **1**, `StoreFailure::UpgradeModelDamag
 needs your decision is printed, the exit code stays **0**: a `warning:` for every model the
 schema needs that the store does not keep (with the commands that import it: the store opens
 once it is there), a `note:` per model for the vector properties with a model but no source property
-`from` (one combined schema patch for all properties of the model; when that model is one of the
-missing ones, the command starts with "after `graphersal embed-model import <repo> --into
-<store>`:", since the store opens only then), and a `note:` for every
-saved query writing such a property directly (a vector rule refuses that write):
+`from` (one combined schema patch for all properties of the model, one label per line; when that
+model is one of the missing ones, the comment above the patch says it runs after the model's
+import, since the store opens only then), and a `note:` for every
+saved query writing such a property directly (a vector rule refuses that write). Each note is a
+short headline with one detail per line and every command on a line of its own under a comment;
+notes are separated by a blank line (layout: [Format Versions](store_versions.md#after-the-upgrade)):
 
 ```text
 $ graphersal store upgrade store/ --in-place
 Verified the store store/ (store format version 3): 2 snapshot(s), 1 WAL segment(s), 12 record(s).
 Upgraded store/ in place to store format version 4: GRAPH rewritten, the models/ directory migrated (below), every other file kept. The older Graphersal no longer opens it.
 Converted the embedding model model2vec/acme/tiny@70c61d0ed332 into a blob with its catalog definition: model2vec/acme/tiny@70c61d0ed332 (8.5 KiB).
-The models were defined by commit 12; the history before it has no models. Take a full backup now (graphersal store backup store/ <new_dir>): a backup taken before the upgrade does not take increments of the upgraded store.
-note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs), and from then on emb itself is not written directly (write the source property)
+The models were defined by commit 12; the history before it has no models.
+  # take a full backup now: a backup taken before the upgrade does not take increments of the upgraded store
+  graphersal store backup store/ <new_dir>
+note: doc.emb has vectors of acme/tiny but no source property
+  vectors: 3 element(s)
+  to keep them current: add "from": "<source property>" to its schema declaration
+  first fill: re-embeds every doc (the whole database is locked while it runs)
+  afterwards: write the source property, never emb itself
+  # add the source property (replace <source property> first)
+  graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'
 Use it: graphersal --graph store/
 ```
 
