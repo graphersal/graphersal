@@ -6374,3 +6374,210 @@ fn store_journal_last_prints_the_newest_records_oldest_first() {
     assert_eq!(res.code, 2, "{}", res.stderr);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #19 (follow-up): `text` is in the note layout: blocks set apart by one blank line,
+/// each a headline at the margin followed by lines indented by two spaces (a `Help:` with its
+/// lines indented under it); every `graphersal ...` command line follows a `# comment` line
+/// indented alike, and no line puts a command inside a sentence (`Use it:`, `Run:`,
+/// backticks).
+fn assert_note_layout(text: &str) {
+    assert!(!text.contains("\n\n\n"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        assert!(
+            !line.contains("Use it:") && !line.contains("Run: ") && !line.contains("`graphersal"),
+            "a command inside a sentence: {line:?}\n{text}"
+        );
+        if trimmed.starts_with("graphersal ") {
+            assert!(i > 0, "{text}");
+            let above = lines[i - 1];
+            assert!(
+                above.trim_start().starts_with("# "),
+                "no comment above {line:?}\n{text}"
+            );
+            assert_eq!(
+                line.len() - trimmed.len(),
+                above.len() - above.trim_start().len(),
+                "the comment and its command are indented alike: {line:?}\n{text}"
+            );
+        }
+        let headline = i == 0 || lines[i - 1].is_empty();
+        if !headline && !line.is_empty() && !line.starts_with("Help: ") {
+            assert!(line.starts_with("  "), "not indented: {line:?}\n{text}");
+        }
+    }
+}
+
+/// Issue #19 (follow-up): every `store` result is one block per thing done (a headline, one
+/// `key: value` per line, commands on their own lines under a comment), the hints that named a
+/// command inline (`Use it: ...`, `Open it: ...`, `Run: ...`) included; the CLI's own errors
+/// give their commands in the `Help:` the same way; a usage error ends with the help command;
+/// `store attic` shows one section per entry.
+#[test]
+fn store_results_errors_and_usage_are_in_the_note_layout() {
+    let dir = temp_path("note-layout-store");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).to_string_lossy().to_string();
+    let (d, fork, backup, single) = (
+        path("data"),
+        path("fork"),
+        path("backup"),
+        path("one.gstore"),
+    );
+    let ok = |args: &[&str]| {
+        let res = run(args, "");
+        assert_eq!(res.code, 0, "{args:?}: {}{}", res.stdout, res.stderr);
+        assert_note_layout(&res.stdout);
+        assert_note_layout(&res.stderr);
+        res.stdout
+    };
+    let created = ok(&["store", "create", &d, "--from", "modern"]);
+    assert!(
+        created.contains("\n  commit: 0\n  snapshots: 1\n"),
+        "{created}"
+    );
+    assert!(
+        created.ends_with(&format!(
+            "\n  # open it in the REPL\n  graphersal --graph {d}\n  # or serve it to the \
+             browser playground\n  graphersal --graph {d} --server\n"
+        )),
+        "{created}"
+    );
+    let res = run(
+        &[
+            "--graph",
+            &d,
+            "-e",
+            r#"g.add_v("x").to_list(); g.mark("m1"); g.add_v("y").to_list()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    ok(&["store", "checkpoint", &d]);
+    let verified = ok(&["store", "verify", &d]);
+    assert!(
+        verified.ends_with("\n\nok: no damage found\n"),
+        "{verified}"
+    );
+    let forked = ok(&["store", "fork", &d, &fork, "--at-mark", "m1"]);
+    assert!(forked.contains("\n  mark: m1 @ commit 1\n"), "{forked}");
+    let backed = ok(&["store", "backup", &d, &backup]);
+    assert!(
+        backed.contains(&format!(
+            "\n\nThe backup {backup} is read-only\n  # open it read-only in the REPL\n  \
+             graphersal --graph {backup}\n  # make it the live store\n  graphersal store \
+             restore {backup}\n"
+        )),
+        "{backed}"
+    );
+    // `info` keeps its columns; its commands stand under the value column.
+    let info = run(&["store", "info", &backup], "").stdout;
+    assert!(
+        info.contains(&format!(
+            "\n  access    read-only\n            # make it the live store\n            \
+             graphersal store restore {backup}\n"
+        )),
+        "{info}"
+    );
+    let rolled = ok(&["store", "rollback", &d, "--at-mark", "m1"]);
+    assert!(
+        rolled.contains("\n  # or keep it as a new store\n"),
+        "{rolled}"
+    );
+    let attic = ok(&["store", "attic", &d]);
+    assert!(attic.starts_with("── Attic entry "), "{attic}");
+    for key in [
+        "id:",
+        "commits:",
+        "rolled back:",
+        "reason:",
+        "size:",
+        "snapshots:",
+    ] {
+        assert!(
+            attic.lines().any(|l| l.starts_with(&format!("  {key}"))),
+            "{key} {attic}"
+        );
+    }
+    ok(&["store", "convert", &d, &single]);
+    let advice = ok(&[
+        "store",
+        "compact-advice",
+        &single,
+        "--min-ratio",
+        "0",
+        "--min-reclaimable",
+        "0",
+        "--min-size",
+        "0",
+    ]);
+    assert!(advice.contains("\n  decided by: "), "{advice}");
+    ok(&["store", "compact", &single]);
+    ok(&["store", "prune", &d, "--up-to", "1"]);
+    ok(&["store", "restore", &backup]);
+
+    // Errors: the commands of the help on their own lines, indented under `Help:`.
+    let res = run(&["store", "create", &d], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "\nHelp: open it, see what it holds, or choose an empty or new directory for the new \
+             store\n        # open it\n        graphersal --graph {d}\n"
+        )),
+        "{}",
+        res.stderr
+    );
+    // A usage error ends with the command that shows the usage.
+    let res = run(&["store", "frobnicate"], "");
+    assert_eq!(res.code, 2);
+    assert_eq!(
+        res.stderr,
+        "Unknown store command: frobnicate\n  # show the usage\n  graphersal store help\n"
+    );
+    // embed-model: the usage error, an empty models directory, a store that is none.
+    let res = run(&["embed-model", "frobnicate"], "");
+    assert_eq!(res.code, 2);
+    assert!(
+        res.stderr
+            .ends_with("\n  # show the usage\n  graphersal embed-model help\n"),
+        "{}",
+        res.stderr
+    );
+    let models = path("models");
+    let res = run(&["embed-model", "list", "--dir", &models], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr
+            .ends_with("\n  # download one\n  graphersal embed-model download <owner/name>\n"),
+        "{}",
+        res.stderr
+    );
+    let nothing = path("nothing");
+    let res = run(
+        &["embed-model", "download", "acme/tiny", "--into", &nothing],
+        "",
+    );
+    assert_eq!(res.code, 2);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "\n  # create one\n  graphersal store create {nothing}\n"
+        )),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["--graph", "modern", "--host", "0.0.0.0", "-e", "1"], "");
+    assert_eq!(res.code, 2);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr
+            .ends_with("\n  # show the usage\n  graphersal --help\n"),
+        "{}",
+        res.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

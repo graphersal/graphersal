@@ -30,7 +30,7 @@ repair. `persist::SingleFileDir` is the backend; anything that takes a store dir
 ```bash
 graphersal store create graph.gstore --from modern   # or any name with --single-file
 graphersal --graph graph.gstore -e 'g.v().count().next()'   # REPL, -e, --server: as on a directory
-graphersal store info graph.gstore                   # ... "file  single file, 23.0 KiB (23.0 KiB live, 0 B free space inside: ...)"
+graphersal store info graph.gstore                   # ... "file  single file, 23.0 KiB", then its live and free bytes
 graphersal store compact-advice graph.gstore         # [--min-ratio 0.3] [--min-reclaimable BYTES] [--min-size BYTES]
 graphersal store compact graph.gstore                # prune + rewrite (refused while a server has it open)
 graphersal store convert graph.gstore graph-dir/     # one file into a directory (a closed store), verified

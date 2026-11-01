@@ -22,7 +22,7 @@ snapshot is lossless.
 |---|---|---|
 | `The store data/ is in use: another writer holds its lock` | a dev server, a REPL or a program has the store open read-write | use the reading commands (they work), the dev server's Store menu, or stop the writer. A crashed writer never leaves a stale lock (the OS releases it) |
 | `data/ is not a Graphersal store: no valid GRAPH file (...)` | the path is not a store (a typo, or not created yet), or both `GRAPH` copies are unreadable | check the path; `graphersal --graph <dir> --create-store` creates a store; for damage see [Damage](store_damage.md) |
-| `... is a BACKUP (up to commit N, ...)`, `PersistError::IsBackup` | a backup opens read-only | `graphersal store restore <dir>` makes it the live store, `store fork <dir> <new>` a writable copy |
+| `note: ... is a BACKUP: opened READ-ONLY, ...`, `PersistError::IsBackup` | a backup opens read-only | `graphersal store restore <dir>` makes it the live store, `store fork <dir> <new>` a writable copy |
 | `warning: the store ... has DAMAGE and opened READ-ONLY in maintenance mode` | checksums failed, a WAL segment is missing, ... | follow the [runbook](store_damage.md#runbook-the-disk-started-to-fail): stop writing, `verify`, `repair --to` |
 | `The commit was rejected by the commit hook 'maintenance'` | a write to a store in maintenance mode | the same: repair into a new directory |
 | `The journal is poisoned by an earlier failure` | an fsync or a write failed (a full disk, an I/O error) | fix the cause, then reopen the store (or restart the server): recovery continues from the last durable commit |

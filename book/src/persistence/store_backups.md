@@ -41,10 +41,28 @@ graphersal store restore data.zip restored/          # unpack a ZIP backup as th
 
 ```text
 $ graphersal store backup data/ backup/
-Full backup into backup/: snapshot 3, the WAL up to commit 3 (1 segment(s)); 8 file(s), 9605 bytes.
-The backup is read-only (graphersal --graph backup/ opens it so); `graphersal store restore backup/` makes it the live store.
+Full backup into backup/
+  snapshot: commit 3
+  WAL: up to commit 3
+  WAL segments copied: 1
+  files: 8
+  bytes: 9605
+
+The backup backup/ is read-only
+  # open it read-only in the REPL
+  graphersal --graph backup/
+  # make it the live store
+  graphersal store restore backup/
 $ graphersal store backup data/ backup/
-Incremental backup into backup/: commits 4..4 (1 new); copied 0 snapshot(s), 0 WAL segment(s), 83 bytes appended to the last segment; 83 bytes in total.
+Incremental backup into backup/
+  commits: 4..4 (1 new)
+  snapshots copied: 0
+  WAL segments copied: 0
+  bytes appended to the last segment: 83
+  bytes: 83
+
+The backup backup/ is read-only
+  ...
 ```
 
 `Store::backup_dir(dir, target)` (and `backup_dir_with`, `backup_zip_dir`) back up a store
@@ -123,8 +141,16 @@ original's `graph_id` and lineage. It opens **read-only**: `Store::open` refuses
   refused. `store.backup_marker()` returns the marker.
 - `Store::open_read_only(dir, target)` loads any commit it holds.
 - `graphersal --graph backup/` (REPL, `-e`, `--server`) opens it read-only with a note:
-  `note: backup/ is a BACKUP (up to commit 4, taken 2026-10-08T07:05:09Z): opened READ-ONLY, writes are refused. Help: ...`
-  (the help names `store restore` and `store fork`).
+
+  ```text
+  note: backup/ is a BACKUP: opened READ-ONLY, writes are refused
+    backup: up to commit 4
+    taken: 2026-10-08T07:05:09Z
+    # make it the live store
+    graphersal store restore backup/
+    # or make a writable copy
+    graphersal store fork backup/ <new_dir>
+  ```
 - The dev server shows a "Backup: read-only" banner; its Store menu offers View and Fork only.
 
 ## Restore

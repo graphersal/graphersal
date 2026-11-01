@@ -19,8 +19,11 @@ for snapshot in store.snapshots()? {
 
 ```text
 $ graphersal store checkpoint data/ --name nightly
-Snapshot at commit 3 (8 vertices, 6 edges).
-Merged from the snapshot at commit 0 and 3 commits: 0 segment files reused, 0 copied, 2 written.
+Snapshot at commit 3
+  vertices: 8
+  edges: 6
+  merged from: the snapshot at commit 0 and 3 commits
+  segment files: 0 reused, 0 copied, 2 written
 $ graphersal store list data/
       commit  last commit             vertices       edges  name
            0  -                              6           6
@@ -89,8 +92,11 @@ says what it did:
 
 ```text
 $ graphersal store checkpoint data/ --name nightly
-Snapshot at commit 3 (8 vertices, 6 edges).
-Merged from the snapshot at commit 0 and 3 commits: 4 segment files reused, 0 copied, 1 written.
+Snapshot at commit 3
+  vertices: 8
+  edges: 6
+  merged from: the snapshot at commit 0 and 3 commits
+  segment files: 4 reused, 0 copied, 1 written
 ```
 
 ## The donor rule

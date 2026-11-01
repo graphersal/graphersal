@@ -421,8 +421,11 @@ files with their sizes and SHA-256). A failed or interrupted download leaves no 
 repositories. `graphersal embed-model list` shows what is there:
 
 ```text
-REPO                           SIZE  LICENCE  IDENTITY
-minishlab/potion-base-8M   29.5 MiB  mit      model2vec/minishlab/potion-base-8M@fac4fa854e68
+── Downloaded model ──────────────────────────────────────────────────────────
+  model:     minishlab/potion-base-8M
+  full name: model2vec/minishlab/potion-base-8M@fac4fa854e68
+  size:      29.5 MiB
+  licence:   mit
 ```
 
 **Which model.** All three below are MIT licensed Model2Vec models of 256 dimensions from

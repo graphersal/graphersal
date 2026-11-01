@@ -199,3 +199,33 @@ pub fn exit_code(code: i32) -> i32 {
         _ => code,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_help_puts_its_commands_under_the_help_line() {
+        let help = Note::new("open it, or choose another directory")
+            .command("open it", "graphersal --graph data/")
+            .help();
+        assert_eq!(
+            help,
+            "Help: open it, or choose another directory\n        # open it\n        \
+             graphersal --graph data/"
+        );
+    }
+
+    #[test]
+    fn use_it_and_usage_put_each_command_under_its_comment() {
+        assert_eq!(
+            use_it(Note::new("Open data/"), "data/").text(),
+            "Open data/\n  # open it in the REPL\n  graphersal --graph data/\n  # or serve it to \
+             the browser playground\n  graphersal --graph data/ --server"
+        );
+        assert_eq!(
+            usage_text("Unknown command: x", "graphersal store help"),
+            "Unknown command: x\n  # show the usage\n  graphersal store help"
+        );
+    }
+}
