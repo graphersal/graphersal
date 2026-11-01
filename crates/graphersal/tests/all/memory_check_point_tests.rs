@@ -85,8 +85,28 @@ impl Drop for Temp {
 }
 
 /// Every file below `root` with its bytes, sorted by path (a byte-equal listing).
+///
+/// On Windows an open store holds an OS lock (the `LOCK` file of a directory store, the whole
+/// file of a single-file store) that makes a read through another handle fail with raw OS error
+/// 33 (`ERROR_LOCK_VIOLATION`) or 32 (`ERROR_SHARING_VIOLATION`); such a file is listed with its
+/// size and modification time instead of its bytes. Every other read error panics.
 #[cfg(not(target_arch = "wasm32"))]
 fn listing(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn contents(path: &std::path::Path) -> Vec<u8> {
+        match std::fs::read(path) {
+            Err(err) if cfg!(windows) && matches!(err.raw_os_error(), Some(32 | 33)) => {
+                let meta = std::fs::metadata(path).unwrap();
+                let modified = meta
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                format!("<os-locked: {} bytes, modified {modified}>", meta.len()).into_bytes()
+            }
+            read => read.unwrap(),
+        }
+    }
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
@@ -98,7 +118,7 @@ fn listing(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
                 walk(&path, base, out);
             } else {
                 let name = path.strip_prefix(base).unwrap().display().to_string();
-                out.push((name, std::fs::read(&path).unwrap()));
+                out.push((name, contents(&path)));
             }
         }
     }
@@ -106,7 +126,7 @@ fn listing(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     if root.is_dir() {
         walk(root, root, &mut out);
     } else {
-        out.push((String::new(), std::fs::read(root).unwrap()));
+        out.push((String::new(), contents(root)));
     }
     out
 }
