@@ -2354,7 +2354,7 @@ fn store_commands_and_scripts_on_a_store_directory() {
         "",
     );
     assert_eq!(res.stdout.trim(), "6", "{}", res.stderr);
-    assert!(!res.stdout.contains("Marks not carried"), "{}", res.stdout);
+    assert!(!res.stdout.contains("marks not carried"), "{}", res.stdout);
     // A fork at the mark: the fork carries no marks and says which ones it leaves behind.
     let fork_at_mark = temp_path("store-fork-mark");
     let _ = std::fs::remove_dir_all(&fork_at_mark);
@@ -2371,12 +2371,20 @@ fn store_commands_and_scripts_on_a_store_directory() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("Marks not carried (2;"),
+        res.stdout.contains("marks not carried: 2 ("),
         "{}",
         res.stdout
     );
-    assert!(res.stdout.contains("  zoe @ commit 1"), "{}", res.stdout);
-    assert!(res.stdout.contains("  later @ commit 1"), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("  mark: zoe @ commit 1"),
+        "{}",
+        res.stdout
+    );
+    assert!(
+        res.stdout.contains("  mark: later @ commit 1"),
+        "{}",
+        res.stdout
+    );
     let _ = std::fs::remove_dir_all(&fork_at_mark);
     let gsnap = temp_path("store.gsnap");
     let res = run(&["store", "export", d, gsnap.to_str().unwrap()], "");
@@ -2468,7 +2476,7 @@ fn store_prune_and_compact_refuse_to_drop_marks_without_the_flag() {
     }
     let marks = || run(&["store", "marks", d], "").stdout;
     let res = run(&["store", "compact-advice", d], "");
-    assert!(res.stdout.contains("marks lost  m0, m1"), "{}", res.stdout);
+    assert!(res.stdout.contains("marks lost: m0, m1"), "{}", res.stdout);
 
     for args in [
         &["store", "prune", d, "--up-to", "4"][..],
@@ -2494,13 +2502,17 @@ fn store_prune_and_compact_refuse_to_drop_marks_without_the_flag() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stdout
-            .contains("No longer reachable (their history was pruned): the mark(s) m0."),
+            .contains("marks no longer reachable: m0 (their history was pruned)"),
         "{}",
         res.stdout
     );
     let res = run(&["store", "compact", d, "--drop-marks"], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    assert!(res.stdout.contains("the mark(s) m1."), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("marks no longer reachable: m1 "),
+        "{}",
+        res.stdout
+    );
     assert!(!marks().contains("m1"), "{}", marks());
     // Nothing affected any more: no flag needed.
     let res = run(&["store", "compact", d], "");
@@ -2534,7 +2546,7 @@ fn store_backups_are_incremental_read_only_and_restorable() {
     let res = run(&["store", "backup", d, b], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("Incremental backup") && res.stdout.contains("commits 1..1"),
+        res.stdout.contains("Incremental backup") && res.stdout.contains("commits: 1..1"),
         "{}",
         res.stdout
     );
@@ -2543,7 +2555,7 @@ fn store_backups_are_incremental_read_only_and_restorable() {
     write("bob");
     let res = run(&["store", "backup", d, b], "");
     assert!(
-        res.stdout.contains("copied 1 snapshot(s) [1]"),
+        res.stdout.contains("snapshots copied: 1 [1]"),
         "{}",
         res.stdout
     );
@@ -2667,8 +2679,14 @@ fn store_rollback_attic_and_repair_commands() {
     assert_eq!(count(d).trim(), "7");
     let res = run(&["store", "attic", d], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    let id = res.stdout.split_whitespace().next().unwrap().to_string();
-    assert!(res.stdout.contains("commits 2..=2"), "{}", res.stdout);
+    let id = res
+        .stdout
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("id:"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(res.stdout.contains("commits:     2..=2"), "{}", res.stdout);
     let res = run(&["store", "attic", d, "changes", &id], "");
     assert!(res.stdout.contains("commit        2"), "{}", res.stdout);
     let res = run(&["store", "info", d], "");
@@ -2850,7 +2868,7 @@ fn store_targets_by_rfc_3339_time() {
         let res = run(&["store", "fork", d, &f, "--at-time", time], "");
         assert_eq!(res.code, 0, "{time}: {}", res.stderr);
         assert!(
-            res.stdout.contains("to undo the fork, delete"),
+            res.stdout.contains("undo: delete the directory"),
             "{}",
             res.stdout
         );
@@ -2960,7 +2978,7 @@ fn store_commands_on_a_single_file_store() {
         res.stdout
     );
     assert!(
-        res.stdout.contains("decided by  total_bytes"),
+        res.stdout.contains("decided by: total_bytes"),
         "{}",
         res.stdout
     );
@@ -2979,13 +2997,17 @@ fn store_commands_on_a_single_file_store() {
         "",
     );
     assert!(res.stdout.starts_with("compact now"), "{}", res.stdout);
-    assert!(res.stdout.contains("prune "), "{}", res.stdout);
+    assert!(res.stdout.contains("prune: "), "{}", res.stdout);
     let res = run(&["store", "compact-advice", f, "--min-ratio", "2"], "");
     assert_eq!(res.code, 2);
     let before = std::fs::metadata(f).unwrap().len();
     let res = run(&["store", "compact", f], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    assert!(res.stdout.contains("Compacted the file"), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("\n  file: ") && res.stdout.contains(" given back)"),
+        "{}",
+        res.stdout
+    );
     assert!(std::fs::metadata(f).unwrap().len() < before);
     let res = run(&["store", "verify", f], "");
     assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
@@ -3038,13 +3060,13 @@ fn store_checkpoint_merges_a_closed_store_and_is_refused_while_it_is_open() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stdout
-            .contains("Snapshot at commit 1 (6 vertices, 6 edges)"),
+            .contains("Snapshot at commit 1\n  vertices: 6\n  edges: 6\n"),
         "{}",
         res.stdout
     );
     assert!(
         res.stdout
-            .contains("Merged from the snapshot at commit 0 and 1 commits"),
+            .contains("merged from: the snapshot at commit 0 and 1 commits"),
         "{}",
         res.stdout
     );
@@ -3287,7 +3309,7 @@ fn store_damage_policy_and_verified_backups_on_the_command_line() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("damage policy continue"),
+        res.stdout.contains("damage policy: continue"),
         "{}",
         res.stdout
     );
@@ -3321,7 +3343,7 @@ fn store_damage_policy_and_verified_backups_on_the_command_line() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stderr.contains("damage policy maintenance"),
+        res.stderr.contains("damage policy: maintenance"),
         "{}",
         res.stderr
     );
@@ -3905,13 +3927,13 @@ fn store_upgrade_converts_a_store_of_graphersal_0_1() {
     let res = run(&["store", "upgrade", &old, &new], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("store format version 2"),
+        res.stdout.contains("store format version: 2"),
         "{}",
         res.stdout
     );
     assert!(
         res.stdout
-            .contains(&format!("Use it: graphersal --graph {new}"))
+            .contains(&format!("\n  graphersal --graph {new}\n"))
     );
     let res = run(&["--graph", &new, "-e", "g.v().count().next()"], "");
     assert_eq!(res.stdout.trim(), "9", "{}", res.stderr);
@@ -4002,7 +4024,7 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     let res = run(&["store", "upgrade", &old, "--in-place"], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     for needle in [
-        "store format version 3",
+        "store format version: 3",
         "the models/ directory migrated",
         "Converted the embedding model model2vec/acme/tiny@70c61d0ed332",
         "model2vec/local/b6b362e7a651@b6b362e7a651",
@@ -4441,7 +4463,7 @@ mod embed_models {
         };
         let res = import(&model_text, &["--default"]);
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains(", the default"), "{}", res.stdout);
+        assert!(res.stdout.contains("\n  default: yes"), "{}", res.stdout);
         // `embed` without a name uses the database's default (3 components).
         let dims = run_env(
             &["--graph", &store_text, "-e", r#"embed("graph").dimension"#],
@@ -4884,13 +4906,17 @@ mod embed_models {
             ],
         );
         assert_eq!(res.code, 0, "stdout {} stderr {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("acme/tiny ->"), "{}", res.stdout);
         assert!(
-            res.stdout.contains("identity model2vec/acme/tiny@"),
+            res.stdout.contains("Downloaded acme/tiny into"),
             "{}",
             res.stdout
         );
-        assert!(res.stdout.contains("dimension 3"), "{}", res.stdout);
+        assert!(
+            res.stdout.contains("full name: model2vec/acme/tiny@"),
+            "{}",
+            res.stdout
+        );
+        assert!(res.stdout.contains("dimension: 3"), "{}", res.stdout);
         assert!(
             res.stderr.contains("model.safetensors"),
             "progress: {}",
@@ -4937,7 +4963,11 @@ mod embed_models {
         let env = [("GRAPHERSAL_EMBED_MODELS", models_text.as_str())];
         let list = run_env(&["embed-model", "list"], &env);
         assert_eq!(list.code, 0, "{}", list.stderr);
-        assert!(list.stdout.starts_with("REPO"), "{}", list.stdout);
+        assert!(
+            list.stdout.starts_with("── Downloaded model "),
+            "{}",
+            list.stdout
+        );
         assert!(
             list.stdout.contains("model2vec/acme/tiny@"),
             "{}",
@@ -5332,9 +5362,9 @@ mod embed_models {
             &[("GRAPHERSAL_HF_ENDPOINT", endpoint.as_str())],
         );
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("-> the store"), "{}", res.stdout);
+        assert!(res.stdout.contains("into the store"), "{}", res.stdout);
         assert!(
-            res.stdout.contains("identity model2vec/acme/tiny@"),
+            res.stdout.contains("full name: model2vec/acme/tiny@"),
             "{}",
             res.stdout
         );
@@ -5513,7 +5543,7 @@ mod embed_models {
             res.stderr
         );
         let list = run_env(&["embed-model", "list", "--dir", &models], &[]);
-        assert!(list.stdout.contains("LICENCE"), "{}", list.stdout);
+        assert!(list.stdout.contains("licence:"), "{}", list.stdout);
         assert!(list.stdout.contains("unknown"), "{}", list.stdout);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -5666,7 +5696,7 @@ mod embed_models {
             &[],
         );
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("licence apache-2.0"), "{}", res.stdout);
+        assert!(res.stdout.contains("licence: apache-2.0"), "{}", res.stdout);
         let res = run_env(&["embed-model", "import", &model_text], &[]);
         assert_eq!(res.code, 2, "{}", res.stderr);
 
@@ -5795,7 +5825,7 @@ mod embed_models {
         assert!(!out.contains("written by"), "{out}");
         for needle in [
             "\n  model:        acme/a\n  full name:    model2vec/acme/a@",
-            "\n  licence:      apache-2.0\n  licence text: from the repository (LICENSE)\n",
+            "\n  licence:      apache-2.0\n  licence text: from the repository (its own licence file)\n",
             "\n  licence:      mit (named in the model card)\n  licence text: standard MIT text \
              (the repository has no licence file)\n",
             "\n  licence:      other\n  licence text: none (no standard text for this licence)\n",
@@ -5821,7 +5851,7 @@ mod embed_models {
         );
         assert!(
             info.stdout
-                .contains("\n    licence text  from the repository (LICENSE)\n"),
+                .contains("\n    licence text  from the repository (its own licence file)\n"),
             "{}",
             info.stdout
         );
@@ -6342,5 +6372,212 @@ fn store_journal_last_prints_the_newest_records_oldest_first() {
     assert_eq!(res.code, 2, "{}", res.stderr);
     let res = run(&["store", "journal", d, "--last", "0"], "");
     assert_eq!(res.code, 2, "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #19 (follow-up): `text` is in the note layout: blocks set apart by one blank line,
+/// each a headline at the margin followed by lines indented by two spaces (a `Help:` with its
+/// lines indented under it); every `graphersal ...` command line follows a `# comment` line
+/// indented alike, and no line puts a command inside a sentence (`Use it:`, `Run:`,
+/// backticks).
+fn assert_note_layout(text: &str) {
+    assert!(!text.contains("\n\n\n"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        assert!(
+            !line.contains("Use it:") && !line.contains("Run: ") && !line.contains("`graphersal"),
+            "a command inside a sentence: {line:?}\n{text}"
+        );
+        if trimmed.starts_with("graphersal ") {
+            assert!(i > 0, "{text}");
+            let above = lines[i - 1];
+            assert!(
+                above.trim_start().starts_with("# "),
+                "no comment above {line:?}\n{text}"
+            );
+            assert_eq!(
+                line.len() - trimmed.len(),
+                above.len() - above.trim_start().len(),
+                "the comment and its command are indented alike: {line:?}\n{text}"
+            );
+        }
+        let headline = i == 0 || lines[i - 1].is_empty();
+        if !headline && !line.is_empty() && !line.starts_with("Help: ") {
+            assert!(line.starts_with("  "), "not indented: {line:?}\n{text}");
+        }
+    }
+}
+
+/// Issue #19 (follow-up): every `store` result is one block per thing done (a headline, one
+/// `key: value` per line, commands on their own lines under a comment), the hints that named a
+/// command inline (`Use it: ...`, `Open it: ...`, `Run: ...`) included; the CLI's own errors
+/// give their commands in the `Help:` the same way; a usage error ends with the help command;
+/// `store attic` shows one section per entry.
+#[test]
+fn store_results_errors_and_usage_are_in_the_note_layout() {
+    let dir = temp_path("note-layout-store");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).to_string_lossy().to_string();
+    let (d, fork, backup, single) = (
+        path("data"),
+        path("fork"),
+        path("backup"),
+        path("one.gstore"),
+    );
+    let ok = |args: &[&str]| {
+        let res = run(args, "");
+        assert_eq!(res.code, 0, "{args:?}: {}{}", res.stdout, res.stderr);
+        assert_note_layout(&res.stdout);
+        assert_note_layout(&res.stderr);
+        res.stdout
+    };
+    let created = ok(&["store", "create", &d, "--from", "modern"]);
+    assert!(
+        created.contains("\n  commit: 0\n  snapshots: 1\n"),
+        "{created}"
+    );
+    assert!(
+        created.ends_with(&format!(
+            "\n  # open it in the REPL\n  graphersal --graph {d}\n  # or serve it to the \
+             browser playground\n  graphersal --graph {d} --server\n"
+        )),
+        "{created}"
+    );
+    let res = run(
+        &[
+            "--graph",
+            &d,
+            "-e",
+            r#"g.add_v("x").to_list(); g.mark("m1"); g.add_v("y").to_list()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    ok(&["store", "checkpoint", &d]);
+    let verified = ok(&["store", "verify", &d]);
+    assert!(
+        verified.ends_with("\n\nok: no damage found\n"),
+        "{verified}"
+    );
+    let forked = ok(&["store", "fork", &d, &fork, "--at-mark", "m1"]);
+    assert!(forked.contains("\n  mark: m1 @ commit 1\n"), "{forked}");
+    let backed = ok(&["store", "backup", &d, &backup]);
+    assert!(
+        backed.contains(&format!(
+            "\n\nThe backup {backup} is read-only\n  # open it read-only in the REPL\n  \
+             graphersal --graph {backup}\n  # make it the live store\n  graphersal store \
+             restore {backup}\n"
+        )),
+        "{backed}"
+    );
+    // `info` keeps its columns; its commands stand under the value column.
+    let info = run(&["store", "info", &backup], "").stdout;
+    assert!(
+        info.contains(&format!(
+            "\n  access    read-only\n            # make it the live store\n            \
+             graphersal store restore {backup}\n"
+        )),
+        "{info}"
+    );
+    let rolled = ok(&["store", "rollback", &d, "--at-mark", "m1"]);
+    assert!(
+        rolled.contains("\n  # or keep it as a new store\n"),
+        "{rolled}"
+    );
+    let attic = ok(&["store", "attic", &d]);
+    assert!(attic.starts_with("── Attic entry "), "{attic}");
+    for key in [
+        "id:",
+        "commits:",
+        "rolled back:",
+        "reason:",
+        "size:",
+        "snapshots:",
+    ] {
+        assert!(
+            attic.lines().any(|l| l.starts_with(&format!("  {key}"))),
+            "{key} {attic}"
+        );
+    }
+    ok(&["store", "convert", &d, &single]);
+    let advice = ok(&[
+        "store",
+        "compact-advice",
+        &single,
+        "--min-ratio",
+        "0",
+        "--min-reclaimable",
+        "0",
+        "--min-size",
+        "0",
+    ]);
+    assert!(advice.contains("\n  decided by: "), "{advice}");
+    ok(&["store", "compact", &single]);
+    ok(&["store", "prune", &d, "--up-to", "1"]);
+    ok(&["store", "restore", &backup]);
+
+    // Errors: the commands of the help on their own lines, indented under `Help:`.
+    let res = run(&["store", "create", &d], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "\nHelp: open it, see what it holds, or choose an empty or new directory for the new \
+             store\n        # open it\n        graphersal --graph {d}\n"
+        )),
+        "{}",
+        res.stderr
+    );
+    // A usage error ends with the command that shows the usage.
+    let res = run(&["store", "frobnicate"], "");
+    assert_eq!(res.code, 2);
+    assert_eq!(
+        res.stderr,
+        "Unknown store command: frobnicate\n  # show the usage\n  graphersal store help\n"
+    );
+    // embed-model: the usage error, an empty models directory, a store that is none.
+    let res = run(&["embed-model", "frobnicate"], "");
+    assert_eq!(res.code, 2);
+    assert!(
+        res.stderr
+            .ends_with("\n  # show the usage\n  graphersal embed-model help\n"),
+        "{}",
+        res.stderr
+    );
+    let models = path("models");
+    let res = run(&["embed-model", "list", "--dir", &models], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr
+            .ends_with("\n  # download one\n  graphersal embed-model download <owner/name>\n"),
+        "{}",
+        res.stderr
+    );
+    let nothing = path("nothing");
+    let res = run(
+        &["embed-model", "download", "acme/tiny", "--into", &nothing],
+        "",
+    );
+    assert_eq!(res.code, 2);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "\n  # create one\n  graphersal store create {nothing}\n"
+        )),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["--graph", "modern", "--host", "0.0.0.0", "-e", "1"], "");
+    assert_eq!(res.code, 2);
+    assert_note_layout(&res.stderr);
+    assert!(
+        res.stderr
+            .ends_with("\n  # show the usage\n  graphersal --help\n"),
+        "{}",
+        res.stderr
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

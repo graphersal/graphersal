@@ -38,8 +38,18 @@ graphersal store rollback --help      # the same (-h works too)
   `GRAPHERSAL_LOG` sets the level: `off`, `error`, `warn` (default), `info`, `debug`, `trace`.
 - A read-write open (`--graph <DIR>`, `mark`, `prune`, `rollback`, `compact`, `attic
   restore|remove`) that finds one `GRAPH` copy missing, damaged or stale rewrites it from the
-  other and says so in one line: `note: the store data/: GRAPH.copy is not usable (...); GRAPH
-  is used; the other copy was rewritten from it`.
+  other and says so in a note, with the command that checks the rest:
+
+  ```text
+  note: the store data/: GRAPH.copy is not usable (...); GRAPH is used; the other copy was rewritten from it
+    # check the rest of the store
+    graphersal store verify data/
+  ```
+- **Layout.** Every result is one block per thing the command did: a short headline, then one
+  indented `key: value` per line, and every shell command on a line of its own under a `# comment`
+  saying what it does (never inside a sentence); blocks are set apart by a blank line. Lists of
+  records (`models`, `attic`) show one section per record with one field per line. A usage error
+  ends with the command that shows the usage, an error's `Help:` lists its commands the same way.
 - Times are printed in UTC (`2026-10-08T07:05:08Z`), in the form `--at-time` accepts back.
 - **While the store is open elsewhere** (a dev server, a REPL): `info`, `list`, `marks`,
   `verify`, `fork`, `backup`, `export`, `repair`, `compact-advice` and `attic` (list, changes,
@@ -94,10 +104,25 @@ size, the damage policy and the backend are [fixed for the store's life](creatio
 
 ```text
 $ graphersal store create data/ --from modern
-Created the store data/: graph 01a11a54-8209-7661-92e2-147ae6d8bbd3, commit 0, 1 snapshot(s); damage policy maintenance (fixed for its life).
-Use it: graphersal --graph data/ (or --server)
+Created the store data/
+  graph: 01a11a54-8209-7661-92e2-147ae6d8bbd3
+  commit: 0
+  snapshots: 1
+  damage policy: maintenance (fixed for its life)
+  # open it in the REPL
+  graphersal --graph data/
+  # or serve it to the browser playground
+  graphersal --graph data/ --server
 $ graphersal store create graph.gstore --from modern --on-damage continue
-Created the single-file store graph.gstore: graph 01a11a54-8ca5-7fd3-8ed5-fcd7729f0e80, commit 0, 1 snapshot(s); damage policy continue (fixed for its life).
+Created the single-file store graph.gstore
+  graph: 01a11a54-8ca5-7fd3-8ed5-fcd7729f0e80
+  commit: 0
+  snapshots: 1
+  damage policy: continue (fixed for its life)
+  # open it in the REPL
+  graphersal --graph graph.gstore
+  # or serve it to the browser playground
+  graphersal --graph graph.gstore --server
 ```
 
 A packed snapshot makes the store without opening it (`Store::create_from_packed_dir`), and what
@@ -115,7 +140,12 @@ only one the schema names, its import takes `--default`:
 
 ```text
 $ graphersal store create data/ --from old.gsnap
-Created the store data/: graph 01a11a54-9f3c-7b21-8e0d-5a2c9e41d7b3, commit 3120, 1 snapshot(s); damage policy maintenance (fixed for its life).
+Created the store data/
+  graph: 01a11a54-9f3c-7b21-8e0d-5a2c9e41d7b3
+  commit: 3120
+  snapshots: 1
+  damage policy: maintenance (fixed for its life)
+
 warning: the schema needs the embedding model acme/tiny, which the store does not keep
   identity: model2vec/acme/tiny@0123456789ab
   needed by: doc.emb
@@ -128,7 +158,12 @@ warning: the schema needs the embedding model acme/tiny, which the store does no
 note: doc.emb has vectors of model2vec/acme/tiny@0123456789ab but no source property
   vectors: 250 element(s)
   ...
-Use it: graphersal --graph data/ (or --server)
+
+Open data/
+  # open it in the REPL
+  graphersal --graph data/
+  # or serve it to the browser playground
+  graphersal --graph data/ --server
 ```
 
 Exit 2 when the source cannot be loaded or `--on-damage` names no policy; 1 when `DIR` is a
@@ -166,12 +201,23 @@ fixed at creation (never changed):
 ```
 
 Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back store), `backup
-up to commit N, taken T` (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
+up to commit N` with `taken` and `access` below it and the command that makes it the live store
+(a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
 (a `models` block: one block per model under its repository, one field per line: `full name`
 (the identity), `size`, `licence`, `licence text`, `default`, `used by`; a model the schema names
 but the store lacks as `missing model`, see [`models`](#models)), the store's blobs (`blobs  N (size; M unreferenced, removed by the next
-prune)`, by names and lengths only, see [Blobs](store_blobs.md)), and for a single file
-`file  single file, 23.0 KiB (23.0 KiB live, 0 B free space inside: ...)`. `state` is `open (in
+prune)`, by names and lengths only, see [Blobs](store_blobs.md)), and for a single file its
+size with `live` and `free` below it and the command that tells whether compacting pays:
+
+```text
+file        single file, 23.0 KiB
+  live      23.0 KiB
+  free      0 B inside the file
+            # see whether compacting gives that space back
+            graphersal store compact-advice graph.gstore
+```
+
+ `state` is `open (in
 use, or not closed cleanly)` while a writer has it (or after a crash).
 
 A store written by a **newer** Graphersal (its `GRAPH`, a snapshot or WAL file, or the single
@@ -234,11 +280,15 @@ Writes a snapshot of the current state of the CLOSED store, merged from the last
 WAL after it without loading the graph ([how](store_checkpoints.md#how-a-checkpoint-is-written)):
 
 ```text
-Snapshot at commit 3 (8 vertices, 6 edges).
-Merged from the snapshot at commit 0 and 3 commits: 4 segment files reused, 0 copied, 1 written.
+Snapshot at commit 3
+  vertices: 8
+  edges: 6
+  merged from: the snapshot at commit 0 and 3 commits
+  segment files: 4 reused, 0 copied, 1 written
 ```
 
-`Nothing was committed after it: no new snapshot written.` when the newest snapshot is current.
+`written: no: nothing was committed after it, no new snapshot written` when the newest snapshot
+is current.
 "In use" while another process has the store open (a server's Store menu has **Checkpoint**,
 which merges the same way while commits go on). Damage in what it reads stops it with exit 1 and
 nothing written; run `verify`.
@@ -249,7 +299,9 @@ nothing written; run `verify`.
 graphersal store verify <DIR>
 ```
 
-Reads every checksum (snapshots, WAL, `GRAPH`, marks). Exit **0** with `ok: no damage found`;
+Reads every checksum (snapshots, WAL, `GRAPH`, marks) and says what it read (`Checked the store
+data/` with `snapshots`, `WAL segments`, `records` and `commits` below it). Exit **0** with `ok: no
+damage found`;
 exit **1** with every problem and the damage report (the donor of each damaged item). See
 [Verify](store_verify.md). Files of a newer format version are never listed as damage: `verify`
 exits **1** with the "written by a newer Graphersal" refusal shown under [info](#info) (no
@@ -266,14 +318,20 @@ the latest), with a new lineage that records `DIR` as its parent. `DIR` is not c
 
 ```text
 $ graphersal store fork data/ branch/ --at-mark before-import
-Forked into branch/ at commit 1: graph 01a11a54-87d2-7995-b2cb-e450e4319735 (parent 01a11a54-8209-7661-92e2-147ae6d8bbd3).
-Marks not carried (1; they stay targets of data/ only):
-  before-import @ commit 1
-Open it: graphersal --graph branch/ --server (or the REPL: graphersal --graph branch/).
-data/ is unchanged; to undo the fork, delete the directory branch/.
+Forked data/ into branch/
+  at commit: 1
+  graph: 01a11a54-87d2-7995-b2cb-e450e4319735
+  parent: 01a11a54-8209-7661-92e2-147ae6d8bbd3
+  marks not carried: 1 (they stay targets of data/ only)
+  mark: before-import @ commit 1
+  undo: delete the directory branch/ (data/ is unchanged)
+  # open it in the REPL
+  graphersal --graph branch/
+  # or serve it to the browser playground
+  graphersal --graph branch/ --server
 ```
 
-A fork starts without marks: the `Marks not carried` lines (printed only when there are any) name
+A fork starts without marks: the `marks not carried` and `mark` lines (printed only when there are any) name
 the source's marks at or before the fork's position. Exit 1 when the target is not reached
 (`Recovery target mark "nosuch" not reached`).
 
@@ -290,8 +348,21 @@ or the store is in use. See [Rollback and the Attic](store_rollback.md).
 
 ```text
 $ graphersal store rollback data/ --at-commit 1 --delete
-Rolled back from commit 4 to commit 1: new lineage 01a11a54-8b90-7dba-b74a-cadc851e226f.
-The history after it (commits 2..=4, 1 snapshot(s), 2 WAL file(s)) was deleted: this cannot be undone.
+Rolled back data/ from commit 4 to commit 1
+  new lineage: 01a11a54-8b90-7dba-b74a-cadc851e226f
+  history after it: commits 2..=4, 1 snapshot(s), 2 WAL file(s)
+  kept: no: deleted, this cannot be undone
+$ graphersal store rollback data/ --at-mark before-import
+Rolled back data/ from commit 4 to commit 1
+  new lineage: 01a11a54-8b91-7c02-9d4e-3f6a8b2c1d07
+  history after it: commits 2..=4, 1 snapshot(s), 2 WAL file(s)
+  kept: in the attic as 20261008T070510Z-00000000000000000002
+  # undo (only while nothing new is committed or marked)
+  graphersal store attic data/ restore 20261008T070510Z-00000000000000000002
+  # or keep it as a new store
+  graphersal store attic data/ fork 20261008T070510Z-00000000000000000002 <NEW_DIR>
+  # or delete it
+  graphersal store attic data/ remove 20261008T070510Z-00000000000000000002
 ```
 
 ### attic
@@ -306,12 +377,19 @@ graphersal store attic <DIR> remove <ID>           delete the entry for good
 
 ```text
 $ graphersal store attic data/
-20261008T070510Z-00000000000000000002  commits 2..=4 rolled back at 2026-10-08T07:05:10Z (rollback to mark "before-import"), 9.3 KiB, 1 snapshot(s)
+── Attic entry ───────────────────────────────────────────────────────────────
+  id:          20261008T070510Z-00000000000000000002
+  commits:     2..=4
+  rolled back: 2026-10-08T07:05:10Z
+  reason:      rollback to mark "before-import"
+  size:        9.3 KiB
+  snapshots:   1
 $ graphersal store attic data/ restore 20261008T070510Z-00000000000000000002
 Restored 20261008T070510Z-00000000000000000002: the store is at commit 4 again.
 ```
 
-`restore` works only while nothing was committed or marked since that rollback; `fork` always
+One section per entry, one field per line (`The attic is empty.` without entries). `restore`
+works only while nothing was committed or marked since that rollback; `fork` always
 does (and lists the marks of the entry's history it does not carry, like `store fork`). `restore` and `remove` are "in use" while a server has the store open.
 
 ### backup
@@ -328,18 +406,42 @@ archive (always full; the file must not exist; feature `persist-zip`, on in the 
 
 ```text
 $ graphersal store backup data/ backup/
-Full backup into backup/: snapshot 3, the WAL up to commit 3 (1 segment(s)); 8 file(s), 9605 bytes.
-The backup is read-only (graphersal --graph backup/ opens it so); `graphersal store restore backup/` makes it the live store.
+Full backup into backup/
+  snapshot: commit 3
+  WAL: up to commit 3
+  WAL segments copied: 1
+  files: 8
+  bytes: 9605
+
+The backup backup/ is read-only
+  # open it read-only in the REPL
+  graphersal --graph backup/
+  # make it the live store
+  graphersal store restore backup/
 $ graphersal store backup data/ backup/
-Incremental backup into backup/: nothing new since commit 4; the backup is current.
-The backup is read-only (graphersal --graph backup/ opens it so); `graphersal store restore backup/` makes it the live store.
+Incremental backup into backup/
+  state: current (nothing new since commit 4)
+
+The backup backup/ is read-only
+  ...
 $ graphersal store backup data/ data.zip --zip
-Full backup of snapshot 3 and the WAL up to commit 4: 8 file(s), 9688 bytes, in data.zip; every checksum read back.
+Full backup into data.zip
+  snapshot: commit 3
+  WAL: up to commit 4
+  files: 8
+  bytes: 9688
+  checked: every checksum read back
+  # unpack it into a new live store
+  graphersal store restore data.zip <NEW_DIR>
 ```
 
+An increment that copied something lists `commits` (`5..7 (3 new)`), `snapshots copied`, `WAL
+segments copied` (with their numbers in brackets), `bytes appended to the last segment` and
+`bytes`.
+
 The store's [embedding models](store_models.md) are copied too, with their cards and licence
-files, and the report lists them (`It carries 1 embedding model(s) with their licences (handing it
-on redistributes them):` and one line per model): who hands a backup on redistributes them.
+files, and the report lists them (`It carries 1 embedding model(s) with their licences`, then one
+section per model as [`models`](#models) shows it): who hands a backup on redistributes them.
 `--without-models` (with `--zip` only; a usage error otherwise) leaves them out: such an archive is
 also restored by Graphersal 0.3.0, which refuses one with models as written by a newer version.
 
@@ -353,7 +455,11 @@ is intact.
 ```text
 $ graphersal store backup data/ backup/
 Error: The backup stopped: the store data/ is damaged: wal/00000000000000000001.wal at byte 64: record of commit 1: checksum mismatch; nothing of the backup into backup/ was kept
-Help: Repair the MAIN store, never the backup: graphersal store repair data/ --to <new_dir> ...
+Help: Repair the MAIN store, never the backup: Store::repair_dir builds a verified, repaired copy ...
+        # build a repaired copy of the main store
+        graphersal store repair data/ --to <new_dir>
+        # show the full damage report
+        graphersal store verify data/
 ```
 
 Refused (exit 1, the backup unchanged): a backup of another graph, a directory holding a store
@@ -382,9 +488,20 @@ Graphersal's store is upgraded to the current format as it is unpacked (verified
 
 ```text
 $ graphersal store restore backup/
-Restored: backup/ is now the live store (the backup up to commit 4, taken 2026-10-08T07:05:09Z; the same graph id). Use it: graphersal --graph backup/
+Restored backup/: it is the live store now
+  backup: up to commit 4
+  taken: 2026-10-08T07:05:09Z
+  graph id: the same
+  # open it in the REPL
+  graphersal --graph backup/
+  # or serve it to the browser playground
+  graphersal --graph backup/ --server
 $ graphersal store restore data.zip restored/
-Restored into restored/ (the live store). Use it: graphersal --graph restored/
+Restored data.zip into restored/: it is the live store
+  # open it in the REPL
+  graphersal --graph restored/
+  # or serve it to the browser playground
+  graphersal --graph restored/ --server
 ```
 
 ### export
@@ -398,7 +515,7 @@ Writes the latest stored snapshot (or the one at commit `N`, which must be a sna
 with `--graph FILE.gsnap`, `store create --from FILE.gsnap`, or the playground.
 
 The file carries the store's [embedding models](store_models.md) with their cards and licences
-(listed after the first line) as blobs, unless `--without-models` (the definitions stay; the
+(listed after the first line, one section per model) as blobs, unless `--without-models` (the definitions stay; the
 models are missing in what is made from the file: `graphersal embed-model import <repo> --into
 <store>` writes a missing model's blob back). `store create --from FILE.gsnap` and the
 playground put them back into a store. A damaged model blob stops the export (exit 1; export
@@ -423,7 +540,7 @@ keep (`Missing embedding model`). Works while a server has the store open.
 `licence text` says where the text the store keeps beside the model comes from; Graphersal never
 writes a licence:
 
-- `from the repository (LICENSE)`: the repository's own licence file, named;
+- `from the repository (its own licence file)`: the repository's own licence file;
 - `standard MIT text (the repository has no licence file)`: the unchanged standard text of the
   licence the model card names (bundled for MIT and Apache-2.0; the copyright holders are those
   the model card names), and `licence` says `mit (named in the model card)`;
@@ -445,7 +562,7 @@ $ graphersal store models data/
   full name:    model2vec/acme/other@456789abcdef
   size:         7.6 MiB
   licence:      apache-2.0
-  licence text: from the repository (LICENSE)
+  licence text: from the repository (its own licence file)
   default:      yes
   used by:      nothing (not used by the schema)
 ```
@@ -470,7 +587,16 @@ graphersal store prune <DIR> --up-to <COMMIT> [--drop-marks]
 ```
 
 Removes snapshots and WAL only needed for targets before `COMMIT`; the last two snapshots and the
-attic's bases always stay (`Kept from commit 0; removed 0 snapshot(s) [] and 0 WAL segment(s).`).
+attic's bases always stay:
+
+```text
+$ graphersal store prune data/ --up-to 1200
+Pruned data/
+  kept from: commit 1100
+  snapshots removed: 2 (at commits 0, 600)
+  WAL segments removed: 1
+```
+
 Without `--up-to` it is a usage error (exit 2: nothing is pruned implicitly). On a backup
 directory it prunes the backup.
 
@@ -480,14 +606,15 @@ history a mark needs, it names those marks, changes nothing and exits 1:
 ```text
 $ graphersal store prune data --up-to 4
 Error: `store prune` would make the mark(s) "m0", "m1" unreachable: it removes the history they need, so they cannot be opened, forked or rolled back to afterwards (only from a backup that holds older snapshots). Nothing was changed.
-Help: run it again with --drop-marks to prune anyway, or back the store up first (`graphersal store backup data <BACKUP_DIR>`).
+Help: run it again with --drop-marks to prune anyway, or back the store up first
+        # back the store up first
+        graphersal store backup data <BACKUP_DIR>
 ```
 
-With `--drop-marks` it prunes and names them on a second line ("No longer reachable (their
-history was pruned): the mark(s) ..."); `store marks` no longer lists them. Without affected
-marks the flag changes nothing. A prune also removes the [blobs](store_blobs.md) no retained
-history references any more and says so on a line of its own ("Removed N unreferenced blob(s)
-(size)."). See [Prune, Compact and Retention](store_prune.md).
+With `--drop-marks` it prunes and names them (`marks no longer reachable: m0, m1 (their history
+was pruned)`); `store marks` no longer lists them. Without affected marks the flag changes
+nothing. A prune also removes the [blobs](store_blobs.md) no retained history references any
+more and says so (`unreferenced blobs removed: N (size)`). See [Prune, Compact and Retention](store_prune.md).
 
 ### compact
 
@@ -499,12 +626,15 @@ Prunes up to the current commit, then, for a single-file store, rewrites the fil
 free space (the disk needs room for the live data meanwhile). On a directory the prune is all.
 Like `prune`, it refuses (exit 1, nothing changed) when the prune would make marks unreachable,
 naming them, unless `--drop-marks` is given; `compact-advice` lists them beforehand
-(`marks lost  m0, m1 (...)`).
+(`marks lost: m0, m1 (...)`).
 
 ```text
 $ graphersal store compact graph.gstore
-Pruned: kept from commit 0; removed 0 snapshot(s) and 0 WAL segment(s).
-Compacted the file: 23.7 KiB -> 22.8 KiB (930 B given back).
+Compacted graph.gstore
+  kept from: commit 0
+  snapshots removed: 0
+  WAL segments removed: 0
+  file: 23.7 KiB -> 22.8 KiB (930 B given back)
 ```
 
 ### journal
@@ -548,15 +678,15 @@ Whether `compact` is worth it now, and the numbers; cheap (reads only names, siz
 has the store open. The rule: at least `--min-ratio` of the store (0.0..1.0, default 0.5) and
 `--min-reclaimable` bytes (default 64 MiB) to gain, in a store of at least `--min-size` bytes
 (default 64 MiB), and enough free disk space. Always exit 0 (the answer is in the text: `compact
-now: ...` with a `Run: graphersal store compact <DIR>` line, or `no compaction needed: ...`).
+now: ...` with the command under `# compact the store now`, or `no compaction needed: ...`).
 
 ```text
 $ graphersal store compact-advice data/
 no compaction needed: the store is smaller than the minimum of 64.0 MiB
-store       9.6 KiB (directory: compact = prune)
-prune       0 B
-reclaimable 0 B (0 % of the store)
-decided by  total_bytes
+  store: 9.6 KiB (directory: compact = prune)
+  prune: 0 B
+  reclaimable: 0 B (0 % of the store)
+  decided by: total_bytes
 ```
 
 ### convert
@@ -573,8 +703,15 @@ backups of `DIR` (its first backup is a full one into a new directory).
 
 ```text
 $ graphersal store convert data/ graph.gstore
-Copied the store data/ into the single file graph.gstore: 9 file(s), 9.6 KiB; verified.
-Use it: graphersal --graph graph.gstore. data/ is unchanged.
+Copied the store data/ into the single file graph.gstore
+  files: 9
+  size: 9.6 KiB
+  verified: yes
+  source: data/ is unchanged
+  # open it in the REPL
+  graphersal --graph graph.gstore
+  # or serve it to the browser playground
+  graphersal --graph graph.gstore --server
 ```
 
 ### upgrade
@@ -618,9 +755,21 @@ notes are separated by a blank line (layout: [Format Versions](store_versions.md
 
 ```text
 $ graphersal store upgrade store/ --in-place
-Verified the store store/ (store format version 3): 2 snapshot(s), 1 WAL segment(s), 12 record(s).
-Upgraded store/ in place to store format version 4: GRAPH rewritten, the models/ directory migrated (below), every other file kept. The older Graphersal no longer opens it.
-Converted the embedding model model2vec/acme/tiny@70c61d0ed332 into a blob with its catalog definition: model2vec/acme/tiny@70c61d0ed332 (8.5 KiB).
+Verified the store store/
+  store format version: 3
+  snapshots: 2
+  WAL segments: 1
+  records: 12
+
+Upgraded store/ in place to store format version 4
+  GRAPH: rewritten
+  every other file: kept, the models/ directory migrated (below)
+  the older Graphersal: no longer opens it
+
+Converted the embedding model model2vec/acme/tiny@70c61d0ed332 into a blob with its catalog definition
+  full name: model2vec/acme/tiny@70c61d0ed332
+  size: 8.5 KiB
+
 The models were defined by commit 12; the history before it has no models.
   # take a full backup now: a backup taken before the upgrade does not take increments of the upgraded store
   graphersal store backup store/ <new_dir>
@@ -631,7 +780,12 @@ note: doc.emb has vectors of acme/tiny but no source property
   afterwards: write the source property, never emb itself
   # add the source property (replace <source property> first)
   graphersal --graph store/ -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'
-Use it: graphersal --graph store/
+
+Open store/
+  # open it in the REPL
+  graphersal --graph store/
+  # or serve it to the browser playground
+  graphersal --graph store/ --server
 ```
 
 Which versions are upgraded, and how, is decided by one table (the same in
@@ -652,13 +806,38 @@ every other command does (below):
 
 ```text
 $ graphersal store upgrade old/ new/
-Verified the store old/ (store format version 2): 2 snapshot(s), 2 WAL segment(s), 10 record(s).
-Upgraded into new/ (store format version 4): 15 file(s), 21.2 KiB; verified. old/ is unchanged (keep using new/: it is the same store, with the same identity).
-Use it: graphersal --graph new/
+Verified the store old/
+  store format version: 2
+  snapshots: 2
+  WAL segments: 2
+  records: 10
+
+Upgraded old/ into new/
+  store format version: 4
+  files: 15
+  size: 21.2 KiB
+  verified: yes
+  source: old/ is unchanged (keep using new/: it is the same store, with the same identity)
+
+Open new/
+  # open it in the REPL
+  graphersal --graph new/
+  # or serve it to the browser playground
+  graphersal --graph new/ --server
 $ graphersal store upgrade old/ --in-place
-Verified the store old/ (store format version 2): 2 snapshot(s), 2 WAL segment(s), 10 record(s).
-Upgraded old/ in place to store format version 4: GRAPH rewritten, every other file kept. The older Graphersal no longer opens it.
-Use it: graphersal --graph old/
+Verified the store old/
+  ...
+
+Upgraded old/ in place to store format version 4
+  GRAPH: rewritten
+  every other file: kept
+  the older Graphersal: no longer opens it
+
+Open old/
+  # open it in the REPL
+  graphersal --graph old/
+  # or serve it to the browser playground
+  graphersal --graph old/ --server
 ```
 
 ### repair
@@ -693,8 +872,9 @@ Copies the [blobs](store_blobs.md) the store references that are missing or dama
 `SOURCE`: a backup directory (full or incremental), a ZIP backup (`.zip`), a packed snapshot
 (`.gsnap`) or another store (a directory or `.gstore`). Each blob is checked (length, CRC-32C,
 hash) before it is moved into place; a healthy blob is never touched. The store must be closed
-(exit 1 "in use" otherwise). Prints one summary line and one line per blob (`restored`, `not in
-the source`, `damaged there too`); `--json` prints the report as one JSON object (`source`,
+(exit 1 "in use" otherwise). Prints a summary (`referenced`, `missing or damaged`, `restored`,
+`bytes restored`) and one line per blob (`restored blob`, `not in the source`, `damaged there
+too`); `--json` prints the report as one JSON object (`source`,
 `referenced`, `wanted`, `restored`, `bytesRestored`, `notFound`, `damagedInSource`,
 `complete`). Exit **0** when every blob the store references is intact afterwards, else **1**
 with the list.

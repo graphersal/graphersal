@@ -479,23 +479,38 @@ pub fn run(cli: &Cli) -> i32 {
                 if snapshots == 1 { "" } else { "s" }
             ),
         );
-        let state = if let Some(marker) = store.backup_marker() {
-            format!(
-                "a BACKUP (up to commit {}): READ-ONLY, writes are refused; make it the live \
-                 store with `graphersal store restore {location}` (after stopping the server)",
-                marker.commit_seq
-            )
+        if let Some(marker) = store.backup_marker() {
+            store_section.note(
+                "state",
+                &crate::out::Note::new(format!(
+                    "a BACKUP (up to commit {}): READ-ONLY, writes are refused",
+                    marker.commit_seq
+                ))
+                .command(
+                    "make it the live store (after stopping the server)",
+                    format!("graphersal store restore {location}"),
+                )
+                .text(),
+            );
         } else if store.maintenance().is_some() {
-            format!(
-                "MAINTENANCE MODE (damage found; read-only): the UI shows the damage report; \
-                 repair with `graphersal store repair {location} --to <new_dir>`"
-            )
+            store_section.note(
+                "state",
+                &crate::out::Note::new(
+                    "MAINTENANCE MODE (damage found; read-only): the UI shows the damage report",
+                )
+                .command(
+                    "build a repaired copy in a new directory",
+                    format!("graphersal store repair {location} --to <new_dir>"),
+                )
+                .text(),
+            );
         } else {
-            "durable: every commit is in the write-ahead log before the query answers; \
-             Ctrl+C stops the server and closes the store cleanly"
-                .to_string()
-        };
-        store_section.row("state", state);
+            store_section.row(
+                "state",
+                "durable: every commit is in the write-ahead log before the query answers; \
+                 Ctrl+C stops the server and closes the store cleanly",
+            );
+        }
         store_section.row("loaded", loaded);
     } else {
         graph_section.row("source", graph_title(&cli.graph));

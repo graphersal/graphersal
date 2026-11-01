@@ -110,8 +110,12 @@ $ graphersal store rollback data/ --at-commit 2        # entry ...-03: commits 3
 $ graphersal store attic data/ restore 20261009T010700Z-00000000000000000005
 Error: Cannot restore the attic entry: the store's lineage changed since that rollback (another
 rollback or restore; attic entries restore newest first); restore the newer entry
-20261009T010702Z-00000000000000000003 first (graphersal store attic <dir> restore
-20261009T010702Z-00000000000000000003), or fork the entry instead (...)
+20261009T010702Z-00000000000000000003 first, or fork the entry instead (the help shows the commands)
+Help: Another rollback or restore came after this entry's rollback, and attic entries restore newest first: ...
+        # restore the newer entry first (the message names it)
+        graphersal store attic <dir> restore <newer_id>
+        # or fork this entry into a new store
+        graphersal store attic <dir> fork <id> <new_dir>
 $ graphersal store attic data/ restore 20261009T010702Z-00000000000000000003   # back at commit 4
 $ graphersal store attic data/ restore 20261009T010700Z-00000000000000000005   # back at commit 6
 ```

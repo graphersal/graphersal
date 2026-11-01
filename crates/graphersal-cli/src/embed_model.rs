@@ -217,7 +217,10 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn usage(message: &str) -> i32 {
-    errln!("{message}\n\nRun `graphersal embed-model help` for usage.");
+    errln!(
+        "{}",
+        crate::out::usage_text(message, "graphersal embed-model help")
+    );
     EXIT_USAGE_ERROR
 }
 
@@ -393,42 +396,36 @@ fn find_models(dir: &Path) -> Vec<Listed> {
 fn list(dir: &Path) -> i32 {
     let models = find_models(dir);
     if models.is_empty() {
-        errln!(
-            "No downloaded models in {} (graphersal embed-model download <owner/name>)",
-            dir.display()
+        crate::out::print_note(
+            "note",
+            &crate::out::Note::new(format!("No downloaded models in {}", dir.display()))
+                .command(
+                    "download one",
+                    "graphersal embed-model download <owner/name>",
+                )
+                .text(),
         );
         return EXIT_OK;
     }
-    let width = models
+    // One section per model, one field per line (as `graphersal store models`).
+    let sections: Vec<crate::sections::Section> = models
         .iter()
-        .map(|m| m.repo.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let license_width = models
-        .iter()
-        .map(|m| m.license.len())
-        .max()
-        .unwrap_or(7)
-        .max(7);
-    outln!(
-        "{:width$}  {:>9}  {:license_width$}  IDENTITY",
-        "REPO",
-        "SIZE",
-        "LICENCE"
-    );
-    for model in &models {
-        let identity = match &model.identity {
-            Ok(identity) => identity.clone(),
-            Err(err) => format!("(unreadable: {err})"),
-        };
-        outln!(
-            "{:width$}  {:>9}  {:license_width$}  {identity}",
-            model.repo,
-            human_bytes(model.bytes),
-            model.license
-        );
-    }
+        .map(|model| {
+            let mut section = crate::sections::Section::new("Downloaded model");
+            section.row("model", model.repo.clone());
+            section.row(
+                "full name",
+                match &model.identity {
+                    Ok(identity) => identity.clone(),
+                    Err(err) => format!("(unreadable: {err})"),
+                },
+            );
+            section.row("size", human_bytes(model.bytes));
+            section.row("licence", model.license.clone());
+            section
+        })
+        .collect();
+    outln!("{}", crate::sections::render(&sections));
     EXIT_OK
 }
 
@@ -499,10 +496,7 @@ fn download(
         && !Store::is_store(store)
             .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
     {
-        return Err(DownloadError::Usage(format!(
-            "--into {store}: not a Graphersal store (create one with `graphersal store create \
-             {store}`)"
-        )));
+        return Err(DownloadError::Usage(not_a_store(store)));
     }
     if !is_repo_name(repo) {
         return Err(DownloadError::Usage(format!(
@@ -656,23 +650,40 @@ fn download(
             ModelSource::Files(new),
             ImportModelOptions::new().with_principal("cli"),
         )?;
-        outln!("{repo} -> the store {store} ({})", stored.identity);
-        outln!(
-            "identity {}, dimension {}",
-            stored.identity,
-            stored.dimension
-        );
+        crate::out::print_block(&imported_note(repo, store, &stored).text());
         return Ok(());
     }
 
     install(&staging, &target)?;
     staging.done = true;
-    outln!("{repo} -> {}", target.display());
-    match dimension {
-        Some(dimension) => outln!("identity {identity}, dimension {dimension}"),
-        None => outln!("identity {identity}"),
+    let mut note = crate::out::Note::new(format!("Downloaded {repo} into {}", target.display()))
+        .detail("full name", &identity);
+    if let Some(dimension) = dimension {
+        note = note.detail("dimension", dimension.to_string());
     }
+    let note = note.command(
+        "import it into a store",
+        format!("graphersal embed-model import {repo} --into <STORE>"),
+    );
+    crate::out::print_block(&note.text());
     Ok(())
+}
+
+/// The usage error of an `--into` that names no store, with the command that creates one.
+fn not_a_store(store: &str) -> String {
+    crate::out::Note::new(format!("--into {store}: not a Graphersal store"))
+        .command("create one", format!("graphersal store create {store}"))
+        .text()
+}
+
+/// The block an import into the store `store` prints: what went in (`source`, a repository or
+/// a directory) and the model the store keeps now.
+fn imported_note(source: &str, store: &str, stored: &ModelInfo) -> crate::out::Note {
+    crate::out::Note::new(format!("Imported {source} into the store {store}"))
+        .detail("full name", &stored.identity)
+        .detail("dimension", stored.dimension.to_string())
+        .detail("licence", &stored.license)
+        .detail("default", if stored.default { "yes" } else { "no" })
 }
 
 /// The role of one of the three model files by its name.
@@ -812,9 +823,14 @@ fn import_source(model: &str, models: Option<&str>) -> Result<PathBuf, String> {
     let cache = ModelCache::at(models_dir(models)?);
     cache.resolve(model).map_err(|err| {
         format!(
-            "{}\nHelp: run `graphersal embed-model download <owner/name>` first, or pass the \
-             directory of a Model2Vec model",
-            reason_of(&err)
+            "{}\n{}",
+            reason_of(&err),
+            crate::out::Note::new("download it first, or pass the directory of a Model2Vec model")
+                .command(
+                    "download the model",
+                    "graphersal embed-model download <owner/name>"
+                )
+                .help()
         )
     })
 }
@@ -866,10 +882,7 @@ fn import(dir: &Path, store: &str, flags: &ImportFlags<'_>) -> Result<(), Downlo
     if !Store::is_store(store)
         .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
     {
-        return Err(DownloadError::Usage(format!(
-            "--into {store}: not a Graphersal store (create one with `graphersal store create \
-             {store}`)"
-        )));
+        return Err(DownloadError::Usage(not_a_store(store)));
     }
     if let Some(repo) = flags.repo
         && !is_repo_name(repo)
@@ -928,18 +941,7 @@ fn import(dir: &Path, store: &str, flags: &ImportFlags<'_>) -> Result<(), Downlo
         options = options.with_license(license);
     }
     let stored = add_to_store(store, ModelSource::Dir(dir.to_path_buf()), options)?;
-    outln!(
-        "{} -> the store {store} ({})",
-        dir.display(),
-        stored.identity
-    );
-    outln!(
-        "identity {}, dimension {}, licence {}{}",
-        stored.identity,
-        stored.dimension,
-        stored.license,
-        if stored.default { ", the default" } else { "" }
-    );
+    crate::out::print_block(&imported_note(&dir.display().to_string(), store, &stored).text());
     Ok(())
 }
 

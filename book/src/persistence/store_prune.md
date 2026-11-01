@@ -16,7 +16,8 @@ println!("kept from commit {}; removed snapshots {:?}, {} WAL segment(s)",
 ```
 
 ```bash
-graphersal store prune data/ --up-to 1200    # "Kept from commit N; removed ... snapshot(s) and ... WAL segment(s)."
+# prune: "Pruned data/" with "kept from: commit N", "snapshots removed", "WAL segments removed"
+graphersal store prune data/ --up-to 1200
 graphersal store prune data/                 # refused: "needs --up-to <COMMIT> (nothing is pruned implicitly)", exit 2
 ```
 
@@ -55,8 +56,8 @@ the backup directory.
 
 Prune does not look at [marks](store_marks.md): a mark before the oldest kept snapshot loses the
 history it needs and becomes **unreachable**. The report names those marks
-(`report.marks_unreachable`; `graphersal store prune` prints "No longer reachable (their history
-was pruned): the mark(s) ..."), and so does the compaction advice *before* anything is removed
+(`report.marks_unreachable`; `graphersal store prune` prints `marks no longer reachable: ...
+(their history was pruned)`), and so does the compaction advice *before* anything is removed
 (`advice.prune.marks_unreachable`, the Store menu's Disk space block), so look there before
 `compact`. From then on the listings (`store.marks()`, `store marks`, `store info`, the Store menu)
 leave such a mark out, opening it fails with "a prune removed the history it needs", and its name
@@ -94,11 +95,17 @@ removals free the space at once.
 
 ```text
 $ graphersal store compact data/
-Pruned: kept from commit 0; removed 0 snapshot(s) and 0 WAL segment(s).
-A directory store: the prune gave the space back (nothing to compact).
+Compacted data/
+  kept from: commit 0
+  snapshots removed: 0
+  WAL segments removed: 0
+  file: a directory store: the prune gave the space back (nothing to compact)
 $ graphersal store compact graph.gstore
-Pruned: kept from commit 0; removed 0 snapshot(s) and 0 WAL segment(s).
-Compacted the file: 23.7 KiB -> 22.8 KiB (930 B given back).
+Compacted graph.gstore
+  kept from: commit 0
+  snapshots removed: 0
+  WAL segments removed: 0
+  file: 23.7 KiB -> 22.8 KiB (930 B given back)
 ```
 
 ## Is it worth it? The compaction advice
@@ -128,13 +135,14 @@ let advice = store.compaction_advice_with(eager)?;
 ```text
 $ graphersal store compact-advice graph.gstore
 no compaction needed: the store is smaller than the minimum of 64.0 MiB
-store       23.0 KiB (single file)
-live        23.0 KiB
-garbage     0 B (0 %)
-prune       0 B
-reclaimable 0 B (0 % of the store)
-disk        23.0 KiB needed, 77.4 GiB free
-decided by  total_bytes
+  store: 23.0 KiB (single file)
+  live: 23.0 KiB
+  garbage: 0 B (0 %)
+  prune: 0 B
+  reclaimable: 0 B (0 % of the store)
+  disk needed: 23.0 KiB
+  disk free: 77.4 GiB
+  decided by: total_bytes
 ```
 
 `CompactionAdvice` carries the numbers behind the answer: the store's total, live and garbage

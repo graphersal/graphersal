@@ -363,9 +363,8 @@ test('the menu lists the store models with their licences and the models the sch
 // Issue #19: the licence text says where the text the store keeps comes from, never that
 // Graphersal wrote a licence.
 test('the licence text names its source exactly', () => {
-  assert.equal(licenceTextOf({ licenseText: 'file', licenseFiles: ['LICENSE', 'COPYING'] }),
-    'from the repository (LICENSE, COPYING)');
-  assert.equal(licenceTextOf({ licenseText: 'file' }), 'from the repository');
+  assert.equal(licenceTextOf({ licenseText: 'file' }),
+    'from the repository (its own licence file)');
   assert.equal(licenceTextOf({ licenseText: 'template', license: 'apache-2.0' }),
     'standard Apache-2.0 text (the repository has no licence file)');
   assert.equal(licenceTextOf({ licenseText: 'none', license: 'other' }),

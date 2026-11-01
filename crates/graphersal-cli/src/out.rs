@@ -131,6 +131,54 @@ impl Note {
     pub fn text(self) -> String {
         self.text
     }
+
+    /// The note as the `Help:` text of an error, laid out as the engine lays out a help of
+    /// several lines (`graphersal::error::format_diagnostic`): `Help: ` before the headline,
+    /// every further line indented under it.
+    pub fn help(self) -> String {
+        let mut out = String::new();
+        for (i, line) in self.text.lines().enumerate() {
+            if i == 0 {
+                out.push_str("Help: ");
+            } else {
+                out.push_str("\n      ");
+            }
+            out.push_str(line);
+        }
+        out
+    }
+}
+
+/// `note` with the commands that open `path` (a store, a backup, a `.gsnap`): in the REPL, or
+/// served to the browser playground by the dev server.
+pub fn use_it(note: Note, path: &str) -> Note {
+    note.command("open it in the REPL", format!("graphersal --graph {path}"))
+        .command(
+            "or serve it to the browser playground",
+            format!("graphersal --graph {path} --server"),
+        )
+}
+
+/// The usage error `message` with the command that shows the usage (`help_command`) on a line
+/// of its own under a comment.
+pub fn usage_text(message: &str, help_command: &str) -> String {
+    Note::new(message)
+        .command("show the usage", help_command)
+        .text()
+}
+
+/// Whether a block was printed on stdout ([`print_block`]): the next one is set apart.
+static BLOCK_PRINTED: AtomicBool = AtomicBool::new(false);
+
+/// Prints the block `text` on stdout (the note layout: a headline, then lines indented by two
+/// spaces: details `key: value`, commands under a `# comment`), set apart from the block
+/// before it by a blank line. The result of a `store` or `embed-model` command is one block
+/// per thing it did.
+pub fn print_block(text: &str) {
+    if BLOCK_PRINTED.swap(true, Ordering::Relaxed) {
+        write_stdout(format_args!("\n"));
+    }
+    write_stdout(format_args!("{text}\n"));
 }
 
 /// Whether stdout still takes output (no write to it has failed yet).
@@ -149,5 +197,35 @@ pub fn exit_code(code: i32) -> i32 {
         CLOSED => EXIT_CLOSED_PIPE,
         FAILED => 1,
         _ => code,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_help_puts_its_commands_under_the_help_line() {
+        let help = Note::new("open it, or choose another directory")
+            .command("open it", "graphersal --graph data/")
+            .help();
+        assert_eq!(
+            help,
+            "Help: open it, or choose another directory\n        # open it\n        \
+             graphersal --graph data/"
+        );
+    }
+
+    #[test]
+    fn use_it_and_usage_put_each_command_under_its_comment() {
+        assert_eq!(
+            use_it(Note::new("Open data/"), "data/").text(),
+            "Open data/\n  # open it in the REPL\n  graphersal --graph data/\n  # or serve it to \
+             the browser playground\n  graphersal --graph data/ --server"
+        );
+        assert_eq!(
+            usage_text("Unknown command: x", "graphersal store help"),
+            "Unknown command: x\n  # show the usage\n  graphersal store help"
+        );
     }
 }

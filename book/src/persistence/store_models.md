@@ -149,8 +149,7 @@ MIT or Apache-2.0 text of the licence the model card names, kept as `LICENSE` wi
 paragraph saying where the text comes from; the copyright holders are those the model card
 names) and the licences of its base models are part of the model's tar. Graphersal never writes
 a licence of its own. `graphersal store models <dir>` and `graphersal store info <dir>` name
-every model with its licence and where the licence text comes from (`ModelInfo::license_text`,
-the repository's files in `ModelInfo::license_files`): who hands a store or a copy of it on
+every model with its licence and where the licence text comes from (`ModelInfo::license_text`): who hands a store or a copy of it on
 redistributes its models.
 
 ```text
@@ -165,8 +164,7 @@ $ graphersal store models data/
   used by:      the schema (doc.emb)
 ```
 
-The other two forms of `licence text` are `from the repository (LICENSE)` (the repository's own
-file, named) and `none (no standard text for this licence)`.
+The other two forms of `licence text` are `from the repository (its own licence file)` and `none (no standard text for this licence)`.
 
 ## What carries the models
 

@@ -3050,9 +3050,9 @@ impl StoreCore {
         if self.maintenance.is_some() {
             return Err(refused(format!(
                 "the store {} opened in maintenance mode: its graph in memory is the state \
-                 salvaged from donors, not a verified one. Build a repaired copy instead: \
-                 graphersal store repair {} --to <new_dir> (Store::repair_to)",
-                self.shared.dir, self.shared.dir
+                 salvaged from donors, not a verified one. Build a repaired copy instead \
+                 (Store::repair_to; the help shows the command)",
+                self.shared.dir
             )));
         }
         if self.damage_found()?.is_empty() {
@@ -4384,10 +4384,14 @@ fn manifest_copy_warnings(dir: &DirPath) -> Vec<String> {
     let bytes = match files::read_bounded(&path.join(snapshot_dir::MANIFEST_FILE), 256 << 20) {
         Ok(bytes) => bytes,
         Err(err) => {
-            return vec![format!(
-                "snapshot {seq}: its manifest could not be read again to check its two fixed \
-                 copies ({err}); run `graphersal store verify`"
-            )];
+            return vec![
+                crate::graph::note_text::NoteText::new(format!(
+                    "snapshot {seq}: its manifest could not be read again to check its two \
+                     fixed copies ({err})"
+                ))
+                .command("check the store", "graphersal store verify <dir>")
+                .finish(),
+            ];
         }
     };
     let fixed = super::manifest::FIXED_BYTES;
@@ -4398,10 +4402,18 @@ fn manifest_copy_warnings(dir: &DirPath) -> Vec<String> {
     let tail = super::manifest::ManifestFixed::decode(&bytes[bytes.len() - fixed..]);
     match (head, tail) {
         (Ok(head), Ok(tail)) if head == tail => Vec::new(),
-        _ => vec![format!(
-            "snapshot {seq}: one copy of the manifest's fixed part is damaged (the other one was \
-             used); run `graphersal store verify` and plan a repair"
-        )],
+        _ => vec![
+            crate::graph::note_text::NoteText::new(format!(
+                "snapshot {seq}: one copy of the manifest's fixed part is damaged (the other one \
+                 was used); plan a repair"
+            ))
+            .command("check the store", "graphersal store verify <dir>")
+            .command(
+                "build a repaired copy in a new directory",
+                "graphersal store repair <dir> --to <new_dir>",
+            )
+            .finish(),
+        ],
     }
 }
 
@@ -4712,12 +4724,16 @@ fn report_blob_damage_to(
         &catalogue::BLOB_DAMAGED,
         event.field(
             "recommendation",
-            format!(
-                "with the store closed, graphersal store restore-blobs <dir> --from <backup> \
-                 copies {name} back from a backup, a ZIP backup, a .gsnap or another copy of \
-                 the store (the same hash is the same bytes); or write the content again; \
-                 graphersal store verify lists every blob problem"
-            ),
+            crate::graph::note_text::NoteText::new(format!(
+                "copy {name} back from a backup, a ZIP backup, a .gsnap or another copy of the \
+                 store (the same hash is the same bytes), or write the content again"
+            ))
+            .command(
+                "with the store closed: copy the blob back",
+                "graphersal store restore-blobs <dir> --from <backup>",
+            )
+            .command("list every blob problem", "graphersal store verify <dir>")
+            .finish(),
         ),
     );
 }
@@ -5562,9 +5578,9 @@ fn drop_damaged_blobs(
             StoreFailure::BlobUnavailable,
             format!(
                 "--drop-damaged-blobs would leave out models the schema needs: the vector \
-                 properties {} name them. Restore their blobs first (graphersal store \
-                 restore-blobs <dir> --from <backup>), or change the schema so no property \
-                 names them; nothing was written",
+                 properties {} name them. Restore their blobs first (restore-blobs, \
+                 Store::restore_blobs_from; the help shows the command), or change the schema so \
+                 no property names them; nothing was written",
                 needed.join(", ")
             ),
         ));

@@ -22,7 +22,7 @@ life ([Checkpoints](store_checkpoints.md#the-chunk-size)).
 ```bash
 graphersal store create data/ --from modern       # --from: modern, empty, large, tree, a GraphSON/GraphML file, a .gsnap
 graphersal store create small-chunks/ --chunk-size 262144   # 256 KiB chunks
-graphersal --graph new/ --create-store -e 'g.add_v("person").to_list()'   # create when missing ("note: created the store new/ (damage policy maintenance)")
+graphersal --graph new/ --create-store -e 'g.add_v("person").to_list()'   # create when missing ("note: created the store new/", then "damage policy: maintenance")
 ```
 
 ## Open: recovery on open

@@ -373,14 +373,13 @@ function licenceName(id) {
 
 /**
  * Where the licence text a store keeps beside a model comes from (the CLI's `licence text`
- * row): the repository's own licence files (named), the unchanged standard text of the
+ * row): the repository's own licence file, the unchanged standard text of the
  * licence the model card names (the repository has none), or none. Graphersal never writes a
  * licence.
  */
 export function licenceTextOf(m) {
   if (m.licenseText === 'file') {
-    const files = m.licenseFiles || [];
-    return files.length ? `from the repository (${files.join(', ')})` : 'from the repository';
+    return 'from the repository (its own licence file)';
   }
   if (m.licenseText === 'template') {
     return `standard ${licenceName(m.license)} text (the repository has no licence file)`;

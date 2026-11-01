@@ -41,6 +41,24 @@ Every record has the same envelope plus typed fields:
 A reader of an older version shows a record of a kind it does not know by its message and
 fields.
 
+A `recommendation` field says how to fix what the record reports, in the layout of every
+Graphersal note: a short headline, then each command on its own line under a `# comment` saying
+what it does. The text form of a record (`JournalRecord::to_line`, `graphersal store journal`,
+the playground's journal panel) keeps the one-line fields in parentheses on the record's line
+and puts a field of several lines below it, indented:
+
+```text
+2026-10-09T08:53:20.000000Z #12 error  model.unavailable the model acme/tiny is missing: queries with it fail (repo=acme/tiny, identity=model2vec/acme/tiny@0123456789ab, cause=missing)
+  recommendation: download the model again and import it into the store, or restore the store from a backup or replica
+    # download the model's files again
+    graphersal embed-model download acme/tiny
+    # import them into the store in place of the damaged copy
+    graphersal embed-model import acme/tiny --into <store> --replace
+```
+
+The JSON forms (`--json`, `GET /api/journal`, MCP, Python) keep the field as one string with its
+line breaks.
+
 ## Repeats and states
 
 The journal is append-only, so a repeat is collected BEFORE it is written, never by rewriting

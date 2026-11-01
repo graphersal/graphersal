@@ -45,7 +45,9 @@ warning: the store damaged/ has DAMAGE and opened READ-ONLY in maintenance mode:
   DAMAGE wal: the store was closed cleanly at commit 3, but its files end at commit 2; commit 3; no donor: LOST
   note: the open found damage: Corrupt journal 0 at byte 188: record of commit 3: checksum mismatch
   note: built on snapshot 1 (snapshots/00000000000000000001)
-Help: repair it into a new directory with `graphersal store repair damaged/ --to <new_dir>` (the damaged files stay untouched), or restore a backup.
+Help: repair it into a new directory (the damaged files stay untouched), or restore a backup
+        # build a repaired copy in a new directory
+        graphersal store repair damaged/ --to <new_dir>
 8
 ```
 

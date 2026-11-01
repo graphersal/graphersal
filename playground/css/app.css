@@ -1462,7 +1462,7 @@ table.data-table.catalog-table td, table.data-table.catalog-table th { white-spa
 .catalog-dialog .jl-table { font-size: 13px; }
 .catalog-table-wrap:has(> .jl-table) { max-height: 60vh; overflow-y: auto; }
 table.data-table.catalog-table.jl-table td:nth-child(5) { white-space: normal; min-width: 30ch; }
-.jl-fields { word-break: break-word; }
+.jl-fields { word-break: break-word; white-space: pre-wrap; }
 .jl-time { font-variant-numeric: tabular-nums; }
 table.data-table.catalog-table { width: 100%; }
 table.data-table.catalog-table td .cc-reason { font-size: 12px; white-space: normal; min-width: 28ch; }

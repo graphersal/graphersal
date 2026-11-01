@@ -25,8 +25,6 @@ pub const MAX_MODEL_NAME_BYTES: usize = 256;
 const MAX_LICENSE_BYTES: usize = 64;
 /// The most base models a definition keeps.
 const MAX_BASE_MODELS: usize = 16;
-/// The most licence file names a definition keeps.
-const MAX_LICENSE_FILES: usize = 16;
 /// The longest revision or commit text.
 const MAX_REVISION_BYTES: usize = 255;
 
@@ -65,7 +63,6 @@ pub struct ModelDefinition {
     load_bytes: u64,
     license: Option<String>,
     license_text: Option<String>,
-    license_files: Vec<String>,
     base_models: Vec<BaseModel>,
     gated: bool,
     default: bool,
@@ -89,7 +86,6 @@ impl ModelDefinition {
             load_bytes: 0,
             license: None,
             license_text: None,
-            license_files: Vec::new(),
             base_models: Vec::new(),
             gated: false,
             default: false,
@@ -132,14 +128,6 @@ impl ModelDefinition {
     pub fn with_license(mut self, license: Option<String>, text: Option<String>) -> Self {
         self.license = license;
         self.license_text = text;
-        self.original = None;
-        self
-    }
-
-    /// The same model with the names of the licence files its repository holds (`LICENSE`,
-    /// `NOTICE`; the files of a licence text `file`, never a standard text the Store added).
-    pub fn with_license_files(mut self, files: Vec<String>) -> Self {
-        self.license_files = files;
         self.original = None;
         self
     }
@@ -218,12 +206,6 @@ impl ModelDefinition {
         self.license_text.as_deref()
     }
 
-    /// The names of the licence files the model's repository holds (empty: none, or a
-    /// definition written by 0.5.0 or 0.5.1, which did not record them).
-    pub fn license_files(&self) -> &[String] {
-        &self.license_files
-    }
-
     /// The models this one was made from.
     pub fn base_models(&self) -> &[BaseModel] {
         &self.base_models
@@ -267,9 +249,8 @@ impl ModelDefinition {
     }
 
     /// The payload map: keys `blob`, `family`, `repo`, `revision`, `commit`, `dimension`,
-    /// `load_bytes`, `license`, `license_text`, `license_files`, `base_models`, `gated`,
-    /// `default` (absent ones left out; `license_files` only when not empty, `default` only
-    /// when true), then the unknown keys. A model this version does not
+    /// `load_bytes`, `license`, `license_text`, `base_models`, `gated`, `default` (absent ones
+    /// left out; `default` only when true), then the unknown keys. A model this version does not
     /// serve is written back exactly as read.
     pub fn to_payload(&self) -> PropertyMap {
         if let Some(original) = &self.original {
@@ -298,17 +279,6 @@ impl ModelDefinition {
         }
         if let Some(text) = &self.license_text {
             map.insert("license_text", text.as_str().into());
-        }
-        if !self.license_files.is_empty() {
-            map.insert(
-                "license_files",
-                ElementProperty::Array(
-                    self.license_files
-                        .iter()
-                        .map(|name| name.as_str().into())
-                        .collect(),
-                ),
-            );
         }
         map.insert(
             "base_models",
@@ -433,19 +403,6 @@ impl ModelDefinition {
             }
             Some(_) => return Err(malformed("base_models", "must be an array")),
         }
-        let mut license_files = Vec::new();
-        match map.get("license_files") {
-            None => {}
-            Some(ElementProperty::Array(items)) => {
-                for item in items {
-                    let Some(name) = item.text() else {
-                        return Err(malformed("license_files", "an entry is not a string"));
-                    };
-                    license_files.push(name.into_owned());
-                }
-            }
-            Some(_) => return Err(malformed("license_files", "must be an array")),
-        }
         let model = ModelDefinition {
             blob,
             family,
@@ -456,12 +413,11 @@ impl ModelDefinition {
             load_bytes: count("load_bytes")?,
             license: text("license")?,
             license_text: text("license_text")?,
-            license_files,
             base_models,
             gated: flag("gated")?,
             default: flag("default")?,
             extra: {
-                const KNOWN: [&str; 13] = [
+                const KNOWN: [&str; 12] = [
                     "blob",
                     "family",
                     "repo",
@@ -471,7 +427,6 @@ impl ModelDefinition {
                     "load_bytes",
                     "license",
                     "license_text",
-                    "license_files",
                     "base_models",
                     "gated",
                     "default",
@@ -584,21 +539,6 @@ impl ModelDefinition {
                 return Err(field(
                     "base_models",
                     format!("the base model {:?} is not a repository name", base.repo),
-                ));
-            }
-        }
-        // A model keeps at most 64 files (format spec 4.5); a file name is a plain name.
-        if self.license_files.len() > MAX_LICENSE_FILES {
-            return Err(field(
-                "license_files",
-                format!("at most {MAX_LICENSE_FILES} licence files"),
-            ));
-        }
-        for name in &self.license_files {
-            if name.is_empty() || !label_ok(name) || name.contains('/') {
-                return Err(field(
-                    "license_files",
-                    format!("{name:?} is not a file name"),
                 ));
             }
         }

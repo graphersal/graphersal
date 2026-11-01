@@ -86,7 +86,6 @@ fn model_dict<'py>(py: Python<'py>, model: &persist::ModelInfo) -> PyResult<Boun
     dict.set_item("dimension", model.dimension)?;
     dict.set_item("license", &model.license)?;
     dict.set_item("license_text", &model.license_text)?;
-    dict.set_item("license_files", &model.license_files)?;
     dict.set_item("gated", model.gated)?;
     let bases = PyList::empty(py);
     for base in &model.base_models {
@@ -726,10 +725,10 @@ impl Store {
 
     /// ``store.models()``: the embedding models of the store's current position (format spec
     /// 4.5, catalog kind 5), each ``{"identity", "repo", "revision", "commit", "dimension",
-    /// "license", "license_text", "license_files", "gated", "base_models": [{"repo", "license"}],
+    /// "license", "license_text", "gated", "base_models": [{"repo", "license"}],
     /// "default", "bytes", "load_bytes", "state", "needed_by": ["label.key"], "used_by_schema",
     /// "problem"}``. ``license_text`` says where the licence text the store keeps comes from:
-    /// ``"file"`` (the repository's own licence files, named in ``license_files``),
+    /// ``"file"`` (the repository's own licence file),
     /// ``"template"`` (the repository has no licence file: the unchanged standard text of the
     /// licence the model card names) or ``"none"`` (no standard text for this licence). Every copy of the store carries them:
     /// handing the store on redistributes them.
