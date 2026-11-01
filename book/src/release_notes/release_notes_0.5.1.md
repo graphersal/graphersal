@@ -17,6 +17,10 @@ of 0.5.0 are read and written exactly as before.
   of a 250 000-element graph and then ran some 200 000 single `merge_e(...)` traversals in scripts
   of 300 took over ten minutes instead of under one. Now the tracked measure (the `graphersal`
   command line, the dev server, the playground, Python) never walks the graph for this, and the
-  estimated measure (a library host without the tracking allocator) keeps the last walked figure,
-  adjusted by the elements added or removed, until the unit ends; between units a stale figure is
-  walked again at most once, and cached, as before.
+  estimated measure (a library host without the tracking allocator) never walks the graph inside
+  a unit that holds changes, also near the ceiling: it keeps the last walked figure, adjusted by
+  the elements added or removed, until the unit ends; between units a stale figure is walked
+  again at most once, and cached, as before. In the estimated mode the figure inside such a unit
+  is therefore an extrapolation from the last walk and can be off after large changes in it;
+  install the tracking allocator for exact figures
+  ([Resource Limits](../users_guide/resource_limits.md)).

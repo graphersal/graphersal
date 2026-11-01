@@ -26,7 +26,11 @@
 //! where precision matters. `TraversalGraph` also has no hint once its element count doubled or
 //! halved since the last walk, but only outside an open unit with changes, where the walk is
 //! cached: inside such a unit (a script, a transaction) the hint stays an estimate, so the
-//! runs of a unit do not walk the graph one after the other (`graph::memory::footprint_hint`).
+//! runs of a unit do not walk the graph one after the other (`graph::memory::footprint_hint`),
+//! and near the ceiling `TraversalGraph`'s `memory_footprint_bytes` does not walk inside such a
+//! unit either (user decision 2026-11-01): it answers the last walk extrapolated by the element
+//! counts. A documented edge case of the estimated mode: inside a transaction the figure can be
+//! off after large changes in it; the tracking allocator gives exact figures.
 //! The tracked measure never walks (`RunMemory::tracked_growth`). Every check is a few loads
 //! and one comparison.
 //!
@@ -160,6 +164,7 @@ impl MemoryBudget {
     /// count. The footprint is the storage's cheap hint
     /// ([`GraphStorage::memory_footprint_hint`]) while that is below half of the ceiling, else
     /// the exact figure ([`GraphStorage::memory_footprint_bytes`]: at most ONE walk, none when
+    /// an open unit of `TraversalGraph` holds changes (its extrapolated estimate) or
     /// the graph has not changed since the last one; a storage without introspection counts as
     /// 0 bytes), so a run far below the ceiling never walks the graph. A storage that cannot
     /// measure itself fails the run with its error.
@@ -634,8 +639,8 @@ mod tests {
 
     /// Near the ceiling (the hint at least half of it) the estimated check walks the graph
     /// once per commit position: reads reuse the figure, a committed write walks again, a
-    /// rolled-back unit does not, and a run inside a unit with uncommitted changes walks without
-    /// caching.
+    /// rolled-back unit does not, and a run inside a unit with uncommitted changes does not walk
+    /// at all (user decision 2026-11-01: it takes the last walk extrapolated by the counts).
     #[test]
     fn estimated_footprint_is_walked_once_per_commit_position_near_the_ceiling() {
         use std::sync::atomic::Ordering;
@@ -673,7 +678,7 @@ mod tests {
             read(&graph);
             assert_eq!(walks(&graph), 2, "a rolled-back unit keeps the figure");
 
-            // Inside a unit with uncommitted changes every run walks and nothing is cached.
+            // Inside a unit with uncommitted changes no run walks (the extrapolated estimate).
             let mark = graph.begin_unit().unwrap();
             graph
                 .insert_vertex(Some("open".into()), vec!["x".into()], Default::default())
@@ -681,7 +686,7 @@ mod tests {
             let seq = graph.last_commit_seq();
             graph.traversal_mut().v(None).count().to_list().unwrap();
             graph.traversal_mut().v(None).count().to_list().unwrap();
-            assert_eq!(walks(&graph), 4, "uncommitted changes are never cached");
+            assert_eq!(walks(&graph), 2, "uncommitted changes are never walked");
             graph
                 .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
                 .unwrap();
@@ -689,7 +694,7 @@ mod tests {
             read(&graph);
             assert_eq!(
                 walks(&graph),
-                4,
+                2,
                 "after the rollback the cached figure applies again"
             );
 
@@ -698,7 +703,7 @@ mod tests {
                 .insert_vertex(Some("direct".into()), vec!["x".into()], Default::default())
                 .unwrap();
             read(&graph);
-            assert_eq!(walks(&graph), 5, "changed element counts: walked again");
+            assert_eq!(walks(&graph), 3, "changed element counts: walked again");
         });
     }
 
@@ -985,6 +990,58 @@ mod tests {
                 assert_eq!(graph.vertex_count(), 3100);
                 let walked = walks(&graph) - before;
                 assert!(walked <= 1, "{walked} walks for 3000 traversals");
+            });
+        }
+
+        /// Estimated mode NEAR the ceiling (the hint at least half of it), one unit with changes:
+        /// no run walks (user decision 2026-11-01), neither a traversal's start nor an import's
+        /// `UnitBudget`; the extrapolated estimate still counts the unit's added elements, so a
+        /// unit that grows past the ceiling is still refused.
+        #[test]
+        fn near_the_ceiling_an_open_unit_never_walks() {
+            let mut graph = crate::TraversalGraph::tinkerpop_modern();
+            let limit = crate::graph::memory::compute(&graph).total_bytes() * 3 / 2;
+            crate::traversal::memory_limit::memory_limit_scope(limit, || {
+                graph.memory_usage().unwrap();
+                let before = walks(&graph);
+                let mark = graph.begin_unit().unwrap();
+                graph
+                    .insert_vertex(Some("open".into()), vec!["x".into()], Default::default())
+                    .unwrap();
+                for _ in 0..200 {
+                    graph.traversal_mut().v(None).count().to_list().unwrap();
+                }
+                for _ in 0..20 {
+                    UnitBudget::start(&graph, "test import").unwrap().unwrap();
+                }
+                assert_eq!(walks(&graph), before, "no walk inside the open unit");
+                // Grow the unit past the ceiling: the estimate counts the added elements.
+                for i in 0..2000 {
+                    graph
+                        .insert_vertex(
+                            Some(format!("grow{i}").into()),
+                            vec!["x".into()],
+                            Default::default(),
+                        )
+                        .unwrap();
+                }
+                let err = graph.traversal_mut().v(None).count().to_list().unwrap_err();
+                let mut root = &*err;
+                while let TraverserError::StepFailed { source, .. } = root {
+                    root = source;
+                }
+                assert!(
+                    matches!(
+                        root,
+                        TraverserError::ResourceLimitExceeded { limit, .. }
+                            if limit == MEMORY_LIMIT
+                    ),
+                    "{err:?}"
+                );
+                assert_eq!(walks(&graph), before, "still no walk");
+                graph
+                    .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+                    .unwrap();
             });
         }
 

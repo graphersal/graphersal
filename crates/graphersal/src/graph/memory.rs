@@ -9,7 +9,8 @@
 //! last walk adjusted by the element counts, no walk) and, only near the ceiling, before the
 //! first walk or (outside an open unit with changes) once the element count doubled or halved,
 //! `footprint_bytes` (cached; walks again only after the graph changed). Never a walk per check,
-//! nor one per traversal inside an open unit (see [`footprint_hint`]).
+//! and never one inside an open unit with uncommitted changes: there both are the last walk
+//! extrapolated by the element counts (see [`footprint_bytes`]).
 
 /// Snapshot of a graph's approximate in-memory footprint, in bytes, broken down by subsystem.
 ///
@@ -373,18 +374,57 @@ impl FootprintCache {
 
 /// [`compute`]'s total for `graph`, walked again only when the graph changed since the cached
 /// walk (the commit position or the element counts differ). A rolled-back unit restores the
-/// data and leaves the commit position, so the cached figure stays valid. While an open unit
-/// holds uncommitted changes the figure is walked and not cached.
+/// data and leaves the commit position, so the cached figure stays valid.
+///
+/// While an open unit holds uncommitted changes the graph is NEVER walked (user decision
+/// 2026-11-01): a walk there could not be cached (a rollback may restore other data under the
+/// same commit position), so every run of the unit would walk again, O(graph) per traversal.
+/// The figure is then [`footprint_estimate`]: the last walk extrapolated by the element counts.
+/// A documented edge case of the estimated memory measure: after large changes inside the
+/// unit (property rewrites, elements far from the walked average) it can be off until the unit
+/// ends; the tracking allocator gives exact figures. `memory_usage()` still walks on request.
 pub(crate) fn footprint_bytes(graph: &super::TraversalGraph) -> u64 {
+    if !graph.undo.entries().is_empty() {
+        return footprint_estimate(graph);
+    }
     let key = footprint_key(graph);
-    let cacheable = graph.undo.entries().is_empty();
-    if cacheable
-        && let Some((cached, bytes)) = *graph.footprint.entry.lock()
+    if let Some((cached, bytes)) = *graph.footprint.entry.lock()
         && cached == key
     {
         return bytes;
     }
     walk(graph).total_bytes()
+}
+
+/// The footprint without a walk: the last walk extrapolated to the current element counts at
+/// its average element size ([`extrapolate`], whatever the drift), or the element count times
+/// the minimum element size (`MIN_ELEMENT_BYTES`) when the graph has never been walked.
+fn footprint_estimate(graph: &super::TraversalGraph) -> u64 {
+    let now = element_count(graph);
+    match *graph.footprint.entry.lock() {
+        Some((key, bytes)) => extrapolate(key, bytes, now),
+        None => now.saturating_mul(crate::traversal::memory_budget::MIN_ELEMENT_BYTES),
+    }
+}
+
+/// Vertices plus edges of `graph`.
+fn element_count(graph: &super::TraversalGraph) -> u64 {
+    (graph.graph.node_count() as u64).saturating_add(graph.graph.edge_count() as u64)
+}
+
+/// The walked total `bytes` (taken at `key`) moved to `now` elements at the walk's average
+/// element size (at least `MIN_ELEMENT_BYTES`).
+fn extrapolate(key: FootprintKey, bytes: u64, now: u64) -> u64 {
+    let walked = key.vertices.saturating_add(key.edges);
+    let per_element = bytes
+        .checked_div(walked)
+        .unwrap_or(0)
+        .max(crate::traversal::memory_budget::MIN_ELEMENT_BYTES);
+    if now >= walked {
+        bytes.saturating_add((now - walked).saturating_mul(per_element))
+    } else {
+        bytes.saturating_sub((walked - now).saturating_mul(per_element))
+    }
 }
 
 /// [`compute`] for `graph`, remembered as the footprint cache when no open unit holds
@@ -423,20 +463,16 @@ fn footprint_key(graph: &super::TraversalGraph) -> FootprintKey {
 /// walk again: O(graph) per traversal (the 0.5.0 regression: a script dropping most of a graph
 /// and then running many small writes). There the hint stays an estimate from the last walk,
 /// whatever the drift; the next run outside the unit walks again if the band is exceeded.
-/// Property values rewritten since the walk are not seen; the memory checks also walk again
-/// when the estimate reaches half of the ceiling.
+/// Property values rewritten since the walk are not seen; outside an open unit with changes the
+/// memory checks also walk again when the estimate reaches half of the ceiling (inside one
+/// [`footprint_bytes`] does not walk either).
 pub(crate) fn footprint_hint(graph: &super::TraversalGraph) -> Option<u64> {
     let (key, bytes) = (*graph.footprint.entry.lock())?;
     let walked = key.vertices.saturating_add(key.edges);
-    let now = (graph.graph.node_count() as u64).saturating_add(graph.graph.edge_count() as u64);
+    let now = element_count(graph);
     let refreshable = graph.undo.entries().is_empty();
     if refreshable && (now > walked.saturating_mul(2).saturating_add(1024) || now < walked / 2) {
         return None;
     }
-    let per_element = bytes.checked_div(walked).unwrap_or(0).max(128);
-    Some(if now >= walked {
-        bytes.saturating_add((now - walked).saturating_mul(per_element))
-    } else {
-        bytes.saturating_sub((walked - now).saturating_mul(per_element))
-    })
+    Some(extrapolate(key, bytes, now))
 }
