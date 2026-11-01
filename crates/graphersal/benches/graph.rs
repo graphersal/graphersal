@@ -1932,6 +1932,34 @@ mod mutations {
             });
     }
 
+    /// One script (`eval_value_atomic`, one unit) dropping six sevenths of [`graph`], then
+    /// running 2000 small writing traversals (`add_e`): the pattern of a loader that clears
+    /// most of a graph and writes it again. Guards against a footprint walk per traversal
+    /// inside an open unit (0.5.0 walked the graph at every one of the 2000: 0.5.1 fix).
+    #[divan::bench(sample_count = 10)]
+    fn script_writes_after_mass_drop(bencher: divan::Bencher) {
+        use graphersal::auth::AllowAll;
+        use graphersal::script::{ScriptLimits, eval_value_atomic};
+        const SCRIPT: &str = r#"
+            g.V().has("k", P.neq(0)).drop().iterate();
+            for i in 0..2000 { g.V("hub").addE("self").to(__.V("v0")).iterate(); }
+        "#;
+        let limits = ScriptLimits::default();
+        bencher
+            .with_inputs(|| Arc::new(Graph::new(graph(N))))
+            .bench_local_values(|graph| {
+                let _ = eval_value_atomic(
+                    graph.clone(),
+                    SCRIPT,
+                    Default::default(),
+                    &limits,
+                    Arc::new(AllowAll),
+                )
+                .unwrap();
+                graph
+            });
+    }
+
     /// A trivial script through `eval_value_with_limits`: the fixed cost (engine build, scope)
     /// the two script cases above include.
     #[divan::bench(sample_count = 20)]

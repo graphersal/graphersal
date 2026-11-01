@@ -1026,9 +1026,13 @@ pub trait GraphStorage: Send + Sync {
     /// introspection: the figure the estimated memory budget (`memory.limit` without a tracking
     /// allocator) starts every run from. A storage may cache it by its commit position
     /// ([`Self::last_commit_seq`]) so that a run on an unchanged graph does not walk it again;
-    /// `TraversalGraph` does (also keyed by its element counts; not cached while an open unit
-    /// holds uncommitted changes). Default: [`Self::memory_usage`]'s total, uncached. `Err`:
-    /// a backend error; a run under an estimated memory budget fails with it.
+    /// `TraversalGraph` does (also keyed by its element counts). While an open unit holds
+    /// uncommitted changes `TraversalGraph` never walks: it answers its last walk extrapolated
+    /// by the element counts (a walk there could not be cached, so every traversal of the unit
+    /// would pay one). That figure is an estimate and can be off after large changes inside
+    /// the unit; install the tracking allocator for exact figures, or ask
+    /// [`Self::memory_usage`], which always walks. Default: [`Self::memory_usage`]'s total,
+    /// uncached. `Err`: a backend error; a run under an estimated memory budget fails with it.
     ///
     /// [`MemoryStats::total_bytes`]: crate::graph::MemoryStats::total_bytes
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
@@ -1041,7 +1045,9 @@ pub trait GraphStorage: Send + Sync {
     /// footprint: it takes this hint while the hint is below half of the ceiling, and the exact
     /// figure only above (or without a hint). `TraversalGraph` answers the total of its last
     /// walk adjusted by the elements added or removed since, at the average element size of that
-    /// walk (`None` before its first walk). `Err`: a backend error; a run fails with it.
+    /// walk (`None` before its first walk and, outside an open unit with changes, once its
+    /// element count doubled or halved since the walk, so that the caller walks again and the
+    /// walk is cached). `Err`: a backend error; a run fails with it.
     fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
         Ok(None)
     }
