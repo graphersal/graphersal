@@ -34,19 +34,45 @@ apt-get -y install nginx certbot python3-certbot-nginx ufw unattended-upgrades r
 dpkg-reconfigure -f noninteractive unattended-upgrades
 
 # --- firewall: SSH, HTTP, HTTPS only -----------------------------------------------------------
-ufw allow OpenSSH
+# `limit` allows SSH but refuses an address that opens 6 or more connections within 30 seconds.
+ufw limit OpenSSH
 ufw allow 'Nginx Full'
 ufw --force enable
 
-# --- SSH: keys only ----------------------------------------------------------------------------
+# --- SSH: keys only, few unauthenticated connections -------------------------------------------
 cat > /etc/ssh/sshd_config.d/60-graphersal.conf <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
-# Ubuntu 24.04 starts sshd per connection through ssh.socket (ssh.service is inactive and a plain
-# reload fails): try-reload-or-restart touches only a running service; a new sshd reads the file.
-systemctl try-reload-or-restart ssh.service
+# Every unauthenticated connection is an sshd process of about 15 MB; with the default
+# MaxStartups 10:30:100 a burst of them OOM-killed nginx on the 458 MB droplet (2026-11-01).
+# At most 4 before random drops, 10 in all, and 20 seconds to log in.
+cat > /etc/ssh/sshd_config.d/10-graphersal.conf <<'EOF'
+MaxStartups 4:50:10
+LoginGraceTime 20
+EOF
+# sshd -t needs the privilege separation directory, which only a started ssh.service creates.
+install -d -m 755 /run/sshd
+# Restart only with a valid configuration: a broken one would lock every SSH login out.
+if sshd -t; then
+  systemctl restart ssh
+else
+  echo "sshd -t failed: ssh NOT restarted; fix /etc/ssh/sshd_config.d/ and restart it." >&2
+fi
+
+# --- swap: 1 GiB, so a burst of memory use slows the droplet instead of killing a service -------
+if [ ! -e /swapfile ]; then
+  fallocate -l 1G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+fi
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  swapon /swapfile
+fi
+if ! grep -q '^/swapfile[[:space:]]' /etc/fstab; then
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 # --- the deploy user: owns the web root, logs in with root's SSH key, no sudo ------------------
 if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
@@ -131,9 +157,18 @@ cat > /etc/nginx/conf.d/graphersal-gzip.conf <<'EOF'
 gzip_vary on;
 gzip_types text/css application/javascript application/json application/schema+json application/wasm image/svg+xml;
 EOF
+# nginx restarts after a crash or an OOM kill, and the kernel picks it last when memory runs out.
+install -d /etc/systemd/system/nginx.service.d
+cat > /etc/systemd/system/nginx.service.d/override.conf <<'EOF'
+[Service]
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=-500
+EOF
+systemctl daemon-reload
 nginx -t
-systemctl enable --now nginx
-systemctl reload nginx
+systemctl enable nginx
+systemctl restart nginx
 
 # --- certificates: a helper to run once the DNS points here -------------------------------------
 cat > /usr/local/sbin/graphersal-certs <<EOF
