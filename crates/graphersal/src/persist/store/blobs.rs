@@ -914,10 +914,13 @@ pub struct BlobUsage {
     pub count: u64,
     /// Their total length in bytes.
     pub bytes: u64,
-    /// Blob files no retained history references (removed by the next prune); `0` when the
-    /// referenced set could not be read, and in [`Store::quick_info`](super::Store::quick_info)
-    /// (not counted).
+    /// Blob files no retained history references (removed by the next prune); `0` when they
+    /// were not counted ([`Self::unreferenced_counted`] is `false`).
     pub unreferenced: u64,
+    /// Whether [`Self::unreferenced`] was counted: `false` in
+    /// [`Store::quick_info`](super::Store::quick_info) and when the referenced set could not be
+    /// read, so `count - unreferenced` is the number of blobs in use only when this is `true`.
+    pub unreferenced_counted: bool,
 }
 
 /// What [`referenced`] found: every blob a retained history of the store references.
@@ -1425,6 +1428,7 @@ pub(crate) fn listing_usage(root: &DirPath) -> Result<BlobUsage, PersistError> {
         count: listing.blobs.len() as u64,
         bytes: listing.blobs.iter().map(|b| b.len).sum(),
         unreferenced: 0,
+        unreferenced_counted: false,
     })
 }
 
@@ -1438,11 +1442,15 @@ pub(crate) fn usage(
         count: listing.blobs.len() as u64,
         bytes: listing.blobs.iter().map(|b| b.len).sum(),
         unreferenced: 0,
+        unreferenced_counted: false,
     };
     if usage.count > 0
         && let Ok(unreferenced) = unreferenced_files(root, chain, 0, &listing.blobs, attic)
     {
         usage.unreferenced = unreferenced.len() as u64;
+        usage.unreferenced_counted = true;
+    } else if usage.count == 0 {
+        usage.unreferenced_counted = true;
     }
     Ok(usage)
 }

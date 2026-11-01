@@ -366,3 +366,29 @@ fn a_model_definition_of_a_newer_version_is_kept_and_written_back() {
     // built-in besides the served model).
     assert!(!serves(&store, "future/model"));
 }
+
+#[test]
+fn prune_keeps_the_blob_of_a_model_the_schema_uses() {
+    let store = Store::create(graphersal::persist::MemDir::new(), options()).unwrap();
+    import(&store, 1, "acme/tiny");
+    set_schema(&store, "acme/tiny");
+    // Prunes up to the newest commit, so no history from before the import is kept: only the
+    // current catalog's definition (needed by the schema) references the model's blob.
+    let mut removed = 0;
+    for round in 0..3 {
+        add_person(&store, &format!("p{round}"));
+        store.checkpoint(None).unwrap();
+        let seq = store.graph().read().last_commit_seq();
+        removed += store.prune(seq).unwrap().blobs_removed;
+    }
+    assert_eq!(removed, 0);
+    let blobs = store.info().unwrap().blobs;
+    assert_eq!(
+        (blobs.count, blobs.unreferenced, blobs.unreferenced_counted),
+        (1, 0, true)
+    );
+    assert_eq!(store.models().unwrap()[0].needed_by, ["doc.emb"]);
+    assert!(serves(&store, "acme/tiny"));
+    // The quick listing does not count the references, and says so.
+    assert!(!store.quick_info().unwrap().blobs.unreferenced_counted);
+}
