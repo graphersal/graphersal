@@ -205,8 +205,10 @@ up to commit N` with `taken` and `access` below it and the command that makes it
 (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
 (a `models` block: one block per model under its repository, one field per line: `full name`
 (the identity), `size`, `licence`, `licence text`, `default`, `used by`; a model the schema names
-but the store lacks as `missing model`, see [`models`](#models)), the store's blobs (`blobs  N (size; M unreferenced, removed by the next
-prune)`, by names and lengths only, see [Blobs](store_blobs.md)), and for a single file its
+but the store lacks as `missing model`, see [`models`](#models)), the store's blobs (`blobs  N (size)` with `in use` and `unused` below it: a blob is in use
+while a retained history references it, for example the catalog definition of a model the
+schema uses, and the next prune removes the unused ones; `in use  not counted` when the
+references could not be read; see [Blobs](store_blobs.md)), and for a single file its
 size with `live` and `free` below it and the command that tells whether compacting pays:
 
 ```text

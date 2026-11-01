@@ -5858,6 +5858,43 @@ mod embed_models {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn store_info_counts_the_blobs_in_use_and_the_unused_ones_apart() {
+        let base = fresh_dir("m2v_blob_lines");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let store_text = store.display().to_string();
+        let model_text = model.display().to_string();
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "mit",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert_eq!(info.code, 0, "{}", info.stderr);
+        let out = &info.stdout;
+        // The model's blob is referenced by its catalog definition: in use, nothing unused.
+        assert!(out.contains("\nblobs       1 ("), "{out}");
+        assert!(out.contains("\n  in use    1\n"), "{out}");
+        assert!(
+            out.contains("\n  unused    0 (the next prune removes unused blobs)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("unreferenced"), "{out}");
+    }
+
     /// Issue #19: the notes of a one-shot run are set apart by a blank line, each a headline
     /// with its details indented; the no-default note names the command on its own line.
     #[test]

@@ -1245,11 +1245,22 @@ pub fn run(args: &[String]) -> i32 {
                     );
                     if info.blobs.count > 0 {
                         outln!(
-                            "blobs       {} ({}; {} unreferenced, removed by the next prune)",
+                            "blobs       {} ({})",
                             info.blobs.count,
-                            bytes_text(info.blobs.bytes),
-                            info.blobs.unreferenced
+                            bytes_text(info.blobs.bytes)
                         );
+                        if info.blobs.unreferenced_counted {
+                            outln!(
+                                "  in use    {}",
+                                info.blobs.count.saturating_sub(info.blobs.unreferenced)
+                            );
+                            outln!(
+                                "  unused    {} (the next prune removes unused blobs)",
+                                info.blobs.unreferenced
+                            );
+                        } else {
+                            outln!("  in use    not counted (the references could not be read)");
+                        }
                     }
                     if !info.models.is_empty() || !info.schema_models.is_empty() {
                         outln!(
