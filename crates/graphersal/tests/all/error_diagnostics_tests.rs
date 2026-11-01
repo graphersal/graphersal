@@ -12625,9 +12625,13 @@ fn an_unavailable_database_model_names_the_restore_commands() {
     assert!(report.contains("the embedder is unavailable"), "{report}");
     assert!(
         report.contains(
-            "graphersal embed-model import <repo> --into <store> --replace; or restore the \
-             store from a backup"
+            "\n        # import them into the store in place of the damaged copy\n        \
+             graphersal embed-model import <repo> --into <store> --replace"
         ),
+        "{report}"
+    );
+    assert!(
+        report.contains("or restore the store from a backup"),
         "{report}"
     );
     assert!(!report.contains("with_embedders"), "{report}");

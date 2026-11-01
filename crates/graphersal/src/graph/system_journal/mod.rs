@@ -283,7 +283,13 @@ impl JournalRecord {
         crate::value::physical::to_json_text(&self.to_property()).unwrap_or_default()
     }
 
-    /// One line of text: time (UTC), level, kind, message and the fields.
+    /// The record as text: one header line with the time (UTC), level, kind, message and the
+    /// one-line fields in parentheses. A field whose value spans several lines (a
+    /// `recommendation` in the note layout: a headline, then each command on its own line
+    /// under a `# comment`) follows on lines of its own, indented by two spaces: `name:` and
+    /// the value's first line, then its other lines as they are, indented by two more spaces.
+    /// The header line is always the first line, so a reader splitting records by line finds
+    /// one record per unindented line.
     pub fn to_line(&self) -> String {
         let time = jiff::Timestamp::from_microsecond(self.time)
             .map(|t| t.strftime("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
@@ -296,25 +302,41 @@ impl JournalRecord {
             self.kind,
             self.message
         );
-        if !self.fields.is_empty() {
+        let (inline, below): (Vec<_>, Vec<_>) = self
+            .fields
+            .iter()
+            .map(|(name, value)| (name, field_text(value)))
+            .partition(|(_, text)| !text.contains('\n'));
+        if !inline.is_empty() {
+            let inline: Vec<String> = inline
+                .into_iter()
+                .map(|(name, text)| format!("{name}={text}"))
+                .collect();
             line.push_str(" (");
-            line.push_str(&render_fields(&self.fields));
+            line.push_str(&inline.join(", "));
             line.push(')');
+        }
+        for (name, text) in below {
+            let mut lines = text.lines();
+            line.push_str(&format!("\n  {name}: {}", lines.next().unwrap_or_default()));
+            for rest in lines {
+                line.push_str(&format!("\n  {rest}"));
+            }
         }
         line
     }
+}
+
+/// The display text of one field value.
+fn field_text(value: &ElementProperty) -> String {
+    crate::value::physical::to_display_text(value.logical().as_ref()).to_string()
 }
 
 /// `name=value, ...` of `fields` (display text).
 pub(crate) fn render_fields(fields: &[(String, ElementProperty)]) -> String {
     fields
         .iter()
-        .map(|(name, value)| {
-            format!(
-                "{name}={}",
-                crate::value::physical::to_display_text(value.logical().as_ref())
-            )
-        })
+        .map(|(name, value)| format!("{name}={}", field_text(value)))
         .collect::<Vec<_>>()
         .join(", ")
 }

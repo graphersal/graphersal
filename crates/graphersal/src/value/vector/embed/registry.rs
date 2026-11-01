@@ -469,12 +469,23 @@ impl Embedder for StoredModelEmbedder {
     }
 }
 
-/// The commands that bring a model back.
+/// The commands that bring a model back: the `recommendation` of the journal's `model.*`
+/// records, in the note layout (a headline, then each command on its own line under a
+/// `# comment`).
 pub(crate) fn recommendation(repo: &str) -> String {
-    format!(
-        "graphersal embed-model download {repo}, then graphersal embed-model import {repo} \
-         --into <store> --replace; or restore the store from a backup or replica"
+    crate::graph::note_text::NoteText::new(
+        "download the model again and import it into the store, or restore the store from a \
+         backup or replica",
     )
+    .command(
+        "download the model's files again",
+        &format!("graphersal embed-model download {repo}"),
+    )
+    .command(
+        "import them into the store in place of the damaged copy",
+        &format!("graphersal embed-model import {repo} --into <store> --replace"),
+    )
+    .finish()
 }
 
 // ---------------------------------------------------------------------------------------------

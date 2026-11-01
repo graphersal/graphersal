@@ -96,7 +96,11 @@ segment headers, commit continuity, a missing or emptied newest segment). After 
 ```text
 $ graphersal store backup data/ backup/
 Error: The backup stopped: the store data/ is damaged: wal/00000000000000000001.wal at byte 64: record of commit 1: checksum mismatch; nothing of the backup into backup/ was kept
-Help: Repair the MAIN store, never the backup: graphersal store repair data/ --to <new_dir> (Store::repair_dir) builds a verified, repaired copy in a new directory and reports what was repaired, lost and diverged; the damaged files are never changed. The full damage report: graphersal store verify data/. Existing backups stay valid: keep them until the repaired store is backed up.
+Help: Repair the MAIN store, never the backup: Store::repair_dir builds a verified, repaired copy in a new directory and reports what was repaired, lost and diverged; the damaged files are never changed. Existing backups stay valid: keep them until the repaired store is backed up.
+        # build a repaired copy of the main store
+        graphersal store repair data/ --to <new_dir>
+        # show the full damage report
+        graphersal store verify data/
 ```
 
 ## A backup from memory

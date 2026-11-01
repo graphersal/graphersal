@@ -950,9 +950,7 @@ fn entry_path(dir: &DirPath, id: &str) -> Result<DirPath, PersistError> {
         return Err(PersistError::store(
             "use the attic entry",
             StoreFailure::UnknownAtticEntry,
-            format!(
-                "the store has no attic entry {id:?} (graphersal store attic <dir> lists them)"
-            ),
+            format!("the store has no attic entry {id:?} (the help shows how to list them)"),
         ));
     }
     Ok(path)
@@ -1021,20 +1019,14 @@ pub(super) fn plan_restore(
                     .into_iter()
                     .find(|other| other.id != id && other.graph_id == entry.new_graph_id)
             })
-            .map(|other| {
-                format!(
-                    "restore the newer entry {} first (graphersal store attic <dir> restore {}), \
-                     or ",
-                    other.id, other.id
-                )
-            })
+            .map(|other| format!("restore the newer entry {} first, or ", other.id))
             .unwrap_or_default();
         return refuse(
             StoreFailure::AtticLineageChanged,
             format!(
                 "the store's lineage changed since that rollback (another rollback or restore; \
              attic entries restore newest first); {newer}fork the entry instead \
-             (graphersal store attic <dir> fork {id} <new_dir>)"
+             (the help shows the commands)"
             ),
         );
     }

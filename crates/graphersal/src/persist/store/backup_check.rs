@@ -68,11 +68,15 @@ pub(super) fn check_graph_files(
             main
         }),
         (Ok(file), Err(err)) | (Err(err), Ok(file)) => {
-            findings.warnings.push(format!(
-                "one copy of GRAPH is not usable ({err}); the other one was used and the backup \
-                 has two intact copies (`graphersal store verify` lists it; a repair or the next \
-                 read-write open of the store rewrites it)"
-            ));
+            findings.warnings.push(
+                crate::graph::note_text::NoteText::new(format!(
+                    "one copy of GRAPH is not usable ({err}); the other one was used and the \
+                     backup has two intact copies (a repair or the next read-write open of the \
+                     store rewrites it)"
+                ))
+                .command("list it", "graphersal store verify <dir>")
+                .finish(),
+            );
             Some(file)
         }
         (Err(main), Err(copy)) => {

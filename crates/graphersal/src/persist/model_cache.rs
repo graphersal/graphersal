@@ -91,11 +91,18 @@ impl ModelCache {
             OPERATION,
             StoreFailure::UnknownModel,
             match looked {
-                Some(downloaded) => format!(
+                // The command names the model, so it stays in the message, on a line of its
+                // own (the note layout).
+                Some(downloaded) => crate::graph::note_text::NoteText::new(format!(
                     "'{model}' is neither a downloaded model (looked in {}) nor a directory; \
-                     download it first: graphersal embed-model download {model}",
+                     download it first",
                     downloaded.display()
-                ),
+                ))
+                .command(
+                    "download it into the local models directory",
+                    &format!("graphersal embed-model download {model}"),
+                )
+                .finish(),
                 None => format!(
                     "no such directory '{model}', and it is not a Hugging Face repository name \
                      (owner/name)"
