@@ -1100,7 +1100,7 @@ mod tests {
                             Arc::new(crate::graph::AllowAll),
                         )
                     };
-                    result.unwrap();
+                    let _ = result.unwrap();
                     let graph = graph.read();
                     assert_eq!(graph.edge_count(), 2000);
                     // One unit: no walk at all. One unit per statement: walks only between
