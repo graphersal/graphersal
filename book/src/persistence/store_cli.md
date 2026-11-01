@@ -423,7 +423,7 @@ keep (`Missing embedding model`). Works while a server has the store open.
 `licence text` says where the text the store keeps beside the model comes from; Graphersal never
 writes a licence:
 
-- `from the repository (LICENSE)`: the repository's own licence file, named;
+- `from the repository (its own licence file)`: the repository's own licence file;
 - `standard MIT text (the repository has no licence file)`: the unchanged standard text of the
   licence the model card names (bundled for MIT and Apache-2.0; the copyright holders are those
   the model card names), and `licence` says `mit (named in the model card)`;
@@ -445,7 +445,7 @@ $ graphersal store models data/
   full name:    model2vec/acme/other@456789abcdef
   size:         7.6 MiB
   licence:      apache-2.0
-  licence text: from the repository (LICENSE)
+  licence text: from the repository (its own licence file)
   default:      yes
   used by:      nothing (not used by the schema)
 ```

@@ -1226,7 +1226,6 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
         "dimension": model.dimension,
         "license": model.license,
         "licenseText": model.license_text,
-        "licenseFiles": model.license_files,
         "baseModels": model.base_models.iter().map(|b| json!({
             "repo": b.repo, "license": b.license,
         })).collect::<Vec<_>>(),

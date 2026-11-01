@@ -335,7 +335,7 @@ pub fn command_help(command: &str) -> Option<String> {
              with its files as one blob; format spec 4.5), one section per model with one\n\
              `key: value` per line: the model (its repository), its full name (the identity a\n\
              schema's `embedder` records, model2vec/<repo>@<12 hex>), the size, the licence, where\n\
-             the licence text comes from (from the repository: its own licence file, named;\n\
+             the licence text comes from (from the repository: its own licence file;\n\
              standard text: the repository has no licence file, so the store keeps the unchanged\n\
              standard text of the licence the model card names; none: no standard text for this\n\
              licence), whether it is the default, what in the schema uses it, and whether the\n\
@@ -517,19 +517,26 @@ pub fn licence_rows(model: &ModelInfo) -> [(String, String); 2] {
     } else {
         model.license.clone()
     };
-    let text = match model.license_text.as_str() {
-        "file" if model.license_files.is_empty() => "from the repository".to_string(),
-        "file" => format!("from the repository ({})", model.license_files.join(", ")),
-        "template" => format!(
-            "standard {} text (the repository has no licence file)",
-            crate::cli::license_text(&model.license)
-        ),
-        _ => "none (no standard text for this licence)".to_string(),
-    };
     [
         ("licence".to_string(), licence),
-        ("licence text".to_string(), text),
+        (
+            "licence text".to_string(),
+            licence_text_value(&model.license_text, &model.license),
+        ),
     ]
+}
+
+/// The `licence text` value of a model whose licence text comes from `source` (`file`,
+/// `template` or `none`) for the licence `licence`: never a file name, never "written by".
+fn licence_text_value(source: &str, licence: &str) -> String {
+    match source {
+        "file" => "from the repository (its own licence file)".to_string(),
+        "template" => format!(
+            "standard {} text (the repository has no licence file)",
+            crate::cli::license_text(licence)
+        ),
+        _ => "none (no standard text for this licence)".to_string(),
+    }
 }
 
 /// One model as the store commands show it, one `(key, value)` per line: model, full name,
@@ -2462,6 +2469,22 @@ mod tests {
             let err = parse_time(bad).unwrap_err();
             assert!(err.to_string().contains("RFC 3339"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn the_licence_text_says_where_the_text_comes_from_without_a_file_name() {
+        assert_eq!(
+            licence_text_value("file", "apache-2.0"),
+            "from the repository (its own licence file)"
+        );
+        assert_eq!(
+            licence_text_value("template", "mit"),
+            "standard MIT text (the repository has no licence file)"
+        );
+        assert_eq!(
+            licence_text_value("none", "other"),
+            "none (no standard text for this licence)"
+        );
     }
 
     #[test]

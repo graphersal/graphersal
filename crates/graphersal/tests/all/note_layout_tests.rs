@@ -1,16 +1,14 @@
 //! Issue #19: the notes of upgrades and loads, and the refusal of a store whose model is
 //! missing, are a short headline with indented details (one `key: value` per line) and every
 //! command on a line of its own under a one-line `# comment`; the import of the only model the
-//! schema names, in a store without a default, takes `--default`; a model records the names of
-//! its repository's licence files.
+//! schema names, in a store without a default, takes `--default`.
 
 #![cfg(all(feature = "persist", not(target_arch = "wasm32")))]
 
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use graphersal::persist::{ImportModelOptions, ModelRole, ModelSource, Store, StoreOptions};
+use graphersal::persist::{Store, StoreOptions};
 
 use crate::model_fixture::*;
 
@@ -154,45 +152,4 @@ fn every_note_of_a_040_upgrade_and_gsnap_has_the_layout() {
         ),
         "{default}"
     );
-}
-
-#[test]
-fn a_model_records_the_names_of_its_repository_licence_files() {
-    let temp = Temp::new("note-licence-files");
-    let path = temp.join("s");
-    let store = Store::create(&path, options()).unwrap();
-    let with_files = tiny_model(1, "acme/a")
-        .with_file(
-            "LICENSE",
-            ModelRole::License,
-            Cursor::new(b"own terms".to_vec()),
-        )
-        .with_file(
-            "COPYING",
-            ModelRole::License,
-            Cursor::new(b"more terms".to_vec()),
-        );
-    let model = store
-        .import_model(ModelSource::Files(with_files), ImportModelOptions::new())
-        .unwrap()
-        .model;
-    assert_eq!(model.license_text, "file");
-    assert_eq!(model.license_files, ["COPYING", "LICENSE"]);
-    // A standard text the store keeps is no file of the repository.
-    let template = store
-        .import_model(
-            ModelSource::Files(tiny_model(2, "acme/b")),
-            ImportModelOptions::new(),
-        )
-        .unwrap()
-        .model;
-    assert_eq!(template.license_text, "template");
-    assert!(template.license_files.is_empty());
-    store.close().unwrap();
-    // The names are part of the definition: they survive a reopen.
-    let store = Store::open(&path, options()).unwrap();
-    let models = store.models().unwrap();
-    let a = models.iter().find(|m| m.repo == "acme/a").unwrap();
-    assert_eq!(a.license_files, ["COPYING", "LICENSE"]);
-    store.close().unwrap();
 }

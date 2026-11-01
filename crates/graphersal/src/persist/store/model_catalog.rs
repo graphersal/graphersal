@@ -161,15 +161,11 @@ pub struct ModelInfo {
     pub dimension: u64,
     /// The licence (an SPDX id), `unknown` when not stated.
     pub license: String,
-    /// Where the licence text comes from: `file` (the repository's own licence files, see
-    /// [`Self::license_files`]), `template` (the repository has no licence file: the unchanged
+    /// Where the licence text comes from: `file` (the repository's own licence file),
+    /// `template` (the repository has no licence file: the unchanged
     /// standard text of the licence the model card names, which the Store keeps as `LICENSE`)
     /// or `none` (no standard text for this licence).
     pub license_text: String,
-    /// The names of the licence files the repository holds (`LICENSE`), for a licence text
-    /// `file`; empty otherwise, and for a model imported by 0.5.0 or 0.5.1 (which did not record
-    /// them).
-    pub license_files: Vec<String>,
     /// The models this one was made from.
     pub base_models: Vec<BaseModel>,
     /// Whether the repository is gated.
@@ -356,7 +352,6 @@ pub(crate) fn model_info(
         dimension: model.dimension(),
         license: model.license().unwrap_or("unknown").to_string(),
         license_text: model.license_text().unwrap_or("none").to_string(),
-        license_files: model.license_files().to_vec(),
         base_models: model.base_models().to_vec(),
         gated: model.gated(),
         default: model.is_default(),
@@ -428,7 +423,6 @@ impl Prepared {
                     Some(manifest.license.clone()),
                     Some(manifest.license_text.clone()),
                 )
-                .with_license_files(self.repository_license_files())
                 .with_base_models(
                     manifest
                         .base_models
@@ -439,23 +433,6 @@ impl Prepared {
                 .with_gated(manifest.gated)
                 .with_default(default),
         )
-    }
-
-    /// The licence files the model's repository holds (licence text `file`): the files of the
-    /// role `license`, without the standard texts the import adds for base models
-    /// (`LICENSE-BASE-<licence>`); empty for a standard text or none.
-    fn repository_license_files(&self) -> Vec<String> {
-        if self.manifest.license_text != "file" {
-            return Vec::new();
-        }
-        self.manifest
-            .files
-            .iter()
-            .filter(|f| {
-                f.role == ModelRole::License.as_str() && !f.name.starts_with("LICENSE-BASE-")
-            })
-            .map(|f| f.name.clone())
-            .collect()
     }
 
     /// The length of the tar these files make.

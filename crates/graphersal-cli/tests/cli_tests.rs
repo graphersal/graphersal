@@ -5795,7 +5795,7 @@ mod embed_models {
         assert!(!out.contains("written by"), "{out}");
         for needle in [
             "\n  model:        acme/a\n  full name:    model2vec/acme/a@",
-            "\n  licence:      apache-2.0\n  licence text: from the repository (LICENSE)\n",
+            "\n  licence:      apache-2.0\n  licence text: from the repository (its own licence file)\n",
             "\n  licence:      mit (named in the model card)\n  licence text: standard MIT text \
              (the repository has no licence file)\n",
             "\n  licence:      other\n  licence text: none (no standard text for this licence)\n",
@@ -5821,7 +5821,7 @@ mod embed_models {
         );
         assert!(
             info.stdout
-                .contains("\n    licence text  from the repository (LICENSE)\n"),
+                .contains("\n    licence text  from the repository (its own licence file)\n"),
             "{}",
             info.stdout
         );

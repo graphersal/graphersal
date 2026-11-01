@@ -734,7 +734,6 @@ order, followed by the keys the writer does not know:
 | `dimension` | int64: the vector dimension |
 | `load_bytes` | int64: the memory the loaded model takes (measured at import; the memory check of a load uses it before reading the blob) |
 | `license`, `license_text` | strings, as the manifest's (4.5) |
-| `license_files` | array of strings (optional, absent = not recorded): the names of the licence files (role `license`) the repository holds, for a `license_text` `file`; never a standard text the writer added. Written since the release after 0.5.1; a reader that does not know the key keeps it as an unknown key |
 | `base_models` | array of `{repo, license?}` |
 | `gated` | boolean |
 | `default` | boolean, absent = false: the default model |
