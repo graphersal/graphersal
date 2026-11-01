@@ -88,7 +88,10 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn usage(message: &str) -> i32 {
-    errln!("Error: {message}\n\nRun `graphersal health --help` for usage.");
+    errln!(
+        "{}",
+        crate::out::usage_text(&format!("Error: {message}"), "graphersal health --help")
+    );
     EXIT_USAGE_ERROR
 }
 

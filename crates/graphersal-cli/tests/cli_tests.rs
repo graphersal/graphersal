@@ -2354,7 +2354,7 @@ fn store_commands_and_scripts_on_a_store_directory() {
         "",
     );
     assert_eq!(res.stdout.trim(), "6", "{}", res.stderr);
-    assert!(!res.stdout.contains("Marks not carried"), "{}", res.stdout);
+    assert!(!res.stdout.contains("marks not carried"), "{}", res.stdout);
     // A fork at the mark: the fork carries no marks and says which ones it leaves behind.
     let fork_at_mark = temp_path("store-fork-mark");
     let _ = std::fs::remove_dir_all(&fork_at_mark);
@@ -2371,12 +2371,20 @@ fn store_commands_and_scripts_on_a_store_directory() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("Marks not carried (2;"),
+        res.stdout.contains("marks not carried: 2 ("),
         "{}",
         res.stdout
     );
-    assert!(res.stdout.contains("  zoe @ commit 1"), "{}", res.stdout);
-    assert!(res.stdout.contains("  later @ commit 1"), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("  mark: zoe @ commit 1"),
+        "{}",
+        res.stdout
+    );
+    assert!(
+        res.stdout.contains("  mark: later @ commit 1"),
+        "{}",
+        res.stdout
+    );
     let _ = std::fs::remove_dir_all(&fork_at_mark);
     let gsnap = temp_path("store.gsnap");
     let res = run(&["store", "export", d, gsnap.to_str().unwrap()], "");
@@ -2468,7 +2476,7 @@ fn store_prune_and_compact_refuse_to_drop_marks_without_the_flag() {
     }
     let marks = || run(&["store", "marks", d], "").stdout;
     let res = run(&["store", "compact-advice", d], "");
-    assert!(res.stdout.contains("marks lost  m0, m1"), "{}", res.stdout);
+    assert!(res.stdout.contains("marks lost: m0, m1"), "{}", res.stdout);
 
     for args in [
         &["store", "prune", d, "--up-to", "4"][..],
@@ -2494,13 +2502,17 @@ fn store_prune_and_compact_refuse_to_drop_marks_without_the_flag() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stdout
-            .contains("No longer reachable (their history was pruned): the mark(s) m0."),
+            .contains("marks no longer reachable: m0 (their history was pruned)"),
         "{}",
         res.stdout
     );
     let res = run(&["store", "compact", d, "--drop-marks"], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    assert!(res.stdout.contains("the mark(s) m1."), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("marks no longer reachable: m1 "),
+        "{}",
+        res.stdout
+    );
     assert!(!marks().contains("m1"), "{}", marks());
     // Nothing affected any more: no flag needed.
     let res = run(&["store", "compact", d], "");
@@ -2534,7 +2546,7 @@ fn store_backups_are_incremental_read_only_and_restorable() {
     let res = run(&["store", "backup", d, b], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("Incremental backup") && res.stdout.contains("commits 1..1"),
+        res.stdout.contains("Incremental backup") && res.stdout.contains("commits: 1..1"),
         "{}",
         res.stdout
     );
@@ -2543,7 +2555,7 @@ fn store_backups_are_incremental_read_only_and_restorable() {
     write("bob");
     let res = run(&["store", "backup", d, b], "");
     assert!(
-        res.stdout.contains("copied 1 snapshot(s) [1]"),
+        res.stdout.contains("snapshots copied: 1 [1]"),
         "{}",
         res.stdout
     );
@@ -2667,8 +2679,14 @@ fn store_rollback_attic_and_repair_commands() {
     assert_eq!(count(d).trim(), "7");
     let res = run(&["store", "attic", d], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    let id = res.stdout.split_whitespace().next().unwrap().to_string();
-    assert!(res.stdout.contains("commits 2..=2"), "{}", res.stdout);
+    let id = res
+        .stdout
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("id:"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(res.stdout.contains("commits:     2..=2"), "{}", res.stdout);
     let res = run(&["store", "attic", d, "changes", &id], "");
     assert!(res.stdout.contains("commit        2"), "{}", res.stdout);
     let res = run(&["store", "info", d], "");
@@ -2850,7 +2868,7 @@ fn store_targets_by_rfc_3339_time() {
         let res = run(&["store", "fork", d, &f, "--at-time", time], "");
         assert_eq!(res.code, 0, "{time}: {}", res.stderr);
         assert!(
-            res.stdout.contains("to undo the fork, delete"),
+            res.stdout.contains("undo: delete the directory"),
             "{}",
             res.stdout
         );
@@ -2960,7 +2978,7 @@ fn store_commands_on_a_single_file_store() {
         res.stdout
     );
     assert!(
-        res.stdout.contains("decided by  total_bytes"),
+        res.stdout.contains("decided by: total_bytes"),
         "{}",
         res.stdout
     );
@@ -2979,13 +2997,17 @@ fn store_commands_on_a_single_file_store() {
         "",
     );
     assert!(res.stdout.starts_with("compact now"), "{}", res.stdout);
-    assert!(res.stdout.contains("prune "), "{}", res.stdout);
+    assert!(res.stdout.contains("prune: "), "{}", res.stdout);
     let res = run(&["store", "compact-advice", f, "--min-ratio", "2"], "");
     assert_eq!(res.code, 2);
     let before = std::fs::metadata(f).unwrap().len();
     let res = run(&["store", "compact", f], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    assert!(res.stdout.contains("Compacted the file"), "{}", res.stdout);
+    assert!(
+        res.stdout.contains("\n  file: ") && res.stdout.contains(" given back)"),
+        "{}",
+        res.stdout
+    );
     assert!(std::fs::metadata(f).unwrap().len() < before);
     let res = run(&["store", "verify", f], "");
     assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
@@ -3038,13 +3060,13 @@ fn store_checkpoint_merges_a_closed_store_and_is_refused_while_it_is_open() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stdout
-            .contains("Snapshot at commit 1 (6 vertices, 6 edges)"),
+            .contains("Snapshot at commit 1\n  vertices: 6\n  edges: 6\n"),
         "{}",
         res.stdout
     );
     assert!(
         res.stdout
-            .contains("Merged from the snapshot at commit 0 and 1 commits"),
+            .contains("merged from: the snapshot at commit 0 and 1 commits"),
         "{}",
         res.stdout
     );
@@ -3287,7 +3309,7 @@ fn store_damage_policy_and_verified_backups_on_the_command_line() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("damage policy continue"),
+        res.stdout.contains("damage policy: continue"),
         "{}",
         res.stdout
     );
@@ -3321,7 +3343,7 @@ fn store_damage_policy_and_verified_backups_on_the_command_line() {
     );
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stderr.contains("damage policy maintenance"),
+        res.stderr.contains("damage policy: maintenance"),
         "{}",
         res.stderr
     );
@@ -3905,13 +3927,13 @@ fn store_upgrade_converts_a_store_of_graphersal_0_1() {
     let res = run(&["store", "upgrade", &old, &new], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
-        res.stdout.contains("store format version 2"),
+        res.stdout.contains("store format version: 2"),
         "{}",
         res.stdout
     );
     assert!(
         res.stdout
-            .contains(&format!("Use it: graphersal --graph {new}"))
+            .contains(&format!("\n  graphersal --graph {new}\n"))
     );
     let res = run(&["--graph", &new, "-e", "g.v().count().next()"], "");
     assert_eq!(res.stdout.trim(), "9", "{}", res.stderr);
@@ -4002,7 +4024,7 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     let res = run(&["store", "upgrade", &old, "--in-place"], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
     for needle in [
-        "store format version 3",
+        "store format version: 3",
         "the models/ directory migrated",
         "Converted the embedding model model2vec/acme/tiny@70c61d0ed332",
         "model2vec/local/b6b362e7a651@b6b362e7a651",
@@ -4441,7 +4463,7 @@ mod embed_models {
         };
         let res = import(&model_text, &["--default"]);
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains(", the default"), "{}", res.stdout);
+        assert!(res.stdout.contains("\n  default: yes"), "{}", res.stdout);
         // `embed` without a name uses the database's default (3 components).
         let dims = run_env(
             &["--graph", &store_text, "-e", r#"embed("graph").dimension"#],
@@ -4884,13 +4906,17 @@ mod embed_models {
             ],
         );
         assert_eq!(res.code, 0, "stdout {} stderr {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("acme/tiny ->"), "{}", res.stdout);
         assert!(
-            res.stdout.contains("identity model2vec/acme/tiny@"),
+            res.stdout.contains("Downloaded acme/tiny into"),
             "{}",
             res.stdout
         );
-        assert!(res.stdout.contains("dimension 3"), "{}", res.stdout);
+        assert!(
+            res.stdout.contains("full name: model2vec/acme/tiny@"),
+            "{}",
+            res.stdout
+        );
+        assert!(res.stdout.contains("dimension: 3"), "{}", res.stdout);
         assert!(
             res.stderr.contains("model.safetensors"),
             "progress: {}",
@@ -4937,7 +4963,11 @@ mod embed_models {
         let env = [("GRAPHERSAL_EMBED_MODELS", models_text.as_str())];
         let list = run_env(&["embed-model", "list"], &env);
         assert_eq!(list.code, 0, "{}", list.stderr);
-        assert!(list.stdout.starts_with("REPO"), "{}", list.stdout);
+        assert!(
+            list.stdout.starts_with("── Downloaded model "),
+            "{}",
+            list.stdout
+        );
         assert!(
             list.stdout.contains("model2vec/acme/tiny@"),
             "{}",
@@ -5332,9 +5362,9 @@ mod embed_models {
             &[("GRAPHERSAL_HF_ENDPOINT", endpoint.as_str())],
         );
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("-> the store"), "{}", res.stdout);
+        assert!(res.stdout.contains("into the store"), "{}", res.stdout);
         assert!(
-            res.stdout.contains("identity model2vec/acme/tiny@"),
+            res.stdout.contains("full name: model2vec/acme/tiny@"),
             "{}",
             res.stdout
         );
@@ -5513,7 +5543,7 @@ mod embed_models {
             res.stderr
         );
         let list = run_env(&["embed-model", "list", "--dir", &models], &[]);
-        assert!(list.stdout.contains("LICENCE"), "{}", list.stdout);
+        assert!(list.stdout.contains("licence:"), "{}", list.stdout);
         assert!(list.stdout.contains("unknown"), "{}", list.stdout);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -5666,7 +5696,7 @@ mod embed_models {
             &[],
         );
         assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
-        assert!(res.stdout.contains("licence apache-2.0"), "{}", res.stdout);
+        assert!(res.stdout.contains("licence: apache-2.0"), "{}", res.stdout);
         let res = run_env(&["embed-model", "import", &model_text], &[]);
         assert_eq!(res.code, 2, "{}", res.stderr);
 

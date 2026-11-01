@@ -185,11 +185,15 @@ pub fn license_text(id: &str) -> String {
 /// The usage error of a flag or args-file key 0.5.0 removed (`--embedder`,
 /// `--default-embedder`): the models a database uses are imported into it.
 pub fn removed_embedder_flag(flag: &str) -> String {
-    format!(
-        "{flag} was removed in 0.5.0: the models a database uses are imported into it: \
-         graphersal embed-model import <repo> --into <store>; queries name the model by its \
-         repository or use the database's default"
+    crate::out::Note::new(format!(
+        "{flag} was removed in 0.5.0: the models a database uses are imported into it; queries \
+         name the model by its repository or use the database's default"
+    ))
+    .command(
+        "import a model into the store",
+        "graphersal embed-model import <repo> --into <store>",
     )
+    .text()
 }
 
 /// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
@@ -647,8 +651,13 @@ fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
     };
     if !Store::is_store(path).map_err(format)? {
         return Err(StartError::failed(format!(
-            "Error: '{path}' is not a Graphersal store (no GRAPH file)\nHelp: --read-only opens \
-             an existing store; create one with `graphersal store create {path}` first."
+            "Error: '{path}' is not a Graphersal store (no GRAPH file)\n{}",
+            crate::out::Note::new("--read-only opens an existing store; create one first")
+                .command(
+                    "create the store",
+                    format!("graphersal store create {path}")
+                )
+                .help()
         )));
     }
     let recovered = Store::open_read_only(path, RecoveryTarget::Latest).map_err(format)?;
@@ -884,10 +893,18 @@ impl GraphSpec {
             // A store this process may not write (no permission, a read-only file system such
             // as a `:ro` container mount) is served read-only instead of not at all.
             Err(StoreOpenError::NotWritable(message)) if !create => {
-                errln!(
-                    "note: the store {path} cannot be opened for writing ({message}): serving \
-                     it READ-ONLY, writes are refused. Help: pass --read-only to say so, or \
-                     make the store writable for this user."
+                crate::out::print_note(
+                    "note",
+                    &crate::out::Note::new(format!(
+                        "the store {path} cannot be opened for writing: serving it READ-ONLY, \
+                         writes are refused"
+                    ))
+                    .detail("why", message.as_str())
+                    .detail(
+                        "help",
+                        "pass --read-only to say so, or make the store writable for this user",
+                    )
+                    .text(),
                 );
                 open_store_read_only(path)
             }
@@ -915,13 +932,22 @@ impl GraphSpec {
             match Store::backup_marker_dir(path) {
                 Ok(Some(marker)) => {
                     let store = Store::open_backup(path, StoreOptions::new()).map_err(format)?;
-                    errln!(
-                        "note: {path} is a BACKUP (up to commit {}, taken {}): opened READ-ONLY, \
-                         writes are refused. Help: `graphersal store restore {path}` makes it the \
-                         live store; `graphersal store fork {path} <new_dir>` makes a writable \
-                         copy.",
-                        marker.commit_seq,
-                        crate::store_cmd::format_time(marker.taken_at)
+                    crate::out::print_note(
+                        "note",
+                        &crate::out::Note::new(format!(
+                            "{path} is a BACKUP: opened READ-ONLY, writes are refused"
+                        ))
+                        .detail("backup", format!("up to commit {}", marker.commit_seq))
+                        .detail("taken", crate::store_cmd::format_time(marker.taken_at))
+                        .command(
+                            "make it the live store",
+                            format!("graphersal store restore {path}"),
+                        )
+                        .command(
+                            "or make a writable copy",
+                            format!("graphersal store fork {path} <new_dir>"),
+                        )
+                        .text(),
                     );
                     store
                 }
@@ -946,10 +972,16 @@ impl GraphSpec {
                         drop(store);
                         return Err(format!(
                             "Error: the store {path} exists with the damage policy \"{have}\"; \
-                             --on-damage {wanted} applies only to a store being created\nHelp: \
-                             the damage policy is fixed when a store is created and never \
-                             changes (`graphersal store info {path}` shows it); drop \
-                             --on-damage, or create a new store with it."
+                             --on-damage {wanted} applies only to a store being created\n{}",
+                            crate::out::Note::new(
+                                "the damage policy is fixed when a store is created and never \
+                                 changes; drop --on-damage, or create a new store with it"
+                            )
+                            .command(
+                                "see the store's damage policy",
+                                format!("graphersal store info {path}")
+                            )
+                            .help()
                         )
                         .into());
                     }
@@ -963,12 +995,22 @@ impl GraphSpec {
             let policy = on_damage.unwrap_or_default();
             let store = Store::create(path, StoreOptions::new().with_damage_policy(policy))
                 .map_err(format)?;
-            errln!("note: created the store {path} (damage policy {policy})");
+            crate::out::print_note(
+                "note",
+                &crate::out::Note::new(format!("created the store {path}"))
+                    .detail("damage policy", policy.to_string())
+                    .text(),
+            );
             store
         } else {
             return Err(format!(
-                "Error: '{path}' is not a Graphersal store (no GRAPH file)\nHelp: create one with \
-                 `graphersal store create {path}`, or add --create-store to create it now."
+                "Error: '{path}' is not a Graphersal store (no GRAPH file)\n{}",
+                crate::out::Note::new("create one, or add --create-store to create it now")
+                    .command(
+                        "create the store",
+                        format!("graphersal store create {path}")
+                    )
+                    .help()
             )
             .into());
         };
@@ -976,24 +1018,32 @@ impl GraphSpec {
         if let Some(damage) = store.maintenance() {
             errln!(
                 "warning: the store {path} has DAMAGE and opened READ-ONLY in maintenance mode: \
-                 queries read the intact data, writes are refused.\n{damage}Help: repair it into \
-                 a new directory with `graphersal store repair {path} --to <new_dir>` (the \
-                 damaged files stay untouched), or restore a backup."
+                 queries read the intact data, writes are refused.\n{damage}{}",
+                crate::out::Note::new(
+                    "repair it into a new directory (the damaged files stay untouched), or \
+                     restore a backup"
+                )
+                .command(
+                    "build a repaired copy in a new directory",
+                    format!("graphersal store repair {path} --to <new_dir>")
+                )
+                .help()
             );
         } else if !report.clean_close {
-            errln!(
-                "note: the store {path} was not closed cleanly last time; recovered to commit {} \
-                 ({} commits replayed{})",
-                report.commit_seq,
-                report.commits_replayed,
-                report
-                    .torn_tail
-                    .map(|t| format!(", an interrupted last write of {} bytes cut", t.bytes))
-                    .unwrap_or_default()
-            );
+            let mut note =
+                crate::out::Note::new(format!("the store {path} was not closed cleanly last time"))
+                    .detail("recovered to", format!("commit {}", report.commit_seq))
+                    .detail("commits replayed", report.commits_replayed.to_string());
+            if let Some(torn) = report.torn_tail {
+                note = note.detail(
+                    "interrupted last write",
+                    format!("{} bytes cut", torn.bytes),
+                );
+            }
+            crate::out::print_note("note", &note.text());
         }
         if let Some(note) = crate::store_cmd::graph_file_repaired_note(path, &store) {
-            errln!("{note}");
+            crate::out::print_note("note", &note);
         }
         for warning in &report.warnings {
             errln!("warning: {warning}");
@@ -1440,25 +1490,34 @@ impl Cli {
             }
             cli.mode = Mode::Server;
         } else if cli.host.is_some() {
-            return Err(
-                "--host needs --server: it is the address the dev server listens on \
-                 (graphersal --graph <src> --server --host 0.0.0.0)"
-                    .to_string(),
-            );
+            return Err(crate::out::Note::new(
+                "--host needs --server: it is the address the dev server listens on",
+            )
+            .command(
+                "serve the graph on every network address",
+                "graphersal --graph <src> --server --host 0.0.0.0",
+            )
+            .text());
         } else if cli.mcp {
-            return Err(
-                "--mcp needs --server: the MCP endpoint is part of the dev server \
-                 (graphersal --graph <src> --server --mcp)"
-                    .to_string(),
-            );
+            return Err(crate::out::Note::new(
+                "--mcp needs --server: the MCP endpoint is part of the dev server",
+            )
+            .command(
+                "serve the graph with the MCP endpoint",
+                "graphersal --graph <src> --server --mcp",
+            )
+            .text());
         }
         if cli.ai.is_some() {
             if !server {
-                return Err(
-                    "--ai needs --server: the AI Chat is part of the dev server \
-                     (graphersal --graph <src> --server --ai ai.json)"
-                        .to_string(),
-                );
+                return Err(crate::out::Note::new(
+                    "--ai needs --server: the AI Chat is part of the dev server",
+                )
+                .command(
+                    "serve the graph with the AI Chat",
+                    "graphersal --graph <src> --server --ai ai.json",
+                )
+                .text());
             }
             if !cfg!(feature = "ai") {
                 return Err(

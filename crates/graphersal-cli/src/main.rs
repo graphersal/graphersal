@@ -88,7 +88,7 @@ fn run() -> Result<()> {
     let options = match Cli::parse(args) {
         Ok(options) => options,
         Err(err) => {
-            errln!("{err}\n\nRun `graphersal --help` for usage.");
+            errln!("{}", out::usage_text(&err.to_string(), "graphersal --help"));
             exit(cli::EXIT_USAGE_ERROR);
         }
     };

@@ -16,6 +16,7 @@ use graphersal::persist::{
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
+use crate::out::{Note, print_block, use_it};
 use graphersal::system_journal::{JournalQuery, Level};
 pub use graphersal_session::store::{bytes_text, format_time, parse_time, uuid_text};
 
@@ -408,7 +409,8 @@ pub fn command_help(command: &str) -> Option<String> {
     Some(out)
 }
 
-/// What a backup copied, as `store backup` prints it.
+/// What a backup copied, as `store backup` prints it: blocks in the note layout (a headline,
+/// one `key: value` per line, commands under a comment), set apart by a blank line.
 pub fn backup_summary(report: &BackupReport, target: &str) -> String {
     let list = |items: &[u64]| {
         if items.is_empty() {
@@ -418,68 +420,100 @@ pub fn backup_summary(report: &BackupReport, target: &str) -> String {
             format!(" [{}]", items.join(", "))
         }
     };
-    let mut out = String::new();
-    if !report.incremental {
-        out.push_str(&format!(
-            "Full backup into {target}: snapshot {}, the WAL up to commit {} ({} segment(s)); {} \
-             file(s), {} bytes.\n",
-            report.snapshot_commit_seq,
-            report.commit_seq,
-            report.segments_copied.len(),
-            report.files.len(),
-            report.bytes
-        ));
+    let note = if !report.incremental {
+        Note::new(format!("Full backup into {target}"))
+            .detail("snapshot", format!("commit {}", report.snapshot_commit_seq))
+            .detail("WAL", format!("up to commit {}", report.commit_seq))
+            .detail(
+                "WAL segments copied",
+                report.segments_copied.len().to_string(),
+            )
+            .detail("files", report.files.len().to_string())
+            .detail("bytes", report.bytes.to_string())
     } else if report.bytes == 0 && !report.lineage_changed {
-        out.push_str(&format!(
-            "Incremental backup into {target}: nothing new since commit {}; the backup is \
-             current.\n",
-            report.commit_seq
-        ));
+        Note::new(format!("Incremental backup into {target}")).detail(
+            "state",
+            format!("current (nothing new since commit {})", report.commit_seq),
+        )
     } else {
-        out.push_str(&format!(
-            "Incremental backup into {target}: commits {}..{} ({} new); copied {} snapshot(s){}, \
-             {} WAL segment(s){}, {} bytes appended to the last segment; {} bytes in total.\n",
-            report.previous_commit_seq + 1,
-            report.commit_seq,
-            report.commit_seq.saturating_sub(report.previous_commit_seq),
-            report.snapshots_copied.len(),
-            list(&report.snapshots_copied),
-            report.segments_copied.len(),
-            list(&report.segments_copied),
-            report.tail_bytes,
-            report.bytes
-        ));
+        let mut note = Note::new(format!("Incremental backup into {target}"))
+            .detail(
+                "commits",
+                format!(
+                    "{}..{} ({} new)",
+                    report.previous_commit_seq + 1,
+                    report.commit_seq,
+                    report.commit_seq.saturating_sub(report.previous_commit_seq)
+                ),
+            )
+            .detail(
+                "snapshots copied",
+                format!(
+                    "{}{}",
+                    report.snapshots_copied.len(),
+                    list(&report.snapshots_copied)
+                ),
+            )
+            .detail(
+                "WAL segments copied",
+                format!(
+                    "{}{}",
+                    report.segments_copied.len(),
+                    list(&report.segments_copied)
+                ),
+            )
+            .detail(
+                "bytes appended to the last segment",
+                report.tail_bytes.to_string(),
+            )
+            .detail("bytes", report.bytes.to_string());
         if report.lineage_changed {
-            out.push_str(
-                "The store was rolled back in place since the last backup; the backup follows \
-                 its new lineage.\n",
+            note = note.detail(
+                "lineage",
+                "the store was rolled back in place since the last backup; the backup follows \
+                 its new lineage",
             );
         }
+        note
+    };
+    let mut blocks = vec![note.text()];
+    let carried = models_carried(&report.models);
+    if !carried.is_empty() {
+        blocks.push(carried.trim_end().to_string());
     }
-    out.push_str(&models_carried(&report.models));
-    out.push_str(&format!(
-        "The backup is read-only (graphersal --graph {target} opens it so); `graphersal store \
-         restore {target}` makes it the live store.\n"
-    ));
-    out
+    blocks.push(
+        Note::new(format!("The backup {target} is read-only"))
+            .command(
+                "open it read-only in the REPL",
+                format!("graphersal --graph {target}"),
+            )
+            .command(
+                "make it the live store",
+                format!("graphersal store restore {target}"),
+            )
+            .text(),
+    );
+    format!("{}\n", blocks.join("\n\n"))
 }
 
 /// The embedding models a copy carries, with their licences (empty without models): who hands
-/// the copy on redistributes them. One block per model, one `key: value` per line.
+/// the copy on redistributes them. A headline, then one section per model (as `store models`
+/// shows them), one `key: value` per line; ends with a newline.
 pub fn models_carried(models: &[ModelInfo]) -> String {
     if models.is_empty() {
         return String::new();
     }
-    let mut out = format!(
-        "It carries {} embedding model(s) with their licences (handing it on redistributes \
-         them):\n",
+    let headline = Note::new(format!(
+        "It carries {} embedding model(s) with their licences",
         models.len()
-    );
-    for model in models {
-        let used = !model.needed_by.is_empty();
-        out.push_str(&rows_text(&model_rows(model, used), "  ", true));
-    }
-    out
+    ))
+    .detail("handing it on", "redistributes them")
+    .text();
+    let models: Vec<(&ModelInfo, bool)> = models
+        .iter()
+        .map(|model| (model, !model.needed_by.is_empty()))
+        .collect();
+    format!("{headline}\n\n{}\n", model_sections(&models, &[]))
 }
 
 /// Whether a schema's `embedder` names a model a store keeps (a Model2Vec identity), not a
@@ -633,82 +667,97 @@ fn backend_of(path: &str, single_file: bool) -> Arc<dyn StoreDir> {
     }
 }
 
-/// The compaction advice as `store compact-advice` prints it.
+/// The compaction advice as `store compact-advice` prints it: the verdict as the headline, one
+/// `key: value` per line, and the command when compacting is recommended.
 pub fn advice_text(advice: &CompactionAdvice, dir: &str) -> String {
-    let mut out = format!(
-        "{}: {}\n",
+    let mut note = Note::new(format!(
+        "{}: {}",
         if advice.recommended {
             "compact now"
         } else {
             "no compaction needed"
         },
         advice.reason
+    ))
+    .detail(
+        "store",
+        format!(
+            "{} ({})",
+            bytes_text(advice.total_bytes),
+            if advice.compactable {
+                "single file"
+            } else {
+                "directory: compact = prune"
+            }
+        ),
     );
-    out.push_str(&format!(
-        "store       {} ({})\n",
-        bytes_text(advice.total_bytes),
-        if advice.compactable {
-            "single file"
-        } else {
-            "directory: compact = prune"
-        }
-    ));
     if advice.compactable {
-        out.push_str(&format!(
-            "live        {}\ngarbage     {} ({:.0} %)\n",
-            bytes_text(advice.live_bytes),
-            bytes_text(advice.garbage_bytes),
-            advice.garbage_ratio * 100.0
-        ));
-    }
-    out.push_str(&format!(
-        "prune       {}{}\n",
-        bytes_text(advice.prune_bytes),
-        if advice.prune_first {
+        note = note.detail("live", bytes_text(advice.live_bytes)).detail(
+            "garbage",
             format!(
-                " first ({} snapshot(s), {} WAL segment(s))",
-                advice.prune.snapshots_removed.len(),
-                advice.prune.segments_removed.len()
-            )
-        } else {
-            String::new()
-        }
-    ));
-    out.push_str(&format!(
-        "reclaimable {} ({:.0} % of the store)\n",
-        bytes_text(advice.reclaimable_bytes),
-        advice.reclaimable_ratio * 100.0
-    ));
+                "{} ({:.0} %)",
+                bytes_text(advice.garbage_bytes),
+                advice.garbage_ratio * 100.0
+            ),
+        );
+    }
+    note = note.detail(
+        "prune",
+        format!(
+            "{}{}",
+            bytes_text(advice.prune_bytes),
+            if advice.prune_first {
+                format!(
+                    " first ({} snapshot(s), {} WAL segment(s))",
+                    advice.prune.snapshots_removed.len(),
+                    advice.prune.segments_removed.len()
+                )
+            } else {
+                String::new()
+            }
+        ),
+    );
+    note = note.detail(
+        "reclaimable",
+        format!(
+            "{} ({:.0} % of the store)",
+            bytes_text(advice.reclaimable_bytes),
+            advice.reclaimable_ratio * 100.0
+        ),
+    );
     if advice.compactable {
-        out.push_str(&format!(
-            "disk        {} needed, {}\n",
-            bytes_text(advice.space_needed),
-            advice
-                .free_space
-                .map_or("free space unknown".to_string(), |f| format!(
-                    "{} free",
-                    bytes_text(f)
-                ))
-        ));
+        note = note
+            .detail("disk needed", bytes_text(advice.space_needed))
+            .detail(
+                "disk free",
+                advice.free_space.map_or("unknown".to_string(), bytes_text),
+            );
     }
     let lost = &advice.prune.marks_unreachable;
     if !lost.is_empty() {
-        out.push_str(&format!(
-            "marks lost  {} (unreachable afterwards; compact asks for --drop-marks)\n",
-            lost.join(", ")
-        ));
+        note = note.detail(
+            "marks lost",
+            format!(
+                "{} (unreachable afterwards; compact asks for --drop-marks)",
+                lost.join(", ")
+            ),
+        );
     }
-    out.push_str(&format!("decided by  {}\n", advice.decided_by.name()));
+    note = note.detail("decided by", advice.decided_by.name());
     if advice.recommended {
         let confirm = if lost.is_empty() { "" } else { " --drop-marks" };
-        out.push_str(&format!("Run: graphersal store compact {dir}{confirm}\n"));
+        note = note.command(
+            "compact the store now",
+            format!("graphersal store compact {dir}{confirm}"),
+        );
     }
-    out
+    format!("{}\n", note.text())
 }
 
-/// The stderr `note:` of an open that rewrote a missing, damaged or stale `GRAPH` /
-/// `GRAPH.copy` from the other copy ([`graphersal::persist::OpenReport::graph_file_repaired`]),
-/// or `None` when both copies were intact.
+/// The stderr note (printed with [`crate::out::print_note`]) of an open that rewrote a
+/// missing, damaged or stale `GRAPH` / `GRAPH.copy` from the other copy
+/// ([`graphersal::persist::OpenReport::graph_file_repaired`]), or `None` when both copies were
+/// intact.
 pub fn graph_file_repaired_note(path: &str, store: &Store) -> Option<String> {
     let read_only = store.backup_marker().is_some()
         || store.maintenance().is_some()
@@ -719,15 +768,20 @@ pub fn graph_file_repaired_note(path: &str, store: &Store) -> Option<String> {
         .as_ref()
         .map(|what| {
             if read_only {
-                format!(
-                    "note: the store {path}: {what}; the copy is left as it is (a read-only open \
-                 writes nothing)"
-                )
+                Note::new(format!(
+                    "the store {path}: {what}; the copy is left as it is (a read-only open \
+                     writes nothing)"
+                ))
+                .text()
             } else {
-                format!(
-                    "note: the store {path}: {what}; the other copy was rewritten from it \
-                 (`graphersal store verify {path}` checks the rest)"
+                Note::new(format!(
+                    "the store {path}: {what}; the other copy was rewritten from it"
+                ))
+                .command(
+                    "check the rest of the store",
+                    format!("graphersal store verify {path}"),
                 )
+                .text()
             }
         })
 }
@@ -736,7 +790,7 @@ pub fn graph_file_repaired_note(path: &str, store: &Store) -> Option<String> {
 fn open_rw(path: &str) -> Result<Store, PersistError> {
     let store = Store::open(path, StoreOptions::new())?;
     if let Some(note) = graph_file_repaired_note(path, &store) {
-        errln!("{note}");
+        crate::out::print_note("note", &note);
     }
     Ok(store)
 }
@@ -760,9 +814,14 @@ pub fn create_refusal(path: &str) -> Option<String> {
     };
     if is_store {
         return Some(format!(
-            "Error: cannot create a store in {path}: it is a store already\nHelp: open it \
-             (`graphersal --graph {path}`), see what it holds (`graphersal store info {path}`), \
-             or choose an empty or new directory for the new store."
+            "Error: cannot create a store in {path}: it is a store already\n{}",
+            Note::new(
+                "open it, see what it holds, or choose an empty or new directory for the new \
+                 store"
+            )
+            .command("open it", format!("graphersal --graph {path}"))
+            .command("see what it holds", format!("graphersal store info {path}"))
+            .help()
         ));
     }
     let empty = std::fs::read_dir(dir)
@@ -770,9 +829,13 @@ pub fn create_refusal(path: &str) -> Option<String> {
         .unwrap_or(false);
     (!empty).then(|| {
         format!(
-            "Error: cannot create a store in {path}: the directory is not empty\nHelp: choose an \
-             empty or new directory, or open the existing store if it is one (`graphersal store \
-             info {path}`)."
+            "Error: cannot create a store in {path}: the directory is not empty\n{}",
+            Note::new("choose an empty or new directory, or open the existing store if it is one")
+                .command(
+                    "see whether it is a store and what it holds",
+                    format!("graphersal store info {path}")
+                )
+                .help()
         )
     })
 }
@@ -788,9 +851,15 @@ fn marks_refusal(command: &str, dir: &str, marks: &[String]) -> i32 {
     errln!(
         "Error: `store {command}` would make the mark(s) {names} unreachable: it removes the \
          history they need, so they cannot be opened, forked or rolled back to afterwards (only \
-         from a backup that holds older snapshots). Nothing was changed.\nHelp: run it again with \
-         --drop-marks to {command} anyway, or back the store up first (`graphersal store backup \
-         {dir} <BACKUP_DIR>`)."
+         from a backup that holds older snapshots). Nothing was changed.\n{}",
+        Note::new(format!(
+            "run it again with --drop-marks to {command} anyway, or back the store up first"
+        ))
+        .command(
+            "back the store up first",
+            format!("graphersal store backup {dir} <BACKUP_DIR>")
+        )
+        .help()
     );
     EXIT_QUERY_ERROR
 }
@@ -870,7 +939,10 @@ fn journal_command(
 }
 
 fn usage(message: &str) -> i32 {
-    errln!("{message}\n\nRun `graphersal store help` for usage.");
+    errln!(
+        "{}",
+        crate::out::usage_text(message, "graphersal store help")
+    );
     EXIT_USAGE_ERROR
 }
 
@@ -1057,9 +1129,9 @@ pub fn run(args: &[String]) -> i32 {
                         .and_then(|report| Ok((Store::inspect(&backend)?, report)));
                 return match created {
                     Ok((info, report)) => {
-                        print_created(&info, dir);
+                        print_block(&created_note(&info, dir).text());
                         print_upgrade_models(&report, dir);
-                        outln!("Use it: graphersal --graph {dir} (or --server)");
+                        print_block(&use_it(Note::new(format!("Open {dir}")), dir).text());
                         EXIT_OK
                     }
                     Err(err) => fail(err),
@@ -1102,8 +1174,7 @@ pub fn run(args: &[String]) -> i32 {
             }) {
                 Ok((info, removed)) => {
                     print_removed_function_uses(&removed, dir);
-                    print_created(&info, dir);
-                    outln!("Use it: graphersal --graph {dir} (or --server)");
+                    print_block(&use_it(created_note(&info, dir), dir).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1125,13 +1196,11 @@ pub fn run(args: &[String]) -> i32 {
                         outln!("  branched  at commit {}", first.branched_at);
                     }
                     if let Some(marker) = info.backup {
-                        outln!(
-                            "backup      up to commit {}, taken {} (read-only; `graphersal \
-                             store restore {}` makes it the live store)",
-                            marker.commit_seq,
-                            format_time(marker.taken_at),
-                            positional[0]
-                        );
+                        outln!("backup      up to commit {}", marker.commit_seq);
+                        outln!("  taken     {}", format_time(marker.taken_at));
+                        outln!("  access    read-only");
+                        outln!("            # make it the live store");
+                        outln!("            graphersal store restore {}", positional[0]);
                     }
                     outln!(
                         "state       {}",
@@ -1210,13 +1279,19 @@ pub fn run(args: &[String]) -> i32 {
                         }
                     }
                     match info.space {
-                        Some(space) => outln!(
-                            "file        single file, {} ({} live, {} free space inside: \
-                             `store compact-advice`)",
-                            bytes_text(space.total_bytes),
-                            bytes_text(space.live_bytes),
-                            bytes_text(space.garbage_bytes())
-                        ),
+                        Some(space) => {
+                            outln!("file        single file, {}", bytes_text(space.total_bytes));
+                            outln!("  live      {}", bytes_text(space.live_bytes));
+                            outln!(
+                                "  free      {} inside the file",
+                                bytes_text(space.garbage_bytes())
+                            );
+                            outln!("            # see whether compacting gives that space back");
+                            outln!(
+                                "            graphersal store compact-advice {}",
+                                positional[0]
+                            );
+                        }
                         None => outln!("file        a directory"),
                     }
                     // The parameters fixed when the store was created (book: Persistence,
@@ -1340,11 +1415,17 @@ pub fn run(args: &[String]) -> i32 {
                 .unwrap_or_default();
             match Store::models_dir(positional[0].as_str()) {
                 Ok(models) if models.is_empty() => {
-                    errln!(
-                        "{} keeps no embedding models (add one with `graphersal embed-model \
-                         download <REPO> --into {}`)",
-                        positional[0],
-                        positional[0]
+                    crate::out::print_note(
+                        "note",
+                        &Note::new(format!("{} keeps no embedding models", positional[0]))
+                            .command(
+                                "download a model into the store",
+                                format!(
+                                    "graphersal embed-model download <REPO> --into {}",
+                                    positional[0]
+                                ),
+                            )
+                            .text(),
                     );
                     let missing: Vec<&String> = used.iter().filter(|i| stored_kind(i)).collect();
                     if !missing.is_empty() {
@@ -1406,30 +1487,39 @@ pub fn run(args: &[String]) -> i32 {
             match Store::checkpoint_dir(&positional[0], StoreOptions::new(), name.as_deref()) {
                 Ok(report) => {
                     let info = &report.snapshot;
-                    outln!(
-                        "Snapshot at commit {} ({} vertices, {} edges).",
-                        info.commit_seq,
-                        info.vertex_count,
-                        info.edge_count
-                    );
-                    if !report.written {
-                        outln!("Nothing was committed after it: no new snapshot written.");
+                    let note = Note::new(format!("Snapshot at commit {}", info.commit_seq))
+                        .detail("vertices", info.vertex_count.to_string())
+                        .detail("edges", info.edge_count.to_string());
+                    let note = if !report.written {
+                        note.detail(
+                            "written",
+                            "no: nothing was committed after it, no new snapshot written",
+                        )
                     } else if report.merged {
-                        outln!(
-                            "Merged from the snapshot at commit {} and {} commits: {} segment \
-                             files reused, {} copied, {} written.",
-                            report.base_commit_seq,
-                            report.commits_merged,
-                            report.segments_reused,
-                            report.segments_copied,
-                            report.segments_written
-                        );
+                        note.detail(
+                            "merged from",
+                            format!(
+                                "the snapshot at commit {} and {} commits",
+                                report.base_commit_seq, report.commits_merged
+                            ),
+                        )
+                        .detail(
+                            "segment files",
+                            format!(
+                                "{} reused, {} copied, {} written",
+                                report.segments_reused,
+                                report.segments_copied,
+                                report.segments_written
+                            ),
+                        )
                     } else {
-                        outln!(
-                            "Encoded from the loaded graph (the WAL since the last snapshot is \
-                             larger than the merge bound)."
-                        );
-                    }
+                        note.detail(
+                            "encoded from",
+                            "the loaded graph (the WAL since the last snapshot is larger than \
+                             the merge bound)",
+                        )
+                    };
+                    print_block(&note.text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1439,13 +1529,16 @@ pub fn run(args: &[String]) -> i32 {
             try_code!(need(1));
             match Store::verify_dir(&positional[0]) {
                 Ok(report) => {
-                    outln!(
-                        "{} snapshot(s), {} WAL segment(s), {} record(s), commits {}..{}",
-                        report.snapshots_checked,
-                        report.segments_checked,
-                        report.records_checked,
-                        report.first_commit,
-                        report.last_commit
+                    print_block(
+                        &Note::new(format!("Checked the store {}", positional[0]))
+                            .detail("snapshots", report.snapshots_checked.to_string())
+                            .detail("WAL segments", report.segments_checked.to_string())
+                            .detail("records", report.records_checked.to_string())
+                            .detail(
+                                "commits",
+                                format!("{}..{}", report.first_commit, report.last_commit),
+                            )
+                            .text(),
                     );
                     for note in &report.notes {
                         outln!("note: {note}");
@@ -1462,7 +1555,7 @@ pub fn run(args: &[String]) -> i32 {
                         );
                     }
                     if report.is_ok() {
-                        outln!("ok: no damage found");
+                        print_block("ok: no damage found");
                         EXIT_OK
                     } else {
                         if let Ok(damage) = Store::damage_report_dir(&positional[0])
@@ -1471,10 +1564,17 @@ pub fn run(args: &[String]) -> i32 {
                             out!("{damage}");
                         }
                         errln!(
-                            "Error: {} problem(s) found. Help: keep the store's files (do not prune); \
-                             build a repaired copy with `graphersal store repair <dir> --to \
-                             <new_dir>`, restore a backup, or fork a target before the damage.",
-                            report.problems.len()
+                            "Error: {} problem(s) found\n{}",
+                            report.problems.len(),
+                            Note::new(
+                                "keep the store's files (do not prune); build a repaired copy, \
+                                 restore a backup, or fork a target before the damage"
+                            )
+                            .command(
+                                "build a repaired copy in a new directory",
+                                format!("graphersal store repair {} --to <NEW_DIR>", positional[0])
+                            )
+                            .help()
                         );
                         EXIT_QUERY_ERROR
                     }
@@ -1486,10 +1586,19 @@ pub fn run(args: &[String]) -> i32 {
                         Ok(damage) if !damage.is_empty() => {
                             out!("{damage}");
                             errln!(
-                                "Error: the store's GRAPH file cannot be read ({err}). Help: keep \
-                                 the store's files (do not prune); \
-                                 build a repaired copy with `graphersal store repair <dir> --to \
-                                 <new_dir>`, or restore a backup."
+                                "Error: the store's GRAPH file cannot be read ({err})\n{}",
+                                Note::new(
+                                    "keep the store's files (do not prune); build a repaired \
+                                     copy, or restore a backup"
+                                )
+                                .command(
+                                    "build a repaired copy in a new directory",
+                                    format!(
+                                        "graphersal store repair {} --to <NEW_DIR>",
+                                        positional[0]
+                                    )
+                                )
+                                .help()
                             );
                             EXIT_QUERY_ERROR
                         }
@@ -1526,26 +1635,10 @@ pub fn run(args: &[String]) -> i32 {
             };
             match pruned {
                 Ok(report) => {
-                    outln!(
-                        "Kept from commit {}; removed {} snapshot(s){} and {} WAL segment(s).",
-                        report.kept_from,
-                        report.snapshots_removed.len(),
-                        commit_list(&report.snapshots_removed),
-                        report.segments_removed.len()
+                    print_block(
+                        &prune_details(Note::new(format!("Pruned {}", positional[0])), &report)
+                            .text(),
                     );
-                    if !report.marks_unreachable.is_empty() {
-                        outln!(
-                            "No longer reachable (their history was pruned): the mark(s) {}.",
-                            report.marks_unreachable.join(", ")
-                        );
-                    }
-                    if report.blobs_removed > 0 {
-                        outln!(
-                            "Removed {} unreferenced blob(s) ({}).",
-                            report.blobs_removed,
-                            bytes_text(report.blob_bytes_removed)
-                        );
-                    }
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1557,25 +1650,20 @@ pub fn run(args: &[String]) -> i32 {
             match Store::fork_dir(&positional[0], target, &positional[1]) {
                 Ok(report) => {
                     let info = &report.snapshot;
-                    outln!(
-                        "Forked into {} at commit {}: graph {} (parent {}).",
-                        positional[1],
-                        info.commit_seq,
-                        uuid_text(info.graph_id),
-                        uuid_text(info.parent_graph_id)
-                    );
-                    print_marks_not_carried(&report.marks_not_carried, &positional[0]);
-                    outln!(
-                        "Open it: graphersal --graph {} --server (or the REPL: graphersal \
-                         --graph {}).",
-                        positional[1],
-                        positional[1]
-                    );
-                    outln!(
-                        "{} is unchanged; to undo the fork, delete the directory {}.",
-                        positional[0],
-                        positional[1]
-                    );
+                    let note =
+                        Note::new(format!("Forked {} into {}", positional[0], positional[1]))
+                            .detail("at commit", info.commit_seq.to_string())
+                            .detail("graph", uuid_text(info.graph_id))
+                            .detail("parent", uuid_text(info.parent_graph_id));
+                    let note = marks_not_carried(note, &report.marks_not_carried, &positional[0])
+                        .detail(
+                            "undo",
+                            format!(
+                                "delete the directory {} ({} is unchanged)",
+                                positional[1], positional[0]
+                            ),
+                        );
+                    print_block(&use_it(note, &positional[1]).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1631,15 +1719,26 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 return match result {
                     Ok(report) => {
-                        outln!(
-                            "Full backup of snapshot {} and the WAL up to commit {}: {} file(s), \
-                             {} bytes, in {target}; every checksum read back.",
-                            report.snapshot_commit_seq,
-                            report.commit_seq,
-                            report.files.len(),
-                            report.bytes
+                        print_block(
+                            &Note::new(format!("Full backup into {target}"))
+                                .detail(
+                                    "snapshot",
+                                    format!("commit {}", report.snapshot_commit_seq),
+                                )
+                                .detail("WAL", format!("up to commit {}", report.commit_seq))
+                                .detail("files", report.files.len().to_string())
+                                .detail("bytes", report.bytes.to_string())
+                                .detail("checked", "every checksum read back")
+                                .command(
+                                    "unpack it into a new live store",
+                                    format!("graphersal store restore {target} <NEW_DIR>"),
+                                )
+                                .text(),
                         );
-                        out!("{}", models_carried(&report.models));
+                        let carried = models_carried(&report.models);
+                        if !carried.is_empty() {
+                            print_block(carried.trim_end());
+                        }
                         for warning in &report.warnings {
                             errln!("warning: {warning}");
                         }
@@ -1661,7 +1760,7 @@ pub fn run(args: &[String]) -> i32 {
             };
             match Store::backup_dir_with(dir, target, mode) {
                 Ok(report) => {
-                    out!("{}", backup_summary(&report, target));
+                    print_block(backup_summary(&report, target).trim_end());
                     for warning in &report.warnings {
                         errln!("warning: {warning}");
                     }
@@ -1676,19 +1775,22 @@ pub fn run(args: &[String]) -> i32 {
                 if Path::new(dir).is_file()
                     && matches!(SingleFileDir::is_single_file(dir), Ok(false))
                 {
-                    return usage(&format!(
-                        "'{dir}' is a file: unpack a ZIP backup with `graphersal store restore \
-                         {dir} <NEW_DIR>`"
-                    ));
+                    return usage(
+                        &Note::new(format!("'{dir}' is a file"))
+                            .command(
+                                "unpack a ZIP backup into a new live store",
+                                format!("graphersal store restore {dir} <NEW_DIR>"),
+                            )
+                            .text(),
+                    );
                 }
                 return match Store::restore_backup(dir) {
                     Ok(marker) => {
-                        outln!(
-                            "Restored: {dir} is now the live store (the backup up to commit {}, \
-                             taken {}; the same graph id). Use it: graphersal --graph {dir}",
-                            marker.commit_seq,
-                            format_time(marker.taken_at)
-                        );
+                        let note = Note::new(format!("Restored {dir}: it is the live store now"))
+                            .detail("backup", format!("up to commit {}", marker.commit_seq))
+                            .detail("taken", format_time(marker.taken_at))
+                            .detail("graph id", "the same");
+                        print_block(&use_it(note, dir).text());
                         EXIT_OK
                     }
                     Err(err) => fail(err),
@@ -1704,11 +1806,11 @@ pub fn run(args: &[String]) -> i32 {
             };
             match Store::restore_zip(std::io::BufReader::new(file), &positional[1]) {
                 Ok(()) => {
-                    outln!(
-                        "Restored into {} (the live store). Use it: graphersal --graph {}",
-                        positional[1],
-                        positional[1]
-                    );
+                    let note = Note::new(format!(
+                        "Restored {} into {}: it is the live store",
+                        positional[0], positional[1]
+                    ));
+                    print_block(&use_it(note, &positional[1]).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1744,7 +1846,11 @@ pub fn run(args: &[String]) -> i32 {
                         "Exported the snapshot at commit {} to {target}.",
                         info.commit_seq
                     );
-                    out!("{}", models_carried(&carried));
+                    let carried = models_carried(&carried);
+                    if !carried.is_empty() {
+                        outln!();
+                        out!("{carried}");
+                    }
                     EXIT_OK
                 }
                 Err(err) => {
@@ -1772,37 +1878,40 @@ pub fn run(args: &[String]) -> i32 {
                 Ok(report)
             }) {
                 Ok(report) => {
-                    outln!(
-                        "Rolled back from commit {} to commit {}: new lineage {}.",
-                        report.previous_commit_seq,
-                        report.target,
-                        uuid_text(report.graph_id)
-                    );
                     let dir = &positional[0];
-                    let range = format!(
-                        "commits {}..={}, {} snapshot(s), {} WAL file(s)",
-                        report.target + 1,
-                        report.previous_commit_seq,
-                        report.snapshots_moved.len(),
-                        report.segments_moved
-                    );
-                    match &report.attic {
-                        Some(id) => {
-                            outln!("The history after it ({range}) is in the attic as {id}.");
-                            outln!(
-                                "Undo (only while nothing new is committed or marked): \
-                                 graphersal store attic {dir} restore {id}"
-                            );
-                            outln!(
-                                "Keep it as a new store instead: graphersal store attic {dir} \
-                                 fork {id} <NEW_DIR>; delete it: graphersal store attic {dir} \
-                                 remove {id}"
-                            );
-                        }
-                        None => outln!(
-                            "The history after it ({range}) was deleted: this cannot be undone."
+                    let note = Note::new(format!(
+                        "Rolled back {dir} from commit {} to commit {}",
+                        report.previous_commit_seq, report.target
+                    ))
+                    .detail("new lineage", uuid_text(report.graph_id))
+                    .detail(
+                        "history after it",
+                        format!(
+                            "commits {}..={}, {} snapshot(s), {} WAL file(s)",
+                            report.target + 1,
+                            report.previous_commit_seq,
+                            report.snapshots_moved.len(),
+                            report.segments_moved
                         ),
-                    }
+                    );
+                    let note = match &report.attic {
+                        Some(id) => note
+                            .detail("kept", format!("in the attic as {id}"))
+                            .command(
+                                "undo (only while nothing new is committed or marked)",
+                                format!("graphersal store attic {dir} restore {id}"),
+                            )
+                            .command(
+                                "or keep it as a new store",
+                                format!("graphersal store attic {dir} fork {id} <NEW_DIR>"),
+                            )
+                            .command(
+                                "or delete it",
+                                format!("graphersal store attic {dir} remove {id}"),
+                            ),
+                        None => note.detail("kept", "no: deleted, this cannot be undone"),
+                    };
+                    print_block(&note.text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1824,16 +1933,19 @@ pub fn run(args: &[String]) -> i32 {
             let target = backend_of(to, flag("single-file").is_some());
             match Store::convert(from.as_str(), &target) {
                 Ok((files, bytes)) => {
-                    outln!(
-                        "Copied the store {from} into the {} {to}: {files} file(s), {}; verified.",
-                        if target.space_usage().unwrap().is_some() {
+                    let note = Note::new(format!(
+                        "Copied the store {from} into the {} {to}",
+                        if matches!(target.space_usage(), Ok(Some(_))) {
                             "single file"
                         } else {
                             "directory"
-                        },
-                        bytes_text(bytes)
-                    );
-                    outln!("Use it: graphersal --graph {to}. {from} is unchanged.");
+                        }
+                    ))
+                    .detail("files", files.to_string())
+                    .detail("size", bytes_text(bytes))
+                    .detail("verified", "yes")
+                    .detail("source", format!("{from} is unchanged"));
+                    print_block(&use_it(note, to).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1864,36 +1976,24 @@ pub fn run(args: &[String]) -> i32 {
             match compacted {
                 Ok(Err(lost)) => marks_refusal("compact", dir, &lost),
                 Ok(Ok(report)) => {
-                    outln!(
-                        "Pruned: kept from commit {}; removed {} snapshot(s) and {} WAL segment(s).",
-                        report.prune.kept_from,
-                        report.prune.snapshots_removed.len(),
-                        report.prune.segments_removed.len()
-                    );
-                    if !report.prune.marks_unreachable.is_empty() {
-                        outln!(
-                            "No longer reachable (their history was pruned): the mark(s) {}.",
-                            report.prune.marks_unreachable.join(", ")
-                        );
-                    }
-                    if report.prune.blobs_removed > 0 {
-                        outln!(
-                            "Removed {} unreferenced blob(s) ({}).",
-                            report.prune.blobs_removed,
-                            bytes_text(report.prune.blob_bytes_removed)
-                        );
-                    }
-                    match report.compaction {
-                        Some(c) => outln!(
-                            "Compacted the file: {} -> {} ({} given back).",
-                            bytes_text(c.bytes_before),
-                            bytes_text(c.bytes_after),
-                            bytes_text(report.bytes_freed())
+                    let note = prune_details(Note::new(format!("Compacted {dir}")), &report.prune);
+                    let note = match report.compaction {
+                        Some(c) => note.detail(
+                            "file",
+                            format!(
+                                "{} -> {} ({} given back)",
+                                bytes_text(c.bytes_before),
+                                bytes_text(c.bytes_after),
+                                bytes_text(report.bytes_freed())
+                            ),
                         ),
-                        None => outln!(
-                            "A directory store: the prune gave the space back (nothing to compact)."
+                        None => note.detail(
+                            "file",
+                            "a directory store: the prune gave the space back (nothing to \
+                             compact)",
                         ),
-                    }
+                    };
+                    print_block(&note.text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1993,7 +2093,8 @@ pub fn run(args: &[String]) -> i32 {
                         );
                     }
                     if report.is_lossless() {
-                        outln!("ok: nothing lost. Use it: graphersal --graph {to}");
+                        outln!();
+                        print_block(&use_it(Note::new("ok: nothing lost"), &to).text());
                         EXIT_OK
                     } else {
                         errln!(
@@ -2025,34 +2126,43 @@ pub fn run(args: &[String]) -> i32 {
                     if flag("json").is_some() {
                         outln!("{}", restore_json(&report));
                     } else {
-                        outln!(
-                            "{} blob(s) referenced, {} missing or damaged, {} restored from {} \
-                             ({} bytes).",
-                            report.referenced,
-                            report.wanted.len(),
-                            report.restored.len(),
-                            report.source,
-                            report.bytes_restored
-                        );
+                        let mut note = Note::new(format!(
+                            "Restored the blobs of {} from {}",
+                            positional[0], report.source
+                        ))
+                        .detail("referenced", report.referenced.to_string())
+                        .detail("missing or damaged", report.wanted.len().to_string())
+                        .detail("restored", report.restored.len().to_string())
+                        .detail("bytes restored", report.bytes_restored.to_string());
                         for blob in &report.restored {
-                            outln!("restored            {blob}");
+                            note = note.detail("restored blob", blob);
                         }
                         for blob in &report.not_found {
-                            outln!("not in the source   {blob}");
+                            note = note.detail("not in the source", blob);
                         }
                         for blob in &report.damaged_in_source {
-                            outln!("damaged there too   {blob}");
+                            note = note.detail("damaged there too", blob);
                         }
+                        print_block(&note.text());
                     }
                     if report.is_complete() {
                         EXIT_OK
                     } else {
                         errln!(
-                            "Error: {} blob(s) are still missing or damaged. Help: restore them \
-                             from another backup or copy of the store, or build a copy without \
-                             them: graphersal store repair {} --to <NEW_DIR> --drop-damaged-blobs",
+                            "Error: {} blob(s) are still missing or damaged\n{}",
                             report.not_found.len() + report.damaged_in_source.len(),
-                            positional[0]
+                            Note::new(
+                                "restore them from another backup or copy of the store, or build \
+                                 a copy without them"
+                            )
+                            .command(
+                                "build a repaired copy without them",
+                                format!(
+                                    "graphersal store repair {} --to <NEW_DIR> --drop-damaged-blobs",
+                                    positional[0]
+                                )
+                            )
+                            .help()
                         );
                         EXIT_QUERY_ERROR
                     }
@@ -2148,41 +2258,61 @@ fn run_upgrade(positional: &[String], in_place: bool, single_file: bool) -> i32 
         "store"
     };
     let verify = &report.verify;
-    outln!(
-        "Verified the {what} {dir} (store format version {}): {} snapshot(s), {} WAL segment(s), \
-         {} record(s).",
-        report.from_version,
-        verify.snapshots_checked,
-        verify.segments_checked,
-        verify.records_checked
+    print_block(
+        &Note::new(format!("Verified the {what} {dir}"))
+            .detail("store format version", report.from_version.to_string())
+            .detail("snapshots", verify.snapshots_checked.to_string())
+            .detail("WAL segments", verify.segments_checked.to_string())
+            .detail("records", verify.records_checked.to_string())
+            .text(),
     );
     if report.in_place {
         let kept = if report.migration_commit.is_some() || !report.models_converted.is_empty() {
-            "the models/ directory migrated (below), every other file kept"
+            "kept, the models/ directory migrated (below)"
         } else {
-            "every other file kept"
+            "kept"
         };
-        outln!(
-            "Upgraded {dir} in place to store format version {}: GRAPH rewritten, {kept}. The \
-             older Graphersal no longer opens it.",
-            report.to_version
+        print_block(
+            &Note::new(format!(
+                "Upgraded {dir} in place to store format version {}",
+                report.to_version
+            ))
+            .detail("GRAPH", "rewritten")
+            .detail("every other file", kept)
+            .detail("the older Graphersal", "no longer opens it")
+            .text(),
         );
     } else {
         let to = &positional[1];
-        outln!(
-            "Upgraded into {to} (store format version {}): {} file(s), {}; verified. {dir} is \
-             unchanged (keep using {to}: it is the same store, with the same identity).",
-            report.to_version,
-            report.files_copied,
-            bytes_text(report.bytes_copied)
+        print_block(
+            &Note::new(format!("Upgraded {dir} into {to}"))
+                .detail("store format version", report.to_version.to_string())
+                .detail("files", report.files_copied.to_string())
+                .detail("size", bytes_text(report.bytes_copied))
+                .detail("verified", "yes")
+                .detail(
+                    "source",
+                    format!(
+                        "{dir} is unchanged (keep using {to}: it is the same store, with the \
+                         same identity)"
+                    ),
+                )
+                .text(),
         );
     }
     let target = if report.in_place { dir } else { &positional[1] };
     print_upgrade_models(&report, target);
     if report.backup.is_some() {
-        outln!("It stays a backup: graphersal store restore {target} makes it the live store.");
+        print_block(
+            &Note::new(format!("{target} stays a backup"))
+                .command(
+                    "make it the live store",
+                    format!("graphersal store restore {target}"),
+                )
+                .text(),
+        );
     } else {
-        outln!("Use it: graphersal --graph {target}");
+        print_block(&use_it(Note::new(format!("Open {target}")), target).text());
     }
     EXIT_OK
 }
@@ -2193,11 +2323,14 @@ fn run_upgrade(positional: &[String], in_place: bool, single_file: bool) -> i32 
 /// schema patch). The exit code does not change.
 fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &str) {
     for model in &report.models_converted {
-        outln!(
-            "Converted the embedding model {} into a blob with its catalog definition: {} ({}).",
-            model.former_identity(),
-            model.identity(),
-            bytes_text(model.bytes())
+        print_block(
+            &Note::new(format!(
+                "Converted the embedding model {} into a blob with its catalog definition",
+                model.former_identity()
+            ))
+            .detail("full name", model.identity())
+            .detail("size", bytes_text(model.bytes()))
+            .text(),
         );
         if model.renamed() {
             let note = crate::out::Note::new(format!(
@@ -2219,20 +2352,23 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
         }
     }
     if let Some(commit) = report.migration_commit {
-        outln!("The models were defined by commit {commit}; the history before it has no models.");
-        if report.backup.is_some() {
-            outln!(
-                "  # back the upgraded store up into a new directory: this backup does not take \
-                 increments of the store upgraded on its own (each has its own migration commit)"
-            );
-            outln!("  graphersal store backup <store> <new_dir>");
+        let note = Note::new(format!(
+            "The models were defined by commit {commit}; the history before it has no models."
+        ));
+        let note = if report.backup.is_some() {
+            note.command(
+                "back the upgraded store up into a new directory: this backup does not take \
+                 increments of the store upgraded on its own (each has its own migration commit)",
+                "graphersal store backup <store> <new_dir>",
+            )
         } else {
-            outln!(
-                "  # take a full backup now: a backup taken before the upgrade does not take \
-                 increments of the upgraded store"
-            );
-            outln!("  graphersal store backup {target} <new_dir>");
-        }
+            note.command(
+                "take a full backup now: a backup taken before the upgrade does not take \
+                 increments of the upgraded store",
+                format!("graphersal store backup {target} <new_dir>"),
+            )
+        };
+        print_block(&note.text());
     }
     for missing in &report.models_missing {
         crate::out::print_note("warning", &missing.note(target));
@@ -2245,21 +2381,62 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
     print_removed_function_uses(&report.saved_queries_using_removed, target);
 }
 
-/// The line `store create` prints for the new store at `dir`.
-fn print_created(info: &graphersal::persist::StoreInfo, dir: &str) {
-    outln!(
-        "Created the {} {dir}: graph {}, commit {}, {} snapshot(s); damage policy {} (fixed for \
-         its life).",
+/// The block `store create` prints for the new store at `dir`.
+fn created_note(info: &graphersal::persist::StoreInfo, dir: &str) -> Note {
+    Note::new(format!(
+        "Created the {} {dir}",
         if info.space.is_some() {
             "single-file store"
         } else {
             "store"
-        },
-        uuid_text(info.graph_id),
-        info.commit_seq,
-        info.snapshots.len(),
-        info.damage_policy
-    );
+        }
+    ))
+    .detail("graph", uuid_text(info.graph_id))
+    .detail("commit", info.commit_seq.to_string())
+    .detail("snapshots", info.snapshots.len().to_string())
+    .detail(
+        "damage policy",
+        format!("{} (fixed for its life)", info.damage_policy),
+    )
+}
+
+/// `note` with what a prune did: the commit it kept from, the snapshots, WAL segments and
+/// blobs it removed, the marks it made unreachable.
+fn prune_details(note: Note, report: &graphersal::persist::PruneReport) -> Note {
+    let mut note = note
+        .detail("kept from", format!("commit {}", report.kept_from))
+        .detail(
+            "snapshots removed",
+            format!(
+                "{}{}",
+                report.snapshots_removed.len(),
+                commit_list(&report.snapshots_removed)
+            ),
+        )
+        .detail(
+            "WAL segments removed",
+            report.segments_removed.len().to_string(),
+        );
+    if !report.marks_unreachable.is_empty() {
+        note = note.detail(
+            "marks no longer reachable",
+            format!(
+                "{} (their history was pruned)",
+                report.marks_unreachable.join(", ")
+            ),
+        );
+    }
+    if report.blobs_removed > 0 {
+        note = note.detail(
+            "unreferenced blobs removed",
+            format!(
+                "{} ({})",
+                report.blobs_removed,
+                bytes_text(report.blob_bytes_removed)
+            ),
+        );
+    }
+    note
 }
 
 /// The saved queries calling a DSL function this version removed (`note:` lines with the
@@ -2270,19 +2447,22 @@ fn print_removed_function_uses(uses: &[graphersal::catalog::RemovedFunctionUse],
     }
 }
 
-/// The marks a fork or repair did not carry, one line each (`name @ commit N`), with where they
-/// stay usable.
-fn print_marks_not_carried(marks: &[graphersal::changes::Mark], source: &str) {
+/// `note` with the marks a fork did not carry (their number, where they stay usable, then one
+/// `mark: name @ commit N` line each).
+fn marks_not_carried(note: Note, marks: &[graphersal::changes::Mark], source: &str) -> Note {
     if marks.is_empty() {
-        return;
+        return note;
     }
-    outln!(
-        "Marks not carried ({}; they stay targets of {source} only):",
-        marks.len()
+    let note = note.detail(
+        "marks not carried",
+        format!("{} (they stay targets of {source} only)", marks.len()),
     );
-    for mark in marks {
-        outln!("  {} @ commit {}", mark.name(), mark.commit_seq());
-    }
+    marks.iter().fold(note, |note, mark| {
+        note.detail(
+            "mark",
+            format!("{} @ commit {}", mark.name(), mark.commit_seq()),
+        )
+    })
 }
 
 /// `graphersal store attic <DIR> [list | changes <ID> | restore <ID> | fork <ID> <NEW_DIR> |
@@ -2294,32 +2474,37 @@ fn run_attic(positional: &[String]) -> i32 {
     let action = positional.get(1).map(String::as_str).unwrap_or("list");
     let id = positional.get(2);
     let need_id = || {
-        usage(&format!(
-            "`store attic <DIR> {action}` takes an entry id (graphersal store attic {dir} lists them)"
-        ))
+        usage(
+            &Note::new(format!("`store attic <DIR> {action}` takes an entry id"))
+                .command("list the entries", format!("graphersal store attic {dir}"))
+                .text(),
+        )
     };
     match action {
         "list" => match Store::attic_list_dir(dir) {
             Ok(entries) => {
                 if entries.is_empty() {
                     outln!("The attic is empty.");
+                    return EXIT_OK;
                 }
-                for e in entries {
-                    outln!(
-                        "{}  commits {}..={} rolled back at {} ({}), {}{}",
-                        e.id,
-                        e.target + 1,
-                        e.last_commit_seq,
-                        format_time(e.time),
-                        e.reason,
-                        bytes_text(e.bytes),
-                        if e.snapshots.is_empty() {
-                            String::new()
-                        } else {
-                            format!(", {} snapshot(s)", e.snapshots.len())
-                        }
-                    );
-                }
+                // One section per entry, one field per line (as `store models`).
+                let sections: Vec<crate::sections::Section> = entries
+                    .iter()
+                    .map(|e| {
+                        let mut section = crate::sections::Section::new("Attic entry");
+                        section.unwrapped("id", e.id.clone());
+                        section.row(
+                            "commits",
+                            format!("{}..={}", e.target + 1, e.last_commit_seq),
+                        );
+                        section.row("rolled back", format_time(e.time));
+                        section.row("reason", e.reason.to_string());
+                        section.row("size", bytes_text(e.bytes));
+                        section.row("snapshots", e.snapshots.len().to_string());
+                        section
+                    })
+                    .collect();
+                outln!("{}", crate::sections::render(&sections));
                 EXIT_OK
             }
             Err(err) => fail(err),
@@ -2378,17 +2563,14 @@ fn run_attic(positional: &[String]) -> i32 {
             match Store::attic_fork_dir(dir, id, new_dir) {
                 Ok(report) => {
                     let info = &report.snapshot;
-                    outln!(
-                        "Forked {id} into {new_dir} at commit {}: graph {} (parent {}).",
-                        info.commit_seq,
-                        uuid_text(info.graph_id),
-                        uuid_text(info.parent_graph_id)
-                    );
-                    print_marks_not_carried(&report.marks_not_carried, dir);
-                    outln!(
-                        "Open it: graphersal --graph {new_dir} --server. The attic entry stays; \
-                         to undo the fork, delete the directory {new_dir}."
-                    );
+                    let note = Note::new(format!("Forked the attic entry {id} into {new_dir}"))
+                        .detail("at commit", info.commit_seq.to_string())
+                        .detail("graph", uuid_text(info.graph_id))
+                        .detail("parent", uuid_text(info.parent_graph_id));
+                    let note = marks_not_carried(note, &report.marks_not_carried, dir)
+                        .detail("attic entry", "stays")
+                        .detail("undo", format!("delete the directory {new_dir}"));
+                    print_block(&use_it(note, new_dir).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
