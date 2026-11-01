@@ -45,13 +45,20 @@ of each damaged item, and exits with **1**:
 
 ```text
 $ graphersal store verify damaged/
-2 snapshot(s), 2 WAL segment(s), 3 record(s), commits 1..2
+Checked the store damaged/
+  snapshots: 2
+  WAL segments: 2
+  records: 3
+  commits: 1..2
 DAMAGE: wal/00000000000000000002.wal: Corrupt journal 1 at byte 188: record of commit 3: checksum mismatch
 DAMAGE: wal: the store was closed cleanly at commit 3, but its files end at commit 2
 2 damaged item(s); readable state: snapshot 1 + WAL at commit 2; a repair LOSES data (see the items without a donor)
   DAMAGE wal/00000000000000000002.wal at byte 188: record checksum mismatch; 83 bytes up to the next valid record; commits from 3 on; no donor: LOST
   ...
-Error: 2 problem(s) found. Help: keep the store's files (do not prune); build a repaired copy with `graphersal store repair <dir> --to <new_dir>`, restore a backup, or fork a target before the damage.
+Error: 2 problem(s) found
+Help: keep the store's files (do not prune); build a repaired copy, restore a backup, or fork a target before the damage
+        # build a repaired copy in a new directory
+        graphersal store repair damaged/ --to <NEW_DIR>
 ```
 
 - `verify` takes no lock and changes nothing: run it while a dev server or another program has the
