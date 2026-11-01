@@ -243,8 +243,10 @@ What is compared with the ceiling (the error's `help()` says which one applied):
   graph is far from the ceiling: it takes the footprint of the last walk, adjusted by the
   elements added or removed since. The graph is walked (time proportional to its size, cached by
   its commit position) only on the first run, once its element count has doubled or halved since
-  the last walk, and on every run after a committed change while the figure is at least half of
-  the ceiling. `g.memory_usage()` walks the graph too and keeps its figure for the next runs:
+  the last walk (only between units: inside a script or transaction that has already changed
+  data, the figure stays the estimate until the unit ends, so its traversals do not walk the
+  graph one after the other), and on every run after a committed change while the figure is at
+  least half of the ceiling. With a tracking allocator no traversal walks the graph. `g.memory_usage()` walks the graph too and keeps its figure for the next runs:
   call it after rewriting many property values to refresh the estimate. For large graphs that
   change often near the ceiling, prefer the tracking allocator.
 
