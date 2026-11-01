@@ -83,6 +83,56 @@ pub fn write_stderr(args: fmt::Arguments<'_>) {
     }
 }
 
+/// Whether a note was printed on stderr ([`print_note`]): the next one is set apart.
+static NOTE_PRINTED: AtomicBool = AtomicBool::new(false);
+
+/// Prints the note `text` on stderr, its headline after `prefix` (`note`, `warning`): the
+/// engine's note layout (a short headline, then lines indented by two spaces: one detail
+/// `key: value` each, a shell command on a line of its own under a `# comment`) stays as it
+/// is. A note after another one is set apart by a blank line. The one printer of every note
+/// the CLI shows (upgrades, loads, model imports).
+pub fn print_note(prefix: &str, text: &str) {
+    if NOTE_PRINTED.swap(true, Ordering::Relaxed) {
+        write_stderr(format_args!("\n"));
+    }
+    write_stderr(format_args!("{prefix}: {text}\n"));
+}
+
+/// A note the CLI writes itself, in the engine's note layout (see [`print_note`]).
+pub struct Note {
+    text: String,
+}
+
+impl Note {
+    /// A note whose headline is `headline`.
+    pub fn new(headline: impl AsRef<str>) -> Self {
+        Note {
+            text: headline.as_ref().to_string(),
+        }
+    }
+
+    /// Adds the detail line `key: value`.
+    pub fn detail(mut self, key: &str, value: impl AsRef<str>) -> Self {
+        self.text
+            .push_str(&format!("\n  {key}: {}", value.as_ref()));
+        self
+    }
+
+    /// Adds the shell command `command` on a line of its own under the comment `comment`.
+    pub fn command(mut self, comment: &str, command: impl AsRef<str>) -> Self {
+        self.text.push_str(&format!("\n  # {comment}"));
+        for line in command.as_ref().lines() {
+            self.text.push_str(&format!("\n  {line}"));
+        }
+        self
+    }
+
+    /// The note's text.
+    pub fn text(self) -> String {
+        self.text
+    }
+}
+
 /// Whether stdout still takes output (no write to it has failed yet).
 pub fn stdout_open() -> bool {
     STDOUT.load(Ordering::Relaxed) == OPEN

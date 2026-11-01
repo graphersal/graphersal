@@ -3937,6 +3937,53 @@ fn store_upgrade_converts_a_store_of_graphersal_0_1() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Issue #19: the notes and warnings of `store upgrade` are headlines with indented details,
+/// set apart by a blank line; every command is on a line of its own under its `# comment`;
+/// the import of the only model the schema names, in a store without a default, takes
+/// `--default`; the refusal of the open has the same layout.
+#[test]
+fn store_upgrade_notes_put_every_command_on_its_own_line() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("store-upgrade-layout");
+    let _ = std::fs::remove_dir_all(&root);
+    let missing = root.join("missing");
+    copy_tree(&fixtures.join("missing"), &missing);
+    let missing = missing.to_string_lossy().to_string();
+    let res = run(&["store", "upgrade", &missing, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stderr.contains(&format!(
+            "\n  # download the model into the local models directory\n  graphersal embed-model \
+             download acme/gone\n  # import it into the store as its default model (embed() \
+             without a model name uses it)\n  graphersal embed-model import acme/gone --into \
+             {missing} --default\n\nnote: doc.emb has vectors of"
+        )),
+        "{}",
+        res.stderr
+    );
+    // No line holds two commands, and every command line follows its comment.
+    let lines: Vec<&str> = res.stderr.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("graphersal ") {
+            assert_eq!(line.matches("graphersal ").count(), 1, "{line}");
+            assert!(lines[i - 1].trim_start().starts_with("# "), "{line}");
+        }
+    }
+    let res = run(&["--graph", &missing, "-e", "1"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains(
+            "the model acme/gone is not in the database at this position\n  needed by: \
+             doc.emb\n  # download the model into the local models directory\n  graphersal \
+             embed-model download acme/gone\n"
+        ),
+        "{}",
+        res.stderr
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `graphersal store upgrade` of stores written by the released 0.4.0 (the golden fixtures of
 /// `graphersal`'s tests, `tests/data/v0.4.0`): the models under `models/` become blobs with
 /// definitions, the exit code stays 0, a model the schema needs but the store lacks is a
@@ -3960,7 +4007,7 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
         "Converted the embedding model model2vec/acme/tiny@70c61d0ed332",
         "model2vec/local/b6b362e7a651@b6b362e7a651",
         "defined by commit 12",
-        "Take a full backup now",
+        "take a full backup now",
     ] {
         assert!(res.stdout.contains(needle), "{needle}: {}", res.stdout);
     }
@@ -3968,11 +4015,13 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
                  \"<source property>\"}}}}}})";
     for needle in [
         "note: the model model2vec@b6b362e7a651 had no repository name",
-        "note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property",
+        "note: doc.emb has vectors of acme/tiny but no source property\n  vectors: 3 element(s)",
         &format!("graphersal --graph {old} -e '{patch}'"),
         "re-embeds every doc",
-        "note: person.emb has vectors of hash-ngram/1 (2 element(s))",
-        "note: note.emb has vectors of local/b6b362e7a651 (1 element(s))",
+        "note: person.emb has vectors of hash-ngram/1 but no source property\n  vectors: 2 \
+         element(s)",
+        "note: note.emb has vectors of local/b6b362e7a651 but no source property\n  vectors: 1 \
+         element(s)",
     ] {
         assert!(res.stderr.contains(needle), "{needle}: {}", res.stderr);
     }
@@ -4006,7 +4055,8 @@ fn store_upgrade_converts_models_and_warns_about_missing_ones() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stderr.contains(
-            &"warning: the schema needs the model model2vec/acme/gone@0123456789ab (doc.emb)"
+            &"warning: the schema needs the embedding model acme/gone, which the store does not \
+              keep\n  identity: model2vec/acme/gone@0123456789ab\n  needed by: doc.emb\n"
                 .to_string()
         ),
         "{}",
@@ -4091,9 +4141,11 @@ fn store_upgrade_names_saved_queries_calling_a_removed_function() {
     assert_eq!(res.code, 0, "{}", res.stderr);
     assert!(
         res.stderr.contains(&format!(
-            "note: saved query \"fill\" calls embed_property, removed in 0.5.0: a call of the \
-             query fails now, and it is not rewritten; replace the call by the vector rule \
-             (graphersal --graph {created} -e '{patch}')"
+            "note: saved query \"fill\" calls embed_property, removed in 0.5.0\n  effect: a call \
+             of the query fails now; the query is not rewritten\n  replacement: a vector rule; \
+             its first fill embeds every element of the label (the whole database is locked \
+             while it runs)\n  # declare the vector rule that replaces the call\n  graphersal \
+             --graph {created} -e '{patch}'"
         )),
         "{}",
         res.stderr
@@ -4421,9 +4473,14 @@ mod embed_models {
             replaced.stderr
         );
         let listed = run_env(&["store", "models", &store_text], &[]);
-        assert_eq!(listed.stdout.lines().count(), 1, "{}", listed.stdout);
+        assert_eq!(
+            listed.stdout.matches("── Embedding model ").count(),
+            1,
+            "{}",
+            listed.stdout
+        );
         assert!(
-            listed.stdout.contains(", the default"),
+            listed.stdout.contains("  default:      yes\n"),
             "the default stays: {}",
             listed.stdout
         );
@@ -4588,7 +4645,8 @@ mod embed_models {
         assert_eq!(res.code, 0, "{}", res.stderr);
         assert!(res.stdout.contains("Created the store"), "{}", res.stdout);
         assert!(
-            res.stderr.contains("warning: the schema needs the model")
+            res.stderr
+                .contains("warning: the schema needs the embedding model")
                 && res.stderr.contains(&format!(
                     "graphersal embed-model import acme/tiny --into {made_text}"
                 )),
@@ -4597,7 +4655,8 @@ mod embed_models {
         );
         assert!(
             res.stderr.contains(
-                "note: doc.emb is declared with vectors of acme/tiny (no element holds one yet)"
+                "note: doc.emb is declared with vectors of acme/tiny but has no source \
+                 property\n  vectors: no element holds one yet"
             ),
             "{}",
             res.stderr
@@ -5280,7 +5339,7 @@ mod embed_models {
             res.stdout
         );
         // MIT without a licence file: the standard text is written beside the model.
-        assert!(res.stderr.contains("standard mit text"), "{}", res.stderr);
+        assert!(res.stderr.contains("standard MIT text"), "{}", res.stderr);
         assert!(!res.stderr.contains("warning"), "{}", res.stderr);
         // Nothing in the models directory.
         assert!(!models.join("acme").join("tiny").exists());
@@ -5294,7 +5353,12 @@ mod embed_models {
             listed.stdout
         );
         assert!(
-            listed.stdout.contains("licence mit (standard text"),
+            listed
+                .stdout
+                .contains("licence:      mit (named in the model card)\n")
+                && listed.stdout.contains(
+                    "licence text: standard MIT text (the repository has no licence file)\n"
+                ),
             "{}",
             listed.stdout
         );
@@ -5335,7 +5399,11 @@ mod embed_models {
 
         let info = run_env(&["store", "info", &store_text], &[]);
         assert!(info.stdout.contains("models      1"), "{}", info.stdout);
-        assert!(info.stdout.contains("licence mit"), "{}", info.stdout);
+        assert!(
+            info.stdout.contains("mit (named in the model card)"),
+            "{}",
+            info.stdout
+        );
 
         // The shareable copies name the models they carry, or leave them out (an export is of
         // a stored snapshot: one after the import holds the model).
@@ -5356,7 +5424,12 @@ mod embed_models {
         let zip = base.join("b.zip").display().to_string();
         let res = run_env(&["store", "backup", &store_text, &zip, "--zip"], &[]);
         assert_eq!(res.code, 0, "{}", res.stderr);
-        assert!(res.stdout.contains("licence mit"), "{}", res.stdout);
+        assert!(
+            res.stdout
+                .contains("\n  licence:      mit (named in the model card)\n"),
+            "{}",
+            res.stdout
+        );
         let bare_zip = base.join("bare.zip").display().to_string();
         let res = run_env(
             &[
@@ -5473,7 +5546,7 @@ mod embed_models {
         let res = run_env(&["--graph", &store_text, "-e", "1"], &[]);
         assert_eq!(res.code, 0, "{}", res.stderr);
         assert!(
-            res.stderr.contains("(licence Apache-2.0)"),
+            res.stderr.contains("\n  licence: Apache-2.0\n"),
             "{}",
             res.stderr
         );
@@ -5627,13 +5700,16 @@ mod embed_models {
         assert_eq!(res.stdout.trim(), "1");
         assert!(
             res.stderr
-                .contains("loaded the embedding model model2vec/acme/tiny@"),
+                .contains("loaded the embedding model acme/tiny from")
+                && res.stderr.contains("\n  full name: model2vec/acme/tiny@"),
             "{}",
             res.stderr
         );
         let info = run_env(&["store", "info", &store_text], &[]);
         assert!(
-            info.stdout.contains("used by the schema"),
+            info.stdout
+                .lines()
+                .any(|l| l.trim_start().starts_with("used by") && l.contains("the schema (")),
             "{}",
             info.stdout
         );
@@ -5662,6 +5738,150 @@ mod embed_models {
         );
         let info = run_env(&["store", "info", &store_text], &[]);
         assert!(info.stdout.contains("missing"), "{}", info.stdout);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #19: `store models` prints one section per model (styled like the `--server`
+    /// banner), one `key: value` per line, and the licence wording says exactly where the
+    /// text comes from: never that Graphersal wrote a licence. `store info` shows the same
+    /// fields, one per line.
+    #[test]
+    fn store_models_prints_one_section_per_model_with_the_exact_licence_wording() {
+        let base = fresh_dir("m2v_sections");
+        let with_file = base.join("with-file");
+        write_model(&with_file);
+        std::fs::write(with_file.join("LICENSE"), "own terms").unwrap();
+        let template = base.join("template");
+        write_model(&template);
+        let other = base.join("other");
+        write_model(&other);
+        // Each model its own weights, so each has its own identity.
+        for (dir, byte) in [(&template, 1u8), (&other, 2u8)] {
+            let mut weights = std::fs::read(dir.join("model.safetensors")).unwrap();
+            let last = weights.len() - 1;
+            weights[last] ^= byte;
+            std::fs::write(dir.join("model.safetensors"), weights).unwrap();
+        }
+        let store = base.join("store");
+        create_store(&store);
+        let store_text = store.display().to_string();
+        for (dir, repo, license) in [
+            (&with_file, "acme/a", "apache-2.0"),
+            (&template, "acme/b", "mit"),
+            (&other, "acme/c", "other"),
+        ] {
+            let dir = dir.display().to_string();
+            let res = run_env(
+                &[
+                    "embed-model",
+                    "import",
+                    &dir,
+                    "--into",
+                    &store_text,
+                    "--repo",
+                    repo,
+                    "--license",
+                    license,
+                ],
+                &[],
+            );
+            assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+            assert!(!res.stderr.contains("written by"), "{}", res.stderr);
+        }
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        assert_eq!(listed.code, 0, "{}", listed.stderr);
+        let out = &listed.stdout;
+        assert_eq!(out.matches("── Embedding model ").count(), 3, "{out}");
+        assert!(!out.contains("written by"), "{out}");
+        for needle in [
+            "\n  model:        acme/a\n  full name:    model2vec/acme/a@",
+            "\n  licence:      apache-2.0\n  licence text: from the repository (LICENSE)\n",
+            "\n  licence:      mit (named in the model card)\n  licence text: standard MIT text \
+             (the repository has no licence file)\n",
+            "\n  licence:      other\n  licence text: none (no standard text for this licence)\n",
+            "\n  default:      no\n  used by:      nothing (not used by the schema)\n",
+        ] {
+            assert!(out.contains(needle), "{needle:?}\n{out}");
+        }
+        // Every section line is a `key: value` row (or the heading, or the blank between).
+        for line in out.lines() {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("── ")
+                    || line.starts_with("  ") && line.contains(": "),
+                "{line:?}\n{out}"
+            );
+        }
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert!(
+            info.stdout
+                .contains("\n  acme/a\n    full name     model2vec/acme/a@"),
+            "{}",
+            info.stdout
+        );
+        assert!(
+            info.stdout
+                .contains("\n    licence text  from the repository (LICENSE)\n"),
+            "{}",
+            info.stdout
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #19: the notes of a one-shot run are set apart by a blank line, each a headline
+    /// with its details indented; the no-default note names the command on its own line.
+    #[test]
+    fn the_notes_of_an_open_are_headlines_with_indented_details() {
+        let base = fresh_dir("m2v_note_layout");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let store_text = store.display().to_string();
+        let model_text = model.display().to_string();
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "mit",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        // The standard-text note of the import.
+        assert!(
+            res.stderr.contains(
+                "note: the repository of acme/tiny has no licence file\n  licence: mit (named \
+                 in the model card)\n  licence text: standard MIT text (the repository has no \
+                 licence file)\n"
+            ),
+            "{}",
+            res.stderr
+        );
+        let res = run_env(&["--graph", &store_text, "-e", "1"], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stderr.contains(&format!(
+                "\n\nnote: the store {store_text} holds embedding models but none is the \
+                 default\n  effect: embed() without a model name uses hash-ngram/1\n"
+            )),
+            "{}",
+            res.stderr
+        );
+        assert!(
+            res.stderr.contains(&format!(
+                "\n  # or make one the default, so embed() without a model name uses it\n  \
+                 graphersal store models default {store_text} acme/tiny\n"
+            )),
+            "{}",
+            res.stderr
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

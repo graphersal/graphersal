@@ -332,11 +332,14 @@ pub fn command_help(command: &str) -> Option<String> {
             "graphersal store models <DIR>\n    graphersal store models remove <DIR> <REPO>\n    \
              graphersal store models default <DIR> <REPO>|--none",
             "Lists the embedding models of the store's current state (catalog definitions, each\n\
-             with its files as one blob; format spec 4.5): the identity a schema's `embedder`\n\
-             records (model2vec/<repo>@<12 hex>), the size, the licence and where its text comes\n\
-             from (file: a licence file of the repository; template: the standard text of the\n\
-             licence the model card names, written by Graphersal; none), whether the repository\n\
-             is gated, and whether the schema uses it. `remove` drops the model of REPO from the\n\
+             with its files as one blob; format spec 4.5), one section per model with one\n\
+             `key: value` per line: the model (its repository), its full name (the identity a\n\
+             schema's `embedder` records, model2vec/<repo>@<12 hex>), the size, the licence, where\n\
+             the licence text comes from (from the repository: its own licence file, named;\n\
+             standard text: the repository has no licence file, so the store keeps the unchanged\n\
+             standard text of the licence the model card names; none: no standard text for this\n\
+             licence), whether it is the default, what in the schema uses it, and whether the\n\
+             repository is gated. `remove` drops the model of REPO from the\n\
              current state: ONE commit appended to the WAL without loading the graph (format\n\
              spec 12.12; earlier positions keep it, a prune removes its blob later); refused\n\
              while the schema needs it, and with \"in use\" while a writer has the store open.\n\
@@ -461,8 +464,8 @@ pub fn backup_summary(report: &BackupReport, target: &str) -> String {
     out
 }
 
-/// The lines naming the embedding models a copy carries, with their licences (empty without
-/// models): who hands the copy on redistributes them.
+/// The embedding models a copy carries, with their licences (empty without models): who hands
+/// the copy on redistributes them. One block per model, one `key: value` per line.
 pub fn models_carried(models: &[ModelInfo]) -> String {
     if models.is_empty() {
         return String::new();
@@ -473,20 +476,21 @@ pub fn models_carried(models: &[ModelInfo]) -> String {
         models.len()
     );
     for model in models {
-        out.push_str(&format!("  {}\n", model_line(model)));
+        let used = !model.needed_by.is_empty();
+        out.push_str(&rows_text(&model_rows(model, used), "  ", true));
     }
     out
 }
 
-/// Whether the schema's identity `named` (`model2vec/<repo>@<12 hex>`, possibly with a
-/// `?normalize=` suffix) names the stored model `model` (the same files: the same 12 hex
-/// digits, whatever repository name the schema recorded).
 /// Whether a schema's `embedder` names a model a store keeps (a Model2Vec identity), not a
 /// built-in embedder such as `hash-ngram/1` (never "missing").
 fn stored_kind(identity: &str) -> bool {
     identity.starts_with("model2vec/") || identity.starts_with("model2vec@")
 }
 
+/// Whether the schema's identity `named` (`model2vec/<repo>@<12 hex>`, possibly with a
+/// `?normalize=` suffix) names the stored model `model` (the same files: the same 12 hex
+/// digits, whatever repository name the schema recorded).
 pub fn same_model(named: &str, model: &ModelInfo) -> bool {
     let hex = |identity: &str| {
         identity
@@ -498,36 +502,118 @@ pub fn same_model(named: &str, model: &ModelInfo) -> bool {
     hex(named).is_some() && hex(named) == hex(&model.identity)
 }
 
-/// One model as the store commands show it: repository, identity, size, licence and its
-/// text's source, default, state.
-pub fn model_line(model: &ModelInfo) -> String {
-    let mut line = format!(
-        "{}  {}  {}  licence {} ({})",
-        model.repo,
-        model.identity,
-        bytes_text(model.bytes),
-        model.license,
-        match model.license_text.as_str() {
-            "file" => "text from the repository",
-            "template" => "standard text, written by Graphersal",
-            _ => "no licence text",
-        }
-    );
+/// A model named in a sentence: its repository and its full name (the identity).
+pub fn model_name(model: &ModelInfo) -> String {
+    format!("{} ({})", model.repo, model.identity)
+}
+
+/// The licence rows of a model: `licence` (the SPDX id, and where the name comes from when the
+/// store keeps a standard text for it) and `licence text` (where the text the store keeps comes
+/// from). Graphersal never writes a licence: a standard text is the unchanged text of the
+/// licence the model card names.
+pub fn licence_rows(model: &ModelInfo) -> [(String, String); 2] {
+    let licence = if model.license_text == "template" {
+        format!("{} (named in the model card)", model.license)
+    } else {
+        model.license.clone()
+    };
+    let text = match model.license_text.as_str() {
+        "file" if model.license_files.is_empty() => "from the repository".to_string(),
+        "file" => format!("from the repository ({})", model.license_files.join(", ")),
+        "template" => format!(
+            "standard {} text (the repository has no licence file)",
+            crate::cli::license_text(&model.license)
+        ),
+        _ => "none (no standard text for this licence)".to_string(),
+    };
+    [
+        ("licence".to_string(), licence),
+        ("licence text".to_string(), text),
+    ]
+}
+
+/// One model as the store commands show it, one `(key, value)` per line: model, full name,
+/// size, licence, licence text, default, used by (`used`: the schema names it), then gated and
+/// a problem when there is one.
+pub fn model_rows(model: &ModelInfo, used: bool) -> Vec<(String, String)> {
+    let mut rows = vec![
+        ("model".to_string(), model.repo.clone()),
+        ("full name".to_string(), model.identity.clone()),
+        ("size".to_string(), bytes_text(model.bytes)),
+    ];
+    rows.extend(licence_rows(model));
+    rows.push((
+        "default".to_string(),
+        if model.default { "yes" } else { "no" }.to_string(),
+    ));
+    let used_by = if !model.needed_by.is_empty() {
+        format!("the schema ({})", model.needed_by.join(", "))
+    } else if used {
+        "the schema".to_string()
+    } else {
+        "nothing (not used by the schema)".to_string()
+    };
+    rows.push(("used by".to_string(), used_by));
     if model.gated {
-        line.push_str(", gated repository");
+        rows.push((
+            "gated".to_string(),
+            "yes (the terms accepted to download it may restrict passing it on)".to_string(),
+        ));
     }
-    if model.default {
-        line.push_str(", the default");
+    let problem = match &model.state {
+        graphersal::persist::ModelState::Missing => Some("its blob is missing".to_string()),
+        state => state.reason().map(str::to_string),
+    };
+    if let Some(problem) = problem {
+        rows.push(("problem".to_string(), problem));
     }
-    match &model.state {
-        graphersal::persist::ModelState::Missing => line.push_str(" [its blob is missing]"),
-        state => {
-            if let Some(reason) = state.reason() {
-                line.push_str(&format!(" [{reason}]"));
-            }
-        }
+    rows
+}
+
+/// The rows of a model the schema names that the store does not keep.
+fn missing_model_rows(identity: &str) -> Vec<(String, String)> {
+    vec![
+        ("full name".to_string(), identity.to_string()),
+        (
+            "problem".to_string(),
+            "the schema names it, the store holds no such model".to_string(),
+        ),
+    ]
+}
+
+/// `graphersal store models <DIR>`: one section per model (`models`, each with whether the
+/// schema names it), then one per model the schema names that the store does not keep
+/// (`missing`), styled like the sections of the `--server` banner.
+pub fn model_sections(models: &[(&ModelInfo, bool)], missing: &[&String]) -> String {
+    let mut sections = Vec::new();
+    for (model, used) in models {
+        let mut section = crate::sections::Section::new("Embedding model");
+        section.rows(model_rows(model, *used));
+        sections.push(section);
     }
-    line
+    for identity in missing {
+        let mut section = crate::sections::Section::new("Missing embedding model");
+        section.rows(missing_model_rows(identity));
+        sections.push(section);
+    }
+    crate::sections::render(&sections)
+}
+
+/// `rows` as lines `<indent><key>: <value>` (`colon`) or `<indent><key>  <value>`, the values
+/// aligned in one column.
+fn rows_text(rows: &[(String, String)], indent: &str, colon: bool) -> String {
+    let mark = if colon { ":" } else { " " };
+    let width = rows
+        .iter()
+        .map(|(key, _)| key.chars().count() + 1)
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (key, value) in rows {
+        let key = format!("{key}{mark}");
+        out.push_str(&format!("{indent}{key:width$} {value}\n"));
+    }
+    out
 }
 
 /// The backend for a path: a single file when asked (`--single-file`), else by the path
@@ -1095,19 +1181,24 @@ pub fn run(args: &[String]) -> i32 {
                             info.models.len(),
                             bytes_text(info.models.iter().map(|m| m.bytes).sum())
                         );
+                        // One block per model, one field per line (like the fixed parameters
+                        // below).
                         for model in &info.models {
                             let in_use = info.schema_models.iter().any(|u| same_model(u, model));
-                            outln!(
-                                "  {}{}",
-                                model_line(model),
-                                if in_use { ", used by the schema" } else { "" }
-                            );
+                            let mut rows = model_rows(model, in_use);
+                            let (_, repo) = rows.remove(0);
+                            outln!("  {repo}");
+                            out!("{}", rows_text(&rows, "    ", false));
                         }
                         for identity in &info.schema_models {
                             if stored_kind(identity)
                                 && !info.models.iter().any(|m| same_model(identity, m))
                             {
-                                outln!("  missing {identity} (the schema names it)");
+                                outln!("  missing model");
+                                out!(
+                                    "{}",
+                                    rows_text(&missing_model_rows(identity), "    ", false)
+                                );
                             }
                         }
                     }
@@ -1201,7 +1292,7 @@ pub fn run(args: &[String]) -> i32 {
                     Ok(report) => {
                         match (&report.model, repo) {
                             (Some(model), Some(_)) => {
-                                outln!("The default model is now {}.", model_line(model))
+                                outln!("The default model is now {}.", model_name(model))
                             }
                             _ => outln!(
                                 "No model is the default now: embed() without a name uses \
@@ -1229,7 +1320,7 @@ pub fn run(args: &[String]) -> i32 {
                 ) {
                     Ok(report) => {
                         if let Some(model) = &report.model {
-                            outln!("Removed {}.", model_line(model));
+                            outln!("Removed {}.", model_name(model));
                         }
                         EXIT_OK
                     }
@@ -1248,32 +1339,24 @@ pub fn run(args: &[String]) -> i32 {
                         positional[0],
                         positional[0]
                     );
-                    for identity in used.iter().filter(|i| stored_kind(i)) {
-                        outln!("missing  {identity}  (the schema names it)");
+                    let missing: Vec<&String> = used.iter().filter(|i| stored_kind(i)).collect();
+                    if !missing.is_empty() {
+                        outln!("{}", model_sections(&[], &missing));
                     }
                     EXIT_OK
                 }
                 Ok(models) => {
-                    for model in &models {
-                        let in_use = used.iter().any(|u| same_model(u, model));
-                        outln!(
-                            "{}  {}",
-                            model_line(model),
-                            if in_use {
-                                "used by the schema"
-                            } else {
-                                "not used by the schema"
-                            }
-                        );
-                    }
-                    for identity in &used {
-                        if stored_kind(identity) && !models.iter().any(|m| same_model(identity, m))
-                        {
-                            outln!(
-                                "missing  {identity}  (the schema names it, the store holds no such model)"
-                            );
-                        }
-                    }
+                    let missing: Vec<&String> = used
+                        .iter()
+                        .filter(|identity| {
+                            stored_kind(identity) && !models.iter().any(|m| same_model(identity, m))
+                        })
+                        .collect();
+                    let models: Vec<(&ModelInfo, bool)> = models
+                        .iter()
+                        .map(|model| (model, used.iter().any(|u| same_model(u, model))))
+                        .collect();
+                    outln!("{}", model_sections(&models, &missing));
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -2110,47 +2193,47 @@ fn print_upgrade_models(report: &graphersal::persist::UpgradeReport, target: &st
             bytes_text(model.bytes())
         );
         if model.renamed() {
-            errln!(
-                "note: the model {} had no repository name of its own in the store; it is now {} \
-                 (repository {}), and the schema's embedder naming it was renamed with it. To \
-                 give it its real name, import it again: graphersal embed-model import <dir> \
-                 --into {target} --repo <owner/name>, then point the schema at it.",
-                model.former_identity(),
-                model.identity(),
-                model.repo()
+            let note = crate::out::Note::new(format!(
+                "the model {} had no repository name of its own in the store",
+                model.former_identity()
+            ))
+            .detail("now", model.identity())
+            .detail("repository", model.repo())
+            .detail(
+                "schema",
+                "its embedder naming the model was renamed with it",
+            )
+            .command(
+                "give it its real name: import its files again under that name, then point \
+                 the schema at it",
+                format!("graphersal embed-model import <dir> --into {target} --repo <owner/name>"),
             );
+            crate::out::print_note("note", &note.text());
         }
     }
     if let Some(commit) = report.migration_commit {
+        outln!("The models were defined by commit {commit}; the history before it has no models.");
         if report.backup.is_some() {
             outln!(
-                "The models were defined by commit {commit}; the history before it has no \
-                 models. This backup does not take increments of the store upgraded on its own \
-                 (each has its own migration commit): back the upgraded store up into a new \
-                 directory (graphersal store backup <store> <new_dir>)."
+                "  # back the upgraded store up into a new directory: this backup does not take \
+                 increments of the store upgraded on its own (each has its own migration commit)"
             );
+            outln!("  graphersal store backup <store> <new_dir>");
         } else {
             outln!(
-                "The models were defined by commit {commit}; the history before it has no \
-                 models. Take a full backup now (graphersal store backup {target} <new_dir>): a \
-                 backup taken before the upgrade does not take increments of the upgraded store."
+                "  # take a full backup now: a backup taken before the upgrade does not take \
+                 increments of the upgraded store"
             );
+            outln!("  graphersal store backup {target} <new_dir>");
         }
     }
     for missing in &report.models_missing {
-        errln!(
-            "warning: the schema needs the model {} ({}), which the store does not keep (Graphersal \
-             0.4 and earlier served it through a command-line embedder); the store does not open \
-             until it is imported: {}",
-            missing.identity(),
-            missing.needed_by().join(", "),
-            missing.commands(target).join(" then ")
-        );
+        crate::out::print_note("warning", &missing.note(target));
     }
     // One note per model (its properties with one combined patch), then the saved queries
     // writing a vector property directly.
     for note in report.vector_notes(target) {
-        errln!("note: {note}");
+        crate::out::print_note("note", &note);
     }
     print_removed_function_uses(&report.saved_queries_using_removed, target);
 }
@@ -2176,7 +2259,7 @@ fn print_created(info: &graphersal::persist::StoreInfo, dir: &str) {
 /// replacement); a saved query is never rewritten.
 fn print_removed_function_uses(uses: &[graphersal::catalog::RemovedFunctionUse], store: &str) {
     for removed in uses {
-        errln!("note: {}", removed.note(store));
+        crate::out::print_note("note", &removed.note(store));
     }
 }
 

@@ -67,7 +67,9 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
     `hash-ngram/1` (imported into the Store, or carried by a `.gsnap` file), by its repository
     (the name queries call it by) with its licence and whether it is the default, a note when the
     database holds models but none is the default, and every model the schema names that the
-    database lacks ([Embedding Models in a Store](store_models.md));
+    database lacks ([Embedding Models in a Store](store_models.md)); a note keeps the layout of
+    the CLI's notes (its headline in the row, one detail per line below it, each command on a
+    line of its own under its `# comment`, never wrapped);
   - **Server**: the limits of every query, where the UI comes from, the MCP endpoint and the
     command that connects Claude Code, the AI Chat, and the addresses it listens on.
 

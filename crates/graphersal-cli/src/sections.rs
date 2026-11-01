@@ -1,8 +1,10 @@
-//! The block `--server` prints on stderr at start, after the warning box: one section per topic
-//! (`── Store ──`, `── Graph ──`, `── Embedding models ──`, `── Server ──`), each a list of
-//! `key: value` rows whose values start in one column across all sections; a long value wraps
-//! at word boundaries under its value column, an explicit `\n` starts a new line there. stdout
-//! keeps only the address line.
+//! Sections of `key: value` rows: the block `--server` prints on stderr at start, after the
+//! warning box (`── Store ──`, `── Graph ──`, `── Embedding models ──`, `── Server ──`; stdout
+//! keeps only the address line), and the lists of `graphersal store models` (one section per
+//! model). Each section is a list of `key: value` rows whose values start in one column across
+//! all sections; a long value wraps at word boundaries under its value column, an explicit
+//! `\n` starts a new line there. A note ([`Section::note`]) keeps its layout: its headline is a
+//! row, its indented lines follow under the value column, its commands never wrap.
 
 /// The width the block is laid out for (the warning box is as wide).
 pub(super) const WIDTH: usize = 78;
@@ -11,6 +13,8 @@ pub(super) const WIDTH: usize = 78;
 pub(super) struct Section {
     title: String,
     rows: Vec<(String, String, bool)>,
+    /// Whether the last rows are a note (the next note is set apart by a blank line).
+    after_note: bool,
 }
 
 impl Section {
@@ -19,23 +23,49 @@ impl Section {
         Self {
             title: title.to_string(),
             rows: Vec::new(),
+            after_note: false,
         }
     }
 
     /// Adds the row `key: value`.
     pub(super) fn row(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.after_note = false;
         self.rows.push((key.into(), value.into(), true));
     }
 
     /// Adds the row `key: value`, never wrapped, so a command or a path copies in one piece.
     pub(super) fn unwrapped(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.after_note = false;
         self.rows.push((key.into(), value.into(), false));
     }
 
     /// Adds every row of `rows`.
     pub(super) fn rows(&mut self, rows: impl IntoIterator<Item = (String, String)>) {
+        self.after_note = false;
         self.rows
             .extend(rows.into_iter().map(|(key, value)| (key, value, true)));
+    }
+
+    /// Adds the note `text` (the engine's note layout: a headline, then lines indented by two
+    /// spaces) under `key`: the headline wraps in the row; each further line follows under the
+    /// value column, a detail wrapped, a `# comment` and the command lines after it never
+    /// wrapped (they copy in one piece). A note right after another note is set apart
+    /// by a blank line.
+    pub(super) fn note(&mut self, key: &str, text: &str) {
+        if self.after_note {
+            self.rows.push((String::new(), String::new(), false));
+        }
+        let mut lines = text.lines();
+        let headline = lines.next().unwrap_or_default();
+        self.rows
+            .push((key.to_string(), headline.to_string(), true));
+        let mut commands = false;
+        for line in lines {
+            let line = line.strip_prefix("  ").unwrap_or(line);
+            commands |= line.starts_with("# ");
+            self.rows.push((String::new(), line.to_string(), !commands));
+        }
+        self.after_note = true;
     }
 
     /// Whether the section has no row (it is left out).
@@ -62,14 +92,26 @@ pub(super) fn render(sections: &[Section]) -> String {
         }
         out.push(heading(&section.title));
         for (key, value, wraps) in &section.rows {
-            let width = if *wraps {
-                WIDTH.saturating_sub(indent).max(20)
+            // An unwrapped value keeps its lines as they are (the indentation of a command
+            // spanning lines included).
+            let mut lines = if *wraps {
+                wrap(value, WIDTH.saturating_sub(indent).max(20))
             } else {
-                usize::MAX
-            };
-            let mut lines = wrap(value, width).into_iter();
+                value.split('\n').map(str::to_string).collect()
+            }
+            .into_iter();
             let first = lines.next().unwrap_or_default();
-            out.push(format!("  {:key_width$} {first}", format!("{key}:")));
+            if key.is_empty() && value.is_empty() {
+                // The blank line between two notes.
+                out.push(String::new());
+                continue;
+            }
+            let key = if key.is_empty() {
+                String::new()
+            } else {
+                format!("{key}:")
+            };
+            out.push(format!("  {key:key_width$} {first}").trim_end().to_string());
             out.extend(lines.map(|line| format!("{:indent$}{line}", "")));
         }
     }
@@ -246,5 +288,41 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// Issue #19: a note keeps its layout in the banner: its details under the value column,
+    /// its commands never wrapped (a command spanning lines keeps its indentation), and two
+    /// notes set apart by a blank line.
+    #[test]
+    fn a_note_keeps_its_layout() {
+        let mut models = Section::new("Embedding models");
+        models.row("model", "acme/tiny");
+        let long = format!("graphersal --graph kb -e '{}'", "x".repeat(90));
+        models.note(
+            "note",
+            &format!(
+                "the store kb holds embedding models but none is the default\n  effect: \
+                 embed() without a model name uses hash-ngram/1\n  # make one the default\n  \
+                 {long}\n    indented"
+            ),
+        );
+        models.note("note", "a second note\n  why: because");
+        let text = render(&[models]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[1], "  model: acme/tiny");
+        assert_eq!(
+            lines[2],
+            "  note:  the store kb holds embedding models but none is the default"
+        );
+        assert_eq!(
+            lines[3],
+            "         effect: embed() without a model name uses hash-ngram/1"
+        );
+        assert_eq!(lines[4], "         # make one the default");
+        assert_eq!(lines[5], format!("         {long}"));
+        assert_eq!(lines[6], "           indented");
+        assert_eq!(lines[7], "");
+        assert_eq!(lines[8], "  note:  a second note");
+        assert_eq!(lines[9], "         why: because");
     }
 }

@@ -17,6 +17,7 @@ use super::model_catalog;
 use super::upgrade::{self, ConvertedModel, MissingModel, VectorWithoutRule};
 use super::{ModelInfo, ModelState};
 use crate::graph::GraphStorage;
+use crate::graph::note_text::NoteText;
 use crate::persist::PersistError;
 
 /// What [`read_snapshot_file`](crate::persist::read_snapshot_file) found in a packed snapshot
@@ -50,67 +51,139 @@ pub struct SnapshotLoadReport {
 }
 
 impl SnapshotLoadReport {
-    /// The notes for the file at `file` (one line each; the CLI prints them as `note:`): the
-    /// converted models, the models stored but none the default, the missing models, the
-    /// vectors without a rule and the saved queries calling a removed function. Empty when
-    /// there is nothing to say.
+    /// The notes for the file at `file` (the CLI prints each after `note:`, Python as a
+    /// `UserWarning`): the converted models, the models stored but none the default, the
+    /// missing models, the vectors without a rule and the saved queries calling a removed
+    /// function. Each is a short headline, then indented lines (one detail `key: value` each;
+    /// a shell command on a line of its own under a `# comment` saying what it does). Empty
+    /// when there is nothing to say.
     pub fn notes(&self, file: &str) -> Vec<String> {
         let mut notes = Vec::new();
+        let into_store = || {
+            (
+                "put the graph into a store (the file stays as it is)".to_string(),
+                format!("graphersal store create <dir> --from {file}"),
+            )
+        };
         for converted in &self.models_converted {
             if converted.renamed() {
-                notes.push(format!(
-                    "the embedding model {} of {file} (Graphersal 0.4.0) is served as {} (the \
-                     catalog keeps one model per repository; the schema names the new identity)",
-                    converted.former_identity(),
-                    converted.identity()
-                ));
+                notes.push(
+                    NoteText::new(format!(
+                        "the embedding model {} of {file} (Graphersal 0.4.0) is served as {}",
+                        converted.former_identity(),
+                        converted.identity()
+                    ))
+                    .detail(
+                        "why",
+                        "the catalog keeps one model per repository; the schema names the new \
+                         identity",
+                    )
+                    .finish(),
+                );
             } else {
-                notes.push(format!(
-                    "the embedding model {} of {file} (Graphersal 0.4.0) was converted in \
-                     memory; the file stays as it is (graphersal store create <dir> --from \
-                     {file} keeps it converted)",
-                    converted.repo()
-                ));
+                notes.push(
+                    NoteText::new(format!(
+                        "the embedding model {} of {file} (Graphersal 0.4.0) was converted in \
+                         memory",
+                        converted.repo()
+                    ))
+                    .detail("file", "stays as it is")
+                    .command(
+                        "keep the model converted: put the graph into a store",
+                        &format!("graphersal store create <dir> --from {file}"),
+                    )
+                    .finish(),
+                );
             }
         }
+        // The only model the schema needs, in a file without a default: its import into the
+        // store makes it the default.
+        let needed: Vec<&str> = self
+            .models_missing
+            .iter()
+            .map(MissingModel::identity)
+            .chain(
+                self.models
+                    .iter()
+                    .filter(|m| !m.needed_by.is_empty())
+                    .map(|m| m.identity.as_str()),
+            )
+            .collect();
+        let default = |identity: &str| {
+            self.default_model.is_none()
+                && needed.iter().all(|n| {
+                    model_catalog::base_identity(n) == model_catalog::base_identity(identity)
+                })
+        };
         for model in &self.models {
             if model.state == ModelState::Missing {
-                notes.push(format!(
-                    "{file} names the embedding model {} but does not carry it (an export \
-                     without models): text queries and vector rules with it fail; put the graph \
-                     into a store and import the model: graphersal store create <dir> --from \
-                     {file}, graphersal embed-model download {repo}, graphersal embed-model \
-                     import {repo} --into <dir>",
-                    model.identity,
-                    repo = model.repo
+                let mut steps = vec![into_store()];
+                steps.extend(model_catalog::model_import_steps(
+                    &model.repo,
+                    "<dir>",
+                    !model.default && default(&model.identity),
+                    false,
                 ));
+                notes.push(
+                    NoteText::new(format!(
+                        "{file} names the embedding model {} but does not carry it",
+                        model.identity
+                    ))
+                    .detail("repository", &model.repo)
+                    .detail("why", "an export without models")
+                    .detail("effect", "text queries and vector rules with it fail")
+                    .commands(&steps)
+                    .finish(),
+                );
             }
         }
         if !self.models.is_empty() && self.default_model.is_none() {
-            notes.push(format!(
-                "{file} holds {} embedding model(s) but none is the default: embed() without a \
-                 name uses hash-ngram/1; name one (g.v().embed(\"text\", #{{embedder: \"{}\"}})) \
-                 or set a default in a store (graphersal store models default <dir> <repo>)",
-                self.models.len(),
-                self.models[0].repo
-            ));
+            notes.push(
+                NoteText::new(format!(
+                    "{file} holds {} embedding model(s) but none is the default",
+                    self.models.len()
+                ))
+                .detail("effect", "embed() without a model name uses hash-ngram/1")
+                .detail(
+                    "name one",
+                    format!(
+                        "g.v().embed(\"text\", #{{embedder: \"{}\"}})",
+                        self.models[0].repo
+                    ),
+                )
+                .command(
+                    "or make one the default, in a store",
+                    "graphersal store models default <dir> <repo>",
+                )
+                .finish(),
+            );
         }
         for missing in &self.models_missing {
             let repo = missing.repo().unwrap_or("<repo>");
-            notes.push(format!(
-                "the schema of {file} names the embedding model {} ({}) that the file does not \
-                 carry: text queries on those properties fail; put the graph into a store and \
-                 import the model: graphersal store create <dir> --from {file}, graphersal \
-                 embed-model download {repo}, graphersal embed-model import {repo} --into <dir>",
-                missing.identity(),
-                missing.needed_by().join(", ")
+            let mut steps = vec![into_store()];
+            steps.extend(model_catalog::model_import_steps(
+                repo,
+                "<dir>",
+                default(missing.identity()),
+                false,
             ));
+            notes.push(
+                NoteText::new(format!(
+                    "the schema of {file} names the embedding model {repo}, which the file does \
+                     not carry"
+                ))
+                .detail("identity", missing.identity())
+                .detail("needed by", missing.needed_by().join(", "))
+                .detail("effect", "text queries on those properties fail")
+                .commands(&steps)
+                .finish(),
+            );
         }
         // ONE note per model; its command runs in a store: a schema change of the loaded file
         // stays in memory.
         notes.extend(upgrade::vector_notes(
             &self.vectors_without_rule,
-            |_, patch| VectorWithoutRule::packed_command(file, patch),
+            |_, patch| VectorWithoutRule::packed_steps(file, patch),
         ));
         for removed in &self.saved_queries_using_removed {
             notes.push(removed.note_for_packed(file));

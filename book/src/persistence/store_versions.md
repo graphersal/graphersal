@@ -165,27 +165,69 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   a second revision of a repository another model of the store takes (the catalog keeps one
   model per repository).
 - **Models the schema needs that the store does not keep** (0.4.0 served them through
-  its `--embedder` flag, removed in 0.5.0) are listed (`UpgradeReport::models_missing`, a CLI `warning:` with the
-  commands): such a store opens once they are imported (`graphersal embed-model download
-  <repo>`, `graphersal embed-model import <repo> --into <store>`). The upgrade itself succeeds.
+  its `--embedder` flag, removed in 0.5.0) are listed (`UpgradeReport::models_missing`, a CLI
+  `warning:` with the commands, `MissingModel::note`): such a store opens once they are
+  imported. The upgrade itself succeeds. When the store has no default model and this is the
+  only model the schema names, the import takes `--default`, so `embed(text)` without a model
+  name uses it (`MissingModel::suggests_default`; later: `graphersal store models default
+  <store> <repo>`):
+
+  ```text
+  warning: the schema needs the embedding model acme/tiny, which the store does not keep
+    identity: model2vec/acme/tiny@0123456789ab
+    needed by: doc.emb
+    effect: the store does not open until the model is imported
+    # download the model into the local models directory
+    graphersal embed-model download acme/tiny
+    # import it into the store as its default model (embed() without a model name uses it)
+    graphersal embed-model import acme/tiny --into store --default
+  ```
+
 - **Vector properties without a rule.** 0.4.0's `embed_property` recorded only the model
   (`embedder`), never the property the text came from, so nothing keeps such vectors current.
   The upgrade never guesses the source and recomputes nothing: it lists each such property
   (`UpgradeReport::vectors_without_rule`: element kind, label, property, model, how many
   elements hold a vector, counted in the newest snapshot) and the CLI prints ONE `note:` per
-  model with the ready schema patch (`UpgradeReport::vector_notes`). A model with one such
-  property gets its own note, for example
+  model with the ready schema patch (`UpgradeReport::vector_notes`). Every note has the same
+  layout: a short headline, then one detail per line, and each command on a line of its own
+  under a comment saying what it does; notes are separated by a blank line. A model with one
+  such property gets its own note, for example
 
   ```text
-  note: doc.emb has vectors of acme/tiny (3 element(s)) but no source property; to keep it current add "from": "<source property>" to its schema declaration (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'); the first fill re-embeds every doc (the whole database is locked while it runs), and from then on emb itself is not written directly (write the source property)
+  note: doc.emb has vectors of acme/tiny but no source property
+    vectors: 3 element(s)
+    to keep them current: add "from": "<source property>" to its schema declaration
+    first fill: re-embeds every doc (the whole database is locked while it runs)
+    afterwards: write the source property, never emb itself
+    # add the source property (replace <source property> first)
+    graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}}})'
   ```
 
-  A model with several such properties gets one note listing them (element kind, label,
-  property, count) with ONE combined patch for all of them, for example
+  A model with several such properties gets one note listing them (one line each: element
+  kind, label, property, count) with ONE combined patch for all of them, one label per line
+  (the shell takes the lines inside the quotes), for example
 
   ```text
-  note: 3 vector properties are declared with vectors of acme/tiny (5 vector(s) in all) but have no source property: doc.emb (3), note.emb (2), draft.emb (no element holds one yet); to keep them current add "from": "<source property>" to each declaration, all in one change (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}, note: ..., draft: ...}})'); ...
+  note: 3 vector properties are declared with vectors of acme/tiny but have no source property
+    doc.emb: 3 vector(s)
+    note.emb: 2 vector(s)
+    draft.emb: no element holds one yet
+    vectors: 5 in all
+    to keep them current: add "from": "<source property>" to each declaration, all in one change
+    first fill: re-embeds every element of these labels (the whole database is locked while it runs)
+    afterwards: write the source properties, never emb itself
+    # add the source property (replace <source property> first)
+    graphersal --graph store -e 'g.patch_schema(#{
+      vertices: #{
+        doc: #{schema: #{properties: #{emb: #{from: "<source property>"}}}},
+        note: #{schema: #{properties: #{emb: #{from: "<source property>"}}}},
+        draft: #{schema: #{properties: #{emb: #{from: "<source property>"}}}}
+      }
+    })'
   ```
+
+  For a model the store does not keep, the comment above the patch says it runs after the
+  model's import: the store does not open before.
 
   See [Vector Rules](../users_guide/vector_rules.md): adding `from` makes it a rule whose first
   fill re-embeds EVERY element of the label while the whole database is locked. Several labels
@@ -201,10 +243,16 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   source property instead. The upgrade lists every saved query whose body writes such a
   property by its literal name on a label its effects may write
   (`UpgradeReport::saved_queries_writing_vectors`, Python
-  `report["saved_queries_writing_vectors"]`), one `note:` each, for example `note: saved query
-  "load_docs" writes emb directly (doc.emb): once the vector rule exists, direct writes of it
-  are refused: remove that write (the rule computes emb from its source property); the query
-  is not rewritten`; the preview of the patch names them too (`fill[..].direct_writes`, and a
+  `report["saved_queries_writing_vectors"]`), one `note:` each, for example
+
+  ```text
+  note: saved query "load_docs" writes emb directly
+    where: doc.emb
+    effect: once the vector rule exists, direct writes of it are refused
+    fix: remove that write (the rule computes emb from its source property); the query is not rewritten
+  ```
+
+  The preview of the patch names them too (`fill[..].direct_writes`, and a
   line of `fill_warning`). Only a literal key in `property(..)` is found (`property("emb", ..)`,
   also after a cardinality, in a Rhai body); a computed key, the maps of `merge_v`/`merge_e` and GQL
   bodies are not, so check
@@ -218,7 +266,11 @@ The upgrade prints (and `UpgradeReport` holds) what still needs your decision; t
   properties literally, for example
 
   ```text
-  note: saved query "fill" calls embed_property, removed in 0.5.0: a call of the query fails now, and it is not rewritten; replace the call by the vector rule (graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})'); its first fill embeds every element of the label (the whole database is locked while it runs)
+  note: saved query "fill" calls embed_property, removed in 0.5.0
+    effect: a call of the query fails now; the query is not rewritten
+    replacement: a vector rule; its first fill embeds every element of the label (the whole database is locked while it runs)
+    # declare the vector rule that replaces the call
+    graphersal --graph store -e 'g.patch_schema(#{vertices: #{doc: #{schema: #{type: "object", properties: #{emb: #{type: "array", format: "vector", embedder: "hash-ngram/1", from: "text"}}}}}})'
   ```
 
   Then redefine or drop the query. `graphersal store create <dir> --from <0.4.0 .gsnap>` prints

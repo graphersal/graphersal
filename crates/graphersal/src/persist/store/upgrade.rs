@@ -34,6 +34,7 @@ use super::maintenance::{self, VerifyReport};
 use super::migrate_models;
 use super::{BackupMarker, Store};
 use crate::graph::GraphStorage;
+use crate::graph::note_text::NoteText;
 use crate::graph::system_journal::{Event, catalogue};
 use crate::persist::StoreFailure;
 
@@ -267,6 +268,9 @@ pub struct MissingModel {
     pub(crate) identity: String,
     pub(crate) repo: Option<String>,
     pub(crate) needed_by: Vec<String>,
+    /// The store has no default model and this is the only model the schema names: its import
+    /// should make it the default (`--default`), so `embed` without a model name uses it.
+    pub(crate) suggest_default: bool,
 }
 
 impl MissingModel {
@@ -285,14 +289,45 @@ impl MissingModel {
         &self.needed_by
     }
 
+    /// Whether its import should make it the store's default model ([`Self::commands`] adds
+    /// `--default` then): the store has no default model and this is the only model the schema
+    /// names, so `embed` without a model name keeps using `hash-ngram/1` until a default is set.
+    pub fn suggests_default(&self) -> bool {
+        self.suggest_default
+    }
+
     /// The commands that put the model into the store at `store`: a download, then the import
-    /// into the closed store (`<repo>` when the identity names no repository).
+    /// into the closed store (`<repo>` when the identity names no repository), with `--default`
+    /// when [`Self::suggests_default`].
     pub fn commands(&self, store: &str) -> Vec<String> {
+        self.steps(store)
+            .into_iter()
+            .map(|(_, command)| command)
+            .collect()
+    }
+
+    /// [`Self::commands`] with the one-line comment saying what each does.
+    fn steps(&self, store: &str) -> Vec<(String, String)> {
         let repo = self.repo.as_deref().unwrap_or("<repo>");
-        vec![
-            format!("graphersal embed-model download {repo}"),
-            format!("graphersal embed-model import {repo} --into {store}"),
-        ]
+        super::model_catalog::model_import_steps(repo, store, self.suggest_default, false)
+    }
+
+    /// The text every front end shows for it, for the store at `store`: a short headline, then
+    /// indented lines (one detail `key: value` each; a shell command on a line of its own under
+    /// a `# comment` saying what it does); the CLI prints the headline after `warning:`.
+    pub fn note(&self, store: &str) -> String {
+        NoteText::new(format!(
+            "the schema needs the embedding model {}, which the store does not keep",
+            self.repo.as_deref().unwrap_or(&self.identity)
+        ))
+        .detail("identity", &self.identity)
+        .detail("needed by", self.needed_by.join(", "))
+        .detail(
+            "effect",
+            "the store does not open until the model is imported",
+        )
+        .commands(&self.steps(store))
+        .finish()
     }
 }
 
@@ -373,60 +408,116 @@ impl VectorWithoutRule {
         )
     }
 
-    /// The text every front end shows for it (one line: the CLI prints it as a `note:`), with
-    /// the ready command for the store at `store`.
+    /// The text every front end shows for it, with the ready command for the store at `store`:
+    /// a short headline, then indented lines (one detail `key: value` each; a shell command on
+    /// a line of its own under a `# comment` saying what it does); the CLI prints the headline
+    /// after `note:`.
     pub fn note(&self, store: &str) -> String {
-        self.note_with(&format!(
-            "graphersal --graph {store} -e '{}'",
-            self.schema_patch()
-        ))
+        self.note_with(&store_steps(store, &self.schema_patch(), None))
     }
 
-    /// The ready command of a note for a graph loaded from the packed snapshot `file` without
-    /// a store, running `patch`: a schema change of such a graph lives only in memory, so the
-    /// command puts the graph into a store first.
-    pub(crate) fn packed_command(file: &str, patch: &str) -> String {
-        format!(
-            "in a store, as the change of a .gsnap loaded without one stays in memory: \
-             graphersal store create <dir> --from {file}, then graphersal --graph <dir> -e \
-             '{patch}'"
-        )
+    /// The commands of a note for a graph loaded from the packed snapshot `file` without a
+    /// store, running `patch`: a schema change of such a graph lives only in memory, so the
+    /// first command puts the graph into a store.
+    pub(crate) fn packed_steps(file: &str, patch: &str) -> Vec<(String, String)> {
+        vec![
+            (
+                "put the graph into a store (a change of a .gsnap loaded without one stays in \
+                 memory)"
+                    .to_string(),
+                format!("graphersal store create <dir> --from {file}"),
+            ),
+            (
+                "add the source property (replace <source property> first)".to_string(),
+                format!("graphersal --graph <dir> -e '{patch}'"),
+            ),
+        ]
     }
 
-    /// The note with `command`, the ready command that adds the source property.
-    fn note_with(&self, command: &str) -> String {
-        let holds = if self.exact() && self.elements == 0 {
-            format!(
-                "{}.{} is declared with vectors of {} (no element holds one yet)",
-                self.label, self.property, self.model
+    /// The note with `steps`, the commented commands that add the source property.
+    fn note_with(&self, steps: &[(String, String)]) -> String {
+        let (headline, count) = if self.exact() && self.elements == 0 {
+            (
+                format!(
+                    "{}.{} is declared with vectors of {} but has no source property",
+                    self.label, self.property, self.model
+                ),
+                "no element holds one yet".to_string(),
             )
         } else {
-            let count = if self.exact() {
-                format!("{} element(s)", self.elements)
-            } else {
+            (
                 format!(
-                    "{} element(s) in the newest snapshot, {} later commit(s) not counted",
-                    self.elements, self.not_counted
-                )
-            };
-            format!(
-                "{}.{} has vectors of {} ({count})",
-                self.label, self.property, self.model
+                    "{}.{} has vectors of {} but no source property",
+                    self.label, self.property, self.model
+                ),
+                if self.exact() {
+                    format!("{} element(s)", self.elements)
+                } else {
+                    format!(
+                        "{} element(s) in the newest snapshot, {} later commit(s) not counted",
+                        self.elements, self.not_counted
+                    )
+                },
             )
         };
-        format!(
-            "{holds} but no source property; to keep it current add \"from\": \"<source \
-             property>\" to its schema declaration ({command}); the first fill re-embeds every \
-             {} (the whole database is locked while it runs), and from then on {} itself is not \
-             written directly (write the source property)",
-            self.label, self.property
-        )
+        NoteText::new(headline)
+            .detail("vectors", count)
+            .detail(
+                "to keep them current",
+                "add \"from\": \"<source property>\" to its schema declaration",
+            )
+            .detail(
+                "first fill",
+                format!(
+                    "re-embeds every {} (the whole database is locked while it runs)",
+                    self.label
+                ),
+            )
+            .detail(
+                "afterwards",
+                format!("write the source property, never {} itself", self.property),
+            )
+            .commands(steps)
+            .finish()
     }
 
     /// The ONE schema patch (the DSL's `g.patch_schema`) that adds the source property to
     /// every vector property of `vectors` (one change, one lock, one fill per property);
     /// replace each `<source property>` with the property its vectors were made from.
     pub fn combined_schema_patch(vectors: &[VectorWithoutRule]) -> String {
+        let groups = Self::patch_groups(vectors)
+            .into_iter()
+            .map(|(name, labels)| format!("{name}: #{{{}}}", labels.join(", ")))
+            .collect::<Vec<_>>();
+        format!("g.patch_schema(#{{{}}})", groups.join(", "))
+    }
+
+    /// [`Self::combined_schema_patch`] laid out for a note: one label per line when it names
+    /// more than one label (a shell takes the lines inside the command's quotes), else the one
+    /// line.
+    pub(crate) fn combined_schema_patch_lines(vectors: &[VectorWithoutRule]) -> String {
+        let groups = Self::patch_groups(vectors);
+        if groups.iter().map(|(_, labels)| labels.len()).sum::<usize>() <= 1 {
+            return Self::combined_schema_patch(vectors);
+        }
+        let groups = groups
+            .into_iter()
+            .map(|(name, labels)| {
+                format!(
+                    "  {name}: #{{\n{}\n  }}",
+                    labels
+                        .iter()
+                        .map(|label| format!("    {label}"))
+                        .collect::<Vec<_>>()
+                        .join(",\n")
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("g.patch_schema(#{{\n{}\n}})", groups.join(",\n"))
+    }
+
+    /// The groups (`vertices`, `edges`) of a combined patch, each with its labels' entries.
+    fn patch_groups(vectors: &[VectorWithoutRule]) -> Vec<(&'static str, Vec<String>)> {
         let group = |kind: crate::graph::schema::ElementKind| {
             let mut labels: Vec<(&str, Vec<&str>)> = Vec::new();
             for vector in vectors.iter().filter(|v| v.kind == kind) {
@@ -457,21 +548,36 @@ impl VectorWithoutRule {
         ] {
             let labels = group(kind);
             if !labels.is_empty() {
-                groups.push(format!("{name}: #{{{}}}", labels.join(", ")));
+                groups.push((name, labels));
             }
         }
-        format!("g.patch_schema(#{{{}}})", groups.join(", "))
+        groups
     }
+}
+
+/// The commented command running the schema patch `patch` on the store at `store`; for a model
+/// the store lacks (`missing`: its repository) the comment says it runs after the model's
+/// import (the store does not open before).
+fn store_steps(store: &str, patch: &str, missing: Option<&str>) -> Vec<(String, String)> {
+    let comment = match missing {
+        Some(repo) => format!(
+            "after the import of {repo} (the store does not open before): add the source \
+             property (replace <source property> first)"
+        ),
+        None => "add the source property (replace <source property> first)".to_string(),
+    };
+    vec![(comment, format!("graphersal --graph {store} -e '{patch}'"))]
 }
 
 /// The notes of `vectors`, ONE per model (in the order the models first appear): a model with
 /// one property gets that property's note ([`VectorWithoutRule::note`]); a model with several
-/// lists them (element kind, label, property, count; "no element holds one yet" for an empty
-/// one) with ONE combined patch ([`VectorWithoutRule::combined_schema_patch`]) run by
-/// `command(patch)`.
+/// lists them (one line each: element kind, label, property, count; "no element holds one
+/// yet" for an empty one) with ONE combined patch
+/// ([`VectorWithoutRule::combined_schema_patch`], one label per line) run by the commented
+/// commands `steps(model, patch)`.
 pub(crate) fn vector_notes(
     vectors: &[VectorWithoutRule],
-    command: impl Fn(&str, &str) -> String,
+    steps: impl Fn(&str, &str) -> Vec<(String, String)>,
 ) -> Vec<String> {
     let mut models: Vec<&str> = Vec::new();
     for vector in vectors {
@@ -488,35 +594,33 @@ pub(crate) fn vector_notes(
                 .cloned()
                 .collect();
             if let [single] = group.as_slice() {
-                return single.note_with(&command(model, &single.schema_patch()));
+                return single.note_with(&steps(model, &single.schema_patch()));
             }
-            let places = group
-                .iter()
-                .map(|v| {
-                    let element = match v.kind {
-                        crate::graph::schema::ElementKind::Vertex => "",
-                        crate::graph::schema::ElementKind::Edge => "edge ",
-                    };
-                    // The WAL after the newest snapshot is the same for every property: its
-                    // "not counted" is said once, after the total, not per property.
-                    let count = if v.elements == 0 && v.exact() {
-                        "no element holds one yet".to_string()
-                    } else {
-                        v.elements.to_string()
-                    };
-                    format!("{element}{}.{} ({count})", v.label, v.property)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let mut note = NoteText::new(format!(
+                "{} vector properties are declared with vectors of {model} but have no source \
+                 property",
+                group.len()
+            ));
+            for v in &group {
+                let element = match v.kind {
+                    crate::graph::schema::ElementKind::Vertex => "",
+                    crate::graph::schema::ElementKind::Edge => "edge ",
+                };
+                // The WAL after the newest snapshot is the same for every property: its
+                // "not counted" is said once, after the total, not per property.
+                let count = if v.elements == 0 && v.exact() {
+                    "no element holds one yet".to_string()
+                } else {
+                    format!("{} vector(s)", v.elements)
+                };
+                note = note.detail(&format!("{element}{}.{}", v.label, v.property), count);
+            }
             let total: u64 = group.iter().map(|v| v.elements).sum();
             let not_counted = group.iter().map(|v| v.not_counted).max().unwrap_or(0);
             let total = if not_counted > 0 {
-                format!(
-                    "{total} vector(s) in the newest snapshot, {not_counted} later commit(s) not \
-                     counted"
-                )
+                format!("{total} in the newest snapshot, {not_counted} later commit(s) not counted")
             } else {
-                format!("{total} vector(s) in all")
+                format!("{total} in all")
             };
             let mut properties: Vec<&str> = Vec::new();
             for v in &group {
@@ -524,17 +628,28 @@ pub(crate) fn vector_notes(
                     properties.push(&v.property);
                 }
             }
-            format!(
-                "{} vector properties are declared with vectors of {model} ({total}) but have no \
-                 source property: {places}; to keep them current add \"from\": \
-                 \"<source property>\" to each declaration, all in one change ({}); the first \
-                 fill re-embeds every element of these labels (the whole database is locked \
-                 while it runs), and from then on {} itself is not written directly (write the \
-                 source property)",
-                group.len(),
-                command(model, &VectorWithoutRule::combined_schema_patch(&group)),
-                properties.join(", ")
-            )
+            note.detail("vectors", total)
+                .detail(
+                    "to keep them current",
+                    "add \"from\": \"<source property>\" to each declaration, all in one change",
+                )
+                .detail(
+                    "first fill",
+                    "re-embeds every element of these labels (the whole database is locked \
+                     while it runs)",
+                )
+                .detail(
+                    "afterwards",
+                    format!(
+                        "write the source properties, never {} itself",
+                        properties.join(", ")
+                    ),
+                )
+                .commands(&steps(
+                    model,
+                    &VectorWithoutRule::combined_schema_patch_lines(&group),
+                ))
+                .finish()
         })
         .collect()
 }
@@ -542,20 +657,20 @@ pub(crate) fn vector_notes(
 impl UpgradeReport {
     /// The notes of [`Self::vectors_without_rule`], ONE per model (a model with several
     /// properties lists them with one combined schema patch), with the ready command for the
-    /// store at `store` (for a model of [`Self::models_missing`] the command says it runs
+    /// store at `store` (for a model of [`Self::models_missing`] its comment says it runs
     /// after the model's import, since the store does not open before); then one note per
     /// saved query writing a vector property directly
-    /// ([`Self::saved_queries_writing_vectors`]). The CLI prints each as a `note:`.
+    /// ([`Self::saved_queries_writing_vectors`]). Each note is a short headline, then indented
+    /// lines (one detail `key: value` each; a shell command on a line of its own under a
+    /// `# comment` saying what it does); the CLI prints the headline after `note:`.
     pub fn vector_notes(&self, store: &str) -> Vec<String> {
         let mut notes = vector_notes(&self.vectors_without_rule, |model, patch| {
-            let run = format!("graphersal --graph {store} -e '{patch}'");
-            match self.models_missing.iter().find(|m| m.identity == model) {
-                Some(missing) => format!(
-                    "after `graphersal embed-model import {} --into {store}`: {run}",
-                    missing.repo.as_deref().unwrap_or("<repo>")
-                ),
-                None => run,
-            }
+            let missing = self
+                .models_missing
+                .iter()
+                .find(|m| m.identity == model)
+                .map(|m| m.repo.as_deref().unwrap_or("<repo>"));
+            store_steps(store, patch, missing)
         });
         notes.extend(
             self.saved_queries_writing_vectors
@@ -856,6 +971,11 @@ pub(super) fn report_new_store(
             report.models_missing.push(MissingModel {
                 repo: crate::value::vector::embed::identity::parse_identity(&identity)
                     .and_then(|parsed| parsed.repo.map(str::to_string)),
+                suggest_default: super::model_catalog::suggests_default(
+                    schema.as_ref(),
+                    &definitions,
+                    &identity,
+                ),
                 identity,
                 needed_by: places,
             });
@@ -929,6 +1049,11 @@ pub(super) fn missing_models(
             out.push(MissingModel {
                 repo: crate::value::vector::embed::identity::parse_identity(&identity)
                     .and_then(|parsed| parsed.repo.map(str::to_string)),
+                suggest_default: super::model_catalog::suggests_default(
+                    schema,
+                    definitions,
+                    &identity,
+                ),
                 identity,
                 needed_by: places,
             });
@@ -1425,6 +1550,11 @@ mod tests {
         }
     }
 
+    /// The commented command a test note runs: the patch itself.
+    fn patch_step(_: &str, patch: &str) -> Vec<(String, String)> {
+        vec![("run the patch".to_string(), patch.to_string())]
+    }
+
     /// Found dogfooding the knowledge-graph store (14 properties of one model): the commits
     /// after the newest snapshot are the same for every property, so the one note per model
     /// says "not counted" once, after the total, instead of once per property.
@@ -1435,23 +1565,34 @@ mod tests {
             without_rule("b", 2, 7),
             without_rule("c", 0, 7),
         ];
-        let notes = vector_notes(&vectors, |_, patch| patch.to_string());
+        let notes = vector_notes(&vectors, patch_step);
         assert_eq!(notes.len(), 1, "{notes:#?}");
         let note = &notes[0];
         assert!(
-            note.contains(
-                "3 vector properties are declared with vectors of m (6 vector(s) in the newest \
-                 snapshot, 7 later commit(s) not counted) but have no source property: a.emb (4), \
-                 b.emb (2), c.emb (0);"
+            note.starts_with(
+                "3 vector properties are declared with vectors of m but have no source \
+                 property\n  a.emb: 4 vector(s)\n  b.emb: 2 vector(s)\n  c.emb: 0 vector(s)\n  \
+                 vectors: 6 in the newest snapshot, 7 later commit(s) not counted\n"
             ),
             "{note}"
         );
         assert_eq!(note.matches("not counted").count(), 1, "{note}");
 
         let exact = [without_rule("a", 4, 0), without_rule("b", 0, 0)];
-        let note = &vector_notes(&exact, |_, patch| patch.to_string())[0];
+        let note = &vector_notes(&exact, patch_step)[0];
         assert!(
-            note.contains("(4 vector(s) in all) but have no source property: a.emb (4), b.emb (no element holds one yet);"),
+            note.contains(
+                "\n  a.emb: 4 vector(s)\n  b.emb: no element holds one yet\n  vectors: 4 in all\n"
+            ),
+            "{note}"
+        );
+        // The combined patch names one label per line, under its comment.
+        assert!(
+            note.ends_with(
+                "\n  # run the patch\n  g.patch_schema(#{\n    vertices: #{\n      a: #{schema: \
+                 #{properties: #{emb: #{from: \"<source property>\"}}}},\n      b: #{schema: \
+                 #{properties: #{emb: #{from: \"<source property>\"}}}}\n    }\n  })"
+            ),
             "{note}"
         );
     }
@@ -1467,21 +1608,81 @@ mod tests {
         };
         let plain = &report.vector_notes("kb.gstore")[0];
         assert!(
-            plain.contains("(graphersal --graph kb.gstore -e 'g.patch_schema("),
+            plain.contains(
+                "\n  # add the source property (replace <source property> first)\n  graphersal \
+                 --graph kb.gstore -e 'g.patch_schema("
+            ),
             "{plain}"
         );
         report.models_missing = vec![MissingModel {
             identity: "m".to_string(),
             repo: Some("acme/tiny".to_string()),
             needed_by: vec!["doc.emb".to_string()],
+            suggest_default: false,
         }];
         let after = &report.vector_notes("kb.gstore")[0];
         assert!(
             after.contains(
-                "(after `graphersal embed-model import acme/tiny --into kb.gstore`: graphersal \
-                 --graph kb.gstore -e 'g.patch_schema("
+                "\n  # after the import of acme/tiny (the store does not open before): add the \
+                 source property (replace <source property> first)\n  graphersal --graph \
+                 kb.gstore -e 'g.patch_schema("
             ),
             "{after}"
+        );
+    }
+
+    /// Issue #19: every note is a headline with indented details and commented commands, one
+    /// command per line; the import of the only model the schema names, in a store without a
+    /// default, makes it the default.
+    #[test]
+    fn a_missing_model_note_has_one_commented_command_per_line() {
+        let mut missing = MissingModel {
+            identity: "model2vec/acme/tiny@0123456789ab".to_string(),
+            repo: Some("acme/tiny".to_string()),
+            needed_by: vec!["doc.emb".to_string(), "note.emb".to_string()],
+            suggest_default: false,
+        };
+        assert_eq!(
+            missing.note("kb.gstore"),
+            "the schema needs the embedding model acme/tiny, which the store does not keep\n  \
+             identity: model2vec/acme/tiny@0123456789ab\n  needed by: doc.emb, note.emb\n  \
+             effect: the store does not open until the model is imported\n  # download the \
+             model into the local models directory\n  graphersal embed-model download \
+             acme/tiny\n  # import it into the store\n  graphersal embed-model import acme/tiny \
+             --into kb.gstore"
+        );
+        missing.suggest_default = true;
+        assert!(missing.suggests_default());
+        assert_eq!(
+            missing.commands("kb.gstore"),
+            [
+                "graphersal embed-model download acme/tiny",
+                "graphersal embed-model import acme/tiny --into kb.gstore --default",
+            ]
+        );
+        assert!(
+            missing.note("kb.gstore").ends_with(
+                "\n  # import it into the store as its default model (embed() without a model \
+                 name uses it)\n  graphersal embed-model import acme/tiny --into kb.gstore \
+                 --default"
+            ),
+            "{}",
+            missing.note("kb.gstore")
+        );
+    }
+
+    /// A single property's note: headline, one detail per line, the commented command.
+    #[test]
+    fn a_vector_note_is_a_headline_with_details() {
+        assert_eq!(
+            without_rule("doc", 3, 0).note("kb"),
+            "doc.emb has vectors of m but no source property\n  vectors: 3 element(s)\n  to \
+             keep them current: add \"from\": \"<source property>\" to its schema \
+             declaration\n  first fill: re-embeds every doc (the whole database is locked while \
+             it runs)\n  afterwards: write the source property, never emb itself\n  # add the \
+             source property (replace <source property> first)\n  graphersal --graph kb -e \
+             'g.patch_schema(#{vertices: #{doc: #{schema: #{properties: #{emb: #{from: \
+             \"<source property>\"}}}}}})'"
         );
     }
 

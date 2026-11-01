@@ -144,10 +144,29 @@ and checks it is the tar of its identity.
 
 ## The licence travels with the model
 
-The licence the repository states, its licence file (or, without one, the standard MIT or
-Apache-2.0 text, marked as a template) and the licences of its base models are part of the
-model's tar. `graphersal store info <dir>` names every model with its licence: who hands a store
-or a copy of it on redistributes its models.
+The licence the repository states, its licence file (or, without one, the unchanged standard
+MIT or Apache-2.0 text of the licence the model card names, kept as `LICENSE` with a first
+paragraph saying where the text comes from; the copyright holders are those the model card
+names) and the licences of its base models are part of the model's tar. Graphersal never writes
+a licence of its own. `graphersal store models <dir>` and `graphersal store info <dir>` name
+every model with its licence and where the licence text comes from (`ModelInfo::license_text`,
+the repository's files in `ModelInfo::license_files`): who hands a store or a copy of it on
+redistributes its models.
+
+```text
+$ graphersal store models data/
+── Embedding model ───────────────────────────────────────────────────────────
+  model:        acme/tiny
+  full name:    model2vec/acme/tiny@0123456789ab
+  size:         29.5 MiB
+  licence:      mit (named in the model card)
+  licence text: standard MIT text (the repository has no licence file)
+  default:      yes
+  used by:      the schema (doc.emb)
+```
+
+The other two forms of `licence text` are `from the repository (LICENSE)` (the repository's own
+file, named) and `none (no standard text for this licence)`.
 
 ## What carries the models
 
@@ -193,7 +212,16 @@ Changes stay in memory: the file is never written.
   the schema names that the file lacks, vector properties without a rule, saved queries calling
   a removed function. Their schema patches run in a store (`graphersal store create <dir> --from
   file.gsnap`, then `graphersal --graph <dir> -e '...'`): a schema change of the loaded file
-  stays in memory.
+  stays in memory. Each note is a short headline with one detail per line below it and every
+  command on a line of its own under a comment saying what it does, for example
+
+  ```text
+  note: data.gsnap holds 2 embedding model(s) but none is the default
+    effect: embed() without a model name uses hash-ngram/1
+    name one: g.v().embed("text", #{embedder: "acme/tiny"})
+    # or make one the default, in a store
+    graphersal store models default <dir> <repo>
+  ```
 
 ## Older Graphersal versions
 
