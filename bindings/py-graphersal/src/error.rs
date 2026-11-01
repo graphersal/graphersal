@@ -199,6 +199,17 @@ fn new_graphersal_error(py: Python<'_>, message: String, help: Option<String>) -
     err
 }
 
+/// Emits `text` as one ``UserWarning`` (a note of a load or an open).
+pub(crate) fn warn(py: Python<'_>, text: &str) -> PyResult<()> {
+    let text = std::ffi::CString::new(text.replace('\0', " ")).unwrap_or_default();
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+        &text,
+        1,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,15 +343,4 @@ mod tests {
         assert_eq!(kind_of(result), ErrorKind::Other);
         assert_eq!(classify("Error: parse failure"), ErrorKind::Other);
     }
-}
-
-/// Emits `text` as one ``UserWarning`` (a note of a load or an open).
-pub(crate) fn warn(py: Python<'_>, text: &str) -> PyResult<()> {
-    let text = std::ffi::CString::new(text.replace('\0', " ")).unwrap_or_default();
-    PyErr::warn(
-        py,
-        &py.get_type::<pyo3::exceptions::PyUserWarning>(),
-        &text,
-        1,
-    )
 }
