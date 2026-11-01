@@ -488,3 +488,52 @@ fn a_missing_blob_names_both_recovery_commands_and_a_closed_change_names_the_ope
     assert!(err.help().unwrap().contains("Store::remove_model"));
     store.close().unwrap();
 }
+
+/// A refusal's help lists the CLI commands in the note layout (issue #19): the advice in prose
+/// with the Rust API names, then each command on its own line under a `# comment`, indented
+/// under `Help:` by the diagnostic.
+#[test]
+fn a_refusal_lists_its_commands_on_lines_of_their_own() {
+    let dir = MemDir::new();
+    let store = store_with_commits(&dir, 3);
+    let err = store.attic_restore("nope").expect_err("no such entry");
+    assert!(
+        err.to_string()
+            .ends_with("the store has no attic entry \"nope\" (the help shows how to list them)"),
+        "{err}"
+    );
+    assert!(
+        graphersal::error::format_diagnostic(&err).ends_with(
+            "\nHelp: Name an existing attic entry by its id (Store::attic_list).\n        \
+             # list the attic entries\n        graphersal store attic <dir> list"
+        ),
+        "{err}"
+    );
+    store
+        .rollback_to(RecoveryTarget::CommitSeq(2), RollbackMode::Move)
+        .unwrap();
+    store
+        .rollback_to(RecoveryTarget::CommitSeq(1), RollbackMode::Move)
+        .unwrap();
+    let entries = store.attic_list().unwrap();
+    let older = entries.iter().find(|e| e.target == 2).unwrap();
+    let newer = entries.iter().find(|e| e.target == 1).unwrap();
+    let err = store.attic_restore(&older.id).expect_err("newest first");
+    assert!(
+        err.to_string().contains(&format!(
+            "restore the newer entry {} first, or fork",
+            newer.id
+        )),
+        "{err}"
+    );
+    let help = err.help().unwrap_or_default();
+    assert!(
+        help.ends_with(
+            "\n  # restore the newer entry first (the message names it)\n  graphersal store \
+             attic <dir> restore <newer_id>\n  # or fork this entry into a new store\n  \
+             graphersal store attic <dir> fork <id> <new_dir>"
+        ),
+        "{help}"
+    );
+    store.close().unwrap();
+}

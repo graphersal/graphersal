@@ -176,6 +176,12 @@ test('rows: readable times, level badges, fields, at most `shown` of them', () =
   assert.equal(journalTime(undefined), '');
   assert.equal(journalIsoTime(0), '1970-01-01T00:00:00.000000Z');
   assert.equal(fieldsText(null), '');
+  // A value of several lines (a recommendation in the note layout) follows on lines of its own.
+  assert.equal(
+    fieldsText({ model: 'acme/tiny', recommendation: 'bring it back\n  # download it\n  graphersal embed-model download acme/tiny' }),
+    'model=acme/tiny\n  recommendation: bring it back\n    # download it\n    graphersal embed-model download acme/tiny',
+  );
+  assert.equal(fieldsText({ note: 'a\nb' }), '  note: a\n  b');
 });
 
 test('the footer counts the rows not shown and says what is older or gone', () => {

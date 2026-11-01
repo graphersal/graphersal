@@ -1,6 +1,7 @@
 //! [`PersistError`]: every failure of the persistence formats.
 
 use crate::error::{DiagnosticError, GraphError};
+use crate::graph::note_text::NoteText;
 
 /// A failure while writing or reading a snapshot or a journal, or while recovering.
 ///
@@ -541,213 +542,362 @@ impl StoreFailure {
         }
     }
 
-    /// The advice for this cause: the `help()` of [`PersistError::Store`].
-    fn advice(self) -> &'static str {
+    /// The advice for this cause: the `help()` of [`PersistError::Store`], in the note layout
+    /// (the prose first, then every CLI command on its own line under a `# comment`).
+    fn advice(self) -> String {
         match self {
-            StoreFailure::Closed => {
+            StoreFailure::Closed => help_text(
                 "The store was closed (Store::close or Store::shutdown) and accepts no more \
-                 operations. Open it again (Store::open; CLI: graphersal --graph <dir>) and \
-                 repeat the operation."
-            }
+                 operations. Open it again (Store::open) and repeat the operation.",
+                &[("open the store again", "graphersal --graph <dir>")],
+            ),
             StoreFailure::LockPoisoned => {
                 "A thread panicked while it held a lock of this open store, so its state in \
                  memory cannot be trusted. End the process (or drop the store) and open the \
                  store again: recovery continues from the last durable commit."
+                    .to_string()
             }
-            StoreFailure::NameTaken => {
-                "Choose another name. Snapshot names are unique in the store (Store::snapshots; \
-                 CLI: graphersal store list <dir>); mark names are unique along the store's \
-                 whole history, also those of marks a prune made unreachable (Store::marks; \
-                 CLI: graphersal store marks <dir>)."
+            StoreFailure::NameTaken => help_text(
+                "Choose another name. Snapshot names are unique in the store \
+                 (Store::snapshots); mark names are unique along the store's whole history, \
+                 also those of marks a prune made unreachable (Store::marks).",
+                &[
+                    (
+                        "list the snapshots and their names",
+                        "graphersal store list <dir>",
+                    ),
+                    ("list the marks", "graphersal store marks <dir>"),
+                ],
+            ),
+            StoreFailure::NameTooLong => {
+                "Use a snapshot name of at most 255 bytes (UTF-8).".to_string()
             }
-            StoreFailure::NameTooLong => "Use a snapshot name of at most 255 bytes (UTF-8).",
-            StoreFailure::SnapshotExists => {
+            StoreFailure::SnapshotExists => help_text(
                 "A commit has at most one snapshot, and the one at the current commit has \
                  another name. Commit something first, or checkpoint without a name (or with \
-                 that snapshot's name), which returns the existing snapshot (CLI: graphersal \
-                 store list <dir> shows it)."
-            }
-            StoreFailure::NoSnapshot => {
-                "Name a commit that has a snapshot (Store::snapshots; CLI: graphersal store \
-                 list <dir>), or write one first (Store::checkpoint; CLI: graphersal store \
-                 checkpoint <dir>)."
-            }
-            StoreFailure::BackupRunning => {
+                 that snapshot's name), which returns the existing snapshot.",
+                &[("list the snapshots", "graphersal store list <dir>")],
+            ),
+            StoreFailure::NoSnapshot => help_text(
+                "Name a commit that has a snapshot (Store::snapshots), or write one first \
+                 (Store::checkpoint).",
+                &[
+                    ("list the snapshots", "graphersal store list <dir>"),
+                    ("write a snapshot", "graphersal store checkpoint <dir>"),
+                ],
+            ),
+            StoreFailure::BackupRunning => help_text(
                 "A backup is copying the store's files, and a prune would delete some of them. \
-                 Prune again when the backup has finished (Store::prune; CLI: graphersal store \
-                 prune <dir> --up-to <commit>)."
-            }
-            StoreFailure::PruneRunning => {
+                 Prune again when the backup has finished (Store::prune).",
+                &[(
+                    "prune again once the backup has finished",
+                    "graphersal store prune <dir> --up-to <commit>",
+                )],
+            ),
+            StoreFailure::PruneRunning => help_text(
                 "A prune is deleting files of the store. Back up again when it has finished \
-                 (Store::backup; CLI: graphersal store backup <dir> <backup_dir>)."
-            }
-            StoreFailure::NothingAfterTarget => {
+                 (Store::backup).",
+                &[(
+                    "back up again once the prune has finished",
+                    "graphersal store backup <dir> <backup_dir>",
+                )],
+            ),
+            StoreFailure::NothingAfterTarget => help_text(
                 "A rollback goes back in time: choose a target before the current commit \
-                 (Store::info, Store::marks; CLI: graphersal store info <dir>, graphersal store \
-                 marks <dir>)."
-            }
-            StoreFailure::UnknownAtticEntry => {
-                "Name an existing attic entry by its id (Store::attic_list; CLI: graphersal \
-                 store attic <dir> lists them)."
-            }
-            StoreFailure::AtticLineageChanged => {
+                 (Store::info, Store::marks).",
+                &[
+                    ("show the current commit", "graphersal store info <dir>"),
+                    ("list the marks", "graphersal store marks <dir>"),
+                ],
+            ),
+            StoreFailure::UnknownAtticEntry => help_text(
+                "Name an existing attic entry by its id (Store::attic_list).",
+                &[(
+                    "list the attic entries",
+                    "graphersal store attic <dir> list",
+                )],
+            ),
+            StoreFailure::AtticLineageChanged => help_text(
                 "Another rollback or restore came after this entry's rollback, and attic \
                  entries restore newest first: restore the newer entry first, or fork this one \
-                 into a new store (Store::attic_fork; CLI: graphersal store attic <dir> fork \
-                 <id> <new_dir>)."
-            }
-            StoreFailure::ChangedSinceRollback => {
+                 into a new store (Store::attic_fork).",
+                &[
+                    (
+                        "restore the newer entry first (the message names it)",
+                        "graphersal store attic <dir> restore <newer_id>",
+                    ),
+                    (
+                        "or fork this entry into a new store",
+                        "graphersal store attic <dir> fork <id> <new_dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::ChangedSinceRollback => help_text(
                 "A restore would drop what was committed or marked since the rollback. Fork the \
-                 entry into a new store instead (Store::attic_fork; CLI: graphersal store attic \
-                 <dir> fork <id> <new_dir>)."
-            }
-            StoreFailure::AtticBaseMissing => {
+                 entry into a new store instead (Store::attic_fork).",
+                &[(
+                    "fork the entry into a new store",
+                    "graphersal store attic <dir> fork <id> <new_dir>",
+                )],
+            ),
+            StoreFailure::AtticBaseMissing => help_text(
                 "The snapshot the attic entry continues is gone from the store (removed by hand, \
-                 or damaged). Check the store (Store::verify; CLI: graphersal store verify \
-                 <dir>); when the entry is needed, take it from a backup of the store, else \
-                 remove it (Store::attic_remove; CLI: graphersal store attic <dir> remove <id>)."
-            }
-            StoreFailure::NotABackup => {
-                "The directory is a live store, not a backup: open it as a store (Store::open; \
-                 CLI: graphersal --graph <dir>) and prune it with Store::prune (CLI: graphersal \
-                 store prune <dir> --up-to <commit>)."
-            }
-            StoreFailure::KeptSnapshotDamaged => {
+                 or damaged). Check the store (Store::verify); when the entry is needed, take it \
+                 from a backup of the store, else remove it (Store::attic_remove).",
+                &[
+                    ("check the store", "graphersal store verify <dir>"),
+                    (
+                        "remove the entry from the attic",
+                        "graphersal store attic <dir> remove <id>",
+                    ),
+                ],
+            ),
+            StoreFailure::NotABackup => help_text(
+                "The directory is a live store, not a backup: open it as a store (Store::open) \
+                 and prune it with Store::prune.",
+                &[
+                    ("open it as a store", "graphersal --graph <dir>"),
+                    ("prune it", "graphersal store prune <dir> --up-to <commit>"),
+                ],
+            ),
+            StoreFailure::KeptSnapshotDamaged => help_text(
                 "A snapshot the prune would keep is damaged, so nothing was removed (the older \
-                 snapshots are its donors). Check the store (Store::verify; CLI: graphersal \
-                 store verify <dir>) and build a repaired copy in a new directory \
-                 (Store::repair_dir; CLI: graphersal store repair <dir> --to <new_dir>)."
-            }
-            StoreFailure::CopyDoesNotVerify => {
+                 snapshots are its donors). Check the store (Store::verify) and build a repaired \
+                 copy in a new directory (Store::repair_dir).",
+                &[
+                    ("check the store", "graphersal store verify <dir>"),
+                    (
+                        "build a repaired copy in a new directory",
+                        "graphersal store repair <dir> --to <new_dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::CopyDoesNotVerify => help_text(
                 "The copy was written but did not read back intact: check the target disk \
                  (free space, I/O errors), remove the copy and repeat the operation into a new \
-                 directory (graphersal store verify <new_dir> lists what failed)."
-            }
-            StoreFailure::ChangedConcurrently => {
+                 directory.",
+                &[(
+                    "list what failed in the copy",
+                    "graphersal store verify <new_dir>",
+                )],
+            ),
+            StoreFailure::ChangedConcurrently => help_text(
                 "A file of the store changed or vanished while the operation read it: never \
                  change a store's files by hand or from another program. Repeat the operation; \
-                 when it fails again, check the store (Store::verify; CLI: graphersal store \
-                 verify <dir>)."
-            }
+                 when it fails again, check the store (Store::verify).",
+                &[("check the store", "graphersal store verify <dir>")],
+            ),
             StoreFailure::JournalSyncFailed => {
                 "Writing or syncing the journal failed (a full disk, an I/O error), so the \
                  journal refuses further commits. Fix the cause, then reopen the store: \
                  recovery continues from the last durable commit."
+                    .to_string()
             }
             StoreFailure::MissingCapability => {
                 "A Store journals every commit in a commit hook that runs before the commit is \
                  final, so the storage must roll a unit back on a veto and build a change set \
                  per commit: it must claim StorageCapabilities::atomic and change_capture. Keep \
                  the graph in a storage that does (TraversalGraph does), or implement both."
+                    .to_string()
             }
-            StoreFailure::ReloadFailed => {
+            StoreFailure::ReloadFailed => help_text(
                 "The graph in memory was emptied after the failed reload, so queries now read \
                  an empty graph, never a partial one; the store is stopped and writes nothing \
                  more. The files on disk are intact. Close the store and open it again (restart \
                  the server; CLI: run the command again): the open completes the rollback or \
                  restore (or undoes it) and loads the full graph. If the open fails too, check \
-                 the disk and the store (graphersal store verify <dir>)."
-            }
+                 the disk and the store.",
+                &[("check the store", "graphersal store verify <dir>")],
+            ),
             StoreFailure::Stopped => {
                 "An in-place rollback or attic restore failed part-way, so the store stopped: \
                  it writes nothing more (no commit, mark, checkpoint, prune or rollback). The \
                  files on disk are intact. Close the store and open it again (restart the \
                  server): the open completes the change (or undoes it) and the store is \
                  writable again."
+                    .to_string()
             }
-            StoreFailure::AlreadyCurrent => {
-                "The store already has the current format: open it as it is (Store::open; CLI: \
-                 graphersal --graph <dir>). For a copy of it use Store::convert (CLI: graphersal \
-                 store convert <dir> <new>) or a backup (graphersal store backup <dir> \
-                 <backup_dir>)."
-            }
-            StoreFailure::DamagedSource => {
+            StoreFailure::AlreadyCurrent => help_text(
+                "The store already has the current format: open it as it is (Store::open). For \
+                 a copy of it use Store::convert or a backup.",
+                &[
+                    ("open it as it is", "graphersal --graph <dir>"),
+                    (
+                        "copy it into a new store",
+                        "graphersal store convert <dir> <new>",
+                    ),
+                    (
+                        "or back it up",
+                        "graphersal store backup <dir> <backup_dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::DamagedSource => help_text(
                 "Nothing was written: the upgrade only converts an intact store (the message \
                  lists the first problems the scrub found). Repair it instead: \
-                 Store::repair_dir (CLI: graphersal store repair <dir> --to <new_dir>) reads the \
-                 older store and writes a NEW store of the current format with what is intact (it reports what was \
-                 repaired, lost and diverged; the damaged store is never changed). Or restore a \
-                 backup and upgrade that (graphersal store upgrade <backup_dir> <new_dir>)."
-            }
-            StoreFailure::UpgradeNeedsCopy => {
+                 Store::repair_dir reads the older store and writes a NEW store of the current \
+                 format with what is intact (it reports what was repaired, lost and diverged; \
+                 the damaged store is never changed). Or restore a backup and upgrade that.",
+                &[
+                    (
+                        "write a repaired store of the current format",
+                        "graphersal store repair <dir> --to <new_dir>",
+                    ),
+                    (
+                        "or upgrade a restored backup",
+                        "graphersal store upgrade <backup_dir> <new_dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::UpgradeNeedsCopy => help_text(
                 "Nothing was written: an upgrade from this store format version changes more \
                  than the version word, so it is never done in place. Upgrade it into a NEW \
-                 store (the older one stays as it is): Store::upgrade (CLI: graphersal store \
-                 upgrade <dir> <new_dir>; Python graphersal.Store.upgrade(source, target)). The \
-                 supported upgrades are listed in the format versions table of the book \
-                 (persistence/store_versions.md)."
-            }
-            StoreFailure::UnknownModel => {
-                "List the models the store holds (Store::models; CLI: graphersal store models \
-                 <dir>) and name one of them by its repository (owner/name). A model enters a \
-                 store only by an explicit import (Store::import_model; CLI: graphersal \
-                 embed-model download <repo> then graphersal embed-model import <repo> --into \
-                 <dir>)."
-            }
-            StoreFailure::InvalidModel => {
+                 store (the older one stays as it is): Store::upgrade (Python \
+                 graphersal.Store.upgrade(source, target)). The supported upgrades are listed \
+                 in the format versions table of the book (persistence/store_versions.md).",
+                &[(
+                    "upgrade it into a new store",
+                    "graphersal store upgrade <dir> <new_dir>",
+                )],
+            ),
+            StoreFailure::UnknownModel => help_text(
+                "List the models the store holds (Store::models) and name one of them by its \
+                 repository (owner/name). A model enters a store only by an explicit import \
+                 (Store::import_model).",
+                &[
+                    (
+                        "list the models the store holds",
+                        "graphersal store models <dir>",
+                    ),
+                    (
+                        "download a model into the local models directory",
+                        "graphersal embed-model download <repo>",
+                    ),
+                    (
+                        "import it into the store",
+                        "graphersal embed-model import <repo> --into <dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::InvalidModel => help_text(
                 "Nothing was added. A Model2Vec model is one config, one tokenizer and one \
                  weights file (config.json, tokenizer.json, model.safetensors), plus its card \
                  (README.md) and licence files; file names are 1 to 40 ASCII letters, digits, \
                  '.', '_' and '-'; the model needs its Hugging Face repository name \
                  (ImportModelOptions::with_repo; CLI --repo). Check the model directory and \
-                 import it again (Store::import_model; CLI: graphersal embed-model import \
-                 <model_dir> --into <dir>)."
-            }
-            StoreFailure::ModelUnavailable => {
+                 import it again (Store::import_model).",
+                &[(
+                    "import the model directory again",
+                    "graphersal embed-model import <model_dir> --into <dir>",
+                )],
+            ),
+            StoreFailure::ModelUnavailable => help_text(
                 "The store is intact but does not open while a model its schema needs is \
-                 missing or damaged. Get the model's files again (graphersal embed-model \
-                 download <repo>) and import them into the store (graphersal embed-model import \
-                 <repo> --into <dir> --replace; Store::import_model), or restore the store from \
-                 a backup or a replica that holds the model."
-            }
+                 missing or damaged. Get the model's files again and import them into the store \
+                 (Store::import_model), or restore the store from a backup or a replica that \
+                 holds the model.",
+                &[
+                    (
+                        "download the model's files again",
+                        "graphersal embed-model download <repo>",
+                    ),
+                    (
+                        "import them into the store",
+                        "graphersal embed-model import <repo> --into <dir> --replace",
+                    ),
+                ],
+            ),
             StoreFailure::ModelDoesNotFit => {
                 "Nothing was loaded. Raise the process memory ceiling to at least the minimum \
                  the message names (CLI --memory-limit; Rust exec::set_memory_limit; Python \
                  graphersal.set_memory_limit), or open the store on a machine with more memory."
+                    .to_string()
             }
             StoreFailure::ModelInUse => {
                 "Nothing was changed. The schema's vector properties named in the message use the \
                  model: re-embed them with another model, or drop the properties (or their \
                  `embedder`) from the schema first, then remove the model."
+                    .to_string()
             }
-            StoreFailure::ModelRevisionExists => {
+            StoreFailure::ModelRevisionExists => help_text(
                 "Nothing was changed. The store keeps one revision per repository. Import the new \
-                 revision with replace (ImportModelOptions::with_replace(true); CLI: graphersal \
-                 embed-model import <repo> --into <dir> --replace): it becomes the current \
-                 revision (and the default if the old one was), the old definition is dropped \
-                 in the same commit and its blob is removed by the next prune. Vectors the old \
-                 revision made must be re-embedded (the message names their properties)."
-            }
-            StoreFailure::UpgradeModelDamaged => {
+                 revision with replace (ImportModelOptions::with_replace(true)): it becomes the \
+                 current revision (and the default if the old one was), the old definition is \
+                 dropped in the same commit and its blob is removed by the next prune. Vectors \
+                 the old revision made must be re-embedded (the message names their \
+                 properties).",
+                &[(
+                    "import the new revision in place of the old one",
+                    "graphersal embed-model import <repo> --into <dir> --replace",
+                )],
+            ),
+            StoreFailure::UpgradeModelDamaged => help_text(
                 "Nothing was written: the upgrade converts every embedding model the store keeps \
                  under models/ into a blob and refuses a damaged one before it changes anything \
                  (the message names the model and the file). Restore the model's directory \
                  models/<id> from a backup of the store and upgrade again; or move the damaged \
                  directory out of models/ (the store closed), upgrade, and import the model again \
-                 afterwards: graphersal embed-model download <repo> then graphersal embed-model \
-                 import <repo> --into <dir> (Store::import_model)."
-            }
-            StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => {
+                 afterwards (Store::import_model).",
+                &[
+                    (
+                        "after the upgrade: download the model again",
+                        "graphersal embed-model download <repo>",
+                    ),
+                    (
+                        "import it into the upgraded store",
+                        "graphersal embed-model import <repo> --into <dir>",
+                    ),
+                ],
+            ),
+            StoreFailure::BlobUnavailable | StoreFailure::BlobDamaged => help_text(
                 "The store itself is intact and keeps working; only what needs this blob fails. \
-                 Run graphersal store verify <dir> (Store::verify) to list every missing or \
-                 damaged blob. Any copy of a blob with the same hash is the same bytes: with the \
-                 store closed, graphersal store restore-blobs <dir> --from <backup|file.zip|\
-                 file.gsnap|other store> (Store::restore_blobs_from) copies every missing or \
-                 damaged blob back and checks it. Without a copy, graphersal store repair <dir> \
-                 --to <new_dir> --drop-damaged-blobs (RepairOptions::with_drop_damaged_blobs) \
-                 builds a store without the definitions that reference them (refused while the \
-                 schema needs one: change the schema first). By hand: copy the file into \
-                 blobs/<2 hex>/<hash> (the name the error gives), or write the content again \
-                 (Store::write_blob) where you still have it."
-            }
-            StoreFailure::AutoCheckpointFailed => {
+                 List every missing or damaged blob (Store::verify). Any copy of a blob with the \
+                 same hash is the same bytes: with the store closed, restore-blobs \
+                 (Store::restore_blobs_from) copies every missing or damaged blob back from a \
+                 backup, a ZIP backup, a .gsnap or another store, and checks it. Without a \
+                 copy, a repair with --drop-damaged-blobs \
+                 (RepairOptions::with_drop_damaged_blobs) builds a store without the \
+                 definitions that reference them (refused while the schema needs one: change \
+                 the schema first). By hand: copy the file into blobs/<2 hex>/<hash> (the name \
+                 the error gives), or write the content again (Store::write_blob) where you \
+                 still have it.",
+                &[
+                    (
+                        "list every missing or damaged blob",
+                        "graphersal store verify <dir>",
+                    ),
+                    (
+                        "copy them back from a copy (the store closed)",
+                        "graphersal store restore-blobs <dir> --from <backup|file.zip|file.gsnap|other store>",
+                    ),
+                    (
+                        "or build a store without them",
+                        "graphersal store repair <dir> --to <new_dir> --drop-damaged-blobs",
+                    ),
+                ],
+            ),
+            StoreFailure::AutoCheckpointFailed => help_text(
                 "The automatic checkpoint failed; the commits are safe in the journal. It is \
                  tried again at the next commit while it is due (Store::run_due_checkpoint); a \
-                 manual checkpoint reports the failure with its own help (Store::checkpoint; \
-                 CLI: graphersal store checkpoint <dir>)."
-            }
+                 manual checkpoint reports the failure with its own help (Store::checkpoint).",
+                &[(
+                    "write a checkpoint by hand",
+                    "graphersal store checkpoint <dir>",
+                )],
+            ),
         }
     }
+}
+
+/// `prose` in the note layout ([`NoteText`]), followed by every `(comment, command)` of
+/// `commands` on lines of their own: the layout of every `help()` that names CLI commands.
+pub(crate) fn help_text(prose: &str, commands: &[(&str, &str)]) -> String {
+    commands
+        .iter()
+        .fold(NoteText::new(prose), |note, (comment, command)| {
+            note.command(comment, command)
+        })
+        .finish()
 }
 
 impl std::fmt::Display for StoreFailure {
@@ -973,12 +1123,17 @@ impl DiagnosticError for PersistError {
                  not full; then repeat the operation."
                     .to_string()
             }
-            PersistError::Corrupt { .. } => "The bytes were damaged or are not a Graphersal \
-                 snapshot or journal. Load an older copy (another snapshot, a backup); a damaged \
-                 journal record is never skipped silently, because the commits after it depend \
-                 on it. A Store with damage opens read-only in maintenance mode; build a repaired \
-                 copy with Store::repair_to (CLI: graphersal store repair <dir> --to <new_dir>)."
-                .to_string(),
+            PersistError::Corrupt { .. } => help_text(
+                "The bytes were damaged or are not a Graphersal snapshot or journal. Load an \
+                 older copy (another snapshot, a backup); a damaged journal record is never \
+                 skipped silently, because the commits after it depend on it. A Store with \
+                 damage opens read-only in maintenance mode; build a repaired copy with \
+                 Store::repair_to.",
+                &[(
+                    "build a repaired copy of a store in a new directory",
+                    "graphersal store repair <dir> --to <new_dir>",
+                )],
+            ),
             PersistError::UnsupportedVersion { .. } => "The store or file was written by a \
                  newer Graphersal; open it with that version (or a later one). It is not \
                  damaged: this build refuses it without reading further or changing anything, \
@@ -989,7 +1144,7 @@ impl DiagnosticError for PersistError {
                  newer Graphersal wrote (its checksum is valid, so the bytes are intact); open \
                  it with that version (or a later one). It is not damaged: this build changes \
                  nothing, and it never repairs it (a repair by this build would drop what it \
-                 cannot read). Do not run graphersal store repair on it with this version."
+                 cannot read). Do not repair it (store repair) with this version."
                 .to_string(),
             PersistError::MemoryBudget {
                 needed,
@@ -1031,91 +1186,169 @@ impl DiagnosticError for PersistError {
                  commits. A Store: reopen it (the refused record was cut off, or its position \
                  recorded, so it is never replayed); check the disk first."
                 .to_string(),
-            PersistError::Locked { .. } => "Close the other writer first (stop the server or \
-                 the program that has the store open). To only read the data while it runs, use \
-                 Store::open_read_only (CLI: graphersal store info / list / backup work on a \
-                 store in use). A change of a closed store's catalog (graphersal \
-                 embed-model import --into, graphersal store models remove; \
+            PersistError::Locked { .. } => help_text(
+                "Close the other writer first (stop the server or the program that has the \
+                 store open). To only read the data while it runs, use Store::open_read_only \
+                 (CLI: store info, list and backup work on a store in use). A change of a \
+                 closed store's catalog (embed-model import --into, store models remove; \
                  Store::import_model_dir and its kin) needs the lock too: make it on the open \
                  store instead (Store::import_model, Store::remove_model, \
-                 Store::set_default_model; the dev server's Store menu), or close it first."
-                .to_string(),
-            PersistError::NotAStore { .. } => "Create a store with Store::create (CLI: \
-                 graphersal store create <dir>, or --graph <dir> --create-store), or name the \
-                 directory of an existing store (it holds a GRAPH file)."
-                .to_string(),
-            PersistError::DirectoryNotEmpty { path } => format!(
+                 Store::set_default_model; the dev server's Store menu), or close it first.",
+                &[
+                    (
+                        "show what a store in use holds",
+                        "graphersal store info <dir>",
+                    ),
+                    ("list its snapshots", "graphersal store list <dir>"),
+                    ("back it up", "graphersal store backup <dir> <backup_dir>"),
+                ],
+            ),
+            PersistError::NotAStore { .. } => help_text(
+                "Create a store with Store::create, or name the directory of an existing store \
+                 (it holds a GRAPH file).",
+                &[
+                    ("create a store", "graphersal store create <dir>"),
+                    (
+                        "or create it while opening it",
+                        "graphersal --graph <dir> --create-store",
+                    ),
+                ],
+            ),
+            PersistError::DirectoryNotEmpty { path } => help_text(
                 "Choose an empty or new directory for the new store, or open the existing store \
-                 if it is one (Store::open; CLI: graphersal store info {path} shows what it \
-                 holds, graphersal --graph {path} opens it)."
+                 if it is one (Store::open).",
+                &[
+                    (
+                        "show what it holds",
+                        &format!("graphersal store info {path}"),
+                    ),
+                    ("open it", &format!("graphersal --graph {path}")),
+                ],
             ),
             PersistError::OlderFormat { path, found, .. }
                 if super::store::upgradable_from(*found) =>
             {
-                format!(
-                    "Upgrade it with this build; no older Graphersal is needed. Into a new store \
-                     (the older one stays as it is): graphersal store upgrade {path} <new_dir> \
-                     (a <new_file>.gstore path for one file); or in place (back it up first: \
-                     afterwards the older Graphersal no longer opens it): graphersal store \
-                     upgrade {path} --in-place. In Rust Store::upgrade / Store::upgrade_in_place, \
-                     in Python graphersal.Store.upgrade. Everything is carried: the graph, schema \
+                help_text(
+                    "Upgrade it with this build; no older Graphersal is needed: into a new \
+                     store (the older one stays as it is; a <new_file>.gstore path for one \
+                     file), or in place (back it up first: afterwards the older Graphersal no \
+                     longer opens it). In Rust Store::upgrade / Store::upgrade_in_place, in \
+                     Python graphersal.Store.upgrade. Everything is carried: the graph, schema \
                      and catalog, the history, marks, attic entries and the store's identity; a \
                      backup directory stays a backup. The embedding models of a Graphersal 0.4.0 \
-                     store (its models/ directory) become blobs with one catalog definition each, \
-                     added by one commit. The store is verified first; a damaged one is refused \
-                     (graphersal store repair {path} --to <new_dir> writes a repaired store of the \
-                     current format)."
+                     store (its models/ directory) become blobs with one catalog definition \
+                     each, added by one commit. The store is verified first; a damaged one is \
+                     refused (a repair writes a repaired store of the current format).",
+                    &[
+                        (
+                            "upgrade into a new store",
+                            &format!("graphersal store upgrade {path} <new_dir>"),
+                        ),
+                        (
+                            "or upgrade in place",
+                            &format!("graphersal store upgrade {path} --in-place"),
+                        ),
+                        (
+                            "a damaged store: write a repaired store of the current format",
+                            &format!("graphersal store repair {path} --to <new_dir>"),
+                        ),
+                    ],
                 )
             }
-            PersistError::OlderFormat { path, .. } => format!(
+            PersistError::OlderFormat { path, .. } => help_text(
                 "This is a pre-release store format the converter does not read. Migrate it \
-                 through a packed snapshot. With the Graphersal that wrote the store \
-                 (the older binary; the store closed), export its current state: graphersal \
-                 --graph {path} -e 'g.export_snapshot(\"graph.gsnap\")'. Then create a new store \
-                 from it with this build: graphersal store create <new_dir> --from graph.gsnap \
-                 (a <new_file>.gstore path or --single-file for one file). The new store has the \
-                 graph, its schema and its catalog; marks, attic entries and backups are not \
-                 carried, so keep the old store until the new one is verified and backed up."
+                 through a packed snapshot: export its current state with the Graphersal that \
+                 wrote the store (the older binary; the store closed), then create a new store \
+                 from it with this build (a <new_file>.gstore path or --single-file for one \
+                 file). The new store has the graph, its schema and its catalog; marks, attic \
+                 entries and backups are not carried, so keep the old store until the new one \
+                 is verified and backed up.",
+                &[
+                    (
+                        "with the older binary: export the current state",
+                        &format!(
+                            "graphersal --graph {path} -e 'g.export_snapshot(\"graph.gsnap\")'"
+                        ),
+                    ),
+                    (
+                        "with this build: create a new store from it",
+                        "graphersal store create <new_dir> --from graph.gsnap",
+                    ),
+                ],
             ),
-            PersistError::Store { cause, .. } => cause.advice().to_string(),
-            PersistError::Maintenance { path, .. } => format!(
+            PersistError::Store { cause, .. } => cause.advice(),
+            PersistError::Maintenance { path, .. } => help_text(
                 "Read what is intact (the data stays queryable). The damage report lists the \
-                 damaged files, chunks and records and their donors (Store::maintenance; CLI: \
-                 graphersal store verify {path}). Build a repaired copy in ANOTHER directory \
-                 with Store::repair_to (CLI: graphersal store repair {path} --to <new_dir>): it \
-                 reports what was repaired, lost and diverged; the damaged files are never \
-                 changed. Then use the repaired store, or restore a backup."
+                 damaged files, chunks and records and their donors (Store::maintenance). Build \
+                 a repaired copy in ANOTHER directory with Store::repair_to: it reports what was \
+                 repaired, lost and diverged; the damaged files are never changed. Then use the \
+                 repaired store, or restore a backup.",
+                &[
+                    (
+                        "show the damage report",
+                        &format!("graphersal store verify {path}"),
+                    ),
+                    (
+                        "build a repaired copy in another directory",
+                        &format!("graphersal store repair {path} --to <new_dir>"),
+                    ),
+                ],
             ),
-            PersistError::ReadOnly { path, .. } => format!(
+            PersistError::ReadOnly { path, .. } => help_text(
                 "The store was written by a newer Graphersal that maintains something this \
                  version does not know; a write from this version would leave it inconsistent. \
                  Read the data here (queries work), and open the store read-write with that \
-                 newer version (graphersal store info {path} shows the store's position). A \
-                 backup copies it byte for byte; a fork keeps a critical definition and stays \
-                 read-only for this version (a graph schema of a newer version cannot be forked \
-                 here: this version would drop it). Never run graphersal store repair on it \
-                 with this version."
+                 newer version. A backup copies it byte for byte; a fork keeps a critical \
+                 definition and stays read-only for this version (a graph schema of a newer \
+                 version cannot be forked here: this version would drop it). Never repair it \
+                 (store repair) with this version.",
+                &[(
+                    "show the store's position",
+                    &format!("graphersal store info {path}"),
+                )],
             ),
-            PersistError::IsBackup { path, .. } => format!(
-                "Read it read-only: Store::open_backup or Store::open_read_only (CLI: graphersal \
-                 --graph {path} opens it read-only; store info / list / verify / export work on \
-                 it). When the original store is lost and you continue from the backup, make it \
-                 the live store with the same graph id: graphersal store restore {path} \
-                 (Store::restore_backup). For an independent writable copy: graphersal store \
-                 fork {path} <new_dir> (Store::fork_dir)."
+            PersistError::IsBackup { path, .. } => help_text(
+                "Read it read-only: Store::open_backup or Store::open_read_only (CLI: store \
+                 info, list, verify and export work on it too). When the original store is \
+                 lost and you continue from the backup, make it the live store with the same \
+                 graph id (Store::restore_backup). For an independent writable copy, fork it \
+                 (Store::fork_dir).",
+                &[
+                    ("open it read-only", &format!("graphersal --graph {path}")),
+                    (
+                        "make it the live store",
+                        &format!("graphersal store restore {path}"),
+                    ),
+                    (
+                        "or fork it into an independent writable copy",
+                        &format!("graphersal store fork {path} <new_dir>"),
+                    ),
+                ],
             ),
-            PersistError::BackupRefused { .. } => "The backup directory is left as it was (a \
-                 refused or interrupted increment is rolled back; the backup stays readable). \
-                 Back up into a new, empty directory for a full backup (CLI: graphersal store \
-                 backup <dir> <new_dir> --full; BackupMode::Full), or name the backup directory \
-                 of this store: a fork, repair or copy is a different store and never continues \
-                 the original's backups, and after a rollback behind the backup the old backup \
-                 stays as the archive of the abandoned history. An increment needs the store's WAL since the backup's position: \
-                 back up more often than you prune (store prune --up-to). After a store upgrade \
-                 that migrated embedding models (graphersal store upgrade), take a full backup: \
-                 the store and a backup upgraded on their own each have their own migration \
-                 commit, so the backup does not continue the store."
-                .to_string(),
+            PersistError::BackupRefused { .. } => help_text(
+                "The backup directory is left as it was (a refused or interrupted increment is \
+                 rolled back; the backup stays readable). Back up into a new, empty directory \
+                 for a full backup (BackupMode::Full), or name the backup directory of this \
+                 store: a fork, repair or copy is a different store and never continues the \
+                 original's backups, and after a rollback behind the backup the old backup \
+                 stays as the archive of the abandoned history. An increment needs the store's \
+                 WAL since the backup's position: back up more often than you prune (store \
+                 prune --up-to). After a store upgrade that migrated embedding models (store \
+                 upgrade), take a full backup: the store and a backup upgraded on their own \
+                 each have their own migration commit, so the backup does not continue the \
+                 store. A store opened in maintenance mode holds a salvaged graph, not a \
+                 verified one: build a repaired copy of it instead (Store::repair_to).",
+                &[
+                    (
+                        "take a full backup into a new, empty directory",
+                        "graphersal store backup <dir> <new_dir> --full",
+                    ),
+                    (
+                        "a store in maintenance mode: build a repaired copy",
+                        "graphersal store repair <dir> --to <new_dir>",
+                    ),
+                ],
+            ),
             PersistError::BackupDamaged(damage) => match damage.side {
                 DamageSide::Store => {
                     let memory = if damage.from_memory {
@@ -1128,34 +1361,61 @@ impl DiagnosticError for PersistError {
                     } else {
                         ""
                     };
-                    format!(
-                        "{memory}Repair the MAIN store, never the backup: graphersal store \
-                         repair {store} --to <new_dir> (Store::repair_dir) builds a verified, \
-                         repaired copy in a new directory and reports what was repaired, lost \
-                         and diverged; the damaged files are never changed. The full damage \
-                         report: graphersal store verify {store}. Existing backups stay valid: \
-                         keep them until the repaired store is backed up.",
-                        store = damage.store
+                    let store = &damage.store;
+                    help_text(
+                        &format!(
+                            "{memory}Repair the MAIN store, never the backup: \
+                             Store::repair_dir builds a verified, repaired copy in a new \
+                             directory and reports what was repaired, lost and diverged; the \
+                             damaged files are never changed. Existing backups stay valid: \
+                             keep them until the repaired store is backed up."
+                        ),
+                        &[
+                            (
+                                "build a repaired copy of the main store",
+                                &format!("graphersal store repair {store} --to <new_dir>"),
+                            ),
+                            (
+                                "show the full damage report",
+                                &format!("graphersal store verify {store}"),
+                            ),
+                        ],
                     )
                 }
-                DamageSide::Backup => format!(
-                    "The store verified; the copy written to {backup} did not read back intact \
-                     (or the backup an increment continues is damaged: graphersal store verify \
-                     {backup}). Check the backup's disk, then back up again, into a new, empty \
-                     directory when the old backup is damaged (CLI: graphersal store backup \
-                     <dir> <new_dir> --full; BackupMode::Full).",
-                    backup = damage.backup
-                ),
+                DamageSide::Backup => {
+                    let backup = &damage.backup;
+                    help_text(
+                        &format!(
+                            "The store verified; the copy written to {backup} did not read back \
+                             intact (or the backup an increment continues is damaged). Check the \
+                             backup's disk, then back up again, into a new, empty directory when \
+                             the old backup is damaged (BackupMode::Full)."
+                        ),
+                        &[
+                            (
+                                "check the backup",
+                                &format!("graphersal store verify {backup}"),
+                            ),
+                            (
+                                "take a full backup into a new, empty directory",
+                                "graphersal store backup <dir> <new_dir> --full",
+                            ),
+                        ],
+                    )
+                }
             },
-            PersistError::DamageFound { path, .. } => format!(
+            PersistError::DamageFound { path, .. } => help_text(
                 "The data in memory is intact and stays queryable. Save it first with a backup \
                  from memory into a new directory (Store::backup_from_memory; the dev server's \
                  Store menu, Back up from memory; Python store.backup(path, from_memory=True)): \
                  it writes nothing to the damaged store. Then build a repaired copy of the store \
-                 in another directory: graphersal store repair {path} --to <new_dir> \
-                 (Store::repair_dir), and continue with it. A store created with --on-damage \
-                 continue keeps committing instead (the policy is fixed when a store is \
-                 created)."
+                 in another directory (Store::repair_dir), and continue with it. A store created \
+                 with --on-damage continue keeps committing instead (the policy is fixed when a \
+                 store is created).",
+                &[(
+                    "then build a repaired copy in another directory",
+                    &format!("graphersal store repair {path} --to <new_dir>"),
+                )],
             ),
             PersistError::Graph(err) => return err.help(),
             PersistError::Journal(err) => err.help().to_string(),
@@ -1334,5 +1594,198 @@ mod tests {
         assert_eq!(names.len(), causes.len());
         let err = PersistError::store("prune the store", StoreFailure::BackupRunning, "busy");
         assert_eq!(err.to_string(), "Cannot prune the store: busy");
+    }
+
+    /// Asserts the note layout of a help (issue #19): the prose on the first line names no
+    /// shell command; every further line is indented by two spaces, and every command is a line
+    /// of its own (starting with `graphersal`) right under a `# comment`. Returns the commands.
+    pub(crate) fn assert_note_layout(help: &str) -> Vec<String> {
+        let lines: Vec<&str> = help.lines().collect();
+        let first = lines.first().copied().unwrap_or_default();
+        for command in [
+            "graphersal store ",
+            "graphersal embed-model ",
+            "graphersal --graph",
+        ] {
+            assert!(!first.contains(command), "a command in the prose: {help}");
+        }
+        let mut commands = Vec::new();
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            let body = line
+                .strip_prefix("  ")
+                .unwrap_or_else(|| panic!("an unindented line {line:?} in: {help}"));
+            if body.starts_with("# ") {
+                let next = lines.get(i + 1).map(|l| l.trim_start()).unwrap_or_default();
+                assert!(
+                    next.starts_with("graphersal "),
+                    "a comment without a command: {help}"
+                );
+            } else {
+                assert!(
+                    body.starts_with("graphersal "),
+                    "a line that is no command: {help}"
+                );
+                assert!(
+                    lines[i - 1].trim_start().starts_with("# "),
+                    "a command without its comment: {help}"
+                );
+                assert!(
+                    !body.contains(", graphersal") && !body.contains("; graphersal"),
+                    "two commands in one line: {help}"
+                );
+                commands.push(body.to_string());
+            }
+        }
+        commands
+    }
+
+    /// Every help naming a CLI command lays it out as a note: the advice in prose, each command
+    /// on its own line under a comment (rule 6: the commands stay, the Rust API names too).
+    #[test]
+    fn every_help_lists_its_commands_on_lines_of_their_own() {
+        let causes = [
+            StoreFailure::Closed,
+            StoreFailure::LockPoisoned,
+            StoreFailure::NameTaken,
+            StoreFailure::NameTooLong,
+            StoreFailure::SnapshotExists,
+            StoreFailure::NoSnapshot,
+            StoreFailure::BackupRunning,
+            StoreFailure::PruneRunning,
+            StoreFailure::NothingAfterTarget,
+            StoreFailure::UnknownAtticEntry,
+            StoreFailure::AtticLineageChanged,
+            StoreFailure::ChangedSinceRollback,
+            StoreFailure::AtticBaseMissing,
+            StoreFailure::NotABackup,
+            StoreFailure::KeptSnapshotDamaged,
+            StoreFailure::CopyDoesNotVerify,
+            StoreFailure::ChangedConcurrently,
+            StoreFailure::JournalSyncFailed,
+            StoreFailure::MissingCapability,
+            StoreFailure::ReloadFailed,
+            StoreFailure::Stopped,
+            StoreFailure::AlreadyCurrent,
+            StoreFailure::DamagedSource,
+            StoreFailure::UpgradeNeedsCopy,
+            StoreFailure::UnknownModel,
+            StoreFailure::InvalidModel,
+            StoreFailure::BlobUnavailable,
+            StoreFailure::BlobDamaged,
+            StoreFailure::ModelUnavailable,
+            StoreFailure::ModelDoesNotFit,
+            StoreFailure::ModelInUse,
+            StoreFailure::ModelRevisionExists,
+            StoreFailure::UpgradeModelDamaged,
+            StoreFailure::AutoCheckpointFailed,
+        ];
+        for cause in causes {
+            assert_note_layout(&help_of(cause));
+        }
+        let path = "kb".to_string();
+        let damage = |side, from_memory| {
+            PersistError::BackupDamaged(Box::new(BackupDamage {
+                side,
+                store: "kb".to_string(),
+                backup: "kb-backup".to_string(),
+                problems: Vec::new(),
+                from_memory,
+            }))
+        };
+        let errors = [
+            PersistError::corrupt("journal 0", 8, "checksum mismatch"),
+            PersistError::Locked { path: path.clone() },
+            PersistError::NotAStore {
+                path: path.clone(),
+                reason: "no GRAPH file".to_string(),
+            },
+            PersistError::DirectoryNotEmpty { path: path.clone() },
+            PersistError::OlderFormat {
+                path: path.clone(),
+                found: 3,
+                supported: 4,
+            },
+            PersistError::OlderFormat {
+                path: path.clone(),
+                found: 1,
+                supported: 4,
+            },
+            PersistError::Maintenance {
+                path: path.clone(),
+                damage: 2,
+            },
+            PersistError::ReadOnly {
+                path: path.clone(),
+                reason: "a newer definition".to_string(),
+            },
+            PersistError::IsBackup {
+                path: path.clone(),
+                commit_seq: 4,
+            },
+            PersistError::BackupRefused {
+                reason: "another graph".to_string(),
+            },
+            damage(DamageSide::Store, false),
+            damage(DamageSide::Store, true),
+            damage(DamageSide::Backup, false),
+            PersistError::DamageFound {
+                path: path.clone(),
+                found_by: "a backup".to_string(),
+                problems: 1,
+            },
+        ];
+        for err in &errors {
+            let help = err.help().unwrap_or_default();
+            assert!(!assert_note_layout(&help).is_empty(), "no command: {help}");
+        }
+        // The commands name the store, and keep every command the prose used to name.
+        let older = errors[4].help().unwrap_or_default();
+        assert_eq!(
+            assert_note_layout(&older),
+            [
+                "graphersal store upgrade kb <new_dir>",
+                "graphersal store upgrade kb --in-place",
+                "graphersal store repair kb --to <new_dir>",
+            ]
+        );
+        assert!(
+            older.contains("Store::upgrade / Store::upgrade_in_place"),
+            "{older}"
+        );
+        assert_eq!(
+            help_of(StoreFailure::NoSnapshot),
+            "Name a commit that has a snapshot (Store::snapshots), or write one first \
+             (Store::checkpoint).\n  # list the snapshots\n  graphersal store list <dir>\n  \
+             # write a snapshot\n  graphersal store checkpoint <dir>"
+        );
+        let blobs = help_of(StoreFailure::BlobDamaged);
+        assert_eq!(
+            assert_note_layout(&blobs),
+            [
+                "graphersal store verify <dir>",
+                "graphersal store restore-blobs <dir> --from <backup|file.zip|file.gsnap|other \
+                 store>",
+                "graphersal store repair <dir> --to <new_dir> --drop-damaged-blobs",
+            ]
+        );
+        // The journal's model recommendation (`model.*` records) has the same layout.
+        assert_eq!(
+            assert_note_layout(&crate::value::vector::embed::registry::recommendation(
+                "acme/tiny"
+            )),
+            [
+                "graphersal embed-model download acme/tiny",
+                "graphersal embed-model import acme/tiny --into <store> --replace",
+            ]
+        );
+        // The rendered diagnostic keeps the commands under `Help:`, indented.
+        let report = crate::error::format_diagnostic(&errors[3]);
+        assert!(
+            report.ends_with(
+                "\n        # show what it holds\n        graphersal store info kb\n        \
+                 # open it\n        graphersal --graph kb"
+            ),
+            "{report}"
+        );
     }
 }

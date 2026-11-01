@@ -29,6 +29,8 @@ use std::sync::{Arc, OnceLock};
 
 use compact_str::CompactString;
 
+use crate::graph::note_text::NoteText;
+
 use super::{MAX_VECTOR_DIMENSION, Vector, VectorElement, VectorMetric};
 
 /// The longest embedder name, in bytes.
@@ -467,12 +469,17 @@ impl EmbedError {
     /// The help text of this error, in the canonical snake_case DSL style.
     pub fn help(&self) -> String {
         match self {
-            EmbedError::UnknownEmbedder { .. } => "g.embedders() lists the embedders of this \
-                 database: the built-in \"hash-ngram/1\" and the models imported into it, named \
-                 by their repository: g.v().values(\"name\").embed(#{embedder: \"hash-ngram/1\"}). \
-                 A model enters a database by an import: graphersal embed-model import <repo> \
-                 --into <store> (Python: store.import_model(\"<repo>\"))."
-                .to_string(),
+            EmbedError::UnknownEmbedder { .. } => NoteText::new(
+                "g.embedders() lists the embedders of this database: the built-in \
+                 \"hash-ngram/1\" and the models imported into it, named by their repository: \
+                 g.v().values(\"name\").embed(#{embedder: \"hash-ngram/1\"}). A model enters a \
+                 database by an import (Python: store.import_model(\"<repo>\")).",
+            )
+            .command(
+                "import a model into the store",
+                "graphersal embed-model import <repo> --into <store>",
+            )
+            .finish(),
             EmbedError::NotText { .. } => "embed() takes strings only; nothing is converted \
                  implicitly. Convert the value first with as_string(): \
                  g.v().values(\"age\").as_string().embed(), or embed a string property: \
@@ -486,12 +493,21 @@ impl EmbedError {
                  text, of the dimension and element kind its model states). This is a bug: \
                  report it with the model's repository (g.embedders() names it)."
                 .to_string(),
-            EmbedError::Unavailable { .. } => "The model cannot run (its blob is missing or \
-                 damaged, it does not fit under the memory ceiling, or this build has no model \
-                 loader). Bring it back: graphersal embed-model download <repo>, then \
-                 graphersal embed-model import <repo> --into <store> --replace; or restore the \
-                 store from a backup. g.embedders() lists the embedders of this database."
-                .to_string(),
+            EmbedError::Unavailable { .. } => NoteText::new(
+                "The model cannot run (its blob is missing or damaged, it does not fit under the \
+                 memory ceiling, or this build has no model loader). Bring it back: download it \
+                 again and import it into the store, or restore the store from a backup. \
+                 g.embedders() lists the embedders of this database.",
+            )
+            .command(
+                "download the model's files again",
+                "graphersal embed-model download <repo>",
+            )
+            .command(
+                "import them into the store in place of the damaged copy",
+                "graphersal embed-model import <repo> --into <store> --replace",
+            )
+            .finish(),
             EmbedError::Failed { .. } => "The embedder reported the error above; its message \
                  says what went wrong."
                 .to_string(),

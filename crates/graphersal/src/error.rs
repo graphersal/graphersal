@@ -2500,14 +2500,24 @@ impl DiagnosticError for GraphError {
             )),
             GraphError::VectorRuleFailed {
                 label, key, model, ..
-            } => Some(format!(
-                "Nothing was written: the whole unit was rolled back. The vector rule of \
-                 {label}.{key} embeds with {model}. A model that does not load or is damaged \
-                 comes back with graphersal embed-model download <repo>, then graphersal \
-                 embed-model import <repo> --into <store> --replace; a fill stopped by the \
-                 memory ceiling needs a higher one (--memory-limit, memory.limit); a cancelled \
-                 or timed-out fill runs again unchanged."
-            )),
+            } => Some(
+                crate::graph::note_text::NoteText::new(format!(
+                    "Nothing was written: the whole unit was rolled back. The vector rule of \
+                     {label}.{key} embeds with {model}. A model that does not load or is \
+                     damaged comes back when it is downloaded and imported again (below); a \
+                     fill stopped by the memory ceiling needs a higher one (--memory-limit, \
+                     memory.limit); a cancelled or timed-out fill runs again unchanged."
+                ))
+                .command(
+                    "download the model's files again",
+                    "graphersal embed-model download <repo>",
+                )
+                .command(
+                    "import them into the store in place of the damaged copy",
+                    "graphersal embed-model import <repo> --into <store> --replace",
+                )
+                .finish(),
+            ),
             GraphError::VectorRuleModelMissing { model, .. } => Some(if model.contains("?normalize=") {
                 format!(
                     "A vector rule embeds with hash-ngram/1 or a model of the store, named by \
@@ -2517,11 +2527,16 @@ impl DiagnosticError for GraphError {
                     model.split_once('?').map_or(model.as_str(), |(base, _)| base)
                 )
             } else {
-                format!(
+                crate::graph::note_text::NoteText::new(format!(
                     "A vector rule embeds with hash-ngram/1 or a model of the store. Import the \
-                     model first: graphersal embed-model import <repo> --into <store> (the \
-                     repository of {model}), or use \"embedder\": \"hash-ngram/1\"."
+                     model first (the repository of {model}), or use \"embedder\": \
+                     \"hash-ngram/1\"."
+                ))
+                .command(
+                    "import the model into the store",
+                    "graphersal embed-model import <repo> --into <store>",
                 )
+                .finish()
             }),
         }
     }
@@ -11325,5 +11340,75 @@ mod tests {
         ] {
             assert!(help.contains(needle), "{needle} missing in: {help}");
         }
+    }
+
+    /// The model helps list their commands on lines of their own, each under a `# comment`
+    /// (the note layout, issue #19); the prose keeps the rest of the advice.
+    #[test]
+    fn the_model_helps_list_their_commands_on_lines_of_their_own() {
+        let failed = GraphError::VectorRuleFailed {
+            label: "doc".to_string(),
+            key: "emb".to_string(),
+            model: "model2vec/acme/tiny@0123456789ab".to_string(),
+            cause: Box::new(crate::value::EmbedError::unavailable("the blob is damaged")),
+        }
+        .help()
+        .unwrap_or_default();
+        assert_eq!(
+            failed.lines().skip(1).collect::<Vec<_>>(),
+            [
+                "  # download the model's files again",
+                "  graphersal embed-model download <repo>",
+                "  # import them into the store in place of the damaged copy",
+                "  graphersal embed-model import <repo> --into <store> --replace",
+            ],
+            "{failed}"
+        );
+        assert!(
+            !failed
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .contains("graphersal ")
+        );
+        let missing = GraphError::VectorRuleModelMissing {
+            label: "doc".to_string(),
+            key: "emb".to_string(),
+            model: "model2vec/acme/tiny@0123456789ab".to_string(),
+        }
+        .help()
+        .unwrap_or_default();
+        assert_eq!(
+            missing,
+            "A vector rule embeds with hash-ngram/1 or a model of the store. Import the model \
+             first (the repository of model2vec/acme/tiny@0123456789ab), or use \"embedder\": \
+             \"hash-ngram/1\".\n  # import the model into the store\n  graphersal embed-model \
+             import <repo> --into <store>"
+        );
+        let unknown = crate::value::EmbedError::unknown("acme/none").help();
+        assert!(
+            unknown.ends_with(
+                "\n  # import a model into the store\n  graphersal embed-model import <repo> \
+                 --into <store>"
+            ),
+            "{unknown}"
+        );
+        assert!(
+            unknown.contains("g.embedders() lists the embedders"),
+            "{unknown}"
+        );
+        let unavailable = crate::value::EmbedError::unavailable("gone").help();
+        assert!(
+            unavailable.ends_with(
+                "\n  # download the model's files again\n  graphersal embed-model download \
+                 <repo>\n  # import them into the store in place of the damaged copy\n  \
+                 graphersal embed-model import <repo> --into <store> --replace"
+            ),
+            "{unavailable}"
+        );
+        assert!(
+            unavailable.contains("or restore the store from a backup"),
+            "{unavailable}"
+        );
     }
 }

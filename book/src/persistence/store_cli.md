@@ -353,7 +353,11 @@ is intact.
 ```text
 $ graphersal store backup data/ backup/
 Error: The backup stopped: the store data/ is damaged: wal/00000000000000000001.wal at byte 64: record of commit 1: checksum mismatch; nothing of the backup into backup/ was kept
-Help: Repair the MAIN store, never the backup: graphersal store repair data/ --to <new_dir> ...
+Help: Repair the MAIN store, never the backup: Store::repair_dir builds a verified, repaired copy ...
+        # build a repaired copy of the main store
+        graphersal store repair data/ --to <new_dir>
+        # show the full damage report
+        graphersal store verify data/
 ```
 
 Refused (exit 1, the backup unchanged): a backup of another graph, a directory holding a store

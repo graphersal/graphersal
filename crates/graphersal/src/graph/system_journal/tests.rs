@@ -492,3 +492,47 @@ fn a_newest_first_query_of_a_full_ring_says_older_records_are_gone() {
     assert_eq!(past.records.len(), 1, "only seq 6 is still held");
     assert!(past.truncated);
 }
+
+/// `to_line` keeps one header line per record; a field of several lines (a `recommendation` in
+/// the note layout) follows below it, indented, and the one-line fields stay in parentheses.
+#[test]
+fn a_multi_line_field_follows_the_record_line_indented() {
+    let journal = SystemJournal::in_memory(CommitClock::new());
+    let recommendation = crate::graph::note_text::NoteText::new("bring the model back")
+        .command(
+            "download the model's files again",
+            "graphersal embed-model download acme/tiny",
+        )
+        .finish();
+    journal.emit(
+        &catalogue::MODEL_UNAVAILABLE,
+        Event::new("the model acme/tiny is missing: queries with it fail")
+            .field("repo", "acme/tiny")
+            .field("identity", "model2vec/acme/tiny@0123456789ab")
+            .field("cause", "missing")
+            .field("recommendation", recommendation),
+    );
+    let records = journal.query(&JournalQuery::new()).unwrap().records;
+    let line = records[0].to_line();
+    let lines: Vec<&str> = line.lines().collect();
+    assert!(
+        lines[0].ends_with(
+            "model.unavailable the model acme/tiny is missing: queries with it fail \
+             (repo=acme/tiny, identity=model2vec/acme/tiny@0123456789ab, cause=missing)"
+        ),
+        "{line}"
+    );
+    assert_eq!(
+        lines[1..],
+        [
+            "  recommendation: bring the model back",
+            "    # download the model's files again",
+            "    graphersal embed-model download acme/tiny",
+        ],
+        "{line}"
+    );
+    // A record without a field of several lines stays one line.
+    journal.emit(&catalogue::STORE_OPENED, Event::new("opened"));
+    let records = journal.query(&JournalQuery::new()).unwrap().records;
+    assert!(!records[1].to_line().contains('\n'));
+}

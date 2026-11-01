@@ -198,10 +198,27 @@ function valueText(value) {
   }
 }
 
-/** The fields as `name=value, ...` (the CLI's line form). */
+/**
+ * The fields as the CLI shows them (`JournalRecord::to_line`): the one-line ones as
+ * `name=value, ...`; a value of several lines (a `recommendation`: a headline, then each command
+ * on its own line under a `# comment`) on lines of its own below them, `name: ` before its first
+ * line, every line indented by two spaces (the panel keeps the line breaks: `white-space:
+ * pre-wrap`).
+ */
 export function fieldsText(fields) {
   if (!fields || typeof fields !== 'object') return '';
-  return Object.entries(fields).map(([k, v]) => `${k}=${valueText(v)}`).join(', ');
+  const inline = [];
+  const below = [];
+  for (const [k, v] of Object.entries(fields)) {
+    const text = valueText(v);
+    if (text.includes('\n')) {
+      const [first, ...rest] = text.split('\n');
+      below.push([`  ${k}: ${first}`, ...rest.map((line) => `  ${line}`)].join('\n'));
+    } else {
+      inline.push(`${k}=${text}`);
+    }
+  }
+  return [inline.join(', '), ...below].filter((part) => part !== '').join('\n');
 }
 
 /** The badge class of a level (`badge danger` for errors, ...). */
