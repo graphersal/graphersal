@@ -106,6 +106,21 @@
 //! an aggregate call is a grouping key), and `DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` follow
 //! it as after `gql:project`. Its output rows are generated traversers (fresh paths), so an
 //! aggregating `WITH` row read later is labelled `#w<k>` like any materializing `WITH` row.
+//!
+//! Whole-pattern counts (issue #20). The binder writes `count(x)` of a never-`NULL` variable as
+//! `count(*)` (`bind::Binder::count_rows`), so the aggregation reads no label for `x`. At the
+//! top of a read query, an aggregation whose every column is `count(*)` ([`counts_rows`])
+//! right after a node scan and its filters (`has_label`, pushed `has()`) is emitted as
+//! `count()` followed by `gql:project` of the count ([`Instr::CountRow`],
+//! [`Lowered::whole_count`]), which the optimizer's `count_pushdown` answers from the
+//! statistics or an index: `MATCH (n:L) RETURN count(n)` is
+//! `v(labels: ["L"]).count().gql:project("..")`. After a scan of an unconstrained node, one
+//! directed hop with nothing on the edge and an unconstrained node reached, the scan and the
+//! hop become `e()` plus the edge labels: `MATCH ()-[r:T]->() RETURN count(r)` is
+//! `e(labels: ["T"]).count().gql:project("..")`; it reads edges only (`Read` on edges, like
+//! `g.e().count()`), never the endpoints. Every other aggregation stays `gql:aggregate`
+//! (either direction: a self-loop counts once, every other edge twice; longer patterns,
+//! subquery and `CALL` bodies, writing queries).
 
 use std::sync::Arc;
 
@@ -500,6 +515,10 @@ enum Instr<S: GraphStorage> {
         site: Site,
         subqueries: Bodies<S>,
         returning: bool,
+        /// When every column is `count(*)` (issue #20): the columns of the
+        /// [`Instr::CountRow`] that stands for it in a whole-pattern count
+        /// ([`Lowered::whole_count`]).
+        counting: Option<Vec<GqlColumn<S>>>,
     },
     /// `gql:distinct()` (GQL equality, decision C3).
     Distinct,
@@ -586,6 +605,14 @@ enum Instr<S: GraphStorage> {
     /// `count()`: the last step of a `COUNT { }` body (stage 2d): the host answers the count of
     /// the body's matches or rows, bulk counted.
     Count,
+    /// `gql:project(columns)` right after a [`Instr::Count`] standing for an aggregating
+    /// projection whose every column is `count(*)` (issue #20, [`Lowered::whole_count`]): each
+    /// column reads the count, the current object (the extra slot after the bindings);
+    /// `returning` as for [`Instr::Project`].
+    CountRow {
+        columns: Vec<GqlColumn<S>>,
+        returning: bool,
+    },
     /// `gql:value(column)`: the last step of a `COLLECT { }` body (stage 2d), the one column of
     /// the body's `RETURN` record (the current object, `Binding::Column(0)`, `expr` its slot
     /// 0); the host collects the values into the list.
@@ -733,6 +760,14 @@ struct Hop<S: GraphStorage> {
     /// The group variable of a quantified edge: the vertex each iteration reaches gets its
     /// inner label (`as("#gv<id>")`) when a path variable reads the group.
     inner: Option<BindingId>,
+}
+
+/// What a whole-pattern count scans ([`Lowered::whole_count`], issue #20).
+enum CountScan {
+    /// The node scan and its filters as lowered.
+    Nodes,
+    /// `e()` with these labels (`None`: any edge) in place of the scan and the hop.
+    Edges(Option<Vec<String>>),
 }
 
 /// The lowered query, ready to be emitted onto a source.
@@ -926,8 +961,90 @@ impl<S: GraphStorage> Lowered<S> {
     where
         S: 'g,
     {
-        let instrs = std::mem::take(&mut self.instrs);
-        self.emit_into(source, instrs)
+        let mut instrs = std::mem::take(&mut self.instrs);
+        let Some((edge, at)) = self.whole_count(&instrs) else {
+            return self.emit_into(source, instrs);
+        };
+        // A whole-pattern count (issue #20): `count()` and its row in place of the
+        // aggregation, after the scan and its filters, or after `e()` for one edge.
+        let mut rest = instrs.split_off(at);
+        let (columns, returning) = match rest.first_mut() {
+            Some(Instr::Aggregate {
+                counting,
+                returning,
+                ..
+            }) => (counting.take().unwrap_or_default(), *returning),
+            _ => return self.emit_into(source, instrs.into_iter().chain(rest).collect()),
+        };
+        rest[0] = Instr::CountRow { columns, returning };
+        rest.insert(0, Instr::Count);
+        let source = match edge {
+            CountScan::Edges(labels) => {
+                let source = source.e(ArgStrings::None);
+                match labels {
+                    Some(labels) => source.has_label(labels),
+                    None => source,
+                }
+            }
+            CountScan::Nodes => self.emit_into(source, instrs),
+        };
+        self.emit_into(source, rest)
+    }
+
+    /// A whole-pattern count at the top of a read query (issue #20): the position of an
+    /// aggregation that only counts rows ([`Instr::Aggregate`] with `counting`), preceded only
+    /// by
+    /// - a node scan and its filters (`has_label`, pushed `has()`, no label set): `count()`
+    ///   after it is answered from the statistics or an index (`count_pushdown`):
+    ///   [`CountScan::Nodes`];
+    /// - or a scan of an unconstrained node, one directed hop with nothing on the edge and an
+    ///   unconstrained node reached (`MATCH ()-[r:T]->() RETURN count(r)`): every edge of the
+    ///   labels is counted exactly once (a self-loop too), so `e().has_label(T).count()` gives
+    ///   the same number: [`CountScan::Edges`] with the hop's labels.
+    ///
+    /// Either direction is not covered (a self-loop counts once, every other edge twice), nor
+    /// a writing query (its plans stay as written, W15).
+    fn whole_count(&self, instrs: &[Instr<S>]) -> Option<(CountScan, usize)> {
+        if self.writes || !matches!(instrs.first(), Some(Instr::Scan)) {
+            return None;
+        }
+        let counting = |at: usize| {
+            matches!(
+                instrs.get(at),
+                Some(Instr::Aggregate {
+                    counting: Some(_),
+                    ..
+                })
+            )
+        };
+        let unlabelled =
+            |instr: &Instr<S>| matches!(instr, Instr::Label(id) if !self.is_labelled(*id));
+        let filter = |instr: &Instr<S>| {
+            unlabelled(instr) || matches!(instr, Instr::HasLabel(_) | Instr::Has(..))
+        };
+        let mut at = 1;
+        while instrs.get(at).is_some_and(filter) {
+            at += 1;
+        }
+        if counting(at) {
+            return Some((CountScan::Nodes, at));
+        }
+        // The edge form: nothing but unset labels around the hop.
+        if !instrs.get(1..at).is_some_and(|s| s.iter().all(unlabelled)) {
+            return None;
+        }
+        let Some(Instr::Hop(hop)) = instrs.get(at) else {
+            return None;
+        };
+        let plain = hop.quantifier.is_none()
+            && hop.inner.is_none()
+            && matches!(hop.direction, EdgeDirection::Right | EdgeDirection::Left)
+            && hop.steps.iter().all(unlabelled);
+        let mut next = at + 1;
+        while instrs.get(next).is_some_and(unlabelled) {
+            next += 1;
+        }
+        (plain && counting(next)).then(|| (CountScan::Edges(hop.labels.clone()), next))
     }
 
     /// Emits `instrs` onto `g` (the source, or the child of an `optional()`).
@@ -1018,6 +1135,7 @@ impl<S: GraphStorage> Lowered<S> {
                     site,
                     subqueries,
                     returning: false,
+                    counting: _,
                 } => g.gql_aggregate(
                     Arc::clone(&self.query),
                     columns,
@@ -1031,6 +1149,7 @@ impl<S: GraphStorage> Lowered<S> {
                     site,
                     subqueries,
                     returning: true,
+                    counting: _,
                 } => g.gql_aggregate_returning(
                     Arc::clone(&self.query),
                     columns,
@@ -1128,6 +1247,24 @@ impl<S: GraphStorage> Lowered<S> {
                     self.children(subqueries),
                 ),
                 Instr::Count => g.count(),
+                Instr::CountRow {
+                    columns,
+                    returning: false,
+                } => g.gql_project(
+                    Arc::clone(&self.query),
+                    columns,
+                    self.check_bindings(Site::default()),
+                    Vec::new(),
+                ),
+                Instr::CountRow {
+                    columns,
+                    returning: true,
+                } => g.gql_project_returning(
+                    Arc::clone(&self.query),
+                    columns,
+                    self.check_bindings(Site::default()),
+                    Vec::new(),
+                ),
                 Instr::Collect(expr) => g.gql_value(
                     Arc::clone(&self.query),
                     expr,
@@ -1475,6 +1612,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Merge { .. }
             | Instr::Value { .. }
             | Instr::Count
+            | Instr::CountRow { .. }
             | Instr::Collect(_)
             | Instr::Optional(_)
             | Instr::Union(_)
@@ -3862,6 +4000,27 @@ impl<'q> Lowering<'q> {
                         &self.scope(None, &[], Some(&hooks)),
                     )
                     .map_err(|error| eval_error(self.query, error))?;
+                    // Every column counts the rows (issue #20): the row of a `count()` in its
+                    // place, used when the emission finds a whole-pattern count.
+                    let counting = if counts_rows(columns) {
+                        let mut compiled = Vec::with_capacity(columns.len());
+                        for column in columns {
+                            let count = Expr {
+                                kind: ExprKind::Variable(Identifier {
+                                    name: String::new(),
+                                    span: column.written,
+                                }),
+                                span: column.written,
+                            };
+                            compiled.push(GqlColumn {
+                                name: CompactString::from(column.name.as_str()),
+                                expr: self.compile(&count, Some(n), &[])?,
+                            });
+                        }
+                        Some(compiled)
+                    } else {
+                        None
+                    };
                     let columns = columns
                         .iter()
                         .zip(outputs)
@@ -3877,6 +4036,7 @@ impl<'q> Lowering<'q> {
                         site,
                         subqueries: self.bodies(hooks, site)?,
                         returning,
+                        counting,
                     });
                 }
                 ResultOp::Distinct => instrs.push(Instr::Distinct),
@@ -4033,6 +4193,7 @@ impl<'q> Lowering<'q> {
                 | Instr::PartLabel(_)
                 | Instr::Merge { .. }
                 | Instr::Count
+                | Instr::CountRow { .. }
                 | Instr::Collect(_)
                 | Instr::Discard => {}
             }
@@ -4867,6 +5028,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             | Instr::PartLabel(_)
             | Instr::Merge { .. }
             | Instr::Count
+            | Instr::CountRow { .. }
             | Instr::Collect(_)
             | Instr::Discard => {}
         }
@@ -4952,10 +5114,31 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::PartLabel(_)
             | Instr::Merge { .. }
             | Instr::Count
+            | Instr::CountRow { .. }
             | Instr::Collect(_)
             | Instr::Discard => {}
         }
     }
+}
+
+/// Whether an aggregating projection of `columns` only counts rows (issue #20): every column is
+/// exactly `count(*)` without `DISTINCT` (the binder writes `count(x)` of a never-`NULL`
+/// variable as `count(*)`, `bind::Binder::count_rows`), so `count()` gives the same number
+/// (bulk counted; `0` for no row, the one row of an empty input without keys).
+fn counts_rows(columns: &[Column]) -> bool {
+    !columns.is_empty()
+        && columns.iter().all(|column| {
+            column.aggregate
+                && matches!(
+                    &column.expr.kind,
+                    ExprKind::FunctionCall {
+                        name,
+                        distinct: false,
+                        args: CallArgs::Star(_),
+                    } if super::parser::lookup_function(&name.name)
+                        .is_some_and(|spec| spec.function == super::parser::Function::Count)
+                )
+        })
 }
 
 /// The names of `labels` as written (a `SET` / `REMOVE` label item, an edge pattern's labels).
