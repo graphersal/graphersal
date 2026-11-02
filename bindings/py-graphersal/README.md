@@ -716,6 +716,18 @@ results). The same allocator makes Memory profiles exact:
 (a bare `profile()` collects no memory data). The cost is a few counter increments per
 allocation of the extension.
 
+`graph.memory_report()` shows where a graph's own memory goes (per label and property, plus the
+slots: `report["structure"]["vertex_slots"]["spare"]`). A graph built by write queries keeps the
+spare capacity its growing vectors reserved past the data (up to about half of the slots); a
+loaded graph has none. After a bulk load by queries, release it once with
+`graph.shrink_to_fit()`; it changes no data and commits nothing (the vacant slots of removed
+elements stay):
+
+```python
+graph.execute('g.gql("UNWIND range(0, 199999) AS i CREATE (:P {id: i})").iterate()')
+graph.shrink_to_fit()   # {'measured': True, 'before_bytes': ..., 'after_bytes': ..., 'released_bytes': ...}
+```
+
 ## GraphRAG example
 
 [`examples/graphrag.py`](https://github.com/graphersal/graphersal/blob/main/bindings/py-graphersal/examples/graphrag.py) ingests a small knowledge graph of text entities and

@@ -296,6 +296,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "statistics",
             "memory_usage",
             "memory_report",
+            "shrink_to_fit",
             "mark",
             "import_graphml",
             "import_graphson",
@@ -522,6 +523,11 @@ const SEE_ALSO: &[(&str, &str, &str)] = &[
     ),
     (
         "memory_report",
+        "Memory Inspection and Profiling",
+        "users_guide/memory_and_profiling.md",
+    ),
+    (
+        "shrink_to_fit",
         "Memory Inspection and Profiling",
         "users_guide/memory_and_profiling.md",
     ),

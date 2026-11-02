@@ -190,7 +190,7 @@ unless a page says otherwise; the differences are collected in
 
 ### Graph information and files
 
-[`statistics`](steps/statistics.md) · [`memory_usage`](steps/memory_usage.md) · [`memory_report`](steps/memory_report.md) · [`mark`](steps/mark.md) · [`import_graphml`](steps/import_graphml.md) · [`import_graphson`](steps/import_graphson.md) · [`export_graphml`](steps/export_graphml.md) · [`export_graphson`](steps/export_graphson.md) · [`export_snapshot`](steps/export_snapshot.md)
+[`statistics`](steps/statistics.md) · [`memory_usage`](steps/memory_usage.md) · [`memory_report`](steps/memory_report.md) · [`shrink_to_fit`](steps/shrink_to_fit.md) · [`mark`](steps/mark.md) · [`import_graphml`](steps/import_graphml.md) · [`import_graphson`](steps/import_graphson.md) · [`export_graphml`](steps/export_graphml.md) · [`export_graphson`](steps/export_graphson.md) · [`export_snapshot`](steps/export_snapshot.md)
 
 ### Predicates, tokens and test data
 

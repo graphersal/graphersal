@@ -5430,6 +5430,21 @@ mod tests {
         assert_eq!(stats.edge_label_count("knows"), 1);
     }
 
+    /// A storage that reports no memory figures (the `memory_usage` default) still shrinks
+    /// through `Graph::shrink_to_fit`; the report says nothing was measured instead of
+    /// inventing numbers.
+    #[test]
+    fn shrink_to_fit_on_a_storage_without_memory_figures_measures_nothing() {
+        let graph = crate::graph::Graph::new(MockStorage {
+            tg: build_test_graph(),
+        });
+        let report = graph.shrink_to_fit().unwrap();
+        assert_eq!(report.before_bytes, None);
+        assert_eq!(report.after_bytes, None);
+        assert_eq!(report.released_bytes(), None);
+        assert_eq!(GraphStorage::vertex_count(&*graph.read()).unwrap(), 2);
+    }
+
     /// A schema with a vector rule needs change capture (the rule pass walks the unit's undo
     /// log): a storage without it refuses the rule, not the schema's other parts.
     #[test]

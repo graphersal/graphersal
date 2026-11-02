@@ -893,6 +893,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","docComments":["/// Records a named mark in the graph's journal for point-in-time recovery; needs a journal (see the book page Persistence).","///","/// Example: `g.mark(\"before-import\")` fails with `no journal is registered`"],"name":"mark","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Records full paths for this traversal (TinkerPop's withPath(); path recording is otherwise derived from the query).","///","/// Example: `g.with_path().v(1).out().path().count().next()` returns `3`"],"name":"withPath","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"GraphTraversalSource"}
 {"access":"public","docComments":["/// Records full paths for this traversal (TinkerPop's withPath(); path recording is otherwise derived from the query).","///","/// Example: `g.with_path().v(1).out().path().count().next()` returns `3`"],"name":"with_path","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"GraphTraversalSource"}
+{"access":"public","docComments":["/// Releases the spare capacity a graph built by write queries keeps (slots and index room past the data) and returns its memory total before and after (before_bytes, after_bytes, released_bytes; measured false when the storage reports no figures); changes no data.","///","/// Example: `{ g.inject(1).repeat(__.add_v(\"p\")).times(100).iterate(); g.shrink_to_fit().released_bytes > 0 }` returns `true`"],"name":"shrink_to_fit","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a compression rule and decompresses its values; false when there is none.","///","/// Example: `{ g.define_compression(#{name: \"bio\", label: \"person\", path: \"bio\"}); g.drop_compression(\"bio\") }` returns `true`"],"name":"drop_compression","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a label from the label set of each incoming vertex and passes it on; the last one leaves it unlabeled (Graphersal extension).","///","/// Example: `g.v(1).drop_label(\"person\").labels().next()` returns `[]`"],"name":"drop_label","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"GraphTraversalSource"}
 {"access":"public","docComments":["/// Removes a saved query; false when there is none.","///","/// Example: `{ g.define_query(#{name: \"n\", body: \"fn n() { 1 }\"}); g.drop_query(\"n\") }` returns `true`"],"name":"drop_query","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
@@ -3093,6 +3094,7 @@ set_label(_: &mut GraphTraversalSource, _: string) -> GraphTraversalSource
 set_schema(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 set_schema(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 set_visualizer(_: &mut GraphTraversalSource, _: VisualizeFormat) -> GraphTraversalSource
+shrink_to_fit(_: &mut GraphTraversalSource) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 shuffle(_: &mut Fake, _: array) -> array
 sideEffect(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 side_effect(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
@@ -3947,6 +3949,7 @@ set
 set_label
 set_schema
 set_visualizer
+shrink_to_fit
 shuffle
 sideEffect
 side_effect
