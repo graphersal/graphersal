@@ -7012,14 +7012,77 @@ impl<'q> Binder<'q> {
             });
             names.push(name);
         }
+        let mut counting = vec![false; columns.len()];
         if columns.iter().any(|c| c.aggregate) {
             self.check_grouping(&columns, items, star.is_some(), clause)?;
+            for (column, counts) in columns.iter_mut().zip(counting.iter_mut()) {
+                *counts = self.count_rows(column);
+            }
         }
-        for column in &columns {
-            let ids = column.bindings.clone();
-            self.mark_read(&ids);
+        for (column, counts) in columns.iter().zip(counting) {
+            // A `count(x)` written as `count(*)` reads no variable of the row.
+            if !counts {
+                let ids = column.bindings.clone();
+                self.mark_read(&ids);
+            }
         }
         Ok((columns, names))
+    }
+
+    /// A column that is exactly `count(x)` (no `DISTINCT`) of a variable that can never be
+    /// `NULL` on a row becomes `count(*)` (issue #20): the same number, but the aggregate no
+    /// longer reads `x`, so the column does not mark `x` read and `x` gets no path label (no
+    /// `as("x")` per row), and the lowering can answer a whole-pattern count from the
+    /// statistics. The name, the written span and the call's span stay, so the column and the
+    /// profile read `count(x)` as written. Never `NULL`: a node or edge variable of a
+    /// non-optional `MATCH` of this query or body ([`Self::never_null`]); a query with a write
+    /// clause keeps the call as written. Returns whether it rewrote the column; its `bindings`
+    /// still list `x` (an `ORDER BY` key reusing the column by its text reads what the column
+    /// reads).
+    fn count_rows(&self, column: &mut Column) -> bool {
+        let ExprKind::FunctionCall {
+            name,
+            distinct: false,
+            args: CallArgs::Exprs(args),
+        } = &column.expr.kind
+        else {
+            return false;
+        };
+        let counting = lookup_function(&name.name)
+            .is_some_and(|spec| spec.function == super::parser::Function::Count);
+        let ([arg], [id]) = (args.as_slice(), column.bindings.as_slice()) else {
+            return false;
+        };
+        if !counting || !matches!(arg.kind, ExprKind::Variable(_)) || !self.never_null(*id) {
+            return false;
+        }
+        let span = arg.span;
+        if let ExprKind::FunctionCall { args, .. } = &mut column.expr.kind {
+            *args = CallArgs::Star(span);
+        }
+        true
+    }
+
+    /// Whether binding `id` holds an element on every row where it is in scope: a node or edge
+    /// pattern variable (no `WITH` / `FOR` / `CALL` / `MERGE` column, no group variable, no
+    /// variable of a parenthesized path pattern's body: a `?` singleton may be `NULL`) whose
+    /// first appearance is a non-optional `MATCH` of the query or body being bound, in a query
+    /// without write clauses (a deleted element stays out of this reasoning).
+    fn never_null(&self, id: BindingId) -> bool {
+        let Some(binding) = self.bindings.get(id.0) else {
+            return false;
+        };
+        matches!(binding.kind, BindingKind::Node | BindingKind::Edge)
+            && binding.column.is_none()
+            && !binding.group
+            && !binding.checked
+            && binding.subquery == self.subquery
+            && self.body_of(id).is_none()
+            && matches!(self.segments.get(binding.segment), Some(Segment::Match(_)))
+            && !self
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Write(_)))
     }
 
     /// `GROUP BY` of `RETURN` (module docs): checks the keys against the columns; returns

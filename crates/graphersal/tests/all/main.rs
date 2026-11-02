@@ -91,6 +91,7 @@ mod gql_aggregate_tests;
 mod gql_call_tests;
 mod gql_compat_forms_tests;
 mod gql_composite_tests;
+mod gql_count_pushdown_tests;
 mod gql_exists_tests;
 mod gql_expression_tests;
 mod gql_for_tests;
