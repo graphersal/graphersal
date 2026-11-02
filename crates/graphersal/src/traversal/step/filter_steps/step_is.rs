@@ -6,6 +6,8 @@ use crate::*;
 #[derive(Clone)]
 struct StepIs<B: Into<PValue> + Debug + Clone + Send + Sync> {
     predicate: P<B>,
+    /// The hashed operands of a long `within`/`without` list (issue #21).
+    within: crate::value::membership::LiteralSetCache,
 }
 
 impl<B: Into<PValue> + Debug + Clone + Send + Sync> fmt::Display for StepIs<B> {
@@ -40,7 +42,10 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
         let predicate = predicate.into();
         self.push_step(GraphStep::Filter(
             is_step_tag(&predicate),
-            Box::new(StepIs { predicate }),
+            Box::new(StepIs {
+                predicate,
+                within: Default::default(),
+            }),
         ))
     }
 }
@@ -67,7 +72,13 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
         predicate: T,
     ) -> Self {
         let predicate = predicate.into();
-        let step = GraphStep::Filter(is_step_tag(&predicate), Box::new(StepIs { predicate }));
+        let step = GraphStep::Filter(
+            is_step_tag(&predicate),
+            Box::new(StepIs {
+                predicate,
+                within: Default::default(),
+            }),
+        );
         self.push_step(step)
     }
 }
@@ -85,7 +96,8 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
         context: &mut TraverserContext<'_, S>,
         source: &Traverser<S>,
     ) -> TraverserResult<bool> {
-        self.predicate.test(context, &source.value)
+        self.predicate
+            .test_cached(context, &source.value, &self.within)
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {

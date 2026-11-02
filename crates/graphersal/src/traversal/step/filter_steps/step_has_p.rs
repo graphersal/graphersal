@@ -7,6 +7,8 @@ use crate::*;
 struct StepHasP<B: Into<PValue> + Debug + Clone + Send + Sync> {
     key: String,
     predicate: P<B>,
+    /// The hashed operands of a long `within`/`without` list (issue #21).
+    within: crate::value::membership::LiteralSetCache,
 }
 
 impl<B: Into<PValue> + Debug + Clone + Send + Sync> fmt::Display for StepHasP<B> {
@@ -95,6 +97,7 @@ fn has_p_step<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send +
             Box::new(StepHasP {
                 key: name.to_string(),
                 predicate,
+                within: Default::default(),
             }),
         ),
         PropKey::Path(path) => super::step_has_path::has_path_p_step(path, predicate),
@@ -183,7 +186,9 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                             *node_index,
                             PropertyHandleKind::Value,
                         );
-                        Ok(self.predicate.test(context, &traverser_value)?)
+                        Ok(self
+                            .predicate
+                            .test_cached(context, &traverser_value, &self.within)?)
                     } else {
                         Ok(false)
                     }
@@ -197,7 +202,9 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                     let value = vertex.get(self.key.as_str());
                     if let Some(value) = value {
                         let traverser_value = TraverserValue::Computed(value.to_logical(), None);
-                        Ok(self.predicate.test(context, &traverser_value)?)
+                        Ok(self
+                            .predicate
+                            .test_cached(context, &traverser_value, &self.within)?)
                     } else {
                         Ok(false)
                     }
@@ -224,7 +231,11 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                         Some(nested) => {
                                             let traverser_value =
                                                 TraverserValue::Computed(nested.to_logical(), None);
-                                            self.predicate.test(context, &traverser_value)
+                                            self.predicate.test_cached(
+                                                context,
+                                                &traverser_value,
+                                                &self.within,
+                                            )
                                         }
                                         None => Ok(false),
                                     }
@@ -263,7 +274,11 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                         Some(nested) => {
                                             let traverser_value =
                                                 TraverserValue::Computed(nested.to_logical(), None);
-                                            self.predicate.test(context, &traverser_value)
+                                            self.predicate.test_cached(
+                                                context,
+                                                &traverser_value,
+                                                &self.within,
+                                            )
                                         }
                                         None => Ok(false),
                                     }
@@ -297,7 +312,11 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                 *edge_index,
                                 PropertyHandleKind::Value,
                             );
-                            Ok(self.predicate.test(context, &traverser_value)?)
+                            Ok(self.predicate.test_cached(
+                                context,
+                                &traverser_value,
+                                &self.within,
+                            )?)
                         } else {
                             Ok(false)
                         }
@@ -315,7 +334,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                     None,
                 );
                 if let Some(val) = obj.get(&key_tv) {
-                    self.predicate.test(context, val)
+                    self.predicate.test_cached(context, val, &self.within)
                 } else {
                     Ok(false)
                 }
@@ -323,7 +342,8 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 
             TraverserValue::Record { keys, values } => {
                 if let Some(idx) = keys.iter().position(|k| k.as_str() == self.key.as_str()) {
-                    self.predicate.test(context, &values[idx])
+                    self.predicate
+                        .test_cached(context, &values[idx], &self.within)
                 } else {
                     Ok(false)
                 }

@@ -114,6 +114,10 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// Whether merge points may merge equal traversers in this execution: the `bulk.merge`
     /// option, switched off when the plan mutates the graph.
     pub(crate) bulk_merge: bool,
+    /// Whether the plan of this execution never writes to the graph (from the path analysis'
+    /// effects; `false` until known). Only then does a `within` index over a side effect hash a
+    /// lazily read property value by its value: it cannot change during the run.
+    pub(crate) reads_only: bool,
     /// Whether a merge actually merged something. Invariant: no traverser has a bulk above 1
     /// unless this is `true`, so count and expansion fast paths may use `len()` while it is
     /// `false`.
@@ -244,6 +248,7 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             loop_stack: Vec::new(),
             loop_persist: false,
             bulk_merge: false,
+            reads_only: false,
             bulk_active: false,
             sack_merge: None,
             bulk_one: false,

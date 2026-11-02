@@ -274,5 +274,6 @@ mod where_by_tests;
 mod where_label_equality_tests;
 mod where_scope_tests;
 mod where_unnest_optimization_tests;
+mod within_side_effect_tests;
 mod workload_store_tests;
 mod wrong_results_step1_tests;

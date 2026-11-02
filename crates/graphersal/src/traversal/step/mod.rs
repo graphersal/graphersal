@@ -1294,7 +1294,7 @@ pub(crate) trait GraphStepSideEffect<'g, S: GraphStorage + 'g>:
         {
             side_effect.insert(
                 compact_str::CompactString::new(key),
-                crate::traversal::side_effect::SideEffectValue::List(Vec::new()),
+                crate::traversal::side_effect::SideEffectValue::list(Vec::new()),
             );
         }
     }

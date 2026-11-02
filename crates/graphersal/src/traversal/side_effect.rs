@@ -7,6 +7,7 @@
 
 use crate::graph::Graph;
 use crate::graph::GraphStorage;
+use crate::value::membership::{MemberIndex, MemberIndexCell};
 use crate::*;
 use fnv::FnvBuildHasher;
 use indexmap::{IndexMap, IndexSet};
@@ -19,10 +20,15 @@ pub(crate) enum SideEffectValue<S: GraphStorage> {
     /// A single value: a `withSideEffect` seed, a `tree()` result, a `subgraph()` schema.
     Value(TraverserValue<S>),
     /// An `aggregate()`/`store()` bucket: every collected value, duplicates kept.
-    List(Vec<TraverserValue<S>>),
+    ///
+    /// The list only ever grows at its end (`push_side_effect_n`); the [`MemberIndexCell`] is the
+    /// `within`/`without` index over it, extended lazily by the next test. Code that changed the
+    /// list in any other way would have to reset the cell.
+    List(Vec<TraverserValue<S>>, MemberIndexCell),
     /// A bucket declared as a set (`withSideEffect("a", Set.of())`): every value is kept once, in
     /// first-seen order. Bulk is invisible: a traverser of bulk `n` inserts its value once.
-    Set(IndexSet<TraverserValue<S>, FnvBuildHasher>),
+    /// Append-only like [`Self::List`], with the same index.
+    Set(IndexSet<TraverserValue<S>, FnvBuildHasher>, MemberIndexCell),
     /// A bucket declared with an [`Operator`] (`withSideEffect("a", 0, Operator.sum)`): `aggregate()`
     /// and `store()` combine into `value` with `op` instead of collecting a list.
     ///
@@ -153,8 +159,12 @@ impl<S: GraphStorage> Clone for SideEffectValue<S> {
     fn clone(&self) -> Self {
         match self {
             SideEffectValue::Value(value) => SideEffectValue::Value(value.clone()),
-            SideEffectValue::List(items) => SideEffectValue::List(items.clone()),
-            SideEffectValue::Set(items) => SideEffectValue::Set(items.clone()),
+            SideEffectValue::List(items, index) => {
+                SideEffectValue::List(items.clone(), index.clone())
+            }
+            SideEffectValue::Set(items, index) => {
+                SideEffectValue::Set(items.clone(), index.clone())
+            }
             SideEffectValue::Reduced { op, value, pending } => SideEffectValue::Reduced {
                 op: *op,
                 value: value.clone(),
@@ -173,8 +183,8 @@ impl<S: GraphStorage> std::fmt::Debug for SideEffectValue<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SideEffectValue::Value(value) => f.debug_tuple("Value").field(value).finish(),
-            SideEffectValue::List(items) => f.debug_tuple("List").field(items).finish(),
-            SideEffectValue::Set(items) => f.debug_tuple("Set").field(items).finish(),
+            SideEffectValue::List(items, _) => f.debug_tuple("List").field(items).finish(),
+            SideEffectValue::Set(items, _) => f.debug_tuple("Set").field(items).finish(),
             SideEffectValue::Reduced { op, value, .. } => f
                 .debug_struct("Reduced")
                 .field("op", op)
@@ -198,7 +208,7 @@ impl<S: GraphStorage> SideEffectValue<S> {
     /// keeps appending to, any other value is a single value.
     pub(crate) fn seed(value: ElementProperty) -> Self {
         match TraverserValue::from(value) {
-            TraverserValue::Array(items) => SideEffectValue::List(items),
+            TraverserValue::Array(items) => SideEffectValue::list(items),
             other => SideEffectValue::Value(other),
         }
     }
@@ -207,8 +217,10 @@ impl<S: GraphStorage> SideEffectValue<S> {
     pub(crate) fn to_traverser_value(&self) -> TraverserValue<S> {
         match self {
             SideEffectValue::Value(value) => value.clone(),
-            SideEffectValue::List(items) => TraverserValue::Array(items.clone()),
-            SideEffectValue::Set(items) => TraverserValue::Array(items.iter().cloned().collect()),
+            SideEffectValue::List(items, _) => TraverserValue::Array(items.clone()),
+            SideEffectValue::Set(items, _) => {
+                TraverserValue::Array(items.iter().cloned().collect())
+            }
             SideEffectValue::Reduced { value, .. } => TraverserValue::from(value.clone()),
             // Readers without storage access (`within(..)`, `math`) see the selected edges; the
             // graph itself comes from `read`.
@@ -265,15 +277,44 @@ impl<S: GraphStorage> SideEffectValue<S> {
 
     /// The seed of `withSideEffect(name, Set.of(..))`: duplicates collapse, first-seen order kept.
     pub(crate) fn seed_set(items: impl IntoIterator<Item = ElementProperty>) -> Self {
-        SideEffectValue::Set(items.into_iter().map(TraverserValue::from).collect())
+        SideEffectValue::Set(
+            items.into_iter().map(TraverserValue::from).collect(),
+            MemberIndexCell::default(),
+        )
+    }
+
+    /// An `aggregate()`/`store()` list bucket holding `items`.
+    pub(crate) fn list(items: Vec<TraverserValue<S>>) -> Self {
+        SideEffectValue::List(items, MemberIndexCell::default())
+    }
+
+    /// The members of an append-only collection bucket (a list or a set) long enough for a
+    /// `within` index, with the bucket's index cell; `None` for every other bucket (scanned).
+    pub(crate) fn indexable_members(
+        &mut self,
+    ) -> Option<(IndexableMembers<'_, S>, &mut MemberIndexCell)> {
+        match self {
+            SideEffectValue::List(items, index) if MemberIndex::covers(items.len()) => {
+                Some((IndexableMembers::List(items), index))
+            }
+            SideEffectValue::Set(items, index) if MemberIndex::covers(items.len()) => {
+                Some((IndexableMembers::Set(items), index))
+            }
+            SideEffectValue::Value(_)
+            | SideEffectValue::List(..)
+            | SideEffectValue::Set(..)
+            | SideEffectValue::Reduced { .. }
+            | SideEffectValue::Subgraph { .. }
+            | SideEffectValue::Group(_) => None,
+        }
     }
 
     /// The members a `within`/`without` test ranges over: the list or set items, or the one value.
     pub(crate) fn members(&self) -> Members<'_, S> {
         match self {
             SideEffectValue::Value(value) => Members::One(std::iter::once(value)),
-            SideEffectValue::List(items) => Members::Slice(items.iter()),
-            SideEffectValue::Set(items) => Members::Set(items.iter()),
+            SideEffectValue::List(items, _) => Members::Slice(items.iter()),
+            SideEffectValue::Set(items, _) => Members::Set(items.iter()),
             SideEffectValue::Subgraph { edges, .. } => Members::Owned(
                 edges
                     .iter()
@@ -293,6 +334,30 @@ impl<S: GraphStorage> SideEffectValue<S> {
                 other => Members::Owned(vec![TraverserValue::from(other.clone())].into_iter()),
             },
             SideEffectValue::Group(bucket) => Members::Owned(vec![bucket.to_map()].into_iter()),
+        }
+    }
+}
+
+/// The members of a list or set bucket by position ([`SideEffectValue::indexable_members`]).
+pub(crate) enum IndexableMembers<'a, S: GraphStorage> {
+    List(&'a [TraverserValue<S>]),
+    Set(&'a IndexSet<TraverserValue<S>, FnvBuildHasher>),
+}
+
+impl<'a, S: GraphStorage> IndexableMembers<'a, S> {
+    /// The number of members.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            IndexableMembers::List(items) => items.len(),
+            IndexableMembers::Set(items) => items.len(),
+        }
+    }
+
+    /// The member at `position`.
+    pub(crate) fn get(&self, position: usize) -> Option<&'a TraverserValue<S>> {
+        match self {
+            IndexableMembers::List(items) => items.get(position),
+            IndexableMembers::Set(items) => items.get_index(position),
         }
     }
 }

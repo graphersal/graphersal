@@ -268,7 +268,7 @@ impl P<PValue> {
 }
 
 /// A stream value read as a comparable scalar (see `P::compare`).
-enum Scalar<'a> {
+pub(crate) enum Scalar<'a> {
     Null,
     Bool(bool),
     Number(&'a Number),
@@ -279,6 +279,19 @@ enum Scalar<'a> {
 }
 
 impl<'a> Scalar<'a> {
+    /// The scalar a literal operand holds (every operand is one), borrowed.
+    pub(crate) fn of_operand(value: &'a PValue) -> Self {
+        match value {
+            PValue::String(s) => Scalar::Str(Cow::Borrowed(s.as_str())),
+            PValue::Number(n) => Scalar::Number(n),
+            PValue::Boolean(b) => Scalar::Bool(*b),
+            PValue::Uuid(u) => Scalar::Uuid(*u),
+            PValue::Temporal(t) => Scalar::Temporal(*t),
+            PValue::Vector(v) => Scalar::Vector(v),
+            PValue::Null => Scalar::Null,
+        }
+    }
+
     /// The scalar a property value holds; `None` for a container or an element.
     fn of(property: &'a ElementProperty) -> Option<Self> {
         match property {
@@ -708,22 +721,21 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
             PValue::String(key) => key,
             _ => return Ok(None),
         };
-        let Some(bucket) = context.side_effect.get(key.as_str()) else {
+        let storage: &S = &*context.storage;
+        let Some(bucket) = context.side_effect.get_mut(key.as_str()) else {
             return Ok(None);
         };
         // Two scalars compare by value however each is held, an element by identity, anything
         // else by materialized value. The argument is materialized at most once, and only when
         // neither side is a scalar or an element (never the whole bucket per traverser when it
-        // can be avoided).
-        let context: &TraverserContext<'_, S> = context;
-        let mut materialized: Option<ElementProperty> = None;
-        let mut contains = false;
-        for member in bucket.members() {
-            if side_effect_member_matches(context, arg_value, &member, &mut materialized)? {
-                contains = true;
-                break;
-            }
-        }
+        // can be avoided). A long list or set is searched through its hash index.
+        let contains = side_effect_contains(
+            storage,
+            context.reads_only,
+            &context.memory,
+            arg_value,
+            bucket,
+        )?;
         Ok(Some(contains != negate))
     }
 
@@ -760,8 +772,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
             crate::traversal::side_effect::SideEffectValue::Reduced { value, .. } => {
                 Some(std::borrow::Cow::Owned(TraverserValue::from(value.clone())))
             }
-            crate::traversal::side_effect::SideEffectValue::List(_)
-            | crate::traversal::side_effect::SideEffectValue::Set(_)
+            crate::traversal::side_effect::SideEffectValue::List(..)
+            | crate::traversal::side_effect::SideEffectValue::Set(..)
             | crate::traversal::side_effect::SideEffectValue::Subgraph { .. }
             | crate::traversal::side_effect::SideEffectValue::Group(_) => None,
         };
@@ -824,6 +836,25 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         arg_value: &TraverserValue<S>,
     ) -> TraverserResult<bool> {
         self.test_resolving(context, arg_value, PathRef::default(), Operands::Values)
+    }
+
+    /// [`test`](Self::test) with the step's [`LiteralSetCache`]: a top-level `within`/`without`
+    /// with a long literal list is a hash lookup in the set built once for the step (issue #21);
+    /// the result is the same as `test`'s.
+    ///
+    /// [`LiteralSetCache`]: crate::value::membership::LiteralSetCache
+    pub(crate) fn test_cached<S: crate::graph::GraphStorage>(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        arg_value: &TraverserValue<S>,
+        cache: &crate::value::membership::LiteralSetCache,
+    ) -> TraverserResult<bool> {
+        match cache.get(self) {
+            Some((set, negated)) => {
+                Ok(literal_set_contains(&*context.storage, arg_value, set)? != negated)
+            }
+            None => self.test(context, arg_value),
+        }
     }
 
     /// The literal fallback of `where(P)`: like [`test`](Self::test), but a bare-string operand
@@ -979,19 +1010,9 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 Some(Ordering::Greater | Ordering::Equal)
             )),
 
-            P::WithIn(expected) => {
-                for candidate in expected {
-                    if Self::compare(context, arg_value, &candidate.clone().into())?
-                        == Some(Ordering::Equal)
-                    {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
+            P::WithIn(expected) => within_literal(&*context.storage, arg_value, expected),
 
-            P::WithOut(compare_value) => Ok(!P::WithIn(compare_value.clone())
-                .test_resolving(context, arg_value, arg_path, operands)?),
+            P::WithOut(expected) => Ok(!within_literal(&*context.storage, arg_value, expected)?),
 
             P::Inside(low, high) => Ok(Self::compare(context, arg_value, &low.clone().into())?
                 == Some(Ordering::Greater)
@@ -1098,19 +1119,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         let Some(actual) = Self::read_scalar(context, actual)? else {
             return Ok(None);
         };
-        Ok(match (&actual, expected) {
-            (Scalar::Number(a), PValue::Number(b)) => crate::value::scalar::compare_numbers(a, b),
-            (Scalar::Str(a), PValue::String(b)) => Some(a.as_ref().cmp(b.as_str())),
-            (Scalar::Bool(a), PValue::Boolean(b)) => Some(a.cmp(b)),
-            (Scalar::Uuid(a), PValue::Uuid(b)) => Some(a.cmp(b)),
-            // Temporal values compare within one temporal type only (TinkerPop compares dates
-            // with dates); a `datetime` by its instant.
-            (Scalar::Temporal(a), PValue::Temporal(b)) if a.kind() == b.kind() => Some(a.cmp(b)),
-            // Vectors with vectors only (a Graphersal extension), by their total order.
-            (Scalar::Vector(a), PValue::Vector(b)) => Some((*a).cmp(b)),
-            (Scalar::Null, PValue::Null) => Some(Ordering::Equal),
-            _ => None,
-        })
+        Ok(compare_scalar(&actual, expected))
     }
 
     /// Reads the scalar a stream value holds, in place. `None` for anything that is not a
@@ -1120,64 +1129,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         context: &'c TraverserContext<'_, S>,
         value: &'c TraverserValue<S>,
     ) -> TraverserResult<Option<Scalar<'c>>> {
-        Ok(match value {
-            TraverserValue::Computed(property, _) => Scalar::of(property),
-            TraverserValue::PathProperty(prop) => Scalar::of(&prop.1),
-            TraverserValue::VertexProperty(prop, vertex_index, kind) => {
-                if *kind == crate::value::PropertyHandleKind::Label {
-                    context
-                        .storage
-                        .vertex_label(*vertex_index)?
-                        .map(|l| Scalar::Str(Cow::Borrowed(l)))
-                } else if *kind == crate::value::PropertyHandleKind::Id {
-                    let id =
-                        crate::graph::storage::stored_vertex_id(&*context.storage, *vertex_index)?;
-                    Some(Scalar::Str(Cow::Borrowed(id)))
-                } else if !kind.reads_property() {
-                    None
-                } else {
-                    match context
-                        .storage
-                        .vertex_properties(*vertex_index)?
-                        .and_then(|p| p.get(prop.as_str()))
-                    {
-                        Some(property) => Scalar::of(property),
-                        None => Some(Scalar::Null),
-                    }
-                }
-            }
-            TraverserValue::EdgeProperty(prop, edge_index, kind) => {
-                if *kind == crate::value::PropertyHandleKind::Label {
-                    context
-                        .storage
-                        .edge_label(*edge_index)?
-                        .map(|l| Scalar::Str(Cow::Borrowed(l)))
-                } else if *kind == crate::value::PropertyHandleKind::Id {
-                    let id = crate::graph::storage::stored_edge_id(&*context.storage, *edge_index)?;
-                    Some(Scalar::Str(Cow::Borrowed(id)))
-                } else if !kind.reads_property() {
-                    None
-                } else {
-                    match context
-                        .storage
-                        .edge_properties(*edge_index)?
-                        .and_then(|p| p.get(prop.as_str()))
-                    {
-                        Some(property) => Scalar::of(property),
-                        None => Some(Scalar::Null),
-                    }
-                }
-            }
-            TraverserValue::Vertex(_)
-            | TraverserValue::Edge(_)
-            | TraverserValue::Path(_)
-            | TraverserValue::Object(_)
-            | TraverserValue::Record { .. }
-            | TraverserValue::Array(_)
-            | TraverserValue::Schema(_)
-            | TraverserValue::Graph(_)
-            | TraverserValue::Entry(_) => None,
-        })
+        read_scalar_in(&*context.storage, value)
     }
 
     /// Evaluates `typeOf()` against a stream value.
@@ -1418,13 +1370,13 @@ impl From<f64> for P<PValue> {
 /// [`values_equal`]), element handles by identity, anything else by materialized value (the
 /// argument's snapshot is computed once into `materialized`).
 fn side_effect_member_matches<S: crate::graph::GraphStorage>(
-    context: &TraverserContext<'_, S>,
+    storage: &S,
     arg: &TraverserValue<S>,
     member: &TraverserValue<S>,
     materialized: &mut Option<ElementProperty>,
 ) -> TraverserResult<bool> {
-    let left = P::<PValue>::read_scalar(context, arg)?;
-    let right = P::<PValue>::read_scalar(context, member)?;
+    let left = read_scalar_in(storage, arg)?;
+    let right = read_scalar_in(storage, member)?;
     match (left, right) {
         (Some(left), Some(right)) => return Ok(left.equals(&right)),
         (Some(_), None) | (None, Some(_)) => return Ok(false),
@@ -1433,10 +1385,218 @@ fn side_effect_member_matches<S: crate::graph::GraphStorage>(
     if is_element_handle(arg) && is_element_handle(member) {
         return Ok(arg == member);
     }
-    let storage: &S = context.storage;
     if materialized.is_none() {
         *materialized = Some(arg.into_node_property(storage)?);
     }
     let member = member.into_node_property(storage)?;
     Ok(materialized.as_ref() == Some(&member))
+}
+
+/// Whether `arg` is a member of a side-effect bucket by [`side_effect_member_matches`]
+/// (`where(within(key))`).
+///
+/// A list or set bucket of at least `membership::MIN_INDEXED` members is searched through its
+/// [`MemberIndex`](crate::value::membership::MemberIndex) (issue #21): the members added since
+/// the last test are classified first (each member once over the whole run), then only the
+/// members that can be equal are compared, by the same comparison. Every other bucket, and an
+/// argument that is neither a scalar nor an element handle, is scanned as before.
+fn side_effect_contains<S: crate::graph::GraphStorage>(
+    storage: &S,
+    reads_only: bool,
+    memory: &crate::traversal::run_memory::RunMemory,
+    arg: &TraverserValue<S>,
+    bucket: &mut crate::traversal::side_effect::SideEffectValue<S>,
+) -> TraverserResult<bool> {
+    use crate::value::membership::{MemberClass, element_hash, scalar_hash};
+    let mut materialized: Option<ElementProperty> = None;
+    let Some((members, cell)) = bucket.indexable_members() else {
+        for member in bucket.members() {
+            if side_effect_member_matches(storage, arg, &member, &mut materialized)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    };
+    let index = cell.get_or_default();
+    if index.indexed() > members.len() {
+        index.reset();
+    }
+    if index.indexed() < members.len() {
+        let before = index.heap_bytes();
+        while let Some(member) = members.get(index.indexed()) {
+            let lazy = matches!(
+                member,
+                TraverserValue::VertexProperty(..) | TraverserValue::EdgeProperty(..)
+            );
+            let class = if lazy && !reads_only {
+                // A plan that writes may change the property the handle reads.
+                MemberClass::Linear
+            } else {
+                match read_scalar_in(storage, member) {
+                    Ok(Some(scalar)) => MemberClass::Scalar(scalar_hash(&scalar)),
+                    Ok(None) if is_element_handle(member) => {
+                        MemberClass::Element(element_hash(member))
+                    }
+                    // A failing read is repeated (and reported) by the exact comparison.
+                    Ok(None) | Err(_) => MemberClass::Linear,
+                }
+            };
+            index.push(class);
+        }
+        let grown = index.heap_bytes().saturating_sub(before);
+        memory.charge(grown);
+        memory.retain(grown);
+    }
+    let candidate =
+        |position: usize, materialized: &mut Option<ElementProperty>| match members.get(position) {
+            Some(member) => side_effect_member_matches(storage, arg, member, materialized),
+            None => Ok(false),
+        };
+    match read_scalar_in(storage, arg)? {
+        Some(scalar) => {
+            for position in index.scalar_candidates(scalar_hash(&scalar)) {
+                if candidate(position, &mut materialized)? {
+                    return Ok(true);
+                }
+            }
+        }
+        None if is_element_handle(arg) => {
+            for position in index.element_candidates(element_hash(arg)) {
+                if candidate(position, &mut materialized)? {
+                    return Ok(true);
+                }
+            }
+        }
+        // A container or a path compares with every member by value.
+        None => {
+            for position in 0..members.len() {
+                if candidate(position, &mut materialized)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+    }
+    for &position in index.linear() {
+        if candidate(position as usize, &mut materialized)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Compares a scalar with a literal operand by the comparability rules of `P::compare`.
+pub(crate) fn compare_scalar(actual: &Scalar<'_>, expected: &PValue) -> Option<Ordering> {
+    match (actual, expected) {
+        (Scalar::Number(a), PValue::Number(b)) => crate::value::scalar::compare_numbers(a, b),
+        (Scalar::Str(a), PValue::String(b)) => Some(a.as_ref().cmp(b.as_str())),
+        (Scalar::Bool(a), PValue::Boolean(b)) => Some(a.cmp(b)),
+        (Scalar::Uuid(a), PValue::Uuid(b)) => Some(a.cmp(b)),
+        // Temporal values compare within one temporal type only (TinkerPop compares dates
+        // with dates); a `datetime` by its instant.
+        (Scalar::Temporal(a), PValue::Temporal(b)) if a.kind() == b.kind() => Some(a.cmp(b)),
+        // Vectors with vectors only (a Graphersal extension), by their total order.
+        (Scalar::Vector(a), PValue::Vector(b)) => Some((*a).cmp(b)),
+        (Scalar::Null, PValue::Null) => Some(Ordering::Equal),
+        _ => None,
+    }
+}
+
+/// `within(literal list)`: whether the stream value equals one of `operands` by `P::compare`.
+/// The value is read once (a lazily read property is looked up once, not per operand).
+fn within_literal<S: crate::graph::GraphStorage, T: Into<PValue> + Clone>(
+    storage: &S,
+    arg: &TraverserValue<S>,
+    operands: &[T],
+) -> TraverserResult<bool> {
+    if operands.is_empty() {
+        return Ok(false);
+    }
+    let Some(actual) = read_scalar_in(storage, arg)? else {
+        return Ok(false);
+    };
+    for operand in operands {
+        let operand: PValue = operand.clone().into();
+        if compare_scalar(&actual, &operand) == Some(Ordering::Equal) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the stream value equals one operand of a long literal `within` list: the operands
+/// of the value's hash, confirmed by `P::compare`'s rules (the same answer as [`within_literal`]).
+fn literal_set_contains<S: crate::graph::GraphStorage>(
+    storage: &S,
+    arg: &TraverserValue<S>,
+    set: &crate::value::membership::LiteralSet,
+) -> TraverserResult<bool> {
+    let Some(actual) = read_scalar_in(storage, arg)? else {
+        return Ok(false);
+    };
+    let hash = crate::value::membership::scalar_hash(&actual);
+    Ok(set
+        .candidates(hash)
+        .any(|operand| compare_scalar(&actual, operand) == Some(Ordering::Equal)))
+}
+
+/// `P::read_scalar` with only the storage borrowed, so a caller can hold a side-effect bucket
+/// mutably at the same time.
+pub(crate) fn read_scalar_in<'c, S: crate::graph::GraphStorage>(
+    storage: &'c S,
+    value: &'c TraverserValue<S>,
+) -> TraverserResult<Option<Scalar<'c>>> {
+    Ok(match value {
+        TraverserValue::Computed(property, _) => Scalar::of(property),
+        TraverserValue::PathProperty(prop) => Scalar::of(&prop.1),
+        TraverserValue::VertexProperty(prop, vertex_index, kind) => {
+            if *kind == crate::value::PropertyHandleKind::Label {
+                storage
+                    .vertex_label(*vertex_index)?
+                    .map(|l| Scalar::Str(Cow::Borrowed(l)))
+            } else if *kind == crate::value::PropertyHandleKind::Id {
+                let id = crate::graph::storage::stored_vertex_id(storage, *vertex_index)?;
+                Some(Scalar::Str(Cow::Borrowed(id)))
+            } else if !kind.reads_property() {
+                None
+            } else {
+                match storage
+                    .vertex_properties(*vertex_index)?
+                    .and_then(|p| p.get(prop.as_str()))
+                {
+                    Some(property) => Scalar::of(property),
+                    None => Some(Scalar::Null),
+                }
+            }
+        }
+        TraverserValue::EdgeProperty(prop, edge_index, kind) => {
+            if *kind == crate::value::PropertyHandleKind::Label {
+                storage
+                    .edge_label(*edge_index)?
+                    .map(|l| Scalar::Str(Cow::Borrowed(l)))
+            } else if *kind == crate::value::PropertyHandleKind::Id {
+                let id = crate::graph::storage::stored_edge_id(storage, *edge_index)?;
+                Some(Scalar::Str(Cow::Borrowed(id)))
+            } else if !kind.reads_property() {
+                None
+            } else {
+                match storage
+                    .edge_properties(*edge_index)?
+                    .and_then(|p| p.get(prop.as_str()))
+                {
+                    Some(property) => Scalar::of(property),
+                    None => Some(Scalar::Null),
+                }
+            }
+        }
+        TraverserValue::Vertex(_)
+        | TraverserValue::Edge(_)
+        | TraverserValue::Path(_)
+        | TraverserValue::Object(_)
+        | TraverserValue::Record { .. }
+        | TraverserValue::Array(_)
+        | TraverserValue::Schema(_)
+        | TraverserValue::Graph(_)
+        | TraverserValue::Entry(_) => None,
+    })
 }
