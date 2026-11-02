@@ -2915,6 +2915,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         context.memory.set_writes(effects.mutates);
         // A plan that mutates never merges: one logical traverser must stay one mutation.
         context.bulk_merge = context.options.bulk_merge && !effects.mutates;
+        context.reads_only = !effects.mutates;
         // A sack merge operator or `bulk.one` makes merging visible: only an explicit barrier
         // merges then, so the result never depends on where the optimizer put a merge point.
         context.bulk_one = context.options.bulk_one;

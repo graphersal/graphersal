@@ -292,7 +292,7 @@ fn resolve_name<S: GraphStorage>(
     match context.side_effect.get(name) {
         Some(SideEffectValue::Value(value)) => return resolve_vertex(context, value.clone()),
         Some(SideEffectValue::Reduced { .. }) => return Err(not_a_vertex("reduced value")),
-        Some(SideEffectValue::List(_)) | Some(SideEffectValue::Set(_)) => {
+        Some(SideEffectValue::List(..)) | Some(SideEffectValue::Set(..)) => {
             return Err(not_a_vertex("array"));
         }
         Some(SideEffectValue::Subgraph { .. }) => return Err(not_a_vertex("graph")),

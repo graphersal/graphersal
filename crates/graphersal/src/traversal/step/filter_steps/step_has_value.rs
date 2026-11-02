@@ -276,6 +276,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasValue {
 /// mirrors this codebase's own `has()`/`has_p()` split.
 struct StepHasValueP<B: Into<PValue> + Debug + Clone + Send + Sync> {
     predicate: P<B>,
+    /// The hashed operands of a long `within`/`without` list (issue #21).
+    within: crate::value::membership::LiteralSetCache,
 }
 
 impl<B: Into<PValue> + Debug + Clone + Send + Sync> fmt::Display for StepHasValueP<B> {
@@ -301,6 +303,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     ) -> Self {
         let step = StepHasValueP {
             predicate: predicate.into(),
+            within: Default::default(),
         };
         self.push_step(GraphStep::Filter("has_value", Box::new(step)))
     }
@@ -335,6 +338,7 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
             "has_value",
             Box::new(StepHasValueP {
                 predicate: predicate.into(),
+                within: Default::default(),
             }),
         );
         self.push_step(step)
@@ -368,7 +372,8 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
             | ElementProperty::Vector(_)
             | ElementProperty::Blob(_) => {
                 let candidate = TraverserValue::Computed(value.to_logical(), None);
-                self.predicate.test(context, &candidate)
+                self.predicate
+                    .test_cached(context, &candidate, &self.within)
             }
             ElementProperty::Object(_) | ElementProperty::Vertex(_) | ElementProperty::Edge(_) => {
                 let values: Vec<ElementProperty> = value
@@ -562,6 +567,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {
         Box::new(StepHasValueP {
             predicate: self.predicate.clone(),
+            within: Default::default(),
         })
     }
 }

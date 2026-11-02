@@ -186,8 +186,8 @@ pub(crate) fn side_effect_kind<S: GraphStorage>(
     use crate::traversal::side_effect::SideEffectValue;
     match value {
         SideEffectValue::Value(_) => "single value",
-        SideEffectValue::List(_) => "list",
-        SideEffectValue::Set(_) => "set",
+        SideEffectValue::List(..) => "list",
+        SideEffectValue::Set(..) => "set",
         SideEffectValue::Reduced { .. } => "reduced value",
         SideEffectValue::Subgraph { .. } => "subgraph",
         SideEffectValue::Group(_) => "group map",

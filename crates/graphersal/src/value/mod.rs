@@ -38,6 +38,8 @@ pub mod json_path;
 pub(crate) mod literal;
 /// The `math()` expression engine (exp4j-compatible, plus nested access).
 pub(crate) mod math_expr;
+/// Hash-assisted `within`/`without` membership (side-effect buckets, long literal lists).
+pub(crate) mod membership;
 /// [`Merge`], the `Merge.onCreate/onMatch/outV/inV` option token of the upsert steps.
 pub mod merge;
 /// [`Number`], a numeric property value.

@@ -44,7 +44,7 @@ pub(crate) fn push_side_effect_n<S: GraphStorage>(
     } else {
         1
     };
-    if let Some(SideEffectValue::Set(items)) = side_effect.get_mut(key) {
+    if let Some(SideEffectValue::Set(items, _)) = side_effect.get_mut(key) {
         // A set bucket holds each value once; bulk is invisible. A lazily read property value
         // (`values()`) is compared by its value, not by which element it came from, so it is
         // materialized; elements, property elements (`properties()`, compared by their element
@@ -71,18 +71,18 @@ pub(crate) fn push_side_effect_n<S: GraphStorage>(
     }
     let entry = side_effect
         .entry(key.clone())
-        .or_insert_with(|| SideEffectValue::List(Vec::new()));
+        .or_insert_with(|| SideEffectValue::list(Vec::new()));
     if let SideEffectValue::Value(_) = entry {
         let SideEffectValue::Value(existing) =
-            std::mem::replace(entry, SideEffectValue::List(Vec::new()))
+            std::mem::replace(entry, SideEffectValue::list(Vec::new()))
         else {
             return Ok(());
         };
-        if let SideEffectValue::List(items) = entry {
+        if let SideEffectValue::List(items, _) = entry {
             items.push(existing);
         }
     }
-    if let SideEffectValue::List(items) = entry {
+    if let SideEffectValue::List(items, _) = entry {
         items.try_reserve(copies).map_err(|_| too_many(n))?;
         crate::traversal::bulk::push_copies(items, value, n, deadline)?;
     }
