@@ -675,6 +675,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "set_visualizer":
         "Sets how results of g are displayed in this session (a V token such as V.Table or V.Json).",
         "{ g.set_visualizer(V.Json); g.v(1).values(\"name\").to_list() }" => "[\"marko\"]";
+    "traversal" "shrink_to_fit":
+        "Releases the spare capacity a graph built by write queries keeps (slots and index room past the data) and returns its memory total before and after (before_bytes, after_bytes, released_bytes; measured false when the storage reports no figures); changes no data.",
+        "{ g.inject(1).repeat(__.add_v(\"p\")).times(100).iterate(); g.shrink_to_fit().released_bytes > 0 }" => "true";
     "traversal" "side_effect":
         "Runs the child traversal for its side effects and passes each traverser on unchanged.",
         "g.v(1).side_effect(__.out().aggregate(\"x\")).cap(\"x\").next().len()" => "3";

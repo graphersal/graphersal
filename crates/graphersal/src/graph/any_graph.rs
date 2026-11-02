@@ -112,6 +112,11 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// the storage reports none. Fails like [`Self::capabilities`].
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError>;
 
+    /// [`Graph::shrink_to_fit`]: releases the storage's spare capacity under the write lock
+    /// and reports its memory total before and after; changes no data, commits nothing.
+    /// Unauthorized: the front end asks its authorizer first.
+    fn shrink_to_fit(&self) -> Result<crate::graph::ShrinkReport, GraphError>;
+
     /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>>;
 
@@ -349,6 +354,10 @@ where
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         self.read_checked()?.memory_footprint_bytes()
+    }
+
+    fn shrink_to_fit(&self) -> Result<crate::graph::ShrinkReport, GraphError> {
+        Graph::shrink_to_fit(self)
     }
 
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {

@@ -311,6 +311,7 @@
   - [set_label](traversal/steps/set_label.md)
   - [set_schema](traversal/steps/set_schema.md)
   - [set_visualizer](traversal/steps/set_visualizer.md)
+  - [shrink_to_fit](traversal/steps/shrink_to_fit.md)
   - [side_effect](traversal/steps/side_effect.md)
   - [similarity](traversal/steps/similarity.md)
   - [simple_path](traversal/steps/simple_path.md)

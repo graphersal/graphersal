@@ -151,6 +151,41 @@ impl MemoryStats {
     }
 }
 
+/// What [`Graph::shrink_to_fit`](crate::storage::Graph::shrink_to_fit) released: the storage's
+/// [`MemoryStats::total_bytes`] measured before and after
+/// [`GraphStorage::shrink_to_fit`](crate::storage::GraphStorage::shrink_to_fit) under the same
+/// write lock. Both are `None` when the storage reports no memory figures
+/// ([`GraphStorage::memory_usage`](crate::storage::GraphStorage::memory_usage) answers
+/// `None`): the shrink ran, but nothing was measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ShrinkReport {
+    /// The storage's total bytes before the shrink (`None`: not measured).
+    pub before_bytes: Option<u64>,
+    /// The storage's total bytes after the shrink (`None`: not measured).
+    pub after_bytes: Option<u64>,
+}
+
+impl ShrinkReport {
+    /// `before_bytes - after_bytes` (never negative); `None` when the storage reports no memory
+    /// figures.
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    /// graph.shrink_to_fit().unwrap();
+    /// // Nothing is left to release the second time.
+    /// let report = graph.shrink_to_fit().unwrap();
+    /// assert_eq!(report.released_bytes(), Some(0));
+    /// assert_eq!(report.before_bytes, report.after_bytes);
+    /// ```
+    pub fn released_bytes(&self) -> Option<u64> {
+        Some(self.before_bytes?.saturating_sub(self.after_bytes?))
+    }
+}
+
 /// Computes [`MemoryStats`] for a [`crate::TraversalGraph`]. Lives here, rather than inline in
 /// `graph/storage.rs`'s `impl GraphStorage for TraversalGraph`, purely to keep that file's trait
 /// impl list uncluttered.
@@ -364,9 +399,8 @@ pub(crate) struct FootprintCache {
     pub(crate) walks: std::sync::atomic::AtomicU64,
 }
 
-#[cfg(test)]
 impl FootprintCache {
-    /// Forgets the cached walk, as if the graph had never been walked (tests).
+    /// Forgets the cached walk, as if the graph had never been walked (`shrink_to_fit`, tests).
     pub(crate) fn forget(&self) {
         *self.entry.lock() = None;
     }

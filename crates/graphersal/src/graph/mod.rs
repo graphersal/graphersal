@@ -85,7 +85,7 @@ pub use hooks::{
     CommitHook, CommitHooks, HookError, HookRefusal, JournalSlot, Mark, RollbackReason,
 };
 pub(crate) use index::GraphIndex;
-pub use memory::MemoryStats;
+pub use memory::{MemoryStats, ShrinkReport};
 pub use memory_report::{MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
 pub use persistent::PersistentStorage;
@@ -390,6 +390,14 @@ impl TraversalGraph {
         self.shapes.shrink_to_fit();
         self.node_generations.shrink_to_fit();
         self.edge_generations.shrink_to_fit();
+        // The cached footprint walk is keyed by the commit position and the element counts,
+        // which a shrink leaves unchanged: forget it, so the next figure is walked again. Not
+        // inside an open unit (a live import shrinks there): no walk is made while a unit holds
+        // changes, the memory budget extrapolates from the cached walk instead, and the
+        // pre-shrink figure is the conservative one to keep.
+        if self.undo.entries().is_empty() {
+            self.footprint.forget();
+        }
     }
 
     /// The topology slot of a vertex handle, iff the vertex still exists: the slot is occupied

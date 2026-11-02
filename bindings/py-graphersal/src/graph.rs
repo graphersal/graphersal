@@ -1274,6 +1274,21 @@ impl Graph {
         self.run(py, &script, Some(&params), false, policy.as_deref())
     }
 
+    /// ``graph.shrink_to_fit(*, policy=None)``: releases the spare capacity a graph built by
+    /// write queries keeps (the slots and index room its growing vectors reserved past the
+    /// data; a loaded graph has none), like the DSL's ``g.shrink_to_fit()``. A ``dict`` with
+    /// ``measured``, ``before_bytes``, ``after_bytes`` and ``released_bytes`` (the graph's
+    /// ``memory_usage()`` total before and after). Changes no data and commits nothing; the
+    /// vacant slots of removed elements stay. ``policy`` is asked for ``Update`` on ``Data``.
+    #[pyo3(signature = (*, policy=None))]
+    fn shrink_to_fit(
+        &self,
+        py: Python<'_>,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.run(py, "g.shrink_to_fit()", None, false, policy.as_deref())
+    }
+
     /// ``graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", *,
     /// transform=None, policy=None)``: declares (or replaces) a property index, like the DSL's
     /// ``g.create_index(#{..})``: the ``element``s labelled ``label``, ordered by their

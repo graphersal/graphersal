@@ -753,6 +753,48 @@ impl<S: GraphStorage> Graph<S> {
         }
     }
 
+    /// Releases the storage's spare capacity ([`GraphStorage::shrink_to_fit`]) under the write
+    /// lock and reports what it released: [`GraphStorage::memory_usage`]'s total before and
+    /// after, measured under the same lock ([`ShrinkReport`](crate::storage::ShrinkReport); both
+    /// `None` when the storage reports no memory figures). Book page "Memory Usage and
+    /// Profiling": a graph built by write queries keeps the spare capacity of its growing
+    /// vectors (a load never does); call this after a bulk load by queries.
+    ///
+    /// Changes no data and commits nothing: no unit, no change set, no journal record, the
+    /// commit position unchanged. Vacant slots of removed elements stay (handles stay valid).
+    /// Fails with [`GraphError::GraphViewHeld`] when the current thread may not write the
+    /// graph, [`GraphError::Poisoned`] for a poisoned graph, and with the storage's error when
+    /// it cannot measure or compact itself (its data is unchanged either way). Unauthorized: a
+    /// front end asks its authorizer first (the DSL's `g.shrink_to_fit()` asks `Update` on the
+    /// data).
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::new());
+    /// for i in 0..1000i64 {
+    ///     GraphTraversalSource::new(&mut *graph.write())
+    ///         .add_v("p")
+    ///         .property("i", i)
+    ///         .iterate()
+    ///         .unwrap();
+    /// }
+    /// let report = graph.shrink_to_fit().unwrap();
+    /// assert!(report.released_bytes().unwrap() > 0);
+    /// assert_eq!(graph.shrink_to_fit().unwrap().released_bytes(), Some(0));
+    /// ```
+    pub fn shrink_to_fit(&self) -> Result<crate::graph::ShrinkReport, GraphError> {
+        let mut storage = self.write_checked()?;
+        let total = |stats: Option<crate::graph::MemoryStats>| stats.map(|s| s.total_bytes());
+        let before_bytes = total(storage.memory_usage()?);
+        storage.shrink_to_fit()?;
+        let after_bytes = total(storage.memory_usage()?);
+        Ok(crate::graph::ShrinkReport {
+            before_bytes,
+            after_bytes,
+        })
+    }
+
     /// The snapshot writer set by [`Graph::new_persistent`].
     #[cfg(feature = "persist")]
     pub(crate) fn snapshot_writer(&self) -> Option<SnapshotWriter<S>> {

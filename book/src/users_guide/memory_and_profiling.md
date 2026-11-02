@@ -111,8 +111,9 @@ bookkeeping are not counted. Two caveats worth knowing:
   never releases a removed vertex/edge's slot immediately (it keeps the slot to preserve other
   indices' stability), so a graph that has added and removed many elements can retain more memory
   than its current live element count would suggest. `structure_bytes` accounts for this using the
-  storage's actual retained capacity, not just the live count, but no operation today reclaims that
-  space (`shrink_to_fit()` only compacts the index, not the underlying graph storage).
+  storage's actual retained capacity, not just the live count, but no operation today reclaims the
+  vacant slots of removed elements (`shrink_to_fit()`, below, releases only the spare capacity
+  above the highest live slot and the indexes' spare room).
 - **`property_bytes` is an O(n) walk.** It visits every vertex, every edge, and every property, so
   its cost scales with graph size. On a graph of ~110k elements it completes in roughly a
   millisecond (see the crate's benchmarks for a current number) — fine for interactive use, not
@@ -121,6 +122,46 @@ bookkeeping are not counted. Two caveats worth knowing:
 `memory_usage()` is reachable through the `GraphStorage` trait, so any storage backend plugged into
 a `GraphTraversalSource` gets it uniformly — not just `TraversalGraph`. A backend that doesn't
 support introspection returns `None`.
+
+### Releasing spare capacity: `shrink_to_fit()`
+
+A graph that grows by write queries (`add_v`, `add_e`, GQL `CREATE`, ...) grows its vertex and edge
+slot vectors and its indexes by doubling, so after a bulk load up to about half of the slots can
+be allocated but unused: the memory report's `structure.vertex_slots.spare` and
+`edge_slots.spare`. On 5 million vertices and 10 million edges built with GQL `CREATE` that was
+about 1.2 GB of 4.9 GB. A loaded graph never has any: every load (opening a Store, reading a
+snapshot, a GraphSON or GraphML file read into a new graph, the sample graphs) allocates its
+slots exactly and ends with a shrink.
+
+`g.shrink_to_fit()` releases that spare capacity on the live graph and returns what it released:
+
+```rhai,graph=empty,script
+g.inject(1).repeat(__.add_v("p")).times(1000).iterate();
+g.shrink_to_fit()   // #{measured: true, before_bytes: .., after_bytes: .., released_bytes: ..}
+```
+
+`before_bytes` and `after_bytes` are `memory_usage().total_bytes` measured before and after, under
+the same write lock (`measured` is `false` and the figures are `()` for a storage that reports
+no memory figures). Call it **once, after a bulk load by queries**, not after every batch: the
+next write regrows the vectors from their exact size, so shrinking between batches copies the
+whole slot vector again each time. That is also why the engine never shrinks by itself at the end
+of a unit.
+
+What it releases: the slots above the highest live vertex and edge, the spare room of the id and
+label indexes and of the handle generation arrays, and the shared property key lists no element
+uses any more. What stays: the vacant slots of removed elements below the highest live one
+(`tombstoned`; handles and slot positions are stable, and new elements reuse those slots first)
+and every element, property and index entry. It changes no data and commits nothing: no unit, no
+change set, no journal record, the commit position unchanged, so a Store reopens to the same
+graph. It takes the write lock for its duration (two memory walks and the reallocation), so
+writers and readers wait meanwhile. It asks for `Update` on the data (a read-only policy refuses
+it); on a graph the script built itself it asks nothing.
+
+A Store also has a system job for it: `compact` (off by default, daily at 03:00 when enabled,
+book page [Scheduled Jobs](../persistence/scheduled_jobs.md)). Elsewhere: Rust
+`Graph::shrink_to_fit()` (a `ShrinkReport` with `before_bytes`, `after_bytes` and
+`released_bytes()`; also `AnyGraph::shrink_to_fit`, and `GraphStorage::shrink_to_fit` on the
+bare storage, which reports nothing), Python `graph.shrink_to_fit()` (the same dict).
 
 ## The memory report
 

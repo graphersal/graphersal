@@ -491,6 +491,13 @@ class Graph:
         ``sample_every`` sample; ``limit`` keeps the property rows and the label rows with the
         most bytes (default 500), ``max_rows`` / ``max_labels`` one list each; the rows left
         out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...)."""
+    def shrink_to_fit(self, *, policy: Optional[AccessPolicy] = None) -> dict[str, Any]:
+        """Releases the spare capacity a graph built by write queries keeps (slots and index
+        room past the data; a loaded graph has none). Returns ``measured``, ``before_bytes``,
+        ``after_bytes`` and ``released_bytes`` (the ``memory_usage()`` total before and after;
+        ``None`` with ``measured`` false when the storage reports no figures). Changes no data,
+        commits nothing; vacant slots of removed elements stay. ``policy`` is asked for
+        ``Update`` on ``Data``."""
     def estimate_compression(
         self,
         label: str,

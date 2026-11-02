@@ -403,6 +403,48 @@ impl ScriptGraphTraversalSource {
         Ok(Dynamic::from_map(map))
     }
 
+    /// `g.shrink_to_fit()`: [`Graph::shrink_to_fit`](crate::storage::Graph::shrink_to_fit),
+    /// releases the storage's spare capacity (the slots and index room a graph built by write
+    /// queries keeps after vector doubling). A map `#{measured, before_bytes, after_bytes,
+    /// released_bytes}`: the storage's `memory_usage().total_bytes` before and after, and their
+    /// difference; when the storage reports no memory figures `measured` is `false` and the
+    /// three figures are `()` (the shrink still ran). Changes no data and commits nothing. A
+    /// plain method call, not a traversal step. Asks for `Update` on `Data` (storage
+    /// maintenance writes the graph's memory, so a read-only policy refuses it).
+    pub fn shrink_to_fit(&mut self) -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
+        let operation = "shrink_to_fit";
+        self.require(
+            operation,
+            crate::graph::AccessRequest::new(
+                crate::graph::Action::Update,
+                crate::graph::Resource::data(None, None),
+            ),
+        )?;
+        let Some(g) = self.g.as_ref() else {
+            return Err(Box::new(rhai::EvalAltResult::ErrorRuntime(
+                Dynamic::from(format!("{operation}: no graph associated with this source")),
+                rhai::Position::NONE,
+            )));
+        };
+        let report = g
+            .shrink_to_fit()
+            .map_err(crate::script::saved_query::graph_fail)?;
+        let figure = |n: Option<u64>| {
+            n.map_or(Dynamic::UNIT, |n| {
+                Dynamic::from_int(i64::try_from(n).unwrap_or(i64::MAX))
+            })
+        };
+        let mut map = rhai::Map::new();
+        map.insert(
+            "measured".into(),
+            Dynamic::from_bool(report.released_bytes().is_some()),
+        );
+        map.insert("before_bytes".into(), figure(report.before_bytes));
+        map.insert("after_bytes".into(), figure(report.after_bytes));
+        map.insert("released_bytes".into(), figure(report.released_bytes()));
+        Ok(Dynamic::from_map(map))
+    }
+
     /// Rhai binding for `GraphStorage::statistics()`: a map with `vertex_count`, `edge_count` and
     /// the per-label count maps `vertex_labels`, `primary_vertex_labels`, `edge_labels`, or `()`
     /// when the storage keeps no statistics. One name serves both spellings. Like

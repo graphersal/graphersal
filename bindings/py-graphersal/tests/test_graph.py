@@ -584,6 +584,23 @@ def test_the_memory_report_keeps_the_largest_rows_and_counts_the_rest():
     assert len(graph.memory_report(limit=5, max_rows=7)["properties"]) == 7
 
 
+def test_shrink_to_fit_releases_the_spare_slots_of_a_graph_built_by_queries():
+    graph = graphersal.Graph()
+    graph.execute('g.gql("UNWIND range(0, 2999) AS i CREATE (:P {id: i})").iterate()')
+    assert graph.memory_report()["structure"]["vertex_slots"]["spare"] > 0
+    before = graph.execute("g.memory_usage().total_bytes")
+    report = graph.shrink_to_fit()
+    assert report["measured"] is True
+    assert report["before_bytes"] == before
+    assert report["after_bytes"] == graph.execute("g.memory_usage().total_bytes")
+    assert report["released_bytes"] == before - report["after_bytes"] > 0
+    assert graph.memory_report()["structure"]["vertex_slots"]["spare"] == 0
+    assert graph.execute("g.v().count().next()") == 3000
+    assert graph.shrink_to_fit()["released_bytes"] == 0
+    with pytest.raises(graphersal.PermissionDeniedError):
+        graph.shrink_to_fit(policy=graphersal.AccessPolicy.read_only())
+
+
 def test_a_dedup_rule_shares_repeated_values_and_the_estimate_matches():
     graph = graphersal.Graph()
     for i in range(12):

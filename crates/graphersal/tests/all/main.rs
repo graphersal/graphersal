@@ -212,6 +212,7 @@ mod schema_visualization_tests;
 mod scope_local_tests;
 mod script_host;
 mod script_tests;
+mod shrink_to_fit_tests;
 mod side_effect_fn_tests;
 mod side_effect_set_tests;
 mod side_effect_traversal_tests;

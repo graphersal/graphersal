@@ -206,6 +206,10 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
             &["mark"],
             Refused("it writes a mark into the graph's journal"),
         ),
+        (
+            &["shrink_to_fit"],
+            Refused("it is storage maintenance (it reallocates the graph's memory)"),
+        ),
     ]
 };
 

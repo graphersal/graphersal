@@ -656,6 +656,36 @@ mod access_policy {
     }
 
     #[test]
+    fn shrink_to_fit_asks_for_update_on_data() {
+        let graph = modern();
+        // Storage maintenance: a read-only policy refuses it, like the other maintenance
+        // operations that write (recompress, create_index).
+        assert_denied(
+            run(&graph, "g.shrink_to_fit()", AccessPolicy::read_only()),
+            "shrink_to_fit",
+            "Update Data",
+        );
+        assert_denied(
+            run(&graph, "g.shrink_to_fit()", AccessPolicy::deny_all()),
+            "shrink_to_fit",
+            "Update Data",
+        );
+        let updates = AccessPolicy::read_only().allow(ActionKind::Update, ResourceKind::Data);
+        let report = run(&graph, "g.shrink_to_fit()", updates).expect("Update on Data allows it");
+        let report = report.cast::<graphersal::script::rhai::Map>();
+        assert_eq!(report["measured"].as_bool(), Ok(true));
+        // A graph the script built itself is private: no request is asked.
+        assert!(
+            run(
+                &graph,
+                "let s = GraphSource::empty(); s.add_v(\"p\").iterate(); s.shrink_to_fit().measured",
+                AccessPolicy::deny_all()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn deny_all_denies_the_graph_but_not_plain_computation() {
         let graph = modern();
         let none = AccessPolicy::deny_all;

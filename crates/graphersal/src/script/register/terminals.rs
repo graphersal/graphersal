@@ -24,6 +24,11 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn("with", ScriptGraphTraversalSource::with_option_flag)
         .register_fn("with", ScriptGraphTraversalSource::with_option_value)
         .register_fn_as(&["memory_usage"], ScriptGraphTraversalSource::memory_usage)
+        // Storage maintenance: a Graphersal extension, snake_case only.
+        .register_fn_as(
+            &["shrink_to_fit"],
+            ScriptGraphTraversalSource::shrink_to_fit,
+        )
         .register_fn_as(
             &["memory_report"],
             ScriptGraphTraversalSource::memory_report,
