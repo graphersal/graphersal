@@ -112,6 +112,7 @@ g.gql("MATCH (n:person) RETURN CAST(n.name AS INTEGER) AS x")   // error: invali
 g.gql("MATCH (n:person) RETURN substring(n.name, -1) AS x")   // error: substring() takes a start of 0 or more (22011)
 g.gql("MATCH (n:person) RETURN TRIM(BOTH 'ab' FROM n.name) AS x")   // error: TRIM(.. FROM ..) removes exactly one character (22027)
 g.gql("MATCH (n:person) RETURN ln(n.age - 29) AS x")   // error: ln() of a number <= 0 (2201E)
+g.gql("MATCH (n:person) RETURN n.name =~ (n.name + '(') AS x")   // error: invalid regular expression (2201B)
 g.gql("MATCH (n:person) RETURN sqrt(27 - n.age) AS x")   // error: sqrt() of a negative number (2201F)
 g.gql("MATCH (n:person) RETURN range(1, n.age, 0) AS x")   // error: range() step 0 (22023)
 g.gql("MATCH (n:person) RETURN toFloat(n.age > 30) AS x")   // error: toFloat() takes a number or a string, not a boolean (22G03)
@@ -785,6 +786,7 @@ give it (or a `"default"` in the schema, to match on other keys only). One raise
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |
 | `22011` | data | a negative position or length in `substring()`, `left()`, `right()` |
 | `22027` | data | a `TRIM(c FROM s)` character `c` that is not exactly one character |
+| `2201B` | data | an invalid regular expression on the right of `=~`: a literal or `$parameter` pattern before the run, a pattern computed per row when a row reaches it |
 | `2201E` | data | the logarithm of a number `<= 0`, or to a base `<= 0` or `1` (`ln`, `log`, `log10`) |
 | `2201F` | data | `sqrt()` of a negative number, `power()` of 0 to a negative power or of a negative number to a non-integer power |
 | `22023` | data | an argument outside the function's values: a truncation unit the type lacks or an unknown one (`date.truncate('hour', ..)`), `range()` step 0, a negative `round()` precision or an unknown rounding mode, a negative `replace()` limit, a negative `n` in the list `trim(list, n)` |

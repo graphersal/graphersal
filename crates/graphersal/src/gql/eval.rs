@@ -47,6 +47,13 @@
 //!   "Static kinds").
 //! - **`STARTS WITH` / `ENDS WITH` / `CONTAINS`:** strings only; a `NULL` or non-string operand
 //!   gives `NULL`.
+//! - **`=~`** (Cypher's regular-expression match, a compatibility form): TRUE when the pattern
+//!   matches the **whole** string (Java's `String.matches`, as Neo4j; compiled as
+//!   `^(?:pattern)$`), in the dialect of the Rust `regex` crate (no look-around, no
+//!   back-references; inline flags such as `(?i)`). A `NULL` or non-string operand gives
+//!   `NULL`, as for `STARTS WITH`. A pattern that is no valid expression is error 2201B: a
+//!   literal or `$param` one when the query is compiled (compiled once, [`LinkOp::Regex`]), a
+//!   pattern computed per row when the row reaches it (the last one compiled is kept).
 //! - **Power** `x ^ y` (Cypher, stage 3f): always a float, left-associative (`2 ^ 3 ^ 2` is
 //!   `64.0`), tighter than `* / %` and looser than a unary minus (`-3 ^ 2` is `9.0`); the rules
 //!   of `power(x, y)` (2201F, 22003), `NULL` propagates, another kind is 22G03.
@@ -157,6 +164,7 @@ use super::lexer::Span;
 use super::parser::{Function, FunctionKind, FunctionSpec, lookup_function};
 use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
+use crate::value::predicate::TextRegex;
 use crate::value::scalar::compare_scalars;
 use crate::value::temporal::Temporal;
 use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
@@ -205,6 +213,8 @@ pub(crate) mod status {
     /// Dependent object error: edges still exist (a plain `DELETE` of a node that still has
     /// edges, stage 3d) [ISO].
     pub(crate) const EDGES_STILL_EXIST: &str = "G1001";
+    /// Data exception: invalid regular expression (the pattern of `=~`).
+    pub(crate) const INVALID_REGEX: &str = "2201B";
     /// Data exception: invalid datetime format (temporal text that is no value of the type, a
     /// constructor map with an unknown or conflicting field, an unknown time zone; stage 3g).
     pub(crate) const INVALID_DATETIME_FORMAT: &str = "22007";
@@ -800,6 +810,71 @@ enum LinkOp<E> {
     Index(Compiled<E>),
     /// `[from..to]`, each bound optional.
     Slice(Box<SliceBounds<E>>),
+    /// `=~ pattern` (Cypher's whole-string regular-expression match).
+    Regex(Box<RegexLink<E>>),
+}
+
+/// The pattern of a [`LinkOp::Regex`]: compiled once by [`compile`] when it is a constant
+/// string (a literal or a `$param`), else evaluated per row, where the last expression compiled
+/// is kept with its text, so rows repeating a pattern never compile it again (rule 4).
+#[derive(Debug, Clone)]
+struct RegexLink<E> {
+    pattern: Compiled<E>,
+    /// The expression of a constant string pattern.
+    fixed: Option<TextRegex>,
+    /// A pattern computed per row: the last one compiled.
+    last: RegexCache,
+}
+
+/// The last per-row pattern of a [`RegexLink`] and its compiled expression. A row that finds
+/// the cache taken by another thread compiles without it; a clone starts empty.
+#[derive(Default)]
+struct RegexCache(std::sync::Mutex<Option<(CompactString, TextRegex)>>);
+
+impl Clone for RegexCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for RegexCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RegexCache")
+    }
+}
+
+impl RegexCache {
+    /// Whether `text` matches the whole-string expression of `source` (compiled only when it
+    /// differs from the last one).
+    fn is_match(&self, text: &str, source: &str, span: Span) -> Result<bool, EvalError> {
+        let mut slot = self.0.try_lock().ok();
+        if let Some(guard) = &slot
+            && let Some((last, regex)) = guard.as_ref()
+            && last.as_str() == source
+        {
+            return Ok(regex.is_match(text));
+        }
+        let regex = whole_regex(source, span)?;
+        let matched = regex.is_match(text);
+        if let Some(guard) = slot.as_mut() {
+            **guard = Some((CompactString::from(source), regex));
+        }
+        Ok(matched)
+    }
+}
+
+/// The whole-string expression of `source`, or the 2201B error at `span` (the pattern).
+fn whole_regex(source: &str, span: Span) -> Result<TextRegex, EvalError> {
+    TextRegex::whole_string(source).map_err(|reason| invalid_regex(source, &reason, span))
+}
+
+#[cold]
+fn invalid_regex(source: &str, reason: &str, span: Span) -> EvalError {
+    EvalError::new(
+        status::INVALID_REGEX,
+        format!("invalid regular expression {source:?} for =~: {reason}"),
+        span,
+    )
 }
 
 /// The bounds of a [`LinkOp::Slice`], each optional.
@@ -924,6 +999,11 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         .rev()
         .map(|link| {
             let op = match &link.kind {
+                ExprKind::Binary {
+                    op: BinaryOp::RegexMatch,
+                    right,
+                    ..
+                } => compile_regex(right, scope)?,
                 ExprKind::Binary { op, right, .. } => {
                     LinkOp::Binary(*op, compile_expr(right, scope)?)
                 }
@@ -946,6 +1026,25 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     Ok(Node::Chain(Box::new(first), links))
+}
+
+/// The link of `=~ pattern`: a constant string pattern compiled here, once (an invalid one is
+/// error 2201B before any row).
+#[inline(never)]
+fn compile_regex<E: Clone>(pattern: &Expr, scope: &impl Scope) -> Result<LinkOp<E>, EvalError> {
+    let pattern = compile_expr(pattern, scope)?;
+    let fixed = match &pattern.node {
+        Node::Const(value) => match value.as_str() {
+            Some(source) => Some(whole_regex(source, pattern.span)?),
+            None => None,
+        },
+        _ => None,
+    };
+    Ok(LinkOp::Regex(Box::new(RegexLink {
+        pattern,
+        fixed,
+        last: RegexCache::default(),
+    })))
 }
 
 /// The link of `[i]` or `[a..b]`.
@@ -1412,6 +1511,7 @@ impl<E> Compiled<E> {
                         LinkOp::Binary(_, right)
                         | LinkOp::IsEndpoint(_, _, right)
                         | LinkOp::Index(right) => right.variables(slots),
+                        LinkOp::Regex(regex) => regex.pattern.variables(slots),
                         LinkOp::Slice(bounds) => {
                             for bound in [&bounds.0, &bounds.1].into_iter().flatten() {
                                 bound.variables(slots);
@@ -1772,11 +1872,34 @@ fn eval_chain<'a, En: Env>(
                 subscript(value, &at, index.span, env, link.span)?
             }
             LinkOp::Slice(bounds) => slice(value, bounds, env, link.span)?,
+            LinkOp::Regex(regex) => regex_match(&value, regex, env)?,
         };
         value = Cow::Owned(next);
         left_span = link.span;
     }
     Ok(value)
+}
+
+/// `value =~ pattern`: whole-string match; a `NULL` or non-string operand gives `NULL` (as for
+/// `STARTS WITH`), a per-row pattern that is no valid expression error 2201B.
+fn regex_match<En: Env>(
+    value: &Value<En::Element>,
+    regex: &RegexLink<En::Element>,
+    env: &En,
+) -> Result<Value<En::Element>, EvalError> {
+    let matched = match &regex.fixed {
+        Some(fixed) => value.as_str().map(|text| fixed.is_match(text)),
+        None => {
+            let pattern = regex.pattern.eval_cow(env)?;
+            match (value.as_str(), pattern.as_str()) {
+                (Some(text), Some(source)) => {
+                    Some(regex.last.is_match(text, source, regex.pattern.span)?)
+                }
+                _ => None,
+            }
+        }
+    };
+    Ok(matched.map_or(Value::Null, |m| Truth::of(m).into_value()))
 }
 
 /// Design F6: `||` (and Cypher `+`) of two strings or two lists, and `+` of a list and an item,
@@ -2232,6 +2355,13 @@ fn binary<E: Clone + PartialEq>(
         BinaryOp::StartsWith => text_test(left, right, |a, b| a.starts_with(b)),
         BinaryOp::EndsWith => text_test(left, right, |a, b| a.ends_with(b)),
         BinaryOp::Contains => text_test(left, right, |a, b| a.contains(b)),
+        // A link of its own (`LinkOp::Regex`, compiled once); a whole-string match here.
+        BinaryOp::RegexMatch => match (left.as_str(), right.as_str()) {
+            (Some(text), Some(source)) => {
+                Truth::of(whole_regex(source, span)?.is_match(text)).into_value()
+            }
+            _ => Value::Null,
+        },
         BinaryOp::Concat => concat(left, right, "||", span)?,
         BinaryOp::Add => match (left, right) {
             (

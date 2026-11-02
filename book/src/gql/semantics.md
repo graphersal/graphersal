@@ -1096,6 +1096,23 @@ g.gql("MATCH (n:person {name: 'marko'}) RETURN trim(' \t a \t ') AS t").to_list(
 g.inject(" \t a \t ").trim().to_list()   // "a": Gremlin's trim() removes all whitespace
 ```
 
+### Regular-expression match
+
+`s =~ pattern` (a [compatibility form](aliases.md#regular-expression-match)) matches the whole
+string: the pattern is compiled as `^(?:pattern)$`, so `'marko' =~ 'ar'` is FALSE and
+`'josh' =~ 'mark|jos'` is FALSE (the alternation is anchored as a whole). Three-valued: a `NULL`
+operand gives `NULL`, and so does an operand that is no string (`1 =~ '1'`, `'1' =~ 1`), as for
+`STARTS WITH`. A literal or `$parameter` pattern is compiled once, when the query is compiled,
+so an invalid one is error `2201B` before any row; a pattern computed per row (`n.name =~
+m.pattern`) is compiled when a row reaches it, the last one compiled kept for the next rows, and
+an invalid one fails that row's evaluation (`2201B`).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) WHERE n.name =~ 'ar' RETURN n.name AS name").to_list()   // no rows: the whole string must match
+g.gql("MATCH (n:person) WHERE n.name =~ '.*ar.*' RETURN n.name AS name").to_list()   // #{"name": "marko"}
+g.gql("RETURN NULL =~ 'a' AS a, 'a' =~ NULL AS b, 1 =~ '1' AS c").to_list()   // #{"a": (), "b": (), "c": ()}
+```
+
 ### Elements and paths
 
 - **`startNode(e)` / `endNode(e)`** are the edge's stored source and target, independent of the
@@ -1138,6 +1155,7 @@ Neo4j, each deliberate:
 | `sqrt(-1)` is `NaN`, `ln(0)` is `-Infinity`, `exp(1000)` is `Infinity` | errors `2201F`, `2201E`, `22003` | no `NaN` or infinity from finite numbers (GQL requires the logarithm error too) |
 | `split(s, '')` splits UTF-16 code units | splits characters | an emoji stays one item |
 | range step 0, negative `round` precision: `22N38` / `22N03` | `22023` | the ISO / SQL-heritage code |
+| `=~` takes a Java regular expression (look-around, back-references, possessive quantifiers) | the Rust `regex` crate's syntax: no look-around, no back-references; an invalid pattern is `2201B` | matching stays linear in the text, as for `TextP.regex` ([Regular-expression match](#regular-expression-match)) |
 
 `log(2, x)` and `log(10, x)` are exact for powers of the base, and `keys(map)` keeps keys whose
 value is `NULL`, both as in Neo4j.
@@ -1235,6 +1253,7 @@ these differences is a deliberate decision, described in its section:
 | a comprehension variable may reuse any name that is not in scope | not a name that a `LET` / `WITH` value in scope still reads | [Map projections and comprehensions](#map-projections-and-comprehensions) |
 | `'a' + 1` is `'a1'` | an error (`22G03`): convert explicitly | [Comparisons across types](#comparisons-across-types) |
 | some functions saturate, give `NaN` / infinity or take floats | errors or GQL's types | [Where functions differ from Neo4j](#where-functions-differ-from-neo4j) |
+| `=~` takes a Java regular expression | the Rust `regex` crate's syntax (no look-around, no back-references) | [Regular-expression match](#regular-expression-match) |
 | `id(x)` is an integer; `rand()` | ids are strings (`element_id(x)`); `id()` and `rand()` are refused | [Ids are strings](#ids-are-strings), [Refused Constructs](refused.md) |
 | years up to ±999 999 999 | years -9999 to 9999 (TCK cases excluded) | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
 | `X.realtime()` | refused; one clock per query | [Dates and times](#dates-and-times) |

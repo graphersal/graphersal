@@ -225,6 +225,30 @@ impl TextRegex {
             })
     }
 
+    /// Compiles `pattern` to match a **whole** string (GQL's Cypher-compatible `=~`, like Java's
+    /// `String.matches`): the expression `^(?:pattern)$`. The pattern alone is compiled first,
+    /// so its groups are balanced and the wrapping cannot close one of them (`a)|(b`); a pattern
+    /// ending in an `(?x)` comment gets a line break before the closing `)$`, which the comment
+    /// would otherwise swallow. Fails with the reason when the pattern is not valid.
+    #[cfg_attr(
+        not(feature = "gql"),
+        allow(dead_code, reason = "used by the GQL evaluator")
+    )]
+    pub(crate) fn whole_string(pattern: &str) -> Result<Self, String> {
+        let build = |source: &str| {
+            regex::RegexBuilder::new(source)
+                .size_limit(crate::graph::schema::types::PATTERN_SIZE_LIMIT)
+                .build()
+                .map_err(|err| crate::graph::schema::types::pattern_error_reason(&err))
+        };
+        build(pattern)?;
+        let anchored =
+            build(&format!("^(?:{pattern})$")).or_else(|_| build(&format!("^(?:{pattern}\n)$")))?;
+        Ok(Self {
+            regex: std::sync::Arc::new(anchored),
+        })
+    }
+
     /// The expression's source text.
     pub fn as_str(&self) -> &str {
         self.regex.as_str()

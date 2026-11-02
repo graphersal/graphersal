@@ -896,7 +896,7 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | indexing and slicing | `x[0]`, `x[-1]`, `x[1..3]`, `x[..2]`, `x[1..]`, `m['key']`, `n[k]` (Cypher, [below](#indexing-and-slicing)) |
 | comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; a chain `a < b <= c` is the Cypher compatibility form of `a < b AND b <= c` ([alias](aliases.md)) |
 | logic | `AND`, `OR`, `XOR`, `NOT` |
-| predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
+| predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `=~` (Cypher regular-expression match of the whole string, [compatibility form](aliases.md#regular-expression-match)), `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
 | arithmetic | `+`, `-`, `*`, `/`, `%`, `^` (Cypher power, always a float: `2 ^ 10` is `1024.0`), unary `-` and `+` |
 | concatenation | `\|\|` on two strings or two lists (Cypher `+`); Cypher `+` of a list and one other value appends or prepends it (`[1] + 2` is `[1, 2]`, `0 + [1]` is `[0, 1]`) |
 | conditional | simple `CASE x WHEN v THEN r ... ELSE d END` and searched `CASE WHEN cond THEN r ... END` |
@@ -915,6 +915,7 @@ are errors (`2201F`), an overflow is error `22003`.
 ```rhai,graph=modern
 g.gql("MATCH (n:person) WHERE n.age IN [27, 35] RETURN n.name AS name ORDER BY name").to_list()   // #{"name": "peter"}, #{"name": "vadas"}
 g.gql("MATCH (n:person) WHERE n.name STARTS WITH 'm' OR n.name ENDS WITH 's' OR n.name CONTAINS 'et' RETURN n.name AS name ORDER BY name").to_list()   // marko, peter, vadas
+g.gql("MATCH (n:person) WHERE n.name =~ '[jv].*' RETURN n.name AS name ORDER BY name").to_list()   // josh, vadas
 g.gql("MATCH (n:person) WHERE n.age > 30 XOR n.name = 'josh' RETURN n.name AS name ORDER BY name").to_list()   // #{"name": "peter"}
 g.gql("MATCH (n:person) RETURN n.name || '!' AS a, n.age * 2 + 1 AS b, n.age / 10 AS c, n.age % 10 AS d, n.age / 10.0 AS e ORDER BY a LIMIT 1").to_list()
 // #{"a": "josh!", "b": 65, "c": 3, "d": 2, "e": 3.2}

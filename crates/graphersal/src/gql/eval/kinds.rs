@@ -394,7 +394,8 @@ impl<'e> Walk<'_, 'e> {
             | BinaryOp::Ge
             | BinaryOp::StartsWith
             | BinaryOp::EndsWith
-            | BinaryOp::Contains => Kind::of(K_BOOL | K_NULL),
+            | BinaryOp::Contains
+            | BinaryOp::RegexMatch => Kind::of(K_BOOL | K_NULL),
             BinaryOp::Concat => Kind::ANY,
             BinaryOp::Add => {
                 if (left.bits | right.bits) & !(K_NUMBER | K_NULL) == 0 {

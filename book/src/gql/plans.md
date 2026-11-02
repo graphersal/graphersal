@@ -62,7 +62,8 @@ A `WHERE` condition is split at its top-level `AND`s. A part of the form `var.ke
 where the value is a literal or a `$parameter`, is pushed into `has()` right at the scan or the
 edge it reads, where the optimizer and the property indexes see it; the rest runs in
 `gql:filter`. Pushed: `=` (as `P.eq`), `<`, `<=`, `>`, `>=`, `IN` (with `NULL` items removed),
-`STARTS WITH`, `ENDS WITH`, `CONTAINS` with a string, `IS NOT NULL`. Never pushed: `<>`,
+`STARTS WITH`, `ENDS WITH`, `CONTAINS` with a string, `=~` with a valid pattern (as
+`TextP.regex("^(?:pattern)$")`, the whole-string expression), `IS NOT NULL`. Never pushed: `<>`,
 `IS NULL`, `OR`, `NOT`, conditions over two variables, `NULL` or list operands: there the
 semantics of `has()` and GQL's three-valued logic differ.
 

@@ -76,7 +76,8 @@
 //! six operators, the middle operand copied into both comparisons) < predicates (`IS [NOT] NULL`, `IS [NOT] LABELED`,
 //! `IS [NOT] SOURCE OF` / `DESTINATION OF` (GQL G112; the right operand binds like the one of
 //! `IN`),
-//! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
+//! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, Cypher's regular-expression match `=~` (the
+//! level of `STARTS WITH`, as in Neo4j); tighter than comparison as in openCypher, so
 //! `a = b IS NULL` is `a = (b IS NULL)`) < additive (`+ - ||`) < multiplicative (`* / %`) <
 //! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`, a map
 //! projection `v {..}`, a subscript `x[i]` / `x[a..b]`, left to right; `x['key']` with a
@@ -4799,6 +4800,7 @@ impl<'a> Parser<'a> {
                 _ => None,
             },
             TokenKind::Eq => binary(BinaryOp::Eq, BP_COMPARE),
+            TokenKind::RegexMatch => binary(BinaryOp::RegexMatch, BP_PREDICATE),
             TokenKind::Ne => binary(BinaryOp::Ne, BP_COMPARE),
             TokenKind::Lt => binary(BinaryOp::Lt, BP_COMPARE),
             TokenKind::Le => binary(BinaryOp::Le, BP_COMPARE),
@@ -7248,6 +7250,7 @@ fn starts_operand(token: &Token<'_>) -> bool {
         | TokenKind::LBracket
         | TokenKind::Eof
         | TokenKind::Eq
+        | TokenKind::RegexMatch
         | TokenKind::Ne
         | TokenKind::Lt
         | TokenKind::Le

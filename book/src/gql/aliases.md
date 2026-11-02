@@ -5,8 +5,10 @@ unambiguous and mean exactly the same: an alias is translated to its GQL form wh
 parsed, so both spellings give the same plan and the same rows. An alias never has a meaning of
 its own. This table lists every accepted alias; Cypher functions without any GQL counterpart are
 the [compatibility functions](#compatibility-functions) below, and Cypher's map projections and
-comprehensions, `COUNT { }`, `COLLECT { }`, `SET n += ..` and `MERGE` the compatibility forms
+comprehensions, `COUNT { }`, `COLLECT { }`, `SET n += ..`, `MERGE` and the regular-expression
+match `=~` the compatibility forms
 ([Map projections and comprehensions](#map-projections-and-comprehensions),
+[Regular-expression match](#regular-expression-match),
 [COUNT and COLLECT](#count-and-collect), [SET and REMOVE](#set-and-remove), [MERGE](#merge));
 any other Cypher
 spelling is either not supported yet or [refused](refused.md).
@@ -201,6 +203,31 @@ g.gql("MATCH (p:person) RETURN p.name AS name, reduce(total = 0, w IN [(p)-[e]->
 g.V().hasLabel("person").order().by("name").project("name", "weight").by("name").by(__.out_e().values("weight").fold().sum(Scope.local)).to_list()
 // josh 1.4, marko 1.9, peter 0.2, vadas without "weight" (the sum of no values is no value)
 g.gql("MATCH (p:person) RETURN reduce(s = '', n IN collect_list(p.name) | s || n) AS names").to_list()   // one string of the four names
+```
+
+## Regular-expression match
+
+GQL has no regular-expression operator, so Cypher's `s =~ pattern` is a compatibility form with
+Neo4j's meaning: TRUE when the pattern matches the **whole** string (Java's `String.matches`),
+so `'marko' =~ 'mar'` is FALSE and `'marko' =~ 'mar.*'` TRUE; an alternation is anchored as a
+whole (`'josh' =~ 'mark|jos'` is FALSE). It binds like `STARTS WITH`, and `NOT s =~ p` negates
+it. A `NULL` or non-string operand gives `NULL`, as for `STARTS WITH`.
+
+The pattern is written in the syntax of the Rust
+[`regex`](https://docs.rs/regex/latest/regex/#syntax) crate, not Java's: no look-around, no
+back-references, matching linear in the text; inline flags such as `(?i)` work. A pattern that
+is no valid expression is error `2201B`: a literal or `$parameter` pattern before the query runs
+(it is compiled once), a pattern computed per row when a row reaches it
+([Semantics](semantics.md#regular-expression-match)). On a property with a literal or
+`$parameter` pattern it becomes `has(key, TextP.regex("^(?:pattern)$"))`
+([Plans](plans.md#what-becomes-has)).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) WHERE n.name =~ 'm.*' RETURN n.name AS name").to_list()   // #{"name": "marko"}
+g.V().hasLabel("person").has("name", TextP.regex("^(?:m.*)$")).values("name").to_list()   // "marko"
+g.gql("MATCH (n:person) WHERE n.name =~ '(?i)J.*' RETURN n.name AS name").to_list()   // #{"name": "josh"}
+g.gql("MATCH (n:person) RETURN n.name AS name, n.name =~ '.*a.*' AS a ORDER BY name").to_list()   // josh false, marko true, peter false, vadas true
+g.gql("MATCH (n:person) WHERE n.name =~ 'm(' RETURN n.name AS name")   // error: invalid regular expression (2201B)
 ```
 
 ## Map projections and comprehensions

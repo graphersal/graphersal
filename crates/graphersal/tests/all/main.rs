@@ -100,6 +100,7 @@ mod gql_path_tests;
 mod gql_pipeline_tests;
 mod gql_qpp_tests;
 mod gql_quantifier_tests;
+mod gql_regex_tests;
 mod gql_scope_tests;
 mod gql_script_tests;
 mod gql_static_kind_tests;

@@ -132,6 +132,7 @@ fn sexp(e: &Expr) -> String {
                 BinaryOp::StartsWith => "starts",
                 BinaryOp::EndsWith => "ends",
                 BinaryOp::Contains => "contains",
+                BinaryOp::RegexMatch => "=~",
             };
             format!("({op} {} {})", sexp(left), sexp(right))
         }
@@ -513,6 +514,31 @@ fn precedence() {
     let q = ok("MATCH (n) RETURN (n.a + 1) * 2, -n.b");
     assert_eq!(q.text(q.ret.items[0].expr.span), "(n.a + 1) * 2");
     assert_eq!(q.text(q.ret.items[1].expr.span), "-n.b");
+}
+
+#[test]
+fn regex_match_binds_like_starts_with() {
+    let cases = [
+        ("n.name =~ 'm.*'", "(=~ n.name 'm.*')"),
+        ("NOT n.name =~ 'm.*'", "(not (=~ n.name 'm.*'))"),
+        ("a =~ b AND c", "(and (=~ a b) c)"),
+        ("a = b =~ c", "(= a (=~ b c))"),
+        ("a =~ b || c", "(=~ a (|| b c))"),
+        ("a =~ $p", "(=~ a $p)"),
+        ("a=~b", "(=~ a b)"),
+    ];
+    for (src, tree) in cases {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    let q = ok("MATCH (n) WHERE n.name =~ '(?i)m.*' RETURN n");
+    let condition = q.matches[0].where_clause.as_ref().unwrap();
+    assert_eq!(q.text(condition.span), "n.name =~ '(?i)m.*'");
+    // `=` and `~` apart are not the operator: the `~` is the refused undirected edge, and `=~`
+    // never is one.
+    let f = fail("MATCH (n) WHERE n.name = ~'x' RETURN n");
+    assert_eq!(f.text, "~");
+    let f = fail("MATCH (a)=~(b) RETURN a");
+    assert!(!f.message.contains("undirected"), "{f:?}");
 }
 
 #[test]

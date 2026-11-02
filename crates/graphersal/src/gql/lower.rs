@@ -152,6 +152,7 @@ use crate::traversal::step::sideeffect_steps::step_gql_insert_node::GqlInsertPro
 use crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge;
 use crate::traversal::step::sideeffect_steps::step_gql_remove::GqlRemoveItem;
 use crate::traversal::step::sideeffect_steps::step_gql_set::{GqlSetItem, GqlWriteTarget};
+use crate::value::predicate::TextRegex;
 use crate::value::{Number, P, PValue};
 use crate::{
     AnonymousTraversal, ArgStrings, CompactString, ElementKind, ElementProperty,
@@ -4564,6 +4565,11 @@ fn single(op: PushOp, value: PValue) -> Option<P<PValue>> {
         PushOp::StartsWith if text => P::StartingWith(value),
         PushOp::EndsWith if text => P::EndingWith(value),
         PushOp::Contains if text => P::Containing(value),
+        // An invalid pattern stays in `gql:filter`, whose compilation reports it (2201B).
+        PushOp::Regex => match &value {
+            PValue::String(pattern) => P::Regex(TextRegex::whole_string(pattern).ok()?),
+            _ => return None,
+        },
         PushOp::StartsWith | PushOp::EndsWith | PushOp::Contains | PushOp::In | PushOp::NotNull => {
             return None;
         }

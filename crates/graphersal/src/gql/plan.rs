@@ -860,6 +860,9 @@ pub(crate) enum PushOp {
     EndsWith,
     /// `CONTAINS`: `TextP.containing(s)`.
     Contains,
+    /// `=~`: `TextP.regex("^(?:s)$")`, the whole-string expression (an invalid pattern is not
+    /// pushed: the evaluator reports it).
+    Regex,
     /// `IS NOT NULL`: exactly `has(key, P.neq(()))`, never `has(key)` (which passes a stored
     /// null).
     NotNull,
@@ -878,7 +881,7 @@ impl PushOp {
             PushOp::In => 1,
             PushOp::StartsWith => 2,
             PushOp::Lt | PushOp::Le | PushOp::Gt | PushOp::Ge => 3,
-            PushOp::EndsWith | PushOp::Contains => 4,
+            PushOp::EndsWith | PushOp::Contains | PushOp::Regex => 4,
             PushOp::NotNull => 5,
         }
     }
@@ -922,8 +925,8 @@ pub(crate) enum PushOperand {
 /// Pushable (Phase 0 Q5): a conjunct over exactly one binding of the form `var.key <op> operand`
 /// (or `operand <op> var.key` for `=` and the ranges), `op` one of `=`, `<`, `<=`, `>`, `>=`
 /// (operand a non-null scalar literal or a parameter), `IN` (a list literal of scalars and
-/// `NULL`s, or a parameter), `STARTS WITH` / `ENDS WITH` / `CONTAINS` (a string literal or a
-/// parameter); `var.key IS NOT NULL`; an inline property `{key: operand}` as `=`. Never: `<>`,
+/// `NULL`s, or a parameter), `STARTS WITH` / `ENDS WITH` / `CONTAINS` / `=~` (a string literal
+/// or a parameter); `var.key IS NOT NULL`; an inline property `{key: operand}` as `=`. Never: `<>`,
 /// `IS NULL`, a `NULL` operand, a list or map operand of `=` or a range, a nested list in `IN`,
 /// anything under `NOT` / `OR`, an expression operand.
 pub(crate) fn classify(conjunct: &Conjunct) -> Option<Pushdown> {
@@ -969,12 +972,13 @@ fn classify_expr(expr: &Expr) -> Option<Pushdown> {
                 BinaryOp::StartsWith => PushOp::StartsWith,
                 BinaryOp::EndsWith => PushOp::EndsWith,
                 BinaryOp::Contains => PushOp::Contains,
+                BinaryOp::RegexMatch => PushOp::Regex,
                 _ => return None,
             };
             if let Some(key) = property_key(left) {
                 let operand = match op {
                     PushOp::In => list_operand(right)?,
-                    PushOp::StartsWith | PushOp::EndsWith | PushOp::Contains => {
+                    PushOp::StartsWith | PushOp::EndsWith | PushOp::Contains | PushOp::Regex => {
                         string_operand(right)?
                     }
                     _ => scalar_operand(right)?,

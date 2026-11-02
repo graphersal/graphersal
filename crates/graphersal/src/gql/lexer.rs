@@ -24,7 +24,8 @@
 //!   `<-[e]-`, `-[e]-`) with one grammar, using span adjacency where it matters. In an expression
 //!   the parser reads a `<-` token as `<` followed by a unary minus (`a<-1`).
 //! - **`~` forms** (`~`, `~>`, `<~`, the GQL undirected edges) are tokens so the parser can refuse
-//!   them by name.
+//!   them by name. `=~` with the two characters adjacent is one token, Cypher's regular-expression
+//!   match operator (`a = ~b` stays `=` and `~`).
 //! - **Keywords are contextual.** A word that matches a [`Keyword`] (ASCII case-insensitive) is a
 //!   [`TokenKind::Keyword`] token that keeps its text as written; whether it is reserved is decided
 //!   by the parser per position. Where only a name can stand (after `.`, after `:` in a label
@@ -45,7 +46,7 @@
 //!   `\n`, `\t`, `\r`, `\b`, `\f`, `\uXXXX` (4 hex digits), `\UXXXXXXXX` (8 hex digits); the
 //!   quote character doubled (`'it''s'`) is one quote. Any other escape, and a `\u` that is not a
 //!   Unicode scalar value (e.g. a lone surrogate), is an error.
-//! - **Punctuation and operators:** `( ) [ ] { } : , . .. ;`, `| & ! % * + - / =`, `<> !=`
+//! - **Punctuation and operators:** `( ) [ ] { } : , . .. ;`, `| & ! % * + - / = =~`, `<> !=`
 //!   (both [`TokenKind::Ne`]), `< <= > >=`, `||`, `-> <-`, `~ ~> <~`, `?` (stage 2e: the
 //!   quantifier `{0,1}` of a parenthesized path pattern; anywhere else the parser's syntax
 //!   error).
@@ -209,6 +210,8 @@ pub(crate) enum TokenKind {
     Slash,
     /// `=`
     Eq,
+    /// `=~` (Cypher's whole-string regular-expression match; the two characters adjacent)
+    RegexMatch,
     /// `<>` or `!=` (the token text tells which).
     Ne,
     /// `<`
@@ -267,6 +270,7 @@ impl TokenKind {
             TokenKind::Minus => "`-`",
             TokenKind::Slash => "`/`",
             TokenKind::Eq => "`=`",
+            TokenKind::RegexMatch => "`=~`",
             TokenKind::Ne => "`<>`",
             TokenKind::Lt => "`<`",
             TokenKind::Le => "`<=`",
@@ -327,6 +331,7 @@ impl Token<'_> {
             | TokenKind::Minus
             | TokenKind::Slash
             | TokenKind::Eq
+            | TokenKind::RegexMatch
             | TokenKind::Ne
             | TokenKind::Lt
             | TokenKind::Le
@@ -647,6 +652,7 @@ impl<'a> Lexer<'a> {
             '*' => TokenKind::Star,
             '+' => TokenKind::Plus,
             '/' => TokenKind::Slash,
+            '=' if self.eat('~') => TokenKind::RegexMatch,
             '=' => TokenKind::Eq,
             '.' if self.eat('.') => TokenKind::DotDot,
             '.' => TokenKind::Dot,
@@ -1178,6 +1184,38 @@ mod tests {
         );
         // Single minus stays arithmetic.
         assert_eq!(kinds("a - -1"), vec![K::Ident, M, M, K::Integer(1), K::Eof]);
+    }
+
+    #[test]
+    fn regex_match_operator_only_when_adjacent() {
+        assert_eq!(
+            kinds("n.name =~ 'm.*'"),
+            vec![
+                K::Ident,
+                K::Dot,
+                K::Ident,
+                K::RegexMatch,
+                K::Str("m.*".into()),
+                K::Eof
+            ]
+        );
+        assert_eq!(
+            kinds("a=~b"),
+            vec![K::Ident, K::RegexMatch, K::Ident, K::Eof]
+        );
+        // Apart, `=` and `~` stay two tokens (and `~` the undirected edge the parser refuses).
+        assert_eq!(
+            kinds("a = ~b"),
+            vec![K::Ident, K::Eq, K::Tilde, K::Ident, K::Eof]
+        );
+        assert_eq!(
+            kinds("a ~= b"),
+            vec![K::Ident, K::Tilde, K::Eq, K::Ident, K::Eof]
+        );
+        assert_eq!(kinds("(a)~(b)")[3], K::Tilde);
+        let tokens = tokenize("x =~ y").unwrap();
+        assert_eq!(tokens[1].text, "=~");
+        assert_eq!(TokenKind::RegexMatch.describe(), "`=~`");
     }
 
     #[test]

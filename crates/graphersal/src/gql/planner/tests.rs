@@ -641,6 +641,27 @@ fn pushdown_safe_forms() {
 }
 
 #[test]
+fn pushdown_of_the_regex_match() {
+    let p = pushdown_of("MATCH (n) WHERE n.v =~ 'a.*' RETURN n").expect("pushed");
+    assert_eq!((p.key.as_str(), p.op), ("v", PushOp::Regex));
+    assert_eq!(p.operand, PushOperand::Value(Literal::String("a.*".into())));
+    let p = pushdown_of("MATCH (n) WHERE n.v =~ $p RETURN n").expect("pushed");
+    assert_eq!(p.op, PushOp::Regex);
+    assert!(matches!(p.operand, PushOperand::Parameter { ref name, .. } if name == "p"));
+    // Never mirrored, never with an expression, a NULL or a non-string operand, never under NOT.
+    for cond in [
+        "'a' =~ n.v",
+        "n.v =~ n.w",
+        "n.v =~ NULL",
+        "n.v =~ 1",
+        "NOT n.v =~ 'a'",
+    ] {
+        let q = format!("MATCH (n) WHERE {cond} RETURN n");
+        assert!(pushdown_of(&q).is_none(), "{cond}");
+    }
+}
+
+#[test]
 fn pushdown_refuses_the_unsafe_forms() {
     for cond in [
         "n.v <> 30",

@@ -1281,6 +1281,8 @@ pub(crate) enum BinaryOp {
     EndsWith,
     /// `CONTAINS`.
     Contains,
+    /// `=~` (Cypher's regular-expression match: the whole string, the Rust `regex` dialect).
+    RegexMatch,
 }
 
 /// A `CASE` expression: simple (`CASE x WHEN v THEN ...`) when `operand` is set, searched

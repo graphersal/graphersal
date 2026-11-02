@@ -7526,7 +7526,11 @@ fn gql_help(
                 help.push_str(advice);
                 help.push(' ');
             }
-            help.push_str(GQL_DATA_ADVICE);
+            // A literal or `$param` pattern of `=~` fails before any row: its own advice says
+            // everything.
+            if gqlstatus != crate::gql::eval::status::INVALID_REGEX {
+                help.push_str(GQL_DATA_ADVICE);
+            }
             if gqlstatus == crate::gql::eval::status::DIVISION_BY_ZERO {
                 // Stage 3f: only an integer division fails on a zero divisor (and, 3g, a
                 // duration's).
@@ -8031,6 +8035,18 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
             "TRIM(c FROM s) removes one character c; to remove any of several characters use \
              btrim(s, chars), ltrim(s, chars) or rtrim(s, chars), as in \
              g.gql(\"MATCH (p:person) RETURN btrim(p.name, 'mo') AS s\")."
+        }
+        // Invalid regular expression (the pattern of `=~`).
+        "2201B" => {
+            "x =~ pattern matches the whole string against a regular expression in the syntax of \
+             the Rust `regex` crate (https://docs.rs/regex/latest/regex/#syntax), not Java's: \
+             classes [a-z], \\d, \\w, \\s, groups (..), alternation |, quantifiers * + ? {n,m}, \
+             inline flags such as (?i). Look-around ((?=..), (?!..)) and back-references (\\1) \
+             are not supported. Escape a literal metacharacter with a backslash (doubled in a \
+             GQL string literal), as in \
+             g.gql(\"MATCH (p:person) WHERE p.name =~ '(?i)MAR.*' RETURN p.name\"). A literal \
+             or $param pattern is checked before the query runs; a pattern computed per row \
+             fails at the first row that holds an invalid one."
         }
         // Invalid argument for natural logarithm.
         "2201E" => {

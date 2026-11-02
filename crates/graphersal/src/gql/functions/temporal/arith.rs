@@ -179,6 +179,7 @@ fn symbol(op: BinaryOp) -> &'static str {
         | BinaryOp::StartsWith
         | BinaryOp::EndsWith
         | BinaryOp::Contains
+        | BinaryOp::RegexMatch
         | BinaryOp::Concat => "an operator",
     }
 }
