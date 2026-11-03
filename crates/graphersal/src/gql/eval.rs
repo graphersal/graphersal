@@ -999,25 +999,13 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         .rev()
         .map(|link| {
             let op = match &link.kind {
-                ExprKind::Binary {
-                    op: BinaryOp::RegexMatch,
-                    right,
-                    ..
-                } => compile_regex(right, scope)?,
-                ExprKind::Binary { op, right, .. } => {
+                ExprKind::Binary { op, right, .. } if *op != BinaryOp::RegexMatch => {
                     LinkOp::Binary(*op, compile_expr(right, scope)?)
                 }
                 ExprKind::Property { key, .. } => LinkOp::Property(key.name.as_str().into()),
                 ExprKind::IsNull { negated, .. } => LinkOp::IsNull(*negated),
-                ExprKind::IsLabeled {
-                    labels, negated, ..
-                } => LinkOp::IsLabeled(Labels::compile(labels), *negated),
-                ExprKind::IsEndpoint {
-                    edge, end, negated, ..
-                } => LinkOp::IsEndpoint(*end, *negated, compile_expr(edge, scope)?),
                 ExprKind::Index(index) => compile_subscript(&index.subscript, scope)?,
-                // `chain_left` admits only the kinds above.
-                _ => LinkOp::IsNull(false),
+                _ => compile_rare_link(link, scope)?,
             };
             Ok(Link {
                 op,
@@ -1026,6 +1014,27 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     Ok(Node::Chain(Box::new(first), links))
+}
+
+/// The rarer links of [`compile_chain`] (`=~`, `IS LABELED`, `IS SOURCE / DESTINATION OF`),
+/// in a frame of their own for the reason of [`rare_link`].
+#[inline(never)]
+fn compile_rare_link<E: Clone>(link: &Expr, scope: &impl Scope) -> Result<LinkOp<E>, EvalError> {
+    Ok(match &link.kind {
+        ExprKind::Binary {
+            op: BinaryOp::RegexMatch,
+            right,
+            ..
+        } => compile_regex(right, scope)?,
+        ExprKind::IsLabeled {
+            labels, negated, ..
+        } => LinkOp::IsLabeled(Labels::compile(labels), *negated),
+        ExprKind::IsEndpoint {
+            edge, end, negated, ..
+        } => LinkOp::IsEndpoint(*end, *negated, compile_expr(edge, scope)?),
+        // `chain_left` admits only the kinds of `compile_chain` and of this function.
+        _ => LinkOp::IsNull(false),
+    })
 }
 
 /// The link of `=~ pattern`: a constant string pattern compiled here, once (an invalid one is
@@ -1860,24 +1869,48 @@ fn eval_chain<'a, En: Env>(
             }
             LinkOp::Property(key) => property(&value, key, env, link.span)?,
             LinkOp::IsNull(negated) => Truth::of(value.is_null() != *negated).into_value(),
-            LinkOp::IsLabeled(labels, negated) => {
-                is_labeled(&value, labels, *negated, env, link.span)?
-            }
-            LinkOp::IsEndpoint(end, negated, edge) => {
-                let edge = edge.eval_cow(env)?;
-                functions::is_endpoint(&value, &edge, *end, *negated, env, link.span)?
-            }
             LinkOp::Index(index) => {
                 let at = index.eval_cow(env)?;
                 subscript(value, &at, index.span, env, link.span)?
             }
-            LinkOp::Slice(bounds) => slice(value, bounds, env, link.span)?,
-            LinkOp::Regex(regex) => regex_match(&value, regex, env)?,
+            LinkOp::IsLabeled(..)
+            | LinkOp::IsEndpoint(..)
+            | LinkOp::Slice(_)
+            | LinkOp::Regex(_) => rare_link(&link.op, value, link.span, env)?,
         };
         value = Cow::Owned(next);
         left_span = link.span;
     }
     Ok(value)
+}
+
+/// The rarer links of [`eval_chain`], in a frame of their own: unoptimized builds keep one stack
+/// slot per temporary of every arm, and `eval_chain`'s frame is on the stack once per level of a
+/// nested expression (`deep_expressions_evaluate_without_overflow` runs on 512 KiB).
+#[inline(never)]
+fn rare_link<'a, En: Env>(
+    op: &'a LinkOp<En::Element>,
+    value: Cow<'a, Value<En::Element>>,
+    span: Span,
+    env: &En,
+) -> Result<Value<En::Element>, EvalError> {
+    match op {
+        LinkOp::IsLabeled(labels, negated) => is_labeled(&value, labels, *negated, env, span),
+        LinkOp::IsEndpoint(end, negated, edge) => {
+            let edge = edge.eval_cow(env)?;
+            functions::is_endpoint(&value, &edge, *end, *negated, env, span)
+        }
+        LinkOp::Slice(bounds) => slice(value, bounds, env, span),
+        LinkOp::Regex(regex) => regex_match(&value, regex, env),
+        // `eval_chain` evaluates these itself and never passes them here.
+        LinkOp::Binary(..) | LinkOp::Property(_) | LinkOp::IsNull(_) | LinkOp::Index(_) => {
+            Err(EvalError::new(
+                status::NOT_SUPPORTED,
+                "internal error: a frequent link reached the rare-link evaluator".to_string(),
+                span,
+            ))
+        }
+    }
 }
 
 /// `value =~ pattern`: whole-string match; a `NULL` or non-string operand gives `NULL` (as for
