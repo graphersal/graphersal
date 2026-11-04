@@ -286,7 +286,7 @@ edges, a Model2Vec model in the store) the dev server's report reads:
 
 ```text
 Process memory: where it goes
-  embedding_model         930.8 MiB  exact      model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87
+  embedding_model         513.6 MiB  exact      model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87
   graph                   186.8 MiB  estimated
   script_engine             2.0 MiB  exact      the DSL's registrations, built on 1 thread
   workload_statistics       1.2 MiB  estimated
@@ -294,8 +294,11 @@ Process memory: where it goes
   unattributed              2.9 MiB  of 1.1 GiB tracked
 ```
 
-That model is counted when it loads: its tokenizer takes about 442 MiB in memory (from an
-18 MiB file: a Unigram vocabulary of 500 000 tokens), its embedding matrix 489 MiB.
+That model is counted when it loads: its embedding matrix takes 489 MiB, its tokenizer about
+25 MiB (an 18 MiB file: a Unigram vocabulary of 500 000 tokens). Graphersal keeps a Unigram
+vocabulary in a few flat arrays (the tokens' bytes, their scores and a byte trie in
+breadth-first order), built when the model loads; the `tokenizers` crate's own form of the same
+vocabulary took 442 MiB. The token ids and the vectors are the same bits.
 
 Everything here is computed when the report is asked for, by reading structures that exist
 anyway: nothing is counted on the read, write, commit or query paths (a model's bytes and the
