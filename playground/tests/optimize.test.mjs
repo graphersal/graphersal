@@ -225,3 +225,9 @@ test('process memory: components most bytes first, then the unattributed rest', 
   const untracked = memoryComponents({ components: [{ name: 'graph', bytes: 10, exact: false }] });
   assert.deepEqual(untracked.map((r) => [r.name, r.share]), [['graph', null]]);
 });
+
+test('memoryTotals keeps its doc comment next to it', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const text = await readFile(new URL('../js/optimize.js', import.meta.url), 'utf8');
+  assert.match(text, /\/\*\* The memory totals of a report[^\n]*\*\/\nexport function memoryTotals\(/);
+});

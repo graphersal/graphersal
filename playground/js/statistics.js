@@ -75,7 +75,9 @@ export function processMemoryRows(process) {
     if (typeof mem.wasmMemoryBytes === 'number') rows.push({ name: 'WebAssembly memory', text: formatBytes(mem.wasmMemoryBytes) });
   }
   for (const m of process.models || []) {
-    rows.push({ name: `Model ${m.name}`, text: `${formatBytes(m.bytes)} (${m.dimension} dimensions${m.default ? ', default' : ''})` });
+    // `measured: false`: no tracking allocator counted the load, the size is the definition's estimate.
+    const estimate = m.measured === false ? ', estimate' : '';
+    rows.push({ name: `Model ${m.name}`, text: `${formatBytes(m.bytes)} (${m.dimension} dimensions${m.default ? ', default' : ''}${estimate})` });
   }
   const chat = process.aiChat;
   if (chat) {

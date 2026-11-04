@@ -485,14 +485,13 @@ impl Playground {
         json_text(self.session.graph().memory_view())
     }
 
-    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` (see
-    /// [`Session::statistics`]).
+    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` with
+    /// the whole process in `process.memory` (see [`Session::statistics_with_process`]).
     pub fn statistics(&self) -> Result<String, JsError> {
-        let mut statistics = self
+        let statistics = self
             .session
-            .statistics()
+            .statistics_with_process()
             .map_err(|e| JsError::new(&e.to_string()))?;
-        graphersal_session::process::add_to_statistics(&mut statistics);
         Ok(to_text(&statistics))
     }
 

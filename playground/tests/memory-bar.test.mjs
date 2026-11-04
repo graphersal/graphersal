@@ -115,3 +115,28 @@ test('the query peak is against the per-query limit', () => {
   assert.equal(queryPeakModel({ duration_ns: 1 }), null);
   assert.equal(queryPeakModel(null), null);
 });
+
+test('the component segments get their colour, hint and parts in the tooltip', async () => {
+  const { partLines } = await import('../js/memory-bar.js');
+  const m = memoryBarModel(tracked({
+    segments: [
+      { name: 'structure', bytes: 180 * MIB },
+      { name: 'models', bytes: 931 * MIB, parts: [{ name: 'embedding_model', detail: 'model2vec/m@1', bytes: 931 * MIB }] },
+      { name: 'live_graph', bytes: 700 * MIB, parts: [{ name: 'store_graph', detail: 'kb.gstore', bytes: 700 * MIB }] },
+      { name: 'store', bytes: 4 * MIB },
+      { name: 'engine', bytes: 8 * MIB, parts: [{ name: 'session', bytes: MIB }, { name: 'script_engine', detail: 'the DSL', bytes: 5 * MIB }] },
+      { name: 'other', bytes: 10 * MIB },
+    ],
+  }));
+  assert.deepEqual(m.segments.map((s) => s.name), ['structure', 'models', 'live_graph', 'store', 'engine', 'other']);
+  const live = m.segments[2];
+  assert.equal(live.colour, 'var(--mem-live_graph, var(--text-faint))');
+  assert.match(live.hint, /^the store's live graph, held beside the view/);
+  assert.match(live.hint, /\nstore_graph 700 MiB \(kb\.gstore\)$/);
+  // The parts, most bytes first.
+  assert.deepEqual(m.segments[4].hint.split('\n').slice(1), ['script_engine 5 MiB (the DSL)', 'session 1 MiB']);
+  // A segment without parts keeps its plain hint.
+  assert.equal(m.segments[3].hint, "the store's buffers and, for a store kept in memory, its files");
+  assert.match(m.label, /; live_graph 700 MiB; store 4 MiB; engine 8 MiB; other 10 MiB$/);
+  assert.deepEqual(partLines(undefined), []);
+});

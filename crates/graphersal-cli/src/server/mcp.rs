@@ -1785,7 +1785,9 @@ fn run_tool(
         }
         "statistics" => Ok(compact(&super::with_process_memory(
             context,
-            context.call(|s| s.statistics()).map_err(http_failed)??,
+            context
+                .call(|s| s.statistics_with_process())
+                .map_err(http_failed)??,
         ))),
         "workload_statistics" => {
             let max_rows = args
@@ -2692,7 +2694,9 @@ fn read_resource(context: &Context, uri: &str, read_only: bool) -> Result<String
         )?))),
         "graphersal://statistics" => Ok(compact(&super::with_process_memory(
             context,
-            context.call(|s| s.statistics()).map_err(http_failed)??,
+            context
+                .call(|s| s.statistics_with_process())
+                .map_err(http_failed)??,
         ))),
         "graphersal://dsl-reference" => {
             static REFERENCE: OnceLock<String> = OnceLock::new();

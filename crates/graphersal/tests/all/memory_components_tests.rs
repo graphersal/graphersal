@@ -75,6 +75,32 @@ fn a_host_adds_a_part_it_alone_knows() {
     assert!(!report.component("host_buffer", None).unwrap().exact);
 }
 
+/// The process's parts without a report: what a report adds beside the graph, never the graph
+/// itself, a registered source while it lives.
+#[test]
+fn the_process_components_come_without_a_report() {
+    let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    let source: Arc<dyn MemorySource> = Arc::new(Fixed("components_test_direct", 777));
+    register_memory_source(&source);
+    let parts = AnyGraph::process_memory_components(&graph).unwrap();
+    assert!(
+        parts
+            .iter()
+            .all(|c| c.name != "graph" && c.name != "workload_statistics")
+    );
+    let part = parts
+        .iter()
+        .find(|c| c.name == "components_test_direct")
+        .expect("the source's component");
+    assert_eq!(
+        (part.bytes, part.exact, part.detail.as_deref()),
+        (777, true, Some("test"))
+    );
+    drop(source);
+    let parts = AnyGraph::process_memory_components(&graph).unwrap();
+    assert!(parts.iter().all(|c| c.name != "components_test_direct"));
+}
+
 #[cfg(feature = "persist")]
 mod store {
     use super::*;
@@ -134,6 +160,40 @@ mod store {
         assert!(live.bytes >= live_estimate.total_bytes(), "{live:?}");
         // The view itself is the `graph` component, smaller than the live graph.
         assert!(report.component("graph", None).unwrap().bytes < live.bytes);
+        store.close().unwrap();
+    }
+
+    /// Without the walk too: a view's process parts name its store's live graph, the live
+    /// graph's own do not.
+    #[test]
+    fn the_process_components_of_a_view_name_the_live_graph() {
+        let dir = MemDir::named("memory-components-view-direct");
+        let store = Store::create(&dir, StoreOptions::new()).unwrap();
+        for i in 0..20 {
+            graphersal::script::eval(
+                store.graph().clone(),
+                &format!("g.add_v(\"p\").property(\"n\", {i}).iterate()"),
+            )
+            .unwrap();
+        }
+        let view = store
+            .read_only_at(RecoveryTarget::CommitSeq(5))
+            .unwrap()
+            .into_graph();
+        let at = location(&store);
+        let named = |parts: &[MemoryComponent], name: &str| {
+            parts
+                .iter()
+                .find(|c| c.name == name && c.detail.as_deref() == Some(at.as_str()))
+                .cloned()
+        };
+        let parts = AnyGraph::process_memory_components(&view).unwrap();
+        let live = named(&parts, "store_graph").expect("the live graph beside the view");
+        let live_estimate = AnyGraph::memory_usage(&**store.graph()).unwrap().unwrap();
+        assert!(live.bytes >= live_estimate.total_bytes(), "{live:?}");
+        assert!(named(&parts, "store").is_some());
+        let own = AnyGraph::process_memory_components(&**store.graph()).unwrap();
+        assert!(named(&own, "store_graph").is_none());
         store.close().unwrap();
     }
 

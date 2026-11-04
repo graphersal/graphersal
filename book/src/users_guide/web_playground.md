@@ -81,7 +81,7 @@ answers questions by querying the served graph. In the WebAssembly playground th
   While open it reloads after every run that changed the data. A **Process memory** section
   (hidden when empty) lists what the process holds: the resident set size (RSS, with its peak)
   and the live heap on the dev server (RSS on Linux and macOS only), every loaded embedding model
-  with its estimated size and, on the dev server with `--ai`, the AI Chat history (conversations
+  with its size (measured at its load; marked "estimate" where no tracking allocator counted it) and, on the dev server with `--ai`, the AI Chat history (conversations
   and an estimate of their bytes). The WebAssembly playground has no loaded models, no chat and no RSS; it shows the live heap
   and the size of its WebAssembly memory.
   Above the Memory section, the **process memory bar** shows how full the process is against its
@@ -91,11 +91,18 @@ answers questions by querying the served graph. In the WebAssembly playground th
   place the memory goes: **structure** (vertex and edge slots, ids and labels: the Memory row's
   Structure), **properties** (plain values), **compressed** (compressed and deduplicated values
   with their dictionaries), **indexes** (the id and label indexes plus the property indexes: the
-  Memory row's Indexes and Property indexes), **models** (embedding models in memory) and
-  **other** (the rest of the heap: query buffers, caches, the session). The legend lists every
-  segment with its size, also a tiny one, and a line says what compression saves. Without a
-  tracking allocator only the known segments are shown, marked "process total not tracked";
-  without a ceiling there is no percentage. The same bar opens the Memory tab of **Optimize**.
+  Memory row's Indexes and Property indexes), **models** (embedding models in memory),
+  **live_graph** (a store's live graph, held beside the [read-only view](../persistence/store_point_in_time.md#read-only-views) of a past state
+  you are looking at), **store** (the store's buffers and, for a database kept in memory, its
+  files), **engine** (the script engine, the workload statistics, the session's layouts, the dev
+  server's MCP and AI Chat state) and **other** (the rest of the heap no segment explains: query
+  buffers, caches, allocator overhead). A segment's tooltip lists the parts it sums. The legend
+  lists every segment with its size, also a tiny one, and a line says what compression saves.
+  Without a tracking allocator only the known segments are shown, marked "process total not
+  tracked"; without a ceiling there is no percentage. The same bar opens the Memory tab of
+  **Optimize**; the Statistics tab's **Components and memory report…** button opens that tab,
+  whose **Process memory** table lists every component with its bytes (the memory report's walk,
+  so it is not repeated in the Statistics tab).
   With **Profile** on, a line under the step tree, **Peak memory**, shows the most memory the run
   held at once against the per-query limit `traversal.max_materialized_bytes` (amber and red by
   the same thresholds): a different figure from the process bar, against a different limit.

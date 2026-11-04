@@ -135,6 +135,7 @@ export const state = reactive({
   // hosts the dialogs; openCatalog sets it, the dialog clears it when it closes).
   catalogDialog: null,
   optimizeN: 0, // bumped by every openOptimize: the Optimize panel opens
+  optimizeTab: null, // the tab that openOptimize asked for (taken by the panel), or null
   catalogDialogN: 0, // bumped by every openCatalog, so opening the same manager again reopens it
   catalogDialogScript: null, // the tab text "Save as query…" hands to the saved-query editor
   catalogDialogJournal: null, // {seq, level, source}: the record the System journal opens at (a toast's click)
@@ -1309,8 +1310,13 @@ export async function loadCatalogFile(file) {
 }
 
 /** Opens a manager of the Catalog dropdown: 'queries', 'compression' or 'indexes'. */
-/** Opens the Optimize panel (js/components/optimize.js). */
-export function openOptimize() {
+/**
+ * Opens the Optimize panel (js/components/optimize.js), on the tab `tab` when given
+ * ('advice', 'workload' or 'memory'; the Statistics tab opens 'memory'), else on the tab it
+ * showed last.
+ */
+export function openOptimize(tab = null) {
+  state.optimizeTab = tab;
   state.optimizeN++;
 }
 

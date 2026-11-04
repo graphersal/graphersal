@@ -133,7 +133,8 @@ const COMMANDS: &[(&str, &str, &str)] = &[
 
 /// The answer of `/memory [max_elements]`: the process memory bar
 /// ([`graphersal_session::process::MemoryBar::text`], 80 columns: the process against its
-/// ceiling, the graph's segments; no models, the REPL holds no embedder registry), a blank line,
+/// ceiling, the graph's segments and the process's components: models loaded in the process, a
+/// store, the engine), a blank line,
 /// then [`memory_report`]. An invalid argument answers only the usage line.
 fn memory_answer(graph: &graphersal::storage::Graph, args: &str) -> String {
     let report = memory_report(graph, args);
@@ -141,8 +142,14 @@ fn memory_answer(graph: &graphersal::storage::Graph, args: &str) -> String {
         return report;
     }
     let bar = graphersal_session::storage::SessionGraph::memory_view(graph)
+        .and_then(|memory| {
+            graphersal::storage::AnyGraph::process_memory_components(graph)
+                .map(|components| (memory, components))
+        })
         .map_err(graphersal_session::error::SessionError::from)
-        .and_then(|memory| graphersal_session::process::memory_bar(&memory, 0));
+        .and_then(|(memory, components)| {
+            graphersal_session::process::memory_bar_with(&memory, 0, &components)
+        });
     match bar {
         Ok(bar) => format!("{}\n\n{report}", bar.text(80)),
         Err(err) => format!("Memory   the process memory bar is unavailable: {err}\n\n{report}"),

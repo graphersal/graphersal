@@ -3,10 +3,11 @@
 // defaults). Loaded when the tab becomes active; while active it reloads after a run that changed
 // the data (`changes.data`, state.dataVersion) or a graph load. The rows come from the pure model
 // in js/statistics.js; the process memory bar above the Memory section is the shared MemoryBar
-// (components/memory-bar.js, also in Optimize -> Memory).
+// (components/memory-bar.js, also in Optimize -> Memory). The components table is not repeated
+// here (it needs the memory report's walk): a button opens Optimize -> Memory.
 
 import { ref, computed, watch } from 'vue';
-import { state, isServerMode } from '../store.js';
+import { state, isServerMode, openOptimize } from '../store.js';
 import { statisticsModel, formatCount, counted } from '../statistics.js';
 import { MemoryBar } from './memory-bar.js';
 
@@ -47,7 +48,7 @@ export const StatisticsView = {
 
     const model = computed(() => statisticsModel(raw.value));
     const server = computed(() => isServerMode());
-    return { error, loading, raw, model, server, load, formatCount, counted };
+    return { error, loading, raw, model, server, load, formatCount, counted, openOptimize };
   },
   template: `
   <div class="stats-view">
@@ -78,6 +79,8 @@ export const StatisticsView = {
       <section v-if="raw && raw.process && raw.process.memory" class="stats-section">
         <h4>Process memory ceiling <span class="muted">(the whole process against memory.limit; the segments say where the memory goes)</span></h4>
         <memory-bar :stats="raw"></memory-bar>
+        <p class="mem-bar-note"><button type="button" class="btn small" @click="openOptimize('memory')"
+          title="Optimize -> Memory: the memory report, with every component of the process memory (the graph, models, the store, the script engine, the session) and the rest no component explains">Components and memory report…</button></p>
       </section>
       <section v-if="model.memory" class="stats-section">
         <h4>Memory <span class="muted">(g.memory_usage(), an estimate of the graph's own footprint)</span></h4>
