@@ -31,6 +31,7 @@ mod blob_usage_tests;
 mod bounded_rendering_tests;
 mod branch_batch_tests;
 mod branch_option_tests;
+mod bulk_rules_tests;
 mod bulk_tests;
 mod by_modulating_steps_tests;
 mod by_modulator_tests;

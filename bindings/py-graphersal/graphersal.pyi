@@ -468,6 +468,27 @@ class Graph:
         at ``path`` are kept compressed in memory (``codec="lz4"``, default: ``min_bytes`` 256,
         a dictionary) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 0,
         no dictionary; on a top-level key every value type) and read plain."""
+    def define_compressions(
+        self, rules: list[dict[str, Any]], *, policy: Optional[AccessPolicy] = None
+    ) -> int:
+        """Stores every compression rule of ``rules`` in ONE commit and re-encodes their labels
+        in one pass; each rule is ``define_compression``'s keys, or ``paths`` (a list) instead
+        of ``name`` and ``path`` for one rule per path named ``<label>_<path>``. All or nothing.
+        Returns the number of rules stored."""
+    def advise(
+        self, *, everything: bool = False, policy: Optional[AccessPolicy] = None
+    ) -> dict[str, Any]:
+        """The storage advisor's recommendations (with ``groups`` per kind and codec);
+        changes nothing."""
+    def apply_recommendations(
+        self,
+        ids: list[str],
+        *,
+        everything: bool = False,
+        policy: Optional[AccessPolicy] = None,
+    ) -> list[dict[str, Any]]:
+        """Applies the recommendations ``ids`` of the advice in ONE commit, all or nothing;
+        returns the applied ones (``id``, ``kind``, ``title``, ``memory_bytes``)."""
     def compressions(self, *, policy: Optional[AccessPolicy] = None) -> list[dict[str, Any]]:
         """The compression rules with their current stats; ``served`` is ``False`` (with a
         ``reason``) for a rule this version keeps but does not apply."""

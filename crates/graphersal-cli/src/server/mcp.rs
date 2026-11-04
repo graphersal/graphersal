@@ -56,7 +56,9 @@
 //! (reading) answers the scheduled jobs (`Session::jobs_view`); defining, switching or running
 //! a job stays the user's (the playground's job list, `/api/jobs*`). `advise` (reading)
 //! answers the storage advisor's recommendations (`Session::advise`), each with the command
-//! applying it through the catalog tools. `journal` (reading) answers one page of the graph's
+//! applying it through the catalog tools, and their `groups`; `apply_recommendations`
+//! (writing, refused in read-only mode) applies the ones the user picked by id in one commit
+//! (`Session::apply_recommendations`). `journal` (reading) answers one page of the graph's
 //! system journal (`Session::journal`, at most 100 records unless `limit` says otherwise).
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
@@ -1218,13 +1220,38 @@ fn all_tools() -> Vec<Tool> {
              negative = taken), impact (what it is worth: low, medium, high; for memory its \
              share of the graph), confidence (how much data it rests on) and the exact command \
              applying it (create_index, drop_index, define_compression, drop_compression: \
-             apply one only when the user asked for it). The list is ordered by impact. \
-             everything: true lists every candidate (small graphs).",
+             apply one only when the user asked for it). The list is ordered by impact. groups \
+             sums the recommendations per kind and codec (\"dedup: 74 keys, total -400.1 \
+             MiB\") with their ids, for apply_recommendations. Cost of dedup: on a deduped key \
+             adding a key new to an element and jpath writes into the value are about 30 % \
+             slower, plain overwrites about 5-9 %, reads mostly faster. everything: true lists \
+             every candidate (small graphs).",
             json!({
                 "type": "object",
                 "properties": {
                     "everything": {"type": "boolean", "description": "Report every candidate, ignoring the default thresholds (for small graphs)."},
                 },
+            }),
+        ),
+        tool(
+            "apply_recommendations",
+            "Apply recommendations",
+            Kind::Write,
+            "Applies the storage advisor's recommendations named by `ids` (the ids advise \
+             answered, such as the ids of one of its groups) in ONE commit: the advice is \
+             computed again with the same `everything`, then every index and compression rule \
+             they name is created or dropped together, and all new compression rules re-encode \
+             the data in one pass. All or nothing: an id no longer advised or a refused change \
+             (named in the error) applies nothing. Each change is reversible (drop_index, \
+             drop_compression). Apply only the recommendations the user picked: the user \
+             decides, never apply on your own.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "The recommendation ids from advise (recommendations[].id or groups[].ids)."},
+                    "everything": {"type": "boolean", "description": "The same value advise was called with (the advice is recomputed with it)."},
+                },
+                "required": ["ids"],
             }),
         ),
         tool(
@@ -1866,6 +1893,32 @@ fn run_tool(
                 "Storage advice (memory_bytes: freed, negative = taken):\n{}",
                 compact(&answer)
             ))
+        }
+        "apply_recommendations" => {
+            let ids: Vec<String> = args
+                .get("ids")
+                .and_then(Value::as_array)
+                .and_then(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or("missing argument \"ids\" (a list of recommendation ids from advise)")?;
+            let spec = json!({"everything": args.get("everything").and_then(Value::as_bool).unwrap_or(false)});
+            let answer = context
+                .call(move |s| s.apply_recommendations(&ids, &spec))
+                .map_err(http_failed)?;
+            if answer["ok"] == json!(true) {
+                Ok(format!(
+                    "Applied in one commit (memory_bytes: freed, negative = taken):\n{}",
+                    compact(&answer)
+                ))
+            } else {
+                Err(format!(
+                    "Nothing was applied:\n{}",
+                    answer["error"].as_str().unwrap_or_default()
+                ))
+            }
         }
         "list_jobs" => Ok(format!(
             "Scheduled jobs (times in microseconds since the Unix epoch):\n{}",

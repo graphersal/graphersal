@@ -566,6 +566,16 @@ impl Playground {
         Ok(to_text(&self.session.apply_recommendation(id, &spec)))
     }
 
+    /// Applies the recommendations `ids` (a JSON list of ids) of the advice for `spec` in ONE
+    /// commit, all or nothing: `{ok, applied, memory_bytes}` or `{ok: false, error}`.
+    #[wasm_bindgen(js_name = applyRecommendations)]
+    pub fn apply_recommendations(&mut self, ids: &str, spec: &str) -> Result<String, JsError> {
+        let ids: Vec<String> = serde_json::from_str(ids)
+            .map_err(|e| JsError::new(&format!("ids is a JSON list of ids: {e}")))?;
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.apply_recommendations(&ids, &spec)))
+    }
+
     /// Dismisses the recommendation `id` for `days` (`null`: for good): `{ok}` or `{ok: false,
     /// error}`.
     #[wasm_bindgen(js_name = dismissRecommendation)]

@@ -1334,18 +1334,32 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             value(context.call_fallible(move |s| s.journal(&spec))?)
         }
         // The storage advisor (`graphersal_session::advisor`): POST a spec of thresholds (`{}`:
-        // the defaults); apply one recommendation by its id with the same spec.
+        // the defaults); apply one recommendation by its id (`{id, spec}`), or several at once
+        // in one commit (`{ids: [..], spec}`), with the same spec.
         (Method::Post, "advise") => {
             let body = json_body(request)?;
             value(context.call(move |s| s.advise(&body))?)
         }
         (Method::Post, "advise/apply") => {
             let body = json_body(request)?;
+            let spec = body.get("spec").cloned().unwrap_or(Value::Null);
+            if let Some(ids) = body.get("ids") {
+                let ids: Vec<String> = ids
+                    .as_array()
+                    .and_then(|ids| {
+                        ids.iter()
+                            .map(|id| id.as_str().map(str::to_string))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| {
+                        HttpError(400, "\"ids\" is a list of recommendation ids".to_string())
+                    })?;
+                return value(context.call(move |s| s.apply_recommendations(&ids, &spec))?);
+            }
             let id = body["id"]
                 .as_str()
                 .map(str::to_string)
-                .ok_or_else(|| HttpError(400, "the body needs \"id\"".to_string()))?;
-            let spec = body.get("spec").cloned().unwrap_or(Value::Null);
+                .ok_or_else(|| HttpError(400, "the body needs \"id\" or \"ids\"".to_string()))?;
             value(context.call(move |s| s.apply_recommendation(&id, &spec))?)
         }
         // `{id, days?}`: not recommended for `days` (without: for good); `{id}`: listed again.

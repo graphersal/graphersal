@@ -15,9 +15,7 @@ use crate::graph::compression::CompressionStats;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::Mark;
 use crate::graph::schema::{GraphSchema, SchemaDiff, SchemaPatch, SchemaValidation};
-use crate::graph::{
-    Graph, GraphStatistics, GraphStorage, MemoryStats, StorageCapabilities, Transactional,
-};
+use crate::graph::{Graph, GraphStatistics, GraphStorage, MemoryStats, StorageCapabilities};
 use crate::traversal::GraphTraversalSource;
 
 #[cfg(feature = "io")]
@@ -156,6 +154,16 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         request: &crate::graph::advisor::AdviceRequest,
     ) -> TraverserResult<crate::graph::advisor::Advice>;
 
+    /// [`Graph::apply_recommendations`]: applies several recommendations of the advice for
+    /// `request` in one unit (one commit), all or nothing; `authorizer` (`None`: everything
+    /// allowed) is asked first.
+    fn apply_recommendations(
+        &self,
+        ids: &[String],
+        request: &crate::graph::advisor::AdviceRequest,
+        authorizer: Option<std::sync::Arc<dyn crate::graph::Authorizer>>,
+    ) -> TraverserResult<Vec<crate::graph::advisor::Recommendation>>;
+
     /// The graph as one value, `{"vertices": [..], "edges": [..]}`, with at most `keep`
     /// vertices and `keep` edges (all with `None`): what a script host shows for a graph value
     /// as a script's final value. Internal to the script layer.
@@ -202,11 +210,12 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         name: &str,
     ) -> Result<Option<Definition>, GraphError>;
 
-    /// Stores every definition of `definitions` ([`GraphTraversalSource::set_definition`],
-    /// each replacing the one of the same kind and name) in ONE unit
-    /// ([`Transactional::transaction`]): on an atomic storage either all of them or none. A
-    /// compression rule is stored like any other definition on every storage; only a storage
-    /// with compressed properties ([`TraversalGraph`](crate::TraversalGraph)) applies it.
+    /// Stores every definition of `definitions` ([`GraphTraversalSource::set_definitions`],
+    /// each replacing the one of the same kind and name) in ONE unit: on an atomic storage
+    /// either all of them or none. Goes through [`GraphStorage::set_definitions`], so a
+    /// [`TraversalGraph`](crate::TraversalGraph) applies all compression rules among them in
+    /// one walk. A compression rule is stored like any other definition on every storage; only
+    /// a storage with compressed properties applies it.
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()>;
 
     /// [`GraphTraversalSource::remove_definition`]; `false` when there is none.
@@ -419,6 +428,15 @@ where
         Graph::advise(self, request)
     }
 
+    fn apply_recommendations(
+        &self,
+        ids: &[String],
+        request: &crate::graph::advisor::AdviceRequest,
+        authorizer: Option<std::sync::Arc<dyn crate::graph::Authorizer>>,
+    ) -> TraverserResult<Vec<crate::graph::advisor::Recommendation>> {
+        Graph::apply_recommendations(self, ids, request, authorizer)
+    }
+
     fn listing(&self, keep: Option<usize>) -> TraverserResult<crate::value::ElementProperty> {
         crate::graph::subgraph::graph_listing(&*self.read_checked()?, keep)
     }
@@ -469,12 +487,9 @@ where
     }
 
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()> {
-        self.write_checked()?.transaction(|unit| {
-            for definition in definitions {
-                GraphTraversalSource::new(&mut *unit).set_definition(definition)?;
-            }
-            Ok(())
-        })
+        // One unit, and on a `TraversalGraph` one walk for all compression rules
+        // (`GraphStorage::set_definitions`).
+        GraphTraversalSource::new(&mut *self.write_checked()?).set_definitions(definitions)
     }
 
     fn remove_definition(&self, kind: DefinitionKind, name: &str) -> TraverserResult<bool> {

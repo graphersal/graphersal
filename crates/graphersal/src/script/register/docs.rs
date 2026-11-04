@@ -335,6 +335,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "define_compression":
         "Stores (or replaces) a compression rule #{name, label, path, element, codec, min_bytes, dictionary}: strings at that path are kept compressed in memory (codec \"lz4\") or stored once per distinct value (codec \"dedup\") and read plain (see the book page Compressed Properties).",
         "{ g.define_compression(#{name: \"n\", label: \"person\", path: \"name\"}); g.compressions().len() }" => "1";
+    "traversal" "define_compressions":
+        "Stores a list of compression rules in one commit and re-encodes their labels in one walk: each item a define_compression map, or #{label, paths: [..], codec, ..} for one rule per path named <label>_<path>; all or nothing, answers the number of rules stored (see the book page Compressed Properties).",
+        "{ g.define_compressions([#{label: \"person\", paths: [\"name\", \"age\"], codec: \"dedup\"}, #{name: \"sw_lang\", label: \"software\", path: \"lang\", codec: \"dedup\"}]); g.compressions().map(|r| r.name) }" => "[\"person_age\", \"person_name\", \"sw_lang\"]";
     "traversal" "define_queries":
         "Stores every function of a Rhai source as a saved query in a folder, described by its doc comment; params maps function name -> its parameter map (see the book page Saved Queries).",
         "{ g.define_queries(\"reports\", \"/** Persons. */ fn people() { g.v().has_label(\\\"person\\\") }\"); g.query(\"people\").count().next() }" => "4";

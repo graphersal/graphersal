@@ -13,7 +13,8 @@
 //! - the **advice** (`advise`): `{ok: true, advice}` with [`graphersal::advisor::Advice::to_property`]
 //!   as JSON (`{workload_level, observed_since, commit_seq, property_bytes, memory_bytes,
 //!   graph_bytes, estimates, recommendations: [{id, kind, element, label, key, title, evidence,
-//!   cost, memory_bytes, measured, impact, confidence, reversible, command, action}]}`), or
+//!   cost, memory_bytes, measured, impact, confidence, reversible, command, action}], groups:
+//!   [{key, kind, codec, title, ids, memory_bytes}]}`), or
 //!   `{ok: false, error}`;
 //! - **apply** (`apply_recommendation`): recomputes the advice with the same spec, finds the
 //!   recommendation `id` and runs its catalog command through the session's own operation
@@ -21,6 +22,14 @@
 //!   change feed records it); answers `{ok: true, id, kind, result}` (the operation's answer)
 //!   or `{ok: false, error}` (gone meanwhile, refused). In a store the application is recorded
 //!   (the memory before and what was promised), so the advice lists its outcome for 30 days;
+//! - **apply several** (`apply_recommendations(ids, spec)`): recomputes the advice once and
+//!   applies every recommendation of `ids` (a human's pick, such as one of the advice's
+//!   `groups`) in ONE unit, so one commit (the change feed records it once) and one walk over
+//!   the elements for all the new compression rules
+//!   ([`graphersal::storage::Graph::apply_recommendations`]); all or nothing: an id no longer
+//!   advised or a refused change (named in the error) applies nothing. Answers `{ok: true,
+//!   applied: [{id, kind, title, memory_bytes}], memory_bytes}` or `{ok: false, error}`. Each
+//!   one is recorded as applied in a store, like `apply_recommendation`;
 //! - **dismiss / restore** (`dismiss_recommendation(id, days)`, `restore_recommendation(id)`): a
 //!   dismissed recommendation leaves the list for `days` (`None`: for good) and is listed under
 //!   `dismissed`; kept in the store's workload sidecar (an instance preference, not data). Both
@@ -28,6 +37,7 @@
 
 use crate::error::SessionError;
 use graphersal::advisor::{AdviceRequest, RecommendedAction};
+use graphersal::error::{DefinitionError, GraphError};
 use graphersal::storage::ElementKind;
 use serde_json::{Value, json};
 
@@ -221,6 +231,60 @@ impl Session {
         json!({"ok": true, "id": id, "kind": kind, "result": result})
     }
 
+    /// Applies the recommendations `ids` of the advice for `spec` at once (module docs): ONE
+    /// commit, and one walk over the elements for all the new compression rules
+    /// ([`graphersal::storage::Graph::apply_recommendations`]); all or nothing. Answers `{ok:
+    /// true, applied: [{id, kind, title, memory_bytes}], memory_bytes}` or `{ok: false,
+    /// error}` (an id no longer advised, a refused change named in the error, a read-only
+    /// store). Cancellable through [`Self::cancel_token`] while the advice is computed.
+    pub fn apply_recommendations(&mut self, ids: &[String], spec: &Value) -> Value {
+        if ids.is_empty() {
+            return json!({"ok": false, "error": "no recommendation selected"});
+        }
+        if let Some(reason) = self.write_refusal() {
+            return json!({"ok": false, "error": reason});
+        }
+        let request = match advice_request(spec) {
+            Ok(request) => request,
+            Err(error) => return json!({"ok": false, "error": error.to_string()}),
+        };
+        let cancel = self.cancel_token();
+        cancel.reset();
+        let applied = cancel.scope(|| self.graph.apply_recommendations(ids, &request, None));
+        match applied {
+            Ok(applied) => {
+                let total: i64 = applied.iter().map(|r| r.memory_bytes).sum();
+                let applied: Vec<Value> = applied
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "kind": r.action.kind(),
+                            "title": r.title,
+                            "memory_bytes": r.memory_bytes,
+                        })
+                    })
+                    .collect();
+                json!({"ok": true, "applied": applied, "memory_bytes": total})
+            }
+            Err(err) => {
+                let error = match err.root_cause() {
+                    graphersal::TraverserError::Graph(GraphError::Definition(
+                        DefinitionError::NotFound { kind, name, .. },
+                    )) if kind == "recommendation" => format!(
+                        "the recommendation '{name}' is not advised any more (the data or the \
+                         workload changed): compute the advice again; nothing was applied"
+                    ),
+                    _ => format!(
+                        "nothing was applied: {}",
+                        graphersal::error::format_diagnostic(&*err)
+                    ),
+                };
+                json!({"ok": false, "error": error})
+            }
+        }
+    }
+
     /// Dismisses the recommendation `id` for `days` (`None`: for good) (module docs).
     pub fn dismiss_recommendation(&mut self, id: &str, days: Option<u64>) -> Value {
         let Some(stats) = self.graph.workload_stats() else {
@@ -364,5 +428,76 @@ mod tests {
         // Without a store there is nowhere to keep a dismissal.
         let mut plain = Session::new();
         assert_eq!(plain.dismiss_recommendation(id, None)["ok"], false);
+    }
+
+    #[test]
+    fn several_recommendations_are_applied_at_once_all_or_nothing() {
+        let mut s = Session::new();
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        let answer = s.execute(
+            r#"for i in 0..200 { g.add_v("file").property("kind", if i % 2 == 0 { "doc" } else { "img" }).property("size", i % 3).property("owner", "user-" + (i % 4)).iterate(); }"#,
+            &crate::RunOptions::default(),
+        );
+        assert!(!answer.contains("\"ok\":false"), "{answer}");
+        let spec = json!({"everything": true});
+        let advice = s.advise(&spec)["advice"].clone();
+        let group = advice["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["key"] == "add_compression:dedup")
+            .cloned()
+            .unwrap_or_else(|| panic!("{advice}"));
+        let ids: Vec<String> = group["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.len() >= 3, "{group}");
+        assert!(
+            group["title"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("dedup: {} keys, total -", ids.len())),
+            "{group}"
+        );
+        // An id that is not advised: nothing is applied.
+        let mut wrong = ids.clone();
+        wrong.push("add_compression:vertex:file:nope".to_string());
+        let refused = s.apply_recommendations(&wrong, &spec);
+        assert_eq!(refused["ok"], false);
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains("'add_compression:vertex:file:nope' is not advised any more")
+                && error.contains("nothing was applied"),
+            "{error}"
+        );
+        assert_eq!(s.compression_count().unwrap(), 0);
+        assert_eq!(s.apply_recommendations(&[], &spec)["ok"], false);
+        // The group at once: one commit.
+        let seq = s.graph.last_commit_seq().unwrap();
+        let applied = s.apply_recommendations(&ids, &spec);
+        assert_eq!(applied["ok"], true, "{applied}");
+        assert_eq!(applied["applied"].as_array().unwrap().len(), ids.len());
+        assert_eq!(applied["memory_bytes"], group["memory_bytes"]);
+        assert_eq!(s.graph.last_commit_seq().unwrap(), seq + 1);
+        assert_eq!(s.compression_count().unwrap(), ids.len());
+        let after = s.advise(&spec)["advice"].clone();
+        for id in &ids {
+            assert!(
+                !after["recommendations"].to_string().contains(id.as_str()),
+                "{after}"
+            );
+            assert!(
+                after["applied"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a["id"] == id.as_str()),
+                "{after}"
+            );
+        }
     }
 }

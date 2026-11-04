@@ -140,9 +140,12 @@ The estimate warns with `high_cardinality`; for long unique text use `lz4`. The
 [advisor](optimize.md) recommends a dedup rule only where at most one value in eight is distinct
 and it saves at least 1 MiB.
 
-**The cost**: a write of a coded key looks the value up in the dictionary (a hash of the value; up
-to about 10 % slower than a plain write); reads are as fast as plain ones. A load codes the rule
-keys as it builds the graph (a load takes somewhat longer).
+**The cost**: a write of a coded key looks the value up in the dictionary (a hash of the value).
+Measured at query level on a real graph: overwriting a deduplicated key costs about 5-9 % more
+than a plain write; **adding a key that is new to an element** whose row is coded, and a
+**jpath write into a deduplicated value**, about 30 % more. Reads stay plain and are mostly
+faster (a filter on a coded key compares codes). A load codes the rule keys as it builds the
+graph (a load takes somewhat longer).
 
 The rule's numbers: `compressed_values` counts the values the rule holds (coded or shared, one
 per element), `distinct_values` the distinct values among them, `plain_bytes` and `stored_bytes`
@@ -176,6 +179,35 @@ codec re-encodes its values in the same commit.
 > holds a `dedup` rule as **damaged** from the commit that defined it on (maintenance mode; its
 > repair would drop those commits). Do not open such a store with 0.2.0, and never run
 > `graphersal store repair` from 0.2.0 on it; use 0.2.1 or later.
+
+## Several rules at once
+
+Defining many rules one by one walks the elements of their labels once per rule and commits
+once per rule. A **list of ordinary rules** is stored in **one unit**: one commit (one WAL
+record), and **one walk** over the elements of all their labels re-encodes them for every rule
+together. Measured on a real graph (2.8 million elements, the advisor's 74 dedup rules, 11.9
+million values coded, `--release`): one by one 8.6 s and 74 commits (13,932 bytes of WAL), as
+one list 1.5 s and one commit (2,210 bytes of WAL), with the same values coded and the same
+memory after a reopen. There is no wildcard or template rule:
+the list holds ordinary rules, each stored, listed, dropped and persisted like one defined
+alone. It is all or nothing: a refused rule (an invalid one, a conflict with a stored rule or
+with another rule of the list) fails the whole list with its error, which names the rule, and
+nothing is stored. Undoing such a unit (a rolled-back outer transaction) re-encodes in one walk
+as well.
+
+```rhai,graph=modern
+g.define_compressions([#{label: "person", paths: ["name", "age"], codec: "dedup"}, #{name: "software_lang", label: "software", path: "lang", codec: "dedup"}])
+```
+
+Each item is `define_compression`'s map, or the short form `#{label, paths: [..], element?,
+codec?, min_bytes?, dictionary?}`: one rule per path, each named `<label>_<path>` (the path's
+names joined by `_`, `_edge` added for an edge rule, characters a name may not hold replaced by
+`_`), the advisor's naming. A short form has no `name`. The call answers the number of rules
+stored and asks for `Create` (`Update` for a name already stored) on each rule before anything
+changes.
+
+The [advisor](../persistence/optimize.md#applying-several-at-once) groups its recommendations the
+same way (`dedup: 74 keys, total -400.1 MiB`) and applies a picked group in one commit too.
 
 ## A rule from a newer version
 
@@ -255,9 +287,9 @@ copying a candidate's codec, minimum size and dictionary into the form.
 
 | | Define | List | Drop | Recompress | Estimate |
 |---|---|---|---|---|---|
-| Rhai | `g.define_compression(#{..})` | `g.compressions()` | `g.drop_compression(name)` | `g.recompress(name)` | `g.estimate_compression(#{label, path, element?, codec?, min_bytes?, dictionary?})` |
-| Rust (`GraphTraversalSource`) | `define_compression(name, CompressionDefinition)`, `set_definition(Definition::compression(..))` | `list_definitions(Some(DefinitionKind::COMPRESSION))`, `compression_stats(name)` | `remove_definition(DefinitionKind::COMPRESSION, name)` | `recompress(name)` | `estimate_compression(&CompressionEstimateRequest)` |
-| Python (`Graph`) | `define_compression(name, label, path, element="vertex", min_bytes=None, dictionary=None, codec=None)` | `compressions()` | `drop_compression(name)` | `recompress(name)` | `estimate_compression(label, path, element="vertex", min_bytes=None, dictionary=None, codec=None)` |
+| Rhai | `g.define_compression(#{..})`, `g.define_compressions([#{..}, ..])` | `g.compressions()` | `g.drop_compression(name)` | `g.recompress(name)` | `g.estimate_compression(#{label, path, element?, codec?, min_bytes?, dictionary?})` |
+| Rust (`GraphTraversalSource`) | `define_compression(name, CompressionDefinition)`, `define_compressions([(name, rule), ..])`, `set_definition(Definition::compression(..))`, `set_definitions(vec![..])` | `list_definitions(Some(DefinitionKind::COMPRESSION))`, `compression_stats(name)` | `remove_definition(DefinitionKind::COMPRESSION, name)` | `recompress(name)` | `estimate_compression(&CompressionEstimateRequest)` |
+| Python (`Graph`) | `define_compression(name, label, path, element="vertex", min_bytes=None, dictionary=None, codec=None)`, `define_compressions([{..}, ..])` | `compressions()` | `drop_compression(name)` | `recompress(name)` | `estimate_compression(label, path, element="vertex", min_bytes=None, dictionary=None, codec=None)` |
 | Playground | **Catalog ▾ ▸ Compression**: the rules with their stats, a form with field errors and Estimate | | | | |
 | Dev server | `POST /api/compression/define` | `GET /api/compression` | `POST /api/compression/drop` | `POST /api/compression/recompress` | `POST /api/compression/estimate` |
 | MCP | `define_compression` | `list_compressions` | `drop_compression` | `recompress` | `estimate_compression` (also read-only) |
@@ -281,6 +313,22 @@ let rule = CompressionDefinition::new(ElementKind::Vertex, "customer", "details.
 graph.traversal_mut().define_compression("customer_cv", rule).unwrap();
 ```
 
+Several rules in one unit, one commit and one walk (a storage gets the list through
+`GraphStorage::set_definitions`, whose default stores them one by one):
+
+```rust
+use graphersal::prelude::*;
+use graphersal::catalog::{Codec, CompressionDefinition};
+use graphersal::storage::ElementKind;
+
+let mut graph = TraversalGraph::tinkerpop_modern();
+let dedup = |key: &str| {
+    let rule = CompressionDefinition::new(ElementKind::Vertex, "person", key).unwrap();
+    (format!("person_{key}"), rule.with_codec(Codec::Dedup))
+};
+graph.traversal_mut().define_compressions([dedup("name"), dedup("age")]).unwrap();
+```
+
 The estimate in Rust (`graphersal::catalog`: `CompressionEstimateRequest`, `CompressionCandidate`,
 `CompressionEstimate`); a storage implements it as `GraphStorage::estimate_compression`:
 
@@ -302,7 +350,7 @@ if let Some(best) = estimate.best {
 ```
 
 **Authorization**: a rule is the resource `Definition { kind: compression, name }`: define asks
-`Create` (`Update` when it replaces one), drop `Delete`, recompress `Update`, listing `Read`. No data
+`Create` (`Update` when it replaces one; a list asks it for each rule before anything changes), drop `Delete`, recompress `Update`, listing `Read`. No data
 request is made (the logical data does not change). `AccessPolicy::read_only()`, the MCP read-only
 mode and a saved query (which never writes the catalog) cannot change rules. An estimate asks
 `Read` on the `Data` of its element kind and label.

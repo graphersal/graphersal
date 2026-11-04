@@ -84,6 +84,89 @@ export function recommendationRows(advice) {
   }));
 }
 
+/**
+ * The groups of the advice (one per kind, and for compression per codec), for "select all" in
+ * one click: `[{key, title, ids, count}]`, in the advice's order. The engine answers them
+ * (`advice.groups`); an older engine without them gets one group per kind computed here.
+ */
+export function recommendationGroups(advice) {
+  const recs = (advice && advice.recommendations) || [];
+  if (advice && Array.isArray(advice.groups)) {
+    return advice.groups.map((g) => ({ key: g.key, title: g.title, ids: [...(g.ids || [])], count: (g.ids || []).length }));
+  }
+  const groups = [];
+  for (const r of recs) {
+    let group = groups.find((g) => g.key === r.kind);
+    if (!group) {
+      group = { key: r.kind, title: '', ids: [], count: 0, bytes: 0 };
+      groups.push(group);
+    }
+    group.ids.push(r.id);
+    group.count += 1;
+    group.bytes += Number(r.memory_bytes) || 0;
+  }
+  return groups.map((g) => ({
+    key: g.key,
+    title: `${g.key.replace(/_/g, ' ')}: ${g.count} ${g.count === 1 ? 'key' : 'keys'}, total ${g.bytes > 0 ? '-' : '+'}${formatBytes(Math.abs(g.bytes))}`,
+    ids: g.ids,
+    count: g.count,
+  }));
+}
+
+/**
+ * The selection after the advice changed: only the ids still advised, in the advice's order
+ * (nothing is ever selected by default: a human picks).
+ */
+export function pruneSelection(advice, selected) {
+  const chosen = new Set(selected || []);
+  return ((advice && advice.recommendations) || []).map((r) => r.id).filter((id) => chosen.has(id));
+}
+
+/** Whether every id of `group` is selected (`false` for an empty group). */
+export function groupSelected(group, selected) {
+  const chosen = new Set(selected || []);
+  return !!group && group.ids.length > 0 && group.ids.every((id) => chosen.has(id));
+}
+
+/**
+ * The selection with the ids of `group` added (when not all of them were selected) or removed
+ * (when all were), kept in the advice's order.
+ */
+export function toggleGroup(advice, selected, group) {
+  const chosen = new Set(selected || []);
+  if (groupSelected(group, selected)) for (const id of group.ids) chosen.delete(id);
+  else for (const id of group.ids) chosen.add(id);
+  return pruneSelection(advice, [...chosen]);
+}
+
+/** The selection with `id` added or removed, kept in the advice's order. */
+export function toggleRecommendation(advice, selected, id) {
+  const chosen = new Set(selected || []);
+  if (chosen.has(id)) chosen.delete(id);
+  else chosen.add(id);
+  return pruneSelection(advice, [...chosen]);
+}
+
+/**
+ * What the selection does, for the "Apply selected" bar and its confirmation:
+ * `{count, bytes, text, confirm}`; `text` is `"3 selected · frees 12.0 MiB"`, `confirm` the
+ * question asked before applying (one commit, all or nothing, each reversible).
+ */
+export function selectionSummary(advice, selected) {
+  const chosen = new Set(selected || []);
+  const recs = ((advice && advice.recommendations) || []).filter((r) => chosen.has(r.id));
+  const bytes = recs.reduce((sum, r) => sum + (Number(r.memory_bytes) || 0), 0);
+  const count = recs.length;
+  const effect = effectText(bytes, recs.every((r) => r.measured));
+  const text = count ? `${count} selected · ${effect}` : 'nothing selected';
+  const titles = recs.slice(0, 5).map((r) => `• ${r.title}`);
+  if (count > 5) titles.push(`• … and ${count - 5} more`);
+  const confirm = count
+    ? `Apply ${count === 1 ? 'this recommendation' : `these ${count} recommendations`} in one commit (${effect})?\n\n${titles.join('\n')}\n\nAll or nothing: if one is refused, none is applied. Each can be undone later (drop the rule or the index).`
+    : '';
+  return { count, bytes, text, confirm };
+}
+
 /** The days a "Snooze" dismisses a recommendation for. */
 export const SNOOZE_DAYS = 7;
 

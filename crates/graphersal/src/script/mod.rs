@@ -23,8 +23,8 @@
 // - `saved_query.rs`: saved queries (`define_query`, `query`, `queries`, ...): the access a
 //   call runs under (read-only, or the inferred effects), the compiled-body cache, argument
 //   binding; `effects.rs` infers a body's effects from its AST.
-// - `compression.rs`: compression rules (`define_compression`, `compressions`,
-//   `drop_compression`, `recompress`).
+// - `compression.rs`: compression rules (`define_compression`, `define_compressions`,
+//   `compressions`, `drop_compression`, `recompress`).
 // - `property_index.rs`: property indexes (`create_index`, `indexes`, `drop_index`).
 // - `memory_report.rs`: `memory_report` (the per-label, per-property memory report).
 // - `dynamic.rs`: `Dynamic` conversions and the shared argument diagnostics.

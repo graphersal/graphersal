@@ -284,6 +284,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         "Compressed properties",
         &[
             "define_compression",
+            "define_compressions",
             "drop_compression",
             "compressions",
             "recompress",

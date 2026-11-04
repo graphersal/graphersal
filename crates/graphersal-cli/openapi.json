@@ -2680,8 +2680,8 @@
         "tags": [
           "Optimize"
         ],
-        "summary": "Apply a recommendation",
-        "description": "Recomputes the advice for `spec`, finds `id` and runs its catalog command (one commit): `{ok: true, id, kind, result}` or `{ok: false, error}`.",
+        "summary": "Apply one or several recommendations",
+        "description": "Recomputes the advice for `spec`, finds `id` and runs its catalog command (one commit): `{ok: true, id, kind, result}` or `{ok: false, error}`. With `ids` instead of `id`: applies every recommendation named in ONE commit (all new compression rules in one pass over the data), all or nothing: `{ok: true, applied: [{id, kind, title, memory_bytes}], memory_bytes}` or `{ok: false, error}`.",
         "operationId": "postApiAdviseApply",
         "requestBody": {
           "required": true,
@@ -2692,6 +2692,13 @@
                 "properties": {
                   "id": {
                     "type": "string"
+                  },
+                  "ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Several recommendation ids, applied in one commit (instead of `id`)."
                   },
                   "spec": {
                     "type": "object",
@@ -2726,10 +2733,7 @@
                     },
                     "description": "The advisor's thresholds; `{}`: the defaults, `everything: true`: every candidate."
                   }
-                },
-                "required": [
-                  "id"
-                ]
+                }
               }
             }
           }

@@ -588,6 +588,28 @@ pub trait GraphStorage: Send + Sync {
         })
     }
 
+    /// Stores every definition of `definitions`, in order, each like [`Self::set_definition`]
+    /// (validated and checked against the catalog with the ones before it stored; a list may
+    /// name a definition twice, the last one wins). A refused definition returns its error with
+    /// the ones before it stored: run it inside a unit ([`Transactional::transaction`]) so
+    /// that the unit's rollback takes them back (all or nothing).
+    ///
+    /// The batch entry of a bulk catalog change (several compression rules, several advisor
+    /// recommendations): [`TraversalGraph`] applies the explicit pass of every compression
+    /// rule among them in ONE walk over the elements of their labels instead of one walk per
+    /// rule, and, outside any unit, makes the whole list one unit of its own (one commit).
+    ///
+    /// Default: [`Self::set_definition`] for each definition in turn (an override must keep
+    /// the same result).
+    ///
+    /// [`Transactional::transaction`]: crate::graph::Transactional::transaction
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        for definition in definitions {
+            self.set_definition(definition)?;
+        }
+        Ok(())
+    }
+
     /// Removes the definition of `kind` named `name`; `false` when there is none (nothing
     /// changes). Recorded, captured and a unit of its own like [`Self::set_definition`].
     /// Default: [`GraphError::Unsupported`].
@@ -2979,6 +3001,10 @@ impl GraphStorage for TraversalGraph {
         self.in_own_unit(|this| this.set_definition_recorded(definition))
     }
 
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        self.in_own_unit(|this| this.set_definitions_recorded(definitions))
+    }
+
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         self.in_own_unit(|this| Ok(this.remove_definition_recorded(kind, name)))
     }
@@ -3482,6 +3508,11 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
+    fn set_definitions(&mut self, _definitions: Vec<Definition>) -> Result<(), GraphError> {
+        Err(read_only_view_error())
+    }
+
+    #[inline]
     fn remove_definition(
         &mut self,
         _kind: DefinitionKind,
@@ -3907,6 +3938,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         (**self).set_definition(definition)
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        (**self).set_definitions(definitions)
     }
 
     #[inline]
@@ -4393,6 +4429,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         (**self).set_definition(definition)
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        (**self).set_definitions(definitions)
     }
 
     #[inline]
@@ -5002,6 +5043,16 @@ impl GraphStorage for Arc<TraversalGraph> {
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         match Arc::get_mut(self) {
             Some(graph) => GraphStorage::set_definition(graph, definition),
+            None => Err(GraphError::InvalidElementState {
+                reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
+            }),
+        }
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        match Arc::get_mut(self) {
+            Some(graph) => GraphStorage::set_definitions(graph, definitions),
             None => Err(GraphError::InvalidElementState {
                 reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
             }),

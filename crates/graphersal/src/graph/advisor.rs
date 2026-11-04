@@ -217,6 +217,62 @@ impl RecommendedAction {
     }
 }
 
+/// The catalog change applying a recommendation ([`RecommendedAction::catalog_change`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CatalogChange {
+    /// Store this new definition (an index under its default name, a rule under the
+    /// suggested name).
+    Set(crate::graph::definition::Definition),
+    /// Remove the definition of this kind and name.
+    Remove(crate::graph::definition::DefinitionKind, String),
+}
+
+impl RecommendedAction {
+    /// The catalog change applying it: the same definition its [`Self::command`] stores (the
+    /// index under [`PropertyIndexDefinition::default_name`](crate::graph::PropertyIndexDefinition::default_name),
+    /// the rule with the measured candidate's codec and options) or the one it removes.
+    pub(crate) fn catalog_change(&self) -> Result<CatalogChange, crate::error::DefinitionError> {
+        use crate::graph::definition::{Definition, DefinitionKind};
+        Ok(match self {
+            RecommendedAction::CreateIndex {
+                element,
+                label,
+                key,
+            } => {
+                let index = crate::graph::PropertyIndexDefinition::new(
+                    *element,
+                    label.as_str(),
+                    key.as_str(),
+                );
+                CatalogChange::Set(Definition::property_index(index.default_name(), index))
+            }
+            RecommendedAction::DropIndex { name } => {
+                CatalogChange::Remove(DefinitionKind::PROPERTY_INDEX, name.clone())
+            }
+            RecommendedAction::AddCompression {
+                name,
+                element,
+                label,
+                key,
+                candidate,
+            } => {
+                let rule = crate::graph::CompressionDefinition::new(
+                    *element,
+                    label.as_str(),
+                    key.as_str(),
+                )?
+                .with_codec(candidate.codec)
+                .with_min_bytes(candidate.min_bytes)
+                .with_dictionary(candidate.dictionary);
+                CatalogChange::Set(Definition::compression(name.as_str(), rule))
+            }
+            RecommendedAction::DropCompression { name } => {
+                CatalogChange::Remove(DefinitionKind::COMPRESSION, name.clone())
+            }
+        })
+    }
+}
+
 /// How sure the advisor is of a recommendation: how much data it rests on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
@@ -386,6 +442,96 @@ pub struct Advice {
     pub graph_bytes: u64,
     /// How many properties `estimate_compression` measured.
     pub estimates: usize,
+    /// The recommendations grouped by kind (and codec), for applying a group at once.
+    pub groups: Vec<AdviceGroup>,
+}
+
+/// Recommendations of the same kind (and for `add_compression` the same codec), for applying
+/// several at once ([`Graph::apply_recommendations`](crate::graph::Graph::apply_recommendations)):
+/// "dedup: 74 keys, total -400.1 MiB". Each member keeps its own [`Recommendation::id`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdviceGroup {
+    /// The group's key: the kind, with the codec for `add_compression`
+    /// (`add_compression:dedup`, `create_index`).
+    pub key: String,
+    /// The kind of its recommendations ([`RecommendedAction::kind`]).
+    pub kind: String,
+    /// The codec of its `add_compression` recommendations, `None` for the other kinds.
+    pub codec: Option<String>,
+    /// One line: `dedup: 74 keys, total -400.1 MiB` (`-`: memory freed, `+`: taken).
+    pub title: String,
+    /// The ids of its recommendations, in the advice's order.
+    pub ids: Vec<String>,
+    /// The sum of their [`Recommendation::memory_bytes`] (negative: they take memory).
+    pub memory_bytes: i64,
+}
+
+/// The groups of `recommendations` ([`AdviceGroup`]), in the order their first member appears.
+fn groups_of(recommendations: &[Recommendation]) -> Vec<AdviceGroup> {
+    let mut groups: Vec<AdviceGroup> = Vec::new();
+    for r in recommendations {
+        let codec = match &r.action {
+            RecommendedAction::AddCompression { candidate, .. } => {
+                Some(candidate.codec.name().to_string())
+            }
+            RecommendedAction::CreateIndex { .. }
+            | RecommendedAction::DropIndex { .. }
+            | RecommendedAction::DropCompression { .. } => None,
+        };
+        let kind = r.action.kind();
+        let key = match &codec {
+            Some(codec) => format!("{kind}:{codec}"),
+            None => kind.to_string(),
+        };
+        let at = match groups.iter().position(|g| g.key == key) {
+            Some(at) => at,
+            None => {
+                groups.push(AdviceGroup {
+                    key,
+                    kind: kind.to_string(),
+                    codec,
+                    title: String::new(),
+                    ids: Vec::new(),
+                    memory_bytes: 0,
+                });
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[at];
+        group.ids.push(r.id.clone());
+        group.memory_bytes = group.memory_bytes.saturating_add(r.memory_bytes);
+    }
+    for group in &mut groups {
+        let what = match (group.kind.as_str(), &group.codec) {
+            ("add_compression", Some(codec)) => codec.clone(),
+            (kind, _) => kind.replace('_', " "),
+        };
+        let n = group.ids.len();
+        let noun = match group.kind.as_str() {
+            "drop_index" => {
+                if n == 1 {
+                    "index"
+                } else {
+                    "indexes"
+                }
+            }
+            _ => {
+                if n == 1 {
+                    "key"
+                } else {
+                    "keys"
+                }
+            }
+        };
+        // A change of memory: `-` frees, `+` takes.
+        let sign = if group.memory_bytes > 0 { "-" } else { "+" };
+        group.title = format!(
+            "{what}: {n} {noun}, total {sign}{}",
+            mib_text(group.memory_bytes.unsigned_abs())
+        );
+    }
+    groups
 }
 
 /// The uses of one `(element, label, key)` in the last two days and the last 90 days, summed
@@ -470,7 +616,7 @@ fn element_name(element: ElementKind) -> &'static str {
 
 /// The suggested name of a rule or index on `(element, label, key)`: `<label>_<key>`, with
 /// `_edge` for an edge (characters a name may not hold become `_`).
-fn suggested_name(element: ElementKind, label: &str, key: &str) -> String {
+pub(crate) fn suggested_name(element: ElementKind, label: &str, key: &str) -> String {
     let mut name: String = format!("{label}_{key}")
         .chars()
         .map(|c| {
@@ -550,8 +696,10 @@ fn compression_recommendation(
                 mib_text(saved),
             ),
             format!(
-                "every write of {key} looks the value up in the rule's dictionary (writes of \
-                 {key} up to about 10 % slower); reads stay plain; {reads}"
+                "writes look the value up in the rule's dictionary: overwriting {key} costs \
+                 about 5-9 % more, adding a key that is new to an element of {label} or a jpath \
+                 write into a value of {key} about 30 % more (measured at query level); reads \
+                 stay plain and are mostly faster; {reads}"
             ),
         )
     } else {
@@ -1037,7 +1185,6 @@ pub fn compute(
         .collect();
     applied.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.id.cmp(&b.id)));
     Advice {
-        recommendations,
         dismissed,
         applied,
         workload_level: level,
@@ -1047,6 +1194,8 @@ pub fn compute(
         memory_bytes: bytes_now,
         graph_bytes,
         estimates,
+        groups: groups_of(&recommendations),
+        recommendations,
     }
 }
 
@@ -1054,7 +1203,8 @@ impl Advice {
     /// The advice as a value: `{workload_level, observed_since, commit_seq, property_bytes,
     /// memory_bytes, graph_bytes, estimates, recommendations: [{id, kind, element, label, key,
     /// title, evidence, cost, memory_bytes, measured, impact, confidence, reversible, command,
-    /// action: {..}}], dismissed: [{id, title, until (null: for good)}], applied: [{id, kind,
+    /// action: {..}}], groups: [{key, kind, codec, title, ids, memory_bytes}], dismissed: [{id,
+    /// title, until (null: for good)}], applied: [{id, kind,
     /// title, at, promised_bytes, measured_bytes, index_lookups}]}` (the one form every front
     /// end shows; snake_case keys like the workload report).
     pub fn to_property(&self) -> ElementProperty {
@@ -1178,6 +1328,27 @@ impl Advice {
         );
         map.insert("estimates", int(self.estimates as i64));
         map.insert("recommendations", ElementProperty::Array(recommendations));
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| {
+                let mut map = PropertyMap::default();
+                map.insert("key", text(&g.key));
+                map.insert("kind", text(&g.kind));
+                map.insert(
+                    "codec",
+                    g.codec.as_deref().map_or(ElementProperty::Null, text),
+                );
+                map.insert("title", text(&g.title));
+                map.insert(
+                    "ids",
+                    ElementProperty::Array(g.ids.iter().map(|id| text(id)).collect()),
+                );
+                map.insert("memory_bytes", int(g.memory_bytes));
+                object(map)
+            })
+            .collect();
+        map.insert("groups", ElementProperty::Array(groups));
         map.insert("dismissed", ElementProperty::Array(dismissed));
         map.insert("applied", ElementProperty::Array(applied));
         object(map)

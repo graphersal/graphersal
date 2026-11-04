@@ -4,7 +4,10 @@
 // - Recommendations: the storage advisor's list (create or drop a property index, add or drop
 //   a compression rule), each with its evidence, cost, memory effect, confidence and the exact
 //   command; "Apply" runs it through the catalog (one commit, reversible), "Copy" copies the
-//   command. "Every candidate" lowers the thresholds (small graphs).
+//   command. "Every candidate" lowers the thresholds (small graphs). Several at once: a checkbox
+//   per recommendation, "Select all" per group (kind and codec: "dedup: 74 keys, total -400.1
+//   MiB"), nothing selected by default; "Apply selected" asks for confirmation and applies
+//   them in ONE commit (`applyRecommendations`), all or nothing.
 // - Workload: the workload statistics per list (queries, properties, locks, jobs) in a window
 //   (hour, 2 days, 90 days) for a channel, a sparkline per row; a row opens a detail chart
 //   (runs per bucket with the failed part, mean and max time) with the tier switch.
@@ -16,6 +19,7 @@ import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
   WINDOWS, TIERS, LISTS, MIN_TIMES, SNOOZE_DAYS, sortsDescending, recommendationRows, dismissedRows, appliedRows, adviceSummary, channels, workloadRows, sparkPath,
+  recommendationGroups, pruneSelection, groupSelected, toggleGroup, toggleRecommendation, selectionSummary,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, memoryOmitted, memoryReportSpec,
   memoryComponents,
 } from '../optimize.js';
@@ -34,7 +38,8 @@ export const OptimizePanel = {
   setup() {
     const dlg = ref(null);
     const tab = ref('advice');
-    const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null });
+    // `selected`: the ids ticked for "Apply selected" (none by default: a human picks).
+    const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null, selected: [] });
     const work = reactive({
       report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total', desc: true,
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
@@ -54,8 +59,10 @@ export const OptimizePanel = {
       advice.error = null;
       try {
         const answer = await engine().advise(spec());
-        if (answer && answer.ok) advice.data = answer.advice;
-        else advice.error = (answer && answer.error) || 'The advice failed.';
+        if (answer && answer.ok) {
+          advice.data = answer.advice;
+          advice.selected = pruneSelection(advice.data, advice.selected);
+        } else advice.error = (answer && answer.error) || 'The advice failed.';
       } catch (err) {
         advice.error = message(err);
       } finally {
@@ -176,6 +183,37 @@ export const OptimizePanel = {
         toast(`Not restored: ${message(err)}`, 'error', 9000);
       }
     }
+    // Several at once.
+    const groups = computed(() => recommendationGroups(advice.data));
+    const selection = computed(() => selectionSummary(advice.data, advice.selected));
+    const isSelected = (id) => advice.selected.includes(id);
+    const isGroupSelected = (group) => groupSelected(group, advice.selected);
+    const toggle = (id) => { advice.selected = toggleRecommendation(advice.data, advice.selected, id); };
+    const toggleAll = (group) => { advice.selected = toggleGroup(advice.data, advice.selected, group); };
+    const clearSelection = () => { advice.selected = []; };
+    async function applySelected() {
+      const chosen = selection.value;
+      if (!chosen.count || !window.confirm(chosen.confirm)) return;
+      advice.applying = '*selected*';
+      try {
+        const res = await engine().applyRecommendations([...advice.selected], spec());
+        if (res && res.ok) {
+          const n = (res.applied || []).length;
+          toast(`Applied ${n} recommendation${n === 1 ? '' : 's'} in one commit.`, 'info', 6000);
+          advice.selected = [];
+          await optimizeApplied();
+          await loadAdvice();
+          memory.report = null;
+        } else {
+          toast(`Nothing applied: ${(res && res.error) || 'refused'}`, 'error', 12000);
+          await loadAdvice();
+        }
+      } catch (err) {
+        toast(`Nothing applied: ${message(err)}`, 'error', 12000);
+      } finally {
+        advice.applying = null;
+      }
+    }
     const dismissed = computed(() => dismissedRows(advice.data));
     const applied = computed(() => appliedRows(advice.data));
     async function copy(row) {
@@ -238,6 +276,7 @@ export const OptimizePanel = {
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
+      groups, selection, isSelected, isGroupSelected, toggle, toggleAll, clearSelection, applySelected,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
       memRows, memLabels, memTotals, memComponents, memRowsOmitted, memLabelsOmitted,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
@@ -267,8 +306,21 @@ export const OptimizePanel = {
         </div>
         <div v-if="advice.error" class="field-error">{{ advice.error }}</div>
         <p v-else-if="advice.data && !recRows.length" class="muted">Nothing to recommend now. Recommendations come from frequent full-scan filters on large labels, large strings that repeat or compress well, unused indexes and compressed keys read often. Tick "Every candidate" to look at a small graph.</p>
+        <div v-if="recRows.length > 1" class="op-groups">
+          <span class="muted">Select all:</span>
+          <label v-for="g in groups" :key="g.key" class="op-check" :title="'Tick every recommendation of this group (' + g.count + ')'">
+            <input type="checkbox" :checked="isGroupSelected(g)" :disabled="!!advice.applying" @change="toggleAll(g)"> {{ g.title }}
+          </label>
+        </div>
+        <div v-if="recRows.length > 1" class="op-bar op-selection">
+          <span :class="advice.selected.length ? '' : 'muted'">{{ selection.text }}</span>
+          <span class="spacer"></span>
+          <button type="button" class="btn small" :disabled="!advice.selected.length || !!advice.applying" @click="clearSelection">Clear</button>
+          <button type="button" class="btn small primary" :disabled="!advice.selected.length || !!advice.applying || state.running" @click="applySelected" title="Apply every ticked recommendation in one commit (asks first; all or nothing)">{{ advice.applying === '*selected*' ? 'Applying…' : 'Apply selected' }}</button>
+        </div>
         <div v-for="r in recRows" :key="r.id" class="op-rec">
           <div class="op-rec-head">
+            <input v-if="recRows.length > 1" type="checkbox" :checked="isSelected(r.id)" :disabled="!!advice.applying" @change="toggle(r.id)" :aria-label="'Select: ' + r.title">
             <span class="badge">{{ r.badge }}</span>
             <strong>{{ r.title }}</strong>
             <span class="spacer"></span>
