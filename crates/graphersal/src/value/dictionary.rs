@@ -115,13 +115,21 @@ impl ValueDictionary {
     /// The code of `value`, adding it when new; `Err(value)` when the dictionary is full (2^32
     /// entries): the value then stays in the row.
     pub(crate) fn intern(&self, value: ElementProperty) -> Result<u32, ElementProperty> {
+        self.intern_reporting(value).map(|(code, _)| code)
+    }
+
+    /// [`Self::intern`] that also says whether the value was added (`true`) or found.
+    pub(crate) fn intern_reporting(
+        &self,
+        value: ElementProperty,
+    ) -> Result<(u32, bool), ElementProperty> {
         let hash = identity_hash_u64(&value);
         let mut index = self.lock();
         if let Some(code) = index.table.find(hash, |code| {
             self.get(*code)
                 .is_some_and(|stored| identity_eq(stored, &value))
         }) {
-            return Ok(*code);
+            return Ok((*code, false));
         }
         let code = index.len;
         let Some(next) = code.checked_add(1) else {
@@ -142,7 +150,7 @@ impl ValueDictionary {
         });
         index.len = next;
         index.appended += 1;
-        Ok(code)
+        Ok((code, true))
     }
 
     /// The number of entries (live or not).

@@ -302,6 +302,70 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) -> (usize, Option<ElementProperty>) {
+        if map.is_coded() {
+            return self.insert_full_coded(map, key, value);
+        }
+        self.insert_full_plain(map, key, value)
+    }
+
+    /// [`Self::insert_full`] of a map known not to be a coded row.
+    #[inline]
+    pub(crate) fn insert_full_plain(
+        &mut self,
+        map: &mut PropertyMap,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
+        self.adopt(map);
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            return map.insert_full(key, value);
+        };
+        if let Some(position) = shaped.shape.position(&key)
+            && let Some(slot) = shaped.values.get_mut(position)
+        {
+            return (position, Some(std::mem::replace(slot, value)));
+        }
+        let position = shaped.values.len();
+        shaped.shape = self.with_key_at(&shaped.shape, position, key);
+        shaped.values.reserve_exact(1);
+        shaped.values.push(value);
+        (position, None)
+    }
+
+    /// The in-graph `shift_remove`: `(position, key, value)` of the removed entry; the map moves
+    /// to the shape without that position (transition cache). The value slot stays as capacity.
+    /// An absent key changes nothing.
+    pub(crate) fn shift_remove_full(
+        &mut self,
+        map: &mut PropertyMap,
+        key: &str,
+    ) -> Option<(usize, CompactString, ElementProperty)> {
+        if map.is_coded() {
+            return self.shift_remove_coded(map, key);
+        }
+        self.adopt(map);
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            return map.shift_remove_full(key);
+        };
+        let position = shaped.shape.position(key)?;
+        if position >= shaped.values.len() {
+            return None;
+        }
+        let stored = shaped.shape.keys.get(position)?.clone();
+        shaped.shape = self.without_position(&shaped.shape, position);
+        let value = shaped.values.remove(position);
+        Some((position, stored, value))
+    }
+
+    /// [`Self::insert_full`] of a coded row (out of line: plain maps never take it).
+    #[cold]
+    #[inline(never)]
+    fn insert_full_coded(
+        &mut self,
+        map: &mut PropertyMap,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
         // A new key of a coded row of this table: appended as an own value, the row stays
         // coded (the caller codes it again: `CompressionRules::code_row`).
         if let Repr::Coded(coded) = &mut map.0
@@ -328,26 +392,13 @@ impl ShapeTable {
             return (position, None);
         }
         map.plain_mut();
-        self.adopt(map);
-        let Repr::Shaped(shaped) = &mut map.0 else {
-            return map.insert_full(key, value);
-        };
-        if let Some(position) = shaped.shape.position(&key)
-            && let Some(slot) = shaped.values.get_mut(position)
-        {
-            return (position, Some(std::mem::replace(slot, value)));
-        }
-        let position = shaped.values.len();
-        shaped.shape = self.with_key_at(&shaped.shape, position, key);
-        shaped.values.reserve_exact(1);
-        shaped.values.push(value);
-        (position, None)
+        self.insert_full(map, key, value)
     }
 
-    /// The in-graph `shift_remove`: `(position, key, value)` of the removed entry; the map moves
-    /// to the shape without that position (transition cache). The value slot stays as capacity.
-    /// An absent key changes nothing.
-    pub(crate) fn shift_remove_full(
+    /// [`Self::shift_remove_full`] of a coded row (out of line).
+    #[cold]
+    #[inline(never)]
+    fn shift_remove_coded(
         &mut self,
         map: &mut PropertyMap,
         key: &str,
@@ -358,18 +409,7 @@ impl ShapeTable {
             return self.coded_remove(coded, key);
         }
         map.plain_mut();
-        self.adopt(map);
-        let Repr::Shaped(shaped) = &mut map.0 else {
-            return map.shift_remove_full(key);
-        };
-        let position = shaped.shape.position(key)?;
-        if position >= shaped.values.len() {
-            return None;
-        }
-        let stored = shaped.shape.keys.get(position)?.clone();
-        shaped.shape = self.without_position(&shaped.shape, position);
-        let value = shaped.values.remove(position);
-        Some((position, stored, value))
+        self.shift_remove_full(map, key)
     }
 
     /// [`Self::shift_remove_full`] of a coded row: the position leaves the layout (a transient

@@ -1628,6 +1628,257 @@ impl UnitMark {
     }
 }
 
+impl TraversalGraph {
+    /// [`GraphStorage::set_vertex_property`] in a graph with coding rules (out of line: a
+    /// graph without them never takes it).
+    #[inline(never)]
+    fn set_vertex_property_ruled(
+        &mut self,
+        node: VertexHandle,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        check_property_value(&key, &value)?;
+        self.check_derived_vertex(node, &key)?;
+        let Some(index) = self.resolve_vertex(node) else {
+            return Err(GraphError::vertex_removed());
+        };
+        match self.graph.node_weight_mut(index) {
+            Some(node_ref) => {
+                let value = {
+                    let schema = self.schema.read();
+                    // All labels, in label order: coercion follows the first label that declares
+                    // the key, validation checks every label that declares it.
+                    crate::graph::schema::SchemaValidator::validate_element_property(
+                        &schema,
+                        "vertex",
+                        self.labels.set(node_ref.1),
+                        &key,
+                        value,
+                    )?
+                };
+                let mut value = value;
+                self.compression.prepare_vertex_value(
+                    self.labels.set(node_ref.1),
+                    &key,
+                    &mut value,
+                );
+                let undo_key = self.undo.is_recording().then(|| key.clone());
+                // The property indexes on `key`: the old entry out, the new one in.
+                let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
+                if index_key.is_some() {
+                    self.property_indexes.vertex_entries(
+                        false,
+                        node,
+                        self.labels.set(node_ref.1),
+                        &node_ref.2,
+                        Some(&key),
+                    );
+                }
+                // A coded row takes an existing key in place (a code for a coded key); any
+                // other write goes through the shape table and the row is coded again.
+                let (position, old, grown) =
+                    if node_ref.2.is_coded() || self.compression.has_coded() {
+                        let label_set = node_ref.1;
+                        let labels = &self.labels;
+                        store_value(
+                            &mut self.shapes,
+                            &self.compression,
+                            crate::graph::schema::ElementKind::Vertex,
+                            || {
+                                labels
+                                    .set(label_set)
+                                    .iter()
+                                    .map(CompactString::as_str)
+                                    .collect()
+                            },
+                            &mut node_ref.2,
+                            key,
+                            value,
+                        )
+                    } else {
+                        // No coding rule anywhere: the plain write of `main`.
+                        let (position, old) =
+                            self.shapes.insert_full_plain(&mut node_ref.2, key, value);
+                        (
+                            position,
+                            old.map(crate::graph::undo::OldValue::Plain),
+                            false,
+                        )
+                    };
+                if let Some(index_key) = &index_key {
+                    self.property_indexes.vertex_entries(
+                        true,
+                        node,
+                        self.labels.set(node_ref.1),
+                        &node_ref.2,
+                        Some(index_key),
+                    );
+                }
+                if let Some(key) = undo_key {
+                    self.undo.record(UndoEntry::VertexProperty {
+                        id: node_ref.0.clone(),
+                        key,
+                        old: old.map(|value| (position, value)),
+                    });
+                }
+                if grown {
+                    self.compression_after_write();
+                }
+                Ok(())
+            }
+            None => Err(GraphError::vertex_removed()),
+        }
+    }
+
+    /// [`GraphStorage::set_edge_property`] in a graph with coding rules (out of line).
+    #[inline(never)]
+    fn set_edge_property_ruled(
+        &mut self,
+        edge: EdgeHandle,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        check_property_value(&key, &value)?;
+        self.check_derived_edge(edge, &key)?;
+        let Some(index) = self.resolve_edge(edge) else {
+            return Err(GraphError::edge_removed());
+        };
+        match self.graph.edge_weight_mut(index) {
+            Some(edge_ref) => {
+                let value = {
+                    let schema = self.schema.read();
+                    crate::graph::schema::SchemaValidator::validate_element_property(
+                        &schema,
+                        "edge",
+                        self.labels.name_slice(edge_ref.1),
+                        &key,
+                        value,
+                    )?
+                };
+                let mut value = value;
+                self.compression.prepare_edge_value(
+                    self.labels.name_str(edge_ref.1),
+                    &key,
+                    &mut value,
+                );
+                let undo_key = self.undo.is_recording().then(|| key.clone());
+                let map_was_none = edge_ref.2.is_none();
+                // The property indexes on `key`: the old entry out, the new one in.
+                let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
+                if index_key.is_some() {
+                    self.property_indexes.edge_entries(
+                        false,
+                        edge,
+                        self.labels.name_str(edge_ref.1),
+                        edge_ref.2.as_ref(),
+                        Some(&key),
+                    );
+                }
+                let map = edge_ref.2.get_or_insert_with(PropertyMap::default);
+                let (position, old, grown) = if map.is_coded() || self.compression.has_coded() {
+                    let label = edge_ref.1;
+                    let labels = &self.labels;
+                    store_value(
+                        &mut self.shapes,
+                        &self.compression,
+                        crate::graph::schema::ElementKind::Edge,
+                        || labels.name_str(label).into_iter().collect(),
+                        map,
+                        key,
+                        value,
+                    )
+                } else {
+                    let (position, old) = self.shapes.insert_full_plain(map, key, value);
+                    (
+                        position,
+                        old.map(crate::graph::undo::OldValue::Plain),
+                        false,
+                    )
+                };
+                if let Some(index_key) = &index_key {
+                    self.property_indexes.edge_entries(
+                        true,
+                        edge,
+                        self.labels.name_str(edge_ref.1),
+                        edge_ref.2.as_ref(),
+                        Some(index_key),
+                    );
+                }
+                if let Some(key) = undo_key {
+                    self.undo.record(UndoEntry::EdgeProperty {
+                        id: edge_ref.0.clone(),
+                        key,
+                        old: old.map(|value| (position, value)),
+                        map_was_none,
+                    });
+                }
+                if grown {
+                    self.compression_after_write();
+                }
+                Ok(())
+            }
+            None => Err(GraphError::edge_removed()),
+        }
+    }
+}
+
+/// The in-graph write of the top-level `key` of a stored map: `(position, old value, whether a
+/// value dictionary may have grown)`. A plain map takes the shape table's write (and is coded
+/// when the rules code values); a coded row the in-place code or own value
+/// ([`store_coded_value`]).
+#[inline]
+fn store_value<'l>(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    rules: &crate::graph::compression::CompressionRules,
+    element: crate::graph::schema::ElementKind,
+    labels: impl FnOnce() -> Vec<&'l str>,
+    map: &mut PropertyMap,
+    key: CompactString,
+    value: ElementProperty,
+) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    if map.is_coded() {
+        return store_coded_value(shapes, rules, element, labels, map, key, value);
+    }
+    let (position, old) = shapes.insert_full_plain(map, key, value);
+    let mut grown = false;
+    if rules.has_coded() {
+        rules.code_row(element, &labels(), map);
+        grown = true;
+    }
+    (
+        position,
+        old.map(crate::graph::undo::OldValue::Plain),
+        grown,
+    )
+}
+
+/// [`store_value`] of a coded row (out of line: a graph without dedup rules never takes it).
+#[cold]
+#[inline(never)]
+fn store_coded_value<'l>(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    rules: &crate::graph::compression::CompressionRules,
+    element: crate::graph::schema::ElementKind,
+    labels: impl FnOnce() -> Vec<&'l str>,
+    map: &mut PropertyMap,
+    key: CompactString,
+    value: ElementProperty,
+) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    match map.coded_replace(&key, value) {
+        Ok((position, replaced, added)) => (
+            position,
+            Some(crate::graph::undo::OldValue::from(replaced)),
+            added,
+        ),
+        Err(value) => {
+            let (position, old) = shapes.insert_full(map, key, value);
+            rules.code_row(element, &labels(), map);
+            (position, old.map(crate::graph::undo::OldValue::Plain), true)
+        }
+    }
+}
+
 /// A jpath write in place on a stored map: a coded row gets the new top-level value through
 /// [`PropertyMap::coded_replace`] (a copy of the coded value written at the path; the row stays
 /// coded), any other map through [`write_path_in`] and a re-adoption.
@@ -2162,6 +2413,11 @@ impl GraphStorage for TraversalGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
+        // A graph with coding rules takes the out-of-line copy that keeps coded rows coded;
+        // without them this is the plain write.
+        if self.compression.has_coded() {
+            return self.set_vertex_property_ruled(node, key, value);
+        }
         check_property_value(&key, &value)?;
         self.check_derived_vertex(node, &key)?;
         let Some(index) = self.resolve_vertex(node) else {
@@ -2199,30 +2455,7 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                // A coded row takes an existing key in place (a code for a coded key); any
-                // other write goes through the shape table and the row is coded again.
-                let (position, old) = match node_ref.2.coded_replace(&key, value) {
-                    Ok((position, replaced)) => {
-                        (position, Some(crate::graph::undo::OldValue::from(replaced)))
-                    }
-                    Err(value) => {
-                        let (position, old) = self.shapes.insert_full(&mut node_ref.2, key, value);
-                        if self.compression.has_coded() {
-                            let labels: Vec<&str> = self
-                                .labels
-                                .set(node_ref.1)
-                                .iter()
-                                .map(CompactString::as_str)
-                                .collect();
-                            self.compression.code_row(
-                                crate::graph::schema::ElementKind::Vertex,
-                                &labels,
-                                &mut node_ref.2,
-                            );
-                        }
-                        (position, old.map(crate::graph::undo::OldValue::Plain))
-                    }
-                };
+                let (position, old) = self.shapes.insert_full(&mut node_ref.2, key, value);
                 if let Some(index_key) = &index_key {
                     self.property_indexes.vertex_entries(
                         true,
@@ -2236,10 +2469,10 @@ impl GraphStorage for TraversalGraph {
                     self.undo.record(UndoEntry::VertexProperty {
                         id: node_ref.0.clone(),
                         key,
-                        old: old.map(|value| (position, value)),
+                        old: old
+                            .map(|value| (position, crate::graph::undo::OldValue::Plain(value))),
                     });
                 }
-                self.compression_after_write();
                 Ok(())
             }
             None => Err(GraphError::vertex_removed()),
@@ -2253,6 +2486,9 @@ impl GraphStorage for TraversalGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
+        if self.compression.has_coded() {
+            return self.set_edge_property_ruled(edge, key, value);
+        }
         check_property_value(&key, &value)?;
         self.check_derived_edge(edge, &key)?;
         let Some(index) = self.resolve_edge(edge) else {
@@ -2289,25 +2525,11 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                let map = edge_ref.2.get_or_insert_with(PropertyMap::default);
-                let (position, old) = match map.coded_replace(&key, value) {
-                    Ok((position, replaced)) => {
-                        (position, Some(crate::graph::undo::OldValue::from(replaced)))
-                    }
-                    Err(value) => {
-                        let (position, old) = self.shapes.insert_full(map, key, value);
-                        if self.compression.has_coded() {
-                            let labels: Vec<&str> =
-                                self.labels.name_str(edge_ref.1).into_iter().collect();
-                            self.compression.code_row(
-                                crate::graph::schema::ElementKind::Edge,
-                                &labels,
-                                map,
-                            );
-                        }
-                        (position, old.map(crate::graph::undo::OldValue::Plain))
-                    }
-                };
+                let (position, old) = self.shapes.insert_full(
+                    edge_ref.2.get_or_insert_with(PropertyMap::default),
+                    key,
+                    value,
+                );
                 if let Some(index_key) = &index_key {
                     self.property_indexes.edge_entries(
                         true,
@@ -2321,11 +2543,11 @@ impl GraphStorage for TraversalGraph {
                     self.undo.record(UndoEntry::EdgeProperty {
                         id: edge_ref.0.clone(),
                         key,
-                        old: old.map(|value| (position, value)),
+                        old: old
+                            .map(|value| (position, crate::graph::undo::OldValue::Plain(value))),
                         map_was_none,
                     });
                 }
-                self.compression_after_write();
                 Ok(())
             }
             None => Err(GraphError::edge_removed()),

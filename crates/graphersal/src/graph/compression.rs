@@ -1911,10 +1911,17 @@ impl TraversalGraph {
 
     /// Codes the row of a vertex again after a write that turned it plain (a removed key);
     /// nothing without coding rules.
+    #[inline]
     pub(crate) fn compression_recode_vertex(&mut self, node: crate::graph::VertexHandle) {
-        if !self.compression.has_coded() {
-            return;
+        if self.compression.has_coded() {
+            self.compression_recode_vertex_coded(node);
         }
+    }
+
+    /// [`Self::compression_recode_vertex`] with coding rules (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_recode_vertex_coded(&mut self, node: crate::graph::VertexHandle) {
         let Some(vertex) = self
             .graph
             .node_weight_mut(node.index())
@@ -1933,10 +1940,17 @@ impl TraversalGraph {
     }
 
     /// Edge counterpart of [`Self::compression_recode_vertex`].
+    #[inline]
     pub(crate) fn compression_recode_edge(&mut self, edge: crate::graph::EdgeHandle) {
-        if !self.compression.has_coded() {
-            return;
+        if self.compression.has_coded() {
+            self.compression_recode_edge_coded(edge);
         }
+    }
+
+    /// [`Self::compression_recode_edge`] with coding rules (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_recode_edge_coded(&mut self, edge: crate::graph::EdgeHandle) {
         let Some(weight) = self
             .graph
             .edge_weight_mut(edge.index())
@@ -2004,6 +2018,7 @@ impl TraversalGraph {
 
     /// After a write outside every unit (a direct trait call, a replay): the dictionaries are
     /// checked as at the end of a unit (inside a unit the end of the outermost one does it).
+    #[inline]
     pub(crate) fn compression_after_write(&mut self) {
         if self.compression.has_coded() && self.undo_depth() == 0 {
             self.compression_after_unit(false);

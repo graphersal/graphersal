@@ -700,6 +700,12 @@ impl PropertyMap {
         }
     }
 
+    /// Whether this is a coded row.
+    #[inline]
+    pub(crate) fn is_coded(&self) -> bool {
+        matches!(self.0, Repr::Coded(_))
+    }
+
     /// The row of a coded map.
     #[inline]
     pub(crate) fn coded(&self) -> Option<&Coded> {
@@ -767,7 +773,7 @@ impl PropertyMap {
         &mut self,
         key: &str,
         value: ElementProperty,
-    ) -> Result<(usize, Replaced), ElementProperty> {
+    ) -> Result<(usize, Replaced, bool), ElementProperty> {
         let Repr::Coded(coded) = &mut self.0 else {
             return Err(value);
         };
@@ -794,7 +800,11 @@ impl PropertyMap {
                 else {
                     return Err(value);
                 };
-                Ok((position, Replaced::Own(std::mem::replace(own, value))))
+                Ok((
+                    position,
+                    Replaced::Own(std::mem::replace(own, value)),
+                    false,
+                ))
             }
             Some((at, dictionary)) => {
                 if !dictionary.accepts(&value) {
@@ -804,7 +814,7 @@ impl PropertyMap {
                 let Some(slot) = coded.codes.get_mut(at) else {
                     return Err(value);
                 };
-                let code = dictionary.intern(value)?;
+                let (code, added) = dictionary.intern_reporting(value)?;
                 let old = std::mem::replace(slot, code);
                 Ok((
                     position,
@@ -812,6 +822,7 @@ impl PropertyMap {
                         dictionary,
                         code: old,
                     }),
+                    added,
                 ))
             }
         }
