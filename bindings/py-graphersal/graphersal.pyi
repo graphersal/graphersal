@@ -756,8 +756,10 @@ class Store:
     def models(self) -> list[dict[str, Any]]:
         """The embedding models of the store's current position (catalog kind 5), each
         ``{"identity", "repo", "revision", "commit", "dimension", "license", "license_text",
-        "gated", "base_models", "default", "bytes", "load_bytes", "state", "needed_by",
-        "used_by_schema", "problem"}``. ``state``: ``loaded``, ``not_loaded``, ``damaged``,
+        "gated", "base_models", "default", "bytes", "load_bytes", "memory_bytes", "state",
+        "needed_by", "used_by_schema", "problem"}``. ``bytes``: the size on disk;
+        ``memory_bytes``: the memory measured at the load while it is loaded, else ``None``;
+        ``load_bytes``: the import's estimate kept for older versions. ``state``: ``loaded``, ``not_loaded``, ``damaged``,
         ``missing`` or ``unsupported``. Every copy of the store carries them: handing the store
         on redistributes them."""
     def import_model(

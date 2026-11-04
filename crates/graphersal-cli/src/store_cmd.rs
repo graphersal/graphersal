@@ -573,6 +573,19 @@ fn licence_text_value(source: &str, licence: &str) -> String {
     }
 }
 
+/// The size a model list shows (user decision 2026-11-04): a loaded model its measured
+/// in-memory size (with its size on disk), any other its size on disk.
+pub fn model_size(model: &ModelInfo) -> String {
+    match model.memory_bytes {
+        Some(bytes) => format!(
+            "{} in memory ({} on disk)",
+            bytes_text(bytes),
+            bytes_text(model.bytes)
+        ),
+        None => bytes_text(model.bytes),
+    }
+}
+
 /// One model as the store commands show it, one `(key, value)` per line: model, full name,
 /// size, licence, licence text, default, used by (`used`: the schema names it), then gated and
 /// a problem when there is one.
@@ -580,7 +593,7 @@ pub fn model_rows(model: &ModelInfo, used: bool) -> Vec<(String, String)> {
     let mut rows = vec![
         ("model".to_string(), model.repo.clone()),
         ("full name".to_string(), model.identity.clone()),
-        ("size".to_string(), bytes_text(model.bytes)),
+        ("size".to_string(), model_size(model)),
     ];
     rows.extend(licence_rows(model));
     rows.push((

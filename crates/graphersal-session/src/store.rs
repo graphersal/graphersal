@@ -1234,6 +1234,9 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
         "bytes": model.bytes,
         "bytesText": bytes_text(model.bytes),
         "loadBytes": model.load_bytes,
+        // The size shown (user decision 2026-11-04): in memory when loaded, else on disk.
+        "memoryBytes": model.memory_bytes,
+        "sizeText": model_size_text(model),
         "state": model.state.name(),
         "stateReason": model.state.reason(),
         "neededBy": model.needed_by,
@@ -1243,6 +1246,15 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
             state => state.reason(),
         },
     })
+}
+
+/// The size a model list shows (user decision 2026-11-04): a loaded model its measured
+/// in-memory size, any other its size on disk.
+pub fn model_size_text(model: &ModelInfo) -> String {
+    match model.memory_bytes {
+        Some(bytes) => format!("{} in memory", bytes_text(bytes)),
+        None => bytes_text(model.bytes),
+    }
 }
 
 /// Whether the schema's model identity `named` (with or without a `?normalize=` suffix) is the

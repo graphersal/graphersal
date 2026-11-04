@@ -19,6 +19,37 @@
 /// The sentinel index: "no slot" (the end of a list, an empty free list).
 const END: u32 = u32::MAX;
 
+/// The growth step of a per-element vector below which it doubles (as `Vec` does): a tiny graph
+/// neither reallocates at every insert nor reserves more than it would have.
+pub(crate) const MIN_GROWTH: usize = 64;
+
+/// The bounded growth step of a full vector of `capacity` elements: 1/8 of it, at least
+/// [`MIN_GROWTH`] (but doubling while smaller than that, at least 4).
+#[inline]
+pub(crate) fn growth_step(capacity: usize) -> usize {
+    (capacity / 8).max(capacity.clamp(4, MIN_GROWTH))
+}
+
+/// Makes room for one more element in a per-element vector that is full: by 1/8 of its
+/// capacity ([`growth_step`]), not by doubling (user decision 2026-11-04). A load
+/// allocates its slots exactly; doubling them at the first insert after it added a whole graph's
+/// worth of slots (+255 MiB for the edges of a 2.3M-edge graph). Growth by a fixed fraction is
+/// still geometric, so pushing stays amortized O(1) (each element is copied about 9 times over
+/// a vector's life instead of about once). A refused reservation leaves the vector as it was;
+/// the push that follows then grows it the standard way.
+#[inline]
+pub(crate) fn reserve_one<T>(vec: &mut Vec<T>) {
+    if vec.len() == vec.capacity() {
+        grow(vec);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn grow<T>(vec: &mut Vec<T>) {
+    let _ = vec.try_reserve_exact(growth_step(vec.capacity()));
+}
+
 /// The index of a vertex slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct NodeIndex(u32);
@@ -232,6 +263,7 @@ impl<N, E> Topology<N, E> {
         let index = self.free_node;
         if index == END {
             let index = self.nodes.len();
+            reserve_one(&mut self.nodes);
             self.nodes.push(NodeSlot {
                 weight: Some(weight),
                 next: [END, END],
@@ -280,6 +312,7 @@ impl<N, E> Topology<N, E> {
             next: [EdgeIndex(head_out), EdgeIndex(head_in)],
         };
         if self.free_edge.is_end() {
+            reserve_one(&mut self.edges);
             self.edges.push(slot);
         } else if let Some(vacant) = self.edges.get_mut(index.index()) {
             self.free_edge = vacant.next[0];
@@ -490,6 +523,56 @@ mod tests {
         t.edges_directed(a, Direction::Incoming)
             .map(|e| *e.weight())
             .collect()
+    }
+
+    #[test]
+    fn the_first_insert_after_an_exact_load_grows_the_slots_by_an_eighth() {
+        // A load reserves exactly, then shrinks: no spare slot.
+        let n = 10_000;
+        let mut t: Topology<u32, u32> = Topology::new();
+        t.reserve_exact(n, n);
+        let nodes: Vec<NodeIndex> = (0..n as u32).map(|i| t.add_node(i)).collect();
+        for (i, pair) in nodes.windows(2).enumerate() {
+            t.add_edge(pair[0], pair[1], i as u32).unwrap();
+        }
+        t.add_edge(nodes[0], nodes[0], 0).unwrap();
+        t.shrink_to_fit();
+        assert_eq!(t.capacity(), (n, n));
+        let added = t.add_node(7);
+        t.add_edge(added, added, 7).unwrap();
+        // 1/8 more, not twice as many.
+        assert_eq!(t.capacity(), (n + n / 8, n + n / 8));
+        // Still amortized: 100k more inserts take few reallocations, and the capacity stays
+        // within 1/8 of the length.
+        let mut grows = 0;
+        let mut last = t.capacity().0;
+        for i in 0..100_000 {
+            t.add_node(i);
+            if t.capacity().0 != last {
+                grows += 1;
+                last = t.capacity().0;
+            }
+        }
+        assert!(grows < 30, "{grows} reallocations");
+        let len = t.node_count();
+        assert!(
+            t.capacity().0 <= len + len / 8 + 1,
+            "{:?} for {len}",
+            t.capacity()
+        );
+    }
+
+    #[test]
+    fn tiny_vectors_grow_as_vec_does() {
+        assert_eq!(growth_step(0), 4);
+        assert_eq!(growth_step(4), 4);
+        assert_eq!(growth_step(32), 32);
+        assert_eq!(growth_step(64), 64);
+        assert_eq!(growth_step(512), 64);
+        assert_eq!(growth_step(8_000), 1_000);
+        let mut t: Topology<u32, u32> = Topology::new();
+        t.add_node(1);
+        assert_eq!(t.capacity().0, 4);
     }
 
     #[test]

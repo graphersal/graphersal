@@ -773,7 +773,7 @@ fn check_model_blob(
         // Not read (does not fit, I/O): the blob check reported what it found.
         Err(_) => return Ok(()),
     };
-    let tar = crate::persist::model_tar::read_tar(&bytes)
+    let tar = crate::value::vector::embed::model_tar::read_tar(&bytes)
         .map_err(|reason| format!("is not a valid model tar: {reason}"))?;
     let manifest = &tar.manifest;
     if !manifest.is_known_family() || manifest.identity != identity {
@@ -794,7 +794,7 @@ fn check_model_blob(
     }
     for (name, data) in tar.files() {
         if let Some(file) = manifest.files.iter().find(|f| f.name == name)
-            && crate::persist::model_tar::sha256_hex(data) != file.sha256
+            && crate::value::vector::embed::model_tar::sha256_hex(data) != file.sha256
         {
             return Err(format!(
                 "holds the file {name} with another SHA-256 than listed"

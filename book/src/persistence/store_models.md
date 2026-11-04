@@ -124,7 +124,12 @@ store opens; every other model is loaded at the first query that embeds with it.
 loaded once per process, shared by every position that uses the same blob, and unloaded when no
 position uses it any more. Loaded models count in `g.memory_usage()` as `model_bytes` and fall
 under the process [memory ceiling](../users_guide/resource_limits.md): before a load the ceiling
-is checked with the size the definition records, so nothing is read when it does not fit.
+is checked with the blob's length times 2.2 (a measured 1.84 for `potion-multilingual-128M`,
+whose 506 MiB blob takes 931 MiB loaded, plus a 20 % reserve), so nothing is read when it does
+not fit. The load streams the blob: its tar is read entry by entry and the embedding matrix is
+decoded while it streams, so the memory a load needs at its peak is about the loaded model plus
+the tokenizer's parse, never a second copy of the blob. The blob is read to its end and checked
+(length, CRC-32C) before the tokenizer is parsed, so a damaged blob is reported as damage.
 
 The store does **not open** (in any mode: writable, `--read-only`, a backup, a view of a past
 position) when a model its schema needs is not in its catalog at that position, its blob is
@@ -137,8 +142,9 @@ A build that cannot run models (the browser playground, a library build without 
 ## Listing
 
 `Store::models()` (CLI `graphersal store models <dir>`, `store info`) lists the models of the
-current position: repository, identity, revision, dimension, licence, size, the memory it takes
-loaded, whether it is the default, its state (`loaded`, `not_loaded`, `damaged`, `missing`,
+current position: repository, identity, revision, dimension, licence, size (a model that is
+not loaded shows its size on disk, the blob; a loaded one the memory measured at its load,
+`ModelInfo::memory_bytes`, `ModelInfo::shown_bytes()`), whether it is the default, its state (`loaded`, `not_loaded`, `damaged`, `missing`,
 `unsupported`) and the schema properties that need it. `Store::verify` reads every model's blob
 and checks it is the tar of its identity.
 
