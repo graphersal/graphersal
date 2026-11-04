@@ -466,8 +466,8 @@ class Graph:
     ) -> None:
         """Stores (or replaces) a compression rule: strings of ``element``s labelled ``label``
         at ``path`` are kept compressed in memory (``codec="lz4"``, default: ``min_bytes`` 256,
-        a dictionary) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 25,
-        no dictionary) and read plain."""
+        a dictionary) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 0,
+        no dictionary; on a top-level key every value type) and read plain."""
     def compressions(self, *, policy: Optional[AccessPolicy] = None) -> list[dict[str, Any]]:
         """The compression rules with their current stats; ``served`` is ``False`` (with a
         ``reason``) for a rule this version keeps but does not apply."""

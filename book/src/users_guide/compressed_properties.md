@@ -64,7 +64,7 @@ has:
 | `label` | the label the rule applies to (it need not exist yet) | required |
 | `path` | a property name or a jpath of names: `"cv"`, `"details.career.cv"`, `jpath("$['a b'].c")`; no index (`[0]`, `[-1]`): arrays are not compressed in this version | required |
 | `codec` | `"lz4"` (compress each value) or `"dedup"` ([store each distinct value once](#deduplicating-repeated-values)) | `"lz4"` |
-| `min_bytes` | strings shorter than this (UTF-8 bytes) stay plain; 1 to 16 MiB | 256 (`lz4`), 25 (`dedup`) |
+| `min_bytes` | strings shorter than this (UTF-8 bytes) stay plain; 1 to 16 MiB (`lz4`), 0 to 16 MiB (`dedup`, strings only: a dedup rule on a top-level key codes every other type) | 256 (`lz4`), 0 (`dedup`) |
 | `dictionary` | build a dictionary from the rule's values (`lz4` only; `true` with `dedup` is refused) | `true` (`lz4`), `false` (`dedup`) |
 
 - **Any number of rules**: several paths on one label, the same path on different labels, vertex
@@ -74,7 +74,8 @@ has:
   the same path, the first label in label order wins (the same rule as schema coercion).
 - A **label change** (`add_vertex_label`/`remove_vertex_label`, `set_edge_label`) compresses what a new label's rules
   cover and decompresses what no rule covers any more.
-- Only **strings** are compressed. A number, an object or an array at a rule path stays as it is.
+- An `lz4` rule compresses only **strings**: a number, an object or an array at its path stays
+  as it is. A `dedup` rule on a top-level key takes every value type (below).
 
 ### The explicit pass
 
@@ -96,47 +97,81 @@ the rule changes.
 
 ## Deduplicating repeated values
 
-A rule with `codec: "dedup"` keeps **one copy of every distinct value** at its path in a table of
-the rule, and every element whose value is that text keeps only a reference to it. Reads stay plain
-and cost nothing extra (the text is read in place, nothing is decompressed); query results, change
-sets, exports and files never change, and the files keep their format (plain values; a load shares
-them again).
+A rule with `codec: "dedup"` keeps **one copy of every distinct value** at its path, and every
+element whose value is that one keeps only a reference to it. Reads stay plain and cost nothing
+extra (the value is read in place, nothing is decompressed); query results, change sets, exports
+and files never change, and the files keep their format (plain values; a load shares them
+again).
 
 ```rhai
-// Every `symbol` vertex's `path` (a few hundred distinct file paths over 100,000 symbols).
+// Every `symbol` vertex's `path`, `kind` and `visibility` (a few hundred distinct values over
+// 100,000 symbols).
 g.define_compression(#{name: "symbol_path", label: "symbol", path: "path", codec: "dedup"});
-g.compressions()[0]          // compressed_values (the shared values), distinct_values, ...
+g.define_compression(#{name: "symbol_kind", label: "symbol", path: "kind", codec: "dedup"});
+g.compressions()[0]          // compressed_values, distinct_values, ...
 ```
 
-**When it pays**: long values repeated across many elements, such as file paths, URLs, addresses,
-category, status or type texts. Measured on a code knowledge graph: the `path` of its symbols took
-1.17 MB of heap for 816 distinct values, about 40 KB deduplicated.
+**On a top-level property** (a path of one name, the common case) a dedup rule takes **every
+value type**: strings of any length, numbers, booleans, dates and times, UUIDs, arrays, objects,
+vectors and null. The rule keeps a **dictionary** of the distinct values; the element's row
+holds a 4-byte **code** instead of the 32-byte value slot, and the value's heap (a long string's
+text, an array's elements, an object's entries) exists once, in the dictionary. Two values share
+an entry only when they are **identical**: the same type (the int `1` and the float `1.0` are
+two values), floats by their bits, a `datetime` with its offset and zone (one instant at two
+offsets is two values), arrays element by element and objects entry by entry in their key order.
+`min_bytes` (default 0) applies to strings only: a shorter string stays in the row; every other
+type is coded whatever its size.
 
-**When it does not**:
+**Under a nested path** (`loc.file`) a dedup rule shares **strings** only, and only those longer
+than 24 bytes and at least `min_bytes` (a string of at most 24 bytes is stored inline in its slot
+and owns no heap to share): the value inside the object keeps its slot and points to the one copy
+of its text in the rule's table.
 
-- **Short values.** A string of at most 24 bytes (on 64-bit targets) is stored **inline** in the
-  property slot and owns no heap: there is nothing to share, so a dedup rule never shares it,
-  whatever its `min_bytes` (`repo`, `kind`, `origin`, short codes and names). The default
-  `min_bytes` of a dedup rule is therefore 25.
-- **Mostly distinct values.** Every distinct value costs its bytes plus 32 bytes (the reference
-  counts of its shared copy and its slot in the table), so a path whose values rarely repeat (ids,
-  descriptions, CVs) costs more than it saves. The estimate warns with `high_cardinality`; for long
-  unique text use `lz4`.
+**When it pays**: values repeated across many elements: file paths, URLs, kinds, states, flags,
+categories, dates, small lists of roles or line numbers. Measured on a code knowledge graph: the
+`path` of its symbols took 1.17 MB of heap for 816 distinct values, about 40 KB deduplicated; on a
+larger one (2.8 million elements) the advisor's dedup rules on 130 keys saved about 30 % of the
+property memory. Each coded value saves 28 bytes of its slot plus its heap; each distinct value
+costs its entry (52 bytes) and its heap once.
 
-The rule's numbers: `compressed_values` counts the shared values (one per element), `distinct_values`
-the distinct texts among them, `plain_bytes` their plain size and `stored_bytes` each distinct text
-once plus 32 bytes for it; a reference itself costs nothing beyond the property slot a plain string
-occupies too. `saved_bytes` of an estimate is `plain_bytes - stored_bytes`.
+**When it does not**: **mostly distinct values** (ids, hashes, descriptions, CVs): every
+distinct value costs its entry, so a key whose values rarely repeat saves little or costs memory.
+The estimate warns with `high_cardinality`; for long unique text use `lz4`. The
+[advisor](optimize.md) recommends a dedup rule only where at most one value in eight is distinct
+and it saves at least 1 MiB.
 
-A text no element references any more (it was overwritten, its element dropped) leaves the table
-lazily: when the table has doubled since its last sweep, after a rolled-back transaction, on
-`g.recompress(name)` and on a load, so a table holds at most about twice its live values.
-`g.memory_usage()` reports `deduped_values`, `deduped_plain_bytes` and `dedup_table_bytes` (every
-shared text once, part of `property_bytes`).
+**The cost**: a write of a coded key looks the value up in the dictionary (a hash of the value; up
+to about 10 % slower than a plain write); reads are as fast as plain ones. A load codes the rule
+keys as it builds the graph (a load takes somewhat longer).
+
+The rule's numbers: `compressed_values` counts the values the rule holds (coded or shared, one
+per element), `distinct_values` the distinct values among them, `plain_bytes` and `stored_bytes`
+what they take without and with the rule. On a top-level key `plain_bytes` is each value's slot
+(32 bytes) plus its heap and `stored_bytes` each value's code (4 bytes) plus every distinct value
+once (its dictionary entry, 52 bytes, plus its heap); under a nested path `plain_bytes` is the text
+of each value and `stored_bytes` every distinct text once plus 32 bytes for it (a reference costs
+nothing beyond the slot a plain string occupies too). `saved_bytes` of an estimate is
+`plain_bytes - stored_bytes`.
+
+A dictionary only grows while the graph runs; a value no element holds any more (overwritten,
+its element dropped) is removed when the dictionary is **rebuilt**: at the end of a transaction
+once it holds max(256, twice its entries at the last rebuild, an eighth of the label's elements)
+entries, after a rolled-back transaction that added values, on `g.recompress(name)`, on
+`g.shrink_to_fit()` and on a load. A nested path's table is swept the same way when it has doubled
+since its last sweep. `g.memory_usage()` reports `deduped_values`, `deduped_plain_bytes` and
+`dedup_table_bytes` (the dictionaries, the coded rows' layouts and the nested paths' tables, every
+value once, part of `property_bytes`).
 
 `lz4` and `dedup` are one rule per element kind, label and path: redefining the rule with the other
 codec re-encodes its values in the same commit.
 
+> **Warning (stores written by this version):** a dedup rule with `min_bytes` 0 (the default since this version) cannot be
+> read by Graphersal 0.5.2 and older: they report a store holding one as **damaged**. Upgrade
+> the engine before opening such a store; this version reads every older store and its rules
+> (`min_bytes` 25) as they were written. Rules defined by 0.2.1 to 0.5.2 code their non-string
+> values too once this version loads them; strings shorter than their `min_bytes` stay in the
+> row.
+>
 > **Warning (0.2.0):** Graphersal 0.2.0 does not know the codec `dedup` and reads a store that
 > holds a `dedup` rule as **damaged** from the commit that defined it on (maintenance mode; its
 > repair would drop those commits). Do not open such a store with 0.2.0, and never run
@@ -179,8 +214,9 @@ g.estimate_compression(#{label: "symbol", path: "path", codec: ["lz4", "dedup"]}
 
 Without `codec`, `min_bytes` and `dictionary` the **candidates** are `lz4` without and with a
 dictionary at `min_bytes` 64, 128, 256, 512 and 1024, plus the parameters of the rule that covers
-the path today (if any, a dedup rule too). `codec: "dedup"` measures dedup at `min_bytes` 25, 64,
-128 and 256; a list of codecs measures each codec's candidates. The answer:
+the path today (if any, a dedup rule too). `codec: "dedup"` measures dedup at `min_bytes` 0, 25,
+64, 128 and 256 (on a top-level key counting every value type, with the dictionary's exact
+identity); a list of codecs measures each codec's candidates. The answer:
 
 | Key | Meaning |
 |---|---|
@@ -278,8 +314,9 @@ snapshot and a Store carry the catalog, so a rule survives every store operation
 checkpoint, fork, backup, restore, repair, rollback); the files hold plain values, and the load
 compresses again. A version that does not know the kind keeps the rule unchanged and only loses the
 compression (the definition is not critical). A version that knows the kind but not the codec
-(0.2.0 reading a `dedup` rule written by 0.2.1) cannot decode the rule's payload and reports the
-definition as damage; drop dedup rules before opening a store with an older version.
+(0.2.0 reading a `dedup` rule written by 0.2.1), or a threshold it refuses (0.5.2 and older
+reading a `dedup` rule with `min_bytes` 0), reports the definition as damage; drop dedup rules
+before opening a store with an older version.
 
 In the playground, **Catalog ▾ ▸ Compression** lists the rules with their statistics (here 400
 customer biographies, about 1 KiB each) and defines, edits, recompresses and drops them:

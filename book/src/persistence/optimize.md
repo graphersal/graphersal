@@ -14,7 +14,8 @@ again).
 |---|---|---|
 | create an index | a `(label, key)` filtered by a full scan at least 10 times in two days, on a label of at least 1,000 elements, with no index serving it and values an index holds | the scans become index lookups; the index takes memory (estimated) |
 | drop an index | no query used the index in the time observed, after at least 7 days of statistics | frees the index's memory (measured) |
-| compress or deduplicate | a top-level string property of at least 256 KiB without a rule, not indexed, read fewer than 1,000 times in two days, whose best codec (`lz4` or `dedup`) saves at least 64 KiB and 20 % | frees memory, measured by [`estimate_compression`](../users_guide/compressed_properties.md) with the rule's own code |
+| compress | a top-level string property of at least 256 KiB without a rule, not indexed, read fewer than 1,000 times in two days, whose best `lz4` candidate saves at least 64 KiB and 20 % | frees memory, measured by [`estimate_compression`](../users_guide/compressed_properties.md) with the rule's own code; every read decompresses |
+| deduplicate | a top-level property of any value type without a rule (indexed or not, read often or not) whose values repeat: at most one in 8 distinct (`dedup_distinct_ratio`), saving at least 1 MiB (`min_dedup_saving_bytes`) and more than `lz4` would; the evidence names the values, the distinct ones and the saving in MiB | frees memory (each value keeps a 4-byte code instead of its 32-byte slot, each distinct value is stored once), measured like the above; writes of the key look the value up (up to about 10 % slower), reads stay plain |
 | stop compressing | a compressed key read at least 1,000 times in two days | reads stop decompressing; memory grows back (measured) |
 
 Every recommendation has an **impact**, what applying it is worth, and a **confidence**, how much
@@ -23,7 +24,7 @@ data its figures rest on: the two are separate, so a saving measured exactly on 
 
 | Kind | Impact `high` | Impact `medium` | Impact `low` |
 |---|---|---|---|
-| compress or deduplicate, drop an index | frees 10 % of the graph's memory or more | from 2 % | below 2 % |
+| compress, deduplicate, drop an index | frees 10 % of the graph's memory or more | from 2 % | below 2 % |
 | create an index | its scans read 100 million elements or more in two days | from 10 million | below |
 | stop compressing | read 100,000 times or more in two days | from 10,000 | below |
 
