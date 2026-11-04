@@ -776,12 +776,12 @@ order, followed by the unknown keys:
 | `element` | string: `"vertex"` or `"edge"` |
 | `label` | string: the label |
 | `path` | string: canonical jpath text of object keys only (`$.details.career.cv`) |
-| `codec` | string: `"lz4"` (each value compressed) or `"dedup"` (each distinct value held once in memory; since 0.2.1) |
-| `min_bytes` | int64: strings shorter than this (UTF-8 bytes) stay plain, 1 to 16777216 |
+| `codec` | string: `"lz4"` (each value compressed) or `"dedup"` (each distinct value held once in memory; since 0.2.1; on a top-level key every value type since the version after 0.5.2) |
+| `min_bytes` | int64: strings shorter than this (UTF-8 bytes) stay plain, 1 to 16777216 (`lz4`), 0 to 16777216 (`dedup`; 0 since the version after 0.5.2, which 0.5.2 and older refuse) |
 | `dictionary` | boolean: whether the load builds a dictionary from the rule's values (`lz4` only; `true` with `"dedup"` is invalid) |
 
 `label` and `path` are required; `element` defaults to `"vertex"`, `codec` to `"lz4"`,
-`min_bytes` to 256 (`lz4`) or 25 (`dedup`), `dictionary` to `true` (`lz4`) or `false` (`dedup`);
+`min_bytes` to 256 (`lz4`) or 0 (`dedup`; 25 before this version, whose rules always stored it), `dictionary` to `true` (`lz4`) or `false` (`dedup`);
 writers always write `min_bytes` and `dictionary`. A `codec` or an `element` the reader does not
 know, or a `path` it cannot parse (a newer writer's), is NOT damage and needs no new format
 version (16 rules 1 and 9): the reader keeps the definition, writes its payload back exactly as

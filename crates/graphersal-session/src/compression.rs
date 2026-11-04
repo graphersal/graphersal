@@ -21,7 +21,7 @@
 //!   read);
 //! - a **spec** (`define_compression`): `{name, label, path, element?, codec?, minBytes?,
 //!   dictionary?, replaces?}`; `codec` is `"lz4"` (default: minBytes 256, a dictionary) or
-//!   `"dedup"` (minBytes 25, no dictionary: `dictionary: true` is a field error); `replaces`
+//!   `"dedup"` (minBytes 0, no dictionary: `dictionary: true` is a field error); `replaces`
 //!   names the rule an edit started from (a rename stores the new name and drops the old one
 //!   in one commit);
 //! - **field errors** (a refused define): `[{field, message, help?}]` with `field` one of
@@ -31,7 +31,7 @@
 //!   minBytes?, dictionary?}`; each optional key given narrows the candidates (none: `lz4`
 //!   with and without a dictionary at 64, 128, 256, 512 and 1024 bytes, plus the current
 //!   rule's parameters); `codec` is a name or a list of names (`["lz4", "dedup"]` measures
-//!   both; `dedup` at 25, 64, 128 and 256 bytes);
+//!   both; `dedup` at 0, 25, 64, 128 and 256 bytes);
 //! - an **estimate** (`{ok: true, estimate}`): `{element, label, path, elements, valuesFound,
 //!   stringValues, stringBytes, sampled, measuredValues, histogram: [{minBytes, maxBytes,
 //!   values, bytes}], candidates: [{codec, minBytes, dictionary, compressedValues, plainBytes,
@@ -277,7 +277,7 @@ pub fn estimate_request(spec: &Value) -> Result<CompressionEstimateRequest, Vec<
             None => {
                 errors.push(FieldError::new(
                     "minBytes",
-                    "minBytes is a whole number of bytes (1 to 16777216)",
+                    "minBytes is a whole number of bytes (1 to 16777216; 0 allowed for dedup)",
                 ));
                 None
             }
@@ -441,7 +441,7 @@ impl Session {
                 None => {
                     errors.push(FieldError::new(
                         "minBytes",
-                        "minBytes is a whole number of bytes (1 to 16777216)",
+                        "minBytes is a whole number of bytes (1 to 16777216; 0 allowed for dedup)",
                     ));
                     None
                 }
@@ -811,7 +811,7 @@ mod tests {
         }));
         assert_eq!(answer["ok"], true, "{answer}");
         let candidates = answer["estimate"]["candidates"].as_array().unwrap().clone();
-        assert_eq!(candidates.len(), 14, "{answer}");
+        assert_eq!(candidates.len(), 15, "{answer}");
         let best = &candidates[answer["estimate"]["best"].as_u64().unwrap() as usize];
         assert_eq!(best["codec"], "dedup", "{answer}");
         assert_eq!(best["distinctValues"], 3);

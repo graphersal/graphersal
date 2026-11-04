@@ -1072,8 +1072,8 @@ impl Graph {
     /// like the DSL's ``g.define_compression(#{..})``: strings of ``element``s labelled
     /// ``label`` at ``path`` (a jpath of names such as ``"details.career.cv"``) are kept
     /// compressed in memory (``codec="lz4"``, the default: ``min_bytes`` 256 and a dictionary
-    /// unless given) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 25, no
-    /// dictionary) and read plain. The label's values are re-encoded at once.
+    /// unless given) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 0, no
+    /// dictionary; on a top-level key every value type) and read plain. The label's values are re-encoded at once.
     #[pyo3(signature = (name, label, path, element="vertex", min_bytes=None, dictionary=None, codec=None, *, policy=None))]
     #[allow(clippy::too_many_arguments)]
     fn define_compression(

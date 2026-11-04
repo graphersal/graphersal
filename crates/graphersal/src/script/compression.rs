@@ -228,7 +228,7 @@ impl ScriptGraphTraversalSource {
     /// / `g.define_compression(..)`: stores (or replaces) a compression rule. `path` is a string
     /// read as a jpath (`"details.career.cv"`, because it IS a path) or a `jpath(..)`;
     /// `element` is `"vertex"` (default) or `"edge"`, `codec` `"lz4"` (default: `min_bytes`
-    /// 256, `dictionary` true) or `"dedup"` (each distinct value stored once: `min_bytes` 25,
+    /// 256, `dictionary` true) or `"dedup"` (each distinct value stored once: `min_bytes` 0,
     /// no dictionary; `dictionary: true` is refused). The explicit pass re-encodes the label's
     /// values in the same unit. Asks for `Create` on the rule (`Update` when it replaces one).
     pub fn define_compression(&mut self, spec: Dynamic) -> Result<(), Box<EvalAltResult>> {
@@ -345,7 +345,7 @@ impl ScriptGraphTraversalSource {
     /// Without `codec`/`min_bytes`/`dictionary` every default candidate is measured (`lz4`
     /// with and without a dictionary at 64, 128, 256, 512 and 1024 bytes, plus the current
     /// rule's parameters); each given key narrows the set. `codec` is `"lz4"`, `"dedup"` (at
-    /// 25, 64, 128 and 256 bytes) or a list of them (`["lz4", "dedup"]` compares both). Answers
+    /// 0, 25, 64, 128 and 256 bytes) or a list of them (`["lz4", "dedup"]` compares both). Answers
     /// a map
     /// (`estimate_entry`). Asks for `Read` on the data of that element kind and label.
     pub fn estimate_compression(&mut self, spec: Dynamic) -> Result<rhai::Map, Box<EvalAltResult>> {

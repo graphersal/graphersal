@@ -23,6 +23,7 @@ pub mod compressed;
 pub mod deduped;
 /// The value-depth limit: bounded nesting so recursive readers stay bounded.
 pub(crate) mod depth;
+pub(crate) mod dictionary;
 /// [`Direction`], the `Direction.OUT/IN/BOTH` edge-direction token.
 pub mod direction;
 /// [`DT`], the unit/part token of the date and time steps.
@@ -33,6 +34,7 @@ pub mod element_value;
 pub(crate) mod glob_path;
 /// [`GType`], type tokens used by casts and predicates.
 pub mod gtype;
+pub(crate) mod identity;
 /// [`JsonPath`], for the `json_path()` step.
 pub mod json_path;
 pub(crate) mod literal;
@@ -933,9 +935,10 @@ pub(crate) fn logical_element(element: &PropertyMap) -> PropertyMap {
 /// [`crate::graph::GraphStorage::memory_usage`]'s `property_bytes` walk and `.profile()`'s per-step
 /// estimation (D1/D3).
 pub(crate) fn estimated_element_heap_bytes(element: &PropertyMap) -> u64 {
+    // A coded row's coded values are counted once, in their dictionaries.
     element.own_heap_bytes()
         + element
-            .values()
+            .own_values()
             .map(ElementProperty::estimated_heap_bytes)
             .sum::<u64>()
 }

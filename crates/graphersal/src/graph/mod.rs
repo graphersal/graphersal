@@ -385,6 +385,9 @@ impl TraversalGraph {
     pub fn shrink_to_fit(&mut self) {
         // The slot vectors: spare capacity above the last slot (vacant slots stay, indices are
         // stable). Every load ends here, so a loaded graph keeps no spare slots.
+        // Value dictionaries holding entries no row may use any more are rebuilt first (it
+        // re-codes rows, so it runs before the shapes are swept).
+        self.compression_rebuild_grown();
         self.graph.shrink_to_fit();
         self.index.shrink_to_fit();
         self.shapes.shrink_to_fit();

@@ -340,7 +340,7 @@ export const CompressionManager = {
     </div>
     <div class="dialog-body">
       <template v-if="!d.draft">
-        <p class="muted sq-note">A rule keeps the strings of one vertex or edge label at one property path LZ4-compressed in memory (codec lz4: when at least the minimum size and at most 90 % after compression; a read or a has() on such a field decompresses it), or stores each distinct value once and lets every element point to it (codec dedup: long values repeated across many elements, such as paths, URLs or category texts; strings of up to 24 bytes are stored inline and never shared). Reads are always plain. Files hold plain text. Rules travel with the catalog file and with a snapshot.</p>
+        <p class="muted sq-note">A rule keeps the strings of one vertex or edge label at one property path LZ4-compressed in memory (codec lz4: when at least the minimum size and at most 90 % after compression; a read or a has() on such a field decompresses it), or stores each distinct value once and lets every element point to it (codec dedup: values repeated across many elements, such as paths, URLs, kinds, flags, dates or small lists; on a top-level property every value type, the element keeping a 4-byte code instead of the 32-byte value). Reads are always plain. Files hold plain text. Rules travel with the catalog file and with a snapshot.</p>
         <div v-if="state.compressionsError" class="field-error">{{ state.compressionsError }}</div>
         <p v-else-if="!rows.length" class="muted">No compression rules yet. Large text that queries rarely read (a CV, a description, a document body) is the use case.</p>
         <div v-else class="catalog-table-wrap">
@@ -396,7 +396,7 @@ export const CompressionManager = {
           <select id="cc-codec" :value="d.draft.codec || 'lz4'" @change="setCodec($event.target.value)" :class="{ invalid: d.errors.codec }" style="justify-self:start">
             <option v-for="c in codecs" :key="c" :value="c">{{ c }}</option>
           </select>
-          <span class="hint">{{ (d.draft.codec || 'lz4') === 'dedup' ? 'Each distinct value stored once, every element points to it: for long values repeated across many elements. Reads cost nothing extra.' : 'Each value LZ4-compressed: for large text that queries rarely read.' }}</span>
+          <span class="hint">{{ (d.draft.codec || 'lz4') === 'dedup' ? 'Each distinct value stored once, every element keeps a 4-byte code: for values repeated across many elements (any type on a top-level property). Reads cost nothing extra; writes look the value up.' : 'Each value LZ4-compressed: for large text that queries rarely read.' }}</span>
           <label for="cc-min">Minimum size</label>
           <input id="cc-min" type="text" inputmode="numeric" v-model="d.draft.minBytesText" :class="{ invalid: d.errors.minBytes }" style="width:14ch;justify-self:start">
           <div v-for="m in d.errors.minBytes || []" class="field-error sq-span">{{ m }}</div>

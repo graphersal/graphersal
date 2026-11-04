@@ -812,6 +812,47 @@ impl PartialEq for Vector {
 
 impl Eq for Vector {}
 
+impl Vector {
+    /// Exact identity: the same element kind, dimension and component BITS (`-0.0` differs
+    /// from `0.0`, unlike `==`). The dictionary of a `dedup` rule shares a value only with an
+    /// identical one (`value/identity.rs`); identical vectors hash alike under [`Hash`].
+    pub(crate) fn identical(&self, other: &Vector) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        match (&*self.0, &*other.0) {
+            (Data::F32(a), Data::F32(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+            }
+            (Data::F16(a), Data::F16(b)) => a == b,
+            (
+                Data::I8 {
+                    codes: a,
+                    scale: sa,
+                },
+                Data::I8 {
+                    codes: b,
+                    scale: sb,
+                },
+            ) => sa.to_bits() == sb.to_bits() && a == b,
+            (
+                Data::Bit {
+                    bits: a,
+                    dimension: da,
+                },
+                Data::Bit {
+                    bits: b,
+                    dimension: db,
+                },
+            ) => da == db && a == b,
+            (Data::F32(_) | Data::F16(_) | Data::I8 { .. } | Data::Bit { .. }, _) => false,
+        }
+    }
+}
+
 impl Hash for Vector {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.element().hash(state);

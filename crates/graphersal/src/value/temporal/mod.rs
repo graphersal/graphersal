@@ -686,6 +686,39 @@ impl PartialEq for DateTime {
     }
 }
 
+impl Temporal {
+    /// Exact identity (`value/identity.rs`): equality that also tells a `datetime`'s offset and
+    /// zone and an `offsettime`'s offset apart (`==` compares their instants only).
+    pub(crate) fn identical(&self, other: &Temporal) -> bool {
+        match (self, other) {
+            (Temporal::DateTime(a), Temporal::DateTime(b)) => {
+                a.nanos == b.nanos && a.offset_seconds == b.offset_seconds && a.zone == b.zone
+            }
+            (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) => {
+                a.nanos == b.nanos && a.offset_seconds == b.offset_seconds
+            }
+            _ => self == other,
+        }
+    }
+
+    /// The hash of [`Self::identical`]: the value's hash plus a `datetime`'s offset and zone or
+    /// an `offsettime`'s offset.
+    pub(crate) fn identity_hash<H: Hasher>(&self, state: &mut H) {
+        self.hash(state);
+        match self {
+            Temporal::DateTime(value) => {
+                value.offset_seconds.hash(state);
+                value.zone.hash(state);
+            }
+            Temporal::OffsetTime(value) => value.offset_seconds.hash(state),
+            Temporal::Date(_)
+            | Temporal::LocalDateTime(_)
+            | Temporal::Time(_)
+            | Temporal::Duration(_) => {}
+        }
+    }
+}
+
 impl Eq for DateTime {}
 
 impl Hash for DateTime {

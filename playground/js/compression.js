@@ -11,7 +11,7 @@ import { formatBytes } from './statistics.js';
 /** The default threshold of a rule (the engine's `DEFAULT_MIN_BYTES`). */
 export const DEFAULT_MIN_BYTES = 256;
 /** The default threshold of a dedup rule (the engine's `DEFAULT_DEDUP_MIN_BYTES`). */
-export const DEFAULT_DEDUP_MIN_BYTES = 25;
+export const DEFAULT_DEDUP_MIN_BYTES = 0;
 /** The codecs the form offers: lz4 compresses each value, dedup stores each distinct value once. */
 export const CODECS = Object.freeze(['lz4', 'dedup']);
 /** The codecs the form's Estimate measures (the engine's estimate spec takes a list). */
@@ -190,8 +190,9 @@ export function draftToSpec(draft) {
   let minBytes = defaultMinBytes(draft.codec);
   if (minText) {
     minBytes = Number(minText);
-    if (!Number.isInteger(minBytes) || minBytes < 1 || minBytes > MAX_MIN_BYTES) {
-      errors.push({ field: 'minBytes', message: `A whole number of bytes from 1 to ${MAX_MIN_BYTES}.` });
+    const least = draft.codec === 'dedup' ? 0 : 1;
+    if (!Number.isInteger(minBytes) || minBytes < least || minBytes > MAX_MIN_BYTES) {
+      errors.push({ field: 'minBytes', message: `A whole number of bytes from ${least} to ${MAX_MIN_BYTES}.` });
     }
   }
   if (errors.length) return { errors };

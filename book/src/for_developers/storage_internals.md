@@ -42,14 +42,15 @@ A snapshot load reserves the slots from the manifest's counts, and every load
 (vacant slots stay: indices are stable). The memory report shows `live`, `tombstoned` (vacant) and
 `spare` slots per kind.
 
-## Property maps: `Indexed` and `Shaped`
+## Property maps: `Indexed`, `Shaped` and `Coded`
 
-`PropertyMap` is a newtype over a crate-internal `Repr` with two variants:
+`PropertyMap` is a newtype over a crate-internal `Repr` with three variants:
 
 | Variant | Holds | Used for |
 |---|---|---|
 | `Indexed` | an `IndexMap<CompactString, ElementProperty>` (FNV) | every free-standing map: nested objects, catalog payloads, change sets, results, schema values, every map a caller builds |
 | `Shaped` | `Arc<Shape>` (the ordered key list, shared) + `Vec<ElementProperty>` (this element's values, in key order) | every map a `TraversalGraph` stores per vertex or edge |
+| `Coded` | `Arc<Layout>` (shape, per position own value or code, the `dedup` rules' dictionaries, shared) + `Box<[ElementProperty]>` (own values) + `Box<[u32]>` (codes) | a stored map with values at the top-level keys of `dedup` rules ([Compressed Properties](../users_guide/compressed_properties.md#deduplicating-repeated-values)) |
 
 An `IndexMap` slot costs a cached hash, the key and the value (64 bytes) plus its share of the hash
 index and spare capacity, about 84 to 132 bytes per property. A `Shaped` slot is the value alone
@@ -71,6 +72,18 @@ outside the graph (a clone handed out to a caller who then inserts a new key) fi
 uses the positional helpers (`insert_full`, `shift_remove_full`, `get_full`, `shift_insert`,
 `insert_if_absent`, `indexed_mut`). The hot read paths match `Indexed` first and keep the `Shaped`
 arm out of line, so free-standing maps pay nothing for the second variant.
+
+A `Coded` row exists only under a `dedup` rule on a top-level key: the `Layout` (interned per
+shape, coded positions and rules, in the compression rules' layout table) says for each position
+whether the row holds the value itself or a 4-byte code into the rule's `ValueDictionary`
+(`value/dictionary.rs`: append-only segments of `OnceLock` slots that never move, so a read gives
+`&ElementProperty` without a lock; appends under a mutex; safe Rust only). A coded row never leaves
+the graph: `Clone`, the owned iteration and every mutation through the generic methods turn it into
+a plain `Shaped` row first; the graph's write path replaces an existing key in place (a new code,
+the undo log keeping the old code with its dictionary) and runs every other write on the plain row
+and codes it again (`CompressionRules::code_row`). A graph without `dedup` rules never builds one,
+and the `Shaped` read path has no extra check. The own values and the codes are two boxes (no
+`unsafe` single allocation, user decision 2026-11-04).
 
 ## The shape table
 

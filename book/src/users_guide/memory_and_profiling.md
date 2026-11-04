@@ -32,9 +32,13 @@ With [compression rules](compressed_properties.md) it also reports `compressed_v
 kept compressed), `compressed_plain_bytes` and `compressed_stored_bytes` (their plain and stored
 sizes) and `compression_dictionary_bytes` (the rules' dictionaries, each shared one once; part of
 `total_bytes`). `property_bytes` counts the stored, compressed size, so a rule's saving shows there
-directly. All four are `0` without rules. The `dedup` rules add `deduped_values` (strings shared
-through their tables), `deduped_plain_bytes` (their plain size) and `dedup_table_bytes` (every
-shared text once, part of `property_bytes`); all three are `0` without `dedup` rules.
+directly. All four are `0` without rules. The `dedup` rules add `deduped_values` (the values they
+hold: coded in the element's row on a top-level key, shared strings under a nested path),
+`deduped_plain_bytes` (their plain size: a coded value's 32-byte slot plus its heap, a shared
+string's text) and `dedup_table_bytes` (the value dictionaries, the coded rows' layouts and the
+nested paths' tables: every value once, part of `property_bytes`); all three are `0` without
+`dedup` rules. In the memory report a coded value counts its 4-byte code as its slot and no heap
+(its heap is in the dictionary).
 
 With [property indexes](property_indexes.md) it reports `property_index_bytes`, an estimate of
 their entries (part of `total_bytes`; `0` without indexes).
