@@ -312,7 +312,7 @@ export const StoreMenu = {
         <div class="menu-sep"></div>
         <div class="menu-title" style="color:var(--danger)">Maintenance mode: read-only</div>
         <div class="menu-item store-block">
-          <div><small>{{ info.maintenance.recoverable ? 'Every damaged item has a donor: a repair loses nothing.' : 'Some damage has no donor: a repair loses data (restore a backup if you have one).' }}</small></div>
+          <div><small>{{ info.maintenance.recoverable ? 'Every damaged item has a donor: a repair keeps all data (not the history before it, nor the marks).' : 'Some damage has no donor: a repair loses data (restore a backup if you have one).' }}</small></div>
           <div v-if="info.maintenance.lineageNote" style="margin-top:4px"><small><b>lineage</b> {{ info.maintenance.lineageNote }}</small></div>
           <div v-for="(d, i) in info.maintenance.damage" :key="i" style="margin-top:4px">
             <small :style="d.lost ? 'color:var(--danger)' : ''"><b>{{ d.kind }}</b> {{ d.text }}</small>

@@ -2018,6 +2018,50 @@ mod v040_checkpointed {
         }
     }
 
+    /// A repair that loses no data still never carries the history before the repaired
+    /// position, the marks and the store id: its report says so in words, with the count of
+    /// marks (the field report read "nothing lost" beside "mark not carried").
+    #[test]
+    fn a_lossless_repair_names_what_it_never_carries() {
+        let temp = Temp::new("v040-cp-repair");
+        let dir = copy(&temp, "checkpointed_mark");
+        Store::upgrade_in_place(&dir).unwrap();
+        let report = Store::repair_dir(&dir, temp.join("repaired")).unwrap();
+        assert!(report.is_lossless());
+        assert_eq!(report.marks_not_carried.len(), 1);
+        assert_eq!(
+            report.not_carried(),
+            "the history before commit 2, 1 mark and the store id (backups start anew)"
+        );
+        let text = report.to_string();
+        assert!(text.contains("): all data kept\n"), "{text}");
+        assert!(!text.contains("nothing lost"), "{text}");
+        assert!(
+            text.contains(
+                "  mark not carried: after @ commit 2\n  not carried: the history before commit \
+                 2, 1 mark and the store id (backups start anew); the store it was built from \
+                 keeps them\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            report
+                .damage
+                .to_string()
+                .contains("; a repair keeps all data\n"),
+            "{}",
+            report.damage
+        );
+        // Without marks the marks are not named.
+        let dir = copy(&temp, "checkpointed");
+        Store::upgrade_in_place(&dir).unwrap();
+        let report = Store::repair_dir(&dir, temp.join("repaired2")).unwrap();
+        assert_eq!(
+            report.not_carried(),
+            "the history before commit 6 and the store id (backups start anew)"
+        );
+    }
+
     /// An interrupted write of the first commit after the records (a torn tail) is cut, the
     /// records before it are kept.
     #[test]

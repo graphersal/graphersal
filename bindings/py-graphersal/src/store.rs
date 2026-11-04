@@ -1052,8 +1052,10 @@ impl Store {
 
     /// ``store.repair_to(path)``: builds a repaired copy of this store in a NEW directory (a
     /// damaged store's files are never changed). Returns ``{"commit_seq", "lossless",
-    /// "marks_not_carried", "lineage_approximate_before", "report"}`` (the report as text:
-    /// repaired, lost, diverged, marks not carried; ``marks_not_carried`` is ``[{"name",
+    /// "not_carried", "marks_not_carried", "lineage_approximate_before", "report"}`` (the report
+    /// as text: repaired, lost, diverged, marks not carried; ``lossless``: no data lost;
+    /// ``not_carried``: what a repair never carries, in words (the history before the repaired
+    /// position, the marks, the store id), also when no data is lost; ``marks_not_carried`` is ``[{"name",
     /// "commit_seq"}]``, the repaired store starts without marks; ``lineage_approximate_before``
     /// is the commit before which the lineage is approximate when both GRAPH copies were
     /// damaged, else ``None``).
@@ -1063,6 +1065,7 @@ impl Store {
         let dict = PyDict::new(py);
         dict.set_item("commit_seq", report.commit_seq)?;
         dict.set_item("lossless", report.is_lossless())?;
+        dict.set_item("not_carried", report.not_carried())?;
         dict.set_item(
             "marks_not_carried",
             marks_list(py, &report.marks_not_carried)?,

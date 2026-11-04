@@ -2754,7 +2754,7 @@ fn store_rollback_attic_and_repair_commands() {
     assert_eq!(run(&["store", "repair", d], "").code, 2, "--to is required");
     let res = run(&["store", "repair", d, "--to", r], "");
     assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
-    assert!(res.stdout.contains("nothing lost"), "{}", res.stdout);
+    assert!(res.stdout.contains("ok: all data kept"), "{}", res.stdout);
     assert_eq!(count(r).trim(), "7");
     assert_eq!(run(&["store", "verify", r], "").code, 0);
     let res = run(&["--graph", r, "-e", r#"g.add_v("x").to_list()"#], "");
@@ -6719,5 +6719,33 @@ fn embed_model_import_errors_have_one_error_headline() {
     assert!(res.stderr.starts_with("Error: "), "{}", res.stderr);
     assert!(!res.stderr.contains("Error: Error:"), "{}", res.stderr);
     assert!(res.stderr.contains("\nHelp: "), "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `store repair` of a store that loses no data says "all data kept" and names what a repair
+/// never carries (the history, the marks with their count, the store id) and where it stays.
+#[test]
+fn store_repair_names_what_it_never_carries() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("store-repair-not-carried");
+    let _ = std::fs::remove_dir_all(&root);
+    let store = root.join("store");
+    copy_tree(&fixtures.join("checkpointed_mark"), &store);
+    let store = store.to_string_lossy().to_string();
+    let repaired = root.join("repaired").to_string_lossy().to_string();
+    assert_eq!(run(&["store", "upgrade", &store, "--in-place"], "").code, 0);
+    let res = run(&["store", "repair", &store, "--to", &repaired], "");
+    assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
+    assert!(!res.stdout.contains("nothing lost"), "{}", res.stdout);
+    assert!(
+        res.stdout.contains(&format!(
+            "ok: all data kept\n  not carried: the history before commit 2, 1 mark and the store \
+             id (backups start anew)\n  kept in: {store} (keep it while you need them)\n  # open \
+             it in the REPL\n"
+        )),
+        "{}",
+        res.stdout
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

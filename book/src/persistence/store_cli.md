@@ -850,7 +850,8 @@ graphersal store repair <DIR> --to <NEW_DIR> [--drop-damaged-blobs]
 
 Builds a repaired copy of a damaged store in `NEW_DIR` (never in place; the damaged files are not
 changed) and reports what was repaired, lost and diverged. A store of an older released format
-(Graphersal 0.1.x) is read as it is; the repaired store has the current format. Exit **0** with `ok: nothing lost`,
+(Graphersal 0.1.x) is read as it is; the repaired store has the current format. Exit **0** with `ok: all data kept` (and what a repair
+never carries: `not carried: the history before commit N, ... and the store id`),
 exit **1** when data is lost or diverged (the repaired store is written anyway: read the lists),
 exit **2** without `--to`. The repaired store starts without marks: one `mark not carried: name @
 commit N` line per mark of the damaged store at or before the repaired position. When both
