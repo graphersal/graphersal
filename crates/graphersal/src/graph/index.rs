@@ -137,6 +137,23 @@ pub(crate) struct GraphIndex {
         HashMap<CompactString, IndexSet<EdgeHandle, FnvBuildHasher>, FnvBuildHasher>,
 }
 
+/// Makes room for one more member in a label bucket whose entries are full: by
+/// [`growth_step`](crate::graph::topology::growth_step) (1/8 for a large bucket) instead of `IndexSet`'s growth to its hash
+/// table's capacity (up to about 1.75 times the members after a load's `shrink_to_fit`). The
+/// hash table itself grows in powers of two (it keeps 1/8 free after a load).
+#[inline]
+fn reserve_label_entry<H: std::hash::Hash + Eq>(set: &mut IndexSet<H, FnvBuildHasher>) {
+    if set.len() == set.capacity() {
+        grow_label_entries(set);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn grow_label_entries<H: std::hash::Hash + Eq>(set: &mut IndexSet<H, FnvBuildHasher>) {
+    let _ = set.try_reserve_exact(crate::graph::topology::growth_step(set.len()));
+}
+
 impl GraphIndex {
     pub fn new() -> Self {
         Self::default()
@@ -222,10 +239,9 @@ impl GraphIndex {
         // `IndexSet::insert` is a no-op when `index` is already a member of this label's bucket:
         // labels are a set, not a multiset, so this is the correct behavior, not a regression
         // relative to the old `Vec::push` (which could accumulate duplicate entries).
-        self.node_labels
-            .entry(label.into())
-            .or_default()
-            .insert(index);
+        let set = self.node_labels.entry(label.into()).or_default();
+        reserve_label_entry(set);
+        set.insert(index);
     }
 
     #[allow(dead_code)]
@@ -256,10 +272,9 @@ impl GraphIndex {
     #[allow(dead_code)]
     #[inline]
     pub fn insert_edge_label(&mut self, label: impl Into<CompactString>, index: EdgeHandle) {
-        self.edge_labels
-            .entry(label.into())
-            .or_default()
-            .insert(index);
+        let set = self.edge_labels.entry(label.into()).or_default();
+        reserve_label_entry(set);
+        set.insert(index);
     }
 
     #[allow(dead_code)]
@@ -351,6 +366,23 @@ impl GraphIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_label_bucket_grows_by_an_eighth() {
+        let mut index = GraphIndex::new();
+        for i in 0..8_000 {
+            index.insert_node_label("person", VertexHandle::for_test(i));
+        }
+        index.shrink_to_fit();
+        let bucket = |index: &GraphIndex| index.node_labels.get("person").unwrap().capacity();
+        let before = bucket(&index);
+        index.insert_node_label("person", VertexHandle::for_test(8_000));
+        let after = bucket(&index);
+        // Entries grow by 1/8 (the hash table keeps its own spare room), never to the table's
+        // capacity.
+        assert!(after <= before + before / 8 + 1, "{before} -> {after}");
+        assert!(after > before);
+    }
 
     #[test]
     fn test_node_label_indexing() {

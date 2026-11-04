@@ -146,6 +146,10 @@ impl Generations {
     #[inline]
     pub(crate) fn current(&mut self, slot: usize) -> NonZeroU32 {
         if slot >= self.slots.len() {
+            if slot == self.slots.len() {
+                // The next slot (an append): bounded growth, like the slot vectors.
+                crate::graph::topology::reserve_one(&mut self.slots);
+            }
             self.slots.resize(slot + 1, FIRST_GENERATION);
         }
         self.slots[slot]
@@ -173,6 +177,18 @@ impl Generations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generations_grow_by_an_eighth_after_a_shrink() {
+        let mut generations = Generations::default();
+        for slot in 0..8_000 {
+            generations.current(slot);
+        }
+        generations.shrink_to_fit();
+        assert_eq!(generations.slots.capacity(), 8_000);
+        generations.current(8_000);
+        assert_eq!(generations.slots.capacity(), 9_000);
+    }
 
     #[test]
     fn generation_wraps_and_skips_zero() {

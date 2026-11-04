@@ -126,8 +126,8 @@ support introspection returns `None`.
 ### Releasing spare capacity: `shrink_to_fit()`
 
 A graph that grows by write queries (`add_v`, `add_e`, GQL `CREATE`, ...) grows its vertex and edge
-slot vectors and its indexes by doubling, so after a bulk load up to about half of the slots can
-be allocated but unused: the memory report's `structure.vertex_slots.spare` and
+slot vectors by 1/8 of their size at a time (small ones by doubling) and its hash indexes by
+doubling, so after a bulk load part of the slots and index entries can be allocated but unused: the memory report's `structure.vertex_slots.spare` and
 `edge_slots.spare`. On 5 million vertices and 10 million edges built with GQL `CREATE` that was
 about 1.2 GB of 4.9 GB. A loaded graph never has any: every load (opening a Store, reading a
 snapshot, a GraphSON or GraphML file read into a new graph, the sample graphs) allocates its

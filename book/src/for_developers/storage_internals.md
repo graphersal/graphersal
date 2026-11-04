@@ -31,8 +31,13 @@ its slot, not a list of strings, and `vertex_labels()` still returns a slice. A 
 element (a vertex or edge value in a result) keeps its stored map's shape: the copy is the shared
 key list and the values, no key is hashed.
 
-The vectors grow by doubling, so a graph built element by element can carry up to half its slots
-as spare capacity. A snapshot load reserves the slots from the manifest's counts, and every load
+The vectors grow by 1/8 of their capacity at a time once they hold more than 512 slots (below,
+by doubling, as `Vec` does; `topology::growth_step`), so a graph built element by element carries
+at most about 1/9 of its slots as spare capacity, and the first insert after a load adds 1/8 of
+the slots instead of doubling them (the generations and the label buckets' entries follow the
+same rule; the id index and the label buckets' hash tables are power-of-two tables and keep
+their own spare room after a load). The growth stays geometric, so an insert is amortized O(1).
+A snapshot load reserves the slots from the manifest's counts, and every load
 (snapshot, Store, GraphSON, GraphML) ends with `shrink_to_fit`, which releases the spare capacity
 (vacant slots stay: indices are stable). The memory report shows `live`, `tombstoned` (vacant) and
 `spare` slots per kind.
