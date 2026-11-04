@@ -38,7 +38,8 @@ struct Index {
 
 /// The distinct values of one top-level `dedup` rule (module docs).
 pub(crate) struct ValueDictionary {
-    segments: Box<[OnceLock<Segment>]>,
+    /// Inline (no box): a read reaches a segment with one hop less.
+    segments: [OnceLock<Segment>; SEGMENTS],
     /// A `std` mutex (poisoning recovered): the map types keep their unwind-safety auto
     /// traits.
     index: std::sync::Mutex<Index>,
@@ -76,7 +77,7 @@ impl ValueDictionary {
     /// An empty dictionary of a rule whose strings below `min_bytes` stay in the row.
     pub(crate) fn new(min_bytes: usize) -> Self {
         Self {
-            segments: (0..SEGMENTS).map(|_| OnceLock::new()).collect(),
+            segments: [const { OnceLock::new() }; SEGMENTS],
             index: std::sync::Mutex::new(Index::default()),
             min_bytes,
         }
@@ -195,7 +196,8 @@ impl ValueDictionary {
             self.lock().table.capacity(),
             std::mem::size_of::<u32>(),
         );
-        let array = (self.segments.len() * std::mem::size_of::<OnceLock<Segment>>()) as u64;
+        // The segment array lives in the dictionary's own `Arc` allocation.
+        let array = std::mem::size_of::<Self>() as u64;
         segments + heap + table + array
     }
 }

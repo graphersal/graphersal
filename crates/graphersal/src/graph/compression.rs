@@ -1007,6 +1007,10 @@ impl CompressionRules {
     /// The rule lists of these labels, in label order (one lookup per label, for a whole row).
     fn label_rules(&self, element: ElementKind, labels: &[&str]) -> Vec<&[Rule]> {
         let by_kind = self.by_kind(element);
+        // No rule of this element kind: no label is hashed.
+        if by_kind.is_empty() {
+            return Vec::new();
+        }
         labels
             .iter()
             .filter_map(|label| by_kind.get(*label).map(Vec::as_slice))
