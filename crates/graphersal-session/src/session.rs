@@ -208,10 +208,37 @@ pub struct Session {
     pub(crate) stores: Option<crate::store::Stores>,
     /// Every loaded graph becomes a store in memory ([`Self::set_memory_stores`]).
     pub(crate) memory_stores: bool,
-    /// The force layouts of the Graph panel: running jobs and finished ones ([`crate::layout`]).
-    layouts: crate::layout::LayoutJobs,
+    /// The force layouts of the Graph panel: running jobs and finished ones ([`crate::layout`]);
+    /// shared with the session's memory source ([`SessionMemory`]).
+    layouts: Arc<Mutex<crate::layout::LayoutJobs>>,
+    /// The session's part of every memory report, registered with the engine while the
+    /// session lives ([`graphersal::storage::register_memory_source`]).
+    #[allow(dead_code)]
+    memory: Arc<dyn graphersal::storage::MemorySource>,
     /// The scheduled jobs of the active store and the time zone they run in ([`crate::jobs`]).
     pub(crate) jobs: crate::jobs::SessionJobs,
+}
+
+/// The session's part of a memory report (`session`: its layout jobs and cached layouts,
+/// estimated). The graph it serves, the Stores and the script engine report themselves.
+struct SessionMemory {
+    layouts: std::sync::Weak<Mutex<crate::layout::LayoutJobs>>,
+}
+
+impl graphersal::storage::MemorySource for SessionMemory {
+    fn memory_components(&self, components: &mut graphersal::storage::MemoryComponents) {
+        let Some(layouts) = self.layouts.upgrade() else {
+            return;
+        };
+        // A layout slice holds the lock for a few milliseconds at most; never wait for it.
+        let Ok(layouts) = layouts.try_lock() else {
+            return;
+        };
+        components.push(
+            graphersal::storage::MemoryComponent::estimated("session", layouts.memory_bytes())
+                .with_detail("layout jobs and cached layouts"),
+        );
+    }
 }
 
 impl Default for Session {
@@ -356,6 +383,11 @@ impl Session {
             let elapsed = start.elapsed();
             (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
         });
+        let layouts = Arc::new(Mutex::new(crate::layout::LayoutJobs::default()));
+        let memory: Arc<dyn graphersal::storage::MemorySource> = Arc::new(SessionMemory {
+            layouts: Arc::downgrade(&layouts),
+        });
+        graphersal::storage::register_memory_source(&memory);
         Self {
             graph: factory.empty(),
             factory,
@@ -369,7 +401,8 @@ impl Session {
             run_cancel,
             stores: None,
             memory_stores: false,
-            layouts: crate::layout::LayoutJobs::default(),
+            layouts,
+            memory,
             jobs: crate::jobs::SessionJobs::default(),
         }
     }
@@ -838,8 +871,15 @@ impl Session {
         budget_ms: f64,
     ) -> Result<Value, SessionError> {
         let options = request.options();
-        let job = self.layouts.start(request.input, options)?;
+        let job = self.layouts().start(request.input, options)?;
         self.layout_step(job, budget_ms)
+    }
+
+    /// The layout jobs, locked (only the session's memory source reads them besides).
+    fn layouts(&self) -> std::sync::MutexGuard<'_, crate::layout::LayoutJobs> {
+        self.layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// [`Self::layout_start`] with the request as JSON text.
@@ -860,21 +900,22 @@ impl Session {
     pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, SessionError> {
         self.cancel.reset();
         let budget = crate::layout::slice_budget(budget_ms);
-        self.layouts.step(job, budget, &self.cancel)
+        self.layouts().step(job, budget, &self.cancel)
     }
 
     /// Cancels layout `job`; it keeps the positions reached so far ([`Self::layout_positions`]).
     pub fn layout_cancel(&mut self, job: u64) -> Result<Value, SessionError> {
-        self.layouts.cancel(job)
+        self.layouts().cancel(job)
     }
 
     /// The positions of layout `job`: `x, y` per vertex, centred, the median edge 70 units long.
     /// A job that is no longer running is forgotten afterwards.
     pub fn layout_positions(&mut self, job: u64) -> Result<Vec<f32>, SessionError> {
-        let status = self.layouts.status(job)?;
-        let positions = self.layouts.positions(job)?;
+        let mut layouts = self.layouts();
+        let status = layouts.status(job)?;
+        let positions = layouts.positions(job)?;
         if status["state"] != "running" {
-            self.layouts.finish(job);
+            layouts.finish(job);
         }
         Ok(positions)
     }
@@ -2315,6 +2356,32 @@ mod tests {
         let error = &r["execution"]["error"];
         assert_eq!(error["position"]["line"], 2, "{error}");
         assert!(!error["message"].as_str().unwrap().starts_with("Error: "));
+    }
+
+    #[test]
+    fn the_memory_report_names_the_sessions_layouts_and_the_graph() {
+        let mut s = modern();
+        let request: crate::layout::LayoutRequest = serde_json::from_value(
+            json!({"vertexCount": 3, "edgeSource": [0, 1], "edgeTarget": [1, 2]}),
+        )
+        .unwrap();
+        s.layout_start(request, 5.0).unwrap();
+        let answer = s.memory_report(&Value::Null);
+        let components = answer["report"]["components"].as_array().unwrap().clone();
+        let named = |name: &str| components.iter().any(|c| c["name"] == name);
+        assert!(named("graph"), "{components:?}");
+        // Sessions run in parallel in this test binary: at least this one has a layout.
+        assert!(
+            components
+                .iter()
+                .any(|c| c["name"] == "session" && c["bytes"].as_u64().unwrap() > 0),
+            "{components:?}"
+        );
+        let sum: u64 = components
+            .iter()
+            .map(|c| c["bytes"].as_u64().unwrap())
+            .sum();
+        assert_eq!(answer["report"]["attributed_bytes"], sum);
     }
 
     #[test]

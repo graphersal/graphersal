@@ -86,7 +86,7 @@ pub use hooks::{
 };
 pub(crate) use index::GraphIndex;
 pub use memory::{MemoryStats, ShrinkReport};
-pub use memory_report::{MemoryReport, MemoryReportRequest, StructureMemory};
+pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
 pub use persistent::PersistentStorage;
 pub use property_index::{

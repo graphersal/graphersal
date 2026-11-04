@@ -6749,3 +6749,29 @@ fn store_repair_names_what_it_never_carries() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The memory report of the CLI (which installs the tracking allocator) attributes the process
+/// heap to named components: the graph, the script engine (counted exactly), and leaves a
+/// remainder that is a small part of the heap.
+#[test]
+fn the_memory_report_attributes_the_process_heap() {
+    let res = run(
+        &[
+            "-e",
+            "let r = g.memory_report(); \
+             let engine = r.components.filter(|c| c.name == \"script_engine\"); \
+             let graph = r.components.filter(|c| c.name == \"graph\"); \
+             [engine.len() == 1 && engine[0].exact, graph.len() == 1 && !graph[0].exact, \
+              r.unattributed_bytes != () && r.attributed_bytes <= r.tracked_live_bytes, \
+              r.unattributed_bytes * 2 < r.tracked_live_bytes]",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert_eq!(
+        res.stdout.lines().collect::<Vec<_>>(),
+        vec!["true", "true", "true", "true"],
+        "{}",
+        res.stdout
+    );
+}

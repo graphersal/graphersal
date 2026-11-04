@@ -377,6 +377,39 @@ export function memoryOmitted(report, kind, format = (n) => `${n} B`) {
 }
 
 /** The memory totals of a report: `[{label, bytes}]` (structure, indexes, properties, ...). */
+/**
+ * Where the whole process memory goes (`report.components`, book page "Memory Usage"): one row
+ * per component, most bytes first, then the remainder no component explains
+ * (`unattributed_bytes`, absent without a tracking allocator). `[]` for an older engine.
+ * @returns {Array<{key:string, name:string, detail:string, bytes:number, exact:boolean, share:number|null}>}
+ */
+export function memoryComponents(report) {
+  if (!report || !Array.isArray(report.components)) return [];
+  const tracked = report.tracked_live_bytes || 0;
+  const share = (bytes) => (tracked > 0 ? bytes / tracked : null);
+  const rows = report.components
+    .map((c, i) => ({
+      key: `${c.name}:${c.detail || ''}:${i}`,
+      name: c.name,
+      detail: c.detail || '',
+      bytes: c.bytes || 0,
+      exact: !!c.exact,
+      share: share(c.bytes || 0),
+    }))
+    .sort((a, b) => b.bytes - a.bytes);
+  if (typeof report.unattributed_bytes === 'number') {
+    rows.push({
+      key: 'unattributed',
+      name: 'unattributed',
+      detail: 'the tracked heap no component explains',
+      bytes: report.unattributed_bytes,
+      exact: false,
+      share: share(report.unattributed_bytes),
+    });
+  }
+  return rows;
+}
+
 export function memoryTotals(report) {
   const totals = report && report.structure && report.structure.totals;
   if (!totals) return report ? [{ label: 'Properties', bytes: report.property_bytes || 0 }] : [];

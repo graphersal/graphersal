@@ -111,6 +111,22 @@ pub(crate) fn cgroup_limit() -> Option<u64> {
     }
 }
 
+/// This thread's live heap bytes as a tracking allocator counts them (feature
+/// `alloc-tracking`), `0` without one: the difference of two reads is what the thread kept in
+/// between (a one-time measure of a model load or the script registrations, never a hot path).
+#[inline]
+#[cfg_attr(not(any(feature = "script", feature = "model2vec")), allow(dead_code))]
+pub(crate) fn thread_live_bytes() -> i64 {
+    #[cfg(feature = "alloc-tracking")]
+    {
+        crate::alloc_tracking::thread_live_bytes()
+    }
+    #[cfg(not(feature = "alloc-tracking"))]
+    {
+        0
+    }
+}
+
 /// The exact live heap bytes of the process when a `TrackingAllocator` is installed (feature
 /// `alloc-tracking`); `None` otherwise (the counter reads `0` when no tracking allocator counts).
 #[inline]

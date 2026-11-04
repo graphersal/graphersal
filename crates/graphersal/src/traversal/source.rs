@@ -1882,6 +1882,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// request's token (or the running thread's [`CancelToken`](crate::CancelToken)) is
     /// cancelled.
     ///
+    /// The report's [`components`](crate::graph::MemoryReport::components) name where the
+    /// process memory goes: this graph, the embedding models loaded in the process, the script
+    /// engine and every registered
+    /// [`MemorySource`](crate::graph::memory_report::MemorySource). A Store's live graph is
+    /// listed only by a report through the graph's front end
+    /// ([`AnyGraph::memory_report`](crate::graph::AnyGraph::memory_report), the DSL), which
+    /// knows whether it is the reported one.
+    ///
     /// ```
     /// use graphersal::prelude::*;
     /// use graphersal::storage::{ElementKind, MemoryReportRequest, PropertyTarget};
@@ -1896,6 +1904,18 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().unwrap().property_bytes);
     /// ```
     pub fn memory_report(
+        &self,
+        request: &crate::graph::MemoryReportRequest,
+    ) -> TraverserResult<crate::graph::MemoryReport> {
+        let mut report = self.memory_report_walk(request)?;
+        // A bare storage: whether a Store holds it is unknown, so no Store lists its live graph.
+        crate::graph::memory_report::components::collect(&mut report, None);
+        Ok(report)
+    }
+
+    /// [`Self::memory_report`] without the process's components (the caller adds them once it
+    /// released the graph's lock).
+    pub(crate) fn memory_report_walk(
         &self,
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport> {

@@ -203,3 +203,25 @@ test('a recommendation row names its impact and its share of the graph', async (
   // An older server without impact: no badge.
   assert.equal(recommendationRows(ADVICE)[0].impact, null);
 });
+
+test('process memory: components most bytes first, then the unattributed rest', async () => {
+  const { memoryComponents } = await import('../js/optimize.js');
+  assert.deepEqual(memoryComponents({}), []);
+  assert.deepEqual(memoryComponents(null), []);
+  const rows = memoryComponents({
+    tracked_live_bytes: 1000,
+    unattributed_bytes: 50,
+    components: [
+      { name: 'graph', detail: null, bytes: 200, exact: false },
+      { name: 'embedding_model', detail: 'm@1', bytes: 750, exact: true },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => [r.name, r.detail, r.bytes, r.exact, r.share]), [
+    ['embedding_model', 'm@1', 750, true, 0.75],
+    ['graph', '', 200, false, 0.2],
+    ['unattributed', 'the tracked heap no component explains', 50, false, 0.05],
+  ]);
+  // Without a tracking allocator: no share, no rest.
+  const untracked = memoryComponents({ components: [{ name: 'graph', bytes: 10, exact: false }] });
+  assert.deepEqual(untracked.map((r) => [r.name, r.share]), [['graph', null]]);
+});

@@ -129,7 +129,9 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     /// The memory report of the storage
     /// ([`GraphTraversalSource::memory_report`](crate::GraphTraversalSource::memory_report)),
-    /// computed under one read lock. Fails for an invalid request and when cancelled (the
+    /// computed under one read lock, with the graph's workload statistics and the process's
+    /// components ([`MemoryReport::components`](crate::graph::MemoryReport::components))
+    /// added after the lock is released (a Store whose live graph is not this one lists it). Fails for an invalid request and when cancelled (the
     /// request's or the running thread's [`CancelToken`](crate::CancelToken)). Unauthorized:
     /// the front end asks its authorizer first.
     fn memory_report(
@@ -374,7 +376,24 @@ where
         &self,
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport> {
-        GraphTraversalSource::new(&*self.read_checked()?).memory_report(request)
+        let mut report = {
+            let guard = self.read_checked()?;
+            GraphTraversalSource::new(&*guard).memory_report_walk(request)?
+        };
+        // The lock is released: a Store's source may read its own live graph.
+        if let Some(workload) = Graph::workload_stats(self) {
+            report
+                .components
+                .push(crate::graph::MemoryComponent::estimated(
+                    "workload_statistics",
+                    workload.memory_bytes(),
+                ));
+        }
+        crate::graph::memory_report::components::collect(
+            &mut report,
+            Some(Graph::storage_address(self)),
+        );
+        Ok(report)
     }
 
     fn advise(

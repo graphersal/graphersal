@@ -127,6 +127,22 @@ pub(super) struct Mcp {
 }
 
 impl Mcp {
+    /// The client sessions and their estimated bytes (ids and stored values as JSON text), for
+    /// the memory report; `(0, 0)` while a request holds the list.
+    pub(super) fn memory_bytes(&self) -> (usize, u64) {
+        let Ok(sessions) = self.sessions.try_lock() else {
+            return (0, 0);
+        };
+        let bytes = sessions
+            .iter()
+            .map(|(id, value)| {
+                (std::mem::size_of::<(String, Value)>() + id.capacity() + value.to_string().len())
+                    as u64
+            })
+            .sum();
+        (sessions.len(), bytes)
+    }
+
     pub(super) fn new(read_only: bool, token: Option<String>, query_tools: bool) -> Self {
         Self {
             read_only,
@@ -1234,7 +1250,11 @@ fn all_tools() -> Vec<Tool> {
              keeps the property rows and the label rows with the most bytes (default 50), \
              max_rows and max_labels set one list each; the rows left out are counted with \
              their bytes (rows_omitted, rows_omitted_bytes, labels_omitted, \
-             labels_omitted_elements, labels_omitted_bytes), the totals cover everything.",
+             labels_omitted_elements, labels_omitted_bytes), the totals cover everything. \
+             components says where the whole process memory goes (the graph, embedding \
+             models, the script engine, the store, the dev server's MCP and AI Chat state, \
+             each with bytes and exact or estimated); unattributed_bytes is the tracked heap \
+             no component explains.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1857,8 +1877,8 @@ fn run_tool(
                 .map_err(http_failed)?;
             if answer["ok"] == json!(true) {
                 Ok(format!(
-                    "Memory report (the graph was not changed; bytes are estimates, rows sorted \
-                     by bytes):\n{}",
+                    "Memory report (the graph was not changed; row bytes are estimates, rows \
+                     sorted by bytes; components say which process figures are exact):\n{}",
                     compact(&answer["report"])
                 ))
             } else {

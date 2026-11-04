@@ -24,6 +24,8 @@ Agent guidance. The playground session logic, JSON in, JSON out, shared by `grap
 
 The graph is an `Arc<dyn SessionGraph>` (`AnyGraph` by upcasting + one method per view/selection/edit/create/queries/compression/index/run-unit operation, blanket for `Graph<S>`, each calling the generic helper), stores are `Arc<dyn SessionStore>` (blanket for `Store<S>`). Every graph it builds (samples and GraphML/GraphSON loads read into a `TraversalGraph` then `GraphFactory::adopt`ed; `.gsnap`; memory stores; forks) comes from the host's `GraphFactory`: `Session::with_storage(Arc::new(StorageKind::<S>::persistent()))` (lossless copy through the load sink in source order, `.gsnap`, stores) or `StorageKind::<S>::new()` (copy through the write API; no `.gsnap`, no stores, the Store menu says so). `Session::new()` = `TraversalGraph` (nothing copied), used by wasm, the dev server and MCP. `load_shared` takes any `IntoSessionGraph`. Tests over `Forwarding` and a `NoCompression` wrapper: `storage/tests.rs`; host example `tests/custom_storage_example.rs` (included in the book by anchors).
 
+Memory report: every `Session` registers a `SessionMemory` source (`session`: its layout jobs and cached layouts, `layouts` is an `Arc<Mutex<LayoutJobs>>` for it, read with `try_lock`); the graph, Stores and the script engine report themselves (`graph/CLAUDE.md`).
+
 ## Book tests that live here
 
 `book_playground_examples` runs every `rhai,graph=<sample>` block of the book; `book_step_reference` generates the step reference (see `book/CLAUDE.md`).

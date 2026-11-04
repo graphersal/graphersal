@@ -9,14 +9,15 @@
 //   (hour, 2 days, 90 days) for a channel, a sparkline per row; a row opens a detail chart
 //   (runs per bucket with the failed part, mean and max time) with the tier switch.
 // - Memory: the process memory bar (the shared MemoryBar over `statistics()`, as in the Profile
-//   panel's Statistics tab), then the memory report: totals, properties and labels, the most
-//   bytes first.
+//   panel's Statistics tab), then the memory report: totals, where the process memory goes
+//   (its components and the unattributed rest), properties and labels, the most bytes first.
 
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
   WINDOWS, TIERS, LISTS, MIN_TIMES, SNOOZE_DAYS, sortsDescending, recommendationRows, dismissedRows, appliedRows, adviceSummary, channels, workloadRows, sparkPath,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, memoryOmitted, memoryReportSpec,
+  memoryComponents,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
 import { MemoryBar } from './memory-bar.js';
@@ -222,6 +223,7 @@ export const OptimizePanel = {
     const memRows = computed(() => memoryRows(memory.report));
     const memLabels = computed(() => labelRows(memory.report));
     const memTotals = computed(() => memoryTotals(memory.report));
+    const memComponents = computed(() => memoryComponents(memory.report));
     const memRowsOmitted = computed(() => memoryOmitted(memory.report, 'properties', formatBytes));
     const memLabelsOmitted = computed(() => memoryOmitted(memory.report, 'labels', formatBytes));
 
@@ -229,7 +231,7 @@ export const OptimizePanel = {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
-      memRows, memLabels, memTotals, memRowsOmitted, memLabelsOmitted,
+      memRows, memLabels, memTotals, memComponents, memRowsOmitted, memLabelsOmitted,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
     };
   },
@@ -383,6 +385,22 @@ export const OptimizePanel = {
           <div class="op-totals">
             <div v-for="t in memTotals" :key="t.label" class="op-total"><span class="muted">{{ t.label }}</span><strong>{{ formatBytes(t.bytes) }}</strong></div>
           </div>
+          <template v-if="memComponents.length">
+            <h3>Process memory</h3>
+            <div class="catalog-table-wrap">
+              <table class="data-table catalog-table">
+                <thead><tr><th>Component</th><th>Which</th><th class="num">Bytes</th><th class="num">Share</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="c in memComponents" :key="c.key">
+                    <td class="code">{{ c.name }}</td><td>{{ c.detail }}</td>
+                    <td class="num">{{ c.bytes < 0 ? '-' + formatBytes(-c.bytes) : formatBytes(c.bytes) }}</td>
+                    <td class="num">{{ c.share == null ? '' : (c.share * 100).toFixed(1) + ' %' }}</td>
+                    <td><span class="badge">{{ c.name === 'unattributed' ? 'rest' : (c.exact ? 'exact' : 'estimated') }}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
           <p v-if="memory.report.sampled" class="muted sq-note">Sampled: every {{ memory.report.sample_every }}th element of a large label was read and scaled.</p>
           <h3>Properties</h3>
           <div class="catalog-table-wrap">

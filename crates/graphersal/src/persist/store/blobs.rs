@@ -1110,6 +1110,22 @@ pub(crate) struct AtticBlobs {
 type AtticEntryBlobs = (Vec<(u64, u64)>, Vec<BlobRef>);
 
 impl AtticBlobs {
+    /// What the cache holds, estimated: per entry its id and lists (the memory report).
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        let Ok(entries) = self.entries.try_lock() else {
+            return 0;
+        };
+        entries
+            .iter()
+            .map(|(id, (segments, blobs))| {
+                (id.capacity()
+                    + std::mem::size_of::<(String, AtticEntryBlobs)>()
+                    + segments.capacity() * std::mem::size_of::<(u64, u64)>()
+                    + blobs.capacity() * std::mem::size_of::<BlobRef>()) as u64
+            })
+            .sum()
+    }
+
     /// The blobs the frames of attic entry `id` (WAL `segments`) reference: remembered in
     /// `cache` when given, else read.
     fn of_entry(cache: Option<&Self>, id: &str, segments: &[(u64, DirPath)]) -> Vec<BlobRef> {

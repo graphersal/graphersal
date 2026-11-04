@@ -504,6 +504,34 @@ struct Shared {
     operations: parking_lot::RwLock<()>,
 }
 
+/// The Store's parts of a memory report (`memory_report::components`): `store` (the journal's
+/// record buffers, the attic's blob cache), `store_files` (a store in memory: its files), and
+/// `store_graph` (the live graph, when the report is about another graph such as a view).
+impl crate::graph::memory_report::MemorySource for Shared {
+    fn memory_components(&self, components: &mut crate::graph::memory_report::MemoryComponents) {
+        use crate::graph::MemoryComponent;
+        let location = self.dir.display();
+        let buffers = self.journal.buffer_bytes_now().unwrap_or(0) + self.attic_blobs.heap_bytes();
+        components.push(MemoryComponent::estimated("store", buffers).with_detail(location.clone()));
+        if let Some(files) = self.dir.store_dir().memory_bytes() {
+            components
+                .push(MemoryComponent::exact("store_files", files).with_detail(location.clone()));
+        }
+        let reported = components.reported();
+        if reported.is_some_and(|reported| reported != self.graph.storage_address())
+            && let Some(bytes) = self.graph.memory_total_now()
+        {
+            components.push(MemoryComponent::estimated("store_graph", bytes).with_detail(location));
+        }
+    }
+}
+
+/// Registers a new store's [`Shared`] as a memory source (held weakly: gone with the store).
+fn register_memory(shared: &Arc<Shared>) {
+    let source: Arc<dyn crate::graph::memory_report::MemorySource> = shared.clone();
+    crate::graph::memory_report::register_memory_source(&source);
+}
+
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
 /// marks, point-in-time reads, fork, prune, verify and backup (the storage format spec).
 ///
@@ -1924,6 +1952,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
@@ -2230,6 +2259,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         let thread = if shared.options.checkpoint_after_bytes > 0 {
             spawn_checkpoint_thread(&shared)
         } else {
@@ -2306,6 +2336,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
@@ -2399,6 +2430,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, web_time::Instant::now(), true);
         Ok(StoreCore {
             shared,

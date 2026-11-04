@@ -1238,8 +1238,11 @@ impl Graph {
     /// ``properties`` (one per element kind, label and path: ``elements``, ``value_types``,
     /// ``bytes``, ``sizes``, ``strings``, ``vectors``, ...), ``labels``, ``shapes``,
     /// ``indexes``, ``compression_rules``, ``structure``, ``property_bytes``,
-    /// ``estimated_total_bytes``, ``tracked_live_bytes``, ``sampled``, ... (book page "Memory
-    /// Usage"). ``max_elements``/``sample_every`` sample a large graph (figures extrapolated per
+    /// ``estimated_total_bytes``, ``tracked_live_bytes``, ``components`` (where the whole
+    /// process memory goes: the graph, embedding models, the script engine, stores, each
+    /// ``{name, detail, bytes, exact}``), ``attributed_bytes``, ``unattributed_bytes``,
+    /// ``sampled``, ... (book page "Memory Usage"). Python's own objects are not on the tracked
+    /// heap. ``max_elements``/``sample_every`` sample a large graph (figures extrapolated per
     /// label); ``limit`` keeps the property rows and the label rows with the most bytes (default
     /// 500), ``max_rows``/``max_labels`` one list each; the rows left out are counted with their
     /// bytes (``rows_omitted``, ``rows_omitted_bytes``, ``labels_omitted``, ...).

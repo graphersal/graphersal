@@ -428,6 +428,8 @@ pub(crate) fn compute<S: GraphStorage>(
     request: &MemoryReportRequest,
 ) -> Result<(MemoryReport, bool), crate::error::GraphError> {
     let started = web_time::Instant::now();
+    // Before the walk allocates anything: the report's own working memory is not the process's.
+    let tracked_live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
     let vertex_total = storage.vertex_count()? as u64;
     let total = vertex_total + storage.edge_count()? as u64;
     let step = request.step_for(total);
@@ -509,7 +511,13 @@ pub(crate) fn compute<S: GraphStorage>(
     report.visited_elements = visited;
     report.path_depth = request.path_depth();
     report.commit_seq = storage.last_commit_seq()?;
-    report.tracked_live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
+    report.tracked_live_bytes = tracked_live_bytes;
+    if let Some(structure) = &report.structure {
+        report.components.push(super::MemoryComponent::estimated(
+            "graph",
+            structure.totals.total_bytes(),
+        ));
+    }
     report.elapsed_micros = started.elapsed().as_micros() as u64;
     Ok((report, cancelled))
 }
