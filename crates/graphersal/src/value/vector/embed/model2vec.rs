@@ -10,6 +10,12 @@
 //! (`expect("tokenization failed")`), so every call into it runs under `catch_unwind` and a
 //! panic becomes [`EmbedError::Failed`].
 //!
+//! A tokenizer with a Unigram model (the potion models) runs on the compact Unigram of
+//! `unigram.rs` inside `tokenizers`' own pipeline, and the pooling is this module's
+//! transcription of `model2vec-rs`' (`StaticModel` takes nothing but a `tokenizers::Tokenizer`
+//! with `tokenizers`' own model, many times larger): the same token ids and the same vector
+//! bits. Every other tokenizer runs through `model2vec-rs` as before.
+//!
 //! The model identity is `model2vec/<repo>@<12 hex>` (`<repo>` from the manifest, or given by
 //! the host with [`Model2VecOptions::with_repo`]) or `model2vec@<12 hex>` without one: the first 12 hex digits of a SHA-256 over the three model
 //! files (see [`Model2Vec::model_identity`]), never a path, so a copied or moved directory keeps
@@ -23,9 +29,13 @@ use compact_str::CompactString;
 use model2vec_rs::model::StaticModel;
 use safetensors::tensor::{Dtype, Metadata};
 use serde_json::Value;
+use tokenizers::{
+    DecoderWrapper, NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper, TokenizerImpl,
+};
 
 use super::identity::{identity_digest, identity_text, is_repo_name};
 use super::sha256::{Sha256, hex};
+use super::unigram::CompactUnigram;
 use super::{EmbedContext, EmbedError, Embedder, EmbedderInfo, MAX_EMBEDDER_NAME_BYTES};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
 use crate::value::{Vector, VectorElement};
@@ -57,11 +67,48 @@ const DOWNLOAD_HINT: &str = "Download a model with `graphersal embed-model downl
 /// module docs and on [`Self::model_identity`].
 pub(crate) struct Model2Vec {
     info: EmbedderInfo,
-    model: StaticModel,
+    /// What tokenizes and pools (named `model` as the `model2vec-rs` model it replaces).
+    model: Engine,
     max_tokens: usize,
     normalize: bool,
-    /// Estimated bytes in memory: the f32 embedding matrix and the tokenizer file.
+    /// Estimated bytes in memory: the f32 embedding matrix and the tokenizer (its compact
+    /// arrays, else its file).
     memory_bytes: u64,
+}
+
+/// A `tokenizers` pipeline whose model is the compact Unigram.
+type CompactTokenizer = TokenizerImpl<
+    CompactUnigram,
+    NormalizerWrapper,
+    PreTokenizerWrapper,
+    PostProcessorWrapper,
+    DecoderWrapper,
+>;
+
+/// What tokenizes and pools.
+enum Engine {
+    /// A Unigram tokenizer: the compact model and this module's pooling.
+    Compact(Box<CompactModel>),
+    /// Any other tokenizer: `model2vec-rs` with `tokenizers`' own model.
+    Reference(StaticModel),
+}
+
+/// The model of a Unigram tokenizer: what `model2vec-rs`' `StaticModel` holds, with the compact
+/// tokenizer.
+struct CompactModel {
+    tokenizer: CompactTokenizer,
+    /// The embedding matrix, row by row.
+    embeddings: Vec<f32>,
+    cols: usize,
+    weights: Option<Vec<f32>>,
+    mapping: Option<Vec<usize>>,
+    normalize: bool,
+}
+
+/// A parsed `tokenizer.json`.
+enum ParsedTokenizer {
+    Compact(Box<CompactTokenizer>),
+    Reference(Box<tokenizers::Tokenizer>),
 }
 
 impl fmt::Debug for Model2Vec {
@@ -325,7 +372,14 @@ impl Model2Vec {
         let normalize = options.normalize.unwrap_or(config_normalize);
         let (rows, cols) = (weights.rows, weights.cols);
         let tokenizer = parse_tokenizer(location, tokenizer_bytes)?;
-        check_vocabulary(location, &tokenizer, &weights)?;
+        match &tokenizer {
+            ParsedTokenizer::Compact(tokenizer) => {
+                check_compact_vocabulary(location, tokenizer, &weights)?
+            }
+            ParsedTokenizer::Reference(tokenizer) => {
+                check_vocabulary(location, tokenizer, &weights)?
+            }
+        }
         if cols == 0 || cols > MAX_VECTOR_DIMENSION {
             return Err(unavailable(format!(
                 "the model in {location} has dimension {cols}; a vector has 1 to \
@@ -341,29 +395,58 @@ impl Model2Vec {
         // `model2vec-rs` reads the mapping `as usize` (its `from_bytes`); the vocabulary check
         // above refused every value that names no row.
         let mapping = mapping.map(|m| m.into_iter().map(|row| row as usize).collect::<Vec<_>>());
-        let loaded = catch_unwind(AssertUnwindSafe(|| {
-            StaticModel::from_owned(
-                tokenizer,
-                embeddings,
-                rows,
-                cols,
-                normalize,
-                token_weights,
-                mapping,
-            )
-        }));
-        let model = match loaded {
-            Ok(Ok(model)) => model,
-            Ok(Err(err)) => {
-                return Err(unavailable(format!(
-                    "the model in {location} does not load: {err:#}"
-                )));
+        let matrix_bytes = (rows as u64)
+            .saturating_mul(cols as u64)
+            .saturating_mul(4)
+            .saturating_add(token_weights.as_ref().map_or(0, |w| w.len() as u64 * 4))
+            .saturating_add(mapping.as_ref().map_or(0, |m| m.len() as u64 * 8));
+        let (engine, tokenizer_memory) = match tokenizer {
+            ParsedTokenizer::Compact(tokenizer) => {
+                if embeddings.len() != rows.saturating_mul(cols) {
+                    return Err(unavailable(format!(
+                        "the model in {location} does not load: embeddings length {} != rows \
+                         {rows} * cols {cols}",
+                        embeddings.len()
+                    )));
+                }
+                let tokenizer_memory = tokenizer.get_model().heap_bytes();
+                let model = CompactModel {
+                    tokenizer: *tokenizer,
+                    embeddings,
+                    cols,
+                    weights: token_weights,
+                    mapping,
+                    normalize,
+                };
+                (Engine::Compact(Box::new(model)), tokenizer_memory)
             }
-            Err(_) => {
-                return Err(unavailable(format!(
-                    "the model in {location} does not load (model2vec-rs failed while reading \
-                     it)"
-                )));
+            ParsedTokenizer::Reference(tokenizer) => {
+                let loaded = catch_unwind(AssertUnwindSafe(|| {
+                    StaticModel::from_owned(
+                        *tokenizer,
+                        embeddings,
+                        rows,
+                        cols,
+                        normalize,
+                        token_weights,
+                        mapping,
+                    )
+                }));
+                let model = match loaded {
+                    Ok(Ok(model)) => model,
+                    Ok(Err(err)) => {
+                        return Err(unavailable(format!(
+                            "the model in {location} does not load: {err:#}"
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(unavailable(format!(
+                            "the model in {location} does not load (model2vec-rs failed while \
+                             reading it)"
+                        )));
+                    }
+                };
+                (Engine::Reference(model), tokenizer_bytes.len() as u64)
             }
         };
         let mut identity = identity;
@@ -388,24 +471,41 @@ impl Model2Vec {
                 .with_max_batch(options.max_batch)
                 .with_deterministic(false)
                 .with_local(true),
-            model,
+            model: engine,
             max_tokens: options.max_tokens,
             normalize,
-            memory_bytes: (rows as u64)
-                .saturating_mul(cols as u64)
-                .saturating_mul(4)
-                .saturating_add(tokenizer_bytes.len() as u64),
+            memory_bytes: matrix_bytes.saturating_add(tokenizer_memory),
         })
+    }
+
+    /// Whether the tokenizer runs on the compact Unigram model (tests).
+    #[cfg(test)]
+    fn is_compact(&self) -> bool {
+        matches!(self.model, Engine::Compact(_))
+    }
+
+    /// The token ids pooled for each text (after the unknown ids are dropped and the list is
+    /// cut to `max_tokens`), by the compact model; `None` for another tokenizer (tests).
+    #[cfg(test)]
+    fn compact_token_ids(&self, texts: &[&str]) -> Option<Vec<Vec<u32>>> {
+        match &self.model {
+            Engine::Compact(model) => model.token_ids(texts, self.max_tokens).ok(),
+            Engine::Reference(_) => None,
+        }
     }
 
     /// Embeds one chunk of texts; `offset` is the position of its first text in the batch.
     fn embed_chunk(&self, texts: &[&str], offset: usize) -> Result<Vec<Vector>, EmbedError> {
-        let owned: Vec<String> = texts.iter().map(|text| (*text).to_string()).collect();
-        let encoded = catch_unwind(AssertUnwindSafe(|| {
-            self.model
-                .encode_with_args(&owned, Some(self.max_tokens), owned.len().max(1))
-        }))
-        .map_err(|_| EmbedError::failed("the Model2Vec tokenizer failed on the texts"))?;
+        let encoded = match &self.model {
+            Engine::Compact(model) => model.encode(texts, self.max_tokens)?,
+            Engine::Reference(model) => {
+                let owned: Vec<String> = texts.iter().map(|text| (*text).to_string()).collect();
+                catch_unwind(AssertUnwindSafe(|| {
+                    model.encode_with_args(&owned, Some(self.max_tokens), owned.len().max(1))
+                }))
+                .map_err(|_| EmbedError::failed("the Model2Vec tokenizer failed on the texts"))?
+            }
+        };
         if encoded.len() != texts.len() {
             return Err(EmbedError::bad_output(format!(
                 "model2vec-rs returned {} vectors for {} texts",
@@ -899,12 +999,148 @@ fn f16_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// Parses a `tokenizer.json` (under `catch_unwind`: `tokenizers` may panic on odd input).
-fn parse_tokenizer(location: &str, bytes: &[u8]) -> Result<tokenizers::Tokenizer, EmbedError> {
+#[cfg(test)]
+impl Engine {
+    /// `model2vec-rs`' `StaticModel::encode_with_args` on either engine (tests compare them).
+    fn encode_with_args(
+        &self,
+        sentences: &[String],
+        max_length: Option<usize>,
+        batch_size: usize,
+    ) -> Vec<Vec<f32>> {
+        match self {
+            Engine::Reference(model) => model.encode_with_args(sentences, max_length, batch_size),
+            Engine::Compact(model) => {
+                let max_tokens = max_length.unwrap_or(usize::MAX);
+                let mut out = Vec::new();
+                for batch in sentences.chunks(batch_size.max(1)) {
+                    let texts: Vec<&str> = batch.iter().map(String::as_str).collect();
+                    match model.encode(&texts, max_tokens) {
+                        Ok(vectors) => out.extend(vectors),
+                        Err(err) => panic!("tokenization failed: {err}"),
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
+impl CompactModel {
+    /// The token ids of `texts` as `model2vec-rs`' `encode_with_args` pools them: each text cut
+    /// to `max_tokens` times the median token length in characters, the texts encoded as one
+    /// batch without special tokens, the unknown id dropped, the ids cut to `max_tokens`.
+    fn token_ids(&self, texts: &[&str], max_tokens: usize) -> Result<Vec<Vec<u32>>, EmbedError> {
+        let model = self.tokenizer.get_model();
+        let median = model.median_token_length();
+        let truncated: Vec<&str> = texts
+            .iter()
+            .map(|text| truncate_chars(text, max_tokens.saturating_mul(median)))
+            .collect();
+        let encodings = catch_unwind(AssertUnwindSafe(|| {
+            self.tokenizer.encode_batch_fast::<&str>(truncated, false)
+        }))
+        .map_err(|_| EmbedError::failed("the Model2Vec tokenizer failed on the texts"))?
+        .map_err(|err| {
+            EmbedError::failed(format!(
+                "the Model2Vec tokenizer failed on the texts: {err}"
+            ))
+        })?;
+        let unk_id = model.unk_id();
+        Ok(encodings
+            .into_iter()
+            .map(|encoding| {
+                let mut ids = encoding.get_ids().to_vec();
+                if let Some(unk_id) = unk_id {
+                    ids.retain(|id| *id as usize != unk_id);
+                }
+                ids.truncate(max_tokens);
+                ids
+            })
+            .collect())
+    }
+
+    /// The vectors of `texts` (`model2vec-rs`' `encode_with_args` and `pool_ids`, the same
+    /// operations in the same order, so the same bits).
+    fn encode(&self, texts: &[&str], max_tokens: usize) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.token_ids(texts, max_tokens)?
+            .iter()
+            .map(|ids| self.pool(ids))
+            .collect()
+    }
+
+    /// The mean of the (weighted) rows of `ids`, L2-normalized when the model says so.
+    fn pool(&self, ids: &[u32]) -> Result<Vec<f32>, EmbedError> {
+        let dim = self.cols;
+        let mut sum = vec![0.0_f32; dim];
+        let mut count = 0usize;
+        for &id in ids {
+            let token = id as usize;
+            let row_index = self
+                .mapping
+                .as_ref()
+                .and_then(|m| m.get(token))
+                .copied()
+                .unwrap_or(token);
+            let scale = self
+                .weights
+                .as_ref()
+                .and_then(|w| w.get(token))
+                .copied()
+                .unwrap_or(1.0);
+            let row = row_index
+                .checked_mul(dim)
+                .and_then(|start| self.embeddings.get(start..start.checked_add(dim)?))
+                .ok_or_else(|| {
+                    EmbedError::failed(format!(
+                        "the token id {id} has no row in the embedding matrix"
+                    ))
+                })?;
+            for (s, &v) in sum.iter_mut().zip(row.iter()) {
+                *s += v * scale;
+            }
+            count += 1;
+        }
+        let denom = count.max(1) as f32;
+        for x in &mut sum {
+            *x /= denom;
+        }
+        if self.normalize {
+            let norm = sum.iter().map(|&v| v * v).sum::<f32>().sqrt().max(1e-12);
+            for x in &mut sum {
+                *x /= norm;
+            }
+        }
+        Ok(sum)
+    }
+}
+
+/// `text` cut to its first `chars` characters (`model2vec-rs`' `truncate_str`).
+fn truncate_chars(text: &str, chars: usize) -> &str {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text, |(at, _)| text.get(..at).unwrap_or(text))
+}
+
+/// Parses a `tokenizer.json` (under `catch_unwind`: `tokenizers` may panic on odd input): with
+/// the compact Unigram model when the file declares a Unigram model (`"type": "Unigram"`), else
+/// (or when that parse fails) with `tokenizers`' own models.
+fn parse_tokenizer(location: &str, bytes: &[u8]) -> Result<ParsedTokenizer, EmbedError> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        serde_json::from_slice::<CompactTokenizer>(bytes)
+    })) {
+        Ok(Ok(tokenizer)) => return Ok(ParsedTokenizer::Compact(Box::new(tokenizer))),
+        Ok(Err(err)) => {
+            tracing::debug!(%err, "the tokenizer runs on tokenizers' own model");
+        }
+        Err(_) => {
+            tracing::debug!("the compact tokenizer parse failed; tokenizers' own model is used");
+        }
+    }
     match catch_unwind(AssertUnwindSafe(|| {
         tokenizers::Tokenizer::from_bytes(bytes)
     })) {
-        Ok(Ok(tokenizer)) => Ok(tokenizer),
+        Ok(Ok(tokenizer)) => Ok(ParsedTokenizer::Reference(Box::new(tokenizer))),
         Ok(Err(err)) => Err(unavailable(format!(
             "the tokenizer.json in {location} does not load: {err}"
         ))),
@@ -921,20 +1157,49 @@ fn check_vocabulary(
     tokenizer: &tokenizers::Tokenizer,
     weights: &Weights,
 ) -> Result<(), EmbedError> {
-    let rows = weights.rows;
     for (token, id) in tokenizer.get_vocab(true) {
-        let id = id as usize;
-        let row = match weights.mapping.as_ref().and_then(|m| m.get(id)) {
-            Some(row) => usize::try_from(*row).ok(),
-            None => Some(id),
-        };
-        if row.is_none_or(|row| row >= rows) {
-            return Err(unavailable(format!(
-                "the token {token:?} (id {id}) of the tokenizer in {location} has no row in the \
-                 embedding matrix of {rows} rows: tokenizer.json and model.safetensors do not \
-                 belong together"
-            )));
-        }
+        check_row(location, id, || token, weights)?;
+    }
+    Ok(())
+}
+
+/// [`check_vocabulary`] for the compact tokenizer: the same ids (every distinct token of the
+/// model and every added token), without building the vocabulary map.
+fn check_compact_vocabulary(
+    location: &str,
+    tokenizer: &CompactTokenizer,
+    weights: &Weights,
+) -> Result<(), EmbedError> {
+    let token = |id: u32| tokenizer.id_to_token(id).unwrap_or_default();
+    for id in tokenizer.get_model().distinct_ids() {
+        check_row(location, id, || token(id), weights)?;
+    }
+    for id in tokenizer.get_added_vocabulary().get_vocab().values() {
+        check_row(location, *id, || token(*id), weights)?;
+    }
+    Ok(())
+}
+
+/// Checks that the token id `id` (named by `token` in the message) has a row.
+fn check_row(
+    location: &str,
+    id: u32,
+    token: impl FnOnce() -> String,
+    weights: &Weights,
+) -> Result<(), EmbedError> {
+    let rows = weights.rows;
+    let id = id as usize;
+    let row = match weights.mapping.as_ref().and_then(|m| m.get(id)) {
+        Some(row) => usize::try_from(*row).ok(),
+        None => Some(id),
+    };
+    if row.is_none_or(|row| row >= rows) {
+        let token = token();
+        return Err(unavailable(format!(
+            "the token {token:?} (id {id}) of the tokenizer in {location} has no row in the \
+             embedding matrix of {rows} rows: tokenizer.json and model.safetensors do not \
+             belong together"
+        )));
     }
     Ok(())
 }

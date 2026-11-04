@@ -302,8 +302,9 @@ fn load_uncached(
     check_room(model).map_err(LoadFailure::does_not_fit)?;
     let started = web_time::Instant::now();
     let options = super::Model2VecOptions::default().with_repo(model.repo());
-    // What the model holds is counted once, here, when a tracking allocator is installed: the
-    // tokenizer's in-memory form is many times its file (the estimate counts the file).
+    // What the model holds is counted once, here, when a tracking allocator is installed (the
+    // estimate without one: the matrix plus the compact tokenizer's arrays, or the tokenizer
+    // file for a tokenizer on `tokenizers`' own model, whose in-memory form is many times it).
     let live_before = crate::traversal::memory_budget::thread_live_bytes();
     let loaded = load_streamed(model, source, &options)?;
     if loaded.info().model != identity {

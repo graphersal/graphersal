@@ -16,6 +16,8 @@ pub(crate) mod registry;
 pub(crate) mod identity;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 mod model2vec;
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+mod unigram;
 // The model tar (format spec 4.5): written and verified by a Store (`persist`), read by the
 // model load (`model2vec`), so it lives beside the models rather than in `persist` (issue #24).
 #[cfg(any(
