@@ -5,9 +5,10 @@
 //!
 //! For hosts and front ends: [`Graph::advise`](crate::storage::Graph::advise) (or
 //! `AnyGraph::advise`) computes an [`Advice`]; [`Advice::to_property`] is the one form every
-//! front end shows.
+//! front end shows. [`Graph::apply_recommendations`](crate::storage::Graph::apply_recommendations)
+//! applies several recommendations (a human's pick, such as one [`AdviceGroup`]) in one unit.
 
 pub use crate::graph::advisor::{
-    Advice, AdviceRequest, AppliedOutcome, Confidence, DismissedRecommendation, Impact,
-    Recommendation, RecommendedAction, compute, measured_bytes,
+    Advice, AdviceGroup, AdviceRequest, AppliedOutcome, Confidence, DismissedRecommendation,
+    Impact, Recommendation, RecommendedAction, compute, measured_bytes,
 };

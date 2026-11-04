@@ -806,6 +806,12 @@ export class Engine {
    */
   async applyRecommendation(id, spec) { throw notImplemented('applyRecommendation'); }
 
+  /**
+   * Applies the recommendations `ids` of the advice for `spec` in ONE commit, all or nothing:
+   * `{ok: true, applied: [{id, kind, title, memory_bytes}], memory_bytes}` or `{ok: false, error}`.
+   */
+  async applyRecommendations(ids, spec) { throw notImplemented('applyRecommendations'); }
+
   /** Dismisses the recommendation `id` for `days` (null: for good): `{ok}` or `{ok: false, error}`. */
   async dismissRecommendation(id, days) { throw notImplemented('dismissRecommendation'); }
 

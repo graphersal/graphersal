@@ -186,7 +186,7 @@ unless a page says otherwise; the differences are collected in
 
 ### Compressed properties
 
-[`define_compression`](steps/define_compression.md) · [`drop_compression`](steps/drop_compression.md) · [`compressions`](steps/compressions.md) · [`recompress`](steps/recompress.md) · [`estimate_compression`](steps/estimate_compression.md)
+[`define_compression`](steps/define_compression.md) · [`define_compressions`](steps/define_compressions.md) · [`drop_compression`](steps/drop_compression.md) · [`compressions`](steps/compressions.md) · [`recompress`](steps/recompress.md) · [`estimate_compression`](steps/estimate_compression.md)
 
 ### Graph information and files
 

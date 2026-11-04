@@ -2524,6 +2524,120 @@ mod tests {
         assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"));
     }
 
+    /// 20 vertices (`a`+`b` or `b`, keys `kind`, `state`) and 10 `rel` edges (key `w`).
+    fn two_label_graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for i in 0..20i64 {
+            let mut props = PropertyMap::default();
+            props.insert("kind", ElementProperty::from(i % 3));
+            props.insert("state", ElementProperty::from("open"));
+            let labels = if i % 2 == 0 {
+                vec!["a".into(), "b".into()]
+            } else {
+                vec!["b".into()]
+            };
+            graph
+                .insert_vertex(Some(format!("v{i}").into()), labels, props)
+                .unwrap();
+        }
+        for i in 0..10i64 {
+            let mut props = PropertyMap::default();
+            props.insert("w", ElementProperty::from(i % 2));
+            graph
+                .add_edge_by_ids(
+                    Some(format!("e{i}").into()),
+                    Some("rel".into()),
+                    &format!("v{i}"),
+                    &format!("v{}", i + 1),
+                    props,
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    fn dedup_rule(element: ElementKind, label: &str, key: &str) -> CompressionDefinition {
+        CompressionDefinition::new(element, label, key)
+            .unwrap()
+            .with_codec(Codec::Dedup)
+    }
+
+    fn walks() -> usize {
+        TARGET_WALKS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn the_trait_batch_is_one_unit_one_walk_and_its_rollback_one_walk_too() {
+        let mut graph = two_label_graph();
+        let seq = graph.undo.last_commit_seq;
+        let rules = vec![
+            Definition::compression("a_kind", dedup_rule(ElementKind::Vertex, "a", "kind")),
+            Definition::compression("b_state", dedup_rule(ElementKind::Vertex, "b", "state")),
+            Definition::compression("rel_w", dedup_rule(ElementKind::Edge, "rel", "w")),
+        ];
+        let before = walks();
+        // Outside any unit: a unit of its own, one commit, one walk.
+        GraphStorage::set_definitions(&mut graph, rules).unwrap();
+        assert_eq!(walks(), before + 1);
+        assert_eq!(
+            graph.undo.last_commit_seq,
+            seq + 1,
+            "one commit for the list"
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
+
+        // The rollback of a batch re-encodes its labels in one walk as well.
+        let mark = graph.begin_unit().unwrap();
+        graph
+            .set_definitions_recorded(vec![
+                Definition::compression("a_state", dedup_rule(ElementKind::Vertex, "a", "state")),
+                Definition::compression("b_kind", dedup_rule(ElementKind::Vertex, "b", "kind")),
+            ])
+            .ok();
+        // `b_kind` conflicts with nothing, `a_state` neither: both stored, then undone.
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "b_kind")
+                .is_some()
+        );
+        let before = walks();
+        graph
+            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+            .unwrap();
+        assert_eq!(
+            walks(),
+            before + 1,
+            "one walk for the rollback of the batch"
+        );
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "b_kind")
+                .is_none()
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+
+        // A refused rule in a trait batch: nothing stays, nothing is committed.
+        let seq = graph.undo.last_commit_seq;
+        let bad = vec![
+            Definition::compression("rel_x", dedup_rule(ElementKind::Edge, "rel", "x")),
+            Definition::compression("again", dedup_rule(ElementKind::Vertex, "a", "kind")),
+        ];
+        assert!(GraphStorage::set_definitions(&mut graph, bad).is_err());
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "rel_x")
+                .is_none()
+        );
+        assert_eq!(graph.undo.last_commit_seq, seq);
+        graph.check_compression_invariant().unwrap();
+    }
+
     fn cv(seed: usize) -> String {
         let words = [
             "Senior engineer ",

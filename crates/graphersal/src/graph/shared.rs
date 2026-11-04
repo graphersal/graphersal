@@ -753,6 +753,150 @@ impl<S: GraphStorage> Graph<S> {
         }
     }
 
+    /// Applies the recommendations `ids` of the advice for `request` at once (book page
+    /// "Optimize", section "Applying several at once"): the advice is computed again (an id no
+    /// longer advised fails the whole call with
+    /// [`DefinitionError::NotFound`](crate::error::DefinitionError::NotFound) of kind
+    /// `recommendation`, and nothing changes), then every catalog change their commands name
+    /// (create or drop an index, add or drop a compression rule) runs in ONE unit, so ONE
+    /// commit: the drops first, then every new definition through
+    /// [`GraphTraversalSource::set_definitions`](crate::GraphTraversalSource::set_definitions),
+    /// which on a [`TraversalGraph`](crate::TraversalGraph) applies all the new compression
+    /// rules in ONE walk over the elements of their labels. All or nothing: a refused change
+    /// fails the unit with its error, which names the definition. An id given twice counts
+    /// once. A new index or rule whose suggested name is taken by another definition is
+    /// refused ([`DefinitionError::Conflict`](crate::error::DefinitionError::Conflict)), never
+    /// replaced; a new index is checked against the stored schema like `create_index`.
+    ///
+    /// With attached workload statistics each applied recommendation is recorded
+    /// ([`AppliedAdvice`](crate::graph::workload::AppliedAdvice)), so the advice lists its
+    /// outcome for 30 days: the memory before a recommendation counts the promises of the
+    /// others of the same call as kept, so each outcome measures its own share while their
+    /// promises hold.
+    ///
+    /// `authorizer` (`None`: everything allowed, the trusted front end's case) is asked for
+    /// `Read` on the data (the advice) and for `Create`/`Update`/`Delete` on each definition
+    /// before anything changes. Answers the applied recommendations, in the order of `ids`.
+    pub fn apply_recommendations<I: AsRef<str>>(
+        &self,
+        ids: &[I],
+        request: &crate::graph::advisor::AdviceRequest,
+        authorizer: Option<Arc<dyn crate::graph::Authorizer>>,
+    ) -> crate::error::TraverserResult<Vec<crate::graph::advisor::Recommendation>> {
+        use crate::error::DefinitionError;
+        use crate::graph::advisor::CatalogChange;
+        use crate::graph::definition::DefinitionKind;
+        if let Some(authorizer) = &authorizer {
+            let guard = self.read_checked()?;
+            crate::GraphTraversalSource::new(&*guard)
+                .with_authorizer(Arc::clone(authorizer))
+                .authorize_request(
+                    "apply_recommendations",
+                    &crate::graph::AccessRequest::new(
+                        crate::graph::Action::Read,
+                        crate::graph::Resource::data(None, None),
+                    ),
+                )?;
+        }
+        let advice = self.advise(request)?;
+        let mut chosen: Vec<crate::graph::advisor::Recommendation> = Vec::new();
+        for id in ids {
+            let id = id.as_ref();
+            if chosen.iter().any(|r| r.id == id) {
+                continue;
+            }
+            match advice.recommendations.iter().find(|r| r.id == id) {
+                Some(found) => chosen.push(found.clone()),
+                None => {
+                    return Err(GraphError::from(DefinitionError::NotFound {
+                        kind: "recommendation".to_string(),
+                        name: id.to_string(),
+                    })
+                    .into());
+                }
+            }
+        }
+        if chosen.is_empty() {
+            return Ok(chosen);
+        }
+        let mut removals = Vec::new();
+        let mut definitions = Vec::new();
+        for recommendation in &chosen {
+            match recommendation
+                .action
+                .catalog_change()
+                .map_err(GraphError::from)?
+            {
+                CatalogChange::Set(definition) => definitions.push(definition),
+                CatalogChange::Remove(kind, name) => removals.push((kind, name)),
+            }
+        }
+        {
+            let mut guard = self.write_checked()?;
+            let schema = guard.get_schema()?;
+            for definition in &definitions {
+                if let Some(existing) = guard.definition(definition.kind(), definition.name())? {
+                    let what = if definition.kind() == DefinitionKind::COMPRESSION {
+                        "compression rule"
+                    } else {
+                        "property index"
+                    };
+                    return Err(GraphError::from(DefinitionError::Conflict {
+                        kind: what.to_string(),
+                        name: definition.name().to_string(),
+                        existing: existing.name().to_string(),
+                        reason: format!(
+                            "a {what} of that name exists already; define it under another \
+                             name with its command"
+                        ),
+                    })
+                    .into());
+                }
+                if let Some(index) = definition.as_property_index() {
+                    index
+                        .check_create(definition.name(), schema.as_ref())
+                        .map_err(GraphError::from)?;
+                }
+            }
+            let mut source = crate::GraphTraversalSource::new(&mut *guard);
+            if let Some(authorizer) = authorizer {
+                source = source.with_authorizer(authorizer);
+            }
+            source.atomically(|unit| {
+                for (kind, name) in &removals {
+                    unit.remove_definition(*kind, name)?;
+                }
+                unit.set_definitions(definitions)
+            })?;
+        }
+        if let Some(stats) = self.workload_stats() {
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_micros() as i64);
+            let promised: i64 = chosen.iter().map(|r| r.memory_bytes).sum();
+            for recommendation in &chosen {
+                // The others' promises counted as kept: this one's outcome is its own share.
+                let others = promised.saturating_sub(recommendation.memory_bytes);
+                let before = i64::try_from(advice.memory_bytes)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(others)
+                    .max(0) as u64;
+                let applied = crate::graph::workload::AppliedAdvice::new(
+                    now,
+                    recommendation.action.kind(),
+                    recommendation.title.clone(),
+                    recommendation.memory_bytes,
+                    before,
+                );
+                stats.mark_advice(&recommendation.id, |mark| {
+                    mark.applied = Some(applied);
+                    mark.dismissed_until = None;
+                });
+            }
+        }
+        Ok(chosen)
+    }
+
     /// The address of the storage behind the lock: the identity a Store's memory source
     /// compares with the reported graph's (`memory_report::components`).
     pub(crate) fn storage_address(&self) -> usize {

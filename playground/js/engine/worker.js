@@ -99,6 +99,7 @@ const JSON_METHODS = {
   journal: (spec) => playground.journal(JSON.stringify(spec || {})),
   advise: (spec) => playground.advise(JSON.stringify(spec || {})),
   applyRecommendation: (id, spec) => playground.applyRecommendation(id, JSON.stringify(spec || {})),
+  applyRecommendations: (ids, spec) => playground.applyRecommendations(JSON.stringify(ids || []), JSON.stringify(spec || {})),
   dismissRecommendation: (id, days) => playground.dismissRecommendation(id, days == null ? undefined : days),
   restoreRecommendation: (id) => playground.restoreRecommendation(id),
 };

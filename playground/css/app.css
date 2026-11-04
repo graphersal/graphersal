@@ -1870,6 +1870,8 @@ input.ve-null { color: var(--text-muted); }
 .op-rec { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
 .op-rec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .op-rec-line { margin-top: 4px; font-size: 13px; }
+.op-groups { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
+.op-selection { position: sticky; top: 0; z-index: 1; background: var(--surface); padding: 4px 0; }
 .op-rec-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .op-command { font-size: 12px; background: var(--accent-soft); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 .op-effect { font-size: 13px; font-weight: 600; }

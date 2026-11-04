@@ -38,6 +38,35 @@ pub struct Graph {
     limits: Mutex<GraphLimits>,
 }
 
+/// The advisor's thresholds: the defaults, or every candidate with `everything`.
+fn advice_request(everything: bool) -> graphersal::advisor::AdviceRequest {
+    if everything {
+        graphersal::advisor::AdviceRequest::everything()
+    } else {
+        graphersal::advisor::AdviceRequest::new()
+    }
+}
+
+/// Asks `policy` (none: allowed) for `Read` on the data before an advice, rendered like the
+/// engine's denial so that it maps to `PermissionDeniedError`.
+fn authorize_advice(policy: Option<&AccessPolicy>) -> Result<(), String> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let authorizer: Arc<dyn Authorizer> = Arc::new(policy.to_engine());
+    let request = graphersal::auth::AccessRequest::new(
+        graphersal::auth::Action::Read,
+        graphersal::auth::Resource::data(None, None),
+    );
+    authorizer.authorize(&request).map_err(|denied| {
+        format!(
+            "Error: Permission denied for 'advise' ({request}): {}\nHelp: the advice reads the \
+             data; AccessPolicy.read_only() allows it.",
+            denied.reason()
+        )
+    })
+}
+
 /// What a script run from Python may do: `policy` when the call names one, else everything (the
 /// library's default; a Python program is a trusted local host that already has file access and
 /// the graph itself, `Graph.export_graphml`). A program that runs scripts it did not write
@@ -1167,6 +1196,130 @@ impl Graph {
             policy.as_deref(),
         )?;
         Ok(())
+    }
+
+    /// ``graph.define_compressions(rules, *, policy=None)``: stores (or replaces) every
+    /// compression rule of ``rules`` in ONE commit and re-encodes the values of all their
+    /// labels in ONE pass, like the DSL's ``g.define_compressions([..])``. Each rule is a
+    /// ``dict`` with ``define_compression``'s keys (``name``, ``label``, ``path``, ``element``,
+    /// ``codec``, ``min_bytes``, ``dictionary``), or ``paths`` (a list) instead of ``name`` and
+    /// ``path`` for one rule per path named ``<label>_<path>``. All or nothing: a refused rule
+    /// raises and none is stored. Returns the number of rules stored.
+    #[pyo3(signature = (rules, *, policy=None))]
+    fn define_compressions(
+        &self,
+        py: Python<'_>,
+        rules: Bound<'_, PyAny>,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        // A script parameter is a scalar: each field of each rule is one (a list field such
+        // as `paths` one per item), the maps written into the script by their keys.
+        let params = PyDict::new(py);
+        let list: Vec<Bound<'_, PyDict>> = rules.extract().map_err(|_| {
+            PyTypeError::new_err("rules is a list of dicts (one per rule, or per paths list)")
+        })?;
+        let mut maps = Vec::with_capacity(list.len());
+        for (at, rule) in list.iter().enumerate() {
+            let mut fields = Vec::new();
+            for (key, value) in rule.iter() {
+                let key: String = key
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("a rule's keys are strings"))?;
+                if key.is_empty() || !key.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown key {key:?} in rule {at} (the keys are name, label, path, paths, \
+                         element, codec, min_bytes, dictionary)"
+                    )));
+                }
+                let name = format!("bulk_{at}_{key}");
+                if value.is_instance_of::<pyo3::types::PyList>()
+                    || value.is_instance_of::<pyo3::types::PyTuple>()
+                {
+                    let items: Vec<Bound<'_, PyAny>> = value.extract()?;
+                    let mut names = Vec::with_capacity(items.len());
+                    for (i, item) in items.into_iter().enumerate() {
+                        let item_name = format!("{name}_{i}");
+                        params.set_item(item_name.as_str(), item)?;
+                        names.push(item_name);
+                    }
+                    fields.push(format!("{key}: [{}]", names.join(", ")));
+                } else {
+                    params.set_item(name.as_str(), value)?;
+                    fields.push(format!("{key}: {name}"));
+                }
+            }
+            maps.push(format!("#{{{}}}", fields.join(", ")));
+        }
+        let script = format!("g.define_compressions([{}])", maps.join(", "));
+        self.run(py, &script, Some(&params), false, policy.as_deref())
+    }
+
+    /// ``graph.advise(*, everything=False, policy=None)``: the storage advisor's
+    /// recommendations (book page "Optimize"), without changing anything: a ``dict`` with
+    /// ``recommendations`` (each ``id``, ``kind``, ``title``, ``evidence``, ``cost``,
+    /// ``memory_bytes`` (freed; negative: taken), ``impact``, ``confidence``, ``command``,
+    /// ...), ``groups`` (per kind and codec: ``title`` such as ``"dedup: 74 keys, total
+    /// -400.1 MiB"`` and the ``ids``), ``dismissed``, ``applied`` and the totals.
+    /// ``everything=True`` lists every candidate (small graphs). ``policy`` is asked for
+    /// ``Read`` on the data.
+    #[pyo3(signature = (*, everything=false, policy=None))]
+    fn advise(
+        &self,
+        py: Python<'_>,
+        everything: bool,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        authorize_advice(policy.as_deref()).map_err(|text| map_diagnostic(py, &text))?;
+        let request = advice_request(everything);
+        let graph = Arc::clone(&self.inner);
+        let advice = py
+            .detach(move || {
+                graph
+                    .advise(&request)
+                    .map_err(|err| format_diagnostic(&*err))
+            })
+            .map_err(|text| map_diagnostic(py, &text))?;
+        crate::convert::property_to_pyobject(py, &advice.to_property())
+    }
+
+    /// ``graph.apply_recommendations(ids, *, everything=False, policy=None)``: applies the
+    /// recommendations ``ids`` (from ``advise``, such as one group's ``ids``) in ONE commit,
+    /// all new compression rules in one pass over the data. The advice is computed again with
+    /// the same ``everything``; all or nothing: an id no longer advised or a refused change
+    /// raises (naming it) and nothing is applied. ``policy`` is asked for ``Read`` on the data
+    /// and for ``create``/``update``/``delete`` on each definition. Returns the applied
+    /// recommendations as a ``list`` of ``dict`` (``id``, ``kind``, ``title``,
+    /// ``memory_bytes``).
+    #[pyo3(signature = (ids, *, everything=false, policy=None))]
+    fn apply_recommendations(
+        &self,
+        py: Python<'_>,
+        ids: Vec<String>,
+        everything: bool,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let authorizer = policy
+            .as_deref()
+            .map(|policy| effective_authorizer(Some(policy)));
+        let request = advice_request(everything);
+        let graph = Arc::clone(&self.inner);
+        let applied = py
+            .detach(move || {
+                graph
+                    .apply_recommendations(&ids, &request, authorizer)
+                    .map_err(|err| format_diagnostic(&*err))
+            })
+            .map_err(|text| map_diagnostic(py, &text))?;
+        let list = pyo3::types::PyList::empty(py);
+        for recommendation in &applied {
+            let entry = PyDict::new(py);
+            entry.set_item("id", &recommendation.id)?;
+            entry.set_item("kind", recommendation.action.kind())?;
+            entry.set_item("title", &recommendation.title)?;
+            entry.set_item("memory_bytes", recommendation.memory_bytes)?;
+            list.append(entry)?;
+        }
+        Ok(list.into_any().unbind())
     }
 
     /// ``graph.estimate_compression(label, path, element="vertex", min_bytes=None,

@@ -685,12 +685,45 @@ impl TraversalGraph {
             *end = (*end).min(position);
             *start < *end
         });
+        // A run of compression rule changes (a batch of `set_definitions_recorded`, recorded
+        // one after the other) is restored first and re-encoded ONCE at its end: one walk for
+        // the whole batch, as when it was applied. Anything else ends the run first.
+        let mut rules: Vec<(Option<Definition>, CompactString)> = Vec::new();
         while self.undo.entries.len() > position {
             let Some(entry) = self.undo.entries.pop() else {
                 break;
             };
-            self.undo_entry(entry);
+            match entry {
+                UndoEntry::Definition { kind, name, old }
+                    if kind == DefinitionKind::COMPRESSION =>
+                {
+                    let replaced = match old {
+                        Some(old) => self.definitions.insert(*old),
+                        None => self.definitions.remove(kind, &name),
+                    };
+                    rules.push((replaced, name));
+                }
+                entry => {
+                    self.rules_after_undo(&mut rules);
+                    self.undo_entry(entry);
+                }
+            }
         }
+        self.rules_after_undo(&mut rules);
+    }
+
+    /// The explicit pass of the compression rule changes `rules` just undone (`(what the undo
+    /// replaced, name)` each), in one walk; empties `rules`.
+    fn rules_after_undo(&mut self, rules: &mut Vec<(Option<Definition>, CompactString)>) {
+        if rules.is_empty() {
+            return;
+        }
+        let changes: Vec<(Option<&Definition>, &str)> = rules
+            .iter()
+            .map(|(old, name)| (old.as_ref(), name.as_str()))
+            .collect();
+        self.compression_after_changes(&changes);
+        rules.clear();
     }
 
     /// Applies the inverse of one mutation, without recording anything and without schema

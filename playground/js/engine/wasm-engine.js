@@ -558,6 +558,12 @@ export class WasmEngine extends Engine {
     return res;
   }
 
+  async applyRecommendations(ids, spec) {
+    const res = await this.call('applyRecommendations', plain(ids || []), plain(spec || {}));
+    if (res && res.ok) await this.catalogChanged();
+    return res;
+  }
+
   /** The page changed the catalog: the restore point of a Stop keeps the new catalog. */
   async catalogChanged() {
     this.catalogJson = await this.call('saveCatalog');

@@ -3314,6 +3314,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "workload_statistics",
             "journal",
             "advise",
+            "apply_recommendations",
             "list_jobs",
             "memory_report",
             "graph_info",
@@ -6490,6 +6491,101 @@ fn storage_advice_over_http_and_mcp() {
     .json();
     assert_eq!(restored["ok"], true);
     assert_eq!(post(port, "/api/advise/dismiss", "{}").status, 400);
+}
+
+/// Several recommendations at once (stage V1b): `/api/advise/apply` with `ids` and the MCP
+/// tool `apply_recommendations` apply a pick in one commit, all or nothing; the read-only MCP
+/// mode does not offer the tool.
+#[test]
+fn several_recommendations_are_applied_at_once_over_http_and_mcp() {
+    let ui = ui_dir("advise-many");
+    let data = ui.parent().unwrap().join("advise-many-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let r = execute(
+        port,
+        r#"for i in 0..200 { g.add_v("file").property("kind", if i % 2 == 0 { "doc" } else { "img" }).property("size", i % 3).property("owner", "user-" + (i % 4)).iterate(); }"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let spec = serde_json::json!({"everything": true});
+    let advice = post(port, "/api/advise", &spec.to_string()).json();
+    let group = advice["advice"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["key"] == "add_compression:dedup")
+        .cloned()
+        .unwrap_or_else(|| panic!("{advice}"));
+    let ids: Vec<String> = group["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.len() >= 3, "{group}");
+    // HTTP: the first two, one commit.
+    let applied = post(
+        port,
+        "/api/advise/apply",
+        &serde_json::json!({"ids": &ids[..2], "spec": spec}).to_string(),
+    )
+    .json();
+    assert_eq!(applied["ok"], true, "{applied}");
+    assert_eq!(applied["applied"].as_array().unwrap().len(), 2);
+    assert_eq!(get(port, "/api/graph").json()["compressionRules"], 2);
+    assert_eq!(
+        post(port, "/api/advise/apply", r#"{"ids": "x"}"#).status,
+        400
+    );
+    // MCP: the rest, plus an id no longer advised: nothing applied.
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "apply_recommendations",
+        serde_json::json!({"ids": [&ids[0], &ids[2]], "everything": true}),
+    );
+    assert!(error, "{text}");
+    assert!(text.contains("not advised any more"), "{text}");
+    assert_eq!(get(port, "/api/graph").json()["compressionRules"], 2);
+    let (error, text) = mcp.call(
+        "apply_recommendations",
+        serde_json::json!({"ids": &ids[2..], "everything": true}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("Applied in one commit"), "{text}");
+    assert_eq!(
+        get(port, "/api/graph").json()["compressionRules"],
+        ids.len()
+    );
+    let (error, text) = mcp.call("apply_recommendations", serde_json::json!({}));
+    assert!(error, "{text}");
+    drop(server);
+    // Read-only MCP: no such tool.
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--mcp",
+        "--mcp-read-only",
+    ]);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    assert!(
+        !mcp.tool_names()
+            .iter()
+            .any(|n| n == "apply_recommendations"),
+        "{:?}",
+        mcp.tool_names()
+    );
 }
 
 /// The OpenAPI description (`openapi.json`, EXPERIMENTAL) is answered at `/openapi.json` and

@@ -1433,6 +1433,18 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     }
 
     /// Asks the attached authorizer (if any) for `action` on a catalog definition.
+    /// Asks an attached authorizer for `request` (nothing without one).
+    pub(crate) fn authorize_request(
+        &self,
+        operation: &str,
+        request: &crate::graph::AccessRequest<'_>,
+    ) -> TraverserResult<()> {
+        if let Some(restrictions) = &self.restrictions {
+            restrictions.authorize(operation, request)?;
+        }
+        Ok(())
+    }
+
     fn authorize_definition(
         &self,
         operation: &str,
@@ -1526,6 +1538,82 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             this.storage.set_definition(definition)?;
             Ok(())
         })
+    }
+
+    /// [`Self::set_definition`] of every definition of `definitions`, in order, in ONE unit:
+    /// either all of them are stored or none (the first refused one fails the unit with its
+    /// error, which names it). Asks an attached authorizer for `Create` or `Update` on each
+    /// (`Update` when one of that kind and name is stored) before anything changes. On
+    /// [`TraversalGraph`](crate::TraversalGraph) the explicit pass of all compression rules
+    /// among them runs in ONE walk over the elements of their labels
+    /// ([`GraphStorage::set_definitions`]); a commit hook sees one unit.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::catalog::{CompressionDefinition, Definition, DefinitionKind};
+    /// use graphersal::storage::ElementKind;
+    ///
+    /// let mut graph = TraversalGraph::tinkerpop_modern();
+    /// let rules = ["name", "lang"].map(|key| {
+    ///     let rule = CompressionDefinition::new(ElementKind::Vertex, "software", key).unwrap();
+    ///     Definition::compression(format!("software_{key}"), rule)
+    /// });
+    /// graph.traversal_mut().set_definitions(rules.to_vec()).unwrap();
+    /// let listed = graph.traversal().list_definitions(Some(DefinitionKind::COMPRESSION));
+    /// assert_eq!(listed.unwrap().len(), 2);
+    /// ```
+    pub fn set_definitions(&mut self, definitions: Vec<Definition>) -> TraverserResult<()> {
+        let mut named: Vec<(DefinitionKind, &str)> = Vec::with_capacity(definitions.len());
+        for definition in &definitions {
+            let (kind, name) = (definition.kind(), definition.name());
+            let replaces =
+                named.contains(&(kind, name)) || self.storage.definition(kind, name)?.is_some();
+            let action = if replaces {
+                crate::graph::Action::Update
+            } else {
+                crate::graph::Action::Create
+            };
+            self.authorize_definition("set_definitions", action, Some(kind), Some(name))?;
+            named.push((kind, name));
+        }
+        drop(named);
+        self.atomically(|this| {
+            this.storage.set_definitions(definitions)?;
+            Ok(())
+        })
+    }
+
+    /// [`Self::set_definitions`] of the compression rules `rules` (each `(name, rule)`), in
+    /// ONE unit and, on [`TraversalGraph`](crate::TraversalGraph), ONE walk over the elements
+    /// of their labels: the bulk form of [`Self::define_compression`] (book page "Compressed
+    /// Properties", section "Several rules at once"). All or nothing: a refused rule (an
+    /// invalid one, a conflict with a stored rule or with another rule of the list) fails the
+    /// whole list with its error.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::catalog::{Codec, CompressionDefinition};
+    /// use graphersal::storage::ElementKind;
+    ///
+    /// let mut graph = TraversalGraph::tinkerpop_modern();
+    /// let dedup = |key: &str| {
+    ///     let rule = CompressionDefinition::new(ElementKind::Vertex, "person", key).unwrap();
+    ///     (format!("person_{key}"), rule.with_codec(Codec::Dedup))
+    /// };
+    /// graph.traversal_mut().define_compressions([dedup("name"), dedup("age")]).unwrap();
+    /// let ages = graph.traversal().v(None).values("age").to_list().unwrap();
+    /// assert_eq!(ages.len(), 4);
+    /// ```
+    pub fn define_compressions<N: Into<String>>(
+        &mut self,
+        rules: impl IntoIterator<Item = (N, crate::graph::CompressionDefinition)>,
+    ) -> TraverserResult<()> {
+        self.set_definitions(
+            rules
+                .into_iter()
+                .map(|(name, rule)| Definition::compression(name, rule))
+                .collect(),
+        )
     }
 
     /// [`Self::set_definition`] of the saved query `query` named `name`.

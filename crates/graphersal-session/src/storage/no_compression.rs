@@ -123,6 +123,9 @@ impl GraphStorage for NoCompression {
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         GraphStorage::set_definition(&mut self.0, definition)
     }
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        GraphStorage::set_definitions(&mut self.0, definitions)
+    }
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.0, kind, name)
     }
