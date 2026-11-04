@@ -39,6 +39,8 @@ const CANCEL_EVERY: u64 = 1024;
 const PROGRESS_EVERY: u64 = 16 * 1024;
 /// The size of one value slot.
 const SLOT: u64 = std::mem::size_of::<ElementProperty>() as u64;
+/// The size of one code of a coded value.
+const CODE_BYTES: u64 = crate::value::dictionary::CODE_BYTES;
 /// Strings up to this many bytes are stored inline (`CompactString` on 64-bit targets).
 const INLINE_ID: usize = std::mem::size_of::<CompactString>();
 
@@ -119,6 +121,8 @@ struct RowAcc {
     elements: u64,
     nested: u64,
     types: [u64; TYPE_NAMES.len()],
+    /// The row bytes of the values: a slot each, a code for a coded one.
+    slots: u64,
     heap: u64,
     sizes: [(u64, u64); SIZE_BUCKET_BOUNDS.len() + 1],
     max: u64,
@@ -134,6 +138,7 @@ impl RowAcc {
             elements: 0,
             nested: 0,
             types: [0; TYPE_NAMES.len()],
+            slots: 0,
             heap: 0,
             sizes: [(0, 0); SIZE_BUCKET_BOUNDS.len() + 1],
             max: 0,
@@ -144,12 +149,24 @@ impl RowAcc {
     }
 
     fn add(&mut self, value: &ElementProperty) {
+        self.add_stored(value, false);
+    }
+
+    /// [`Self::add`] of a value that is coded (`coded`: its row holds a code, its heap is
+    /// counted once in its dictionary) or not.
+    fn add_stored(&mut self, value: &ElementProperty, coded: bool) {
         self.elements += 1;
         let ty = type_index(value);
         if let Some(count) = self.types.get_mut(ty) {
             *count += 1;
         }
-        let heap = value.estimated_heap_bytes();
+        let value_heap = value.estimated_heap_bytes();
+        let heap = if coded { 0 } else { value_heap };
+        self.slots += if coded { CODE_BYTES } else { SLOT };
+        if coded {
+            self.compressed.deduped += 1;
+            self.compressed.deduped_plain += SLOT + value_heap;
+        }
         self.heap += heap;
         self.max = self.max.max(heap);
         if let Some(bucket) = self.sizes.get_mut(size_index(heap)) {
@@ -160,10 +177,13 @@ impl RowAcc {
             ElementProperty::String(text) => {
                 let strings = self.strings.get_or_insert_with(Box::default);
                 strings.values += 1;
-                if text.is_heap_allocated() {
-                    strings.heap += heap;
-                } else {
-                    strings.inline += 1;
+                // A coded string's heap is its dictionary's.
+                if !coded {
+                    if text.is_heap_allocated() {
+                        strings.heap += heap;
+                    } else {
+                        strings.inline += 1;
+                    }
                 }
                 strings.plain += text.len() as u64;
                 strings.distinct.add(text.as_bytes());
@@ -198,7 +218,9 @@ impl RowAcc {
             ElementProperty::Object(_) | ElementProperty::Map(_) => self.nested += 1,
             _ => {}
         }
-        self.compressed.add(value);
+        if !coded {
+            self.compressed.add(value);
+        }
     }
 }
 
@@ -346,7 +368,30 @@ impl Walk {
     fn add_map(&mut self, label: usize, map: &crate::value::PropertyMap) {
         let own = map.own_heap_bytes();
         let len = map.len() as u64;
-        if let Some((shape, values)) = map.shaped_parts().filter(|(_, values)| !values.is_empty()) {
+        // The bytes the row's slots take (a coded row: its own values and its codes).
+        let mut row_slots = len * SLOT;
+        if let Some(coded) = map.coded() {
+            row_slots = coded.row_bytes();
+            let shape = &coded.layout.shape;
+            let pointer = Arc::as_ptr(shape) as usize;
+            let entry = self.shape_entry(label, pointer, shape);
+            for position in 0..coded.len() {
+                let row = self
+                    .labels
+                    .get(label)
+                    .and_then(|acc| acc.shape_rows.get(entry))
+                    .and_then(|rows| rows.rows.get(position))
+                    .copied();
+                let is_coded = coded.layout.coded_at(position).is_some();
+                if let Some((_, acc)) = row.and_then(|row| self.rows.get_mut(row))
+                    && let Some(value) = coded.value_at(position)
+                {
+                    acc.add_stored(value, is_coded);
+                }
+            }
+        } else if let Some((shape, values)) =
+            map.shaped_parts().filter(|(_, values)| !values.is_empty())
+        {
             let pointer = Arc::as_ptr(shape) as usize;
             let entry = self.shape_entry(label, pointer, shape);
             for (slot, value) in values.iter().enumerate() {
@@ -373,7 +418,7 @@ impl Walk {
         }
         if let Some(acc) = self.labels.get_mut(label) {
             acc.values += len;
-            acc.overhead += own.saturating_sub(len * SLOT);
+            acc.overhead += own.saturating_sub(row_slots);
         }
     }
 
@@ -616,7 +661,7 @@ fn fold<S: GraphStorage>(
         .rows
         .iter()
         .map(|(label, row)| {
-            let bytes = scale(*label, row.elements * SLOT) + scale(*label, row.heap);
+            let bytes = scale(*label, row.slots) + scale(*label, row.heap);
             if let Some(sum) = label_property_bytes.get_mut(*label) {
                 *sum += bytes;
             }
@@ -724,7 +769,7 @@ fn fold<S: GraphStorage>(
             elements: scale(*label, row.elements),
             label_elements: scales.get(*label).map_or(0, |(count, _)| *count),
             value_types,
-            slot_bytes: scale(*label, row.elements * SLOT),
+            slot_bytes: scale(*label, row.slots),
             heap_bytes: scale(*label, row.heap),
             sizes,
             max_value_bytes: row.max,

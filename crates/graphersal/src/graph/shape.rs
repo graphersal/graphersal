@@ -240,8 +240,16 @@ impl ShapeTable {
         self.adopt_slow(map);
     }
 
-    /// [`Self::adopt`] of a map that is not one of this table's yet.
+    /// [`Self::adopt`] of a map that is not one of this table's yet. A coded row of this table
+    /// stays coded; one of another table (never expected: coded rows do not leave their graph)
+    /// turns plain first.
     fn adopt_slow(&mut self, map: &mut PropertyMap) {
+        if let Repr::Coded(coded) = &map.0 {
+            if self.owns(&coded.layout.shape) {
+                return;
+            }
+            map.plain_mut();
+        }
         match &mut map.0 {
             Repr::Shaped(shaped) => {
                 if let Some((theirs, ours)) = &self.last_foreign
@@ -271,6 +279,8 @@ impl ShapeTable {
                 values.extend(indexed.into_values());
                 map.0 = Repr::Shaped(Shaped { shape, values });
             }
+            // Turned plain above.
+            Repr::Coded(_) => {}
         }
     }
 
@@ -292,6 +302,7 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) -> (usize, Option<ElementProperty>) {
+        map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             return map.insert_full(key, value);
@@ -316,6 +327,7 @@ impl ShapeTable {
         map: &mut PropertyMap,
         key: &str,
     ) -> Option<(usize, CompactString, ElementProperty)> {
+        map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             return map.shift_remove_full(key);
@@ -340,6 +352,7 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) {
+        map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             map.shift_insert(position, key, value);
@@ -845,6 +858,7 @@ mod graph_tests {
         match &vertex.2.0 {
             Repr::Shaped(shaped) => Arc::clone(&shaped.shape),
             Repr::Indexed(_) => panic!("a stored map is shaped"),
+            Repr::Coded(coded) => Arc::clone(&coded.layout.shape),
         }
     }
 

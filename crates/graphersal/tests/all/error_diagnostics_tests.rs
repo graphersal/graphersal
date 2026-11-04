@@ -7340,13 +7340,17 @@ fn a_dictionary_on_a_dedup_rule_help_names_the_fix() {
     let rule = CompressionDefinition::new(ElementKind::Vertex, "symbol", "path")
         .unwrap()
         .with_codec(Codec::Dedup)
-        .with_min_bytes(0);
+        .with_min_bytes(16 * 1024 * 1024 + 1);
     let err = TraversalGraph::new()
         .traversal_mut()
         .define_compression("p", rule)
         .unwrap_err();
     let help = err.help().expect("help");
-    assert!(help.contains(r#"25 for codec "dedup""#), "{help}");
+    assert!(
+        help.contains(r#"with codec "dedup" the shortest string that is stored once: 0 to"#),
+        "{help}"
+    );
+    assert!(help.contains("(default 0)"), "{help}");
     assert!(help.contains(r#"codec: "dedup""#), "{help}");
 }
 

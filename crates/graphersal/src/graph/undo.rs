@@ -199,7 +199,42 @@ pub(crate) struct EdgeImage {
 
 /// The old state of one top-level property: `Some((position, value))` when it existed,
 /// `None` when it was absent.
-pub(crate) type OldProperty = Option<(usize, ElementProperty)>;
+pub(crate) type OldProperty = Option<(usize, OldValue)>;
+
+/// The old value of a property in the undo log: a plain value, or the code of a coded one with
+/// its dictionary (an in-place write of a coded row keeps only the code; the dictionary lives
+/// as long as the entry).
+#[derive(Debug, Clone)]
+pub(crate) enum OldValue {
+    /// The value itself.
+    Plain(ElementProperty),
+    /// A coded value.
+    Coded(crate::value::dictionary::DictRef),
+}
+
+impl OldValue {
+    /// The value (a coded one cloned out of its dictionary).
+    pub(crate) fn into_value(self) -> ElementProperty {
+        match self {
+            OldValue::Plain(value) => value,
+            OldValue::Coded(coded) => coded.value(),
+        }
+    }
+}
+
+impl From<crate::value::property_map::Replaced> for OldValue {
+    fn from(replaced: crate::value::property_map::Replaced) -> Self {
+        match replaced {
+            crate::value::property_map::Replaced::Own(value) => OldValue::Plain(value),
+            crate::value::property_map::Replaced::Code(coded) => OldValue::Coded(coded),
+        }
+    }
+}
+
+/// An undo entry's old property with its value materialized.
+pub(crate) fn plain_old(old: OldProperty) -> Option<(usize, ElementProperty)> {
+    old.map(|(position, value)| (position, value.into_value()))
+}
 
 /// The inverse of one mutation; see the module docs for the mapping.
 #[derive(Debug)]
@@ -281,7 +316,11 @@ pub(crate) fn mark_position(mark: UnitMark) -> usize {
 
 /// Puts a property map back to `old` for `key`: removes what the mutation left and re-inserts
 /// the old value at its old position (a free-standing map: the change-capture shadow).
-pub(crate) fn restore_property(properties: &mut PropertyMap, key: &str, old: OldProperty) {
+pub(crate) fn restore_property(
+    properties: &mut PropertyMap,
+    key: &str,
+    old: Option<(usize, ElementProperty)>,
+) {
     properties.shift_remove(key);
     if let Some((position, value)) = old {
         properties.shift_insert(position, CompactString::from(key), value);
@@ -293,7 +332,7 @@ pub(crate) fn restore_stored_property(
     shapes: &mut crate::graph::shape::ShapeTable,
     properties: &mut PropertyMap,
     key: &str,
-    old: OldProperty,
+    old: Option<(usize, ElementProperty)>,
 ) {
     shapes.shift_remove_full(properties, key);
     if let Some((position, value)) = old {
@@ -391,6 +430,11 @@ impl TraversalGraph {
                 Ok(()) => fill.finish(Ok(self.undo.last_commit_seq)),
                 Err(error) => fill.finish(Err(error)),
             }
+        }
+        // Value dictionaries that grew past their threshold are rebuilt (a failed commit was
+        // rolled back, which did it).
+        if committed.is_ok() {
+            self.compression_after_unit(false);
         }
         committed
     }
@@ -535,6 +579,7 @@ impl TraversalGraph {
         // The values the unit wrote are gone: a dedup table drops the entries only it holds.
         if sweep {
             self.compression.sweep_dedup();
+            self.compression_after_unit(true);
         }
         if notify {
             self.undo.hooks.after_rollback(reason);
@@ -690,9 +735,12 @@ impl TraversalGraph {
                         .filter(|vertex| vertex.3 == handle.generation())
                 });
                 match vertex {
-                    Some(vertex) => {
-                        restore_stored_property(&mut self.shapes, &mut vertex.2, &key, old)
-                    }
+                    Some(vertex) => restore_stored_property(
+                        &mut self.shapes,
+                        &mut vertex.2,
+                        &key,
+                        plain_old(old),
+                    ),
                     None => tracing::error!(%id, "undo: vertex of a property write not found"),
                 }
                 if let Some(handle) = self.index.get_node(&self.graph, &id) {
@@ -723,7 +771,7 @@ impl TraversalGraph {
                                 &mut self.shapes,
                                 edge.2.get_or_insert_with(PropertyMap::default),
                                 &key,
-                                old,
+                                plain_old(old),
                             );
                         }
                     }
@@ -803,32 +851,74 @@ impl TraversalGraph {
         &mut self,
         definition: Definition,
     ) -> Result<(), GraphError> {
-        definition.validate()?;
-        crate::graph::compression::check_conflict(self, &definition)?;
-        crate::graph::property_index::check_conflict(self, &definition)?;
-        crate::graph::model_definition::check_conflict(self, &definition)?;
-        let current = self.definitions.get(definition.kind(), definition.name());
-        if current == Some(&definition) {
-            return Ok(());
-        }
-        if current.is_none() && self.definitions.len() >= crate::graph::definition::MAX_DEFINITIONS
-        {
-            return Err(crate::error::DefinitionError::TooManyDefinitions {
-                limit: crate::graph::definition::MAX_DEFINITIONS,
+        self.set_definitions_recorded(vec![definition])
+    }
+
+    /// [`Self::set_definition_recorded`] of several definitions, in order: each is validated
+    /// and checked against the catalog as it stands with the ones before it stored, then
+    /// stored and recorded; the explicit pass of ALL compression rules among them runs once at
+    /// the end, in ONE walk over the elements of their labels
+    /// ([`Self::compression_after_changes`]), a property index is built once each. A failing
+    /// definition returns its error with the ones before it stored: the caller's unit rolls
+    /// them back (the rollback re-runs their passes). The entry point of every catalog write
+    /// of rules (one rule = a list of one); a bulk front end (several advisor
+    /// recommendations, a list of rules) calls it with all of them inside one unit.
+    pub(crate) fn set_definitions_recorded(
+        &mut self,
+        definitions: Vec<Definition>,
+    ) -> Result<(), GraphError> {
+        let mut compressions: Vec<(Option<Definition>, CompactString)> = Vec::new();
+        let mut indexes: Vec<CompactString> = Vec::new();
+        for definition in definitions {
+            definition.validate()?;
+            crate::graph::compression::check_conflict(self, &definition)?;
+            crate::graph::property_index::check_conflict(self, &definition)?;
+            crate::graph::model_definition::check_conflict(self, &definition)?;
+            let current = self.definitions.get(definition.kind(), definition.name());
+            if current == Some(&definition) {
+                continue;
             }
-            .into());
+            if current.is_none()
+                && self.definitions.len() >= crate::graph::definition::MAX_DEFINITIONS
+            {
+                return Err(crate::error::DefinitionError::TooManyDefinitions {
+                    limit: crate::graph::definition::MAX_DEFINITIONS,
+                }
+                .into());
+            }
+            let kind = definition.kind();
+            let name = CompactString::from(definition.name());
+            let old = self.definitions.insert(definition);
+            // The explicit pass of a rule change (D8) or the build of an index: in the same
+            // unit, recorded only as the definition change (neither changes logical data).
+            if kind == DefinitionKind::COMPRESSION {
+                // The first old state of a name counts (a list may name a rule twice).
+                if !compressions.iter().any(|(_, n)| *n == name) {
+                    compressions.push((old.clone(), name.clone()));
+                }
+            } else if kind == DefinitionKind::PROPERTY_INDEX {
+                if !indexes.contains(&name) {
+                    indexes.push(name.clone());
+                }
+            } else {
+                self.catalog_after_change(kind, old.as_ref(), &name);
+            }
+            self.undo.record(UndoEntry::Definition {
+                kind,
+                name,
+                old: old.map(Box::new),
+            });
         }
-        let kind = definition.kind();
-        let name = CompactString::from(definition.name());
-        let old = self.definitions.insert(definition);
-        // The explicit pass of a rule change (D8) or the build of an index: in the same unit,
-        // recorded only as the definition change (neither changes logical data).
-        self.catalog_after_change(kind, old.as_ref(), &name);
-        self.undo.record(UndoEntry::Definition {
-            kind,
-            name,
-            old: old.map(Box::new),
-        });
+        if !compressions.is_empty() {
+            let changes: Vec<(Option<&Definition>, &str)> = compressions
+                .iter()
+                .map(|(old, name)| (old.as_ref(), name.as_str()))
+                .collect();
+            self.compression_after_changes(&changes);
+        }
+        for name in indexes {
+            self.catalog_after_change(DefinitionKind::PROPERTY_INDEX, None, &name);
+        }
         Ok(())
     }
 
@@ -881,7 +971,7 @@ impl TraversalGraph {
             old: vertex
                 .2
                 .get_full(key)
-                .map(|(position, _, value)| (position, value.clone())),
+                .map(|(position, _, value)| (position, OldValue::Plain(value.clone()))),
         };
         self.undo.record(entry);
     }
@@ -901,7 +991,7 @@ impl TraversalGraph {
                 .2
                 .as_ref()
                 .and_then(|properties| properties.get_full(key))
-                .map(|(position, _, value)| (position, value.clone())),
+                .map(|(position, _, value)| (position, OldValue::Plain(value.clone()))),
             map_was_none: edge.2.is_none(),
         };
         self.undo.record(entry);
@@ -938,6 +1028,12 @@ impl TraversalGraph {
     ) -> VertexHandle {
         // Every map that enters the graph shares its key list through the shape table.
         self.shapes.adopt(&mut properties);
+        // ... and is coded as the `dedup` rules of its labels ask.
+        self.compression_code_row(
+            crate::graph::schema::ElementKind::Vertex,
+            &labels,
+            &mut properties,
+        );
         // The slot the topology fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
         let label_set = self.labels.intern_set(&labels);
@@ -975,6 +1071,13 @@ impl TraversalGraph {
     ) -> EdgeHandle {
         // See `insert_vertex_raw`.
         self.shapes.adopt_optional(&mut properties);
+        if let Some(map) = properties.as_mut() {
+            self.compression_code_row(
+                crate::graph::schema::ElementKind::Edge,
+                label.as_slice(),
+                map,
+            );
+        }
         let mut generations = EdgeGenerations {
             own: crate::graph::handle::FIRST_GENERATION,
             source: from.generation(),

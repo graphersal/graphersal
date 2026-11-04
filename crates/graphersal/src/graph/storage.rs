@@ -2176,7 +2176,30 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                let (position, old) = self.shapes.insert_full(&mut node_ref.2, key, value);
+                // A coded row takes an existing key in place (a code for a coded key); any
+                // other write goes through the shape table and the row is coded again.
+                let (position, old) = match node_ref.2.coded_replace(&key, value) {
+                    Ok((position, replaced)) => {
+                        (position, Some(crate::graph::undo::OldValue::from(replaced)))
+                    }
+                    Err(value) => {
+                        let (position, old) = self.shapes.insert_full(&mut node_ref.2, key, value);
+                        if self.compression.has_coded() {
+                            let labels: Vec<&str> = self
+                                .labels
+                                .set(node_ref.1)
+                                .iter()
+                                .map(CompactString::as_str)
+                                .collect();
+                            self.compression.code_row(
+                                crate::graph::schema::ElementKind::Vertex,
+                                &labels,
+                                &mut node_ref.2,
+                            );
+                        }
+                        (position, old.map(crate::graph::undo::OldValue::Plain))
+                    }
+                };
                 if let Some(index_key) = &index_key {
                     self.property_indexes.vertex_entries(
                         true,
@@ -2193,6 +2216,7 @@ impl GraphStorage for TraversalGraph {
                         old: old.map(|value| (position, value)),
                     });
                 }
+                self.compression_after_write();
                 Ok(())
             }
             None => Err(GraphError::vertex_removed()),
@@ -2242,11 +2266,25 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                let (position, old) = self.shapes.insert_full(
-                    edge_ref.2.get_or_insert_with(PropertyMap::default),
-                    key,
-                    value,
-                );
+                let map = edge_ref.2.get_or_insert_with(PropertyMap::default);
+                let (position, old) = match map.coded_replace(&key, value) {
+                    Ok((position, replaced)) => {
+                        (position, Some(crate::graph::undo::OldValue::from(replaced)))
+                    }
+                    Err(value) => {
+                        let (position, old) = self.shapes.insert_full(map, key, value);
+                        if self.compression.has_coded() {
+                            let labels: Vec<&str> =
+                                self.labels.name_str(edge_ref.1).into_iter().collect();
+                            self.compression.code_row(
+                                crate::graph::schema::ElementKind::Edge,
+                                &labels,
+                                map,
+                            );
+                        }
+                        (position, old.map(crate::graph::undo::OldValue::Plain))
+                    }
+                };
                 if let Some(index_key) = &index_key {
                     self.property_indexes.edge_entries(
                         true,
@@ -2264,6 +2302,7 @@ impl GraphStorage for TraversalGraph {
                         map_was_none,
                     });
                 }
+                self.compression_after_write();
                 Ok(())
             }
             None => Err(GraphError::edge_removed()),
@@ -2444,6 +2483,7 @@ impl GraphStorage for TraversalGraph {
                     shapes.adopt(map);
                 })
                 .ok_or_else(GraphError::vertex_removed);
+            self.compression_recode_vertex(node);
             if let Some(top) = &top {
                 self.pindex_vertex(node, true, Some(top));
             }
@@ -2474,6 +2514,7 @@ impl GraphStorage for TraversalGraph {
                 self.with_vertex_map(node, |shapes, map| {
                     shapes.insert_full(map, key.clone(), resulting)
                 });
+                self.compression_recode_vertex(node);
                 self.pindex_vertex(node, true, Some(&key));
                 Ok(())
             }
@@ -2528,6 +2569,7 @@ impl GraphStorage for TraversalGraph {
                     }
                 })
                 .ok_or_else(GraphError::edge_removed);
+            self.compression_recode_edge(edge);
             if let Some(top) = &top {
                 self.pindex_edge(edge, true, Some(top));
             }
@@ -2560,6 +2602,7 @@ impl GraphStorage for TraversalGraph {
                         resulting,
                     )
                 });
+                self.compression_recode_edge(edge);
                 self.pindex_edge(edge, true, Some(&key));
                 Ok(())
             }
@@ -2606,13 +2649,14 @@ impl GraphStorage for TraversalGraph {
                 .map(|(position, key, value)| UndoEntry::VertexProperty {
                     id: vertex.0.clone(),
                     key,
-                    old: Some((position, value)),
+                    old: Some((position, crate::graph::undo::OldValue::Plain(value))),
                 }),
             None => return Err(GraphError::vertex_removed()),
         };
         if let Some(entry) = entry {
             self.undo.record(entry);
         }
+        self.compression_recode_vertex(node);
         Ok(())
     }
 
@@ -2655,7 +2699,7 @@ impl GraphStorage for TraversalGraph {
                 .map(|(position, key, value)| UndoEntry::EdgeProperty {
                     id: edge_weight.0.clone(),
                     key,
-                    old: Some((position, value)),
+                    old: Some((position, crate::graph::undo::OldValue::Plain(value))),
                     map_was_none: false,
                 }),
             None => return Err(GraphError::edge_removed()),
@@ -2663,6 +2707,7 @@ impl GraphStorage for TraversalGraph {
         if let Some(entry) = entry {
             self.undo.record(entry);
         }
+        self.compression_recode_edge(edge);
         Ok(())
     }
 

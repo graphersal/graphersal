@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | `create_index` | a `(element, label, key)` filtered by a full scan at least `min_filter_runs` times in two days, on a label of at least `min_index_elements` elements, no index serving it, values an index holds | the scans become index lookups; costs index memory (estimated) |
 //! | `drop_index` | an index no query used for its key in the window observed, after at least `min_observed_days` days of statistics | frees the index's memory (measured) |
-//! | `add_compression` | a top-level string property of at least `min_compression_bytes` without a rule, not indexed, read fewer than `hot_reads` times in two days, whose best measured codec saves at least `min_saving_bytes` and `min_saving_percent` | frees memory (measured on the data by `estimate_compression`); reads decompress |
+//! | `add_compression` | lz4: a top-level string property of at least `min_compression_bytes` without a rule, not indexed, read fewer than `hot_reads` times in two days, whose best lz4 candidate saves at least `min_saving_bytes` and `min_saving_percent`; dedup: a top-level property of any value type without a rule (indexed or not, hot or not) whose values repeat (at most one in `dedup_distinct_ratio` distinct) and whose dedup saves at least `min_dedup_saving_bytes` and more than lz4 would | frees memory (measured on the data by `estimate_compression`); lz4 reads decompress, dedup writes look the value up |
 //! | `drop_compression` | a compressed key read at least `hot_reads` times in two days | reads stop decompressing; memory grows back (measured) |
 //!
 //! Impact ([`Impact`], what applying it is worth): for a change of memory (`add_compression`,
@@ -60,8 +60,13 @@ pub struct AdviceRequest {
     /// `add_compression` / `drop_compression`: the reads in two days that make a key hot
     /// (default 1,000).
     pub hot_reads: u64,
-    /// `add_compression`: the most properties measured (the largest first; default 10).
+    /// `add_compression`: the most properties measured (the largest first; default 10), for
+    /// the large strings and again for the repeated values.
     pub max_estimates: usize,
+    /// `add_compression` with `dedup`: the bytes it must save (default 1 MiB).
+    pub min_dedup_saving_bytes: u64,
+    /// `add_compression` with `dedup`: at most one value in this many is distinct (default 8).
+    pub dedup_distinct_ratio: u64,
 }
 
 impl Default for AdviceRequest {
@@ -75,6 +80,8 @@ impl Default for AdviceRequest {
             min_saving_percent: 20,
             hot_reads: 1_000,
             max_estimates: 10,
+            min_dedup_saving_bytes: 1024 * 1024,
+            dedup_distinct_ratio: 8,
         }
     }
 }
@@ -97,6 +104,8 @@ impl AdviceRequest {
             min_saving_percent: 0,
             hot_reads: u64::MAX,
             max_estimates: 50,
+            min_dedup_saving_bytes: 1,
+            dedup_distinct_ratio: 8,
         }
     }
 }
@@ -489,6 +498,104 @@ fn top_level(row: &PropertyMemory) -> Option<(ElementKind, &str, String)> {
     Some((row.target.element, label, key_of(&row.target.path)?))
 }
 
+/// A byte count in MiB for a sentence (`1.4 MiB`, `0.2 MiB`).
+fn mib_text(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// The `add_compression` recommendation of `best`, measured by `measured` on `(element, label,
+/// key)`.
+#[allow(clippy::too_many_arguments)]
+fn compression_recommendation(
+    element: ElementKind,
+    label: &str,
+    key: &str,
+    measured: &crate::graph::CompressionEstimate,
+    best: &crate::catalog::CandidateEstimate,
+    uses: &Uses,
+    workload: Option<&WorkloadReport>,
+    graph_bytes: u64,
+) -> Recommendation {
+    let saved = u64::try_from(best.saved_bytes).unwrap_or(0);
+    let codec = best.candidate.codec.name();
+    let reads = if workload.is_some() {
+        format!("read {} times in two days", uses.reads)
+    } else {
+        "reads are not counted (no workload statistics)".to_string()
+    };
+    let sampled = if measured.sampled {
+        ", measured on a sample"
+    } else {
+        ""
+    };
+    let (title, evidence, cost) = if best.candidate.codec == Codec::Dedup {
+        let one_in = best
+            .compressed_values
+            .checked_div(best.distinct_values)
+            .unwrap_or(0);
+        (
+            format!("Store each distinct {label}.{key} once (dedup)"),
+            format!(
+                "{} values, {} distinct (one in {one_in}); dedup keeps {} instead of {}: saves {}",
+                best.compressed_values,
+                best.distinct_values,
+                bytes_text(best.stored_bytes),
+                bytes_text(best.plain_bytes),
+                mib_text(saved),
+            ),
+            format!(
+                "every write of {key} looks the value up in the rule's dictionary (writes of \
+                 {key} up to about 10 % slower); reads stay plain; {reads}"
+            ),
+        )
+    } else {
+        let share = saved
+            .saturating_mul(100)
+            .checked_div(measured.string_bytes)
+            .unwrap_or(0);
+        let decode = best
+            .decode_bytes_per_sec
+            .map(|speed| format!(", decoding at {}/s", bytes_text(speed as u64)))
+            .unwrap_or_default();
+        (
+            format!("Compress {label}.{key} ({codec})"),
+            format!(
+                "{} of strings in {} values, {} distinct; {codec} keeps {} ({share} % saved){sampled}",
+                bytes_text(measured.string_bytes),
+                measured.string_values,
+                best.distinct_values,
+                bytes_text(best.stored_bytes),
+            ),
+            format!("every read of {key} decompresses the value{decode}; {reads}"),
+        )
+    };
+    Recommendation {
+        id: format!("add_compression:{}:{label}:{key}", element_name(element)),
+        action: RecommendedAction::AddCompression {
+            name: suggested_name(element, label, key),
+            element,
+            label: label.to_string(),
+            key: key.to_string(),
+            candidate: best.candidate,
+        },
+        element,
+        label: label.to_string(),
+        key: key.to_string(),
+        title,
+        evidence,
+        cost,
+        memory_bytes: saved.min(i64::MAX as u64) as i64,
+        measured: true,
+        impact: Impact::of_memory(saved, graph_bytes),
+        confidence: if measured.sampled {
+            Confidence::Medium
+        } else {
+            Confidence::High
+        },
+        reversible: true,
+    }
+}
+
 /// The memory the advisor's outcomes measure: property bytes plus property index bytes.
 pub fn measured_bytes(memory: &MemoryReport) -> u64 {
     memory.property_bytes()
@@ -706,7 +813,16 @@ pub fn compute(
         ));
     }
 
-    // add_compression: large strings without a rule, measured.
+    // add_compression: large strings without a rule (lz4, or dedup when it wins), then values
+    // of any type that repeat (dedup), measured.
+    let dedup_ok = |c: &crate::catalog::CandidateEstimate| {
+        c.candidate.codec == Codec::Dedup
+            && c.compressed_values > 0
+            && c.distinct_values
+                .saturating_mul(request.dedup_distinct_ratio.max(1))
+                <= c.compressed_values
+            && u64::try_from(c.saved_bytes).unwrap_or(0) >= request.min_dedup_saving_bytes.max(1)
+    };
     let mut candidates: Vec<(ElementKind, &str, String, u64)> = memory
         .properties
         .iter()
@@ -720,18 +836,22 @@ pub fn compute(
     candidates.sort_by_key(|c| std::cmp::Reverse(c.3));
     candidates.truncate(request.max_estimates);
     let mut estimates = 0;
+    let mut measured_keys: Vec<(ElementKind, String, String)> = Vec::new();
     for (element, label, key, _) in candidates {
         let uses = Uses::of(workload, element, label, &key);
-        if workload.is_some() && uses.reads >= request.hot_reads {
-            continue;
-        }
+        // A hot key keeps lz4 away (every read would decompress); dedup reads stay plain.
+        let hot = workload.is_some() && uses.reads >= request.hot_reads;
         let Ok(estimate_request) = CompressionEstimateRequest::new(element, label, key.as_str())
         else {
             continue;
         };
-        let estimate_request = estimate_request.with_candidates(
-            CompressionCandidate::matching_codecs(&[Codec::Lz4, Codec::Dedup], None, None),
-        );
+        let mut wanted = if hot {
+            Vec::new()
+        } else {
+            CompressionCandidate::matching_codecs(&[Codec::Lz4], None, None)
+        };
+        wanted.push(CompressionCandidate::dedup(0));
+        let estimate_request = estimate_request.with_candidates(wanted);
         // A target no rule could have (an invalid label, path or threshold) gets no advice; it
         // is not measured, so an estimate error is always a real failure (`Graph::advise`).
         if estimate_request.validate().is_err() {
@@ -741,73 +861,115 @@ pub fn compute(
             continue;
         };
         estimates += 1;
-        let Some(best) = measured.best.and_then(|i| measured.candidates.get(i)) else {
-            continue;
+        measured_keys.push((element, label.to_string(), key.clone()));
+        let best_lz4 = measured
+            .candidates
+            .iter()
+            .filter(|c| c.candidate.codec == Codec::Lz4 && c.saved_bytes > 0)
+            .max_by_key(|c| c.saved_bytes);
+        let dedup = measured
+            .candidates
+            .iter()
+            .find(|c| c.candidate.codec == Codec::Dedup)
+            .filter(|c| dedup_ok(c));
+        // Dedup only where it saves more than lz4 would.
+        let best = match (dedup, best_lz4) {
+            (Some(dedup), Some(lz4)) if dedup.saved_bytes > lz4.saved_bytes => dedup,
+            (Some(dedup), None) => dedup,
+            (_, Some(lz4)) => lz4,
+            (None, None) => continue,
         };
         let saved = u64::try_from(best.saved_bytes).unwrap_or(0);
-        let share = saved
-            .saturating_mul(100)
-            .checked_div(measured.string_bytes)
-            .unwrap_or(0);
-        if saved < request.min_saving_bytes || share < request.min_saving_percent {
-            continue;
+        if best.candidate.codec == Codec::Lz4 {
+            let share = saved
+                .saturating_mul(100)
+                .checked_div(measured.string_bytes)
+                .unwrap_or(0);
+            if saved < request.min_saving_bytes || share < request.min_saving_percent {
+                continue;
+            }
         }
-        let codec = best.candidate.codec.name();
-        let reads = if workload.is_some() {
-            format!("read {} times in two days", uses.reads)
-        } else {
-            "reads are not counted (no workload statistics)".to_string()
-        };
-        let decode = best
-            .decode_bytes_per_sec
-            .map(|speed| format!(", decoding at {}/s", bytes_text(speed as u64)))
-            .unwrap_or_default();
         compression_advice.push((
             saved,
-            Recommendation {
-                id: format!("add_compression:{}:{label}:{key}", element_name(element)),
-                action: RecommendedAction::AddCompression {
-                    name: suggested_name(element, label, &key),
-                    element,
-                    label: label.to_string(),
-                    key: key.clone(),
-                    candidate: best.candidate,
-                },
+            compression_recommendation(
                 element,
-                label: label.to_string(),
-                key: key.clone(),
-                title: if best.candidate.codec == Codec::Dedup {
-                    format!("Store each distinct {label}.{key} once (dedup)")
-                } else {
-                    format!("Compress {label}.{key} ({codec})")
-                },
-                evidence: format!(
-                    "{} of strings in {} values, {} distinct; {codec} keeps {} ({share} % saved){}",
-                    bytes_text(measured.string_bytes),
-                    measured.string_values,
-                    best.distinct_values,
-                    bytes_text(best.stored_bytes),
-                    if measured.sampled {
-                        ", measured on a sample"
-                    } else {
-                        ""
-                    }
-                ),
-                cost: if best.candidate.codec == Codec::Dedup {
-                    format!("reads of {key} stay plain (a shared copy, no decompression); {reads}")
-                } else {
-                    format!("every read of {key} decompresses the value{decode}; {reads}")
-                },
-                memory_bytes: saved.min(i64::MAX as u64) as i64,
-                measured: true,
-                impact: Impact::of_memory(saved, graph_bytes),
-                confidence: if measured.sampled {
-                    Confidence::Medium
-                } else {
-                    Confidence::High
-                },
-                reversible: true,
-            },
+                label,
+                &key,
+                &measured,
+                best,
+                &uses,
+                workload,
+                graph_bytes,
+            ),
+        ));
+    }
+
+    // dedup: values of any type at a top-level key (indexed or not) that repeat: at most one in
+    // `dedup_distinct_ratio` distinct, saving at least `min_dedup_saving_bytes`.
+    let code_saving = (std::mem::size_of::<ElementProperty>() as u64)
+        .saturating_sub(crate::value::dictionary::CODE_BYTES);
+    let mut repeated: Vec<(ElementKind, &str, String, u64)> = memory
+        .properties
+        .iter()
+        .filter(|row| row.rules.is_empty())
+        .filter_map(|row| {
+            let (element, label, key) = top_level(row)?;
+            if measured_keys
+                .iter()
+                .any(|(e, l, k)| *e == element && l == label && *k == key)
+            {
+                return None;
+            }
+            // At most every value's slot minus its code is saved; too few values save too
+            // little.
+            if row.elements.saturating_mul(code_saving) < request.min_dedup_saving_bytes.max(1) {
+                return None;
+            }
+            // Strings that are mostly distinct (the walk's distinct estimate, with slack for its
+            // error) are not measured.
+            if let Some(strings) = row.strings.as_ref()
+                && strings.values == row.elements
+                && strings
+                    .distinct_estimate
+                    .saturating_mul(request.dedup_distinct_ratio.max(1))
+                    > row.elements.saturating_mul(2)
+            {
+                return None;
+            }
+            Some((element, label, key, row.elements))
+        })
+        .collect();
+    repeated.sort_by_key(|c| std::cmp::Reverse(c.3));
+    repeated.truncate(request.max_estimates);
+    for (element, label, key, _) in repeated {
+        let Ok(estimate_request) = CompressionEstimateRequest::new(element, label, key.as_str())
+        else {
+            continue;
+        };
+        let estimate_request = estimate_request.with_candidates([CompressionCandidate::dedup(0)]);
+        if estimate_request.validate().is_err() {
+            continue;
+        }
+        let Some(measured) = estimate(&estimate_request) else {
+            continue;
+        };
+        estimates += 1;
+        let Some(best) = measured.candidates.iter().find(|c| dedup_ok(c)) else {
+            continue;
+        };
+        let uses = Uses::of(workload, element, label, &key);
+        compression_advice.push((
+            u64::try_from(best.saved_bytes).unwrap_or(0),
+            compression_recommendation(
+                element,
+                label,
+                &key,
+                &measured,
+                best,
+                &uses,
+                workload,
+                graph_bytes,
+            ),
         ));
     }
 

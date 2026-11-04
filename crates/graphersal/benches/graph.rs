@@ -1359,6 +1359,67 @@ mod element_properties {
         });
     }
 
+    /// `VERTICES` vertices like [`graph`] with 16 distinct values per key and a `dedup` rule
+    /// on every key: every value is coded (book "Compressed Properties").
+    fn coded_graph(width: usize) -> TraversalGraph {
+        use graphersal::catalog::{Codec, CompressionDefinition};
+        use graphersal::storage::ElementKind;
+        let mut graph = TraversalGraph::new();
+        let keys: Vec<String> = (0..width).map(|k| format!("k{k}")).collect();
+        for i in 0..VERTICES {
+            let props: PropertyMap = keys
+                .iter()
+                .enumerate()
+                .map(|(k, key)| (key.as_str(), ElementProperty::from(((i + k) % 16) as i64)))
+                .collect();
+            graph
+                .insert_vertex(None, vec!["item".into()], props)
+                .unwrap();
+        }
+        for key in &keys {
+            let rule = CompressionDefinition::new(ElementKind::Vertex, "item", key)
+                .unwrap()
+                .with_codec(Codec::Dedup);
+            graph.traversal_mut().define_compression(key, rule).unwrap();
+        }
+        graph
+    }
+
+    /// [`get_key`] on coded rows: the last key of every vertex read through its dictionary.
+    #[divan::bench(args = [1, 3, 25], sample_count = 20)]
+    fn get_key_coded(bencher: divan::Bencher, width: usize) {
+        let graph = coded_graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            handles
+                .iter()
+                .filter_map(|&v| {
+                    graph
+                        .vertex_properties(v)
+                        .unwrap()
+                        .and_then(|p| p.get(&key))
+                })
+                .count()
+        });
+    }
+
+    /// [`write_overwrite`] on coded rows: the value is looked up in the dictionary, the code
+    /// replaced in place.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn write_overwrite_coded(bencher: divan::Bencher, width: usize) {
+        let mut graph = coded_graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            for &v in &handles {
+                graph
+                    .set_vertex_property(v, key.as_str().into(), ElementProperty::from(7))
+                    .unwrap();
+            }
+        });
+    }
+
     /// Overwrites the last key of every vertex.
     #[divan::bench(args = [3, 25], sample_count = 20)]
     fn write_overwrite(bencher: divan::Bencher, width: usize) {
