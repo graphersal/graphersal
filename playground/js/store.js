@@ -1309,7 +1309,6 @@ export async function loadCatalogFile(file) {
   }
 }
 
-/** Opens a manager of the Catalog dropdown: 'queries', 'compression' or 'indexes'. */
 /**
  * Opens the Optimize panel (js/components/optimize.js), on the tab `tab` when given
  * ('advice', 'workload' or 'memory'; the Statistics tab opens 'memory'), else on the tab it
@@ -1333,6 +1332,7 @@ export async function optimizeApplied() {
   }
 }
 
+/** Opens a manager of the Catalog dropdown: 'queries', 'compression' or 'indexes'. */
 export function openCatalog(id) {
   state.catalogDialog = id;
   state.catalogDialogN++;
