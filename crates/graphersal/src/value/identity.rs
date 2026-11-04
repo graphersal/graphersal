@@ -127,9 +127,10 @@ pub(crate) fn identity_hash<H: Hasher>(value: &ElementProperty, state: &mut H) {
     }
 }
 
-/// [`identity_hash`] as one `u64` (FNV).
+/// [`identity_hash`] as one `u64` (one multiply per 8 bytes: the dictionaries hash every value
+/// they code, a load all of them).
 pub(crate) fn identity_hash_u64(value: &ElementProperty) -> u64 {
-    let mut hasher = fnv::FnvHasher::default();
+    let mut hasher = crate::graph::shape::MixHasher::default();
     identity_hash(value, &mut hasher);
     hasher.finish()
 }

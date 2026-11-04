@@ -43,7 +43,7 @@ use crate::value::{ElementProperty, PropertyMap};
 /// A cheap hasher for the transition caches, whose keys are a shape address, a position and
 /// (for an insertion) a short key: one multiply per word instead of FNV's one per byte.
 #[derive(Default)]
-struct MixHasher(u64);
+pub(crate) struct MixHasher(u64);
 
 impl MixHasher {
     #[inline]

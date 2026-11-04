@@ -725,6 +725,9 @@ pub(crate) struct Rule {
 pub(crate) struct LayoutTable {
     layouts: HashMap<LayoutKey, Arc<Layout>>,
     sweep_at: usize,
+    /// The layout interned last: a load and a pass code many rows of one shape alike, so it is
+    /// compared first (no key is built on a hit).
+    last: Option<Arc<Layout>>,
 }
 
 /// The identity of a layout: the shape's and the dictionaries' addresses (each held by the
@@ -751,6 +754,31 @@ const LAYOUT_SWEEP_MIN: usize = 64;
 impl LayoutTable {
     /// The interned layout of `shape` with `slots` and `dicts`.
     fn intern(
+        &mut self,
+        shape: &Arc<Shape>,
+        slots: Vec<u32>,
+        dicts: Vec<Arc<ValueDictionary>>,
+        rules: Vec<Option<Arc<ValueDictionary>>>,
+    ) -> Arc<Layout> {
+        if let Some(last) = &self.last
+            && Arc::ptr_eq(&last.shape, shape)
+            && *last.slots == *slots
+            && last.rules.len() == rules.len()
+            && last.rules.iter().zip(&rules).all(|(a, b)| match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            })
+        {
+            return Arc::clone(last);
+        }
+        let layout = self.intern_new(shape, slots, dicts, rules);
+        self.last = Some(Arc::clone(&layout));
+        layout
+    }
+
+    /// [`Self::intern`] past the memo.
+    fn intern_new(
         &mut self,
         shape: &Arc<Shape>,
         slots: Vec<u32>,
@@ -786,6 +814,7 @@ impl LayoutTable {
 
     /// Drops every layout no row uses.
     pub(crate) fn sweep(&mut self) {
+        self.last = None;
         self.layouts
             .retain(|_, layout| Arc::strong_count(layout) > 1);
         self.sweep_at = (2 * self.layouts.len()).max(LAYOUT_SWEEP_MIN);
@@ -880,14 +909,22 @@ impl CompressionRules {
         properties: &mut PropertyMap,
         force: bool,
     ) {
-        let applies = self.applies(element, labels);
+        let label_rules = self.label_rules(element, labels);
+        // Without rules, or with only rules that code top-level values, every value is plain
+        // (a coded row's own values; its coded ones are plain by construction).
+        if label_rules
+            .iter()
+            .all(|rules| rules.iter().all(|rule| rule.coded.is_some()))
+        {
+            properties
+                .stored_values_mut()
+                .for_each(ElementProperty::make_logical);
+            self.code_row(element, labels, properties);
+            return;
+        }
         for (key, value) in properties.iter_mut() {
-            if applies {
-                let rules = self.for_key(element, labels, key);
-                normalize_value(value, &rules, force);
-            } else {
-                value.make_logical();
-            }
+            let rules = self.for_key(element, labels, key);
+            normalize_value(value, &rules, force);
         }
         self.code_row(element, labels, properties);
     }
@@ -961,19 +998,16 @@ impl CompressionRules {
         labels: &[&str],
         key: &str,
     ) -> Option<&Arc<ValueDictionary>> {
+        coded_in(&self.label_rules(element, labels), key)
+    }
+
+    /// The rule lists of these labels, in label order (one lookup per label, for a whole row).
+    fn label_rules(&self, element: ElementKind, labels: &[&str]) -> Vec<&[Rule]> {
         let by_kind = self.by_kind(element);
-        for label in labels {
-            let Some(rules) = by_kind.get(*label) else {
-                continue;
-            };
-            if let Some(rule) = rules
-                .iter()
-                .find(|rule| rule.path.len() == 1 && rule.path[0] == key)
-            {
-                return rule.coded.as_ref();
-            }
-        }
-        None
+        labels
+            .iter()
+            .filter_map(|label| by_kind.get(*label).map(Vec::as_slice))
+            .collect()
     }
 
     /// Brings a stored map's row into the coding the rules ask for: every top-level value whose
@@ -987,6 +1021,7 @@ impl CompressionRules {
         let Some(shape) = map.stored_shape().map(Arc::clone) else {
             return;
         };
+        let label_rules = self.label_rules(element, labels);
         // A coded row already coded as the rules ask: nothing is built (the common case after
         // an in-place write); a transient layout that codes rightly is only interned.
         if let Some(coded) = map.coded() {
@@ -1000,7 +1035,7 @@ impl CompressionRules {
                 }
             };
             let unchanged = shape.keys.iter().enumerate().all(|(position, key)| {
-                let rule = self.coded_dictionary(element, labels, key);
+                let rule = coded_in(&label_rules, key);
                 let want = rule.filter(|d| {
                     coded
                         .value_at(position)
@@ -1028,7 +1063,7 @@ impl CompressionRules {
         let mut rules: Vec<Option<Arc<ValueDictionary>>> = Vec::with_capacity(shape.len());
         let mut any = false;
         for (position, key) in shape.keys.iter().enumerate() {
-            let rule = self.coded_dictionary(element, labels, key);
+            let rule = coded_in(&label_rules, key);
             rules.push(rule.map(Arc::clone));
             let dictionary = rule.filter(|d| {
                 map.value_at_position(position)
@@ -1489,6 +1524,20 @@ pub(crate) fn codes_value(value: &ElementProperty, min_bytes: usize) -> bool {
         ElementProperty::Deduped(text) => text.len() >= min_bytes,
         other => !other.holds_compressed(),
     }
+}
+
+/// The dictionary that codes the top-level `key` under these labels' rule lists
+/// ([`CompressionRules::coded_dictionary`]): the first label with a rule on exactly `key` decides.
+fn coded_in<'a>(label_rules: &[&'a [Rule]], key: &str) -> Option<&'a Arc<ValueDictionary>> {
+    for rules in label_rules {
+        if let Some(rule) = rules
+            .iter()
+            .find(|rule| rule.path.len() == 1 && rule.path[0] == key)
+        {
+            return rule.coded.as_ref();
+        }
+    }
+    None
 }
 
 /// The bytes a value takes in a plain row: its slot (the plain size of a coded value is
