@@ -330,10 +330,8 @@ the bytes (the rest of the process is not seen).
 
 **Embedding models of a store** (book page [Embedding Models in a
 Store](../persistence/store_models.md)) load under the ceiling too: before a load the blob's
-length times 2.2 (measured before the compact Unigram tokenizer: a model took about 1.84 times
-its blob in memory, plus a 20 % reserve; `potion-multilingual-128M` now takes about 1.01 times
-its blob loaded and 1.14 times at the load's peak; the definition's stored `load_bytes` is not
-read) is checked against what is in
+length times 1.6 (`potion-multilingual-128M` takes about 1.01 times its blob loaded and 1.14
+times at the load's peak, plus a reserve; the definition's stored `load_bytes` is not read) is checked against what is in
 use (the live heap with a tracking allocator, else the models already loaded), so nothing is read
 when it does not fit (operation `"model load"`). A model the schema NEEDS is loaded when the
 store opens: one that does not fit refuses the open with `StoreFailure::ModelDoesNotFit`, whose

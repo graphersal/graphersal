@@ -48,6 +48,9 @@ mod loaded {
                 .unwrap()
                 .into_iter()
                 .filter(|part| part.name == "embedding_model")
+                // The registry is process-wide: models other tests load at the same time are
+                // listed too, so only this test's model counts.
+                .filter(|part| part.detail.as_deref() == Some(identity.as_str()))
                 .collect();
         assert_eq!(measured.len(), 1);
         assert_eq!(measured[0].detail.as_deref(), Some(identity.as_str()));
