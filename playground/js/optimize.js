@@ -376,7 +376,6 @@ export function memoryOmitted(report, kind, format = (n) => `${n} B`) {
   };
 }
 
-/** The memory totals of a report: `[{label, bytes}]` (structure, indexes, properties, ...). */
 /**
  * Where the whole process memory goes (`report.components`, book page "Memory Usage"): one row
  * per component, most bytes first, then the remainder no component explains
@@ -410,6 +409,7 @@ export function memoryComponents(report) {
   return rows;
 }
 
+/** The memory totals of a report: `[{label, bytes}]` (structure, indexes, properties, ...). */
 export function memoryTotals(report) {
   const totals = report && report.structure && report.structure.totals;
   if (!totals) return report ? [{ label: 'Properties', bytes: report.property_bytes || 0 }] : [];

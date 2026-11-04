@@ -43,6 +43,9 @@
   --mem-compressed: #8a5cc7;
   --mem-indexes: #c98a12;
   --mem-models: #c94f7c;
+  --mem-live_graph: #5a8f3c;
+  --mem-store: #b5651d;
+  --mem-engine: #4f6d8a;
   --mem-other: #9aa3b2;
   --radius: 6px;
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -94,6 +97,9 @@
     --mem-compressed: #b69cff;
     --mem-indexes: #e3b341;
     --mem-models: #f08fb5;
+    --mem-live_graph: #8bc66a;
+    --mem-store: #e09552;
+    --mem-engine: #8fb0cf;
     --mem-other: #5d6879;
     color-scheme: dark;
   }
@@ -140,6 +146,9 @@
   --mem-compressed: #b69cff;
   --mem-indexes: #e3b341;
   --mem-models: #f08fb5;
+  --mem-live_graph: #8bc66a;
+  --mem-store: #e09552;
+  --mem-engine: #8fb0cf;
   --mem-other: #5d6879;
   color-scheme: dark;
 }

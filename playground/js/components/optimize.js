@@ -115,11 +115,19 @@ export const OptimizePanel = {
     function close() {
       if (dlg.value && dlg.value.open) dlg.value.close();
     }
+    // While `open` switches to a requested tab, the tab watcher leaves the loading to `open`.
+    let opening = false;
     watch(() => state.optimizeN, async () => {
+      const wanted = state.optimizeTab;
+      state.optimizeTab = null;
+      opening = true;
+      if (wanted) tab.value = wanted;
       await nextTick();
+      opening = false;
       await open();
     });
     watch(tab, () => {
+      if (opening) return;
       const loaded = { advice: advice.data, workload: work.report, memory: memory.report }[tab.value];
       if (!loaded) refresh();
     });

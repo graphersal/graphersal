@@ -14,7 +14,7 @@ Three different figures, two limits, never mixed:
 | Figure | What it is | Against |
 |---|---|---|
 | the graph's footprint (`g.memory_usage()`, below) | an estimate of the graph's own data | nothing: no percentage |
-| the process memory bar (playground Statistics tab and Optimize -> Memory, REPL `/memory`, `/api/statistics`) | the whole process (tracked live heap), split into structure, properties, compressed, indexes, models and other | the process ceiling `memory.limit` ([Seeing how full the process is](resource_limits.md#seeing-how-full-the-process-is)) |
+| the process memory bar (playground Statistics tab and Optimize -> Memory, REPL `/memory`, `/api/statistics`) | the whole process (tracked live heap), split into structure, properties, compressed, indexes, models, live_graph, store, engine and other | the process ceiling `memory.limit` ([Seeing how full the process is](resource_limits.md#seeing-how-full-the-process-is)) |
 | a query's peak (`query_memory` of a profile, "Peak memory" in the playground's Profile panel) | the most one execution held at once | the per-query limit `traversal.max_materialized_bytes` |
 
 ## `graph.memory_usage()`
@@ -310,6 +310,12 @@ unregisters it) and asked at every report, so the DSL, the REPL and every other 
 it. A source answers quickly, never waits on a lock a query may hold, and never asks for a
 report itself. A part only the caller of one report knows goes in with
 `MemoryReport::add_component`.
+
+The process's parts alone, without the report's walk, come from
+`AnyGraph::process_memory_components`: the components above except `graph` and
+`workload_statistics`, cheap enough for every statistics refresh. The process memory bar
+([Seeing how full the process is](resource_limits.md#seeing-how-full-the-process-is)) groups them
+into its segments models, live_graph, store and engine.
 
 ```rust
 use std::sync::Arc;

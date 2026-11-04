@@ -139,6 +139,16 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport>;
 
+    /// The process's parts of a memory report without the report's walk: the components
+    /// [`memory_report`](Self::memory_report) adds beside the graph's own (`graph`,
+    /// `workload_statistics`): the embedding models loaded in the process, the script engine's
+    /// registrations, every Store (its live graph when it is not this graph, such as beside a
+    /// view of a past state) and what hosts register
+    /// ([`register_memory_source`](crate::graph::memory_report::register_memory_source)). Cheap
+    /// enough for a statistics refresh: no element is read, no lock is waited for (a source
+    /// whose lock is busy leaves its part out). Cannot fail today; a `Result` so that it can.
+    fn process_memory_components(&self) -> Result<Vec<crate::graph::MemoryComponent>, GraphError>;
+
     /// [`Graph::advise`]: the storage advisor's recommendations. Unauthorized: the front end
     /// asks its authorizer first.
     fn advise(
@@ -394,6 +404,12 @@ where
             Some(Graph::storage_address(self)),
         );
         Ok(report)
+    }
+
+    fn process_memory_components(&self) -> Result<Vec<crate::graph::MemoryComponent>, GraphError> {
+        Ok(crate::graph::memory_report::components::process_components(
+            Some(Graph::storage_address(self)),
+        ))
     }
 
     fn advise(

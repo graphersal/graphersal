@@ -822,9 +822,10 @@ fn start_session(
             let started = position(&session)
                 .map_err(|err| err.to_string())
                 .and_then(|(_, seq)| {
-                    let mut statistics = session.statistics().map_err(|err| err.to_string())?;
                     // The banner's memory row shows the process against its ceiling.
-                    graphersal_session::process::add_to_statistics(&mut statistics);
+                    let statistics = session
+                        .statistics_with_process()
+                        .map_err(|err| err.to_string())?;
                     Ok((session.cancel_token(), seq, statistics))
                 });
             let failed = started.is_err();
@@ -1372,7 +1373,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Get, "statistics") => value(with_process_memory(
             context,
-            context.call_fallible(|s| s.statistics())?,
+            context.call_fallible(|s| s.statistics_with_process())?,
         )),
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
             let bytes = context.call_fallible(|s| s.save_snapshot())?;
@@ -1695,11 +1696,12 @@ fn ai_status(context: &Context) -> Value {
     }
 }
 
-/// The session's statistics (`Session::statistics`) with the dev server's own part of the
-/// process memory added: `process.memory` (the whole process, [`graphersal_session::process`]) and `process.aiChat {conversations, historyBytes}` when the AI Chat is on
+/// The session's statistics with the whole process (`Session::statistics_with_process`:
+/// `process.memory`, [`graphersal_session::process`]) and the dev server's own part added:
+/// `process.aiChat {conversations, historyBytes}` when the AI Chat is on
 /// ([`ai::process_memory`]). Served by `GET /api/statistics` and the MCP `statistics` tool.
+#[cfg_attr(not(feature = "ai"), allow(unused_mut))]
 fn with_process_memory(context: &Context, mut statistics: Value) -> Value {
-    graphersal_session::process::add_to_statistics(&mut statistics);
     #[cfg(feature = "ai")]
     if let Some(chat) = ai::process_memory(context)
         && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)

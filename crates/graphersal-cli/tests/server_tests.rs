@@ -5559,6 +5559,37 @@ fn the_statistics_list_a_loaded_model_in_the_process_memory() {
     let _ = std::fs::remove_dir_all(store.parent().unwrap());
 }
 
+/// The dev server runs with the tracking allocator: a loaded model's size in `process.models`
+/// is the size measured at its load (`measured: true`, user decision 2026-11-04), the same
+/// figure as the bar's `models` segment, which lists the model as its part.
+#[cfg(feature = "model2vec")]
+#[test]
+fn the_statistics_show_the_measured_size_of_a_loaded_model() {
+    let store = store_with_a_tiny_model("m2v_measured");
+    let server = start(&["--graph", store.to_str().unwrap()]);
+    let r = execute(
+        server.port,
+        r#"g.v().has_label("software").embed("name").to_list().len()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let stats = get(server.port, "/api/statistics").json();
+    let model = &stats["process"]["models"][0];
+    assert_eq!(model["measured"], true, "{stats}");
+    let bytes = model["bytes"].as_u64().unwrap();
+    let segments = stats["process"]["memory"]["segments"].as_array().unwrap();
+    let models = segments
+        .iter()
+        .find(|s| s["name"] == "models")
+        .unwrap_or_else(|| panic!("a models segment: {stats}"));
+    assert_eq!(models["bytes"].as_u64().unwrap(), bytes, "{stats}");
+    assert_eq!(models["parts"][0]["name"], "embedding_model", "{stats}");
+    assert_eq!(models["parts"][0]["detail"], model["model"], "{stats}");
+    // The engine group: at least the DSL's registrations, counted by the tracking allocator.
+    assert!(segments.iter().any(|s| s["name"] == "engine"), "{stats}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
+}
+
 /// Issue #12: `POST /api/compression/estimate` and the MCP tool `estimate_compression` answer
 /// the candidates and change nothing; the tool is a reading one, offered and allowed in
 /// read-only mode.

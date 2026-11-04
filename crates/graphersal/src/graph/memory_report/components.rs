@@ -151,6 +151,15 @@ pub fn register_memory_source(source: &Arc<dyn MemorySource>) {
 /// the address of the reported graph's storage when known. Call it without holding a graph
 /// lock: a Store's source reads its live graph.
 pub(crate) fn collect(report: &mut MemoryReport, reported: Option<usize>) {
+    report.components.extend(process_components(reported));
+}
+
+/// The process's components without a memory report (no walk of any graph): the embedding
+/// models loaded in the process, the script engine's registrations and what every registered
+/// [`MemorySource`] answers (a Store lists its live graph when it is not the graph at
+/// `reported`). What [`collect`] adds to a report; the process memory bar of the front ends
+/// reads it directly. Call it without holding a graph lock.
+pub(crate) fn process_components(reported: Option<usize>) -> Vec<MemoryComponent> {
     let mut components = MemoryComponents {
         list: Vec::new(),
         reported,
@@ -170,5 +179,5 @@ pub(crate) fn collect(report: &mut MemoryReport, reported: Option<usize>) {
     for source in live {
         source.memory_components(&mut components);
     }
-    report.components.extend(components.list);
+    components.list
 }

@@ -4,7 +4,9 @@
 //
 // The figures are computed ONCE, in Rust (crates/graphersal-session `process::MemoryBar`, the
 // same numbers the REPL's `/memory` prints): `statistics().process.memory` carries `usedBytes`,
-// `usedTracked`, `limitBytes?`, `limitSource`, `usedPercent?`, `segments: [{name, bytes}]` and
+// `usedTracked`, `limitBytes?`, `limitSource`, `usedPercent?`, `segments: [{name, bytes, parts?}]`
+// (with the process's components: also `live_graph`, `store`, `engine`; `parts` lists the
+// components a segment sums, shown in its tooltip) and
 // `compression?: {plainBytes, storedBytes}`. This model only renders them; it never recomputes a
 // segment.
 //
@@ -25,8 +27,24 @@ export const SEGMENT_HINTS = {
   compressed: 'compressed and deduplicated values with their dictionaries and shared tables',
   indexes: 'the id and label indexes plus the property indexes (the Memory row\'s Indexes and Property indexes)',
   models: 'embedding models held in memory',
-  other: 'the rest of the process heap: query buffers, caches, the session, allocator overhead',
+  live_graph: 'the store\'s live graph, held beside the view of a past state you are looking at (back to the live graph frees the view)',
+  store: 'the store\'s buffers and, for a store kept in memory, its files',
+  engine: 'the script engine, the workload statistics, the session\'s layouts and the dev server\'s MCP and AI Chat state',
+  other: 'the rest of the process heap no segment explains: query buffers, caches, allocator overhead',
 };
+
+/**
+ * The components a segment sums (`parts: [{name, detail?, bytes}]`, sent with the process's
+ * components) as tooltip lines, the most bytes first: `script_engine 12 MiB (the DSL's ...)`.
+ * @param {Array|undefined} parts
+ * @returns {string[]}
+ */
+export function partLines(parts) {
+  if (!Array.isArray(parts)) return [];
+  return [...parts]
+    .sort((a, b) => (b.bytes || 0) - (a.bytes || 0))
+    .map((p) => `${p.name} ${formatBytes(p.bytes || 0)}${p.detail ? ` (${p.detail})` : ''}`);
+}
 
 /** The words for a ceiling's source (`MemoryLimitSource`). */
 export const SOURCE_TEXT = {
@@ -89,7 +107,7 @@ export function memoryBarModel(raw) {
     text: formatBytes(s.bytes),
     share: Math.min(100, (s.bytes / whole) * 100),
     colour: `var(--mem-${s.name}, var(--text-faint))`,
-    hint: SEGMENT_HINTS[s.name] || '',
+    hint: [SEGMENT_HINTS[s.name] || '', ...partLines(s.parts)].filter(Boolean).join('\n'),
   }));
   const source = mem.limitSource || 'unknown';
   const sourceText = SOURCE_TEXT[source] || source;

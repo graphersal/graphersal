@@ -27,11 +27,12 @@
 //! | `usedBytes`, `usedTracked` | the live heap (tracked) or the known segments' sum (`false`) |
 //! | `limitBytes`, `usedPercent` | the ceiling and the share used; absent without a ceiling |
 //! | `limitSource` | `configured`, `cgroup`, `physical`, `wasm`, `none` or `unknown` |
-//! | `segments` | `[{name, bytes}]`: `structure`, `properties`, `compressed`, `indexes`, `models`, then `other` (tracked only) |
+//! | `segments` | `[{name, bytes, parts?}]`: `structure`, `properties`, `compressed`, `indexes`, `models`, with the process's components also `live_graph`, `store`, `engine`, then `other` (tracked only); `parts: [{name, detail?, bytes}]` lists the components a segment sums |
 //! | `compression` | `{plainBytes, storedBytes}` when values are compressed or deduplicated |
 //! | `estimateAboveHeap` | `true` when the graph's estimate exceeds the live heap (`other` clamped to 0) |
 //! | `limitError` | instead of the bar's keys when the ceiling could not be read |
 
+use graphersal::storage::MemoryComponent;
 use serde_json::{Map, Value, json};
 
 use crate::error::SessionError;
@@ -153,8 +154,23 @@ pub fn memory() -> Value {
 /// Never fails: when the ceiling cannot be read the bar's keys are left out and the error text
 /// is `process.memory.limitError`; the other members are kept.
 pub fn add_to_statistics(statistics: &mut Value) {
+    add_bar(statistics, None);
+}
+
+/// [`add_to_statistics`] with the process's components
+/// ([`graphersal::storage::AnyGraph::process_memory_components`], no memory report walk): the
+/// bar then also shows `live_graph`, `store` and `engine` ([`memory_bar_with`]), so `other` is
+/// what no component explains. [`crate::Session::statistics_with_process`] calls it.
+pub fn add_to_statistics_with(statistics: &mut Value, components: &[MemoryComponent]) {
+    add_bar(statistics, Some(components));
+}
+
+fn add_bar(statistics: &mut Value, components: Option<&[MemoryComponent]>) {
     let models_bytes = models_bytes(&statistics["process"]["models"]);
-    let bar = memory_bar(&statistics["memory"], models_bytes);
+    let bar = match components {
+        Some(components) => memory_bar_with(&statistics["memory"], models_bytes, components),
+        None => memory_bar(&statistics["memory"], models_bytes),
+    };
     if let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut) {
         let mut memory = memory();
         if let Some(out) = memory.as_object_mut() {
@@ -187,10 +203,24 @@ pub fn models_bytes(models: &Value) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MemorySegment {
-    /// `structure`, `properties`, `compressed`, `indexes`, `models` or `other`.
+    /// `structure`, `properties`, `compressed`, `indexes`, `models`, `live_graph`, `store`,
+    /// `engine` or `other`.
     pub name: &'static str,
     /// The segment's bytes.
     pub bytes: u64,
+    /// The process components the segment sums (`models`, `live_graph`, `store`, `engine` when
+    /// the bar was built with them; empty otherwise).
+    pub parts: Vec<MemoryComponent>,
+}
+
+impl MemorySegment {
+    fn new(name: &'static str, bytes: u64) -> Self {
+        MemorySegment {
+            name,
+            bytes,
+            parts: Vec::new(),
+        }
+    }
 }
 
 /// The process memory against its ceiling, split into segments a user can act on: built by
@@ -205,7 +235,10 @@ pub struct MemorySegment {
 /// | `properties` | `property_bytes - compressed_stored_bytes - dedup_table_bytes` |
 /// | `compressed` | `compressed_stored_bytes + compression_dictionary_bytes + dedup_table_bytes` (left out at 0) |
 /// | `indexes` | `index_bytes + property_index_bytes`: the id and label indexes plus the property indexes (left out at 0) |
-/// | `models` | `model_bytes` when the graph reports models it loaded (non-zero), else the loaded embedders (left out at 0) |
+/// | `models` | with components: the `embedding_model` components (every model loaded in the process, once); else `model_bytes` when the graph reports models it loaded (non-zero), else the loaded embedders (left out at 0) |
+/// | `live_graph` | with components: `store_graph`, a Store's live graph held beside the served graph (a view of a past state) (left out at 0) |
+/// | `store` | with components: `store` + `store_files`, a Store's buffers and the files of a store in memory (left out at 0) |
+/// | `engine` | with components: the graph's `workload_bytes` plus every other component (the script engine, the session, the dev server's MCP and AI Chat, a host's own) (left out at 0) |
 /// | `other` | tracked only: the live heap minus the known segments (0 when the estimate is above the heap) |
 ///
 /// With a tracking allocator the used figure is the process's live heap; without one it is the
@@ -249,6 +282,27 @@ pub fn memory_bar(graph_memory: &Value, models_bytes: u64) -> Result<MemoryBar, 
     ))
 }
 
+/// [`memory_bar`] with the process's `components`
+/// ([`graphersal::storage::AnyGraph::process_memory_components`]: everything a memory report
+/// names beside the graph, without its walk): the segments `live_graph`, `store` and `engine`
+/// join the graph's, `models` counts the models loaded in the process. Fails like
+/// [`memory_bar`].
+pub fn memory_bar_with(
+    graph_memory: &Value,
+    models_bytes: u64,
+    components: &[MemoryComponent],
+) -> Result<MemoryBar, SessionError> {
+    let room = graphersal::exec::memory_room()?;
+    Ok(bar_from_parts(
+        graph_memory,
+        models_bytes,
+        Some(components),
+        room.limit(),
+        room.source().as_str(),
+        room.live_bytes(),
+    ))
+}
+
 /// `47.06` -> `47 %`; below 1 one decimal (`0.4 %`), below 0.1 `< 0.1 %` (a small process never
 /// reads `0 %`). The playground's `js/memory-bar.js` `percentText` writes the same.
 pub fn percent_text(percent: f64) -> String {
@@ -269,30 +323,48 @@ fn bar_from(
     source: &'static str,
     live: Option<u64>,
 ) -> MemoryBar {
+    bar_from_parts(graph_memory, models_bytes, None, limit, source, live)
+}
+
+/// The segment a process component belongs to (`None`: the graph's own, already counted).
+fn segment_of(component: &MemoryComponent) -> Option<&'static str> {
+    match component.name.as_str() {
+        "graph" | "workload_statistics" => None,
+        "embedding_model" => Some("models"),
+        "store_graph" => Some("live_graph"),
+        "store" | "store_files" => Some("store"),
+        _ => Some("engine"),
+    }
+}
+
+/// [`memory_bar_with`] from given figures (the formulas of [`MemoryBar`]); `components`
+/// `None` is [`bar_from`].
+fn bar_from_parts(
+    graph_memory: &Value,
+    models_bytes: u64,
+    components: Option<&[MemoryComponent]>,
+    limit: Option<u64>,
+    source: &'static str,
+    live: Option<u64>,
+) -> MemoryBar {
     let field = |key: &str| graph_memory[key].as_u64().unwrap_or(0);
     let mut segments = Vec::new();
     let mut compression = None;
     if graph_memory.is_object() {
         let stored = field("compressed_stored_bytes");
         let dedup = field("dedup_table_bytes");
-        segments.push(MemorySegment {
-            name: "structure",
-            bytes: field("structure_bytes"),
-        });
-        segments.push(MemorySegment {
-            name: "properties",
-            bytes: field("property_bytes")
+        segments.push(MemorySegment::new("structure", field("structure_bytes")));
+        segments.push(MemorySegment::new(
+            "properties",
+            field("property_bytes")
                 .saturating_sub(stored)
                 .saturating_sub(dedup),
-        });
+        ));
         let compressed = stored
             .saturating_add(field("compression_dictionary_bytes"))
             .saturating_add(dedup);
         if compressed > 0 {
-            segments.push(MemorySegment {
-                name: "compressed",
-                bytes: compressed,
-            });
+            segments.push(MemorySegment::new("compressed", compressed));
         }
         if field("compressed_values") > 0 || field("deduped_values") > 0 {
             let plain =
@@ -301,32 +373,56 @@ fn bar_from(
         }
         let indexes = field("index_bytes").saturating_add(field("property_index_bytes"));
         if indexes > 0 {
-            segments.push(MemorySegment {
-                name: "indexes",
-                bytes: indexes,
-            });
+            segments.push(MemorySegment::new("indexes", indexes));
         }
     }
-    // `0` from a graph that loaded none of its own (a host's embedders are the process's).
-    let models = graph_memory["model_bytes"]
-        .as_u64()
-        .filter(|bytes| *bytes > 0)
-        .unwrap_or(models_bytes);
-    if models > 0 {
-        segments.push(MemorySegment {
-            name: "models",
-            bytes: models,
-        });
+    // The process's components, grouped by segment in the bar's order.
+    let mut grouped: Vec<MemorySegment> = ["models", "live_graph", "store", "engine"]
+        .into_iter()
+        .map(|name| MemorySegment::new(name, 0))
+        .collect();
+    if let Some(components) = components {
+        for component in components {
+            if let Some(name) = segment_of(component)
+                && let Some(segment) = grouped.iter_mut().find(|s| s.name == name)
+            {
+                segment.bytes = segment.bytes.saturating_add(component.bytes);
+                segment.parts.push(component.clone());
+            }
+        }
+        // The graph's workload statistics are not in its total: the engine's bookkeeping.
+        let workload = field("workload_bytes");
+        if workload > 0
+            && let Some(engine) = grouped.iter_mut().find(|s| s.name == "engine")
+        {
+            engine.bytes = engine.bytes.saturating_add(workload);
+            engine
+                .parts
+                .push(MemoryComponent::estimated("workload_statistics", workload));
+        }
     }
+    let mut grouped = grouped.into_iter();
+    let mut models = grouped
+        .next()
+        .unwrap_or_else(|| MemorySegment::new("models", 0));
+    if models.bytes == 0 {
+        // `0` from a graph that loaded none of its own (a host's embedders are the process's).
+        models.bytes = graph_memory["model_bytes"]
+            .as_u64()
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(models_bytes);
+    }
+    segments.extend(
+        std::iter::once(models)
+            .chain(grouped)
+            .filter(|s| s.bytes > 0),
+    );
     let known = segments
         .iter()
         .fold(0u64, |sum, segment| sum.saturating_add(segment.bytes));
     let (used_bytes, used_tracked, estimate_above_heap) = match live {
         Some(live) if live > 0 => {
-            segments.push(MemorySegment {
-                name: "other",
-                bytes: live.saturating_sub(known),
-            });
+            segments.push(MemorySegment::new("other", live.saturating_sub(known)));
             (live, true, known > live)
         }
         _ => (known, false, false),
@@ -368,7 +464,25 @@ impl MemoryBar {
             Value::Array(
                 self.segments
                     .iter()
-                    .map(|segment| json!({"name": segment.name, "bytes": segment.bytes}))
+                    .map(|segment| {
+                        let mut out = json!({"name": segment.name, "bytes": segment.bytes});
+                        if !segment.parts.is_empty() {
+                            out["parts"] = Value::Array(
+                                segment
+                                    .parts
+                                    .iter()
+                                    .map(|part| {
+                                        let mut p = json!({"name": part.name, "bytes": part.bytes});
+                                        if let Some(detail) = &part.detail {
+                                            p["detail"] = json!(detail);
+                                        }
+                                        p
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        out
+                    })
                     .collect(),
             ),
         );
@@ -702,6 +816,117 @@ mod tests {
             "         compression saves 285.0 MiB (plain 380.0 MiB -> 95.0 MiB, -75 %)"
         );
         assert!(!text.contains("not tracked"));
+    }
+
+    /// The process's components join the bar: the models loaded in the process, a store's live
+    /// graph beside a view, the store's buffers and files, and the engine group (the script
+    /// engine, a host's parts and the graph's workload statistics); `other` is the rest.
+    #[test]
+    fn components_become_their_own_segments() {
+        let mut memory = graph_memory();
+        memory["workload_bytes"] = json!(2 * MIB);
+        memory["model_bytes"] = json!(500 * MIB);
+        let components = [
+            MemoryComponent::exact("embedding_model", 931 * MIB).with_detail("model2vec/m@1"),
+            MemoryComponent::estimated("store_graph", 700 * MIB).with_detail("kb.gstore"),
+            MemoryComponent::estimated("store", MIB).with_detail("kb.gstore"),
+            MemoryComponent::exact("store_files", 3 * MIB).with_detail("kb.gstore"),
+            MemoryComponent::exact("script_engine", 5 * MIB),
+            MemoryComponent::estimated("session", MIB),
+            MemoryComponent::estimated("mcp", 0),
+            // A graph's own parts are never counted twice.
+            MemoryComponent::estimated("graph", 755 * MIB),
+            MemoryComponent::estimated("workload_statistics", 2 * MIB),
+        ];
+        let bar = bar_from_parts(
+            &memory,
+            0,
+            Some(&components),
+            Some(8192 * MIB),
+            "physical",
+            Some(3000 * MIB),
+        );
+        let names: Vec<&str> = bar.segments.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "structure",
+                "properties",
+                "compressed",
+                "indexes",
+                "models",
+                "live_graph",
+                "store",
+                "engine",
+                "other"
+            ]
+        );
+        // The measured model size wins over the graph's own figure.
+        assert_eq!(segment(&bar, "models"), Some(931 * MIB));
+        assert_eq!(segment(&bar, "live_graph"), Some(700 * MIB));
+        assert_eq!(segment(&bar, "store"), Some(4 * MIB));
+        assert_eq!(segment(&bar, "engine"), Some(5 * MIB + MIB + 2 * MIB));
+        let known = 755 * MIB + 931 * MIB + 700 * MIB + 4 * MIB + 8 * MIB;
+        assert_eq!(segment(&bar, "other"), Some(3000 * MIB - known));
+        let value = bar.to_value();
+        let engine = &value["segments"][7];
+        assert_eq!(engine["name"], "engine");
+        let parts: Vec<&str> = engine["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            parts,
+            ["script_engine", "session", "mcp", "workload_statistics"]
+        );
+        assert_eq!(
+            value["segments"][5]["parts"][0],
+            json!({"name": "store_graph", "detail": "kb.gstore", "bytes": 700 * MIB})
+        );
+        // The graph's segments carry no parts.
+        assert!(value["segments"][0].get("parts").is_none());
+        assert!(
+            bar.text(80).contains("live_graph 700.0 MiB"),
+            "{}",
+            bar.text(80)
+        );
+        // Without models among the components the graph's own figure stays; empty groups are
+        // left out.
+        let bar = bar_from_parts(&memory, 0, Some(&[]), None, "none", None);
+        let names: Vec<&str> = bar.segments.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "structure",
+                "properties",
+                "compressed",
+                "indexes",
+                "models",
+                "engine"
+            ]
+        );
+        assert_eq!(segment(&bar, "models"), Some(500 * MIB));
+        assert_eq!(segment(&bar, "engine"), Some(2 * MIB));
+    }
+
+    #[test]
+    fn statistics_with_components_get_the_new_segments() {
+        let mut statistics = json!({"memory": graph_memory(), "process": {"models": []}});
+        add_to_statistics_with(
+            &mut statistics,
+            &[MemoryComponent::estimated("store_graph", 9 * MIB).with_detail("s")],
+        );
+        let segments = statistics["process"]["memory"]["segments"]
+            .as_array()
+            .unwrap();
+        assert!(
+            segments
+                .iter()
+                .any(|s| s["name"] == "live_graph" && s["bytes"] == json!(9 * MIB)),
+            "{segments:?}"
+        );
     }
 
     #[test]
