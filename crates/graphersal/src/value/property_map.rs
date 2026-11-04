@@ -700,15 +700,12 @@ impl PropertyMap {
         }
     }
 
-    /// The values the map holds itself, mutably: a coded row's own values (its coded values
-    /// are plain by construction and stay coded), every value of any other map.
-    pub(crate) fn stored_values_mut(
-        &mut self,
-    ) -> Box<dyn Iterator<Item = &mut ElementProperty> + '_> {
+    /// The own values of a coded row, mutably (`None`: not a coded row).
+    #[inline]
+    pub(crate) fn coded_own_mut(&mut self) -> Option<&mut [ElementProperty]> {
         match &mut self.0 {
-            Repr::Coded(coded) => Box::new(coded.own.iter_mut()),
-            Repr::Indexed(map) => Box::new(map.values_mut()),
-            Repr::Shaped(shaped) => Box::new(shaped.values.iter_mut()),
+            Repr::Coded(coded) => Some(&mut coded.own),
+            Repr::Indexed(_) | Repr::Shaped(_) => None,
         }
     }
 

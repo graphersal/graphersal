@@ -916,9 +916,12 @@ impl CompressionRules {
             .iter()
             .all(|rules| rules.iter().all(|rule| rule.coded.is_some()))
         {
-            properties
-                .stored_values_mut()
-                .for_each(ElementProperty::make_logical);
+            match properties.coded_own_mut() {
+                Some(own) => own.iter_mut().for_each(ElementProperty::make_logical),
+                None => properties
+                    .values_mut()
+                    .for_each(ElementProperty::make_logical),
+            }
             self.code_row(element, labels, properties);
             return;
         }
@@ -1945,6 +1948,7 @@ impl TraversalGraph {
     }
 
     /// Codes the row of a vertex that just entered the graph (its map adopted).
+    #[inline]
     pub(crate) fn compression_code_row(
         &self,
         element: ElementKind,
