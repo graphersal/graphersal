@@ -124,9 +124,8 @@ store opens; every other model is loaded at the first query that embeds with it.
 loaded once per process, shared by every position that uses the same blob, and unloaded when no
 position uses it any more. Loaded models count in `g.memory_usage()` as `model_bytes` and fall
 under the process [memory ceiling](../users_guide/resource_limits.md): before a load the ceiling
-is checked with the blob's length times 2.2 (a measured 1.84 for `potion-multilingual-128M`,
-whose 506 MiB blob took 931 MiB loaded before the compact Unigram tokenizer, plus a 20 %
-reserve; it now takes 514 MiB), so nothing is read when it does not fit. The load streams the blob: its tar is read entry by entry and the embedding matrix is
+is checked with the blob's length times 1.6 (`potion-multilingual-128M`'s 506 MiB blob takes
+514 MiB loaded and its load peaks at about 1.14 times the blob, plus a reserve), so nothing is read when it does not fit. The load streams the blob: its tar is read entry by entry and the embedding matrix is
 decoded while it streams, so the memory a load needs at its peak is about the loaded model plus
 the tokenizer's parse, never a second copy of the blob. The blob is read to its end and checked
 (length, CRC-32C) before the tokenizer is parsed, so a damaged blob is reported as damage.

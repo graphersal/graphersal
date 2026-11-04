@@ -250,11 +250,12 @@ fn load(
 }
 
 /// The memory a model takes loaded per byte of its blob, before it was loaded once (user
-/// decision 2026-11-04): measured 930.8 MiB in memory for the 506.4 MiB blob of
-/// `minishlab/potion-multilingual-128M` (1.84: the f32 embedding matrix plus the tokenizer's
-/// in-memory form, many times its `tokenizer.json`), plus a 20 % reserve. The streaming load
-/// holds no copy of the blob beside it.
-pub(crate) const LOAD_FACTOR: f64 = 2.2;
+/// decision 2026-11-04): with the compact Unigram tokenizer the 506.4 MiB blob of
+/// `minishlab/potion-multilingual-128M` takes 513.6 MiB loaded (1.01) and its load peaks
+/// 576 MiB above the heap before it (1.14); 1.6 keeps a reserve. The streaming load holds no
+/// copy of the blob beside it. An f16 or i8 matrix decodes to 2 or 4 times its bytes, which
+/// this factor does not cover in full.
+pub(crate) const LOAD_FACTOR: f64 = 1.6;
 
 /// The memory a load of `model` needs, before it is loaded: its blob's length times
 /// [`LOAD_FACTOR`]. Nothing about the size is stored: the definition's `load_bytes` (the
@@ -1021,12 +1022,13 @@ mod size_tests {
             )
             .unwrap()
         };
-        // The measured model: 506.4 MiB blob, 930.8 MiB loaded (1.84); 2.2 keeps a reserve.
+        // The measured model: 506.4 MiB blob, 513.6 MiB loaded, the load peaking 576 MiB above
+        // the heap before it (1.14); 1.6 keeps a reserve.
         let blob_bytes = (506.4 * 1024.0 * 1024.0) as u64;
         let model = ModelDefinition::new(blob(blob_bytes), "minishlab/x").with_load_bytes(1);
         let room = load_room(&model);
-        assert!(room >= (930.8 * 1024.0 * 1024.0) as u64);
-        assert_eq!(room, (blob_bytes as f64 * 2.2).ceil() as u64);
+        assert!(room >= (576.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(room, (blob_bytes as f64 * 1.6).ceil() as u64);
         // The definition's stored estimate plays no part.
         let other =
             ModelDefinition::new(blob(blob_bytes), "minishlab/x").with_load_bytes(u64::MAX / 2);

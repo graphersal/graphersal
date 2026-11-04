@@ -374,7 +374,7 @@ a backup, a view of a past position). A needed model that is not in the catalog 
 position, whose blob is missing or damaged, or whose files do not load refuses the open
 (`model_unavailable`), with the commands that bring it back; one whose load would take the
 process over its memory ceiling refuses it too (`model_does_not_fit`): the check uses the blob's
-`length` times 2.2 before anything is read (versions up to 0.5.2: `length` plus the definition's
+`length` times 1.6 before anything is read (versions up to 0.5.2: `length` plus the definition's
 `load_bytes`), and the message names the
 smallest ceiling that fits. A writable open records the refusal in the journal (`model.load_failed`,
 4.7) best effort. A model of a family or blob algorithm the reader does not know opens the store
@@ -733,7 +733,7 @@ order, followed by the keys the writer does not know:
 | `repo` | string: the repository, the model's user-visible name (required) |
 | `revision`, `commit` | strings (optional) |
 | `dimension` | int64: the vector dimension |
-| `load_bytes` | int64: the import's estimate of the memory the loaded model takes (the f32 embedding matrix plus the tokenizer file). Still written; read by the memory check of versions up to 0.5.2 only (later versions check the blob's `length` times 2.2 and show the size measured at the load) |
+| `load_bytes` | int64: the import's estimate of the memory the loaded model takes (the f32 embedding matrix plus the tokenizer file). Still written; read by the memory check of versions up to 0.5.2 only (later versions check the blob's `length` times 1.6 and show the size measured at the load) |
 | `license`, `license_text` | strings, as the manifest's (4.5) |
 | `base_models` | array of `{repo, license?}` |
 | `gated` | boolean |
