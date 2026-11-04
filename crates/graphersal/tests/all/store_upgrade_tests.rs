@@ -1736,3 +1736,423 @@ mod v040_saved_queries {
         store.close().unwrap();
     }
 }
+
+/// Stores of the released 0.4.0 whose NEWEST WAL segment holds no commit, only the record of a
+/// checkpoint taken while the store was open (and a mark after it): such a checkpoint starts a
+/// segment named by the NEXT commit and writes its record there (`tests/data/v0.4.0`,
+/// `make_checkpointed.sh`). The upgraded store's next commit goes into a segment of that name:
+/// the segment is rewritten with a header of the current version, keeping its records, on every
+/// path that writes the next commit (the migration commit of an upgrade, an open, a commit to
+/// the closed store). Before the fix each of them refused the store as corrupt ("it starts at
+/// commit N, which is not committed yet"), and an in-place upgrade with models stopped half way.
+mod v040_checkpointed {
+    use super::*;
+    use graphersal::catalog::DefinitionKind;
+    use graphersal::persist::{ImportModelOptions, JournalRecord, ModelSource};
+
+    const TINY: &str = "model2vec/acme/tiny@70c61d0ed332";
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v0.4.0")
+    }
+
+    fn copy(temp: &Temp, name: &str) -> PathBuf {
+        let to = temp.join(name);
+        for (relative, bytes) in files_of(&fixtures().join(name)) {
+            let path = to.join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        to
+    }
+
+    fn in_memory(name: &str) -> MemDir {
+        let dir = MemDir::named(name);
+        for (relative, bytes) in files_of(&fixtures().join(name)) {
+            if let Some((parent, _)) = relative.rsplit_once('/') {
+                dir.create_dir_all(parent).unwrap();
+            }
+            dir.write_atomic(&relative, &bytes).unwrap();
+        }
+        dir
+    }
+
+    fn segment_name(seq: u64) -> String {
+        format!("wal/{seq:020}.wal")
+    }
+
+    /// The file format version of a segment's header and its records, one word each:
+    /// `checkpoint <seq>`, `mark <name> <seq>`, `commit <seq>`.
+    fn segment(bytes: &[u8]) -> (u32, Vec<String>) {
+        let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let records = graphersal::persist::read_journal(bytes)
+            .unwrap()
+            .map(|record| match record.unwrap() {
+                JournalRecord::Checkpoint { commit_seq, .. } => format!("checkpoint {commit_seq}"),
+                JournalRecord::Mark(mark) => format!("mark {} {}", mark.name(), mark.commit_seq()),
+                JournalRecord::Commit(changes) => format!("commit {}", changes.commit_seq()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        (version, records)
+    }
+
+    fn segment_at(dir: &Path, seq: u64) -> (u32, Vec<String>) {
+        segment(&fs::read(dir.join(segment_name(seq))).unwrap())
+    }
+
+    fn wal_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir.join("wal"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The fixtures as 0.4.0 wrote them: the newest segment, of file format 3, starts at the
+    /// commit after the store's last one and holds only the checkpoint's (and the mark's)
+    /// records.
+    #[test]
+    fn the_fixtures_end_in_a_segment_without_a_commit() {
+        for (name, next, records) in [
+            ("checkpointed", 6, vec!["checkpoint 5"]),
+            ("checkpointed_mark", 3, vec!["checkpoint 2", "mark after 2"]),
+            (
+                "checkpointed_missing",
+                4,
+                vec!["checkpoint 3", "mark after 3"],
+            ),
+        ] {
+            let dir = fixtures().join(name);
+            assert_eq!(
+                wal_names(&dir).last().unwrap(),
+                &format!("{next:020}.wal"),
+                "{name}"
+            );
+            let (version, found) = segment_at(&dir, next);
+            assert_eq!(
+                (version, found),
+                (3, records.iter().map(|r| r.to_string()).collect())
+            );
+        }
+    }
+
+    /// The upgraded `checkpointed/` store at `dir`: the migration commit (6) follows the
+    /// checkpoint's record in the rewritten segment 6, `models/` and the `INTENT` are gone, the
+    /// store verifies and opens with the model.
+    fn assert_checkpointed_upgraded(report: &UpgradeReport, dir: &Path) {
+        assert_eq!(report.migration_commit, Some(6));
+        let converted: Vec<&str> = report
+            .models_converted
+            .iter()
+            .map(|m| m.identity())
+            .collect();
+        assert_eq!(converted, [TINY]);
+        assert!(!dir.join("INTENT").exists());
+        assert!(!dir.join("models").exists());
+        assert_eq!(
+            wal_names(dir),
+            ["00000000000000000001.wal", "00000000000000000006.wal"]
+        );
+        assert_eq!(
+            segment_at(dir, 6),
+            (
+                persist_version(),
+                vec!["checkpoint 5".to_string(), "commit 6".to_string()]
+            )
+        );
+        assert!(Store::verify_dir(dir).unwrap().is_ok());
+        let store = Store::open(dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 6);
+        let identities: Vec<String> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
+        assert_eq!(identities, [TINY]);
+        assert!(
+            store
+                .graph()
+                .read()
+                .definition(DefinitionKind::MODEL, TINY)
+                .unwrap()
+                .is_some()
+        );
+        // Without the Model2Vec loader a store whose schema needs a model opens read-only:
+        // `checkpointed_mark` covers the commit an open writes.
+        store.close().unwrap();
+        assert!(Store::verify_dir(dir).unwrap().is_ok());
+    }
+
+    #[test]
+    fn an_in_place_upgrade_with_models_writes_its_commit_after_the_checkpoint_record() {
+        let temp = Temp::new("v040-cp-in-place");
+        let dir = copy(&temp, "checkpointed");
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert_checkpointed_upgraded(&report, &dir);
+    }
+
+    #[test]
+    fn an_upgrade_into_a_copy_with_models_writes_its_commit_after_the_checkpoint_record() {
+        let temp = Temp::new("v040-cp-copy");
+        let source = copy(&temp, "checkpointed");
+        let before = files_of(&source);
+        let target = temp.join("upgraded");
+        let report = Store::upgrade(&source, &target).unwrap();
+        assert_checkpointed_upgraded(&report, &target);
+        let after: Vec<_> = files_of(&source)
+            .into_iter()
+            .filter(|(name, _)| name != "LOCK" && name != "BACKUP")
+            .collect();
+        assert_eq!(after, before, "the source stays as it is");
+    }
+
+    #[test]
+    fn an_in_place_upgrade_in_memory_writes_its_commit_after_the_checkpoint_record() {
+        let dir = in_memory("checkpointed");
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert_eq!(report.migration_commit, Some(6));
+        let (version, records) = segment(&dir.read(&segment_name(6), 1 << 20).unwrap());
+        assert_eq!(
+            (version, records),
+            (
+                persist_version(),
+                vec!["checkpoint 5".to_string(), "commit 6".to_string()]
+            )
+        );
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 6);
+        assert_eq!(store.models().unwrap().len(), 1);
+    }
+
+    /// A crash after every write of the in-place upgrade of `checkpointed/`: the image opens
+    /// (as the older store, refused, or upgraded, an interrupted migration completed by the
+    /// open), and repeating the upgrade completes it with the checkpoint's record kept.
+    #[test]
+    fn an_in_place_upgrade_with_models_survives_a_crash_after_every_write() {
+        let base = in_memory("checkpointed");
+        let images = crash_images(&base, |dir| Store::upgrade_in_place(&dir).is_ok());
+        assert!(!images.is_empty());
+        for (step, image) in images.iter().enumerate() {
+            match Store::open(&image.deep_copy(), StoreOptions::new()) {
+                Err(PersistError::OlderFormat { found: 3, .. }) => {}
+                Ok(store) => {
+                    let last = store.graph().read().last_commit_seq();
+                    assert!(last == 5 || last == 6, "step {step}: {last}");
+                    store.close().unwrap();
+                }
+                Err(other) => panic!("crash after {step} writes: {other}"),
+            }
+            let again = image.deep_copy();
+            Store::upgrade_in_place(&again).unwrap_or_else(|e| panic!("step {step}: {e}"));
+            assert!(Store::verify_dir(&again).unwrap().is_ok(), "step {step}");
+            let (version, records) = segment(&again.read(&segment_name(6), 1 << 20).unwrap());
+            assert_eq!(version, persist_version(), "step {step}");
+            assert_eq!(records, ["checkpoint 5", "commit 6"], "step {step}");
+            let store = Store::open(&again, StoreOptions::new()).unwrap();
+            assert_eq!(store.graph().read().last_commit_seq(), 6, "step {step}");
+            assert_eq!(store.models().unwrap().len(), 1, "step {step}");
+            store.close().unwrap();
+        }
+    }
+
+    /// A crash after every write of the closed-store import into the upgraded
+    /// `checkpointed_missing/`: the image still refuses for the missing model or opens with it,
+    /// and repeating the import completes it, the records before its commit kept.
+    #[test]
+    fn a_closed_import_into_the_upgraded_store_survives_a_crash_after_every_write() {
+        let base = in_memory("checkpointed_missing");
+        Store::upgrade_in_place(&base).unwrap();
+        let model = fixtures().join("checkpointed/models/model2vec-70c61d0ed332");
+        let import = |dir: Arc<dyn StoreDir>| {
+            Store::import_model_dir(
+                dir,
+                ModelSource::Dir(model.clone()),
+                ImportModelOptions::new(),
+            )
+        };
+        let images = crash_images(&base, |dir| import(dir).is_ok());
+        assert!(!images.is_empty());
+        for (step, image) in images.iter().enumerate() {
+            match Store::open(&image.deep_copy(), StoreOptions::new()) {
+                Err(PersistError::Store {
+                    cause: StoreFailure::ModelUnavailable,
+                    ..
+                }) => {}
+                Ok(store) => {
+                    assert_eq!(store.graph().read().last_commit_seq(), 4, "step {step}");
+                    store.close().unwrap();
+                }
+                Err(other) => panic!("crash after {step} writes: {other}"),
+            }
+            let again = image.deep_copy();
+            import(Arc::new(again.clone())).unwrap_or_else(|e| panic!("step {step}: {e}"));
+            let (version, records) = segment(&again.read(&segment_name(4), 1 << 20).unwrap());
+            assert_eq!(version, persist_version(), "step {step}");
+            assert_eq!(
+                records,
+                ["checkpoint 3", "mark after 3", "commit 4"],
+                "step {step}"
+            );
+            // A crash between the two `GRAPH` copies leaves them differing until the next
+            // `GRAPH` write: the open uses the copy and is no maintenance mode. (This build has
+            // no Model2Vec loader, so the store, whose schema needs the model, opens read-only
+            // and its close writes no `GRAPH`: the notice stays; it is the only problem.)
+            let store = Store::open(&again, StoreOptions::new()).unwrap();
+            assert!(store.maintenance().is_none(), "step {step}");
+            assert_eq!(store.graph().read().last_commit_seq(), 4, "step {step}");
+            store.close().unwrap();
+            let report = Store::verify_dir(&again).unwrap();
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .all(|p| p.path == "GRAPH"
+                        && p.reason.starts_with("GRAPH and GRAPH.copy differ")),
+                "step {step}: {:?}",
+                report.problems
+            );
+        }
+    }
+
+    /// An interrupted write of the first commit after the records (a torn tail) is cut, the
+    /// records before it are kept.
+    #[test]
+    fn a_torn_tail_after_the_records_is_cut_and_the_records_kept() {
+        let temp = Temp::new("v040-cp-torn");
+        let dir = copy(&temp, "checkpointed_mark");
+        Store::upgrade_in_place(&dir).unwrap();
+        let path = dir.join(segment_name(3));
+        let mut bytes = fs::read(&path).unwrap();
+        let intact = bytes.len();
+        // The first 30 bytes of a record frame: its sync marker, a length and a commit_seq.
+        let frame = bytes[64..94].to_vec();
+        bytes.extend_from_slice(&frame);
+        fs::write(&path, &bytes).unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 2);
+        store
+            .graph()
+            .write()
+            .traversal_mut()
+            .add_v("person")
+            .property("name", "hedy")
+            .to_list()
+            .unwrap();
+        store.close().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.len() > intact);
+        assert_eq!(
+            segment(&bytes),
+            (
+                persist_version(),
+                vec![
+                    "checkpoint 2".to_string(),
+                    "mark after 2".to_string(),
+                    "commit 3".to_string()
+                ]
+            )
+        );
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+    }
+
+    /// The open path: the upgrade rewrites only `GRAPH` (no models), the first open's journal
+    /// continues the segment, the mark stays reachable (a rollback to it and back).
+    #[test]
+    fn the_first_commit_after_an_upgrade_follows_the_checkpoint_and_mark_records() {
+        let temp = Temp::new("v040-cp-open");
+        let dir = copy(&temp, "checkpointed_mark");
+        let report = Store::upgrade_in_place(&dir).unwrap();
+        assert_eq!(report.migration_commit, None);
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 2);
+        let marks: Vec<(String, u64)> = store
+            .marks()
+            .unwrap()
+            .iter()
+            .map(|m| (m.name().to_string(), m.commit_seq()))
+            .collect();
+        assert_eq!(marks, [("after".to_string(), 2)]);
+        store
+            .graph()
+            .write()
+            .traversal_mut()
+            .add_v("person")
+            .property("name", "hedy")
+            .to_list()
+            .unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 3);
+        store.close().unwrap();
+        assert_eq!(wal_names(&dir).len(), 2, "no other segment was started");
+        assert_eq!(
+            segment_at(&dir, 3),
+            (
+                persist_version(),
+                vec![
+                    "checkpoint 2".to_string(),
+                    "mark after 2".to_string(),
+                    "commit 3".to_string()
+                ]
+            )
+        );
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert!(names(&store.graph().read()).contains(&"hedy".to_string()));
+        store
+            .rollback_to(RecoveryTarget::Mark("after".into()), RollbackMode::Move)
+            .unwrap();
+        assert!(!names(&store.graph().read()).contains(&"hedy".to_string()));
+        let entry = store.attic_list().unwrap().pop().unwrap().id;
+        store.attic_restore(&entry).unwrap();
+        assert!(names(&store.graph().read()).contains(&"hedy".to_string()));
+        store.close().unwrap();
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+    }
+
+    /// The case reported from the field: the upgraded store refuses to open until the model its
+    /// schema names is imported; the import is a commit to the CLOSED store and goes into the
+    /// segment after the checkpoint's and the mark's records; then the store opens.
+    #[test]
+    fn a_model_the_schema_needs_imports_into_the_closed_upgraded_store() {
+        let temp = Temp::new("v040-cp-closed");
+        let dir = copy(&temp, "checkpointed_missing");
+        Store::upgrade_in_place(&dir).unwrap();
+        match Store::open(&dir, StoreOptions::new()) {
+            Err(PersistError::Store {
+                cause: StoreFailure::ModelUnavailable,
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+        let report = Store::import_model_dir(
+            &dir,
+            // The model 0.4.0 imported into `checkpointed/` (its manifest names acme/tiny).
+            ModelSource::Dir(fixtures().join("checkpointed/models/model2vec-70c61d0ed332")),
+            ImportModelOptions::new().with_default(true),
+        )
+        .unwrap();
+        assert_eq!(report.model.identity, TINY);
+        assert_eq!(
+            segment_at(&dir, 4),
+            (
+                persist_version(),
+                vec![
+                    "checkpoint 3".to_string(),
+                    "mark after 3".to_string(),
+                    "commit 4".to_string()
+                ]
+            )
+        );
+        assert!(Store::verify_dir(&dir).unwrap().is_ok());
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert_eq!(store.graph().read().last_commit_seq(), 4);
+        let models = store.models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(models[0].default);
+        assert_eq!(store.marks().unwrap().len(), 1);
+        store.close().unwrap();
+    }
+}

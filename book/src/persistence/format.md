@@ -1648,7 +1648,8 @@ single record: such a commit is small) and the next open replays it like any com
    (9.7) and write `GRAPH` without it, remove an unstarted last segment and cut a torn tail
    (9.6), complete the `marks` file (10) and the blob ledger (10.1).
 4. The commit continues the last segment unless it is of an older file format version (never
-   continued, 15) or past the segment size: then a new segment (9.7, `wal_head`). Its time is
+   continued; one that starts at this commit is rewritten in the current version with its
+   records, 15.1) or past the segment size: then a new segment (9.7, `wal_head`). Its time is
    at least every time the files hold (commits, marks, checkpoint records, the system journal's
    tail). It is synced before anything follows; a failed write is cut off again or its cut
    recorded (9.7). Then its ledger frames.
@@ -2035,8 +2036,13 @@ After an upgrade the files of file format version 1 stay where they are: snapsho
 and the attic keep their bytes, so the history is exactly what was written. A writer MUST NOT
 append to a WAL segment of an older file format version: when the newest segment of the
 lineage is older, the next record goes into a new segment of the current version (9.8:
-`wal_head` names it); a segment of an older version that holds no record (it starts at the next
-commit) is replaced whole by one of the current version under the same name.
+`wal_head` names it); a segment of an older version that holds no commit (it starts at the next
+commit) is replaced whole, atomically, by one of the current version under the same name that
+holds the same records. Such a segment is no rarity: a checkpoint taken while the store is open
+starts a segment named by the next commit and writes its Checkpoint record there (9.7), and a
+mark set afterwards adds its Mark record. Those records keep their bytes (their frames do not
+depend on the file format version), a torn tail after them is cut (9.6), and a commit record in
+the segment is damage (it holds a commit the store's state does not).
 
 A new FILE format version alone needs no upgrade and no table row: a store of store format
 version 3 written by 0.2.x (files of version 2) was opened and continued as it is by a reader of

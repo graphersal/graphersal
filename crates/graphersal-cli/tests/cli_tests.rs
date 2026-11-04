@@ -6618,3 +6618,106 @@ fn store_results_errors_and_usage_are_in_the_note_layout() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The case reported from the field, end to end: a store of the released 0.4.0 whose newest WAL
+/// segment holds only the records of a checkpoint and a mark taken while it was open
+/// (`tests/data/v0.4.0/checkpointed_missing`, `make_checkpointed.sh`), and whose schema names a
+/// model it does not keep. `store upgrade --in-place`, then `embed-model import ... --default`
+/// into the closed store (before the fix: "Corrupt .../wal/...4.wal at byte 64: it starts at
+/// commit 4, which is not committed yet"), then the store opens, embeds with the model and
+/// verifies. The upgrade of `checkpointed/` (models under `models/`, a migration commit into
+/// such a segment) succeeds as well.
+#[test]
+fn an_upgraded_store_ending_in_a_checkpoint_segment_takes_the_model_import() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("store-upgrade-040-checkpointed");
+    let _ = std::fs::remove_dir_all(&root);
+    let store = root.join("store");
+    copy_tree(&fixtures.join("checkpointed_missing"), &store);
+    let store = store.to_string_lossy().to_string();
+    let model = fixtures
+        .join("checkpointed/models/model2vec-70c61d0ed332")
+        .to_string_lossy()
+        .to_string();
+
+    let res = run(&["store", "upgrade", &store, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let res = run(&["--graph", &store, "-e", "1"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr
+            .contains("is not in the database at this position"),
+        "{}",
+        res.stderr
+    );
+    let res = run(
+        &[
+            "embed-model",
+            "import",
+            &model,
+            "--into",
+            &store,
+            "--default",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains("model2vec/acme/tiny@70c61d0ed332"),
+        "{}",
+        res.stdout
+    );
+    let res = run(
+        &[
+            "--graph",
+            &store,
+            "-e",
+            "g.v().has_label(\"person\").count().next()",
+        ],
+        "",
+    );
+    assert_eq!((res.code, res.stdout.trim()), (0, "2"), "{}", res.stderr);
+    let res = run(
+        &["--graph", &store, "-e", "embed(\"graph\").to_list().len()"],
+        "",
+    );
+    assert_eq!((res.code, res.stdout.trim()), (0, "3"), "{}", res.stderr);
+    let res = run(&["store", "verify", &store], "");
+    assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
+    let res = run(&["store", "marks", &store], "");
+    assert!(res.stdout.contains("after"), "{}", res.stdout);
+
+    let with_models = root.join("with_models");
+    copy_tree(&fixtures.join("checkpointed"), &with_models);
+    let with_models = with_models.to_string_lossy().to_string();
+    let res = run(&["store", "upgrade", &with_models, "--in-place"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("defined by commit 6"), "{}", res.stdout);
+    let res = run(&["store", "verify", &with_models], "");
+    assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A library error of `embed-model import` (here: a store of an older format version) is
+/// printed as every other one: ONE `Error: ` headline, then its `Help:`.
+#[test]
+fn embed_model_import_errors_have_one_error_headline() {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graphersal/tests/data/v0.4.0");
+    let root = temp_path("embed-model-import-error");
+    let _ = std::fs::remove_dir_all(&root);
+    let store = root.join("store");
+    copy_tree(&fixtures.join("checkpointed_mark"), &store);
+    let store = store.to_string_lossy().to_string();
+    let model = fixtures
+        .join("checkpointed/models/model2vec-70c61d0ed332")
+        .to_string_lossy()
+        .to_string();
+    let res = run(&["embed-model", "import", &model, "--into", &store], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(res.stderr.starts_with("Error: "), "{}", res.stderr);
+    assert!(!res.stderr.contains("Error: Error:"), "{}", res.stderr);
+    assert!(res.stderr.contains("\nHelp: "), "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+}

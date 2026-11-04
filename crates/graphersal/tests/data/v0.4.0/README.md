@@ -22,6 +22,9 @@ repository name (identity `model2vec@b6b362e7a651`).
 | `saved_queries/` | A directory store (written by `make_saved_queries.sh`): two `doc` vertices with a `text`, an open schema, the saved query `docs` and two saved queries calling `g.embed_property` (removed in 0.5.0): `fill` (label and properties literal) and `fill_any` (label computed). 0.4.0 refused such a body in `g.define_query`; they came in through the catalog file (`POST /api/catalog/load` of the dev server). |
 | `saved_queries.gsnap` | A packed snapshot of `saved_queries/` (after a checkpoint). |
 | `missing/` | A store whose schema names `model2vec/acme/gone@0123456789ab` (`doc.emb`), a model it does not keep (0.4.0 served such models through `--embedder`). |
+| `checkpointed/` | (written by `make_checkpointed.sh`) A directory store: the model `acme/tiny` under `models/`; vertices `doc` (2, `text` embedded into `emb`), `person` (1); commit 5 in a checkpoint taken while the store was OPEN (the dev server's `POST /api/store/checkpoint`), so the newest WAL segment `6.wal` holds no commit, only that checkpoint's record. |
+| `checkpointed_mark/` | (`make_checkpointed.sh`) Two `person` vertices, no schema, no model; commit 2 in a checkpoint taken while open and the mark `after` (2) set while open: the newest segment `3.wal` holds a Checkpoint and a Mark record. |
+| `checkpointed_missing/` | (`make_checkpointed.sh`) The same as `checkpointed_mark/` plus a schema (commit 3) naming `model2vec/acme/tiny@70c61d0ed332`, a model the store does not keep: the newest segment `4.wal` holds a Checkpoint and a Mark record; the upgraded store opens only after the model is imported into the CLOSED store. |
 
 They were produced by `make.sh` with the binary built from the tag `v0.4.0` (in a separate
 checkout: `git worktree add <dir> v0.4.0`, `cargo build -p graphersal-cli` there; needs
@@ -30,6 +33,7 @@ checkout: `git worktree add <dir> v0.4.0`, `cargo build -p graphersal-cli` there
 ```sh
 crates/graphersal/tests/data/v0.4.0/make.sh <dir>/target/debug/graphersal
 crates/graphersal/tests/data/v0.4.0/make_saved_queries.sh <dir>/target/debug/graphersal   # also needs curl
+crates/graphersal/tests/data/v0.4.0/make_checkpointed.sh <dir>/target/debug/graphersal    # also needs curl
 ```
 
 The script lists every command. The lock files (`LOCK`, `BACKUP`) are removed afterwards; they
