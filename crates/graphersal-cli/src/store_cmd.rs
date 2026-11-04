@@ -2105,7 +2105,13 @@ pub fn run(args: &[String]) -> i32 {
                     }
                     if report.is_lossless() {
                         outln!();
-                        print_block(&use_it(Note::new("ok: nothing lost"), &to).text());
+                        let note = Note::new("ok: all data kept")
+                            .detail("not carried", report.not_carried())
+                            .detail(
+                                "kept in",
+                                format!("{} (keep it while you need them)", positional[0]),
+                            );
+                        print_block(&use_it(note, &to).text());
                         EXIT_OK
                     } else {
                         errln!(

@@ -1,0 +1,43 @@
+{
+  "format": 2,
+  "family": "model2vec",
+  "identity": "model2vec/acme/tiny@70c61d0ed332",
+  "repo": "acme/tiny",
+  "license": "mit",
+  "license_text": "template",
+  "base_models": [],
+  "gated": false,
+  "added_at": "2026-11-04T07:42:13Z",
+  "files": [
+    {
+      "name": "config.json",
+      "role": "config",
+      "size": 19,
+      "sha256": "3c3e436f6bb3071f0422a97caf2383cad51e32896227132a9834803cce974707"
+    },
+    {
+      "name": "tokenizer.json",
+      "role": "tokenizer",
+      "size": 308,
+      "sha256": "8bff14214c919eae5b1e104c2b93f5cae16be62f7260ec4d4fc8d88862ae6679"
+    },
+    {
+      "name": "model.safetensors",
+      "role": "model",
+      "size": 136,
+      "sha256": "492f852ac2c41b22d297ea534f9369071e4e87227f7f723b13b760a34bc3f134"
+    },
+    {
+      "name": "README.md",
+      "role": "card",
+      "size": 36,
+      "sha256": "f2cb0f001f8d2e28c179c10ecf98c55515eee068582f862e1381a04bee3d0125"
+    },
+    {
+      "name": "LICENSE",
+      "role": "license",
+      "size": 1404,
+      "sha256": "91c3923830c5d4cb10863be9bd6c861f8ab26ed55773a391a693fb9c2787ba8f"
+    }
+  ]
+}

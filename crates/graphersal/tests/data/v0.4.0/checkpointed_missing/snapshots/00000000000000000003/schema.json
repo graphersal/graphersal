@@ -1,0 +1,1 @@
+{"$schema":"https://graphersal.dev/schema/v1","mode":"open","vertices":{"doc":{"schema":{"type":"object","properties":{"emb":{"type":"array","format":"vector","element":"f32","dimension":3,"embedder":"model2vec/acme/tiny@70c61d0ed332"}}}}},"edges":{}}

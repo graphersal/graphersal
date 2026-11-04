@@ -272,7 +272,8 @@ impl DamageReport {
         self.damage.is_empty()
     }
 
-    /// Whether a repair loses nothing: every damaged item has a donor.
+    /// Whether a repair keeps all data of the readable state: every damaged item has a donor. (A
+    /// repair never carries the history before that state nor the marks, see [`RepairReport`].)
     pub fn is_recoverable(&self) -> bool {
         self.damage.iter().all(Damage::is_recoverable)
     }
@@ -290,7 +291,7 @@ impl std::fmt::Display for DamageReport {
             },
             self.commit_seq,
             if self.is_recoverable() {
-                "a repair loses nothing"
+                "a repair keeps all data"
             } else {
                 "a repair LOSES data (see the items without a donor)"
             }
@@ -401,7 +402,25 @@ impl RepairOptions {
 }
 
 impl RepairReport {
-    /// Whether the repair lost nothing and nothing diverged.
+    /// What a repair never carries into the repaired store, even when it loses no data, in
+    /// words: the history before the repaired position (the store holds one snapshot of it), the
+    /// marks (their count, when the damaged store has any) and the store id (a new lineage and
+    /// store: the damaged store's backups are not continued). The store it was built from keeps
+    /// them.
+    pub fn not_carried(&self) -> String {
+        let mut parts = vec![format!("the history before commit {}", self.commit_seq)];
+        match self.marks_not_carried.len() {
+            0 => {}
+            1 => parts.push("1 mark".to_string()),
+            n => parts.push(format!("{n} marks")),
+        }
+        parts.push("the store id (backups start anew)".to_string());
+        let last = parts.pop().unwrap_or_default();
+        format!("{} and {last}", parts.join(", "))
+    }
+
+    /// Whether the repair lost no data of the readable state and nothing diverged. The history
+    /// before it and the marks are never carried ([`Self::not_carried`]).
     pub fn is_lossless(&self) -> bool {
         self.lost_commits.is_empty()
             && self.lost_ranges.is_empty()
@@ -419,7 +438,7 @@ impl std::fmt::Display for RepairReport {
             self.commit_seq,
             crate::value::uuid::format_canonical(self.graph_id),
             if self.is_lossless() {
-                "nothing lost"
+                "all data kept"
             } else {
                 "DATA LOST OR DIVERGED, see below"
             }
@@ -457,6 +476,12 @@ impl std::fmt::Display for RepairReport {
         for reason in &self.models_not_carried {
             writeln!(f, "  model not carried: {reason}")?;
         }
+        // What a repair never carries, also when no data is lost (format spec 13).
+        writeln!(
+            f,
+            "  not carried: {}; the store it was built from keeps them",
+            self.not_carried()
+        )?;
         Ok(())
     }
 }

@@ -1561,3 +1561,98 @@ fn rollback_splits_before_a_commit_in_parts() {
     assert_eq!(names_of(&store.graph().read()), full);
     assert!(store.verify().unwrap().is_ok());
 }
+
+/// [`carried_records`] of an older segment named by the next commit (`new_journal`): its
+/// checkpoint and mark records are kept, a torn tail after them is cut, and a commit record in
+/// it (a commit the store's state does not hold) stays damage.
+#[test]
+fn an_older_segment_starting_at_the_next_commit_keeps_only_its_mark_and_checkpoint_records() {
+    use super::super::wal::{
+        RECORD_CHECKPOINT, RECORD_COMMIT, RECORD_MARK, WAL_HEADER_BYTES, WalHeader, encode_commit,
+        encode_mark, frame_record,
+    };
+    use crate::change::{ChangeSet, CommitMetadata, CommitStamp, Mutation};
+    use crate::graph::hooks::Mark;
+
+    let header = WalHeader {
+        graph_id: 7,
+        first_commit_seq: 5,
+        created_at: 1,
+    }
+    .encode();
+    let mut checkpoint = Vec::new();
+    let mut payload = 4u64.to_le_bytes().to_vec();
+    payload.extend_from_slice(&2i64.to_le_bytes());
+    frame_record(&mut checkpoint, RECORD_CHECKPOINT, 4, &payload).unwrap();
+    let mut mark = Vec::new();
+    frame_record(
+        &mut mark,
+        RECORD_MARK,
+        4,
+        &encode_mark(&Mark::new("after", 4, 3)),
+    )
+    .unwrap();
+    let changes = ChangeSet::new(
+        CommitStamp {
+            commit_seq: 5,
+            committed_at: 4,
+            node_sequence: 1,
+            edge_sequence: 0,
+        },
+        CommitMetadata::new(),
+        vec![Mutation::AddLabel {
+            id: "v0".into(),
+            label: "person".into(),
+        }],
+    );
+    let mut commit = Vec::new();
+    frame_record(
+        &mut commit,
+        RECORD_COMMIT,
+        5,
+        &encode_commit(&changes, Default::default()).unwrap(),
+    )
+    .unwrap();
+
+    let dir = MemDir::new();
+    dir.create_dir_all("wal").unwrap();
+    let path = root(&dir).join("wal/00000000000000000005.wal");
+    let carried = |bytes: &[u8]| {
+        dir.write_atomic("wal/00000000000000000005.wal", bytes)
+            .unwrap();
+        carried_records(&path, bytes.len() as u64, 5)
+    };
+    // Only a header: nothing to carry.
+    assert_eq!(carried(&header).unwrap(), Vec::<u8>::new());
+    // A checkpoint and a mark record: both carried, byte for byte.
+    let records = [checkpoint.clone(), mark.clone()].concat();
+    let whole = [header.clone(), records.clone()].concat();
+    assert_eq!(carried(&whole).unwrap(), records);
+    // A torn tail after them (every cut of the commit record that follows): cut off.
+    for cut in 1..commit.len() {
+        let torn = [whole.clone(), commit[..cut].to_vec()].concat();
+        assert_eq!(carried(&torn).unwrap(), records, "cut at {cut}");
+    }
+    // A whole commit record: damage, at the offset of the record.
+    let with_commit = [whole.clone(), commit.clone()].concat();
+    match carried(&with_commit) {
+        Err(PersistError::Corrupt {
+            location,
+            offset,
+            reason,
+        }) => {
+            assert_eq!(location, path.display());
+            assert_eq!(offset, (WAL_HEADER_BYTES + records.len()) as u64);
+            assert!(reason.contains("not committed yet"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A damaged record (a flipped payload byte of the mark): damage naming the segment.
+    let mut flipped = whole.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x40;
+    match carried(&flipped) {
+        Err(PersistError::Corrupt { location, .. }) => assert_eq!(location, path.display()),
+        other => panic!("{other:?}"),
+    }
+}
