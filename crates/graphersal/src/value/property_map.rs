@@ -227,6 +227,9 @@ pub(crate) struct Layout {
     /// string below the rule's `min_bytes`): an in-place write of a value the rule would code
     /// takes the generic path, which codes it.
     pub(crate) rules: Box<[Option<Arc<ValueDictionary>>]>,
+    /// Whether the layout table holds this layout (a key-adding or key-removing write of a
+    /// coded row makes a transient one, which the following `code_row` interns).
+    pub(crate) interned: bool,
 }
 
 impl Layout {
@@ -315,6 +318,16 @@ impl Coded {
     pub(crate) fn row_bytes(&self) -> u64 {
         shaped_values_bytes(self.own.len()) + self.codes.len() as u64 * CODE_BYTES
     }
+}
+
+/// A stored value reached without turning a coded row plain ([`PropertyMap::stored_value_mut`]).
+pub(crate) enum StoredSlot<'a> {
+    /// The key is absent.
+    Absent,
+    /// The value the map holds itself.
+    Value(&'a mut ElementProperty),
+    /// A coded value (it lives in its dictionary, plain by construction).
+    Coded,
 }
 
 /// What an in-place write of a coded row replaced ([`PropertyMap::coded_replace`]).
@@ -637,6 +650,43 @@ impl PropertyMap {
         match &self.0 {
             Repr::Indexed(_) | Repr::Coded(_) => None,
             Repr::Shaped(shaped) => Some((&shaped.shape, &shaped.values)),
+        }
+    }
+
+    /// The value of `key` for an in-place update that keeps a coded row coded: an own value
+    /// mutably, a coded one as [`StoredSlot::Coded`]; any other map as [`Self::get_mut`].
+    pub(crate) fn stored_value_mut(&mut self, key: &str) -> StoredSlot<'_> {
+        match &mut self.0 {
+            Repr::Coded(coded) => {
+                let Some(position) = coded.layout.shape.position(key) else {
+                    return StoredSlot::Absent;
+                };
+                if coded.layout.coded_at(position).is_some() {
+                    return StoredSlot::Coded;
+                }
+                let at = coded
+                    .layout
+                    .slots
+                    .get(position)
+                    .copied()
+                    .unwrap_or(u32::MAX) as usize;
+                match coded.own.get_mut(at) {
+                    Some(value) => StoredSlot::Value(value),
+                    None => StoredSlot::Absent,
+                }
+            }
+            Repr::Indexed(map) => match map.get_mut(key) {
+                Some(value) => StoredSlot::Value(value),
+                None => StoredSlot::Absent,
+            },
+            Repr::Shaped(shaped) => match shaped
+                .shape
+                .position(key)
+                .and_then(|position| shaped.values.get_mut(position))
+            {
+                Some(value) => StoredSlot::Value(value),
+                None => StoredSlot::Absent,
+            },
         }
     }
 

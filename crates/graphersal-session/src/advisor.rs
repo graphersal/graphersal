@@ -6,7 +6,8 @@
 //!
 //! - a **spec** (`advise`, `apply_recommendation`): `{everything?, min_filter_runs?,
 //!   min_index_elements?, min_observed_days?, min_compression_bytes?, min_saving_bytes?,
-//!   min_saving_percent?, hot_reads?, max_estimates?}` (or `null`): the thresholds of
+//!   min_saving_percent?, hot_reads?, max_estimates?, min_dedup_saving_bytes?,
+//!   dedup_distinct_ratio?, max_dedup_estimates?}` (or `null`): the thresholds of
 //!   [`AdviceRequest`], from its defaults, or from [`AdviceRequest::everything`] (every
 //!   candidate, for small graphs) with `everything: true`; a given threshold wins either way;
 //! - the **advice** (`advise`): `{ok: true, advice}` with [`graphersal::advisor::Advice::to_property`]
@@ -33,7 +34,7 @@ use serde_json::{Value, json};
 use crate::Session;
 
 /// The keys a spec may have.
-const KEYS: [&str; 9] = [
+const KEYS: [&str; 12] = [
     "everything",
     "min_filter_runs",
     "min_index_elements",
@@ -43,6 +44,9 @@ const KEYS: [&str; 9] = [
     "min_saving_percent",
     "hot_reads",
     "max_estimates",
+    "min_dedup_saving_bytes",
+    "dedup_distinct_ratio",
+    "max_dedup_estimates",
 ];
 
 /// The request of a spec (module docs).
@@ -96,6 +100,15 @@ pub fn advice_request(spec: &Value) -> Result<AdviceRequest, SessionError> {
     }
     if let Some(n) = number("max_estimates")? {
         request.max_estimates = usize::try_from(n).unwrap_or(usize::MAX);
+    }
+    if let Some(n) = number("min_dedup_saving_bytes")? {
+        request.min_dedup_saving_bytes = n;
+    }
+    if let Some(n) = number("dedup_distinct_ratio")? {
+        request.dedup_distinct_ratio = n;
+    }
+    if let Some(n) = number("max_dedup_estimates")? {
+        request.max_dedup_estimates = usize::try_from(n).unwrap_or(usize::MAX);
     }
     Ok(request)
 }

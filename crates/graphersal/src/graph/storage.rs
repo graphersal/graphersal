@@ -1628,6 +1628,29 @@ impl UnitMark {
     }
 }
 
+/// A jpath write in place on a stored map: a coded row gets the new top-level value through
+/// [`PropertyMap::coded_replace`] (a copy of the coded value written at the path; the row stays
+/// coded), any other map through [`write_path_in`] and a re-adoption.
+fn write_path_stored(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    map: &mut PropertyMap,
+    path: &crate::value::JsonPath,
+    value: ElementProperty,
+) -> Result<(), GraphError> {
+    if map.coded().is_some() {
+        let name = path_property_name(path)?;
+        let (key, resulting) =
+            crate::graph::write_checks::write_path(map.get(name.as_str()), path, value)?;
+        if let Err(resulting) = map.coded_replace(&key, resulting) {
+            shapes.insert_full(map, key, resulting);
+        }
+        return Ok(());
+    }
+    let written = write_path_in(map, path, value);
+    shapes.adopt(map);
+    written
+}
+
 impl GraphStorage for TraversalGraph {
     type VertexId = VertexHandle;
     type EdgeId = EdgeHandle;
@@ -2328,9 +2351,7 @@ impl GraphStorage for TraversalGraph {
             self.pindex_vertex(node, false, Some(name));
             let written = self
                 .with_vertex_map(node, |shapes, map| {
-                    let written = write_path_in(map, path, value);
-                    shapes.adopt(map);
-                    written
+                    write_path_stored(shapes, map, path, value)
                 })
                 .unwrap_or_else(|| Err(GraphError::vertex_removed()));
             self.compression_normalize_vertex_key(node, name);
@@ -2389,10 +2410,12 @@ impl GraphStorage for TraversalGraph {
             self.pindex_edge(edge, false, Some(name));
             let written = self
                 .with_edge_map(edge, |shapes, map| {
-                    let properties = map.get_or_insert_with(PropertyMap::default);
-                    let written = write_path_in(properties, path, value);
-                    shapes.adopt(properties);
-                    written
+                    write_path_stored(
+                        shapes,
+                        map.get_or_insert_with(PropertyMap::default),
+                        path,
+                        value,
+                    )
                 })
                 .unwrap_or_else(|| Err(GraphError::edge_removed()));
             self.compression_normalize_edge_key(edge, name);

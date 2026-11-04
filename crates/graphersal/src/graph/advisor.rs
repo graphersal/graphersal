@@ -60,9 +60,13 @@ pub struct AdviceRequest {
     /// `add_compression` / `drop_compression`: the reads in two days that make a key hot
     /// (default 1,000).
     pub hot_reads: u64,
-    /// `add_compression`: the most properties measured (the largest first; default 10), for
-    /// the large strings and again for the repeated values.
+    /// `add_compression`: the most large-string properties measured (the largest first;
+    /// default 10).
     pub max_estimates: usize,
+    /// `add_compression` with `dedup`: the most properties of repeated values measured (the
+    /// most values first; default 200). A dedup estimate is exact and cheap (one pass over the
+    /// values, no trial compression).
+    pub max_dedup_estimates: usize,
     /// `add_compression` with `dedup`: the bytes it must save (default 1 MiB).
     pub min_dedup_saving_bytes: u64,
     /// `add_compression` with `dedup`: at most one value in this many is distinct (default 8).
@@ -82,6 +86,7 @@ impl Default for AdviceRequest {
             max_estimates: 10,
             min_dedup_saving_bytes: 1024 * 1024,
             dedup_distinct_ratio: 8,
+            max_dedup_estimates: 200,
         }
     }
 }
@@ -106,6 +111,7 @@ impl AdviceRequest {
             max_estimates: 50,
             min_dedup_saving_bytes: 1,
             dedup_distinct_ratio: 8,
+            max_dedup_estimates: 500,
         }
     }
 }
@@ -940,7 +946,7 @@ pub fn compute(
         })
         .collect();
     repeated.sort_by_key(|c| std::cmp::Reverse(c.3));
-    repeated.truncate(request.max_estimates);
+    repeated.truncate(request.max_dedup_estimates);
     for (element, label, key, _) in repeated {
         let Ok(estimate_request) = CompressionEstimateRequest::new(element, label, key.as_str())
         else {

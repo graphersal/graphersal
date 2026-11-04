@@ -2644,6 +2644,15 @@
                   },
                   "max_estimates": {
                     "type": "integer"
+                  },
+                  "min_dedup_saving_bytes": {
+                    "type": "integer"
+                  },
+                  "dedup_distinct_ratio": {
+                    "type": "integer"
+                  },
+                  "max_dedup_estimates": {
+                    "type": "integer"
                   }
                 },
                 "description": "The advisor's thresholds; `{}`: the defaults, `everything: true`: every candidate."

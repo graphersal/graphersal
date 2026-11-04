@@ -778,6 +778,7 @@ impl LayoutTable {
             slots: key.slots.clone(),
             dicts: dicts.into_boxed_slice(),
             rules: rules.into_boxed_slice(),
+            interned: true,
         });
         self.layouts.insert(key, Arc::clone(&layout));
         layout
@@ -899,7 +900,11 @@ impl CompressionRules {
         properties: &mut PropertyMap,
         key: &str,
     ) {
-        if let Some(value) = properties.get_mut(key) {
+        // A coded value is plain by construction: only an own value is normalized (a coded row
+        // stays coded).
+        if let crate::value::property_map::StoredSlot::Value(value) =
+            properties.stored_value_mut(key)
+        {
             if self.applies(element, labels) {
                 let rules = self.for_key(element, labels, key);
                 normalize_value(value, &rules, false);
@@ -982,6 +987,43 @@ impl CompressionRules {
         let Some(shape) = map.stored_shape().map(Arc::clone) else {
             return;
         };
+        // A coded row already coded as the rules ask: nothing is built (the common case after
+        // an in-place write); a transient layout that codes rightly is only interned.
+        if let Some(coded) = map.coded() {
+            let layout = &coded.layout;
+            let same = |have: Option<&Arc<ValueDictionary>>,
+                        want: Option<&Arc<ValueDictionary>>| {
+                match (have, want) {
+                    (None, None) => true,
+                    (Some(have), Some(want)) => Arc::ptr_eq(have, want),
+                    _ => false,
+                }
+            };
+            let unchanged = shape.keys.iter().enumerate().all(|(position, key)| {
+                let rule = self.coded_dictionary(element, labels, key);
+                let want = rule.filter(|d| {
+                    coded
+                        .value_at(position)
+                        .is_some_and(|value| d.accepts(value))
+                });
+                same(layout.rules.get(position).and_then(Option::as_ref), rule)
+                    && same(layout.coded_at(position).map(|(_, d)| d), want)
+            });
+            if unchanged {
+                if !layout.interned {
+                    let interned = self.layouts.lock().intern(
+                        &shape,
+                        layout.slots.to_vec(),
+                        layout.dicts.to_vec(),
+                        layout.rules.to_vec(),
+                    );
+                    if let Repr::Coded(coded) = &mut map.0 {
+                        coded.layout = interned;
+                    }
+                }
+                return;
+            }
+        }
         let mut target: Vec<Option<&Arc<ValueDictionary>>> = Vec::with_capacity(shape.len());
         let mut rules: Vec<Option<Arc<ValueDictionary>>> = Vec::with_capacity(shape.len());
         let mut any = false;
@@ -1000,6 +1042,7 @@ impl CompressionRules {
             return;
         }
         if let Some(coded) = map.coded()
+            && coded.layout.interned
             && target.iter().enumerate().all(|(position, want)| {
                 match (coded.layout.coded_at(position), want) {
                     (None, None) => true,
@@ -1020,7 +1063,68 @@ impl CompressionRules {
         {
             return;
         }
-        map.plain_mut();
+        if let Repr::Coded(coded) = &mut map.0 {
+            // A coded row is re-coded position by position: a code whose dictionary stays is
+            // kept, nothing is decoded that stays coded.
+            let old = Arc::clone(&coded.layout);
+            let codes = std::mem::take(&mut coded.codes);
+            let mut own_values: Vec<Option<ElementProperty>> = std::mem::take(&mut coded.own)
+                .into_vec()
+                .into_iter()
+                .map(Some)
+                .collect();
+            let mut own = Vec::new();
+            let mut new_codes = Vec::new();
+            let mut slots = Vec::with_capacity(target.len());
+            let mut dicts = Vec::new();
+            for (position, want) in target.into_iter().enumerate() {
+                let value = match old.coded_at(position) {
+                    Some((at, have)) => {
+                        let code = codes.get(at).copied().unwrap_or(u32::MAX);
+                        if let Some(want) = want
+                            && Arc::ptr_eq(have, want)
+                        {
+                            slots.push(CODED_SLOT | new_codes.len() as u32);
+                            new_codes.push(code);
+                            dicts.push(Arc::clone(want));
+                            continue;
+                        }
+                        have.get(code).cloned().unwrap_or(ElementProperty::Null)
+                    }
+                    None => old
+                        .slots
+                        .get(position)
+                        .and_then(|slot| own_values.get_mut(*slot as usize))
+                        .and_then(Option::take)
+                        .unwrap_or(ElementProperty::Null),
+                };
+                let value = match want {
+                    Some(want) => match want.intern(value) {
+                        Ok(code) => {
+                            slots.push(CODED_SLOT | new_codes.len() as u32);
+                            new_codes.push(code);
+                            dicts.push(Arc::clone(want));
+                            continue;
+                        }
+                        Err(value) => value,
+                    },
+                    None => value,
+                };
+                slots.push(own.len() as u32);
+                own.push(value);
+            }
+            *map = if new_codes.is_empty() {
+                PropertyMap::from_shaped(shape, own)
+            } else {
+                let layout = self.layouts.lock().intern(&shape, slots, dicts, rules);
+                PropertyMap::from_coded(
+                    layout,
+                    own.into_boxed_slice(),
+                    new_codes.into_boxed_slice(),
+                )
+            };
+            return;
+        }
         let Repr::Shaped(shaped) = &mut map.0 else {
             return;
         };
@@ -1065,6 +1169,9 @@ impl CompressionRules {
                 .coded()
                 .map(|_| "a coded row without a shape".to_string());
         };
+        if map.coded().is_some_and(|coded| !coded.layout.interned) {
+            return Some("a coded row keeps a transient layout".to_string());
+        }
         for (position, key) in shape.keys.iter().enumerate() {
             let want = self.coded_dictionary(element, labels, key).filter(|d| {
                 map.value_at_position(position)

@@ -302,6 +302,31 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) -> (usize, Option<ElementProperty>) {
+        // A new key of a coded row of this table: appended as an own value, the row stays
+        // coded (the caller codes it again: `CompressionRules::code_row`).
+        if let Repr::Coded(coded) = &mut map.0
+            && self.owns(&coded.layout.shape)
+            && coded.layout.shape.position(&key).is_none()
+        {
+            let position = coded.len();
+            let shape = self.with_key_at(&coded.layout.shape, position, key);
+            let layout = &coded.layout;
+            let mut slots = layout.slots.to_vec();
+            slots.push(coded.own.len() as u32);
+            let mut rules = layout.rules.to_vec();
+            rules.push(None);
+            coded.layout = Arc::new(crate::value::property_map::Layout {
+                shape,
+                slots: slots.into_boxed_slice(),
+                dicts: layout.dicts.clone(),
+                rules: rules.into_boxed_slice(),
+                interned: false,
+            });
+            let mut own = std::mem::take(&mut coded.own).into_vec();
+            own.push(value);
+            coded.own = own.into_boxed_slice();
+            return (position, None);
+        }
         map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
@@ -327,6 +352,11 @@ impl ShapeTable {
         map: &mut PropertyMap,
         key: &str,
     ) -> Option<(usize, CompactString, ElementProperty)> {
+        if let Repr::Coded(coded) = &mut map.0
+            && self.owns(&coded.layout.shape)
+        {
+            return self.coded_remove(coded, key);
+        }
         map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
@@ -339,6 +369,78 @@ impl ShapeTable {
         let stored = shaped.shape.keys.get(position)?.clone();
         shaped.shape = self.without_position(&shaped.shape, position);
         let value = shaped.values.remove(position);
+        Some((position, stored, value))
+    }
+
+    /// [`Self::shift_remove_full`] of a coded row: the position leaves the layout (a transient
+    /// one, interned by the following `code_row`), an own value moves out, a coded one is
+    /// cloned out of its dictionary.
+    fn coded_remove(
+        &mut self,
+        coded: &mut crate::value::property_map::Coded,
+        key: &str,
+    ) -> Option<(usize, CompactString, ElementProperty)> {
+        use crate::value::property_map::CODED_SLOT;
+        let layout = Arc::clone(&coded.layout);
+        let position = layout.shape.position(key)?;
+        let stored = layout.shape.keys.get(position)?.clone();
+        let removed = *layout.slots.get(position)?;
+        let shape = self.without_position(&layout.shape, position);
+        let mut slots = Vec::with_capacity(layout.slots.len().saturating_sub(1));
+        for (at, slot) in layout.slots.iter().enumerate() {
+            if at == position {
+                continue;
+            }
+            let coded_slot = slot & CODED_SLOT != 0;
+            let index = slot & !CODED_SLOT;
+            // The indexes after the removed one of its kind move down by one.
+            let shifted =
+                if coded_slot == (removed & CODED_SLOT != 0) && index > (removed & !CODED_SLOT) {
+                    index - 1
+                } else {
+                    index
+                };
+            slots.push(if coded_slot {
+                CODED_SLOT | shifted
+            } else {
+                shifted
+            });
+        }
+        let mut dicts = layout.dicts.to_vec();
+        let mut rules = layout.rules.to_vec();
+        if position < rules.len() {
+            rules.remove(position);
+        }
+        // Checked before anything changes: a broken row is left as it is.
+        let at = (removed & !CODED_SLOT) as usize;
+        let is_coded = removed & CODED_SLOT != 0;
+        if (is_coded && (at >= coded.codes.len() || at >= dicts.len()))
+            || (!is_coded && at >= coded.own.len())
+        {
+            return None;
+        }
+        let value = if is_coded {
+            let mut codes = std::mem::take(&mut coded.codes).into_vec();
+            let code = codes.remove(at);
+            let dictionary = dicts.remove(at);
+            coded.codes = codes.into_boxed_slice();
+            dictionary
+                .get(code)
+                .cloned()
+                .unwrap_or(ElementProperty::Null)
+        } else {
+            let mut own = std::mem::take(&mut coded.own).into_vec();
+            let value = own.remove(at);
+            coded.own = own.into_boxed_slice();
+            value
+        };
+        coded.layout = Arc::new(crate::value::property_map::Layout {
+            shape,
+            slots: slots.into_boxed_slice(),
+            dicts: dicts.into_boxed_slice(),
+            rules: rules.into_boxed_slice(),
+            interned: false,
+        });
         Some((position, stored, value))
     }
 
