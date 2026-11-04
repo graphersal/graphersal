@@ -487,7 +487,8 @@ class Graph:
         policy: Optional[AccessPolicy] = None,
     ) -> dict[str, Any]:
         """Where the graph's memory goes per label and top-level property (rows, labels,
-        shapes, indexes, compression rules, structure); changes nothing. ``max_elements`` /
+        shapes, indexes, compression rules, structure) and where the process memory goes
+        (``components``, ``attributed_bytes``, ``unattributed_bytes``); changes nothing. ``max_elements`` /
         ``sample_every`` sample; ``limit`` keeps the property rows and the label rows with the
         most bytes (default 500), ``max_rows`` / ``max_labels`` one list each; the rows left
         out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...)."""

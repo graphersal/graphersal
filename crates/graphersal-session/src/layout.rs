@@ -637,6 +637,42 @@ pub fn slice_budget(ms: f64) -> Duration {
 }
 
 impl LayoutJobs {
+    /// The estimated bytes of the running jobs and the cached layouts (their buffers, inputs
+    /// and positions): the session's part of the memory report.
+    pub fn memory_bytes(&self) -> u64 {
+        fn input(input: &LayoutInput) -> usize {
+            (input.edge_source.capacity() + input.edge_target.capacity()) * 4
+        }
+        let jobs: usize = self
+            .jobs
+            .iter()
+            .map(|job| {
+                let layout = &job.layout;
+                std::mem::size_of::<Job>()
+                    + input(&job.key.0)
+                    + (layout.pos.capacity()
+                        + layout.force.capacity()
+                        + layout.previous.capacity()
+                        + layout.mass.capacity())
+                        * 8
+                    + layout.edges.capacity() * 8
+                    + layout.order.capacity() * 4
+                    + layout.cells.capacity() * std::mem::size_of::<Cell>()
+                    + layout.stack.capacity() * 4
+            })
+            .sum();
+        let cache: usize = self
+            .cache
+            .iter()
+            .map(|((key, _), positions)| {
+                std::mem::size_of::<((LayoutInput, LayoutOptions), Vec<f32>)>()
+                    + input(key)
+                    + positions.capacity() * 4
+            })
+            .sum();
+        (jobs + cache) as u64
+    }
+
     /// Starts a layout of `input` (or finds it in the cache: `state` is `done` at once, `cached`
     /// true) and returns its job id.
     pub fn start(

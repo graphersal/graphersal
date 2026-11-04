@@ -4,8 +4,8 @@
 //! `null` (the structure of a storage that does not report one, a label's slot bytes).
 
 use super::{
-    DegreeStats, LabelMemory, MemoryReport, PropertyMemory, PropertyTarget, RuleMemory,
-    StringMemory, StructureMemory,
+    DegreeStats, LabelMemory, MemoryComponent, MemoryReport, PropertyMemory, PropertyTarget,
+    RuleMemory, StringMemory, StructureMemory,
 };
 use crate::graph::memory::MemoryStats;
 use crate::graph::property_index::PropertyIndexInfo;
@@ -209,12 +209,25 @@ fn structure(structure: &StructureMemory) -> ElementProperty {
     object(map)
 }
 
+fn component(part: &MemoryComponent) -> ElementProperty {
+    let mut map = PropertyMap::default();
+    map.insert("name", text(&part.name));
+    map.insert(
+        "detail",
+        part.detail.as_deref().map_or(ElementProperty::Null, text),
+    );
+    map.insert("bytes", int(part.bytes));
+    map.insert("exact", ElementProperty::from(part.exact));
+    object(map)
+}
+
 impl MemoryReport {
     /// The report as a value: an object with `properties`, `rows_omitted`,
     /// `rows_omitted_bytes`, `labels`, `labels_omitted`, `labels_omitted_elements`,
     /// `labels_omitted_bytes`, `labels_omitted_property_bytes`, `shapes`,
     /// `indexes`, `compression_rules`, `structure` (`null` when the storage does not report
-    /// one), `property_bytes`, `estimated_total_bytes`, `tracked_live_bytes`,
+    /// one), `property_bytes`, `estimated_total_bytes`, `tracked_live_bytes`, `components`
+    /// (`[{name, detail, bytes, exact}]`, [`MemoryReport::components`]), `attributed_bytes`,
     /// `unattributed_bytes`, `sampled`, `sample_every`, `visited_elements`, `path_depth`,
     /// `commit_seq` and `elapsed_ms`. A property row names its `element`, `label` and `path`
     /// (`"$.name"`) and carries the figures of [`PropertyMemory`] under their field names, with
@@ -272,6 +285,8 @@ impl MemoryReport {
             optional(self.estimated_total_bytes()),
         );
         map.insert("tracked_live_bytes", optional(self.tracked_live_bytes));
+        map.insert("components", list(&self.components, component));
+        map.insert("attributed_bytes", int(self.attributed_bytes()));
         map.insert(
             "unattributed_bytes",
             self.unattributed_bytes()

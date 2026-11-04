@@ -31,6 +31,18 @@ struct Block {
 }
 
 impl History {
+    /// The estimated bytes the history holds: the sealed blocks, the tail's events as JSON text
+    /// and its message slots (the memory report).
+    pub fn memory_bytes(&self) -> u64 {
+        let blocks: usize = self.blocks.iter().map(|block| block.data.capacity()).sum();
+        let events: usize = self
+            .events
+            .iter()
+            .map(|event| event.to_string().len())
+            .sum();
+        (blocks + events + self.messages.capacity() * std::mem::size_of::<Message>()) as u64
+    }
+
     /// Appends a message to the tail.
     pub fn push_message(&mut self, message: Message) {
         self.messages.push(message);

@@ -136,7 +136,12 @@ pub(crate) enum ModelLoadState {
 pub(crate) struct LoadedModel {
     #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
     model: super::Model2Vec,
+    /// What it holds in memory: counted at its load when a tracking allocator is installed
+    /// ([`Self::exact`]), else the loader's estimate.
     bytes: u64,
+    /// `bytes` was counted by the tracking allocator (the live bytes the load left on its
+    /// thread), not estimated.
+    exact: bool,
     repo: String,
     identity: String,
     /// The texts per second a calibration batch ran at right after the load (the time
@@ -173,6 +178,26 @@ fn cache() -> &'static Mutex<HashMap<Vec<u8>, Weak<LoadedModel>>> {
 /// once): what the estimated memory figures add when no tracking allocator counts them.
 pub(crate) fn loaded_model_bytes() -> u64 {
     LOADED_BYTES.load(Ordering::Acquire)
+}
+
+/// The embedding models loaded in this process (each blob once), as memory report components
+/// (`embedding_model`, the identity as detail; exact when counted at the load).
+pub(crate) fn loaded_models() -> Vec<crate::graph::MemoryComponent> {
+    let mut models: Vec<_> = cache()
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .map(|model| {
+            let part = if model.exact {
+                crate::graph::MemoryComponent::exact("embedding_model", model.bytes)
+            } else {
+                crate::graph::MemoryComponent::estimated("embedding_model", model.bytes)
+            };
+            part.with_detail(model.identity.as_str())
+        })
+        .collect();
+    models.sort_by(|a, b| a.detail.cmp(&b.detail));
+    models
 }
 
 /// The texts per second the loaded model `identity` measured at its load, if it is loaded in
@@ -242,6 +267,9 @@ fn load_uncached(
     };
     let (config, tokenizer, weights) = (file("config")?, file("tokenizer")?, file("model")?);
     let options = super::Model2VecOptions::default().with_repo(model.repo());
+    // What the model holds is counted once, here, when a tracking allocator is installed: the
+    // tokenizer's in-memory form is many times its file (the estimate counts the file).
+    let live_before = crate::traversal::memory_budget::thread_live_bytes();
     let loaded = super::Model2Vec::load_bytes(
         CompactString::from(model.repo()),
         config,
@@ -257,8 +285,14 @@ fn load_uncached(
             loaded.info().model
         )));
     }
+    let counted = crate::traversal::memory_budget::tracked_live_bytes().and_then(|_| {
+        u64::try_from(crate::traversal::memory_budget::thread_live_bytes() - live_before).ok()
+    });
     drop(bytes);
-    let memory = Embedder::memory_bytes(&loaded).unwrap_or(model.load_bytes());
+    let memory = counted
+        .filter(|bytes| *bytes > 0)
+        .or_else(|| Embedder::memory_bytes(&loaded))
+        .unwrap_or(model.load_bytes());
     let texts_per_second = calibrate(&loaded);
     let journal = source.journal();
     if let Some(journal) = &journal {
@@ -274,6 +308,7 @@ fn load_uncached(
     Ok(LoadedModel {
         model: loaded,
         bytes: memory,
+        exact: counted.is_some_and(|bytes| bytes > 0),
         repo: model.repo().to_string(),
         identity: identity.to_string(),
         texts_per_second,

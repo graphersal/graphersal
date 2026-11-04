@@ -208,8 +208,9 @@ The answer is a map:
   for any storage.
 - `property_bytes` (equal to `memory_usage().property_bytes` for a full report),
   `estimated_total_bytes`, `tracked_live_bytes` (the process heap where a tracking allocator is
-  installed: the CLI, the playground, Python) and `unattributed_bytes` (that heap minus the
-  estimate: allocator overhead and the rest of the process), `sampled`, `sample_every`,
+  installed: the CLI, the dev server, the playground, Python; read when the report starts),
+  `components`, `attributed_bytes` and `unattributed_bytes` (see
+  [Where the process memory goes](#where-the-process-memory-goes)), `sampled`, `sample_every`,
   `visited_elements`, `commit_seq`, `elapsed_ms`.
 
 A vertex with several labels counts once, under its **first** (primary) label.
@@ -259,6 +260,83 @@ println!("{report}");
 
 A storage of your own gets every part except `structure` without any work; it fills that one by
 overriding `GraphStorage::memory_structure` (default `None`).
+
+### Where the process memory goes
+
+The graph is often not the largest part of a process. `components` names every part the report
+can see, each `{name, detail, bytes, exact}` (`exact`: counted by the tracking allocator or the
+exact length of plain buffers; otherwise estimated from the structure):
+
+| `name` | What it is | Figure |
+|---|---|---|
+| `graph` | the reported graph's own data (`estimated_total_bytes`, broken down in `structure`) | estimated |
+| `workload_statistics` | the graph's [workload statistics](../persistence/workload_statistics.md) | estimated |
+| `embedding_model` | one per embedding model loaded in the process (`detail`: its identity), shared by every graph that uses it | exact where a tracking allocator counted the load, else the loader's estimate |
+| `script_engine` | the DSL's registrations (Rhai's standard library and every step), built once per thread that runs scripts | exact (tracking allocator) |
+| `store` | a Store's buffers and caches (`detail`: its location) | estimated |
+| `store_files` | the files of a store kept in memory (the playground's databases) | exact |
+| `store_graph` | a Store's live graph, when the report is about another graph (a read-only view of a past state) | estimated |
+| `session`, `mcp`, `ai_chat` | what the playground session (layouts), the dev server's MCP client sessions and its AI Chat conversations hold | estimated |
+
+`attributed_bytes` is their sum and `unattributed_bytes` the tracked heap minus it: what no
+component explains (the estimates' error, other graphs that no Store holds, a host's caches it
+did not register, small buffers). It is `null` without a tracking allocator or for a storage
+that reports no structure. On the knowledge graph of this repository (44 k vertices, 211 k
+edges, a Model2Vec model in the store) the dev server's report reads:
+
+```text
+Process memory: where it goes
+  embedding_model         930.8 MiB  exact      model2vec/minishlab/potion-multilingual-128M@dc7b0f9e9e87
+  graph                   186.8 MiB  estimated
+  script_engine             2.0 MiB  exact      the DSL's registrations, built on 1 thread
+  workload_statistics       1.2 MiB  estimated
+  ...
+  unattributed              2.9 MiB  of 1.1 GiB tracked
+```
+
+That model is counted when it loads: its tokenizer takes about 442 MiB in memory (from an
+18 MiB file: a Unigram vocabulary of 500 000 tokens), its embedding matrix 489 MiB.
+
+Everything here is computed when the report is asked for, by reading structures that exist
+anyway: nothing is counted on the read, write, commit or query paths (a model's bytes and the
+script registrations are measured once, when they are built). A Store lists its live graph as
+`store_graph` only in a report through the graph's front end (the DSL,
+`AnyGraph::memory_report`, the dev server, the playground, Python), which knows which graph is
+reported.
+
+A host adds what it holds itself: implement `MemorySource` and register it with
+`register_memory_source` (both in `graphersal::storage`); it is held weakly (dropping it
+unregisters it) and asked at every report, so the DSL, the REPL and every other front end show
+it. A source answers quickly, never waits on a lock a query may hold, and never asks for a
+report itself. A part only the caller of one report knows goes in with
+`MemoryReport::add_component`.
+
+```rust
+use std::sync::Arc;
+use graphersal::prelude::*;
+use graphersal::storage::{
+    AnyGraph, MemoryComponent, MemoryComponents, MemoryReportRequest, MemorySource,
+    register_memory_source,
+};
+
+struct ResultCache(Vec<u8>);
+impl MemorySource for ResultCache {
+    fn memory_components(&self, components: &mut MemoryComponents) {
+        components.push(MemoryComponent::exact("result_cache", self.0.capacity() as u64));
+    }
+}
+
+let cache: Arc<dyn MemorySource> = Arc::new(ResultCache(Vec::with_capacity(4096)));
+register_memory_source(&cache);
+let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+let report = AnyGraph::memory_report(&graph, &MemoryReportRequest::new()).unwrap();
+assert!(report.component("result_cache", None).is_some());
+```
+
+The resident set (RSS) of a process is usually larger than its tracked heap: the allocator
+keeps pages that were freed after a peak (a model load reads its blob whole and converts its
+matrix; a checkpoint encodes chunks; an open replays the WAL), and the program itself is not on
+the heap. The playground's memory bar shows the RSS beside the tracked heap.
 
 ## Graph statistics
 

@@ -753,6 +753,26 @@ impl<S: GraphStorage> Graph<S> {
         }
     }
 
+    /// The address of the storage behind the lock: the identity a Store's memory source
+    /// compares with the reported graph's (`memory_report::components`).
+    pub(crate) fn storage_address(&self) -> usize {
+        self.lock.data_ptr() as *const () as usize
+    }
+
+    /// The graph's estimated footprint ([`MemoryStats::total_bytes`](crate::graph::MemoryStats::total_bytes) plus its workload
+    /// statistics) for another graph's memory report, without waiting: `None` while a writer
+    /// holds the lock, the thread holds a unit, or the storage reports no figures.
+    #[cfg(feature = "persist")]
+    pub(crate) fn memory_total_now(&self) -> Option<u64> {
+        if self.holds_unit() || self.poison.check().is_err() {
+            return None;
+        }
+        let guard = self.lock.try_read()?;
+        let total = guard.memory_usage().ok()??.total_bytes();
+        drop(guard);
+        Some(total + self.workload.get().map_or(0, |w| w.memory_bytes()))
+    }
+
     /// Releases the storage's spare capacity ([`GraphStorage::shrink_to_fit`]) under the write
     /// lock and reports what it released: [`GraphStorage::memory_usage`]'s total before and
     /// after, measured under the same lock ([`ShrinkReport`](crate::storage::ShrinkReport); both

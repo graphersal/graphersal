@@ -234,6 +234,13 @@ pub struct Journal<W: Write + Send + Sync + 'static> {
     files: Option<Box<dyn JournalFiles<W>>>,
 }
 
+impl<W: Write + Send + Sync + 'static> Journal<W> {
+    /// The capacity of the reusable record buffers, in bytes (the memory report).
+    pub(crate) fn buffer_bytes(&self) -> u64 {
+        (self.record.capacity() + self.part.capacity()) as u64
+    }
+}
+
 impl<W: Write + Send + Sync + 'static> std::fmt::Debug for Journal<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")

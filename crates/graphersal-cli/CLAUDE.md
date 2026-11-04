@@ -29,6 +29,8 @@ Agent guidance for the REPL, the one-shot runner, the dev server, MCP, the AI Ch
 - `/api/queries*` saved queries, `/api/compression*` compression rules, `/api/indexes*` property indexes, `/api/catalog/export|load` the ONE catalog file (every kind).
 - Every session job that moves the commit position is recorded in the change feed with its client (`X-Graphersal-Client` of a page, `mcp`, or `ai` + conversation id as `detail`); the playground polls it (`js/change-feed.js`) and reloads on changes it did not make.
 
+- Memory report: `server::run` registers `ServerMemory` (a `MemorySource` over a `Weak<Context>`, alive while the server runs): `mcp` (`Mcp::memory_bytes`, client sessions) and `ai_chat` (`Ai::memory_bytes`, conversation histories), both `try_lock`.
+
 ## MCP (`--mcp [--mcp-read-only] [--mcp-token] [--mcp-query-tools] [--mcp-max-chars N]`, `POST /mcp`)
 
 - Hand-written MCP Streamable HTTP (initialize-based revisions, JSON answers, no SSE, no `rmcp`/tokio). Tools wrap session methods and queue on the session thread like browser calls.

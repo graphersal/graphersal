@@ -624,6 +624,11 @@ pub fn run(cli: &Cli) -> i32 {
         #[cfg(feature = "ai")]
         ai,
     });
+    // The dev server's own parts of every memory report (MCP sessions, AI Chat
+    // conversations), held weakly by the engine: registered for as long as this function runs.
+    let server_memory: Arc<dyn graphersal::storage::MemorySource> =
+        Arc::new(ServerMemory(Arc::downgrade(&context)));
+    graphersal::storage::register_memory_source(&server_memory);
     start_job_ticker(&context);
     // From here on the requests reach the API (before: health endpoints and 503 answers).
     let _ = serving.context.set(context);
@@ -639,6 +644,35 @@ pub fn run(cli: &Cli) -> i32 {
         None => accept(&server, &serving),
     }
     EXIT_OK
+}
+
+/// The dev server's parts of a memory report (book page "Memory Usage"): `mcp` (the client
+/// sessions of `--mcp`) and `ai_chat` (the conversations of `--ai`), both estimated. Read
+/// without waiting on a lock a request may hold.
+struct ServerMemory(std::sync::Weak<Context>);
+
+impl graphersal::storage::MemorySource for ServerMemory {
+    fn memory_components(&self, components: &mut graphersal::storage::MemoryComponents) {
+        use graphersal::storage::MemoryComponent;
+        let Some(context) = self.0.upgrade() else {
+            return;
+        };
+        if let Some(mcp) = &context.mcp {
+            let (sessions, bytes) = mcp.memory_bytes();
+            components.push(
+                MemoryComponent::estimated("mcp", bytes)
+                    .with_detail(format!("{sessions} client session(s)")),
+            );
+        }
+        #[cfg(feature = "ai")]
+        if let Some(ai) = &context.ai {
+            let (conversations, bytes) = ai.memory_bytes();
+            components.push(
+                MemoryComponent::estimated("ai_chat", bytes)
+                    .with_detail(format!("{conversations} conversation(s)")),
+            );
+        }
+    }
 }
 
 /// How often the dev server ticks the scheduled jobs of the active store.

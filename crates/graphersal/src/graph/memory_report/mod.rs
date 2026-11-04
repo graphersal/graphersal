@@ -14,6 +14,7 @@
 //!
 //! [`GraphStorage::memory_structure`]: crate::graph::GraphStorage::memory_structure
 
+pub(crate) mod components;
 mod hll;
 mod property;
 mod text;
@@ -22,6 +23,8 @@ pub(crate) mod walk;
 use std::sync::Arc;
 
 use compact_str::CompactString;
+
+pub use components::{MemoryComponent, MemoryComponents, MemorySource, register_memory_source};
 
 use crate::graph::compression::CompressionStats;
 use crate::graph::memory::MemoryStats;
@@ -367,9 +370,18 @@ pub struct MemoryReport {
     /// ([`GraphStorage::last_commit_seq`](crate::graph::GraphStorage::last_commit_seq)).
     pub commit_seq: u64,
     /// The process's live heap as counted by an installed tracking allocator
-    /// (`alloc_tracking::global_live_bytes`, feature `alloc-tracking`), `None` without one. It covers the whole
-    /// process (other graphs, the script engine, buffers), not this graph alone.
+    /// (`alloc_tracking::global_live_bytes`, feature `alloc-tracking`), `None` without one,
+    /// read when the report starts (so the report's own working memory is not in it). It covers
+    /// the whole process (other graphs, models, the script engine, buffers), not this graph
+    /// alone: [`Self::components`] says where it goes.
     pub tracked_live_bytes: Option<u64>,
+    /// Where the process memory goes: the reported graph (`graph`, when the storage reports
+    /// its structure), its workload statistics, the embedding models loaded in the process, the
+    /// script engine, the Stores, and what hosts add ([`register_memory_source`]); each with
+    /// its bytes and whether they are exact. Computed when the report is asked for, by reading
+    /// the structures (nothing is counted on the query or commit paths).
+    /// [`Self::unattributed_bytes`] is the tracked heap minus their sum.
+    pub components: Vec<MemoryComponent>,
     /// The time the report took, in microseconds.
     pub elapsed_micros: u64,
 }
@@ -403,13 +415,34 @@ impl MemoryReport {
             .map(|structure| structure.totals.total_bytes())
     }
 
-    /// The tracked live heap minus the estimated total: what the estimate does not explain
-    /// (allocator overhead and fragmentation, the rest of the process). `None` without a tracking
-    /// allocator or without a structure; negative when the estimate is higher.
+    /// The bytes of all [`Self::components`] summed: what the report attributes.
+    pub fn attributed_bytes(&self) -> u64 {
+        self.components
+            .iter()
+            .fold(0u64, |sum, part| sum.saturating_add(part.bytes))
+    }
+
+    /// The tracked live heap minus [`Self::attributed_bytes`]: what no component explains (the
+    /// estimates' error, other graphs not held by a Store, caches of the host that registered
+    /// no source, small buffers). `None` without a tracking allocator or without a structure
+    /// (the graph itself unknown); negative when the estimates are higher.
     pub fn unattributed_bytes(&self) -> Option<i64> {
         let live = self.tracked_live_bytes?;
-        let estimate = self.estimated_total_bytes()?;
-        Some(live as i64 - estimate as i64)
+        self.structure.as_ref()?;
+        Some(live as i64 - self.attributed_bytes() as i64)
+    }
+
+    /// Adds a host's part to [`Self::components`] (for parts known only to the caller of the
+    /// report; a part every report should name is a [`MemorySource`] instead).
+    pub fn add_component(&mut self, component: MemoryComponent) {
+        self.components.push(component);
+    }
+
+    /// The component `name` (with `detail`, when given), if the report has one.
+    pub fn component(&self, name: &str, detail: Option<&str>) -> Option<&MemoryComponent> {
+        self.components.iter().find(|part| {
+            part.name == name && detail.is_none_or(|detail| part.detail.as_deref() == Some(detail))
+        })
     }
 
     /// The row of `target`, if the report has one.

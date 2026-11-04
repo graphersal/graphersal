@@ -146,6 +146,7 @@ mod types;
 
 pub(crate) use registry::Registry;
 pub(super) use registry::new_engine;
+pub(crate) use registry::registration_memory;
 // Read only by `surface_tests` (which needs `io` and `serde`).
 #[cfg(all(test, feature = "io", feature = "serde"))]
 pub(crate) use registry::replaced_signatures;

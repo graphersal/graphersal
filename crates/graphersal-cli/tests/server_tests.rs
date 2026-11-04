@@ -7149,3 +7149,48 @@ fn the_journal_endpoint_answers_the_newest_records_first() {
     drop(server);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// The memory report over HTTP and MCP names where the server's process memory goes: the
+/// graph, the script engine, the playground session, the MCP client sessions; the remainder
+/// is what no component explains.
+#[test]
+fn the_memory_report_names_the_servers_components() {
+    let ui = ui_dir("memory-report-components");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let answer = post(port, "/api/memory/report", "{}").json();
+    assert_eq!(answer["ok"], true, "{answer}");
+    let report = &answer["report"];
+    let components = report["components"].as_array().unwrap();
+    let part = |name: &str| components.iter().find(|c| c["name"] == name);
+    for name in ["graph", "script_engine", "session", "mcp"] {
+        assert!(part(name).is_some(), "{name}: {report}");
+    }
+    assert_eq!(part("script_engine").unwrap()["exact"], true);
+    assert!(
+        part("mcp").unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 client session"),
+        "{report}"
+    );
+    let sum: u64 = components
+        .iter()
+        .map(|c| c["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(report["attributed_bytes"], sum);
+    let tracked = report["tracked_live_bytes"].as_u64().unwrap();
+    let unattributed = report["unattributed_bytes"].as_i64().unwrap();
+    assert_eq!(unattributed, tracked as i64 - sum as i64);
+
+    let (error, text) = mcp.call("memory_report", serde_json::json!({"limit": 1}));
+    assert!(!error, "{text}");
+    assert!(text.contains(r#""components":"#), "{text}");
+}
