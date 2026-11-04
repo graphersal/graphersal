@@ -330,7 +330,8 @@ the bytes (the rest of the process is not seen).
 
 **Embedding models of a store** (book page [Embedding Models in a
 Store](../persistence/store_models.md)) load under the ceiling too: before a load the blob's
-length plus the loaded size its definition records (`load_bytes`) are checked against what is in
+length times 2.2 (measured: a model takes about 1.84 times its blob in memory, plus a 20 %
+reserve; the definition's stored `load_bytes` is not read) is checked against what is in
 use (the live heap with a tracking allocator, else the models already loaded), so nothing is read
 when it does not fit (operation `"model load"`). A model the schema NEEDS is loaded when the
 store opens: one that does not fit refuses the open with `StoreFailure::ModelDoesNotFit`, whose

@@ -633,3 +633,166 @@ fn a_real_potion_model() {
         .unwrap();
     assert!(close > far, "{close} <= {far}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The streaming load gives the vectors of `model2vec-rs`'s own load
+// ---------------------------------------------------------------------------------------------
+
+/// The vectors `model2vec-rs` gives for `texts` when it loads the three files itself
+/// (`StaticModel::from_bytes`, the load before the streaming one) and when our load streams the
+/// weights (`read_weights` through a reader that hands out a few bytes at a time) and builds the
+/// model from them: they must be the same bits.
+fn same_vectors_as_model2vec_rs(config: &[u8], tokenizer: &[u8], weights: &[u8], texts: &[&str]) {
+    let reference = StaticModel::from_bytes(tokenizer, weights, config, None).unwrap();
+    /// A reader handing out at most 7 bytes per call (element and chunk boundaries split).
+    struct Trickle<'a>(&'a [u8]);
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(7).min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+    let streamed = read_weights(&mut Trickle(weights), weights.len() as u64).unwrap();
+    assert_eq!(streamed.sha256, sha256_hex(weights));
+    let ours = Model2Vec::load_parts(
+        "m".into(),
+        config,
+        tokenizer,
+        streamed,
+        &Model2VecOptions::default(),
+        "the test",
+    )
+    .unwrap();
+    let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+    let expected = reference.encode_with_args(&owned, Some(512), 64);
+    let actual = ours.model.encode_with_args(&owned, Some(512), 64);
+    assert_eq!(expected.len(), actual.len());
+    for (e, a) in expected.iter().zip(&actual) {
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(e), bits(a));
+    }
+}
+
+#[test]
+fn the_streaming_load_gives_the_vectors_of_model2vec_rs() {
+    let texts = [
+        "graph traversal",
+        "vector marko josh",
+        "lop ripple graph vector",
+        "unknown words only",
+        "",
+    ];
+    let tokenizer = tokenizer_json(&VOCAB);
+    let config = br#"{"model_type": "model2vec", "normalize": true}"#;
+    // f32, with a mapping and per-token weights stored BEFORE the matrix (data order is not
+    // tensor order), and a tensor nobody reads between them.
+    let weights_f64: Vec<u8> = (0..8)
+        .flat_map(|i| (0.5 + i as f64 / 8.0).to_le_bytes())
+        .collect();
+    let mapping: Vec<u8> = [0i64, 1, 2, 3, 4, 5, 6, 1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let cases: Vec<Vec<u8>> = vec![
+        safetensors(&[("embeddings", "F32", vec![8, 4], f32_bytes(&ROWS))]),
+        safetensors(&[
+            ("weights", "F64", vec![8], weights_f64.clone()),
+            ("unused", "U8", vec![5], vec![1, 2, 3, 4, 5]),
+            ("mapping", "I64", vec![8], mapping),
+            ("embeddings", "F32", vec![8, 4], f32_bytes(&ROWS)),
+        ]),
+        // f16 and i8 matrices.
+        safetensors(&[(
+            "embeddings",
+            "F16",
+            vec![8, 4],
+            (0..32u16)
+                .flat_map(|i| (0x3c00u16 + i * 37).to_le_bytes())
+                .collect(),
+        )]),
+        safetensors(&[(
+            "0",
+            "I8",
+            vec![8, 4],
+            (0..32i16).map(|i| (i * 7 - 100) as i8 as u8).collect(),
+        )]),
+    ];
+    for weights in cases {
+        same_vectors_as_model2vec_rs(config, tokenizer.as_bytes(), &weights, &texts);
+    }
+}
+
+#[test]
+fn every_f16_decodes_as_model2vec_rs_decodes_it() {
+    // One token per f16 bit pattern (a one-column matrix, no normalization): the vector of the
+    // token is its row as `model2vec-rs` decodes it.
+    let vocab: Vec<String> = std::iter::once("[UNK]".to_string())
+        .chain((1..=u16::MAX).map(|i| format!("t{i}")))
+        .collect();
+    let refs: Vec<&str> = vocab.iter().map(String::as_str).collect();
+    let tokenizer = tokenizer_json(&refs);
+    let data: Vec<u8> = (0..=u16::MAX).flat_map(|bits| bits.to_le_bytes()).collect();
+    let weights = safetensors(&[("embeddings", "F16", vec![65_536, 1], data)]);
+    let config = br#"{"model_type": "model2vec", "normalize": false}"#;
+    let reference =
+        StaticModel::from_bytes(tokenizer.as_bytes(), &weights, &config[..], None).unwrap();
+    let texts: Vec<String> = (1..=u16::MAX).map(|bits| format!("t{bits}")).collect();
+    let vectors = reference.encode_with_args(&texts, None, 4096);
+    for (bits, vector) in (1..=u16::MAX).zip(&vectors) {
+        let ours = f16_to_f32(bits);
+        let theirs = vector[0];
+        if theirs.is_nan() {
+            assert!(ours.is_nan(), "{bits:#06x}");
+        } else if theirs == 0.0 {
+            // Pooling sums from +0.0: a -0.0 row comes out as +0.0.
+            assert_eq!(ours, 0.0, "{bits:#06x}");
+        } else {
+            assert_eq!(ours.to_bits(), theirs.to_bits(), "{bits:#06x}");
+        }
+    }
+}
+
+#[test]
+fn a_truncated_or_inconsistent_weights_file_is_refused() {
+    let good = safetensors(&[("embeddings", "F32", vec![8, 4], f32_bytes(&ROWS))]);
+    let reason = |bytes: &[u8], size: u64| match read_weights(&mut &bytes[..], size) {
+        Err(WeightsError::Invalid(reason)) => reason,
+        Err(WeightsError::Read(err)) => panic!("{err}"),
+        Ok(_) => panic!("accepted"),
+    };
+    assert!(reason(&good[..good.len() - 4], good.len() as u64).contains("ends early"));
+    assert!(reason(&good[..20], 20).contains("does not parse"));
+    let mut longer = good.clone();
+    longer.extend_from_slice(&[0; 4]);
+    assert!(reason(&longer, longer.len() as u64).contains("does not end"));
+}
+
+/// Compares the streaming load with `model2vec-rs`'s own on a REAL model:
+///
+/// ```text
+/// GRAPHERSAL_EMBED_MODELS=~/.cache/graphersal/embed-models GRAPHERSAL_EMBED_MODEL=minishlab/potion-multilingual-128M \
+///   cargo test -p graphersal --features model2vec --release --lib \
+///   model2vec::tests::a_real_model_streams_to_the_same_vectors -- --ignored
+/// ```
+#[test]
+#[ignore = "needs a downloaded model under $GRAPHERSAL_EMBED_MODELS"]
+fn a_real_model_streams_to_the_same_vectors() {
+    let Some(root) = std::env::var_os("GRAPHERSAL_EMBED_MODELS") else {
+        panic!("set GRAPHERSAL_EMBED_MODELS to the models directory");
+    };
+    let repo = std::env::var("GRAPHERSAL_EMBED_MODEL")
+        .unwrap_or_else(|_| "minishlab/potion-base-8M".to_string());
+    let [config, tokenizer, weights] = Model2Vec::model_files(PathBuf::from(root).join(repo))
+        .unwrap()
+        .map(|path| std::fs::read(path).unwrap());
+    let texts = [
+        "A graph database keeps vertices and edges with their properties.",
+        "Ein Graph speichert Knoten und Kanten.",
+        "Граф хранит вершины и рёбра.",
+        "banana bread",
+        "zzqx",
+    ];
+    same_vectors_as_model2vec_rs(&config, &tokenizer, &weights, &texts);
+}

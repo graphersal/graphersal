@@ -206,14 +206,12 @@ mod file {
     use std::path::PathBuf;
     use std::sync::{Arc, OnceLock, Weak};
 
+    use super::super::blobs::{BlobFaultError, CheckedBlob};
     use super::super::migrate_models::{LegacyFileSource, LegacyTar, hash_stream};
     use crate::graph::system_journal::SystemJournal;
-    use crate::persist::model_tar::{TarContent, TarFile, TarStream};
     use crate::value::BlobRef;
+    use crate::value::vector::embed::model_tar::{TarContent, TarFile, TarStream};
     use crate::value::vector::embed::registry::{LoadFailure, ModelBytes};
-
-    /// What a blob read names (its memory check).
-    const BLOB_READ: &str = "blob read";
 
     /// Where the model blobs of a packed snapshot lie in its file.
     pub(super) struct PackedFileModels {
@@ -243,7 +241,7 @@ mod file {
         }
 
         /// The bytes `blob` streams from: a blob row, or a converted model's tar built again.
-        fn open(&self, blob: &BlobRef) -> Result<Box<dyn Read>, LoadFailure> {
+        fn stream(&self, blob: &BlobRef) -> Result<Box<dyn Read + Send>, LoadFailure> {
             if let Some((_, at)) = self.blobs.iter().find(|(b, _)| b == blob) {
                 let mut file = File::open(&self.path)
                     .map_err(|err| self.failure(format_args!("cannot be read: {err}")))?;
@@ -283,31 +281,21 @@ mod file {
     }
 
     impl ModelBytes for PackedFileModels {
-        fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, LoadFailure> {
-            crate::traversal::memory_budget::ensure_room(BLOB_READ, blob.length(), 0)
-                .map_err(LoadFailure::does_not_fit)?;
-            let mut reader = self.open(blob)?;
-            let mut bytes = Vec::with_capacity(usize::try_from(blob.length()).unwrap_or(0));
-            // One byte more than the blob: a longer source is damage too.
-            reader
-                .by_ref()
-                .take(blob.length().saturating_add(1))
-                .read_to_end(&mut bytes)
-                .map_err(|err| self.failure(format_args!("cannot be read: {err}")))?;
-            let found = hash_stream(&mut bytes.as_slice()).map_err(|err| self.failure(err))?;
-            if &found != blob {
-                return Err(self.failure(format_args!(
-                    "is not the model's blob (length {}, expected {}; or its checksum or \
-                     SHA-256 differs)",
-                    found.length(),
-                    blob.length()
-                )));
+        fn open(&self, blob: &BlobRef) -> Result<Box<dyn Read + Send + '_>, LoadFailure> {
+            let reader = self.stream(blob)?;
+            Ok(Box::new(CheckedBlob::new(reader, blob, true)))
+        }
+
+        fn read_failure(&self, err: std::io::Error) -> LoadFailure {
+            match BlobFaultError::of(&err) {
+                Some(_) => self
+                    .failure("is not the model's blob (its length, checksum or SHA-256 differs)"),
+                None => self.failure(format_args!("cannot be read: {err}")),
             }
-            Ok(bytes)
         }
 
         fn check(&self, blob: &BlobRef) -> Result<(), LoadFailure> {
-            let mut reader = self.open(blob)?;
+            let mut reader = self.stream(blob)?;
             let found = hash_stream(&mut reader.by_ref().take(blob.length().saturating_add(1)))
                 .map_err(|err| self.failure(err))?;
             if &found != blob {

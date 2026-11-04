@@ -694,10 +694,10 @@ impl Session {
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
     /// bytes, measured, default}] }`, one entry per embedding model of the active store that is
     /// loaded (the built-in `hash-ngram/1` holds none and is left out). `bytes` is the size
-    /// measured at the load (`measured: true`, the process's `embedding_model` component counted
-    /// by the tracking allocator; user decision 2026-11-04: the measured size IS the model's
-    /// size); without a tracking allocator the model definition's estimate `load_bytes`
-    /// (`measured: false`). A host adds its own members: `memory`, the whole process
+    /// measured at the load (user decision 2026-11-04: a loaded model shows its measured
+    /// in-memory size): `measured: true` when the tracking allocator counted it (the process's
+    /// `embedding_model` component), else the loader's estimate (`ModelInfo::shown_bytes`,
+    /// `measured: false`). Never the definition's stored `load_bytes`. A host adds its own members: `memory`, the whole process
     /// ([`Self::statistics_with_process`]; volatile, so `Session::statistics` itself stays
     /// deterministic), and the dev server's `aiChat`. Separate from `GraphStatistics`, which
     /// holds data counts only.
@@ -731,7 +731,7 @@ impl Session {
                     "name": model.repo,
                     "model": model.identity,
                     "dimension": model.dimension,
-                    "bytes": counted.unwrap_or(model.load_bytes),
+                    "bytes": counted.unwrap_or_else(|| model.shown_bytes()),
                     "measured": counted.is_some(),
                     "default": model.default,
                 })

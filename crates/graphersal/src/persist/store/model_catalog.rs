@@ -22,14 +22,14 @@ use crate::graph::note_text::NoteText;
 use crate::graph::schema::GraphSchema;
 use crate::graph::system_journal::{Event, catalogue};
 use crate::graph::{CommitMetadata, GraphStorage, Mutation, PersistentStorage, Transactional};
-use crate::persist::model_tar::{
-    self, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, ManifestBase, ManifestFile, ModelManifest,
-    TarContent, TarFile, TarStream, is_model_file_name, sha256_hex,
-};
 use crate::persist::{PersistError, StoreFailure};
 use crate::value::BlobRef;
 use crate::value::vector::embed::identity::{
     FAMILY, IDENTITY_ROLES, identity_digest, identity_text, is_repo_name, parse_identity,
+};
+use crate::value::vector::embed::model_tar::{
+    self, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, ManifestBase, ManifestFile, ModelManifest,
+    TarContent, TarFile, TarStream, is_model_file_name, sha256_hex,
 };
 use crate::value::vector::embed::registry::{self, ModelLoadState};
 
@@ -172,14 +172,31 @@ pub struct ModelInfo {
     pub gated: bool,
     /// Whether this is the default model.
     pub default: bool,
-    /// The bytes of its blob (the files as a tar).
+    /// The bytes of its blob (the files as a tar): its size on disk.
     pub bytes: u64,
-    /// The memory it takes loaded.
+    /// The estimate its definition records from the import (the f32 embedding matrix plus the
+    /// tokenizer FILE; the tokenizer's in-memory form is many times that). Kept for versions up
+    /// to 0.5.2, whose memory check reads it; this version neither checks nor shows it: see
+    /// [`Self::memory_bytes`] and [`Self::shown_bytes`].
     pub load_bytes: u64,
+    /// The memory the model takes, measured at its load (counted by the tracking allocator,
+    /// else the loader's estimate), when it is loaded in this process
+    /// ([`ModelState::Loaded`]); `None` otherwise.
+    pub memory_bytes: Option<u64>,
     /// Loaded, not loaded, damaged, missing, unsupported.
     pub state: ModelState,
     /// The schema properties (`label.key`) whose vectors this model makes.
     pub needed_by: Vec<String>,
+}
+
+impl ModelInfo {
+    /// The model's size as a list shows it (user decision 2026-11-04): the memory measured at
+    /// its load when it is loaded ([`Self::memory_bytes`]), else its size on disk
+    /// ([`Self::bytes`]). Before a load, the memory check asks for the blob's length times a
+    /// fixed factor (book page "Resource Limits").
+    pub fn shown_bytes(&self) -> u64 {
+        self.memory_bytes.unwrap_or(self.bytes)
+    }
 }
 
 /// What [`Store::import_model`] did.
@@ -357,6 +374,10 @@ pub(crate) fn model_info(
         default: model.is_default(),
         bytes: model.blob().length(),
         load_bytes: model.load_bytes(),
+        memory_bytes: match &state {
+            ModelState::Loaded => registry::loaded_bytes(definition.name()),
+            _ => None,
+        },
         state: match model.unserved_reason() {
             Some(reason) => ModelState::Unsupported { reason },
             None => state,
@@ -892,6 +913,10 @@ pub(crate) fn prepare(
             weights.name
         )));
     };
+    // The definition's `load_bytes` (format spec 6.3 kind 5): the f32 matrix plus the tokenizer
+    // FILE, the estimate versions up to 0.5.2 check a load against. Still written for them; this
+    // version never reads it (its check is `registry::load_room`, its shown size the measured
+    // one, user decision 2026-11-04).
     let load_bytes = rows
         .saturating_mul(cols)
         .saturating_mul(4)
@@ -1778,20 +1803,36 @@ impl StoreModelBytes {
 }
 
 impl registry::ModelBytes for StoreModelBytes {
-    fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, registry::LoadFailure> {
-        blobs::read_blob(&self.dir, blob).map_err(|err| match err {
-            blobs::BlobError::Fault(blobs::BlobFault::Missing) => registry::LoadFailure::Missing,
-            blobs::BlobError::Fault(fault) => {
+    fn open(
+        &self,
+        blob: &BlobRef,
+    ) -> Result<Box<dyn std::io::Read + Send + '_>, registry::LoadFailure> {
+        match blobs::open_blob(&self.dir, blob) {
+            Ok(reader) => Ok(Box::new(reader)),
+            Err(blobs::BlobError::Fault(blobs::BlobFault::Missing)) => {
+                Err(registry::LoadFailure::Missing)
+            }
+            Err(blobs::BlobError::Fault(fault)) => Err(registry::LoadFailure::Damaged(format!(
+                "its blob is damaged ({})",
+                fault.name()
+            ))),
+            Err(blobs::BlobError::Unsupported) => Err(registry::LoadFailure::Unsupported(
+                "its blob uses a hash algorithm this version does not know".to_string(),
+            )),
+            Err(blobs::BlobError::DoesNotFit(err)) => Err(registry::LoadFailure::does_not_fit(err)),
+            Err(blobs::BlobError::Io(err)) => Err(registry::LoadFailure::Damaged(format!(
+                "its blob cannot be read: {err}"
+            ))),
+        }
+    }
+
+    fn read_failure(&self, err: std::io::Error) -> registry::LoadFailure {
+        match blobs::BlobFaultError::of(&err) {
+            Some(fault) => {
                 registry::LoadFailure::Damaged(format!("its blob is damaged ({})", fault.name()))
             }
-            blobs::BlobError::Unsupported => registry::LoadFailure::Unsupported(
-                "its blob uses a hash algorithm this version does not know".to_string(),
-            ),
-            blobs::BlobError::DoesNotFit(err) => registry::LoadFailure::does_not_fit(err),
-            blobs::BlobError::Io(err) => {
-                registry::LoadFailure::Damaged(format!("its blob cannot be read: {err}"))
-            }
-        })
+            None => registry::LoadFailure::Damaged(format!("its blob cannot be read: {err}")),
+        }
     }
 
     fn check(&self, blob: &BlobRef) -> Result<(), registry::LoadFailure> {
@@ -1948,7 +1989,11 @@ pub(crate) fn check_at_open(
                         Event::new(format!("the model {} was loaded", model.repo()))
                             .field("repo", model.repo())
                             .field("identity", base)
-                            .count("load_bytes", model.load_bytes())
+                            .count(
+                                "load_bytes",
+                                registry::loaded_bytes(base)
+                                    .unwrap_or_else(|| registry::load_room(model)),
+                            )
                             .count("ms", 0),
                     ));
                 }
@@ -2014,7 +2059,7 @@ pub(crate) fn check_at_open(
                         repo: Some(model.repo().to_string()),
                         places: places.clone(),
                         failure,
-                        needed: model.blob().length().saturating_add(model.load_bytes()),
+                        needed: registry::load_room(model),
                     }));
                 }
                 reasons.push(registry::unsupported_build(model.repo()));
