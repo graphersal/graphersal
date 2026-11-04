@@ -1061,15 +1061,16 @@ impl TraversalGraph {
     ) -> VertexHandle {
         // Every map that enters the graph shares its key list through the shape table.
         self.shapes.adopt(&mut properties);
+        let label_set = self.labels.intern_set(&labels);
         // ... and is coded as the `dedup` rules of its labels ask.
         self.compression_code_row(
             crate::graph::schema::ElementKind::Vertex,
+            crate::graph::compression::LoadLabels::Vertex(label_set),
             &labels,
             &mut properties,
         );
         // The slot the topology fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
-        let label_set = self.labels.intern_set(&labels);
         let index = self.graph.add_node((
             id,
             label_set,
@@ -1104,9 +1105,11 @@ impl TraversalGraph {
     ) -> EdgeHandle {
         // See `insert_vertex_raw`.
         self.shapes.adopt_optional(&mut properties);
+        let label_id = self.labels.intern_name(label.as_deref());
         if let Some(map) = properties.as_mut() {
             self.compression_code_row(
                 crate::graph::schema::ElementKind::Edge,
+                crate::graph::compression::LoadLabels::Edge(label_id),
                 label.as_slice(),
                 map,
             );
@@ -1119,12 +1122,7 @@ impl TraversalGraph {
         let Some(edge_index) = self.graph.add_edge(
             from.index(),
             to.index(),
-            (
-                id,
-                self.labels.intern_name(label.as_deref()),
-                properties,
-                generations,
-            ),
+            (id, label_id, properties, generations),
         ) else {
             // Unreachable: every caller resolved both endpoints. A handle to no slot reads as
             // removed, and nothing was stored.

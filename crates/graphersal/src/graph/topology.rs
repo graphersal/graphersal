@@ -446,6 +446,33 @@ impl<N, E> Topology<N, E> {
             .filter_map(|(i, slot)| slot.weight.as_ref().map(|w| (NodeIndex::new(i), w)))
     }
 
+    /// The live vertex weights and the live edge weights, mutably, each in at most `parts`
+    /// runs of slots (disjoint: a parallel pass hands each run to its own thread).
+    #[cfg_attr(
+        any(not(feature = "persist"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn weight_runs_mut(
+        &mut self,
+        parts: usize,
+    ) -> (
+        impl Iterator<Item = impl Iterator<Item = &mut N>>,
+        impl Iterator<Item = impl Iterator<Item = &mut E>>,
+    ) {
+        let parts = parts.max(1);
+        let node_run = self.nodes.len().div_ceil(parts).max(1);
+        let edge_run = self.edges.len().div_ceil(parts).max(1);
+        (
+            self.nodes
+                .chunks_mut(node_run)
+                .map(|run| run.iter_mut().filter_map(|slot| slot.weight.as_mut())),
+            self.edges
+                .chunks_mut(edge_run)
+                .map(|run| run.iter_mut().filter_map(|slot| slot.weight.as_mut())),
+        )
+    }
+
     /// The live vertex weights in slot order.
     pub(crate) fn node_weights(&self) -> impl Iterator<Item = &N> + '_ {
         self.nodes.iter().filter_map(|slot| slot.weight.as_ref())

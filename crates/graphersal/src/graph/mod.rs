@@ -167,6 +167,9 @@ pub struct TraversalGraph {
     /// The in-memory state of the compression rules of the catalog (see [`compression`]):
     /// derived from `definitions`, like an index.
     pub(crate) compression: compression::CompressionRules,
+    /// How the load through the persistence load sink codes the rows (see
+    /// [`compression::LoadCoding`]); `Idle` outside a load.
+    pub(crate) load_coding: compression::LoadCoding,
     /// The entries of the property indexes of the catalog (see [`property_index`]): derived
     /// from `definitions` and the data, never persisted.
     pub(crate) property_indexes: property_index::PropertyIndexes,
@@ -221,6 +224,7 @@ impl TraversalGraph {
             graph_id: std::sync::OnceLock::new(),
             definitions: definition::Catalog::default(),
             compression: compression::CompressionRules::default(),
+            load_coding: compression::LoadCoding::Idle,
             property_indexes: property_index::PropertyIndexes::default(),
             footprint: memory::FootprintCache::default(),
             shapes: shape::ShapeTable::new(),

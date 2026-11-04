@@ -210,6 +210,7 @@ impl PersistentStorage for TraversalGraph {
         if self.index.get_node(&self.graph, &id).is_some() {
             return Err(GraphError::duplicate_vertex_id(id.as_str()));
         }
+        self.compression_load_element();
         Ok(self.insert_vertex_raw(id, labels, properties))
     }
 
@@ -232,6 +233,7 @@ impl PersistentStorage for TraversalGraph {
         };
         let from = endpoint(self, from_id)?;
         let to = endpoint(self, to_id)?;
+        self.compression_load_element();
         Ok(self.insert_edge_raw(id, label, Some(properties), from, to))
     }
 
@@ -242,21 +244,24 @@ impl PersistentStorage for TraversalGraph {
     }
 
     fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
+        let kind = definition.kind();
         self.definitions.insert(definition);
+        self.compression_load_definition(kind);
         Ok(())
     }
 
-    /// The compression load pass (the rules' dictionaries and compressed values), the build of
-    /// every property index from the data (entries are never persisted), then
-    /// [`TraversalGraph::shrink_to_fit`].
     fn reserve_load(&mut self, vertices: u64, edges: u64) -> Result<(), GraphError> {
         let room = |n: u64| usize::try_from(n).unwrap_or(0);
         self.graph.reserve_exact(room(vertices), room(edges));
         Ok(())
     }
 
+    /// The compression load pass (the rules' dictionaries and compressed values; the rows of
+    /// top-level `dedup` keys were coded as they entered when the catalog came first), the
+    /// build of every property index from the data (entries are never persisted), then
+    /// [`TraversalGraph::shrink_to_fit`].
     fn finish_load(&mut self) -> Result<(), GraphError> {
-        self.compression_load_pass();
+        self.compression_finish_load();
         self.property_index_rebuild_all();
         TraversalGraph::shrink_to_fit(self);
         Ok(())

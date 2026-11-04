@@ -86,7 +86,7 @@ impl std::hash::Hasher for MixHasher {
     }
 }
 
-type Mix = BuildHasherDefault<MixHasher>;
+pub(crate) type Mix = BuildHasherDefault<MixHasher>;
 
 /// The last insertion transition: `(shape address, position, key print, key, next shape)`.
 type InsertMemo = (usize, usize, KeyPrint, CompactString, Arc<Shape>);

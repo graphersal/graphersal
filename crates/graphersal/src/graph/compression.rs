@@ -25,7 +25,11 @@
 //! - a define, redefine or drop runs the **explicit pass** over the rule's `(element, label)`
 //!   (D8); `recompress` re-runs it and rebuilds the dictionary;
 //! - a rollback normalizes what it restores and re-runs the pass of an undone rule change (D10);
-//! - a load runs one pass over every rule after the elements and the catalog are in place (D11).
+//! - a load runs one pass over every rule after the elements and the catalog are in place (D11);
+//!   a snapshot load whose catalog arrives before its elements (every packed snapshot: the
+//!   manifest's definitions are restored first) codes the top-level `dedup` keys while the rows
+//!   enter the graph instead (stage V2, [`LoadCoding`]), so its end pass only covers the lz4
+//!   and nested-path rules.
 //!
 //! A dedup table entry that no element references any more (its value was overwritten or its
 //! element dropped) is swept lazily: when the table has doubled since its last sweep, after a
@@ -701,6 +705,180 @@ impl DedupTable {
     }
 }
 
+/// How a load through the persistence load sink (`PersistentStorage::load_definition`,
+/// `load_vertex`, `load_edge`, `finish_load`) codes the rows of the top-level `dedup` rules.
+///
+/// The packed snapshot restores the catalog before the elements: the rules are then built from
+/// the catalog when the first element arrives and every row is coded as it enters the graph
+/// (`insert_vertex_raw`/`insert_edge_raw`), straight into the rules' value dictionaries; no
+/// plain row of a coded key is kept until the end, and the end pass only normalizes the labels
+/// of the lz4 and nested-path rules. A compression rule restored after an element (no path of
+/// this version does that) falls back to the full end pass, which rebuilds every rule and
+/// re-codes every row: the same state either way.
+#[derive(Debug, Default)]
+pub(crate) enum LoadCoding {
+    /// No compression rule arrived through the load sink.
+    #[default]
+    Idle,
+    /// A compression rule arrived before any element: the rules are built at the first one.
+    Pending,
+    /// The rules were built at the first element; rows are coded as they enter, through the
+    /// plans of their `(labels, shape)`.
+    Direct(LoadPlans),
+    /// A compression rule arrived after an element: the end of the load runs the full pass.
+    Late,
+}
+
+thread_local! {
+    /// Set while [`TraversalGraph::with_load_post_pass`] runs (a test hook).
+    static LOAD_POST_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The labels of an element entering the graph during a direct load (part of a
+/// [`LoadPlans`] key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LoadLabels {
+    /// A vertex's interned label set.
+    Vertex(crate::graph::labels::LabelSetId),
+    /// An edge's interned label.
+    Edge(crate::graph::labels::LabelId),
+}
+
+/// The coding of the rows of one `(labels, shape)` during a direct load: what
+/// [`CompressionRules::code_row`] decides for a row whose every value its rule accepts, found
+/// once and kept for the load (a load codes millions of rows of a few hundred such pairs).
+struct LoadPlan {
+    /// The shape (its address is part of the key: held, so it is not reused while the plan
+    /// lives).
+    shape: Arc<Shape>,
+    /// Per position, an own value's index or [`CODED_SLOT`] | a code's index.
+    slots: Box<[u32]>,
+    /// One dictionary per code (empty: no position is coded).
+    dicts: Box<[Arc<ValueDictionary>]>,
+    /// Per position, the dictionary of the rule that covers its key.
+    rules: Box<[Option<Arc<ValueDictionary>>]>,
+    /// The interned layout, made by the first row that uses it (so the layout table holds
+    /// exactly the layouts of the rows, as after the whole-graph pass).
+    layout: Option<Arc<Layout>>,
+}
+
+/// The [`LoadPlan`]s of a direct load, by labels and shape address.
+#[derive(Default)]
+pub(crate) struct LoadPlans {
+    plans: HashMap<(LoadLabels, usize), LoadPlan, crate::graph::shape::Mix>,
+}
+
+impl std::fmt::Debug for LoadPlans {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadPlans")
+            .field("plans", &self.plans.len())
+            .finish()
+    }
+}
+
+impl LoadPlans {
+    /// Codes the row `map` of an element with `labels` entering the graph, as
+    /// [`CompressionRules::code_row`] would: through the plan of its labels and shape, or
+    /// through `code_row` itself for a row the plan does not cover (a value a rule does not
+    /// accept, an unadopted or already coded map, a full dictionary).
+    fn code(
+        &mut self,
+        rules: &CompressionRules,
+        element: ElementKind,
+        key: LoadLabels,
+        labels: &[CompactString],
+        map: &mut PropertyMap,
+    ) {
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+            rules.code_row(element, &labels, map);
+            return;
+        };
+        let plan = self
+            .plans
+            .entry((key, Arc::as_ptr(&shaped.shape) as usize))
+            .or_insert_with(|| {
+                let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+                rules.load_plan(element, &labels, &shaped.shape)
+            });
+        if plan.dicts.is_empty() {
+            return;
+        }
+        let accepted = plan.slots.len() == shaped.values.len()
+            && plan.slots.iter().zip(&shaped.values).all(|(slot, value)| {
+                slot & CODED_SLOT == 0
+                    || plan
+                        .dicts
+                        .get((slot & !CODED_SLOT) as usize)
+                        .is_some_and(|dictionary| dictionary.accepts(value))
+            });
+        if !accepted {
+            let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+            rules.code_row(element, &labels, map);
+            return;
+        }
+        let layout = match &plan.layout {
+            Some(layout) => layout,
+            None => plan.layout.insert(rules.layouts.lock().intern(
+                &plan.shape,
+                plan.slots.to_vec(),
+                plan.dicts.to_vec(),
+                plan.rules.to_vec(),
+            )),
+        };
+        let values = std::mem::take(&mut shaped.values);
+        let coded = layout.dicts.len();
+        let mut own = Vec::with_capacity(values.len() - coded);
+        let mut codes = Vec::with_capacity(coded);
+        let mut values = values.into_iter();
+        for (position, slot) in layout.slots.iter().enumerate() {
+            let Some(value) = values.next() else {
+                break;
+            };
+            if slot & CODED_SLOT == 0 {
+                own.push(value);
+                continue;
+            }
+            let interned = match layout.dicts.get((slot & !CODED_SLOT) as usize) {
+                Some(dictionary) => dictionary.intern(value),
+                None => Err(value),
+            };
+            match interned {
+                Ok(code) => codes.push(code),
+                Err(value) => {
+                    // A full dictionary (2^32 entries): the row is put back together plain
+                    // and coded the generic way, which keeps such a value in the row.
+                    let mut plain = Vec::with_capacity(layout.slots.len());
+                    let mut own = own.into_iter();
+                    for slot in layout.slots.iter().take(position) {
+                        let restored = if slot & CODED_SLOT == 0 {
+                            own.next()
+                        } else {
+                            let at = (slot & !CODED_SLOT) as usize;
+                            codes
+                                .get(at)
+                                .and_then(|code| layout.dicts.get(at)?.get(*code))
+                                .cloned()
+                        };
+                        plain.push(restored.unwrap_or(ElementProperty::Null));
+                    }
+                    plain.push(value);
+                    plain.extend(values);
+                    *map = PropertyMap::from_shaped(Arc::clone(&layout.shape), plain);
+                    let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+                    rules.code_row(element, &labels, map);
+                    return;
+                }
+            }
+        }
+        *map = PropertyMap::from_coded(
+            Arc::clone(layout),
+            own.into_boxed_slice(),
+            codes.into_boxed_slice(),
+        );
+    }
+}
+
 /// One active rule.
 #[derive(Debug, Clone)]
 pub(crate) struct Rule {
@@ -812,11 +990,13 @@ impl LayoutTable {
         layout
     }
 
-    /// Drops every layout no row uses.
+    /// Drops every layout no row uses, and the table's spare capacity (so the table's size
+    /// after a sweep depends only on the layouts in use, not on the order they were made in).
     pub(crate) fn sweep(&mut self) {
         self.last = None;
         self.layouts
             .retain(|_, layout| Arc::strong_count(layout) > 1);
+        self.layouts.shrink_to_fit();
         self.sweep_at = (2 * self.layouts.len()).max(LAYOUT_SWEEP_MIN);
     }
 
@@ -925,6 +1105,34 @@ impl CompressionRules {
             self.code_row(element, labels, properties);
             return;
         }
+        // A coded row whose every coded value is still coded by the rule that wins its key:
+        // only its own values are normalized (a coded value is plain by construction, and that
+        // rule leaves it as it is), so nothing coded is decoded and coded again.
+        if let Some(layout) = properties
+            .coded()
+            .map(|coded| Arc::clone(&coded.layout))
+            .filter(|layout| {
+                layout.shape.keys.iter().enumerate().all(|(position, key)| {
+                    layout.coded_at(position).is_none_or(|(_, have)| {
+                        coded_in(&label_rules, key).is_some_and(|want| Arc::ptr_eq(have, want))
+                    })
+                })
+            })
+        {
+            if let Some(own) = properties.coded_own_mut() {
+                for (key, slot) in layout.shape.keys.iter().zip(layout.slots.iter()) {
+                    if slot & CODED_SLOT != 0 {
+                        continue;
+                    }
+                    if let Some(value) = own.get_mut(*slot as usize) {
+                        let rules = self.for_key(element, labels, key);
+                        normalize_value(value, &rules, force);
+                    }
+                }
+            }
+            self.code_row(element, labels, properties);
+            return;
+        }
         for (key, value) in properties.iter_mut() {
             let rules = self.for_key(element, labels, key);
             normalize_value(value, &rules, force);
@@ -1015,6 +1223,40 @@ impl CompressionRules {
             .iter()
             .filter_map(|label| by_kind.get(*label).map(Vec::as_slice))
             .collect()
+    }
+
+    /// The [`LoadPlan`] of the rows of `shape` of an element with these labels: the layout
+    /// [`Self::code_row`] gives such a row when every value its rule covers is accepted.
+    fn load_plan(&self, element: ElementKind, labels: &[&str], shape: &Arc<Shape>) -> LoadPlan {
+        let label_rules = self.label_rules(element, labels);
+        let mut slots = Vec::with_capacity(shape.len());
+        let mut dicts: Vec<Arc<ValueDictionary>> = Vec::new();
+        let mut rules = Vec::with_capacity(shape.len());
+        let mut own = 0u32;
+        for key in shape.keys.iter() {
+            let rule = coded_in(&label_rules, key);
+            rules.push(rule.map(Arc::clone));
+            match rule {
+                Some(dictionary) => {
+                    slots.push(CODED_SLOT | dicts.len() as u32);
+                    dicts.push(Arc::clone(dictionary));
+                }
+                None => {
+                    slots.push(own);
+                    own += 1;
+                }
+            }
+        }
+        if !self.has_coded {
+            dicts.clear();
+        }
+        LoadPlan {
+            shape: Arc::clone(shape),
+            slots: slots.into_boxed_slice(),
+            dicts: dicts.into_boxed_slice(),
+            rules: rules.into_boxed_slice(),
+            layout: None,
+        }
     }
 
     /// Brings a stored map's row into the coding the rules ask for: every top-level value whose
@@ -1929,6 +2171,7 @@ impl TraversalGraph {
     /// and normalizes every rule's label. Nothing happens without rules.
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn compression_load_pass(&mut self) {
+        self.load_coding = LoadCoding::Idle;
         self.compression = CompressionRules::default();
         self.compression_rebuild_rules();
         if self.compression.is_empty() {
@@ -1951,15 +2194,227 @@ impl TraversalGraph {
         }
     }
 
-    /// Codes the row of a vertex that just entered the graph (its map adopted).
+    /// A definition arrived through the load sink: a compression rule makes the rows that
+    /// follow be coded as they enter ([`LoadCoding`]).
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_load_definition(&mut self, kind: DefinitionKind) {
+        if kind != DefinitionKind::COMPRESSION {
+            return;
+        }
+        let elements = self.graph.node_count() + self.graph.edge_count();
+        let post_pass = LOAD_POST_PASS.with(std::cell::Cell::get);
+        self.load_coding = match self.load_coding {
+            LoadCoding::Idle | LoadCoding::Pending if elements == 0 && !post_pass => {
+                LoadCoding::Pending
+            }
+            LoadCoding::Idle | LoadCoding::Pending | LoadCoding::Direct(_) | LoadCoding::Late => {
+                LoadCoding::Late
+            }
+        };
+    }
+
+    /// An element arrives through the load sink: the rules of the catalog are built at the
+    /// first one after a rule arrived ([`LoadCoding::Pending`]), so its row and every later one
+    /// is coded as it enters the graph.
+    #[inline]
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_load_element(&mut self) {
+        if matches!(self.load_coding, LoadCoding::Pending) {
+            self.compression_start_direct_load();
+        }
+    }
+
+    /// Runs `run` with every load through the persistence load sink on this thread coding
+    /// its rows in the end pass over the whole graph, the way of the loads before rows were
+    /// coded as they enter: the reference of the tests that compare both ways. A test helper.
+    #[doc(hidden)]
+    pub fn with_load_post_pass<R>(run: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LOAD_POST_PASS.with(|flag| flag.set(self.0));
+            }
+        }
+        let _restore = Restore(LOAD_POST_PASS.with(|flag| flag.replace(true)));
+        run()
+    }
+
+    /// [`Self::compression_load_element`] at the first element (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_start_direct_load(&mut self) {
+        // Elements stored another way since the rule arrived (not through the sink): the end
+        // of the load codes them all.
+        if self.graph.node_count() + self.graph.edge_count() != 0 {
+            self.load_coding = LoadCoding::Late;
+            return;
+        }
+        self.compression = CompressionRules::default();
+        self.compression_rebuild_rules();
+        self.load_coding = LoadCoding::Direct(LoadPlans::default());
+    }
+
+    /// The compression pass at the end of a load through the sink: after a direct load
+    /// ([`LoadCoding::Direct`]) only the lz4 dictionaries are built and the labels of the
+    /// rules that do not code top-level values (lz4, nested-path `dedup`) are normalized (the
+    /// coded rows are final), else the full [`Self::compression_load_pass`].
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_finish_load(&mut self) {
+        match std::mem::take(&mut self.load_coding) {
+            LoadCoding::Direct(_) => self.compression_finish_direct_load(),
+            LoadCoding::Idle | LoadCoding::Pending | LoadCoding::Late => {
+                self.compression_load_pass()
+            }
+        }
+    }
+
+    /// [`Self::compression_finish_load`] after a direct load.
+    fn compression_finish_direct_load(&mut self) {
+        if self.compression.is_empty() {
+            return;
+        }
+        let mut names: Vec<CompactString> = Vec::new();
+        let mut targets: Vec<(ElementKind, String)> = Vec::new();
+        for rule in self.compression.iter() {
+            if rule.coded.is_some() {
+                continue;
+            }
+            names.push(rule.name.clone());
+            let target = (rule.element, rule.label.to_string());
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        for name in &names {
+            self.compression_build_dictionary(name);
+        }
+        if !targets.is_empty() && !self.compression_normalize_targets_parallel(&targets) {
+            self.compression_normalize_targets(&targets);
+        }
+        for (_, dictionary) in self.compression.coded_rules() {
+            dictionary.mark_rebuilt();
+        }
+    }
+
+    /// [`Self::compression_normalize_targets`] of a direct load's end, in parallel threads
+    /// over disjoint runs of element slots (the lz4 encoding of every value of a rule is the
+    /// costly part of a load with lz4 rules). Every row comes out as the sequential pass
+    /// leaves it: a row is normalized from its own state and the rules alone; only the order
+    /// in which a nested-path `dedup` table gains its entries can differ, which nothing
+    /// reads. `false`: not run (one worker, or a thread could not be started or failed: the
+    /// sequential pass then runs over every row again, which leaves a normalized row as it
+    /// is).
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+    fn compression_normalize_targets_parallel(
+        &mut self,
+        targets: &[(ElementKind, String)],
+    ) -> bool {
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if workers < 2 {
+            return false;
+        }
+        let vertex_labels: Vec<&str> = targets
+            .iter()
+            .filter(|(element, _)| *element == ElementKind::Vertex)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        let edge_labels: Vec<&str> = targets
+            .iter()
+            .filter(|(element, _)| *element == ElementKind::Edge)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        let rules = &self.compression;
+        let names = &self.labels;
+        let (vertex_runs, edge_runs) = self.graph.weight_runs_mut(workers);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let mut started = true;
+            if !vertex_labels.is_empty() {
+                let vertex_labels = &vertex_labels;
+                for run in vertex_runs {
+                    let work = move || {
+                        for vertex in run {
+                            let set = names.set(vertex.1);
+                            if !set
+                                .iter()
+                                .any(|label| vertex_labels.contains(&label.as_str()))
+                            {
+                                continue;
+                            }
+                            let labels: Vec<&str> = set.iter().map(CompactString::as_str).collect();
+                            rules.normalize_element(
+                                ElementKind::Vertex,
+                                &labels,
+                                &mut vertex.2,
+                                true,
+                            );
+                        }
+                    };
+                    match std::thread::Builder::new().spawn_scoped(scope, work) {
+                        Ok(handle) => handles.push(handle),
+                        Err(_) => started = false,
+                    }
+                }
+            }
+            if !edge_labels.is_empty() {
+                let edge_labels = &edge_labels;
+                for run in edge_runs {
+                    let work = move || {
+                        for edge in run {
+                            let Some(label) = names.name_str(edge.1) else {
+                                continue;
+                            };
+                            if !edge_labels.contains(&label) {
+                                continue;
+                            }
+                            if let Some(properties) = edge.2.as_mut() {
+                                rules.normalize_element(
+                                    ElementKind::Edge,
+                                    &[label],
+                                    properties,
+                                    true,
+                                );
+                            }
+                        }
+                    };
+                    match std::thread::Builder::new().spawn_scoped(scope, work) {
+                        Ok(handle) => handles.push(handle),
+                        Err(_) => started = false,
+                    }
+                }
+            }
+            let joined = handles
+                .into_iter()
+                .fold(true, |all, handle| handle.join().is_ok() && all);
+            started && joined
+        })
+    }
+
+    /// Without threads (wasm32) the sequential pass runs.
+    #[cfg(not(all(feature = "persist", not(target_arch = "wasm32"))))]
+    fn compression_normalize_targets_parallel(
+        &mut self,
+        _targets: &[(ElementKind, String)],
+    ) -> bool {
+        false
+    }
+
+    /// Codes the row of an element that just entered the graph (its map adopted) with
+    /// `labels` (interned as `key`): through the plans of a direct load, else
+    /// [`CompressionRules::code_row`].
     #[inline]
     pub(crate) fn compression_code_row(
-        &self,
+        &mut self,
         element: ElementKind,
+        key: LoadLabels,
         labels: &[CompactString],
         properties: &mut PropertyMap,
     ) {
         if !self.compression.has_coded() {
+            return;
+        }
+        if let LoadCoding::Direct(plans) = &mut self.load_coding {
+            plans.code(&self.compression, element, key, labels, properties);
             return;
         }
         let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();

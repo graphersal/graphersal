@@ -50,7 +50,9 @@ current data without changing anything.
   top-level property is looked at; with no rule for the element's labels a write costs one lookup.
 - **The disk stays plain.** Snapshots, the write-ahead log, GraphSON and GraphML hold the plain
   text: the persistence layer compresses whole chunks and large WAL records already, compressing
-  single values twice would only cost CPU. A load compresses the rule paths again in one pass.
+  single values twice would only cost CPU. A load compresses the rule paths again in one pass
+  (in parallel threads where the platform has them; `dedup` keys are coded while the elements
+  are read, see "Deduplicating repeated values").
 
 ## Rules
 
@@ -144,8 +146,12 @@ and it saves at least 1 MiB.
 Measured at query level on a real graph: overwriting a deduplicated key costs about 5-9 % more
 than a plain write; **adding a key that is new to an element** whose row is coded, and a
 **jpath write into a deduplicated value**, about 30 % more. Reads stay plain and are mostly
-faster (a filter on a coded key compares codes). A load codes the rule keys as it builds the
-graph (a load takes somewhat longer).
+faster (a filter on a coded key compares codes). A load codes the rule keys while it reads the
+elements: a snapshot holds its rules before its elements, so each row is coded as it enters the
+graph, straight into the dictionaries, and no plain copy of a coded value is kept until the end
+of the load. Opening a store with rules is then about as fast as opening it without them
+(measured on a real graph with 74 dedup rules and two lz4 rules, `--release`: 4.9 s with the
+rules against 5.4 s for the release before this one without them, 6.7-7.0 s with them).
 
 The rule's numbers: `compressed_values` counts the values the rule holds (coded or shared, one
 per element), `distinct_values` the distinct values among them, `plain_bytes` and `stored_bytes`
