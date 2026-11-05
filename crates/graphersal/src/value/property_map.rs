@@ -380,8 +380,9 @@ impl Eq for PropertyMap {}
 // `Clone` and `PartialEq` recurse through nested values (`ElementProperty::Object` holds a
 // `PropertyMap`); `#[inline(always)]` keeps the wrapper from adding a stack frame per nesting
 // level in unoptimized builds, where the deepest values (`traversal.max_value_depth`) run close to
-// the 2 MiB test-thread stack. The match is written out here (no helper call), and nested maps are
-// always `Indexed`, so the recursion goes through the same frames as a plain `IndexMap`.
+// the 2 MiB test-thread stack. The match is written out here (no helper call). A stored value's
+// nested maps are `Shaped` only down to `graph::shape::NESTED_DEPTH` levels (deeper ones stay
+// `Indexed`), so the frames of a deep recursion are those of a plain `IndexMap` below that bound.
 impl Clone for PropertyMap {
     #[inline(always)]
     fn clone(&self) -> Self {
@@ -586,6 +587,12 @@ impl PropertyMap {
     /// Order-independent equality across representations (the same rule as `IndexMap`'s).
     #[inline(never)]
     fn eq_mixed(&self, other: &Self) -> bool {
+        // Two maps of one shape (stored maps, nested values of one graph): their values in order.
+        if let (Repr::Shaped(a), Repr::Shaped(b)) = (&self.0, &other.0)
+            && Arc::ptr_eq(&a.shape, &b.shape)
+        {
+            return a.values == b.values;
+        }
         self.len() == other.len()
             && self
                 .iter()

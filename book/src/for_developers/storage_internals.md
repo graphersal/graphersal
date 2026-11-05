@@ -48,8 +48,8 @@ A snapshot load reserves the slots from the manifest's counts, and every load
 
 | Variant | Holds | Used for |
 |---|---|---|
-| `Indexed` | an `IndexMap<CompactString, ElementProperty>` (FNV) | every free-standing map: nested objects, catalog payloads, change sets, results, schema values, every map a caller builds |
-| `Shaped` | `Arc<Shape>` (the ordered key list, shared) + `Vec<ElementProperty>` (this element's values, in key order) | every map a `TraversalGraph` stores per vertex or edge |
+| `Indexed` | an `IndexMap<CompactString, ElementProperty>` (FNV) | every free-standing map: catalog payloads, change sets, results, schema values, every map a caller builds; a stored nested object whose key sequence was seen once or that sits deeper than eight levels |
+| `Shaped` | `Arc<Shape>` (the ordered key list, shared) + `Vec<ElementProperty>` (this element's values, in key order) | every map a `TraversalGraph` stores per vertex or edge, and the objects nested in its values (see Nested maps below) |
 | `Coded` | `Arc<Layout>` (shape, per position own value or code, the `dedup` rules' dictionaries, shared) + `Box<[ElementProperty]>` (own values) + `Box<[u32]>` (codes) | a stored map with values at the top-level keys of `dedup` rules ([Compressed Properties](../users_guide/compressed_properties.md#deduplicating-repeated-values)) |
 
 An `IndexMap` slot costs a cached hash, the key and the value (64 bytes) plus its share of the hash
@@ -108,6 +108,24 @@ integer comparison. Loads, replay, undo restores, damage repair, checkpoint merg
 `TraversalGraph::with_vertex_map` / `with_edge_map` (which hand the table and the element's map
 out side by side). A write through a generic map helper (the jpath writes) is followed by `adopt`.
 A map that missed adoption is still correct, it only does not share its keys.
+
+**Nested maps.** The objects inside a stored value (`ElementProperty::Object`, also inside arrays)
+are shaped in the same table, down to eight container levels below the element's own values
+(`NESTED_DEPTH`); deeper maps stay `Indexed`, so the recursive clone, comparison and drop of a
+deeply nested value keep the frames of a plain `IndexMap` below that bound. A nested key sequence
+gets a shape at its second sighting: a key sequence that already has a shape takes it at once, a new
+one is remembered by its hash (`seen_once`, at most 65 536 hashes, cleared by `shrink_to_fit` and
+so at the end of every load) and interned when it comes again. A map whose keys never repeat (a
+JSON document keyed by ids) therefore stays `Indexed`, which is smaller than a shape of its own.
+Nested maps are shaped by `adopt` (a map that is not one of this table's yet), by `insert_full`
+(the value written), by `shaped_copy` (change sets) and after a jpath write of the property; they
+keep their own one-entry memo, so they do not evict the element maps' last shape. They never take
+the transition caches: a key-changing write inside a value (through the public `PropertyMap` API)
+turns that nested map `Indexed`, which stays correct and is shaped again by the next write of the
+property. Two `Shaped` maps of one shape compare their value vectors directly. On the real code
+index graph (2.3M edges, about a million nested objects, 3 300 distinct nested key sequences) this
+saves 91 MiB of property memory; the snapshot bytes are the same except the header's memory
+estimate.
 
 **Sweep.** `ShapeTable::sweep` removes every shape that only the table still refers to (strong
 count 1) and clears the transition caches and memos, which are keyed by shape address. It runs when

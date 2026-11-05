@@ -1885,8 +1885,9 @@ fn store_coded_value<'l>(
     labels: impl FnOnce() -> Vec<&'l str>,
     map: &mut PropertyMap,
     key: CompactString,
-    value: ElementProperty,
+    mut value: ElementProperty,
 ) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    shapes.shape_value(&mut value);
     match map.coded_replace(&key, value) {
         Ok((position, replaced, added)) => (
             position,
@@ -1912,8 +1913,9 @@ fn write_path_stored(
 ) -> Result<(), GraphError> {
     if map.coded().is_some() {
         let name = path_property_name(path)?;
-        let (key, resulting) =
+        let (key, mut resulting) =
             crate::graph::write_checks::write_path(map.get(name.as_str()), path, value)?;
+        shapes.shape_value(&mut resulting);
         if let Err(resulting) = map.coded_replace(&key, resulting) {
             shapes.insert_full(map, key, resulting);
         }
@@ -1921,6 +1923,12 @@ fn write_path_stored(
     }
     let written = write_path_in(map, path, value);
     shapes.adopt(map);
+    // The written property's nested maps (a key added inside one turned it `Indexed`).
+    if let Ok(name) = path_property_name(path)
+        && let Some(value) = map.get_mut(name.as_str())
+    {
+        shapes.shape_value(value);
+    }
     written
 }
 
