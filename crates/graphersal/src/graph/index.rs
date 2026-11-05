@@ -1,4 +1,3 @@
-use crate::graph::handle::Generations;
 use crate::graph::topology::{EdgeIndex, NodeIndex};
 use crate::graph::{EdgeHandle, GraphType, VertexHandle};
 use compact_str::CompactString;
@@ -109,16 +108,45 @@ pub(crate) const fn id_entry_bytes<H>() -> u64 {
 /// No position: the slot has no membership recorded in [`LabelIndex::positions`].
 const NO_POSITION: u32 = u32::MAX;
 
-/// The members of one label: element slots in bucket order (insertion order, a removal moves the
-/// last member into the removed one's place, as `IndexSet::swap_remove` did), plus the label's
-/// number, which keys its memberships in [`LabelIndex::extra`].
-#[derive(Debug, Clone)]
-pub(crate) struct LabelMembers {
-    number: u32,
-    slots: Vec<u32>,
+/// A member of a label index: a handle (or, in unit tests, a bare slot) and its slot.
+pub(crate) trait LabelMember: Copy + Eq {
+    /// The element's slot.
+    fn slot(self) -> u32;
 }
 
-impl LabelMembers {
+impl LabelMember for u32 {
+    #[inline]
+    fn slot(self) -> u32 {
+        self
+    }
+}
+
+impl LabelMember for VertexHandle {
+    #[inline]
+    fn slot(self) -> u32 {
+        self.index().index() as u32
+    }
+}
+
+impl LabelMember for EdgeHandle {
+    #[inline]
+    fn slot(self) -> u32 {
+        self.index().index() as u32
+    }
+}
+
+/// The members of one label: element handles in bucket order (insertion order, a removal moves
+/// the last member into the removed one's place, as `IndexSet::swap_remove` did), plus the
+/// label's number, which keys its memberships in [`LabelIndex::extra`]. A member's handle stays
+/// valid while it is a member: a slot's generation changes only when its element is removed,
+/// and that removes its memberships first.
+#[derive(Debug, Clone)]
+pub(crate) struct LabelMembers<H = u32> {
+    number: u32,
+    slots: Vec<H>,
+}
+
+impl<H> LabelMembers<H> {
     /// The allocated member entries.
     #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
@@ -126,7 +154,7 @@ impl LabelMembers {
     }
 }
 
-/// The label index of one element kind: per label the member slots ([`LabelMembers`]), and where
+/// The label index of one element kind: per label the members ([`LabelMembers`]), and where
 /// each membership sits in its label's list, so a removal is O(1) (`swap_remove`) without a hash
 /// set per label.
 ///
@@ -135,16 +163,15 @@ impl LabelMembers {
 /// `extra`, keyed by `(slot, label number)`. A membership is recorded in exactly one of the two,
 /// and `extra` is always asked first: a slot's `positions` entry is then known to belong to the
 /// label asked about whenever `extra` has no entry for it. Membership tests confirm a
-/// `positions` entry against the list itself (`slots[position] == slot`), since the entry may
-/// belong to another label of the slot.
+/// `positions` entry against the list itself (`slots[position]` has the slot), since the entry
+/// may belong to another label of the slot.
 ///
-/// The index stores slots, not handles: every member is a live element (the raw insert/remove
-/// helpers of `graph/undo.rs` keep the index in step with the topology), and a scan builds each
-/// handle from the slot's current generation ([`Generations::get`]). Removal is by slot and reads
-/// nothing from the graph.
+/// Every member is a live element (the raw insert/remove helpers of `graph/undo.rs` keep the
+/// index in step with the topology), so a slot is in a label at most once and a member's handle
+/// is current. Removal is by slot and reads nothing from the graph.
 #[derive(Debug, Clone)]
-pub(crate) struct LabelIndex {
-    labels: hashbrown::HashMap<CompactString, LabelMembers, FnvBuildHasher>,
+pub(crate) struct LabelIndex<H = u32> {
+    labels: hashbrown::HashMap<CompactString, LabelMembers<H>, FnvBuildHasher>,
     /// Label numbers of removed (emptied) labels, reused first.
     free_numbers: Vec<u32>,
     /// The next never-used label number.
@@ -155,7 +182,7 @@ pub(crate) struct LabelIndex {
     extra: hashbrown::HashMap<(u32, u32), u32, FnvBuildHasher>,
 }
 
-impl Default for LabelIndex {
+impl<H> Default for LabelIndex<H> {
     fn default() -> Self {
         Self {
             labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
@@ -174,10 +201,10 @@ enum Record {
     Extra,
 }
 
-impl LabelIndex {
+impl<H: LabelMember> LabelIndex<H> {
     /// The members of `label`, `None` when no element carries it.
     #[inline]
-    pub(crate) fn get(&self, label: &str) -> Option<&LabelMembers> {
+    pub(crate) fn get(&self, label: &str) -> Option<&LabelMembers<H>> {
         self.labels.get(label)
     }
 
@@ -187,7 +214,7 @@ impl LabelIndex {
     fn locate(
         extra: &hashbrown::HashMap<(u32, u32), u32, FnvBuildHasher>,
         positions: &[u32],
-        members: &LabelMembers,
+        members: &LabelMembers<H>,
         slot: u32,
     ) -> Option<(u32, Record)> {
         if !extra.is_empty()
@@ -196,13 +223,15 @@ impl LabelIndex {
             return Some((position, Record::Extra));
         }
         let position = *positions.get(slot as usize)?;
-        (position != NO_POSITION && members.slots.get(position as usize) == Some(&slot))
-            .then_some((position, Record::Position))
+        (position != NO_POSITION
+            && members.slots.get(position as usize).map(|m| m.slot()) == Some(slot))
+        .then_some((position, Record::Position))
     }
 
     /// Adds `slot` to `label`; nothing when it is a member already (a label's members are a
     /// set).
-    pub(crate) fn insert(&mut self, label: impl Into<CompactString>, slot: u32) {
+    pub(crate) fn insert(&mut self, label: impl Into<CompactString>, member: H) {
+        let slot = member.slot();
         let label = label.into();
         let members = match self.labels.get_mut(label.as_str()) {
             Some(members) => members,
@@ -226,7 +255,7 @@ impl LabelIndex {
         }
         let position = members.slots.len() as u32;
         crate::graph::topology::reserve_one(&mut members.slots);
-        members.slots.push(slot);
+        members.slots.push(member);
         let index = slot as usize;
         if index >= self.positions.len() {
             if index == self.positions.len() {
@@ -263,7 +292,7 @@ impl LabelIndex {
             }
         }
         members.slots.swap_remove(position as usize);
-        if let Some(&moved) = members.slots.get(position as usize) {
+        if let Some(moved) = members.slots.get(position as usize).map(|m| m.slot()) {
             // The moved member's record is found the way `locate` finds it: `extra` first.
             match self.extra.get_mut(&(moved, members.number)) {
                 Some(recorded) => *recorded = position,
@@ -303,7 +332,7 @@ impl LabelIndex {
         let mut total = self.labels.allocation_size() as u64;
         for (label, members) in &self.labels {
             total += compact_string_heap_bytes(label);
-            total += members.slots.capacity() as u64 * u32_bytes;
+            total += (members.slots.capacity() * std::mem::size_of::<H>()) as u64;
         }
         total += self.free_numbers.capacity() as u64 * u32_bytes;
         total += self.positions.capacity() as u64 * u32_bytes;
@@ -311,16 +340,17 @@ impl LabelIndex {
     }
 }
 
-/// What an element with `labels` labels adds to the label index, amortized: one member entry
-/// per label, its slot's position (with any label), and an `extra` entry (key, position, control
-/// byte) for each label beyond the first. Spare capacity is not apportioned.
+/// What an element with `labels` labels adds to the label index, amortized: one member entry (a
+/// handle) per label, its slot's position (with any label), and an `extra` entry (key, position,
+/// control byte) for each label beyond the first. Spare capacity is not apportioned.
 pub(crate) const fn label_memberships_bytes(labels: usize) -> u64 {
     if labels == 0 {
         return 0;
     }
+    let member = std::mem::size_of::<VertexHandle>();
     let word = std::mem::size_of::<u32>();
     let extra = std::mem::size_of::<((u32, u32), u32)>() + 1;
-    (labels * word + word + (labels - 1) * extra) as u64
+    (labels * member + word + (labels - 1) * extra) as u64
 }
 
 /// The id and label indexes of a [`crate::TraversalGraph`].
@@ -341,8 +371,8 @@ pub(crate) const fn label_memberships_bytes(labels: usize) -> u64 {
 /// it valid: a topology clone keeps every slot. Nothing iterates the id index; it serves
 /// point lookups only, so it keeps no insertion order.
 ///
-/// The label indexes (`node_labels`/`edge_labels`, [`LabelIndex`]) keep slots; their scans take
-/// the graph's slot generations to build handles.
+/// The label indexes (`node_labels`/`edge_labels`, [`LabelIndex`]) keep handles in bucket order
+/// and one position per slot.
 ///
 /// Design and invariants: the book page "In-Memory Storage Internals"
 /// (`book/src/for_developers/storage_internals.md`).
@@ -350,8 +380,8 @@ pub(crate) const fn label_memberships_bytes(labels: usize) -> u64 {
 pub(crate) struct GraphIndex {
     nodes: IdTable<u32>,
     edges: IdTable<u32>,
-    pub(crate) node_labels: LabelIndex,
-    pub(crate) edge_labels: LabelIndex,
+    pub(crate) node_labels: LabelIndex<VertexHandle>,
+    pub(crate) edge_labels: LabelIndex<EdgeHandle>,
 }
 
 impl GraphIndex {
@@ -453,84 +483,50 @@ impl GraphIndex {
     /// Adds the live vertex `index` to `label`'s members (nothing when it is one already).
     #[inline]
     pub fn insert_node_label(&mut self, label: impl Into<CompactString>, index: VertexHandle) {
-        self.node_labels.insert(label, index.index().index() as u32);
+        self.node_labels.insert(label, index);
     }
 
     /// Removes the vertex `index` from `label`'s members, by slot (no graph read): the caller
     /// passes a live handle or one whose element just left the graph.
     #[inline]
     pub fn remove_node_label(&mut self, label: &str, index: VertexHandle) {
-        self.node_labels.remove(label, index.index().index() as u32);
+        self.node_labels.remove(label, index.slot());
     }
 
-    /// The members of `label`, in the bucket's order, as handles of the generations in
-    /// `generations` (the graph's vertex slot generations), or `None` if no vertex carries
+    /// Returns the members of `label`'s bucket, in the bucket's insertion order (a removal moves
+    /// the last member into the removed one's place), or `None` if no vertex currently carries
     /// `label`.
     #[inline]
-    pub fn nodes_by_label<'a>(
-        &'a self,
-        generations: &'a Generations,
-        label: &str,
-    ) -> Option<impl Iterator<Item = VertexHandle> + 'a + use<'a>> {
-        self.node_labels.get(label).map(move |members| {
-            members.slots.iter().map(move |&slot| {
-                VertexHandle::new(
-                    NodeIndex::new(slot as usize),
-                    generations.get(slot as usize),
-                )
-            })
-        })
-    }
-
-    /// [`Self::nodes_by_label`] for handles of the first generation (unit tests' handles).
-    #[cfg(test)]
     pub fn get_nodes_by_label(
         &self,
         label: &str,
     ) -> Option<impl Iterator<Item = VertexHandle> + '_ + use<'_>> {
-        static NONE: std::sync::LazyLock<Generations> =
-            std::sync::LazyLock::new(Generations::default);
-        self.nodes_by_label(&NONE, label)
+        self.node_labels
+            .get(label)
+            .map(|members| members.slots.iter().copied())
     }
 
     /// The edge counterpart of [`Self::insert_node_label`].
     #[inline]
     pub fn insert_edge_label(&mut self, label: impl Into<CompactString>, index: EdgeHandle) {
-        self.edge_labels.insert(label, index.index().index() as u32);
+        self.edge_labels.insert(label, index);
     }
 
     /// The edge counterpart of [`Self::remove_node_label`].
     #[inline]
     pub fn remove_edge_label(&mut self, label: &str, index: EdgeHandle) {
-        self.edge_labels.remove(label, index.index().index() as u32);
+        self.edge_labels.remove(label, index.slot());
     }
 
-    /// The edge counterpart of [`Self::nodes_by_label`].
+    /// The edge counterpart of [`Self::get_nodes_by_label`].
     #[inline]
-    pub fn edges_by_label<'a>(
-        &'a self,
-        generations: &'a Generations,
-        label: &str,
-    ) -> Option<impl Iterator<Item = EdgeHandle> + 'a + use<'a>> {
-        self.edge_labels.get(label).map(move |members| {
-            members.slots.iter().map(move |&slot| {
-                EdgeHandle::new(
-                    EdgeIndex::new(slot as usize),
-                    generations.get(slot as usize),
-                )
-            })
-        })
-    }
-
-    /// [`Self::edges_by_label`] for handles of the first generation (unit tests' handles).
-    #[cfg(test)]
     pub fn get_edges_by_label(
         &self,
         label: &str,
     ) -> Option<impl Iterator<Item = EdgeHandle> + '_ + use<'_>> {
-        static NONE: std::sync::LazyLock<Generations> =
-            std::sync::LazyLock::new(Generations::default);
-        self.edges_by_label(&NONE, label)
+        self.edge_labels
+            .get(label)
+            .map(|members| members.slots.iter().copied())
     }
 
     #[allow(dead_code)]
@@ -1055,7 +1051,7 @@ mod label_index_tests {
         }
         index.shrink_to_fit();
         let bytes = index.heap_bytes();
-        // 1000 members and 1000 positions of 4 bytes, plus the one-label table.
+        // 1000 members (bare slots here) and 1000 positions of 4 bytes, plus the one-label table.
         assert!(bytes >= 8_000, "{bytes}");
         assert!(bytes <= 8_000 + 256, "{bytes}");
         index.insert("a_label_longer_than_twenty_four_bytes", 5);
@@ -1063,7 +1059,7 @@ mod label_index_tests {
     }
 
     #[test]
-    fn scans_take_the_generation_of_the_slot() {
+    fn scans_return_the_current_handles_after_slot_reuse() {
         let mut graph = crate::TraversalGraph::new();
         let add = |graph: &mut crate::TraversalGraph, id: &str| {
             graph
@@ -1083,7 +1079,7 @@ mod label_index_tests {
         for label in ["v", "w"] {
             let scanned: Vec<VertexHandle> = graph
                 .index
-                .nodes_by_label(&graph.node_generations, label)
+                .get_nodes_by_label(label)
                 .expect("members")
                 .collect();
             // `keep` moved into the dropped vertex's place; `new` was appended.

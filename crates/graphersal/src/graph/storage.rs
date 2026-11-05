@@ -2089,12 +2089,10 @@ impl GraphStorage for TraversalGraph {
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = VertexHandle> + 'a>, GraphError> {
-        Ok(
-            match self.index.nodes_by_label(&self.node_generations, label) {
-                Some(nodes) => Box::new(nodes),
-                None => Box::new(std::iter::empty()),
-            },
-        )
+        Ok(match self.index.get_nodes_by_label(label) {
+            Some(nodes) => Box::new(nodes),
+            None => Box::new(std::iter::empty()),
+        })
     }
 
     #[inline]
@@ -2102,12 +2100,10 @@ impl GraphStorage for TraversalGraph {
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = EdgeHandle> + 'a>, GraphError> {
-        Ok(
-            match self.index.edges_by_label(&self.edge_generations, label) {
-                Some(edges) => Box::new(edges),
-                None => Box::new(std::iter::empty()),
-            },
-        )
+        Ok(match self.index.get_edges_by_label(label) {
+            Some(edges) => Box::new(edges),
+            None => Box::new(std::iter::empty()),
+        })
     }
 
     #[inline]

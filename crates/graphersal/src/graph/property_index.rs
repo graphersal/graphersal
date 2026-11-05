@@ -1543,10 +1543,7 @@ impl TraversalGraph {
         };
         match definition.element() {
             ElementKind::Vertex => {
-                if let Some(nodes) = self
-                    .index
-                    .nodes_by_label(&self.node_generations, definition.label())
-                {
+                if let Some(nodes) = self.index.get_nodes_by_label(definition.label()) {
                     for node in nodes {
                         if let Some(vertex) = self.vertex_weight(node)
                             && let Some(value) = vertex.2.get(definition.key())
@@ -1561,10 +1558,7 @@ impl TraversalGraph {
                 }
             }
             ElementKind::Edge => {
-                if let Some(edges) = self
-                    .index
-                    .edges_by_label(&self.edge_generations, definition.label())
-                {
+                if let Some(edges) = self.index.get_edges_by_label(definition.label()) {
                     for edge in edges {
                         if let Some(weight) = self.edge_weight(edge)
                             && let Some(value) = weight

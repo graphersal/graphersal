@@ -688,7 +688,7 @@ impl TraversalGraph {
             ElementKind::Vertex => elements.len() as u64,
             ElementKind::Edge => self
                 .index
-                .edges_by_label(&self.edge_generations, &request.label)
+                .get_edges_by_label(&request.label)
                 .map_or(0, Iterator::count) as u64,
         };
         let mut strings: Vec<&ElementProperty> = Vec::new();

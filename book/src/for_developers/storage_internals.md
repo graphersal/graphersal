@@ -198,25 +198,27 @@ so it keeps no insertion order.
 
 The label index (`graph/index.rs`, `GraphIndex.node_labels` / `edge_labels`, one `LabelIndex` per
 element kind) answers `vertices_by_label` / `edges_by_label`, the scans behind `has_label` and
-`hasLabel`-led starts. It keeps slots, not handles:
+`hasLabel`-led starts:
 
-- per label, its members as a `Vec<u32>` of slots in bucket order: insertion order, and a removal
+- per label, its members as a `Vec` of handles in bucket order: insertion order, and a removal
   moves the last member into the removed one's place (`swap_remove`), the order the earlier
   `IndexSet` per label gave, so label scans return elements in the same order as before;
 - per slot, one `u32`: the position of the slot's first recorded membership in its label's list,
   so a removal is O(1) without a hash set per label;
 - a small `(slot, label number) -> position` map for every further label of a multi-label vertex.
   A membership is recorded in exactly one of the two places, and the map is asked first; a
-  per-slot position is confirmed against the list (`list[position] == slot`), since it may belong
-  to another label of the same slot.
+  per-slot position is confirmed against the list (the member at that position has the slot),
+  since it may belong to another label of the same slot.
 
-A scan builds each handle from the slot and the slot's current generation (the graph's
-`Generations` arrays): every member is a live element, since the raw insert and remove helpers of
-`graph/undo.rs` keep the label index in step with the slots, as they do for the ID index. Removal
-is by slot and reads nothing from the graph. An element costs 8 bytes (its member entry and its
-position) plus about 13 bytes for each label beyond its first, against about 30 bytes per label
-membership with a hash set per label (on a graph of 534 thousand vertices and 2.3 million edges:
-89 MB before, about 22 MB after).
+Every member is a live element, since the raw insert and remove helpers of `graph/undo.rs` keep the
+label index in step with the slots, as they do for the ID index; a member's handle stays current
+because a slot's generation changes only when its element is removed, which removes its
+memberships first. Removal is by slot and reads nothing from the graph. An element costs 12 bytes
+(its handle and its position) plus about 21 bytes for each label beyond its first, against about
+30 bytes per label membership with a hash set per label (on a graph of 534 thousand vertices and
+2.3 million edges: 89 MB before, 34 MB after). Keeping bare slots (8 bytes per element) and
+building the handles from the slot generations at scan time would save 11 MB more there, but made
+label scans of that graph 6 to 10 % slower.
 
 ## Measured effect
 
