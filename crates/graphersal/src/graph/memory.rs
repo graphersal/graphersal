@@ -352,9 +352,7 @@ pub(crate) fn loaded_vertex_bytes(
 ) -> u64 {
     use crate::value::compact_string_heap_bytes;
     let slot = super::GraphType::node_slot_bytes() as u64;
-    let mut bytes = slot
-        + super::index::id_entry_bytes::<super::VertexHandle>()
-        + compact_string_heap_bytes(id);
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + compact_string_heap_bytes(id);
     // The entries in the label index (the label itself lives once, in the label table).
     bytes += super::index::label_memberships_bytes(labels.len());
     bytes + stored_properties_bytes(properties)
@@ -389,7 +387,7 @@ pub(crate) fn loaded_edge_bytes(
             0
         }
     };
-    let mut bytes = slot + super::index::id_entry_bytes::<super::EdgeHandle>() + heap(id);
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + heap(id);
     if label.is_some() {
         // The label lives once, in the label table; the edge adds its label index entries.
         bytes += super::index::label_memberships_bytes(1);

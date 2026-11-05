@@ -170,26 +170,27 @@ its values' heap to `property_bytes`; `shape_bytes` is included in `property_byt
 ## The ID index
 
 The ID index (`graph/index.rs`, `GraphIndex.nodes` / `edges`) maps an element id to its handle
-without storing the id a second time. Each table is a `hashbrown::HashTable<(Handle, u32)>`: the
-handle plus a cached 32-bit FNV-1a hash of the id, 12 bytes per bucket and one control byte. The
-id itself lives once, in the element's weight in the graph.
+without storing the id a second time. Each table is a `hashbrown::HashTable<(u32, u32)>`: the
+element's slot plus a cached 32-bit FNV-1a hash of the id, 8 bytes per bucket and one control
+byte. The id itself lives once, in the element's weight in the graph, and so does the slot's
+generation.
 
-- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at the
-  handle's slot: the slot must be occupied, carry the handle's generation, and hold the id asked
-  for. Lookups therefore take the graph as an argument.
-- **Removal** matches by handle and reads nothing from the graph.
+- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at its
+  slot: the slot must be occupied and hold the id asked for; the handle returned carries the
+  generation the weight holds. Lookups therefore take the graph as an argument.
+- **Removal** matches by slot and reads nothing from the graph.
 - **Growth** re-places entries from the cached hash alone (the probe hash is derived from the
   32-bit value), so growing the table during a bulk load does no random reads into the graph.
 
 The invariant that makes this sound, kept by the raw insert and remove helpers of `graph/undo.rs`
 (the only writers of the ID index):
 
-- every handle in the ID index points to a live slot whose weight carries the handle's generation
-  and the id the entry was hashed from;
+- every slot in the ID index is a live slot whose weight carries the id the entry was hashed
+  from (so a slot is in the index at most once);
 - an element's id never changes after insert.
 
-An entry is inserted after its slot's generation is patched and removed by handle right after the
-element left the graph. Cloning the index together with the graph keeps it valid, since a
+An entry is inserted after its slot's generation is patched and removed by slot right after the
+element left the graph, before the slot can be reused. Cloning the index together with the graph keeps it valid, since a
 topology clone keeps every slot. Nothing iterates the ID index; it serves point lookups only,
 so it keeps no insertion order.
 

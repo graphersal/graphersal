@@ -24,9 +24,10 @@ fn table_hash(hash: u32) -> u64 {
     u64::from(hash) | (u64::from(hash) << 32)
 }
 
-/// A table of handles under a cached 32-bit hash of the element id; the id itself is not stored
-/// here (it lives once, in the graph weight). Matching a candidate against an id is the caller's
-/// job (see [`GraphIndex::get_node`]); this type only knows hashes and handles.
+/// A table of entries `H` (the graph's id index keeps slots, `u32`) under a cached 32-bit hash
+/// of the element id; the id itself is not stored here (it lives once, in the graph weight).
+/// Matching a candidate against an id is the caller's job (see [`GraphIndex::get_node`]); this
+/// type only knows hashes and entries.
 #[derive(Debug, Clone)]
 pub(crate) struct IdTable<H> {
     table: HashTable<(H, u32)>,
@@ -98,8 +99,9 @@ impl<H: Copy + Eq> IdTable<H> {
     }
 }
 
-/// What one id index entry adds, amortized: its bucket `(handle, cached hash)` (12 bytes) plus
-/// one control byte. Spare capacity (the table is at most 7/8 full) is not apportioned.
+/// What one id index entry `H` adds, amortized: its bucket `(H, cached hash)` (8 bytes for the
+/// slot the graph keeps) plus one control byte. Spare capacity (the table is at most 7/8 full)
+/// is not apportioned.
 pub(crate) const fn id_entry_bytes<H>() -> u64 {
     (std::mem::size_of::<(H, u32)>() + 1) as u64
 }
@@ -323,18 +325,19 @@ pub(crate) const fn label_memberships_bytes(labels: usize) -> u64 {
 
 /// The id and label indexes of a [`crate::TraversalGraph`].
 ///
-/// The id index (`nodes`/`edges`) stores no ids: an entry is a handle plus a cached 32-bit hash
-/// of its element's id, and a lookup confirms a candidate by comparing the id in the graph
-/// weight at the handle's slot. This relies on an invariant kept by the raw insert/remove
-/// helpers of `graph/undo.rs`, the only writers of the id index:
+/// The id index (`nodes`/`edges`) stores no ids and no generations: an entry is a slot plus a
+/// cached 32-bit hash of its element's id, and a lookup confirms a candidate by comparing the id
+/// in the graph weight at the slot, whose weight also gives the handle's generation. This relies
+/// on an invariant kept by the raw insert/remove helpers of `graph/undo.rs`, the only writers of
+/// the id index:
 ///
-/// - every handle in the id index points to a live slot of the graph whose weight carries the
-///   handle's generation and the id the entry was hashed from;
+/// - every slot in the id index is a live slot of the graph whose weight carries the id the
+///   entry was hashed from (so a slot is in the index at most once);
 /// - an element's id never changes after insert (nothing writes `VertexData.0` / `EdgeData.0`
 ///   of a stored element).
 ///
-/// An entry is inserted after its slot's generation is patched, and removed by handle (no graph
-/// read) right after its element left the graph. Cloning the index together with the graph keeps
+/// An entry is inserted after its slot's generation is patched, and removed by slot (no graph
+/// read) right after its element left the graph, before the slot can be reused. Cloning the index together with the graph keeps
 /// it valid: a topology clone keeps every slot. Nothing iterates the id index; it serves
 /// point lookups only, so it keeps no insertion order.
 ///
@@ -345,8 +348,8 @@ pub(crate) const fn label_memberships_bytes(labels: usize) -> u64 {
 /// (`book/src/for_developers/storage_internals.md`).
 #[derive(Default, Debug, Clone)]
 pub(crate) struct GraphIndex {
-    nodes: IdTable<VertexHandle>,
-    edges: IdTable<EdgeHandle>,
+    nodes: IdTable<u32>,
+    edges: IdTable<u32>,
     pub(crate) node_labels: LabelIndex,
     pub(crate) edge_labels: LabelIndex,
 }
@@ -360,24 +363,34 @@ impl GraphIndex {
     /// [`GraphIndex`]). The id must be free.
     #[inline]
     pub fn insert_node(&mut self, id: impl AsRef<str>, index: VertexHandle) {
-        self.nodes.insert(id_hash(id.as_ref()), index);
+        self.nodes
+            .insert(id_hash(id.as_ref()), index.index().index() as u32);
     }
 
     /// Removes the entry of the vertex `index` indexed under `id`. Reads nothing from the graph,
     /// so it may run after the vertex left it. Returns whether the entry was there.
     #[inline]
     pub fn remove_node(&mut self, id: &str, index: VertexHandle) -> bool {
-        self.nodes.remove(id_hash(id), index)
+        self.nodes.remove(id_hash(id), index.index().index() as u32)
     }
 
     /// The live vertex of `graph` (the graph this index belongs to) with the id `id`.
     #[inline]
     pub fn get_node(&self, graph: &GraphType, id: &str) -> Option<VertexHandle> {
-        self.nodes.find(id_hash(id), |handle| {
-            graph
-                .node_weight(handle.index())
-                .is_some_and(|vertex| vertex.3 == handle.generation() && vertex.0 == id)
-        })
+        let mut generation = None;
+        let slot = self.nodes.find(id_hash(id), |slot| {
+            match graph.node_weight(NodeIndex::new(slot as usize)) {
+                Some(vertex) if vertex.0 == id => {
+                    generation = Some(vertex.3);
+                    true
+                }
+                _ => false,
+            }
+        })?;
+        Some(VertexHandle::new(
+            NodeIndex::new(slot as usize),
+            generation?,
+        ))
     }
 
     /// Whether `graph` holds a live vertex with the id `id`.
@@ -389,23 +402,30 @@ impl GraphIndex {
     /// Indexes the edge `index` under `id`, the id its weight carries. The id must be free.
     #[inline]
     pub fn insert_edge(&mut self, id: impl AsRef<str>, index: EdgeHandle) {
-        self.edges.insert(id_hash(id.as_ref()), index);
+        self.edges
+            .insert(id_hash(id.as_ref()), index.index().index() as u32);
     }
 
     /// The edge counterpart of [`Self::remove_node`].
     #[inline]
     pub fn remove_edge(&mut self, id: &str, index: EdgeHandle) -> bool {
-        self.edges.remove(id_hash(id), index)
+        self.edges.remove(id_hash(id), index.index().index() as u32)
     }
 
     /// The live edge of `graph` (the graph this index belongs to) with the id `id`.
     #[inline]
     pub fn get_edge(&self, graph: &GraphType, id: &str) -> Option<EdgeHandle> {
-        self.edges.find(id_hash(id), |handle| {
-            graph
-                .edge_weight(handle.index())
-                .is_some_and(|edge| edge.3.own == handle.generation() && edge.0 == id)
-        })
+        let mut generation = None;
+        let slot = self.edges.find(id_hash(id), |slot| {
+            match graph.edge_weight(EdgeIndex::new(slot as usize)) {
+                Some(edge) if edge.0 == id => {
+                    generation = Some(edge.3.own);
+                    true
+                }
+                _ => false,
+            }
+        })?;
+        Some(EdgeHandle::new(EdgeIndex::new(slot as usize), generation?))
     }
 
     /// The number of indexed vertex ids and edge ids.
@@ -702,6 +722,37 @@ mod id_index_tests {
     }
 
     #[test]
+    fn graph_entry_is_a_slot_and_a_hash() {
+        assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
+        assert_eq!(id_entry_bytes::<u32>(), 9);
+    }
+
+    #[test]
+    fn lookups_take_the_generation_of_the_slot() {
+        let mut graph = TraversalGraph::new();
+        let first = add_vertex(&mut graph, "x");
+        let a = add_vertex(&mut graph, "a");
+        let b = add_vertex(&mut graph, "b");
+        let e = graph
+            .insert_edge(Some("e".into()), None, a, b, PropertyMap::default())
+            .expect("edge");
+        graph.drop_edge(e).expect("drop edge");
+        graph.drop_vertex(first).expect("drop vertex");
+        // Both slots are reused, under new generations.
+        let again = add_vertex(&mut graph, "y");
+        let f = graph
+            .insert_edge(Some("f".into()), None, b, a, PropertyMap::default())
+            .expect("edge");
+        assert_eq!((again.index(), f.index()), (first.index(), e.index()));
+        assert_eq!(graph.index.get_node(&graph.graph, "y"), Some(again));
+        assert_ne!(graph.index.get_node(&graph.graph, "y"), Some(first));
+        assert_eq!(graph.index.get_edge(&graph.graph, "f"), Some(f));
+        assert_eq!(graph.index.get_node(&graph.graph, "x"), None);
+        assert_eq!(graph.index.get_edge(&graph.graph, "e"), None);
+        assert_eq!(graph.resolve_vertex(first), None);
+    }
+
+    #[test]
     fn table_with_forced_equal_hashes_matches_and_removes_by_handle() {
         let mut table = IdTable::<VertexHandle>::default();
         let a = VertexHandle::for_test(1);
@@ -811,10 +862,11 @@ mod id_index_tests {
         }
         assert_eq!(graph.index.get_node(&graph.graph, "v50000"), None);
         assert_eq!(graph.index.id_counts(), (50_000, 0));
-        // Exact allocation: 65 536 buckets of 13 bytes plus one control group at most.
+        // Exact allocation: 65 536 buckets of 9 bytes (slot, cached hash, control byte) plus one
+        // control group at most.
         let bytes = graph.index.nodes.heap_bytes();
-        assert!(bytes >= 50_000 * 13, "{bytes}");
-        assert!(bytes <= 65_536 * 13 + 64, "{bytes}");
+        assert!(bytes >= 50_000 * 9, "{bytes}");
+        assert!(bytes <= 65_536 * 9 + 64, "{bytes}");
         graph.shrink_to_fit();
         for i in (0..50_000).step_by(997) {
             assert!(graph.index.contains_node(&graph.graph, &format!("v{i}")));
