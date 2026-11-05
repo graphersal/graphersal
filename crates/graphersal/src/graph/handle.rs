@@ -155,6 +155,13 @@ impl Generations {
         self.slots[slot]
     }
 
+    /// The generation of a slot's live occupant (a slot never handed out reads as the first
+    /// generation). The label index keeps slots only and builds its handles from this.
+    #[inline]
+    pub(crate) fn get(&self, slot: usize) -> NonZeroU32 {
+        self.slots.get(slot).copied().unwrap_or(FIRST_GENERATION)
+    }
+
     /// Marks a slot as freed: its next occupant gets a new generation.
     #[inline]
     pub(crate) fn bump(&mut self, slot: usize) {

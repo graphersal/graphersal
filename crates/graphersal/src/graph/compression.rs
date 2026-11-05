@@ -2012,14 +2012,24 @@ impl TraversalGraph {
         let mut ids: Vec<(&str, &PropertyMap)> = Vec::new();
         match element {
             ElementKind::Vertex => {
-                for node in self.index.get_nodes_by_label(label).into_iter().flatten() {
+                for node in self
+                    .index
+                    .nodes_by_label(&self.node_generations, label)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(vertex) = self.vertex_weight(node) {
                         ids.push((vertex.0.as_str(), &vertex.2));
                     }
                 }
             }
             ElementKind::Edge => {
-                for edge in self.index.get_edges_by_label(label).into_iter().flatten() {
+                for edge in self
+                    .index
+                    .edges_by_label(&self.edge_generations, label)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(weight) = self.edge_weight(edge)
                         && let Some(properties) = weight.2.as_ref()
                     {
@@ -2056,7 +2066,7 @@ impl TraversalGraph {
             ElementKind::Vertex => {
                 let nodes: Vec<_> = self
                     .index
-                    .get_nodes_by_label(label)
+                    .nodes_by_label(&self.node_generations, label)
                     .into_iter()
                     .flatten()
                     .collect();
@@ -2067,7 +2077,7 @@ impl TraversalGraph {
             ElementKind::Edge => {
                 let edges: Vec<_> = self
                     .index
-                    .get_edges_by_label(label)
+                    .edges_by_label(&self.edge_generations, label)
                     .into_iter()
                     .flatten()
                     .collect();
@@ -2143,12 +2153,18 @@ impl TraversalGraph {
         let mut edges: Vec<crate::graph::EdgeHandle> = Vec::new();
         for (element, label) in targets {
             match element {
-                ElementKind::Vertex => {
-                    nodes.extend(self.index.get_nodes_by_label(label).into_iter().flatten())
-                }
-                ElementKind::Edge => {
-                    edges.extend(self.index.get_edges_by_label(label).into_iter().flatten())
-                }
+                ElementKind::Vertex => nodes.extend(
+                    self.index
+                        .nodes_by_label(&self.node_generations, label)
+                        .into_iter()
+                        .flatten(),
+                ),
+                ElementKind::Edge => edges.extend(
+                    self.index
+                        .edges_by_label(&self.edge_generations, label)
+                        .into_iter()
+                        .flatten(),
+                ),
             }
         }
         let label_kinds = targets
@@ -2693,7 +2709,7 @@ impl TraversalGraph {
             ElementKind::Vertex => {
                 for node in self
                     .index
-                    .get_nodes_by_label(&rule.label)
+                    .nodes_by_label(&self.node_generations, &rule.label)
                     .into_iter()
                     .flatten()
                 {
@@ -2705,7 +2721,7 @@ impl TraversalGraph {
             ElementKind::Edge => {
                 for edge in self
                     .index
-                    .get_edges_by_label(&rule.label)
+                    .edges_by_label(&self.edge_generations, &rule.label)
                     .into_iter()
                     .flatten()
                 {
