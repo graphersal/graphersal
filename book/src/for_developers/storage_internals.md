@@ -122,10 +122,9 @@ Nested maps are shaped by `adopt` (a map that is not one of this table's yet), b
 keep their own one-entry memo, so they do not evict the element maps' last shape. They never take
 the transition caches: a key-changing write inside a value (through the public `PropertyMap` API)
 turns that nested map `Indexed`, which stays correct and is shaped again by the next write of the
-property. Two `Shaped` maps of one shape compare their value vectors directly. On the real code
-index graph (2.3M edges, about a million nested objects, 3 300 distinct nested key sequences) this
-saves 91 MiB of property memory; the snapshot bytes are the same except the header's memory
-estimate.
+property. Two `Shaped` maps of one shape compare their value vectors directly. On a real code
+index graph (534k vertices, 2.3M edges) this saves 91 MiB of property memory (7.7 %), the open
+takes 2 to 3 % longer; the snapshot bytes are the same except the header's memory estimate.
 
 **Sweep.** `ShapeTable::sweep` removes every shape that only the table still refers to (strong
 count 1) and clears the transition caches and memos, which are keyed by shape address. It runs when

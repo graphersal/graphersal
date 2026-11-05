@@ -1,6 +1,6 @@
 //! Nested objects stored as shapes (stage V3 of the compact memory track): the objects inside a
 //! stored value share their key lists from the second sighting of a key sequence. Everything
-//! observable stays the same: reads, equality, ordering, grouping, jpath writes, rollbacks,
+//! observable stays the same: reads, equality, ordering, deduplication, jpath writes, rollbacks,
 //! compression rules, snapshots; only the memory figures shrink.
 
 use graphersal::catalog::{Codec, CompressionDefinition};
