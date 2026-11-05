@@ -2239,6 +2239,23 @@ impl TraversalGraph {
         run()
     }
 
+    /// Runs `run` with every snapshot chunk decoded on this thread (and by the decoder threads
+    /// it starts) building its nested maps `Indexed`, the way of the loads before chunks built
+    /// them `Shaped`, so the graph converts each one when it stores it: the reference of the
+    /// tests that compare both ways. A test helper.
+    #[doc(hidden)]
+    #[cfg(feature = "persist")]
+    pub fn with_nested_maps_decoded_indexed<R>(run: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::persist::codec::set_nested_indexed(self.0);
+            }
+        }
+        let _restore = Restore(crate::persist::codec::set_nested_indexed(true));
+        run()
+    }
+
     /// [`Self::compression_load_element`] at the first element (out of line).
     #[cold]
     #[inline(never)]
