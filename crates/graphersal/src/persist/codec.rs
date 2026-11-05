@@ -1816,6 +1816,75 @@ mod chunk_shape_tests {
         assert_eq!(depth, crate::graph::shape::NESTED_DEPTH + 2);
     }
 
+    /// Mutated chunk bytes decode the same way with nested maps built `Shaped` and `Indexed`:
+    /// both fail or both give equal maps (no panic either way).
+    #[test]
+    fn mutated_nested_maps_decode_alike_either_way() {
+        let mut table = Table(Vec::new());
+        let mut bytes = Vec::new();
+        let elements = 12;
+        for i in 0..elements as i64 {
+            let mut map = PropertyMap::default();
+            map.insert("name", ElementProperty::from(i));
+            map.insert(
+                "o",
+                object(&[
+                    ("a", i.into()),
+                    ("b", object(&[("a", (i % 3).into())])),
+                    (
+                        "c",
+                        ElementProperty::Array(vec![object(&[("a", 1.into())]), 2.into()]),
+                    ),
+                ]),
+            );
+            map.insert("e", object(&[]));
+            put_map(&mut bytes, &mut table, &map);
+        }
+        // Spare table entries: a mutated reference may name another key or the same text.
+        table.0.push("a".into());
+        table.0.push("zz".into());
+        let decode = |input: &[u8], indexed: bool| -> Vec<DecodeResult<PropertyMap>> {
+            let before = set_nested_indexed(indexed);
+            let mut shapes = ChunkShapes::default();
+            set_nested_indexed(before);
+            let mut reader = Reader::new(input);
+            let mut out = Vec::new();
+            for _ in 0..elements {
+                let result = read_element_properties(&mut reader, &table.0, 8, &mut shapes);
+                let failed = result.is_err();
+                out.push(result);
+                if failed {
+                    break;
+                }
+            }
+            out
+        };
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..3000 {
+            let mut input = bytes.clone();
+            for _ in 0..1 + next() % 3 {
+                let at = (next() % input.len() as u64) as usize;
+                input[at] = (next() & 0xff) as u8;
+            }
+            let shaped = decode(&input, false);
+            let indexed = decode(&input, true);
+            assert_eq!(shaped.len(), indexed.len(), "case {case}");
+            for (a, b) in shaped.iter().zip(&indexed) {
+                match (a, b) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "case {case}"),
+                    (Err(_), Err(_)) => {}
+                    _ => panic!("case {case}: {a:?} vs {b:?}"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_repeated_key_in_a_nested_map_is_an_error_either_way() {
         // `{"o": {"k": 1, "k": 2}}` with two references to the same key, read twice (the
