@@ -150,8 +150,9 @@ faster (a filter on a coded key compares codes). A load codes the rule keys whil
 elements: a snapshot holds its rules before its elements, so each row is coded as it enters the
 graph, straight into the dictionaries, and no plain copy of a coded value is kept until the end
 of the load. Opening a store with rules is then about as fast as opening it without them
-(measured on a real graph with 74 dedup rules and two lz4 rules, `--release`: 4.9 s with the
-rules against 5.4 s for the release before this one without them, 6.7-7.0 s with them).
+(measured on a real graph of 2.8 million elements with 74 dedup rules and two lz4 rules,
+`--release`, the embedding model loaded: 4.9-5.1 s with the rules; earlier versions took
+5.2-5.3 s without the 74 dedup rules and 6.6-7.0 s with them).
 
 The rule's numbers: `compressed_values` counts the values the rule holds (coded or shared, one
 per element), `distinct_values` the distinct values among them, `plain_bytes` and `stored_bytes`
