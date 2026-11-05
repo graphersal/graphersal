@@ -1580,6 +1580,17 @@ mod element_properties {
         persist::write_snapshot(&graph(width), &mut bytes, &WriteOptions::new()).unwrap();
         bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
     }
+
+    /// [`snapshot_load`] of [`coded_graph`]: a `dedup` rule on every key, every row coded by
+    /// the load. Needs `persist` (see [`snapshot_load`]).
+    #[cfg(feature = "persist")]
+    #[divan::bench(args = [3, 25], sample_count = 10)]
+    fn snapshot_load_coded(bencher: divan::Bencher, width: usize) {
+        use graphersal::persist::{self, WriteOptions};
+        let mut bytes = Vec::new();
+        persist::write_snapshot(&coded_graph(width), &mut bytes, &WriteOptions::new()).unwrap();
+        bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
+    }
 }
 
 /// The internal importers on the `element_properties::bulk_build` graph (20k vertices with six

@@ -2410,9 +2410,22 @@ impl TraversalGraph {
         labels: &[CompactString],
         properties: &mut PropertyMap,
     ) {
-        if !self.compression.has_coded() {
-            return;
+        if self.compression.has_coded() {
+            self.compression_code_row_coded(element, key, labels, properties);
         }
+    }
+
+    /// [`Self::compression_code_row`] with coding rules (out of line: an insert without
+    /// rules stays as small as before).
+    #[cold]
+    #[inline(never)]
+    fn compression_code_row_coded(
+        &mut self,
+        element: ElementKind,
+        key: LoadLabels,
+        labels: &[CompactString],
+        properties: &mut PropertyMap,
+    ) {
         if let LoadCoding::Direct(plans) = &mut self.load_coding {
             plans.code(&self.compression, element, key, labels, properties);
             return;
