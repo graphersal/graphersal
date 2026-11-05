@@ -34,9 +34,9 @@ key list and the values, no key is hashed.
 The vectors grow by 1/8 of their capacity at a time once they hold more than 512 slots (below,
 by doubling, as `Vec` does; `topology::growth_step`), so a graph built element by element carries
 at most about 1/9 of its slots as spare capacity, and the first insert after a load adds 1/8 of
-the slots instead of doubling them (the generations and the label buckets' entries follow the
-same rule; the id index and the label buckets' hash tables are power-of-two tables and keep
-their own spare room after a load). The growth stays geometric, so an insert is amortized O(1).
+the slots instead of doubling them (the generations, the label index's member lists and its
+per-slot positions follow the same rule; the id index is a power-of-two table and keeps its own
+spare room after a load). The growth stays geometric, so an insert is amortized O(1).
 A snapshot load reserves the slots from the manifest's counts, and every load
 (snapshot, Store, GraphSON, GraphML) ends with `shrink_to_fit`, which releases the spare capacity
 (vacant slots stay: indices are stable). The memory report shows `live`, `tombstoned` (vacant) and
@@ -170,28 +170,55 @@ its values' heap to `property_bytes`; `shape_bytes` is included in `property_byt
 ## The ID index
 
 The ID index (`graph/index.rs`, `GraphIndex.nodes` / `edges`) maps an element id to its handle
-without storing the id a second time. Each table is a `hashbrown::HashTable<(Handle, u32)>`: the
-handle plus a cached 32-bit FNV-1a hash of the id, 12 bytes per bucket and one control byte. The
-id itself lives once, in the element's weight in the graph.
+without storing the id a second time. Each table is a `hashbrown::HashTable<(u32, u32)>`: the
+element's slot plus a cached 32-bit FNV-1a hash of the id, 8 bytes per bucket and one control
+byte. The id itself lives once, in the element's weight in the graph, and so does the slot's
+generation.
 
-- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at the
-  handle's slot: the slot must be occupied, carry the handle's generation, and hold the id asked
-  for. Lookups therefore take the graph as an argument.
-- **Removal** matches by handle and reads nothing from the graph.
+- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at its
+  slot: the slot must be occupied and hold the id asked for; the handle returned carries the
+  generation the weight holds. Lookups therefore take the graph as an argument.
+- **Removal** matches by slot and reads nothing from the graph.
 - **Growth** re-places entries from the cached hash alone (the probe hash is derived from the
   32-bit value), so growing the table during a bulk load does no random reads into the graph.
 
 The invariant that makes this sound, kept by the raw insert and remove helpers of `graph/undo.rs`
 (the only writers of the ID index):
 
-- every handle in the ID index points to a live slot whose weight carries the handle's generation
-  and the id the entry was hashed from;
+- every slot in the ID index is a live slot whose weight carries the id the entry was hashed
+  from (so a slot is in the index at most once);
 - an element's id never changes after insert.
 
-An entry is inserted after its slot's generation is patched and removed by handle right after the
-element left the graph. Cloning the index together with the graph keeps it valid, since a
+An entry is inserted after its slot's generation is patched and removed by slot right after the
+element left the graph, before the slot can be reused. Cloning the index together with the graph keeps it valid, since a
 topology clone keeps every slot. Nothing iterates the ID index; it serves point lookups only,
 so it keeps no insertion order.
+
+## The label index
+
+The label index (`graph/index.rs`, `GraphIndex.node_labels` / `edge_labels`, one `LabelIndex` per
+element kind) answers `vertices_by_label` / `edges_by_label`, the scans behind `has_label` and
+`hasLabel`-led starts:
+
+- per label, its members as a `Vec` of handles in bucket order: insertion order, and a removal
+  moves the last member into the removed one's place (`swap_remove`), the order the earlier
+  `IndexSet` per label gave, so label scans return elements in the same order as before;
+- per slot, one `u32`: the position of the slot's first recorded membership in its label's list,
+  so a removal is O(1) without a hash set per label;
+- a small `(slot, label number) -> position` map for every further label of a multi-label vertex.
+  A membership is recorded in exactly one of the two places, and the map is asked first; a
+  per-slot position is confirmed against the list (the member at that position has the slot),
+  since it may belong to another label of the same slot.
+
+Every member is a live element, since the raw insert and remove helpers of `graph/undo.rs` keep the
+label index in step with the slots, as they do for the ID index; a member's handle stays current
+because a slot's generation changes only when its element is removed, which removes its
+memberships first. Removal is by slot and reads nothing from the graph. An element costs 12 bytes
+(its handle and its position) plus about 21 bytes for each label beyond its first, against about
+30 bytes per label membership with a hash set per label (on a graph of 534 thousand vertices and
+2.3 million edges: 89 MB before, 34 MB after). Keeping bare slots (8 bytes per element) and
+building the handles from the slot generations at scan time would save 11 MB more there, but made
+label scans of that graph 6 to 10 % slower.
 
 ## Measured effect
 

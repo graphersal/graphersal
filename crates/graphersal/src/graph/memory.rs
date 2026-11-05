@@ -283,7 +283,7 @@ pub(crate) fn structure(graph: &super::TraversalGraph) -> super::StructureMemory
         super::GraphType::edge_slot_bytes() as u64,
     );
     let id_index = graph.index.id_index_heap_bytes();
-    let label_index = graph.index.estimated_heap_bytes().saturating_sub(id_index);
+    let label_index = graph.index.label_index_heap_bytes();
     super::StructureMemory::new(compute(graph))
         .with_slots(vertices, edges)
         .with_index_bytes(id_index, label_index)
@@ -340,16 +340,8 @@ impl CompressedCount {
     }
 }
 
-/// What one entry adds to an `IndexMap<K, V>` of the indexes, amortized: its bucket in the
-/// entries (`hash + key + value`) plus its index slot (a `usize` and one control byte). Spare
-/// capacity is not apportioned, so a full walk ([`compute`]) reports somewhat more.
-fn index_entry_bytes<K, V>() -> u64 {
-    use std::mem::size_of;
-    (size_of::<(usize, K, V)>() + size_of::<usize>() + 1) as u64
-}
-
 /// What one vertex adds to [`compute`]'s figure for a freshly loaded graph (its slot, id,
-/// labels, properties, id-index entry and label-bucket entries), without building the graph: a
+/// labels, properties, id-index entry and label-index entries), without building the graph: a
 /// merge checkpoint keeps the manifest's estimate (format spec 6.1, offset 128) current by
 /// subtracting the replaced elements and adding the new ones. Like [`compute`], an estimate.
 #[cfg_attr(not(feature = "persist"), allow(dead_code))]
@@ -360,11 +352,9 @@ pub(crate) fn loaded_vertex_bytes(
 ) -> u64 {
     use crate::value::compact_string_heap_bytes;
     let slot = super::GraphType::node_slot_bytes() as u64;
-    let mut bytes = slot
-        + super::index::id_entry_bytes::<super::VertexHandle>()
-        + compact_string_heap_bytes(id);
-    // The entry in each label's bucket set (the label itself lives once, in the label table).
-    bytes += labels.len() as u64 * index_entry_bytes::<super::VertexHandle, ()>();
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + compact_string_heap_bytes(id);
+    // The entries in the label index (the label itself lives once, in the label table).
+    bytes += super::index::label_memberships_bytes(labels.len());
     bytes + stored_properties_bytes(properties)
 }
 
@@ -397,10 +387,10 @@ pub(crate) fn loaded_edge_bytes(
             0
         }
     };
-    let mut bytes = slot + super::index::id_entry_bytes::<super::EdgeHandle>() + heap(id);
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + heap(id);
     if label.is_some() {
-        // The label lives once, in the label table; the edge adds its bucket entry.
-        bytes += index_entry_bytes::<super::EdgeHandle, ()>();
+        // The label lives once, in the label table; the edge adds its label index entries.
+        bytes += super::index::label_memberships_bytes(1);
     }
     bytes + properties.map_or(0, stored_properties_bytes)
 }
