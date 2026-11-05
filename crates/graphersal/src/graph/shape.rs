@@ -799,8 +799,6 @@ impl ShapeTable {
     /// the module docs), else it turns `Indexed`, so the stored form does not depend on how a
     /// chunk was decoded. The decoded shape's answer is remembered (`decoded`), so the maps of
     /// one chunk shape cost one pointer comparison each.
-    #[cold]
-    #[inline(never)]
     fn shape_decoded_map(&mut self, map: &mut PropertyMap) {
         let Repr::Shaped(shaped) = &mut map.0 else {
             return;

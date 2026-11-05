@@ -1042,12 +1042,8 @@ pub(crate) fn read_properties<K: KeyReader>(
 /// A shape decoded in a chunk (owner 0: no graph's table).
 type ChunkShape = std::sync::Arc<crate::value::property_map::Shape>;
 
-/// The FNV map of key-reference sequences to the chunk's shapes.
-type KnownShapes = std::collections::HashMap<
-    Box<[usize]>,
-    ChunkShape,
-    std::hash::BuildHasherDefault<fnv::FnvHasher>,
->;
+/// The map of key-reference sequences to the chunk's shapes (one multiply per reference).
+type KnownShapes = std::collections::HashMap<Box<[usize]>, ChunkShape, crate::graph::shape::Mix>;
 
 /// The most first sightings of nested key sequences a chunk remembers (then it starts over:
 /// a sequence first seen before is decoded `Indexed` once more, which is still correct).
@@ -1094,10 +1090,11 @@ pub(crate) struct ChunkShapes {
     nested_ids: Vec<usize>,
     /// The reader offset of each of those references.
     nested_offsets: Vec<u64>,
-    /// The sequence and shape of the previous nested map built `Shaped`.
-    nested_last: Option<(Box<[usize]>, ChunkShape)>,
+    /// The sequence and shape of the previous nested map built `Shaped` (the sequence's
+    /// vector is reused).
+    nested_last: (Vec<usize>, Option<ChunkShape>),
     /// Hashes of the nested sequences seen once (decoded `Indexed`).
-    nested_seen: std::collections::HashSet<u64, std::hash::BuildHasherDefault<fnv::FnvHasher>>,
+    nested_seen: std::collections::HashSet<u64, crate::graph::shape::Mix>,
     /// Whether nested maps are built `Shaped` (off under the test hook [`nested_indexed`]).
     nested: bool,
 }
@@ -1111,7 +1108,7 @@ impl Default for ChunkShapes {
             known: KnownShapes::default(),
             nested_ids: Vec::new(),
             nested_offsets: Vec::new(),
-            nested_last: None,
+            nested_last: (Vec::new(), None),
             nested_seen: std::collections::HashSet::default(),
             nested: !nested_indexed(),
         }
@@ -1184,34 +1181,37 @@ impl ChunkShapes {
         table: &[CompactString],
     ) -> DecodeResult<Option<ChunkShape>> {
         let ids = self.nested_ids.get(base..).unwrap_or_default();
-        let offsets = self.nested_offsets.get(base..).unwrap_or_default();
-        let fresh = match &self.nested_last {
-            Some((last_ids, _)) if **last_ids == *ids => false,
-            _ => !self.known.contains_key(ids),
-        };
-        if fresh {
-            let hash = {
-                use std::hash::{BuildHasher, Hash, Hasher};
-                let mut hasher = self.nested_seen.hasher().build_hasher();
-                ids.hash(&mut hasher);
-                hasher.finish()
-            };
-            if self.nested_seen.len() >= NESTED_SEEN_MAX {
-                self.nested_seen.clear();
-            }
-            if self.nested_seen.insert(hash) {
-                return Ok(None);
-            }
+        if let (last_ids, Some(shape)) = &self.nested_last
+            && **last_ids == *ids
+        {
+            return Ok(Some(std::sync::Arc::clone(shape)));
         }
-        chunk_shape(
-            &mut self.nested_last,
-            &mut self.known,
-            ids,
-            offsets,
-            table,
-            "duplicate key in an object",
-        )
-        .map(Some)
+        let shape = match self.known.get(ids) {
+            Some(shape) => std::sync::Arc::clone(shape),
+            None => {
+                let hash = std::hash::BuildHasher::hash_one(self.nested_seen.hasher(), ids);
+                if self.nested_seen.len() >= NESTED_SEEN_MAX {
+                    self.nested_seen.clear();
+                }
+                if self.nested_seen.insert(hash) {
+                    return Ok(None);
+                }
+                let offsets = self.nested_offsets.get(base..).unwrap_or_default();
+                // Not known, so `last` is never consulted: a throwaway memo.
+                chunk_shape(
+                    &mut None,
+                    &mut self.known,
+                    ids,
+                    offsets,
+                    table,
+                    "duplicate key in an object",
+                )?
+            }
+        };
+        self.nested_last.0.clear();
+        self.nested_last.0.extend_from_slice(ids);
+        self.nested_last.1 = Some(std::sync::Arc::clone(&shape));
+        Ok(Some(shape))
     }
 }
 
