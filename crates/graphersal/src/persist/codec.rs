@@ -1039,69 +1039,179 @@ pub(crate) fn read_properties<K: KeyReader>(
     Ok(properties)
 }
 
-/// The shapes of the element property maps of one chunk, by their key-reference sequence: the
-/// elements of a chunk repeat a few key sequences, so a decoded map is built `Shaped` directly (an
-/// exact value vector plus a shared key list) without an `IndexMap` and without hashing a key.
-/// The graph adopts the shape into its own table when the element is stored.
-#[derive(Default)]
+/// A shape decoded in a chunk (owner 0: no graph's table).
+type ChunkShape = std::sync::Arc<crate::value::property_map::Shape>;
+
+/// The map of key-reference sequences to the chunk's shapes (one multiply per reference).
+type KnownShapes = std::collections::HashMap<Box<[usize]>, ChunkShape, crate::graph::shape::Mix>;
+
+/// The most first sightings of nested key sequences a chunk remembers (then it starts over:
+/// a sequence first seen before is decoded `Indexed` once more, which is still correct).
+const NESTED_SEEN_MAX: usize = 1 << 14;
+
+std::thread_local! {
+    /// Set while [`crate::TraversalGraph::with_nested_maps_decoded_indexed`] runs (a test hook):
+    /// the chunks decoded on this thread build every nested map `Indexed`.
+    static NESTED_INDEXED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the chunks decoded on this thread build nested maps `Indexed` (the test hook).
+pub(crate) fn nested_indexed() -> bool {
+    NESTED_INDEXED.with(std::cell::Cell::get)
+}
+
+/// Sets [`nested_indexed`] for this thread; returns the previous setting.
+pub(crate) fn set_nested_indexed(on: bool) -> bool {
+    NESTED_INDEXED.with(|flag| flag.replace(on))
+}
+
+/// The shapes of the property maps of one chunk, by their key-reference sequence: the elements
+/// of a chunk repeat a few key sequences, so a decoded map is built `Shaped` directly (an exact
+/// value vector plus a shared key list) without an `IndexMap` and without hashing a key. The
+/// graph adopts the shape into its own table when the element is stored.
+///
+/// Nested maps (objects inside values, down to [`crate::graph::shape::NESTED_DEPTH`] container
+/// levels) are built `Shaped` from the SECOND sighting of their key sequence in the chunk on;
+/// the first sighting, an empty map and a deeper map are built `Indexed`, as the graph keeps a
+/// key sequence seen once. The graph decides again when it stores the value
+/// (`ShapeTable::shape_value`: the second sighting in the whole load) and turns a decoded
+/// `Shaped` nested map `Indexed` in the rare case it disagrees, so the stored form never
+/// depends on how a chunk was decoded.
 pub(crate) struct ChunkShapes {
-    /// The key references of the map being read.
+    /// The key references of the element map being read.
     ids: Vec<usize>,
     /// The reader offset of each of those references (for a duplicate-key error).
     offsets: Vec<u64>,
-    /// The sequence and shape of the previous map.
-    last: Option<(
-        Box<[usize]>,
-        std::sync::Arc<crate::value::property_map::Shape>,
-    )>,
-    /// Every sequence of the chunk seen so far.
-    known: std::collections::HashMap<
-        Box<[usize]>,
-        std::sync::Arc<crate::value::property_map::Shape>,
-        std::hash::BuildHasherDefault<fnv::FnvHasher>,
-    >,
+    /// The sequence and shape of the previous element map.
+    last: Option<(Box<[usize]>, ChunkShape)>,
+    /// Every sequence of the chunk with a shape so far (element and nested maps).
+    known: KnownShapes,
+    /// The key references of the nested maps being read, innermost last (a stack).
+    nested_ids: Vec<usize>,
+    /// The reader offset of each of those references.
+    nested_offsets: Vec<u64>,
+    /// The sequence and shape of the previous nested map built `Shaped` (the sequence's
+    /// vector is reused).
+    nested_last: (Vec<usize>, Option<ChunkShape>),
+    /// Hashes of the nested sequences seen once (decoded `Indexed`).
+    nested_seen: std::collections::HashSet<u64, crate::graph::shape::Mix>,
+    /// Whether nested maps are built `Shaped` (off under the test hook [`nested_indexed`]).
+    nested: bool,
+}
+
+impl Default for ChunkShapes {
+    fn default() -> Self {
+        Self {
+            ids: Vec::new(),
+            offsets: Vec::new(),
+            last: None,
+            known: KnownShapes::default(),
+            nested_ids: Vec::new(),
+            nested_offsets: Vec::new(),
+            nested_last: (Vec::new(), None),
+            nested_seen: std::collections::HashSet::default(),
+            nested: !nested_indexed(),
+        }
+    }
+}
+
+/// The shape of the key references `ids` (read at `offsets`) through the memo `last` and the
+/// chunk's `known` sequences; a new sequence is checked for a repeated key (by text, so two
+/// references to equal strings count as a repeat: the error `duplicate`).
+fn chunk_shape(
+    last: &mut Option<(Box<[usize]>, ChunkShape)>,
+    known: &mut KnownShapes,
+    ids: &[usize],
+    offsets: &[u64],
+    table: &[CompactString],
+    duplicate: &'static str,
+) -> DecodeResult<ChunkShape> {
+    use crate::value::property_map::Shape;
+    if let Some((last_ids, shape)) = last
+        && **last_ids == *ids
+    {
+        return Ok(std::sync::Arc::clone(shape));
+    }
+    let shape = match known.get(ids) {
+        Some(shape) => std::sync::Arc::clone(shape),
+        None => {
+            let mut keys: Vec<CompactString> = Vec::with_capacity(ids.len());
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for (at, (index, offset)) in ids.iter().zip(offsets).enumerate() {
+                let key = table.get(*index).ok_or_else(|| {
+                    DecodeError::new(*offset, "string table reference out of range")
+                })?;
+                let repeated = if ids.len() <= 32 {
+                    keys.iter().take(at).any(|other| other == key)
+                } else {
+                    !seen.insert(key.as_str())
+                };
+                if repeated {
+                    return Err(DecodeError::new(*offset, duplicate));
+                }
+                keys.push(key.clone());
+            }
+            let shape = std::sync::Arc::new(Shape::new(keys.into_boxed_slice(), 0));
+            known.insert(ids.into(), std::sync::Arc::clone(&shape));
+            shape
+        }
+    };
+    *last = Some((ids.into(), std::sync::Arc::clone(&shape)));
+    Ok(shape)
 }
 
 impl ChunkShapes {
-    /// The shape of the key references just read; a new sequence is checked for a repeated key
-    /// (by text, so two references to equal strings count as a repeat).
-    fn shape_of(
+    /// The shape of the element key references just read.
+    fn shape_of(&mut self, table: &[CompactString]) -> DecodeResult<ChunkShape> {
+        chunk_shape(
+            &mut self.last,
+            &mut self.known,
+            &self.ids,
+            &self.offsets,
+            table,
+            "duplicate property key",
+        )
+    }
+
+    /// The shape of the nested map whose key references start at `base` of the nested stack:
+    /// `None` at the first sighting of its sequence in the chunk (the map is built `Indexed`).
+    fn nested_shape_of(
         &mut self,
+        base: usize,
         table: &[CompactString],
-    ) -> DecodeResult<std::sync::Arc<crate::value::property_map::Shape>> {
-        use crate::value::property_map::Shape;
-        if let Some((ids, shape)) = &self.last
-            && **ids == *self.ids
+    ) -> DecodeResult<Option<ChunkShape>> {
+        let ids = self.nested_ids.get(base..).unwrap_or_default();
+        if let (last_ids, Some(shape)) = &self.nested_last
+            && **last_ids == *ids
         {
-            return Ok(std::sync::Arc::clone(shape));
+            return Ok(Some(std::sync::Arc::clone(shape)));
         }
-        let shape = match self.known.get(self.ids.as_slice()) {
+        let shape = match self.known.get(ids) {
             Some(shape) => std::sync::Arc::clone(shape),
             None => {
-                let mut keys: Vec<CompactString> = Vec::with_capacity(self.ids.len());
-                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                for (at, (index, offset)) in self.ids.iter().zip(&self.offsets).enumerate() {
-                    let key = table.get(*index).ok_or_else(|| {
-                        DecodeError::new(*offset, "string table reference out of range")
-                    })?;
-                    let repeated = if self.ids.len() <= 32 {
-                        keys.iter().take(at).any(|other| other == key)
-                    } else {
-                        !seen.insert(key.as_str())
-                    };
-                    if repeated {
-                        return Err(DecodeError::new(*offset, "duplicate property key"));
-                    }
-                    keys.push(key.clone());
+                let hash = std::hash::BuildHasher::hash_one(self.nested_seen.hasher(), ids);
+                if self.nested_seen.len() >= NESTED_SEEN_MAX {
+                    self.nested_seen.clear();
                 }
-                let shape = std::sync::Arc::new(Shape::new(keys.into_boxed_slice(), 0));
-                self.known
-                    .insert(self.ids.as_slice().into(), std::sync::Arc::clone(&shape));
-                shape
+                if self.nested_seen.insert(hash) {
+                    return Ok(None);
+                }
+                let offsets = self.nested_offsets.get(base..).unwrap_or_default();
+                // Not known, so `last` is never consulted: a throwaway memo.
+                chunk_shape(
+                    &mut None,
+                    &mut self.known,
+                    ids,
+                    offsets,
+                    table,
+                    "duplicate key in an object",
+                )?
             }
         };
-        self.last = Some((self.ids.as_slice().into(), std::sync::Arc::clone(&shape)));
-        Ok(shape)
+        self.nested_last.0.clear();
+        self.nested_last.0.extend_from_slice(ids);
+        self.nested_last.1 = Some(std::sync::Arc::clone(&shape));
+        Ok(Some(shape))
     }
 }
 
@@ -1117,25 +1227,140 @@ pub(crate) fn read_element_properties(
     let count = reader.count(2)?;
     shapes.ids.clear();
     shapes.offsets.clear();
+    shapes.nested_ids.clear();
+    shapes.nested_offsets.clear();
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
         let key_at = reader.offset();
-        let index = reader.uvar()?;
-        let index = usize::try_from(index)
-            .ok()
-            .filter(|index| *index < table.len())
-            .ok_or_else(|| {
-                DecodeError::new(
-                    key_at,
-                    format!("string table reference {index} out of range"),
-                )
-            })?;
+        let index = table_index(reader, table)?;
         shapes.ids.push(index);
         shapes.offsets.push(key_at);
-        values.push(read_value(reader, &keys, max_depth)?);
+        // An element's own value: a scalar takes `read_tagged_value` at once (the loop of every
+        // load), a container goes out of line.
+        let tag = reader.u8()?;
+        values.push(
+            if (tag == tag::ARRAY || tag == tag::OBJECT) && shapes.nested && max_depth > 0 {
+                read_chunk_container(reader, tag, table, max_depth, shapes, 0)?
+            } else {
+                read_tagged_value(reader, tag, &keys, max_depth, 0)?
+            },
+        );
     }
     let shape = shapes.shape_of(table)?;
     Ok(PropertyMap::from_shaped(shape, values))
+}
+
+/// Reads a string-table reference and checks it against the table.
+#[inline]
+fn table_index(reader: &mut Reader<'_>, table: &[CompactString]) -> DecodeResult<usize> {
+    let start = reader.offset();
+    let index = reader.uvar()?;
+    usize::try_from(index)
+        .ok()
+        .filter(|index| *index < table.len())
+        .ok_or_else(|| {
+            DecodeError::new(
+                start,
+                format!("string table reference {index} out of range"),
+            )
+        })
+}
+
+/// [`read_tagged_value`] (tag included) of a value of an element map in a chunk, `depth`
+/// container levels below the element's own values: the objects in it are built through
+/// `shapes` (see [`ChunkShapes`]) down to [`crate::graph::shape::NESTED_DEPTH`] levels. A
+/// scalar takes [`read_tagged_value`] directly; only a container goes out of line.
+fn read_chunk_value(
+    reader: &mut Reader<'_>,
+    table: &[CompactString],
+    max_depth: usize,
+    shapes: &mut ChunkShapes,
+    depth: usize,
+) -> DecodeResult<ElementProperty> {
+    let tag = reader.u8()?;
+    if (tag == tag::ARRAY || tag == tag::OBJECT)
+        && shapes.nested
+        && depth < crate::graph::shape::NESTED_DEPTH
+        && depth < max_depth
+    {
+        return read_chunk_container(reader, tag, table, max_depth, shapes, depth);
+    }
+    read_tagged_value(reader, tag, &TableKeys(table), max_depth, depth)
+}
+
+/// [`read_chunk_value`] of an array or an object (after its tag).
+#[inline(never)]
+fn read_chunk_container(
+    reader: &mut Reader<'_>,
+    tag: u8,
+    table: &[CompactString],
+    max_depth: usize,
+    shapes: &mut ChunkShapes,
+    depth: usize,
+) -> DecodeResult<ElementProperty> {
+    if tag == tag::OBJECT {
+        return read_chunk_object(reader, table, max_depth, shapes, depth);
+    }
+    let count = reader.count(1)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(read_chunk_value(
+            reader,
+            table,
+            max_depth,
+            shapes,
+            depth + 1,
+        )?);
+    }
+    Ok(ElementProperty::Array(items))
+}
+
+/// [`read_chunk_value`] of an object (after its tag).
+fn read_chunk_object(
+    reader: &mut Reader<'_>,
+    table: &[CompactString],
+    max_depth: usize,
+    shapes: &mut ChunkShapes,
+    depth: usize,
+) -> DecodeResult<ElementProperty> {
+    let count = reader.count(2)?;
+    if count == 0 {
+        return Ok(ElementProperty::Object(Box::new(
+            PropertyMap::with_capacity(0),
+        )));
+    }
+    let base = shapes.nested_ids.len();
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key_at = reader.offset();
+        let index = table_index(reader, table)?;
+        let value = read_chunk_value(reader, table, max_depth, shapes, depth + 1)?;
+        // Pushed after the value: a nested map inside it uses the stack above `base` and
+        // leaves it as it found it.
+        shapes.nested_ids.push(index);
+        shapes.nested_offsets.push(key_at);
+        values.push(value);
+    }
+    let map = match shapes.nested_shape_of(base, table)? {
+        Some(shape) => PropertyMap::from_shaped(shape, values),
+        None => {
+            let mut object = PropertyMap::with_capacity(count);
+            let ids = shapes.nested_ids.get(base..).unwrap_or_default();
+            let offsets = shapes.nested_offsets.get(base..).unwrap_or_default();
+            for ((index, key_at), value) in ids.iter().zip(offsets).zip(values) {
+                let key = table.get(*index).cloned().ok_or_else(|| {
+                    DecodeError::new(*key_at, "string table reference out of range")
+                })?;
+                if object.insert(key, value).is_some() {
+                    return Err(DecodeError::new(*key_at, "duplicate key in an object"));
+                }
+            }
+            object
+        }
+    };
+    shapes.nested_ids.truncate(base);
+    shapes.nested_offsets.truncate(base);
+    Ok(ElementProperty::Object(Box::new(map)))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1452,6 +1677,233 @@ mod chunk_shape_tests {
         );
         let empty = read(&encode(&[]), &table, &mut shapes).unwrap();
         assert!(empty.is_empty());
+    }
+
+    /// Element maps whose values are written with string-table keys (as a chunk writes them).
+    struct Table(Vec<CompactString>);
+
+    impl KeyWriter for Table {
+        fn put_key(&mut self, out: &mut Vec<u8>, key: &str) {
+            let index = match self.0.iter().position(|k| k == key) {
+                Some(index) => index,
+                None => {
+                    self.0.push(key.into());
+                    self.0.len() - 1
+                }
+            };
+            put_uvar(out, index as u64);
+        }
+    }
+
+    fn put_map(out: &mut Vec<u8>, table: &mut Table, map: &PropertyMap) {
+        put_uvar(out, map.len() as u64);
+        for (key, value) in map.iter() {
+            table.put_key(out, key);
+            put_value(out, value, table).unwrap();
+        }
+    }
+
+    fn object(entries: &[(&str, ElementProperty)]) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        for (key, value) in entries {
+            map.insert(*key, value.clone());
+        }
+        ElementProperty::Object(Box::new(map))
+    }
+
+    fn nested(map: &PropertyMap, key: &str) -> PropertyMap {
+        match map.get(key) {
+            Some(ElementProperty::Object(inner)) => (**inner).clone(),
+            other => panic!("no object at {key}: {other:?}"),
+        }
+    }
+
+    fn is_shaped(map: &PropertyMap, key: &str) -> bool {
+        match map.get(key) {
+            Some(ElementProperty::Object(inner)) => inner.shape().is_some(),
+            other => panic!("no object at {key}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_maps_are_shaped_from_their_second_sighting_in_the_chunk() {
+        let mut table = Table(Vec::new());
+        let element = |i: i64| {
+            let mut map = PropertyMap::default();
+            map.insert("a", object(&[("x", i.into()), ("y", "v".into())]));
+            map.insert("b", object(&[]));
+            map.insert(
+                "c",
+                ElementProperty::Array(vec![
+                    object(&[("k", i.into())]),
+                    object(&[("k", 0.into())]),
+                ]),
+            );
+            map
+        };
+        let mut bytes = Vec::new();
+        for i in 0..3 {
+            let mut one = Vec::new();
+            put_map(&mut one, &mut table, &element(i));
+            bytes.push(one);
+        }
+        let mut shapes = ChunkShapes::default();
+        let maps: Vec<PropertyMap> = bytes
+            .iter()
+            .map(|one| read(one, &table.0, &mut shapes).unwrap())
+            .collect();
+        for (i, map) in maps.iter().enumerate() {
+            assert_eq!(*map, element(i as i64));
+        }
+        // The first `a` is the first sighting: `Indexed`; the later ones share a shape.
+        assert!(!is_shaped(&maps[0], "a"));
+        assert!(is_shaped(&maps[1], "a") && is_shaped(&maps[2], "a"));
+        assert!(std::sync::Arc::ptr_eq(
+            nested(&maps[1], "a").shape().unwrap(),
+            nested(&maps[2], "a").shape().unwrap()
+        ));
+        // An empty object stays `Indexed`; in an array the second object is already the second
+        // sighting.
+        assert!(!is_shaped(&maps[2], "b"));
+        let Some(ElementProperty::Array(items)) = maps[0].get("c") else {
+            panic!("array");
+        };
+        let shaped: Vec<bool> = items
+            .iter()
+            .map(|item| matches!(item, ElementProperty::Object(m) if m.shape().is_some()))
+            .collect();
+        assert_eq!(shaped, [false, true]);
+        // Under the test hook every nested map is `Indexed`.
+        let before = set_nested_indexed(true);
+        let mut shapes = ChunkShapes::default();
+        set_nested_indexed(before);
+        for one in &bytes {
+            let map = read(one, &table.0, &mut shapes).unwrap();
+            assert!(!is_shaped(&map, "a"));
+        }
+    }
+
+    #[test]
+    fn nested_maps_deeper_than_the_shaped_levels_stay_indexed() {
+        let mut table = Table(Vec::new());
+        let mut value = object(&[("leaf", 1.into())]);
+        for _ in 0..crate::graph::shape::NESTED_DEPTH + 1 {
+            value = object(&[("d", value)]);
+        }
+        let mut map = PropertyMap::default();
+        map.insert("v", value);
+        let mut one = Vec::new();
+        put_map(&mut one, &mut table, &map);
+        let mut shapes = ChunkShapes::default();
+        let deep = |shapes: &mut ChunkShapes| {
+            read_element_properties(&mut Reader::new(&one), &table.0, 64, shapes).unwrap()
+        };
+        deep(&mut shapes);
+        let back = deep(&mut shapes);
+        assert_eq!(back, map);
+        // Level `depth` below the element's values: shaped above the bound only.
+        let mut current = back.get("v").cloned();
+        let mut depth = 0;
+        while let Some(ElementProperty::Object(inner)) = current {
+            assert_eq!(
+                inner.shape().is_some(),
+                depth < crate::graph::shape::NESTED_DEPTH,
+                "{depth}"
+            );
+            current = inner.get("d").or_else(|| inner.get("leaf")).cloned();
+            depth += 1;
+        }
+        assert_eq!(depth, crate::graph::shape::NESTED_DEPTH + 2);
+    }
+
+    /// Mutated chunk bytes decode the same way with nested maps built `Shaped` and `Indexed`:
+    /// both fail or both give equal maps (no panic either way).
+    #[test]
+    fn mutated_nested_maps_decode_alike_either_way() {
+        let mut table = Table(Vec::new());
+        let mut bytes = Vec::new();
+        let elements = 12;
+        for i in 0..elements as i64 {
+            let mut map = PropertyMap::default();
+            map.insert("name", ElementProperty::from(i));
+            map.insert(
+                "o",
+                object(&[
+                    ("a", i.into()),
+                    ("b", object(&[("a", (i % 3).into())])),
+                    (
+                        "c",
+                        ElementProperty::Array(vec![object(&[("a", 1.into())]), 2.into()]),
+                    ),
+                ]),
+            );
+            map.insert("e", object(&[]));
+            put_map(&mut bytes, &mut table, &map);
+        }
+        // Spare table entries: a mutated reference may name another key or the same text.
+        table.0.push("a".into());
+        table.0.push("zz".into());
+        let decode = |input: &[u8], indexed: bool| -> Vec<DecodeResult<PropertyMap>> {
+            let before = set_nested_indexed(indexed);
+            let mut shapes = ChunkShapes::default();
+            set_nested_indexed(before);
+            let mut reader = Reader::new(input);
+            let mut out = Vec::new();
+            for _ in 0..elements {
+                let result = read_element_properties(&mut reader, &table.0, 8, &mut shapes);
+                let failed = result.is_err();
+                out.push(result);
+                if failed {
+                    break;
+                }
+            }
+            out
+        };
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..3000 {
+            let mut input = bytes.clone();
+            for _ in 0..1 + next() % 3 {
+                let at = (next() % input.len() as u64) as usize;
+                input[at] = (next() & 0xff) as u8;
+            }
+            let shaped = decode(&input, false);
+            let indexed = decode(&input, true);
+            assert_eq!(shaped.len(), indexed.len(), "case {case}");
+            for (a, b) in shaped.iter().zip(&indexed) {
+                match (a, b) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "case {case}"),
+                    (Err(_), Err(_)) => {}
+                    _ => panic!("case {case}: {a:?} vs {b:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_in_a_nested_map_is_an_error_either_way() {
+        // `{"o": {"k": 1, "k": 2}}` with two references to the same key, read twice (the
+        // second read takes the shaped path).
+        let table = table(&["o", "k"]);
+        let mut bytes = Vec::new();
+        put_uvar(&mut bytes, 1);
+        put_uvar(&mut bytes, 0);
+        bytes.push(tag::OBJECT);
+        put_uvar(&mut bytes, 2);
+        for value in [1i64, 2] {
+            put_uvar(&mut bytes, 1);
+            put_value(&mut bytes, &ElementProperty::from(value), &mut InlineKeys).unwrap();
+        }
+        let mut shapes = ChunkShapes::default();
+        for _ in 0..2 {
+            let err = read(&bytes, &table, &mut shapes).unwrap_err();
+            assert_eq!(err.reason, "duplicate key in an object");
+        }
     }
 
     #[test]

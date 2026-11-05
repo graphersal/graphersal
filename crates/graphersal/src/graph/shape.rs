@@ -28,10 +28,13 @@
 //!   repeat stays `Indexed`, which is smaller than a shape of its own. Entry points:
 //!   [`ShapeTable::adopt`] of a map that is not one of this table's yet, [`ShapeTable::insert_full`]
 //!   (`insert_full_plain`, `insert_full_coded`), [`ShapeTable::shaped_copy`] and
-//!   [`ShapeTable::shape_value`] (jpath writes, coded-row writes). Nested maps never take the
-//!   transition caches: a key-changing write inside a value turns that nested map `Indexed`
-//!   (the public `PropertyMap` API), which stays correct and is shaped again by the next write of
-//!   the property.
+//!   [`ShapeTable::shape_value`] (jpath writes, coded-row writes). A snapshot chunk decodes a
+//!   nested map `Shaped` over a chunk shape (owner [`DECODED`]) from the second sighting of its
+//!   key sequence in the chunk; the table applies its own second-sighting rule to it
+//!   (`shape_decoded_map`) and turns it `Indexed` when the rule says so, so the stored form does
+//!   not depend on the decode. Nested maps never take the transition caches: a key-changing
+//!   write inside a value turns that nested map `Indexed` (the public `PropertyMap` API), which
+//!   stays correct and is shaped again by the next write of the property.
 //! - **Sweep:** a shape no map references any more (only the table holds it) is removed by
 //!   [`ShapeTable::sweep`]: when the table has doubled since the last sweep (checked when a new
 //!   shape is interned), on `shrink_to_fit` and after a load. A shape referenced from anywhere (a
@@ -113,6 +116,13 @@ pub(crate) const NESTED_DEPTH: usize = 8;
 /// (a sequence then needs two more sightings) and on [`ShapeTable::shrink_to_fit`].
 const NESTED_SEEN_MAX: usize = 1 << 16;
 
+/// The owner id of the shapes a snapshot chunk decodes (`persist::codec::ChunkShapes`); table
+/// ids start at 1.
+pub(crate) const DECODED: u64 = 0;
+
+/// Entries of the memo of decoded nested shapes ([`ShapeTable::shape_decoded_map`]).
+const DECODED_MEMO: usize = 64;
+
 /// The smallest shape count at which the table sweeps when it has doubled.
 const MIN_SWEEP_AT: usize = 64;
 
@@ -156,6 +166,10 @@ pub(crate) struct ShapeTable {
     last_nested: Option<Arc<Shape>>,
     /// [`keys_hash`]es of nested key sequences seen once without a shape (see the module docs).
     seen_once: std::collections::HashSet<u64, Mix>,
+    /// Decoded nested shape -> this table's shape, by the decoded shape's address (empty until
+    /// the first decoded nested map; cleared by a sweep). The decoded shape is held, so its
+    /// address is not reused while it is remembered.
+    decoded: Vec<Option<(Arc<Shape>, Arc<Shape>)>>,
     /// Tests: leave nested maps as they are (the reference of the byte-identity test).
     #[cfg(test)]
     nested_off: bool,
@@ -193,6 +207,7 @@ impl ShapeTable {
             sweep_at: MIN_SWEEP_AT,
             last_nested: None,
             seen_once: std::collections::HashSet::default(),
+            decoded: Vec::new(),
             #[cfg(test)]
             nested_off: false,
         }
@@ -644,6 +659,7 @@ impl ShapeTable {
         self.last_foreign = None;
         self.last = None;
         self.last_nested = None;
+        self.decoded = Vec::new();
         let before = self.shapes.len();
         // Held by the table alone: one strong reference (the set's).
         self.shapes.retain(|shape| Arc::strong_count(shape) > 1);
@@ -746,6 +762,10 @@ impl ShapeTable {
                 if self.owns(&shaped.shape) {
                     return;
                 }
+                if shaped.shape.owner == DECODED {
+                    self.shape_decoded_map(map);
+                    return;
+                }
                 let theirs = Arc::clone(&shaped.shape);
                 if let Some(ours) = self.nested_shape(
                     theirs.keys.iter().map(CompactString::as_str),
@@ -773,6 +793,51 @@ impl ShapeTable {
             }
             // Never nested; left as it is.
             Repr::Coded(_) => {}
+        }
+    }
+
+    /// [`Self::shape_nested_map`] of a nested map a snapshot chunk decoded `Shaped`
+    /// (`persist::codec::ChunkShapes`, owner [`DECODED`]): it gets this table's shape exactly
+    /// when the same map decoded `Indexed` would (the second sighting of its key sequence, see
+    /// the module docs), else it turns `Indexed`, so the stored form does not depend on how a
+    /// chunk was decoded. The decoded shape's answer is remembered (`decoded`), so the maps of
+    /// one chunk shape cost one pointer comparison each.
+    fn shape_decoded_map(&mut self, map: &mut PropertyMap) {
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            return;
+        };
+        let slot = (address(&shaped.shape) >> 6) % DECODED_MEMO;
+        if let Some(Some((theirs, ours))) = self.decoded.get(slot)
+            && Arc::ptr_eq(theirs, &shaped.shape)
+        {
+            // `ours` is in the table: the memo holds it, and a sweep clears the memo first.
+            shaped.shape = Arc::clone(ours);
+            return;
+        }
+        let theirs = Arc::clone(&shaped.shape);
+        match self.nested_shape(
+            theirs.keys.iter().map(CompactString::as_str),
+            || theirs.keys.clone(),
+            false,
+        ) {
+            Some(ours) => {
+                shaped.shape = Arc::clone(&ours);
+                if self.decoded.is_empty() {
+                    self.decoded.resize(DECODED_MEMO, None);
+                }
+                if let Some(entry) = self.decoded.get_mut(slot) {
+                    *entry = Some((theirs, ours));
+                }
+            }
+            None => {
+                // The first sighting in this graph: `Indexed`, built as the decoder builds one.
+                let values = std::mem::take(&mut shaped.values);
+                let mut indexed = PropertyMap::with_capacity(values.len());
+                for (key, value) in theirs.keys.iter().zip(values) {
+                    indexed.insert(key.clone(), value);
+                }
+                *map = indexed;
+            }
         }
     }
 

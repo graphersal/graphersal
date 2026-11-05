@@ -152,6 +152,7 @@ mod model_definition_tests;
 mod model_fixture;
 mod model_open_tests;
 mod model_size_tests;
+mod nested_decode_tests;
 mod nested_profiling_tests;
 mod nested_shape_tests;
 mod nested_source_tests;
