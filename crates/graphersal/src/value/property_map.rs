@@ -587,11 +587,26 @@ impl PropertyMap {
     /// Order-independent equality across representations (the same rule as `IndexMap`'s).
     #[inline(never)]
     fn eq_mixed(&self, other: &Self) -> bool {
-        // Two maps of one shape (stored maps, nested values of one graph): their values in order.
-        if let (Repr::Shaped(a), Repr::Shaped(b)) = (&self.0, &other.0)
-            && Arc::ptr_eq(&a.shape, &b.shape)
-        {
-            return a.values == b.values;
+        match (&self.0, &other.0) {
+            // Two maps of one shape (stored maps, nested values of one graph): their values in
+            // order.
+            (Repr::Shaped(a), Repr::Shaped(b)) if Arc::ptr_eq(&a.shape, &b.shape) => {
+                return a.values == b.values;
+            }
+            // A stored map and a free-standing one (a `has()` constant, a query's value): each
+            // entry of the hash map found in the shape (key prints, no hashing).
+            (Repr::Shaped(shaped), Repr::Indexed(map))
+            | (Repr::Indexed(map), Repr::Shaped(shaped)) => {
+                return shaped.values.len() == map.len()
+                    && map.iter().all(|(key, value)| {
+                        shaped
+                            .shape
+                            .position(key)
+                            .and_then(|position| shaped.values.get(position))
+                            .is_some_and(|stored| stored == value)
+                    });
+            }
+            _ => {}
         }
         self.len() == other.len()
             && self
