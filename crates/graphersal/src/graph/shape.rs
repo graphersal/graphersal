@@ -28,10 +28,13 @@
 //!   repeat stays `Indexed`, which is smaller than a shape of its own. Entry points:
 //!   [`ShapeTable::adopt`] of a map that is not one of this table's yet, [`ShapeTable::insert_full`]
 //!   (`insert_full_plain`, `insert_full_coded`), [`ShapeTable::shaped_copy`] and
-//!   [`ShapeTable::shape_value`] (jpath writes, coded-row writes). Nested maps never take the
-//!   transition caches: a key-changing write inside a value turns that nested map `Indexed`
-//!   (the public `PropertyMap` API), which stays correct and is shaped again by the next write of
-//!   the property.
+//!   [`ShapeTable::shape_value`] (jpath writes, coded-row writes). A snapshot chunk decodes a
+//!   nested map `Shaped` over a chunk shape (owner [`DECODED`]) from the second sighting of its
+//!   key sequence in the chunk; the table applies its own second-sighting rule to it
+//!   (`shape_decoded_map`) and turns it `Indexed` when the rule says so, so the stored form does
+//!   not depend on the decode. Nested maps never take the transition caches: a key-changing
+//!   write inside a value turns that nested map `Indexed` (the public `PropertyMap` API), which
+//!   stays correct and is shaped again by the next write of the property.
 //! - **Sweep:** a shape no map references any more (only the table holds it) is removed by
 //!   [`ShapeTable::sweep`]: when the table has doubled since the last sweep (checked when a new
 //!   shape is interned), on `shrink_to_fit` and after a load. A shape referenced from anywhere (a

@@ -1223,6 +1223,7 @@ pub(crate) fn read_element_properties(
     max_depth: usize,
     shapes: &mut ChunkShapes,
 ) -> DecodeResult<PropertyMap> {
+    let keys = TableKeys(table);
     let count = reader.count(2)?;
     shapes.ids.clear();
     shapes.offsets.clear();
@@ -1234,7 +1235,16 @@ pub(crate) fn read_element_properties(
         let index = table_index(reader, table)?;
         shapes.ids.push(index);
         shapes.offsets.push(key_at);
-        values.push(read_chunk_value(reader, table, max_depth, shapes, 0)?);
+        // An element's own value: a scalar takes `read_tagged_value` at once (the loop of every
+        // load), a container goes out of line.
+        let tag = reader.u8()?;
+        values.push(
+            if (tag == tag::ARRAY || tag == tag::OBJECT) && shapes.nested && max_depth > 0 {
+                read_chunk_container(reader, tag, table, max_depth, shapes, 0)?
+            } else {
+                read_tagged_value(reader, tag, &keys, max_depth, 0)?
+            },
+        );
     }
     let shape = shapes.shape_of(table)?;
     Ok(PropertyMap::from_shaped(shape, values))
@@ -1258,7 +1268,8 @@ fn table_index(reader: &mut Reader<'_>, table: &[CompactString]) -> DecodeResult
 
 /// [`read_tagged_value`] (tag included) of a value of an element map in a chunk, `depth`
 /// container levels below the element's own values: the objects in it are built through
-/// `shapes` (see [`ChunkShapes`]) down to [`crate::graph::shape::NESTED_DEPTH`] levels.
+/// `shapes` (see [`ChunkShapes`]) down to [`crate::graph::shape::NESTED_DEPTH`] levels. A
+/// scalar takes [`read_tagged_value`] directly; only a container goes out of line.
 fn read_chunk_value(
     reader: &mut Reader<'_>,
     table: &[CompactString],
@@ -1267,25 +1278,41 @@ fn read_chunk_value(
     depth: usize,
 ) -> DecodeResult<ElementProperty> {
     let tag = reader.u8()?;
-    let nested = shapes.nested && depth < crate::graph::shape::NESTED_DEPTH && depth < max_depth;
-    match tag {
-        tag::ARRAY if nested => {
-            let count = reader.count(1)?;
-            let mut items = Vec::with_capacity(count);
-            for _ in 0..count {
-                items.push(read_chunk_value(
-                    reader,
-                    table,
-                    max_depth,
-                    shapes,
-                    depth + 1,
-                )?);
-            }
-            Ok(ElementProperty::Array(items))
-        }
-        tag::OBJECT if nested => read_chunk_object(reader, table, max_depth, shapes, depth),
-        tag => read_tagged_value(reader, tag, &TableKeys(table), max_depth, depth),
+    if (tag == tag::ARRAY || tag == tag::OBJECT)
+        && shapes.nested
+        && depth < crate::graph::shape::NESTED_DEPTH
+        && depth < max_depth
+    {
+        return read_chunk_container(reader, tag, table, max_depth, shapes, depth);
     }
+    read_tagged_value(reader, tag, &TableKeys(table), max_depth, depth)
+}
+
+/// [`read_chunk_value`] of an array or an object (after its tag).
+#[inline(never)]
+fn read_chunk_container(
+    reader: &mut Reader<'_>,
+    tag: u8,
+    table: &[CompactString],
+    max_depth: usize,
+    shapes: &mut ChunkShapes,
+    depth: usize,
+) -> DecodeResult<ElementProperty> {
+    if tag == tag::OBJECT {
+        return read_chunk_object(reader, table, max_depth, shapes, depth);
+    }
+    let count = reader.count(1)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(read_chunk_value(
+            reader,
+            table,
+            max_depth,
+            shapes,
+            depth + 1,
+        )?);
+    }
+    Ok(ElementProperty::Array(items))
 }
 
 /// [`read_chunk_value`] of an object (after its tag).
