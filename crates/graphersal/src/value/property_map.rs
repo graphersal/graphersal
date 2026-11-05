@@ -380,8 +380,9 @@ impl Eq for PropertyMap {}
 // `Clone` and `PartialEq` recurse through nested values (`ElementProperty::Object` holds a
 // `PropertyMap`); `#[inline(always)]` keeps the wrapper from adding a stack frame per nesting
 // level in unoptimized builds, where the deepest values (`traversal.max_value_depth`) run close to
-// the 2 MiB test-thread stack. The match is written out here (no helper call), and nested maps are
-// always `Indexed`, so the recursion goes through the same frames as a plain `IndexMap`.
+// the 2 MiB test-thread stack. The match is written out here (no helper call). A stored value's
+// nested maps are `Shaped` only down to `graph::shape::NESTED_DEPTH` levels (deeper ones stay
+// `Indexed`), so the frames of a deep recursion are those of a plain `IndexMap` below that bound.
 impl Clone for PropertyMap {
     #[inline(always)]
     fn clone(&self) -> Self {
@@ -586,6 +587,27 @@ impl PropertyMap {
     /// Order-independent equality across representations (the same rule as `IndexMap`'s).
     #[inline(never)]
     fn eq_mixed(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            // Two maps of one shape (stored maps, nested values of one graph): their values in
+            // order.
+            (Repr::Shaped(a), Repr::Shaped(b)) if Arc::ptr_eq(&a.shape, &b.shape) => {
+                return a.values == b.values;
+            }
+            // A stored map and a free-standing one (a `has()` constant, a query's value): each
+            // entry of the hash map found in the shape (key prints, no hashing).
+            (Repr::Shaped(shaped), Repr::Indexed(map))
+            | (Repr::Indexed(map), Repr::Shaped(shaped)) => {
+                return shaped.values.len() == map.len()
+                    && map.iter().all(|(key, value)| {
+                        shaped
+                            .shape
+                            .position(key)
+                            .and_then(|position| shaped.values.get(position))
+                            .is_some_and(|stored| stored == value)
+                    });
+            }
+            _ => {}
+        }
         self.len() == other.len()
             && self
                 .iter()

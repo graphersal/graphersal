@@ -1885,8 +1885,9 @@ fn store_coded_value<'l>(
     labels: impl FnOnce() -> Vec<&'l str>,
     map: &mut PropertyMap,
     key: CompactString,
-    value: ElementProperty,
+    mut value: ElementProperty,
 ) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    shapes.shape_value(&mut value);
     match map.coded_replace(&key, value) {
         Ok((position, replaced, added)) => (
             position,
@@ -1910,10 +1911,24 @@ fn write_path_stored(
     path: &crate::value::JsonPath,
     value: ElementProperty,
 ) -> Result<(), GraphError> {
+    // A write into an object member may add a key to a nested map (which turns it `Indexed`) or
+    // create one, and a written object or array is a new nested value: the property's nested
+    // maps are shaped again then (an array element overwritten with a scalar needs nothing).
+    let reshape = matches!(
+        value,
+        ElementProperty::Object(_) | ElementProperty::Array(_)
+    ) || path
+        .segments()
+        .iter()
+        .skip(1)
+        .any(|segment| matches!(segment, crate::value::JsonPathSegment::Key(_)));
     if map.coded().is_some() {
         let name = path_property_name(path)?;
-        let (key, resulting) =
+        let (key, mut resulting) =
             crate::graph::write_checks::write_path(map.get(name.as_str()), path, value)?;
+        if reshape {
+            shapes.shape_value(&mut resulting);
+        }
         if let Err(resulting) = map.coded_replace(&key, resulting) {
             shapes.insert_full(map, key, resulting);
         }
@@ -1921,6 +1936,12 @@ fn write_path_stored(
     }
     let written = write_path_in(map, path, value);
     shapes.adopt(map);
+    if reshape
+        && let Ok(name) = path_property_name(path)
+        && let Some(value) = map.get_mut(name.as_str())
+    {
+        shapes.shape_value(value);
+    }
     written
 }
 

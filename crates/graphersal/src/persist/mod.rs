@@ -44,7 +44,7 @@
 //! assert_eq!(recovered.graph.vertex_count(), 7);
 //! ```
 
-mod codec;
+pub(crate) mod codec;
 mod definitions;
 mod dir;
 mod encoder;

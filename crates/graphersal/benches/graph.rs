@@ -1593,6 +1593,128 @@ mod element_properties {
     }
 }
 
+/// Element properties holding nested objects, modelled on a code-index graph: each vertex has a
+/// `_hashes` object of one key (one of 50 key names) and an `attrs` array of two small objects.
+/// Stored nested maps share their key lists from the second sighting of a key sequence.
+mod nested_values {
+    use graphersal::prelude::*;
+    use graphersal::storage::VertexHandle;
+
+    /// Vertices per graph.
+    const VERTICES: usize = 10_000;
+
+    fn object(entries: Vec<(String, ElementProperty)>) -> ElementProperty {
+        ElementProperty::Object(Box::new(entries.into_iter().collect()))
+    }
+
+    fn hashes(i: usize) -> ElementProperty {
+        object(vec![(
+            format!("ACM:{}", i % 50),
+            ElementProperty::from(format!("{:016x}", i * 7919)),
+        )])
+    }
+
+    fn attrs(i: usize) -> ElementProperty {
+        ElementProperty::Array(
+            (0..2)
+                .map(|k| {
+                    object(vec![
+                        ("line".to_string(), ElementProperty::from((i + k) as i64)),
+                        ("kind".to_string(), ElementProperty::from("call")),
+                    ])
+                })
+                .collect(),
+        )
+    }
+
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for i in 0..VERTICES {
+            let props = PropertyMap::from([
+                ("name", ElementProperty::from(format!("m{i}"))),
+                ("_hashes", hashes(i)),
+                ("attrs", attrs(i)),
+            ]);
+            graph
+                .insert_vertex(None, vec!["Method".into()], props)
+                .unwrap();
+        }
+        graph
+    }
+
+    /// Builds the graph through `insert_vertex`.
+    #[divan::bench(sample_count = 20)]
+    fn insert_build(bencher: divan::Bencher) {
+        bencher.bench_local(graph);
+    }
+
+    /// Overwrites `_hashes` on every vertex (a fresh graph per sample).
+    #[divan::bench(sample_count = 20)]
+    fn write_object(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| {
+                let graph = graph();
+                let handles: Vec<VertexHandle> = GraphStorage::vertices(&graph).unwrap().collect();
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for (i, &v) in handles.iter().enumerate() {
+                    graph
+                        .set_vertex_property(v, "_hashes".into(), hashes(i + 1))
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// `v().value_map().to_list()` (every nested map cloned out).
+    #[divan::bench(sample_count = 20)]
+    fn value_map(bencher: divan::Bencher) {
+        let graph = graph();
+        bencher.bench_local(|| graph.traversal().v(None).value_map(None).to_list());
+    }
+
+    /// `v().values("_hashes").dedup().count()` (nested maps hashed and compared).
+    #[divan::bench(sample_count = 20)]
+    fn dedup_objects(bencher: divan::Bencher) {
+        let graph = graph();
+        bencher.bench_local(|| {
+            graph
+                .traversal()
+                .v(None)
+                .values("_hashes")
+                .dedup()
+                .count()
+                .next()
+        });
+    }
+
+    /// `v().has("_hashes", <object>).count()` (stored nested maps compared with a plain one).
+    #[divan::bench(sample_count = 20)]
+    fn has_object(bencher: divan::Bencher) {
+        let graph = graph();
+        let wanted = hashes(4321);
+        bencher.bench_local(|| {
+            graph
+                .traversal()
+                .v(None)
+                .has("_hashes", wanted.clone())
+                .count()
+                .next()
+        });
+    }
+
+    /// `read_snapshot` of the graph. Needs `persist` (see `element_properties::snapshot_load`).
+    #[cfg(feature = "persist")]
+    #[divan::bench(sample_count = 10)]
+    fn snapshot_load(bencher: divan::Bencher) {
+        use graphersal::persist::{self, WriteOptions};
+        let mut bytes = Vec::new();
+        persist::write_snapshot(&graph(), &mut bytes, &WriteOptions::new()).unwrap();
+        bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
+    }
+}
+
 /// The internal importers on the `element_properties::bulk_build` graph (20k vertices with six
 /// properties and 36-character ids, 60k edges with two): GraphSON and GraphML loads, a live
 /// GraphSON import, and `apply_change_set` / `replay` of the equivalent change set (built from

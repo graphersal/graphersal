@@ -153,6 +153,7 @@ mod model_fixture;
 mod model_open_tests;
 mod model_size_tests;
 mod nested_profiling_tests;
+mod nested_shape_tests;
 mod nested_source_tests;
 mod newer_format_tests;
 mod non_finite_json_tests;
