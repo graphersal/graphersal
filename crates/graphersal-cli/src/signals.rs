@@ -25,8 +25,14 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 pub struct Stop {
     store: Mutex<Option<Arc<Store>>>,
     cancel: Mutex<Option<CancelToken>>,
+    /// The graceful stop of the read-only serving mode ([`Stop::set_drain`]).
+    drain: Mutex<Option<Drain>>,
     signals: AtomicUsize,
 }
+
+/// A graceful stop: runs on a thread of its own after the first signal (no new jobs, the
+/// running ones finish or are cancelled), then the process exits.
+pub type Drain = Arc<dyn Fn() + Send + Sync>;
 
 impl Stop {
     /// The Store a signal closes before the process exits.
@@ -40,6 +46,16 @@ impl Stop {
     pub fn set_cancel(&self, cancel: CancelToken) {
         if let Ok(mut slot) = self.cancel.lock() {
             *slot = Some(cancel);
+        }
+    }
+
+    /// The graceful stop a signal runs instead of cancelling at once (the read-only serving
+    /// mode, which has no Store): `drain` returns once the running jobs ended or were
+    /// cancelled, then the process exits with the handler's exit code.
+    #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
+    pub fn set_drain(&self, drain: Drain) {
+        if let Ok(mut slot) = self.drain.lock() {
+            *slot = Some(drain);
         }
     }
 
@@ -67,6 +83,22 @@ impl Stop {
         if self.signals.fetch_add(1, Ordering::SeqCst) > 0 {
             errln!("Interrupted again: exiting without waiting for the store to close.");
             std::process::exit(EXIT_INTERRUPTED);
+        }
+        if let Some(drain) = self.drain.lock().ok().and_then(|slot| slot.clone()) {
+            // The handler thread stays free for a second signal meanwhile.
+            let draining = std::thread::Builder::new()
+                .name("graphersal-drain".into())
+                .spawn(move || {
+                    drain();
+                    if !without_store.is_empty() {
+                        errln!("{without_store}");
+                    }
+                    std::process::exit(exit_code);
+                });
+            if draining.is_err() {
+                std::process::exit(exit_code);
+            }
+            return;
         }
         if let Some(cancel) = self.cancel.lock().ok().and_then(|slot| slot.clone()) {
             cancel.cancel();

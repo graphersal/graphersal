@@ -1,6 +1,7 @@
 //! The host boundary: how the server that embeds the endpoint runs session jobs ([`Executor`])
 //! and what else the tools read from it ([`Host`]).
 
+use std::cell::RefCell;
 use std::sync::mpsc::channel;
 
 use graphersal_session::Session;
@@ -17,6 +18,9 @@ pub type Job = Box<dyn FnOnce(&mut Session) + Send + 'static>;
 pub struct ClientRef {
     name: String,
     detail: Option<String>,
+    /// Which client of that name: the MCP session id of an endpoint call (none without one).
+    /// A host that shares its workers fairly counts the running and queued jobs per key.
+    key: Option<String>,
 }
 
 impl ClientRef {
@@ -25,7 +29,21 @@ impl ClientRef {
         Self {
             name: name.to_string(),
             detail: detail.map(str::to_string),
+            key: None,
         }
+    }
+
+    /// The same client, told apart from others of its name by `key` (the endpoint sets the MCP
+    /// session id of the request).
+    pub fn with_key(mut self, key: &str) -> Self {
+        self.key = Some(key.to_string());
+        self
+    }
+
+    /// The key that tells this client apart from others of its name (the MCP session id), if
+    /// any.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
     /// The client's name (`mcp`, `ai`, a browser tab's id).
@@ -86,13 +104,17 @@ pub enum McpError {
     Unavailable(String),
     /// An operation failed; the message says why.
     Failed(String),
+    /// The host is too busy to run the job now (its queue is full, the job waited too long,
+    /// the client has too many jobs running, the host is stopping): the endpoint answers the
+    /// request with HTTP `503` and `Retry-After`, so the client retries it later.
+    Busy(String),
 }
 
 impl McpError {
     /// The message.
     pub fn message(&self) -> &str {
         match self {
-            Self::Unavailable(message) | Self::Failed(message) => message,
+            Self::Unavailable(message) | Self::Failed(message) | Self::Busy(message) => message,
         }
     }
 }
@@ -104,6 +126,23 @@ impl std::fmt::Display for McpError {
 }
 
 impl std::error::Error for McpError {}
+
+thread_local! {
+    /// The [`McpError::Busy`] refusal of the last job this thread tried to run for the request
+    /// it answers ([`Ctx::call`]): the endpoint answers such a request `503` instead of a tool
+    /// error ([`take_busy`]).
+    static BUSY: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Forgets a busy refusal of this thread (a request starts).
+pub(crate) fn clear_busy() {
+    let _ = BUSY.try_with(|busy| busy.borrow_mut().take());
+}
+
+/// The busy refusal of a job this thread ran since [`clear_busy`], if any.
+pub(crate) fn take_busy() -> Option<String> {
+    BUSY.try_with(|busy| busy.borrow_mut().take()).ok().flatten()
+}
 
 /// A host and the client its jobs run for: what every tool handler gets.
 #[derive(Clone, Copy)]
@@ -127,7 +166,12 @@ impl Ctx<'_> {
                     let _ = reply.send(job(session));
                 }),
             )
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| {
+                if let McpError::Busy(message) = &err {
+                    let _ = BUSY.try_with(|busy| *busy.borrow_mut() = Some(message.clone()));
+                }
+                err.to_string()
+            })?;
         answer
             .recv()
             .map_err(|_| "the request failed inside the session".to_string())

@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
-use crate::host::{ClientRef, Ctx, Host, McpError};
+use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::resources::{RESOURCES, read_resource};
+use crate::sessions::{SessionKey, Sessions};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
 use crate::transport::{McpRequest, McpResponse};
 
@@ -20,9 +21,6 @@ pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-2
 /// keeps whole results only, so its JSON stays valid.
 pub const MAX_TEXT_CHARS: usize = 60_000;
 
-/// Most MCP sessions remembered; the oldest is forgotten first (its client initializes again).
-const MAX_SESSIONS: usize = 64;
-
 /// The `serverInfo` of `initialize`.
 const SERVER_NAME: &str = "graphersal-dev";
 const SERVER_TITLE: &str = "Graphersal dev server";
@@ -32,6 +30,7 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
 
 /// The client name of the endpoint's session jobs (the host's change feed records it).
 const MCP_CLIENT: &str = "mcp";
@@ -44,8 +43,9 @@ pub struct Mcp {
     /// The operator's configuration (tools, descriptions, instructions, saved-query tools,
     /// resources, answer limit), with the shorthand flags folded in.
     config: Arc<McpConfig>,
-    /// Session id -> `clientInfo` of its `initialize`, in the order they were created.
-    sessions: Mutex<Vec<(String, Value)>>,
+    /// The MCP sessions: a bounded table (the default) or stateless signed ids
+    /// ([`Mcp::with_session_key`]).
+    sessions: Sessions,
     /// The `clientInfo` of the last `initialize` (the playground's top bar names it).
     client: Mutex<Option<Value>>,
 }
@@ -63,9 +63,26 @@ impl Mcp {
             read_only,
             token,
             config: Arc::new(config),
-            sessions: Mutex::new(Vec::new()),
+            sessions: Sessions::table(),
             client: Mutex::new(None),
         }
+    }
+
+    /// Makes the MCP session ids stateless: `initialize` answers an id signed with `key`
+    /// (HMAC-SHA256 over a random nonce and a digest of the client's name), and a request's id
+    /// is checked against the key instead of a table. So there is no limit on the number of
+    /// clients and none evicts another, and every endpoint holding the same key (several
+    /// replicas behind a load balancer) accepts the ids of the others. `DELETE` of a valid id
+    /// answers `200` and the id stays valid (nothing is stored to forget). The client names
+    /// are kept for the statistics, at most [`crate::MAX_CLIENT_NAMES`].
+    pub fn with_session_key(mut self, key: SessionKey) -> Self {
+        self.sessions = Sessions::signed(&key);
+        self
+    }
+
+    /// Whether the session ids are stateless ([`Mcp::with_session_key`]).
+    pub fn stateless_sessions(&self) -> bool {
+        self.sessions.is_signed()
     }
 
     /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
@@ -98,20 +115,11 @@ impl Mcp {
         self.config.answer_limit_chars.unwrap_or(MAX_TEXT_CHARS)
     }
 
-    /// The client sessions and their estimated bytes (ids and stored values as JSON text), for
-    /// the host's memory report; `(0, 0)` while a request holds the list.
+    /// The client sessions (stateless ids: the client names kept) and their estimated bytes
+    /// (ids and stored values as JSON text), for the host's memory report; `(0, 0)` while a
+    /// request holds the list.
     pub fn memory_bytes(&self) -> (usize, u64) {
-        let Ok(sessions) = self.sessions.try_lock() else {
-            return (0, 0);
-        };
-        let bytes = sessions
-            .iter()
-            .map(|(id, value)| {
-                (std::mem::size_of::<(String, Value)>() + id.capacity() + value.to_string().len())
-                    as u64
-            })
-            .sum();
-        (sessions.len(), bytes)
+        self.sessions.memory_bytes()
     }
 
     /// Whether the endpoint offers only reading tools.
@@ -150,7 +158,12 @@ impl Mcp {
 
     /// The caller of the endpoint's tools.
     fn caller(&self) -> ToolCaller {
-        ToolCaller::new(ClientRef::new(MCP_CLIENT, None), self.read_only)
+        self.caller_for(ClientRef::new(MCP_CLIENT, None))
+    }
+
+    /// The caller of the endpoint's tools for `client` (the request's MCP session as its key).
+    fn caller_for(&self, client: ClientRef) -> ToolCaller {
+        ToolCaller::new(client, self.read_only)
             .with_config(self.config.clone())
             .with_max_chars(self.max_chars())
     }
@@ -225,11 +238,7 @@ impl Mcp {
                         "DELETE /mcp needs the Mcp-Session-Id header",
                     );
                 };
-                let removed = self.sessions.lock().is_ok_and(|mut sessions| {
-                    let before = sessions.len();
-                    sessions.retain(|(known, _)| known != id);
-                    sessions.len() < before
-                });
+                let removed = self.sessions.forget(id);
                 empty(if removed { 200 } else { 404 })
             }
             // No server-initiated stream (GET) on this endpoint.
@@ -273,11 +282,7 @@ impl Mcp {
         }
         let session_id = request.header_value("Mcp-Session-Id").map(str::to_string);
         if let Some(id) = &session_id {
-            let known = self
-                .sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.iter().any(|(known, _)| known == id));
-            if !known {
+            if !self.sessions.knows(id) {
                 return rpc_error(
                     404,
                     Value::Null,
@@ -330,7 +335,18 @@ impl Mcp {
             return empty(202);
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
-        match self.dispatch(host, method, &params) {
+        let client = match &session_id {
+            Some(id) => ClientRef::new(MCP_CLIENT, None).with_key(id),
+            None => ClientRef::new(MCP_CLIENT, None),
+        };
+        clear_busy();
+        let dispatched = self.dispatch(host, &client, method, &params);
+        // The host could not take a job now (queue full, waited too long, too many jobs of this
+        // client, stopping): the whole request is `503`, so the client retries it.
+        if let Some(message) = take_busy() {
+            return rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1");
+        }
+        match dispatched {
             Ok((result, new_session)) => {
                 let answer =
                     rpc_answer(200, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
@@ -343,10 +359,15 @@ impl Mcp {
         }
     }
 
-    fn dispatch(&self, host: &dyn Host, method: &str, params: &Value) -> RpcResult {
+    fn dispatch(
+        &self,
+        host: &dyn Host,
+        client: &ClientRef,
+        method: &str,
+        params: &Value,
+    ) -> RpcResult {
         let plain = |value: Value| Ok((value, None));
-        let client = ClientRef::new(MCP_CLIENT, None);
-        let caller = self.caller();
+        let caller = self.caller_for(client.clone());
         match method {
             "initialize" => self.initialize(params),
             "ping" => plain(json!({})),
@@ -360,7 +381,7 @@ impl Mcp {
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 match call_tool(host, &caller, name, &args) {
                     Ok(outcome) => plain(tool_result(outcome.text, outcome.is_error)),
-                    Err(CallRefused::Internal(message)) => Err((-32603, message)),
+                    Err(CallRefused::Internal(message)) => Err((INTERNAL_ERROR, message)),
                     Err(CallRefused::Params(message)) => {
                         let message = if self.read_only && message.contains("(read-only") {
                             message.replace(
@@ -385,10 +406,7 @@ impl Mcp {
                 let Some(resource) = RESOURCES.iter().find(|r| r.uri == uri) else {
                     return Err((-32002, format!("resource not found: {uri}")));
                 };
-                let context = Ctx {
-                    host,
-                    client: &client,
-                };
+                let context = Ctx { host, client };
                 let text =
                     read_resource(&context, uri, self.read_only).map_err(|err| (-32603, err))?;
                 plain(json!({ "contents": [{
@@ -418,13 +436,7 @@ impl Mcp {
             "name": client.get("name").and_then(Value::as_str).unwrap_or("unknown client"),
             "version": client.get("version").and_then(Value::as_str).unwrap_or(""),
         });
-        let session = format!("{:032x}", rand::random::<u128>());
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if sessions.len() >= MAX_SESSIONS {
-                sessions.remove(0);
-            }
-            sessions.push((session.clone(), client.clone()));
-        }
+        let session = self.sessions.create(&client);
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }

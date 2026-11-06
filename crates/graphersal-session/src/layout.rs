@@ -599,6 +599,8 @@ pub struct LayoutJobs {
     next: u64,
     jobs: VecDeque<Job>,
     cache: VecDeque<((LayoutInput, LayoutOptions), Vec<f32>)>,
+    /// Most jobs kept ([`Self::set_limit`]); `None`: [`MAX_JOBS`].
+    limit: Option<usize>,
 }
 
 /// The JSON body of a layout start: the input and the options.
@@ -637,6 +639,17 @@ pub fn slice_budget(ms: f64) -> Duration {
 }
 
 impl LayoutJobs {
+    /// Keeps at most `jobs` jobs (at least 1; the default is 4, one page's worth): the oldest
+    /// is dropped when a new one starts. Sessions that share these jobs across many pages
+    /// (`Session::template`) raise it.
+    pub fn set_limit(&mut self, jobs: usize) {
+        let limit = jobs.max(1);
+        self.limit = Some(limit);
+        while self.jobs.len() > limit {
+            self.jobs.pop_front();
+        }
+    }
+
     /// The estimated bytes of the running jobs and the cached layouts (their buffers, inputs
     /// and positions): the session's part of the memory report.
     pub fn memory_bytes(&self) -> u64 {
@@ -696,7 +709,7 @@ impl LayoutJobs {
         } else {
             SliceOutcome::Running
         };
-        if self.jobs.len() == MAX_JOBS {
+        while self.jobs.len() >= self.limit.unwrap_or(MAX_JOBS) {
             self.jobs.pop_front();
         }
         self.jobs.push_back(Job {

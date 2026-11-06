@@ -98,10 +98,14 @@ pub(super) fn current_client() -> ClientRef {
 impl Executor for Context {
     /// Queues `job` on the session thread for `client` and waits for it ([`Context::call`]).
     fn execute(&self, client: &ClientRef, job: Job) -> Result<(), McpError> {
-        as_client(Client::with_detail(client.name(), client.detail()), || {
-            self.call(move |session| job(session))
-        })
-        .map_err(|HttpError(_, message)| McpError::Unavailable(message))
+        let caller = Client::with_detail(client.name(), client.detail()).with_key(client.key());
+        as_client(caller, || self.call(move |session| job(session))).map_err(
+            |HttpError(status, message)| match status {
+                // The pool of the read-only serving mode is busy: the endpoint answers 503.
+                503 => McpError::Busy(message),
+                _ => McpError::Unavailable(message),
+            },
+        )
     }
 }
 

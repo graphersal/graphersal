@@ -21,3 +21,6 @@ graphersal-session = { workspace = true }
 serde_json = { workspace = true }
 # Unguessable MCP session ids (already in the tree through graphersal).
 rand = { workspace = true }
+# HMAC-SHA256 of the stateless MCP session ids (`sessions.rs`; already in the tree through the
+# CLI's `ureq`/rustls and its model download check).
+ring = { workspace = true }

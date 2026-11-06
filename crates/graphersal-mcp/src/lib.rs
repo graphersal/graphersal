@@ -110,6 +110,7 @@ mod config;
 mod host;
 mod protocol;
 mod resources;
+mod sessions;
 mod tools;
 mod transport;
 
@@ -124,4 +125,5 @@ pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
 };
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};
+pub use sessions::{MAX_CLIENT_NAMES, SessionKey};
 pub use transport::{McpRequest, McpResponse};

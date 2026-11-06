@@ -242,7 +242,8 @@ USAGE:
     graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR]
                [--mcp [--mcp-read-only] [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
                [--mcp-max-chars N] [--mcp-config FILE]]
-               [--ai FILE]
+               [--ai FILE] [--read-only [--workers N] [--queue N] [--queue-timeout S]
+               [--max-inflight-per-client N] [--drain-timeout S]] [--max-connections N]
                                          # DEV server: the playground UI over HTTP (unstable),
                                          # optionally an MCP endpoint for AI agents
     graphersal store <COMMAND> <DIR> ... # manage a Store (graphersal store help)
@@ -286,7 +287,12 @@ OPTIONS:
                            :ro container mount or a file without write permission works; its
                            Store panel and history are not offered. A Store that cannot be
                            opened for writing (no permission, read-only file system) falls back
-                           to this mode with a note.
+                           to this mode with a note. With --server it is the READ-ONLY SERVING
+                           MODE: the playground pages and MCP clients run their queries in
+                           parallel on a pool of workers (--workers, --queue, --queue-timeout,
+                           --max-inflight-per-client, --max-connections, --drain-timeout),
+                           under the SAFE script limits, --timeout 30000 and
+                           --max-materialized-bytes 268435456 unless those flags say otherwise.
         --on-damage <P>    With --create-store: the damage policy of the new store, fixed for
                            its life: "maintenance" (the default: damage found on disk while it
                            is open makes it read-only) or "continue" (it keeps committing and
@@ -360,6 +366,29 @@ OPTIONS:
                            Store warnings (a failed automatic checkpoint, damage found) go
                            to stderr; GRAPHERSAL_LOG=off|error|warn|info|debug|trace sets
                            the level (default warn). Stop it with Ctrl+C.
+        --workers <N>      With --server --read-only (the read-only serving mode): the worker
+                           threads that run the queries of the playground pages and the MCP
+                           clients in parallel, each with its own session over the same graph;
+                           default the available parallelism.
+        --queue <N>        With --server --read-only: the jobs that may wait for a worker;
+                           default 4 x workers. A full queue answers 503 with Retry-After: 1.
+        --queue-timeout <S>
+                           With --server --read-only: the seconds a job may wait for a worker
+                           (or for a slot of its client) before it is refused with 503 and
+                           Retry-After: 1; default 10.
+        --max-inflight-per-client <N>
+                           With --server --read-only: the running and queued jobs of one client
+                           (an MCP session, a browser page); more wait for a slot of their own
+                           client, up to --queue-timeout. Default 4.
+        --drain-timeout <S>
+                           With --server --read-only: after SIGTERM, /readyz answers 503, no new
+                           job is taken, and the running ones get this many seconds to finish
+                           before they are cancelled and the process exits 0; default 20.
+        --max-connections <N>
+                           With --server: the requests handled at once (a thread each); beyond
+                           it the server answers 503 with Retry-After: 1 at once (the health
+                           probes are always answered). Default 512 in the read-only serving
+                           mode, no cap otherwise.
         --port <N>         Port of --server; default 8080. 0 picks a free port (the address
                            is printed on stdout).
         --host <ADDR>      Address --server listens on: an IP address or a host name, e.g.
@@ -1156,6 +1185,29 @@ pub struct Cli {
     /// `--mcp-instructions`: the TEXT of the operator's file, appended to the MCP server
     /// instructions (read and checked while parsing).
     pub mcp_instructions: Option<String>,
+    /// `--workers`: the worker threads of the read-only serving mode (`--server --read-only`);
+    /// `None`: the available parallelism.
+    pub workers: Option<usize>,
+    /// `--queue`: the jobs that may wait for a worker in the read-only serving mode; `None`:
+    /// four per worker.
+    pub queue: Option<usize>,
+    /// `--queue-timeout`: the seconds a job may wait for a worker (or for a slot of its client)
+    /// before it is refused with 503; `None`: [`DEFAULT_QUEUE_TIMEOUT_S`].
+    pub queue_timeout_s: Option<u64>,
+    /// `--max-connections`: the requests the server handles at once (one thread each); beyond
+    /// it the accept loop answers 503. `None`: [`DEFAULT_MAX_CONNECTIONS`] in the read-only
+    /// serving mode, no cap otherwise.
+    pub max_connections: Option<usize>,
+    /// `--max-inflight-per-client`: the running and queued jobs of one client (an MCP session,
+    /// a browser tab) in the read-only serving mode; `None`:
+    /// [`DEFAULT_MAX_INFLIGHT_PER_CLIENT`].
+    pub max_inflight_per_client: Option<usize>,
+    /// `--drain-timeout`: the seconds running jobs may take to finish after SIGTERM in the
+    /// read-only serving mode; `None`: [`DEFAULT_DRAIN_TIMEOUT_S`].
+    pub drain_timeout_s: Option<u64>,
+    /// Whether `--timeout` was given at all (`--timeout 0` turns the read-only serving mode's
+    /// default timeout off).
+    pub timeout_given: bool,
     /// `--mcp-config`: the operator's MCP configuration, read and checked while parsing, with
     /// the shorthand flags (`--mcp-instructions`, `--mcp-query-tools`, `--mcp-max-chars`)
     /// folded in.
@@ -1165,6 +1217,19 @@ pub struct Cli {
 
 /// Default port of `--server`.
 pub const DEFAULT_PORT: u16 = 8080;
+/// Default `--queue-timeout` of the read-only serving mode, in seconds.
+pub const DEFAULT_QUEUE_TIMEOUT_S: u64 = 10;
+/// Default `--max-connections` of the read-only serving mode.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
+/// Default `--max-inflight-per-client` of the read-only serving mode.
+pub const DEFAULT_MAX_INFLIGHT_PER_CLIENT: usize = 4;
+/// Default `--drain-timeout` of the read-only serving mode, in seconds.
+pub const DEFAULT_DRAIN_TIMEOUT_S: u64 = 20;
+/// Default `--timeout` of the read-only serving mode, in milliseconds.
+pub const SERVING_TIMEOUT_MS: u64 = 30_000;
+/// Default `--max-materialized-bytes` of the read-only serving mode (the per-query memory
+/// limit): 256 MiB.
+pub const SERVING_MAX_MATERIALIZED_BYTES: u64 = 256 * 1024 * 1024;
 /// Default `--ui-dir`: the playground directory of a repository checkout, relative to the
 /// current directory; used only when it exists (the embedded UI serves everything else).
 #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
@@ -1225,6 +1290,13 @@ impl Default for Cli {
             mcp_max_chars: None,
             ai: None,
             mcp_instructions: None,
+            workers: None,
+            queue: None,
+            queue_timeout_s: None,
+            max_connections: None,
+            max_inflight_per_client: None,
+            drain_timeout_s: None,
+            timeout_given: false,
             #[cfg(feature = "dev-server")]
             mcp_config: None,
         }
@@ -1386,6 +1458,27 @@ impl Cli {
                         )
                     })?;
                     cli.timeout_ms = (ms > 0).then_some(ms);
+                    cli.timeout_given = true;
+                }
+                "--workers" => {
+                    cli.workers = Some(parse_positive("--workers", &value(&mut args)?)?)
+                }
+                "--queue" => cli.queue = Some(parse_positive("--queue", &value(&mut args)?)?),
+                "--queue-timeout" => {
+                    cli.queue_timeout_s =
+                        Some(parse_positive("--queue-timeout", &value(&mut args)?)? as u64)
+                }
+                "--max-connections" => {
+                    cli.max_connections =
+                        Some(parse_positive("--max-connections", &value(&mut args)?)?)
+                }
+                "--max-inflight-per-client" => {
+                    cli.max_inflight_per_client =
+                        Some(parse_positive("--max-inflight-per-client", &value(&mut args)?)?)
+                }
+                "--drain-timeout" => {
+                    cli.drain_timeout_s =
+                        Some(parse_count("--drain-timeout", &value(&mut args)?)?)
                 }
                 "--max-rows" => cli.max_rows = Some(parse_limit("--max-rows", &value(&mut args)?)?),
                 "--max-items" => {
@@ -1553,6 +1646,31 @@ impl Cli {
                 );
             }
         }
+        let pool_flag = [
+            ("--workers", cli.workers.is_some()),
+            ("--queue", cli.queue.is_some()),
+            ("--queue-timeout", cli.queue_timeout_s.is_some()),
+            ("--max-inflight-per-client", cli.max_inflight_per_client.is_some()),
+            ("--drain-timeout", cli.drain_timeout_s.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(flag, given)| given.then_some(flag));
+        if let Some(flag) = pool_flag
+            && !(server && cli.read_only)
+        {
+            return Err(crate::out::Note::new(format!(
+                "{flag} needs --server --read-only: it sets the worker pool of the read-only \
+                 serving mode"
+            ))
+            .command(
+                "serve the graph read-only with a pool of workers",
+                format!("graphersal --graph <src> --read-only --server {flag} <N>"),
+            )
+            .text());
+        }
+        if cli.max_connections.is_some() && !server {
+            return Err("--max-connections needs --server".to_string());
+        }
         if (cli.mcp_read_only
             || cli.mcp_token.is_some()
             || cli.mcp_query_tools
@@ -1694,6 +1812,16 @@ fn parse_count<T: std::str::FromStr>(flag: &str, raw: &str) -> Result<T, String>
     })
 }
 
+/// Parses the value of a count flag that must be at least 1 (`--workers`, `--queue`, ...).
+fn parse_positive(flag: &str, raw: &str) -> Result<usize, String> {
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "Invalid {flag} value: {raw}. Expected a positive integer"
+        )),
+    }
+}
+
 /// Parses a display limit flag value: an integer of at least 1.
 fn parse_limit(flag: &str, raw: &str) -> Result<usize, String> {
     match raw.trim().parse::<usize>() {
@@ -1706,6 +1834,29 @@ fn parse_limit(flag: &str, raw: &str) -> Result<usize, String> {
 }
 
 impl Cli {
+    /// Whether this is the read-only serving mode (`--server --read-only`): a pool of workers
+    /// over the immutable graph, with safe default limits ([`Self::with_serving_defaults`]).
+    pub fn read_only_serving(&self) -> bool {
+        self.mode == Mode::Server && self.read_only
+    }
+
+    /// This command line with the safe defaults of the read-only serving mode: the SAFE script
+    /// limits (each `--max-*` flag still overrides its own), `--timeout`
+    /// [`SERVING_TIMEOUT_MS`] unless `--timeout` was given (`--timeout 0`: none) and
+    /// `--max-materialized-bytes` [`SERVING_MAX_MATERIALIZED_BYTES`] unless given (`0`:
+    /// unlimited).
+    pub fn with_serving_defaults(&self) -> Self {
+        let mut cli = self.clone();
+        cli.safe_limits = true;
+        if !cli.timeout_given {
+            cli.timeout_ms = Some(SERVING_TIMEOUT_MS);
+        }
+        if cli.max_materialized_bytes.is_none() {
+            cli.max_materialized_bytes = Some(SERVING_MAX_MATERIALIZED_BYTES);
+        }
+        cli
+    }
+
     /// The script limits of this session. This is a trusted local front end, so the default is
     /// [`ScriptLimits::unlimited`]; `--safe-limits` switches to the SAFE defaults and every
     /// `--max-*` flag overrides its own field on top of either.

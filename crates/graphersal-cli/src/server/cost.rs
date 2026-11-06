@@ -106,6 +106,7 @@ pub fn run(args: &[String]) -> i32 {
         session_presets(&cli),
         None,
         Some((opened.graph, title.clone())),
+        None,
     );
     let jobs = match started {
         Ok((jobs, ..)) => jobs,
