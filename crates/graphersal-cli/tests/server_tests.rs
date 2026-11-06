@@ -5591,6 +5591,30 @@ fn the_statistics_show_the_measured_size_of_a_loaded_model() {
     let _ = std::fs::remove_dir_all(store.parent().unwrap());
 }
 
+/// The read-only serving mode opens no Store (the graph serves the database's models): a
+/// loaded model is still listed in `process.models`, with the bar's measured size.
+#[cfg(feature = "model2vec")]
+#[test]
+fn the_read_only_statistics_list_a_loaded_model_too() {
+    let store = store_with_a_tiny_model("m2v_read_only");
+    let server = start(&["--graph", store.to_str().unwrap(), "--read-only"]);
+    let r = execute(
+        server.port,
+        r#"g.v().has_label("software").embed("name").to_list().len()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let stats = get(server.port, "/api/statistics").json();
+    let models = stats["process"]["models"].as_array().expect("models");
+    assert_eq!(models.len(), 1, "{stats}");
+    assert_eq!(models[0]["name"], "acme/tiny");
+    assert_eq!(models[0]["dimension"], 2);
+    let segments = stats["process"]["memory"]["segments"].as_array().unwrap();
+    let bar = segments.iter().find(|s| s["name"] == "models").unwrap();
+    assert_eq!(bar["bytes"], models[0]["bytes"], "{stats}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
+}
+
 /// Issue #12: `POST /api/compression/estimate` and the MCP tool `estimate_compression` answer
 /// the candidates and change nothing; the tool is a reading one, offered and allowed in
 /// read-only mode.
