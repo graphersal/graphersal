@@ -371,6 +371,13 @@ the `Host` and `Origin` headers of every request against DNS rebinding and cross
   the attacker's domain. To open the server by a domain name, start it with `--host <that name>`.
   An `Origin` must be the request's own origin (`http://` followed by its `Host`), so a page of
   another site is refused even when it names an IP address.
+- `--allowed-host <NAME>` (repeatable; also the variable `GRAPHERSAL_ALLOWED_HOSTS`, names
+  separated by commas) admits further names on either address: a `Host` naming one of them is
+  served on any port, and an `Origin` of `http://` or `https://` one of them is accepted whatever
+  the `Host`. They are the public names of the server behind a reverse proxy that ends TLS
+  (`https://kb.example.com`); the `listening` banner lists them under `allowed hosts`. A value
+  with a scheme, port or path is an invocation error (exit code `2`). See
+  [Behind a reverse proxy](docker.md#behind-a-reverse-proxy).
 
 Beyond the headers, every write needs `Content-Type: application/json`, which a page of
 another site cannot send without a CORS preflight that the server never answers. Scripts cannot
