@@ -1137,6 +1137,149 @@ fn a_wildcard_host_warns_and_accepts_network_names() {
     assert_eq!(answer.json()["ok"], true, "{}", answer.body);
 }
 
+/// `--allowed-host`: a fully qualified public name (behind a reverse proxy) is refused without
+/// it and served with it, with an `https://` origin of that name.
+#[test]
+fn an_allowed_host_admits_a_public_name_and_its_https_origin() {
+    let (plain, _, _) = start_on_host(&["--host", "0.0.0.0", "--port", "0"]);
+    let answer = request(
+        plain.port,
+        "GET",
+        "/api/info",
+        None,
+        &["Host: kb.example.com"],
+    );
+    assert_eq!(answer.status, 403, "{}", answer.body);
+    assert!(answer.body.contains("--allowed-host"), "{}", answer.body);
+    drop(plain);
+
+    let (server, _, stderr) = start_on_host(&[
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "0",
+        "--allowed-host",
+        "KB.example.com",
+    ]);
+    assert!(stderr.contains("kb.example.com"), "{stderr}");
+    let port = server.port;
+    for host in ["Host: kb.example.com", "Host: kb.example.com:443"] {
+        let answer = request(port, "GET", "/api/info", None, &[host]);
+        assert_eq!(answer.status, 200, "{host}: {}", answer.body);
+    }
+    // Another fully qualified name stays refused.
+    let answer = request(port, "GET", "/api/info", None, &["Host: evil.example.com"]);
+    assert_eq!(answer.status, 403, "{}", answer.body);
+    // The page served through a TLS proxy: an https origin of the allowed name.
+    for (host, origin) in [
+        ("Host: kb.example.com", "Origin: https://kb.example.com"),
+        ("Host: localhost:8080", "Origin: https://kb.example.com"),
+        ("Host: kb.example.com", "Origin: http://kb.example.com"),
+    ] {
+        let answer = request(
+            port,
+            "POST",
+            "/api/execute",
+            Some(r#"{"script": "1 + 1"}"#),
+            &[host, origin, "Content-Type: application/json"],
+        );
+        assert_eq!(answer.status, 200, "{host} {origin}: {}", answer.body);
+        assert_eq!(answer.json()["ok"], true, "{}", answer.body);
+    }
+    let answer = request(
+        port,
+        "GET",
+        "/api/info",
+        None,
+        &["Host: kb.example.com", "Origin: https://evil.example.com"],
+    );
+    assert_eq!(answer.status, 403, "{}", answer.body);
+}
+
+/// `GRAPHERSAL_ALLOWED_HOSTS` (comma-separated) adds to `--allowed-host`; a malformed entry is a
+/// usage error.
+#[test]
+fn allowed_hosts_come_from_the_environment_too() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "--graph", "empty", "--server", "--host", "0.0.0.0", "--port", "0",
+        ])
+        .args(["--allowed-host", "a.example.com"])
+        .env("GRAPHERSAL_ALLOWED_HOSTS", "b.example.com, c.example.org")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("graphersal starts");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let port: u16 = line
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no address on stdout: {line:?}"));
+    let server = DevServer { child, port };
+    for host in ["a.example.com", "b.example.com", "c.example.org:8443"] {
+        let header = format!("Host: {host}");
+        let answer = request(server.port, "GET", "/api/info", None, &[header.as_str()]);
+        assert_eq!(answer.status, 200, "{host}: {}", answer.body);
+    }
+    let answer = request(
+        server.port,
+        "GET",
+        "/api/info",
+        None,
+        &["Host: d.example.com"],
+    );
+    assert_eq!(answer.status, 403, "{}", answer.body);
+    drop(server);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--graph", "empty", "--server", "--port", "0"])
+        .env("GRAPHERSAL_ALLOWED_HOSTS", "https://kb.example.com")
+        .output()
+        .expect("graphersal runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("GRAPHERSAL_ALLOWED_HOSTS"), "{stderr}");
+}
+
+/// `--allowed-host` without `--server` is a usage error; in an args file it is a list.
+#[test]
+fn allowed_host_needs_the_server_and_is_an_args_file_list() {
+    let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(["--allowed-host", "kb.example.com", "-e", "1"])
+        .output()
+        .expect("graphersal runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--allowed-host needs --server"), "{stderr}");
+
+    let dir = std::env::temp_dir().join(format!("graphersal_allowed_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("args.json");
+    std::fs::write(
+        &file,
+        r#"{"graph": "empty", "host": "0.0.0.0", "allowed-host": ["x.example.com", "y.example.com"]}"#,
+    )
+    .unwrap();
+    let file_arg = format!("@{}", file.display());
+    let (server, _, stderr) = start_on_host(&[file_arg.as_str(), "--port", "0"]);
+    assert!(stderr.contains("x.example.com, y.example.com"), "{stderr}");
+    let answer = request(
+        server.port,
+        "GET",
+        "/api/info",
+        None,
+        &["Host: y.example.com"],
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Starts the server in the directory `cwd` and returns it with the value of its `UI:` banner
 /// row.
 fn start_in(cwd: &std::path::Path, args: &[&str]) -> (DevServer, String) {

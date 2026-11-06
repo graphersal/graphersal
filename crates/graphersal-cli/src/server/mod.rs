@@ -331,13 +331,19 @@ pub fn run(cli: &Cli) -> i32 {
         },
     };
     // --host (or the container default): an address that does not resolve is a usage error.
-    let plan = match bind::BindPlan::new(cli.host.as_deref(), bind::in_container()) {
-        Ok(plan) => plan,
-        Err(message) => {
-            errln!("Error: {message}");
-            return EXIT_USAGE_ERROR;
-        }
-    };
+    // --allowed-host and GRAPHERSAL_ALLOWED_HOSTS: the public names behind a reverse proxy.
+    let env_hosts = std::env::var(bind::ALLOWED_HOSTS_VAR).ok();
+    let plan =
+        match bind::BindPlan::new(cli.host.as_deref(), bind::in_container()).and_then(|plan| {
+            bind::allowed_hosts(&cli.allowed_hosts, env_hosts.as_deref())
+                .map(|names| plan.with_allowed_hosts(names))
+        }) {
+            Ok(plan) => plan,
+            Err(message) => {
+                errln!("Error: {message}");
+                return EXIT_USAGE_ERROR;
+            }
+        };
     // --ai: the file is read and checked before anything starts (a bad file is a usage error).
     #[cfg(feature = "ai")]
     let ai = match &cli.ai {
@@ -717,6 +723,9 @@ pub fn run(cli: &Cli) -> i32 {
     #[cfg(feature = "ai")]
     if let Some(ai) = &ai {
         server_section.row("AI Chat", ai.banner());
+    }
+    if !plan.allowed().is_empty() {
+        server_section.row("allowed hosts", plan.allowed().join(", "));
     }
     server_section.row(
         "listening",
@@ -1380,12 +1389,15 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             return Err(HttpError(
                 403,
                 match context.bind.exposure {
-                    bind::Exposure::Loopback => {
-                        format!("unknown Host: use {}", context.bind.url(context.port))
-                    }
+                    bind::Exposure::Loopback => format!(
+                        "unknown Host: use {} (a public name behind a reverse proxy: start \
+                         the server with --allowed-host <that name>)",
+                        context.bind.url(context.port)
+                    ),
                     bind::Exposure::Network => "unknown Host: open this server by its IP \
                         address, localhost or a name without a dot, or start it with \
-                        --host <that name>"
+                        --host <that name> (or --allowed-host <that name> behind a reverse \
+                        proxy)"
                         .to_string(),
                 },
             ));

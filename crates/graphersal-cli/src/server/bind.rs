@@ -18,9 +18,19 @@
 //!   refused: that is what a DNS rebinding attack sends. An `Origin` must be the request's own
 //!   origin (`http://` + its `Host`): a page of another site is refused even when it names an
 //!   IP address.
+//! - `--allowed-host NAME` (repeatable) and `GRAPHERSAL_ALLOWED_HOSTS` (comma-separated) admit
+//!   further names in both exposures, on any port: a `Host` naming one of them is served, and an
+//!   `Origin` of `http://` or `https://` one of them is accepted whatever the `Host` (a reverse
+//!   proxy that ends TLS for `https://kb.example.com` may forward `Host: kb.example.com` or a
+//!   name of its own). They are the public names of a deployment behind a proxy; the operator
+//!   vouches for them, so the DNS-rebinding guard does not apply to them.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
+
+/// The environment variable with further allowed host names (comma-separated), added to
+/// `--allowed-host`.
+pub(super) const ALLOWED_HOSTS_VAR: &str = "GRAPHERSAL_ALLOWED_HOSTS";
 
 /// The address the server binds without `--host` outside a container.
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -85,6 +95,53 @@ pub(super) struct BindPlan {
     pub(super) reason: Reason,
     /// The `--host` value when it is a name (not an IP address): requests may name it.
     name: Option<String>,
+    /// `--allowed-host` and `GRAPHERSAL_ALLOWED_HOSTS`: further names, lower case, that a
+    /// `Host` or an `http(s)://` `Origin` may name on any port (module docs).
+    allowed: Vec<String>,
+}
+
+/// Checks and normalizes the allowed host names: the `--allowed-host` values followed by the
+/// comma-separated entries of `env` (`GRAPHERSAL_ALLOWED_HOSTS`; empty entries are skipped).
+/// A name is a host name or an IP address without scheme, port or path; the error text is the
+/// CLI's usage error.
+pub(super) fn allowed_hosts(flags: &[String], env: Option<&str>) -> Result<Vec<String>, String> {
+    let from_env = env.into_iter().flat_map(|raw| raw.split(','));
+    let mut names = Vec::new();
+    for (raw, source) in flags
+        .iter()
+        .map(|f| (f.as_str(), "--allowed-host"))
+        .chain(from_env.map(|e| (e, ALLOWED_HOSTS_VAR)))
+    {
+        let name = raw.trim();
+        if name.is_empty() && source == ALLOWED_HOSTS_VAR {
+            continue;
+        }
+        let bare = name
+            .strip_prefix('[')
+            .and_then(|n| n.strip_suffix(']'))
+            .unwrap_or(name);
+        let valid = !name.is_empty()
+            && (bare.parse::<IpAddr>().is_ok()
+                || name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'));
+        if !valid {
+            return Err(format!(
+                "Invalid {source} value: {raw:?}. Expected a host name such as kb.example.com \
+                 (no scheme, port or path): the public name of this server behind a reverse \
+                 proxy"
+            ));
+        }
+        let name = match bare.parse::<IpAddr>() {
+            Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+            Ok(IpAddr::V4(ip)) => ip.to_string(),
+            Err(_) => name.trim_end_matches('.').to_ascii_lowercase(),
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// Parses or resolves a `--host` value: an IP address (IPv6 with or without brackets) or a host
@@ -159,7 +216,28 @@ impl BindPlan {
             exposure,
             reason,
             name,
+            allowed: Vec::new(),
         }
+    }
+
+    /// The plan with further allowed host names (from [`allowed_hosts`]).
+    pub(super) fn with_allowed_hosts(mut self, allowed: Vec<String>) -> Self {
+        self.allowed = allowed;
+        self
+    }
+
+    /// The allowed host names of `--allowed-host` and `GRAPHERSAL_ALLOWED_HOSTS`.
+    pub(super) fn allowed(&self) -> &[String] {
+        &self.allowed
+    }
+
+    /// Whether the name part of `host` (`name`, `name:port`, `[v6]:port`) is an allowed name.
+    fn is_allowed_name(&self, host: &str) -> bool {
+        if self.allowed.is_empty() {
+            return false;
+        }
+        let name = host_name(host).trim_end_matches('.').to_ascii_lowercase();
+        !name.is_empty() && self.allowed.contains(&name)
     }
 
     /// Whether the bind address is a wildcard (`0.0.0.0`, `::`): every interface.
@@ -209,6 +287,9 @@ impl BindPlan {
     /// Whether a request naming `host` (a `Host` header, or the host part of an `Origin`) is
     /// served by this server on `port` (module docs).
     pub(super) fn is_own_host(&self, host: &str, port: u16) -> bool {
+        if self.is_allowed_name(host) {
+            return true;
+        }
         match self.exposure {
             Exposure::Loopback => {
                 let port = port.to_string();
@@ -237,6 +318,15 @@ impl BindPlan {
 
     /// Whether an `Origin` header is allowed for a request whose `Host` is `host`.
     pub(super) fn is_own_origin(&self, origin: &str, host: &str, port: u16) -> bool {
+        // An allowed name: http or https (TLS ended at a reverse proxy), any port, any Host.
+        let allowed_origin = origin
+            .strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+            .map(|h| h.trim_end_matches('/'))
+            .is_some_and(|h| !h.contains('/') && self.is_allowed_name(h));
+        if allowed_origin {
+            return true;
+        }
         let Some(origin_host) = origin
             .strip_prefix("http://")
             .map(|h| h.trim_end_matches('/'))
@@ -392,5 +482,96 @@ mod tests {
         assert!(!plan.is_own_origin("http://192.168.1.9:8080", "192.168.1.5:8080", 8080));
         assert!(!plan.is_own_origin("https://192.168.1.5:8080", "192.168.1.5:8080", 8080));
         assert!(!plan.is_own_origin("null", "192.168.1.5:8080", 8080));
+    }
+
+    #[test]
+    fn allowed_hosts_are_checked_and_normalized() {
+        let flags = vec!["KB.Example.com".to_string(), "10.0.0.7".to_string()];
+        let names =
+            allowed_hosts(&flags, Some(" kb.example.com, ,other.example.org.,[::1] ")).unwrap();
+        assert_eq!(
+            names,
+            ["kb.example.com", "10.0.0.7", "other.example.org", "[::1]"]
+        );
+        assert_eq!(allowed_hosts(&[], None).unwrap(), Vec::<String>::new());
+        assert_eq!(allowed_hosts(&[], Some("")).unwrap(), Vec::<String>::new());
+        for bad in [
+            "",
+            "https://kb.example.com",
+            "kb.example.com:443",
+            "kb/x",
+            "a b",
+        ] {
+            let err = allowed_hosts(&[bad.to_string()], None).unwrap_err();
+            assert!(
+                err.starts_with("Invalid --allowed-host value"),
+                "{bad}: {err}"
+            );
+        }
+        let err = allowed_hosts(&[], Some("ok.example.com,http://x")).unwrap_err();
+        assert!(
+            err.starts_with("Invalid GRAPHERSAL_ALLOWED_HOSTS value"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_allowed_host_admits_its_name_and_both_origins() {
+        let plain = BindPlan::new(Some("0.0.0.0"), false).unwrap();
+        // Without the option: a fully qualified name and an https origin are refused.
+        assert!(!plain.is_own_host("kb.example.com", 8080));
+        assert!(!plain.is_own_origin("https://kb.example.com", "kb.example.com", 8080));
+        let plan = plain
+            .clone()
+            .with_allowed_hosts(allowed_hosts(&["kb.example.com".into()], None).unwrap());
+        assert_eq!(plan.allowed(), ["kb.example.com"]);
+        for ok in [
+            "kb.example.com",
+            "KB.example.com:443",
+            "kb.example.com.:8080",
+        ] {
+            assert!(plan.is_own_host(ok, 8080), "{ok}");
+        }
+        assert!(!plan.is_own_host("evil.example.com", 8080));
+        assert!(!plan.is_own_host("kb.example.com.evil.net", 8080));
+        // Both schemes, any port, whatever Host the proxy forwards.
+        for origin in [
+            "https://kb.example.com",
+            "http://kb.example.com",
+            "https://kb.example.com:8443",
+        ] {
+            assert!(
+                plan.is_own_origin(origin, "kb.example.com", 8080),
+                "{origin}"
+            );
+            assert!(
+                plan.is_own_origin(origin, "localhost:8080", 8080),
+                "{origin}"
+            );
+        }
+        for origin in [
+            "https://evil.example.com",
+            "https://kb.example.com.evil.net",
+            "ftp://kb.example.com",
+            "https://kb.example.com/x",
+            "null",
+        ] {
+            assert!(
+                !plan.is_own_origin(origin, "kb.example.com", 8080),
+                "{origin}"
+            );
+        }
+        // The other rules stay as they were.
+        assert!(plan.is_own_host("192.168.1.5:8080", 8080));
+        assert!(!plan.is_own_host("other.example.org", 8080));
+        assert!(plan.is_own_origin("http://192.168.1.5:8080", "192.168.1.5:8080", 8080));
+        assert!(!plan.is_own_origin("https://192.168.1.5:8080", "192.168.1.5:8080", 8080));
+        // A loopback bind behind a local proxy admits the name too, on any port.
+        let loopback = BindPlan::new(None, false)
+            .unwrap()
+            .with_allowed_hosts(vec!["kb.example.com".into()]);
+        assert!(loopback.is_own_host("kb.example.com", 8080));
+        assert!(loopback.is_own_origin("https://kb.example.com", "127.0.0.1:8080", 8080));
+        assert!(!loopback.is_own_host("graphersal:8080", 8080));
     }
 }

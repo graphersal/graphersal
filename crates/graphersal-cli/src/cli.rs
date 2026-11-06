@@ -400,7 +400,15 @@ OPTIONS:
                            non-loopback address makes the server reachable from the network
                            WITHOUT authentication (a warning on stderr says so); requests
                            must then name the server by an IP address, localhost, a name
-                           without a dot, or the --host name.
+                           without a dot, the --host name, or an --allowed-host name.
+        --allowed-host <NAME>
+                           With --server: a further name requests may use (repeatable; also
+                           GRAPHERSAL_ALLOWED_HOSTS, comma-separated): the public name of the
+                           server behind a reverse proxy, e.g. kb.example.com. A Host header
+                           naming it is served on any port, and an Origin of http:// or
+                           https:// it is accepted (TLS ends at the proxy). Without it a fully
+                           qualified name other than --host is refused with 403 (DNS-rebinding
+                           protection).
         --ui-dir <DIR>     A directory whose files --server serves instead of the playground
                            UI embedded in the binary (a file missing there comes from the
                            embedded copy); default ./playground when it exists.
@@ -1160,6 +1168,9 @@ pub struct Cli {
     /// `--host`: the address the dev server binds (an IP address or a host name); `None` is
     /// the loopback, or `0.0.0.0` inside a container.
     pub host: Option<String>,
+    /// `--allowed-host` (repeatable): further names requests may use for the dev server (the
+    /// public names behind a reverse proxy); `GRAPHERSAL_ALLOWED_HOSTS` is added when it starts.
+    pub allowed_hosts: Vec<String>,
     /// `--ui-dir`: a directory whose files the dev server serves over the embedded playground
     /// UI; `None` is [`DEFAULT_UI_DIR`] when it exists, else the embedded UI alone.
     pub ui_dir: Option<String>,
@@ -1295,6 +1306,7 @@ impl Default for Cli {
             queue_timeout_s: None,
             max_connections: None,
             max_inflight_per_client: None,
+            allowed_hosts: Vec::new(),
             drain_timeout_s: None,
             timeout_given: false,
             #[cfg(feature = "dev-server")]
@@ -1403,6 +1415,7 @@ impl Cli {
                     })?;
                 }
                 "--host" => cli.host = Some(value(&mut args)?),
+                "--allowed-host" => cli.allowed_hosts.push(value(&mut args)?),
                 "--ui-dir" => cli.ui_dir = Some(value(&mut args)?),
                 "--mcp" => cli.mcp = true,
                 "--mcp-read-only" => cli.mcp_read_only = true,
@@ -1672,6 +1685,12 @@ impl Cli {
         }
         if cli.max_connections.is_some() && !server {
             return Err("--max-connections needs --server".to_string());
+        }
+        if !cli.allowed_hosts.is_empty() && !server {
+            return Err(
+                "--allowed-host needs --server: it names the dev server behind a reverse proxy"
+                    .to_string(),
+            );
         }
         if (cli.mcp_read_only
             || cli.mcp_token.is_some()
