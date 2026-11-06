@@ -12,6 +12,7 @@ Python package and the web playground are released with the same number:
 |---|---|---|
 | `graphersal` | crates.io | the library: engine, Rhai DSL, I/O, persistence (feature flags) |
 | `graphersal-session` | crates.io | the playground session logic, published because the CLI depends on it; internal, no stability guarantees |
+| `graphersal-mcp` | crates.io | the MCP endpoint of the servers (protocol, tools, resources, operator configuration), published because the CLI depends on it; internal, no stability guarantees |
 | `graphersal-cli` | crates.io | the `graphersal` binary: REPL, one-shot runner, `graphersal store`, the dev server |
 | `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for four platforms, with `SHA256SUMS` and build provenance attestations |
 | `graphersal-storage-tests` | crates.io | the `GraphStorage` conformance suite, EXPERIMENTAL like the trait (pin the exact version) |
@@ -107,7 +108,7 @@ machine and are compared with the previous release, not per change.
 
 1. Tag the release commit: `git tag -a v0.2.0 -m "Graphersal 0.2.0" && git push origin v0.2.0` (the tag equals the workspace `version`).
 2. The crates go to crates.io by hand, in dependency order: `cargo publish -p graphersal`, then
-   `graphersal-storage-tests`, `graphersal-session` and `graphersal-cli`.
+   `graphersal-storage-tests`, `graphersal-session`, `graphersal-mcp` and `graphersal-cli`.
 3. The workflow `release.yml`, started on the tag: `gh workflow run Release --ref v0.2.0`. It checks that the
    tag matches the version and that the version's release notes exist, then runs two independent parts:
    - **PyPI.** It builds the four-platform wheels and the sdist through `python.yml` (which also runs the

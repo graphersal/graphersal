@@ -7321,3 +7321,97 @@ fn the_memory_report_names_the_servers_components() {
     assert!(!error, "{text}");
     assert!(text.contains(r#""components":"#), "{text}");
 }
+
+#[test]
+fn mcp_config_shapes_what_the_agent_sees() {
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/mcp-kb-readonly.json");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--read-only",
+        "--mcp",
+        "--mcp-config",
+        example,
+    ]);
+    let port = server.port;
+    let answer = mcp_post(
+        port,
+        &[],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+    );
+    let session = answer
+        .headers
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| v.trim().to_string())
+        })
+        .expect("Mcp-Session-Id");
+    let init = answer.json();
+    // `McpClient::connect` expects the default server name.
+    let mut mcp = McpClient {
+        port,
+        session,
+        extra: Vec::new(),
+        next_id: 2,
+    };
+    assert_eq!(init["result"]["serverInfo"]["name"], "project-kb", "{init}");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("A read-only knowledge graph of this project."),
+        "{init}"
+    );
+    assert_eq!(mcp.tool_names(), ["gql", "run_saved_query", "get_schema"]);
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p:person) RETURN p.name AS n ORDER BY n LIMIT 1"}),
+    );
+    assert!(!error && text.contains("\"josh\""), "{text}");
+    let refused = mcp.rpc(
+        "tools/call",
+        serde_json::json!({"name": "statistics", "arguments": {}}),
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not offered")),
+        "{refused}"
+    );
+    let resources = mcp.rpc("resources/list", serde_json::json!({}));
+    assert_eq!(
+        resources["result"]["resources"].as_array().map(Vec::len),
+        Some(3),
+        "{resources}"
+    );
+}
+
+#[test]
+fn a_writing_tool_in_the_mcp_config_of_a_read_only_server_stops_the_start() {
+    let dir = std::env::temp_dir().join(format!("graphersal_srv_{}_mcpcfg", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("c.json");
+    std::fs::write(&config, r#"{"tools": {"include": ["set_schema"]}}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "--graph",
+            "modern",
+            "--server",
+            "--port",
+            "0",
+            "--read-only",
+            "--mcp",
+        ])
+        .args(["--mcp-config", config.to_str().unwrap()])
+        .output()
+        .expect("graphersal runs");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("set_schema") && stderr.contains("read-only"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

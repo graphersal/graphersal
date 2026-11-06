@@ -73,6 +73,21 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("health") {
         exit(health::run(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("mcp-cost") {
+        #[cfg(feature = "dev-server")]
+        {
+            log::install();
+            exit(out::exit_code(server::mcp_cost(&args[1..])));
+        }
+        #[cfg(not(feature = "dev-server"))]
+        {
+            errln!(
+                "mcp-cost is not available: this graphersal was built without the \
+                 `dev-server` feature"
+            );
+            exit(cli::EXIT_USAGE_ERROR);
+        }
+    }
     if args.first().map(String::as_str) == Some("embed-model") {
         #[cfg(feature = "model2vec")]
         exit(out::exit_code(embed_model::run(&args[1..])));

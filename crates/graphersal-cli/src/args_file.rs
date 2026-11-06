@@ -67,6 +67,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("mcp-query-tools", Kind::Switch),
     ("mcp-instructions", Kind::Path),
     ("mcp-max-chars", Kind::Value),
+    ("mcp-config", Kind::Path),
     ("ai", Kind::Path),
 ];
 
@@ -102,6 +103,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--mcp-token",
     "--mcp-instructions",
     "--mcp-max-chars",
+    "--mcp-config",
     "--ai",
 ];
 

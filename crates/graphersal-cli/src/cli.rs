@@ -241,7 +241,7 @@ USAGE:
     graphersal [OPTIONS] --in            # evaluate the script read from stdin, print the result, exit
     graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR]
                [--mcp [--mcp-read-only] [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
-               [--mcp-max-chars N]]
+               [--mcp-max-chars N] [--mcp-config FILE]]
                [--ai FILE]
                                          # DEV server: the playground UI over HTTP (unstable),
                                          # optionally an MCP endpoint for AI agents
@@ -251,6 +251,10 @@ USAGE:
     graphersal health [--ready] [--host ADDR] [--port N]
                                          # probe a running --server: exit 0 when /healthz
                                          # (/readyz) answers 200 (graphersal health --help)
+    graphersal mcp-cost [--graph SRC] [--mcp-config FILE] [--read-only] [--mcp-query-tools]
+                                         # what the MCP prompt (instructions + tools) costs an
+                                         # agent's context, without starting a server
+                                         # (graphersal mcp-cost --help)
 
 OPTIONS:
     -g, --graph <SOURCE>   Graph to run against: "modern" (TinkerPop Modern, the default),
@@ -394,6 +398,20 @@ OPTIONS:
                            compact JSON) and ends with a note naming the next page's offset.
                            The client may limit tool output too (Claude Code: about 25000
                            tokens, MAX_MCP_OUTPUT_TOKENS), so raising this alone may not help.
+        --mcp-config <FILE>
+                           With --mcp: the operator's configuration of the endpoint, JSON:
+                           {"server_name": "..", "instructions": {"mode": "builtin" | "append"
+                           | "replace", "text": ".." | "file": ".."}, "descriptions": "full" |
+                           "short", "tools": {"include": [..], "exclude": [..], "overrides":
+                           {"<tool>": {"description": ".."}}}, "saved_query_tools": {"folders":
+                           [..], "names": [..], "exclude": [..], "paging_params": false},
+                           "resources": [..], "answer_limit_chars": 30000}. Checked at start:
+                           an unknown key or tool is an error (exit 2), a key starting with "_"
+                           is a comment, relative paths resolve against the file, a writing
+                           tool in "include" of a read-only server is an error. Setting the
+                           same thing with a flag (--mcp-instructions, --mcp-query-tools,
+                           --mcp-max-chars) and in the file is an error. graphersal mcp-cost
+                           measures what a configuration costs. The AI Chat does not read it.
         --ai <FILE>        With --server: EXPERIMENTAL AI Chat, an LLM agent working on the
                            served graph. FILE is JSON: {"provider": "openai"|"anthropic",
                            "model": "<id>", "api_key_env": "<VARIABLE>", "base_url": null,
@@ -1138,6 +1156,11 @@ pub struct Cli {
     /// `--mcp-instructions`: the TEXT of the operator's file, appended to the MCP server
     /// instructions (read and checked while parsing).
     pub mcp_instructions: Option<String>,
+    /// `--mcp-config`: the operator's MCP configuration, read and checked while parsing, with
+    /// the shorthand flags (`--mcp-instructions`, `--mcp-query-tools`, `--mcp-max-chars`)
+    /// folded in.
+    #[cfg(feature = "dev-server")]
+    pub mcp_config: Option<graphersal_mcp::McpConfig>,
 }
 
 /// Default port of `--server`.
@@ -1202,6 +1225,8 @@ impl Default for Cli {
             mcp_max_chars: None,
             ai: None,
             mcp_instructions: None,
+            #[cfg(feature = "dev-server")]
+            mcp_config: None,
         }
     }
 }
@@ -1225,6 +1250,7 @@ impl Cli {
         // The first display option given: the playground UI sets those per run, so --server
         // rejects them instead of ignoring them.
         let mut display_flag: Option<String> = None;
+        let mut mcp_config_path: Option<String> = None;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -1325,6 +1351,7 @@ impl Cli {
                     cli.mcp_max_chars = Some(n);
                 }
                 "--ai" => cli.ai = Some(value(&mut args)?),
+                "--mcp-config" => mcp_config_path = Some(value(&mut args)?),
                 "--mcp-instructions" => {
                     cli.mcp_instructions = Some(read_mcp_instructions(&value(&mut args)?)?)
                 }
@@ -1543,6 +1570,31 @@ impl Cli {
             return Err("--mcp-max-chars needs --mcp".to_string());
         }
 
+        if let Some(path) = mcp_config_path {
+            if !cli.mcp {
+                return Err("--mcp-config needs --mcp".to_string());
+            }
+            #[cfg(feature = "dev-server")]
+            {
+                cli.mcp_config = Some(read_mcp_config(
+                    &path,
+                    cli.mcp_instructions.clone(),
+                    cli.mcp_query_tools,
+                    cli.mcp_max_chars,
+                    cli.mcp_read_only || cli.read_only,
+                )?);
+            }
+            #[cfg(not(feature = "dev-server"))]
+            {
+                let _ = path;
+                return Err(
+                    "--mcp-config is not available: this graphersal was built without \
+                            the `dev-server` feature"
+                        .to_string(),
+                );
+            }
+        }
+
         if cli.no_limit && (cli.max_rows.is_some() || cli.max_items.is_some()) {
             return Err(
                 "--no-limit removes every display limit and cannot be combined with \
@@ -1593,6 +1645,37 @@ fn read_mcp_instructions(path: &str) -> Result<String, String> {
         ));
     }
     Ok(text.to_string())
+}
+
+/// Reads and checks the `--mcp-config` file at `path` (JSON; an instructions `file` relative
+/// to it), folds in the shorthand flags (the same setting in both is an error) and checks it
+/// against the mode (`read_only`: a writing tool named in it is an error).
+#[cfg(feature = "dev-server")]
+pub fn read_mcp_config(
+    path: &str,
+    notes: Option<String>,
+    query_tools: bool,
+    max_chars: Option<usize>,
+    read_only: bool,
+) -> Result<graphersal_mcp::McpConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("--mcp-config {path}: cannot read the file ({err})"))?;
+    let base = std::path::Path::new(path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut read_file = |name: &str| -> Result<String, String> {
+        let file = base.join(name);
+        let bytes = std::fs::read(&file).map_err(|err| format!("cannot read the file ({err})"))?;
+        String::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text".to_string())
+    };
+    let config = graphersal_mcp::McpConfig::parse(&text, &mut read_file)
+        .and_then(|config| config.with_flags(notes, query_tools, max_chars))
+        .map_err(|err| format!("--mcp-config {path}: {err}"))?;
+    config
+        .check(read_only)
+        .map_err(|err| format!("--mcp-config {path}: {err}"))?;
+    Ok(config)
 }
 
 /// Parses a `--spelling` / `/set spelling` value: `snake` or `camel`.
@@ -2272,6 +2355,65 @@ mod tests {
         );
         let missing =
             Cli::parse(["--server", "--mcp", "--mcp-instructions", "/nonexistent/n"]).unwrap_err();
+        assert!(missing.contains("cannot read"), "{missing}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "dev-server")]
+    #[test]
+    fn mcp_config_is_read_and_checked_while_parsing() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        // Both examples parse; the knowledge-graph one on a read-only server.
+        let kb = examples.join("mcp-kb-readonly.json");
+        let kb = kb.to_str().unwrap();
+        let cli = Cli::parse(["--server", "--read-only", "--mcp", "--mcp-config", kb]).unwrap();
+        let config = cli.mcp_config.expect("read");
+        assert_eq!(config.descriptions(), graphersal_mcp::Descriptions::Short);
+        assert_eq!(config.answer_limit_chars(), Some(30000));
+        // A relative instructions file resolves against the configuration's directory.
+        let short = examples.join("mcp-short.json");
+        let short = short.to_str().unwrap();
+        let cli = Cli::parse(["--server", "--mcp", "--mcp-config", short]).unwrap();
+        assert!(cli.mcp_config.expect("read").has_saved_query_tools());
+        // The flag of the same setting is an error, so is a missing --mcp.
+        let err = Cli::parse([
+            "--server",
+            "--mcp",
+            "--mcp-query-tools",
+            "--mcp-config",
+            short,
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("--mcp-query-tools") && err.contains("saved_query_tools"),
+            "{err}"
+        );
+        let err = Cli::parse(["--server", "--mcp-config", short]).unwrap_err();
+        assert!(err.contains("--mcp-config needs --mcp"), "{err}");
+
+        let dir = scratch("mcp-config");
+        let file = dir.join("c.json");
+        let path = file.to_str().unwrap();
+        std::fs::write(&file, r#"{"tools": {"include": ["gql", "set_schema"]}}"#).unwrap();
+        assert!(Cli::parse(["--server", "--mcp", "--mcp-config", path]).is_ok());
+        let err =
+            Cli::parse(["--server", "--mcp", "--mcp-read-only", "--mcp-config", path]).unwrap_err();
+        assert!(err.contains(path) && err.contains("set_schema"), "{err}");
+        std::fs::write(&file, r#"{"descripton": "short"}"#).unwrap();
+        let err = Cli::parse(["--server", "--mcp", "--mcp-config", path]).unwrap_err();
+        assert!(err.contains("did you mean \"descriptions\""), "{err}");
+        // The args file takes it as a path relative to itself.
+        let args = dir.join("args.json");
+        std::fs::write(&file, r#"{"descriptions": "short"}"#).unwrap();
+        std::fs::write(
+            &args,
+            r#"{"server": true, "mcp": true, "mcp-config": "c.json"}"#,
+        )
+        .unwrap();
+        let cli = Cli::parse(["--args-file", args.to_str().unwrap()]).unwrap();
+        assert!(cli.mcp_config.is_some());
+        let missing =
+            Cli::parse(["--server", "--mcp", "--mcp-config", "/nonexistent/c.json"]).unwrap_err();
         assert!(missing.contains("cannot read"), "{missing}");
         std::fs::remove_dir_all(dir).unwrap();
     }

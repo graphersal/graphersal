@@ -1,0 +1,18 @@
+{
+  "_comment": "A read-only knowledge-graph endpoint: graphersal --graph kb.gstore --read-only --server --mcp --mcp-config examples/mcp-kb-readonly.json. Only GQL, the schema and the saved queries of the folder kb (each a tool of its own), short descriptions, short instructions. Measure it: graphersal mcp-cost --graph kb.gstore --read-only --mcp-config examples/mcp-kb-readonly.json",
+  "server_name": "project-kb",
+  "instructions": {
+    "mode": "replace",
+    "text": "A read-only knowledge graph of this project. Start with the saved-query tools: they answer the common questions (search by meaning, a symbol by name, where something is used, what a change touches). For anything else read the schema (get_schema) and write a GQL query (gql; what it supports: resource graphersal://gql-reference). Answers are compact JSON; large ones are paged: the note at the end names the next page's offset."
+  },
+  "descriptions": "short",
+  "tools": {
+    "include": ["gql", "get_schema", "run_saved_query"]
+  },
+  "saved_query_tools": {
+    "folders": ["kb"],
+    "paging_params": false
+  },
+  "resources": ["schema", "saved-queries", "gql-reference"],
+  "answer_limit_chars": 30000
+}

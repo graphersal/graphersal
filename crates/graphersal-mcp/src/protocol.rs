@@ -2,10 +2,11 @@
 //! answers), `initialize`, `ping`, `tools/*`, `resources/*`, `prompts/list`, and the server
 //! instructions.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
+use crate::config::{Instructions, McpConfig, SavedQueryTools};
 use crate::host::{ClientRef, Ctx, Host, McpError};
 use crate::resources::{RESOURCES, read_resource};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
@@ -39,13 +40,10 @@ const MCP_CLIENT: &str = "mcp";
 /// every request to it.
 pub struct Mcp {
     read_only: bool,
-    /// Every saved query is also a tool of its own.
-    query_tools: bool,
     token: Option<String>,
-    /// The operator's text, appended to the instructions.
-    operator_notes: Option<String>,
-    /// The largest tool answer in characters.
-    max_chars: usize,
+    /// The operator's configuration (tools, descriptions, instructions, saved-query tools,
+    /// resources, answer limit), with the shorthand flags folded in.
+    config: Arc<McpConfig>,
     /// Session id -> `clientInfo` of its `initialize`, in the order they were created.
     sessions: Mutex<Vec<(String, Value)>>,
     /// The `clientInfo` of the last `initialize` (the playground's top bar names it).
@@ -57,29 +55,47 @@ impl Mcp {
     /// Bearer <token>` when `token` is set, and lists every saved query as a tool of its own
     /// with `query_tools`.
     pub fn new(read_only: bool, token: Option<String>, query_tools: bool) -> Self {
+        let mut config = McpConfig::default();
+        if query_tools {
+            config.saved_query_tools = Some(SavedQueryTools::all());
+        }
         Self {
             read_only,
-            query_tools,
             token,
-            operator_notes: None,
-            max_chars: MAX_TEXT_CHARS,
+            config: Arc::new(config),
             sessions: Mutex::new(Vec::new()),
             client: Mutex::new(None),
         }
+    }
+
+    /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
+    /// by [`McpConfig::with_flags`]). It replaces the whole configuration, including what
+    /// `query_tools`, [`Mcp::with_operator_notes`] and [`Mcp::with_max_chars`] set before.
+    pub fn with_config(mut self, config: McpConfig) -> Self {
+        self.config = Arc::new(config);
+        self
     }
 
     /// Adds the operator's notes to the `initialize` instructions (under the heading "Notes
     /// from the operator of this server about this graph:"). The AI Chat prompt does not carry
     /// them: it has its own text.
     pub fn with_operator_notes(mut self, notes: Option<String>) -> Self {
-        self.operator_notes = notes;
+        Arc::make_mut(&mut self.config).instructions = match notes {
+            Some(notes) => Instructions::Append(notes),
+            None => Instructions::Builtin,
+        };
         self
     }
 
     /// Sets the largest tool answer in characters (`None` keeps [`MAX_TEXT_CHARS`]).
     pub fn with_max_chars(mut self, max_chars: Option<usize>) -> Self {
-        self.max_chars = max_chars.unwrap_or(MAX_TEXT_CHARS);
+        Arc::make_mut(&mut self.config).answer_limit_chars = max_chars;
         self
+    }
+
+    /// The largest tool answer in characters.
+    fn max_chars(&self) -> usize {
+        self.config.answer_limit_chars.unwrap_or(MAX_TEXT_CHARS)
     }
 
     /// The client sessions and their estimated bytes (ids and stored values as JSON text), for
@@ -103,9 +119,64 @@ impl Mcp {
         self.read_only
     }
 
-    /// Whether every saved query is a tool of its own.
+    /// Whether saved queries are tools of their own (`--mcp-query-tools` or the
+    /// configuration's `saved_query_tools`).
     pub fn query_tools(&self) -> bool {
-        self.query_tools
+        self.config.has_saved_query_tools()
+    }
+
+    /// The configuration served.
+    pub fn config(&self) -> &McpConfig {
+        &self.config
+    }
+
+    /// The instructions `initialize` answers.
+    pub fn instructions_text(&self) -> String {
+        let mut instructions = match &self.config.instructions {
+            Instructions::Replace(text) => return text.clone(),
+            Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
+        };
+        if self.read_only {
+            instructions.push_str(READ_ONLY_NOTE);
+        }
+        if let Instructions::Append(notes) = &self.config.instructions {
+            instructions.push_str("\n\n");
+            instructions.push_str(OPERATOR_HEADING);
+            instructions.push_str("\n\n");
+            instructions.push_str(notes);
+        }
+        instructions
+    }
+
+    /// The caller of the endpoint's tools.
+    fn caller(&self) -> ToolCaller {
+        ToolCaller::new(ClientRef::new(MCP_CLIENT, None), self.read_only)
+            .with_config(self.config.clone())
+            .with_max_chars(self.max_chars())
+    }
+
+    /// The `tools/list` entries an agent gets now (saved-query tools read through `host`).
+    pub fn tool_listings(&self, host: &dyn Host) -> Result<Vec<Value>, McpError> {
+        tool_listings(host, &self.caller())
+    }
+
+    /// What the endpoint's prompt costs an agent's context: the instructions and every tool's
+    /// `tools/list` entry in characters (`graphersal mcp-cost`, the budget tests).
+    pub fn prompt_cost(&self, host: &dyn Host) -> Result<PromptCost, McpError> {
+        let tools = self
+            .tool_listings(host)?
+            .iter()
+            .map(|tool| {
+                (
+                    tool["name"].as_str().unwrap_or_default().to_string(),
+                    tool.to_string().chars().count(),
+                )
+            })
+            .collect();
+        Ok(PromptCost {
+            instructions_chars: self.instructions_text().chars().count(),
+            tools,
+        })
     }
 
     /// Whether requests need `Authorization: Bearer <token>`.
@@ -275,9 +346,7 @@ impl Mcp {
     fn dispatch(&self, host: &dyn Host, method: &str, params: &Value) -> RpcResult {
         let plain = |value: Value| Ok((value, None));
         let client = ClientRef::new(MCP_CLIENT, None);
-        let caller = ToolCaller::new(client.clone(), self.read_only)
-            .with_query_tools(self.query_tools)
-            .with_max_chars(self.max_chars);
+        let caller = self.caller();
         match method {
             "initialize" => self.initialize(params),
             "ping" => plain(json!({})),
@@ -305,7 +374,8 @@ impl Mcp {
                     }
                 }
             }
-            "resources/list" => plain(json!({ "resources": RESOURCES.iter().map(|r| json!({
+            "resources/list" => plain(json!({ "resources": RESOURCES.iter()
+                .filter(|r| self.config.lists_resource(r.name)).map(|r| json!({
                 "uri": r.uri, "name": r.name, "title": r.title,
                 "description": r.description, "mimeType": r.mime,
             })).collect::<Vec<_>>() })),
@@ -358,16 +428,7 @@ impl Mcp {
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }
-        let mut instructions = INSTRUCTIONS.to_string();
-        if self.read_only {
-            instructions.push_str(READ_ONLY_NOTE);
-        }
-        if let Some(notes) = &self.operator_notes {
-            instructions.push_str("\n\n");
-            instructions.push_str(OPERATOR_HEADING);
-            instructions.push_str("\n\n");
-            instructions.push_str(notes);
-        }
+        let instructions = self.instructions_text();
         Ok((
             json!({
                 "protocolVersion": version,
@@ -376,7 +437,7 @@ impl Mcp {
                     "resources": { "listChanged": false },
                 },
                 "serverInfo": {
-                    "name": SERVER_NAME,
+                    "name": self.config.server_name.as_deref().unwrap_or(SERVER_NAME),
                     "title": SERVER_TITLE,
                     "version": env!("CARGO_PKG_VERSION"),
                 },
@@ -416,6 +477,34 @@ pub(crate) fn same_secret(given: &str, expected: &str) -> bool {
 }
 
 type RpcResult = Result<(Value, Option<String>), (i64, String)>;
+
+/// What an endpoint's prompt costs ([`Mcp::prompt_cost`]): characters of the instructions and
+/// of every tool's `tools/list` entry (its compact JSON). Tokens are estimated as characters / 4.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PromptCost {
+    /// Characters of the `initialize` instructions.
+    pub instructions_chars: usize,
+    /// Every listed tool's name and the characters of its JSON entry, in listing order.
+    pub tools: Vec<(String, usize)>,
+}
+
+impl PromptCost {
+    /// Characters of every tool entry together.
+    pub fn tools_chars(&self) -> usize {
+        self.tools.iter().map(|(_, chars)| chars).sum()
+    }
+
+    /// Instructions and tools together.
+    pub fn total_chars(&self) -> usize {
+        self.instructions_chars + self.tools_chars()
+    }
+
+    /// The rough token estimate of `chars` characters (characters / 4, rounded up).
+    pub fn tokens(chars: usize) -> usize {
+        chars.div_ceil(4)
+    }
+}
 
 pub(crate) const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
