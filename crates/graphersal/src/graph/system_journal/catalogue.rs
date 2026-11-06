@@ -638,7 +638,13 @@ pub(crate) static MODEL_LOADED: EventKind = event(
     &[
         f("repo", "its repository"),
         f("identity", "its identity"),
-        f("load_bytes", "the memory it takes"),
+        f(
+            "load_bytes",
+            concat!(
+                "the memory the loaded model takes, measured at the load (counted by the ",
+                "tracking allocator, else the loader's estimate), not its size on disk"
+            ),
+        ),
         f("ms", "how long the load took"),
     ],
     Collapse::By(&["identity"]),

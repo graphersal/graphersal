@@ -288,6 +288,75 @@ fn verify_finds_a_damaged_model_and_the_store_stays_writable() {
     ));
 }
 
+/// What `verify` says about the one model of `store`: the problems (path and reason) and the
+/// model's state.
+fn model_verdict(store: &Store) -> (Vec<(String, String)>, String) {
+    let report = store.verify().unwrap();
+    let problems = report
+        .problems
+        .iter()
+        .map(|p| (p.path.clone(), p.reason.clone()))
+        .collect();
+    (problems, format!("{:?}", report.models[0].state))
+}
+
+#[test]
+fn verify_reports_a_damaged_model_blob_with_the_texts_it_always_had() {
+    let temp = Temp::new("verify-texts");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let model = import(&store, 1, "acme/tiny").model;
+    let blob = blob_path(&path, &store, &model.identity);
+    let name = blob
+        .strip_prefix(&path)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let good = fs::read(&blob).unwrap();
+    assert_eq!(model_verdict(&store), (vec![], "NotLoaded".to_string()));
+    let damaged = |reason: &str| {
+        (
+            vec![(name.clone(), reason.to_string())],
+            r#"Damaged { reason: "its blob is damaged" }"#.to_string(),
+        )
+    };
+    // A flipped byte in the middle (the weights), in the first header, in the end blocks.
+    for at in [good.len() / 2, 100, good.len() - 10] {
+        let mut bad = good.clone();
+        bad[at] ^= 0x55;
+        fs::write(&blob, &bad).unwrap();
+        assert_eq!(
+            model_verdict(&store),
+            damaged("the blob's crc check failed"),
+            "byte {at}"
+        );
+    }
+    // Cut short, and one byte longer.
+    fs::write(&blob, &good[..good.len() - 512]).unwrap();
+    assert_eq!(
+        model_verdict(&store),
+        damaged("the blob's length check failed")
+    );
+    let mut longer = good.clone();
+    longer.push(0);
+    fs::write(&blob, &longer).unwrap();
+    assert_eq!(
+        model_verdict(&store),
+        damaged("the blob's length check failed")
+    );
+    fs::remove_file(&blob).unwrap();
+    assert_eq!(
+        model_verdict(&store),
+        (
+            vec![(name.clone(), "the blob is missing".to_string())],
+            "Missing".to_string()
+        )
+    );
+    // Intact again: nothing to report.
+    fs::write(&blob, &good).unwrap();
+    assert_eq!(model_verdict(&store), (vec![], "NotLoaded".to_string()));
+}
+
 #[test]
 fn every_copy_carries_the_models() {
     let temp = Temp::new("copies");

@@ -762,20 +762,36 @@ fn verify_models(dir: &DirPath, report: &mut VerifyReport) {
     report.models = infos;
 }
 
-/// Reads the blob of `model` and checks it is the model tar of the identity `identity`.
+/// Reads the blob of `model` as a stream and checks it is the model tar of the identity
+/// `identity`: the archive's structure and manifest (`model_tar::scan_tar`), the identity, and
+/// each file's SHA-256 against the manifest. The blob is never held whole (a model blob may
+/// be hundreds of MiB).
 fn check_model_blob(
     dir: &DirPath,
     identity: &str,
     model: &crate::graph::model_definition::ModelDefinition,
 ) -> Result<(), String> {
-    let bytes = match super::blobs::read_blob(dir, model.blob()) {
-        Ok(bytes) => bytes,
-        // Not read (does not fit, I/O): the blob check reported what it found.
+    let reader = match super::blobs::open_blob(dir, model.blob()) {
+        Ok(reader) => reader,
+        // Not readable (I/O, length): the blob check reported what it found.
         Err(_) => return Ok(()),
     };
-    let tar = crate::value::vector::embed::model_tar::read_tar(&bytes)
-        .map_err(|reason| format!("is not a valid model tar: {reason}"))?;
-    let manifest = &tar.manifest;
+    check_model_tar(reader, identity)
+}
+
+/// The check of [`check_model_blob`] on the bytes of `reader` (a blob checked by its length and
+/// CRC-32C at its end: a read failure or damage it finds is the blob check's to report, never a
+/// problem of the model).
+fn check_model_tar(reader: impl std::io::Read, identity: &str) -> Result<(), String> {
+    use crate::value::vector::embed::model_tar::{TarStreamError, scan_tar};
+    let scanned = match scan_tar(reader) {
+        Ok(scanned) => scanned,
+        Err(TarStreamError::Read(_)) => return Ok(()),
+        Err(TarStreamError::Invalid(reason)) => {
+            return Err(format!("is not a valid model tar: {reason}"));
+        }
+    };
+    let manifest = &scanned.manifest;
     if !manifest.is_known_family() || manifest.identity != identity {
         return Err(format!(
             "holds the model {} of the family {}",
@@ -792,9 +808,9 @@ fn check_model_blob(
     if !digest.starts_with(short) || short.is_empty() {
         return Err("lists files that are another model than its identity".into());
     }
-    for (name, data) in tar.files() {
-        if let Some(file) = manifest.files.iter().find(|f| f.name == name)
-            && crate::value::vector::embed::model_tar::sha256_hex(data) != file.sha256
+    for (name, sha256) in &scanned.hashes {
+        if let Some(file) = manifest.files.iter().find(|f| &f.name == name)
+            && *sha256 != file.sha256
         {
             return Err(format!(
                 "holds the file {name} with another SHA-256 than listed"
@@ -2156,6 +2172,255 @@ impl Iterator for ChangesSince {
                     return Some(Err(err));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::BlobRef;
+    use crate::value::blob::BlobHashAlgo;
+    use crate::value::vector::embed::identity::FAMILY;
+    use crate::value::vector::embed::model_tar::{
+        MODEL_MANIFEST, ManifestFile, ModelManifest, TarContent, TarFile, TarStream, read_tar,
+        sha256_hex,
+    };
+
+    /// The check of a model blob as it was before it streamed: the blob read whole, then
+    /// `read_tar`. The streaming check must give the same result and the same text.
+    fn reference_check(bytes: &[u8], identity: &str) -> Result<(), String> {
+        let tar =
+            read_tar(bytes).map_err(|reason| format!("is not a valid model tar: {reason}"))?;
+        let manifest = &tar.manifest;
+        if !manifest.is_known_family() || manifest.identity != identity {
+            return Err(format!(
+                "holds the model {} of the family {}",
+                manifest.identity, manifest.family
+            ));
+        }
+        let digest = manifest
+            .digest()
+            .ok_or("lists no config, tokenizer and model file")?;
+        let short = super::super::model_catalog::base_identity(identity)
+            .rsplit('@')
+            .next()
+            .unwrap_or("");
+        if !digest.starts_with(short) || short.is_empty() {
+            return Err("lists files that are another model than its identity".into());
+        }
+        for (name, data) in tar.files() {
+            if let Some(file) = manifest.files.iter().find(|f| f.name == name)
+                && sha256_hex(data) != file.sha256
+            {
+                return Err(format!(
+                    "holds the file {name} with another SHA-256 than listed"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A model tar of `files` (name, role, data) and its identity.
+    fn model_tar(files: &[(&str, &str, &[u8])]) -> (Vec<u8>, String) {
+        let mut listed: Vec<ManifestFile> = files
+            .iter()
+            .map(|(name, role, data)| ManifestFile {
+                name: name.to_string(),
+                role: role.to_string(),
+                size: data.len() as u64,
+                sha256: sha256_hex(data),
+            })
+            .collect();
+        listed.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut manifest = ModelManifest {
+            family: FAMILY.into(),
+            identity: String::new(),
+            repo: "o/n".into(),
+            revision: None,
+            commit: None,
+            license: "mit".into(),
+            license_text: "none".into(),
+            base_models: Vec::new(),
+            gated: false,
+            files: listed,
+        };
+        let digest = manifest.digest().expect("three roles");
+        let identity = format!("{FAMILY}/o/n@{}", &digest[..12]);
+        manifest.identity.clone_from(&identity);
+        let mut entries: Vec<TarFile> = files
+            .iter()
+            .map(|(name, _, data)| TarFile {
+                name: name.to_string(),
+                size: data.len() as u64,
+                sha256: sha256_hex(data),
+                content: TarContent::Bytes(data.to_vec()),
+            })
+            .collect();
+        let bytes = manifest.to_bytes();
+        entries.push(TarFile {
+            name: MODEL_MANIFEST.into(),
+            size: bytes.len() as u64,
+            sha256: sha256_hex(&bytes),
+            content: TarContent::Bytes(bytes),
+        });
+        let mut out = Vec::new();
+        TarStream::new(entries).read_to_end(&mut out).expect("tar");
+        (out, identity)
+    }
+
+    const WEIGHTS: [u8; 700] = [7; 700];
+
+    fn small_model() -> (Vec<u8>, String) {
+        model_tar(&[
+            ("config.json", "config", b"{}"),
+            ("model.safetensors", "model", &WEIGHTS),
+            ("tokenizer.json", "tokenizer", b"{\"t\":1}"),
+        ])
+    }
+
+    #[test]
+    fn the_streamed_check_gives_the_results_and_texts_of_the_whole_blob_check() {
+        let (good, identity) = small_model();
+        assert_eq!(check_model_tar(good.as_slice(), &identity), Ok(()));
+        let mut compared = 0;
+        let mut errors = 0;
+        let mut same = |bytes: &[u8], identity: &str, what: &str| {
+            let expected = reference_check(bytes, identity);
+            assert_eq!(check_model_tar(bytes, identity), expected, "{what}");
+            compared += 1;
+            errors += usize::from(expected.is_err());
+        };
+        same(&good, "model2vec/o/n@000000000000", "another identity");
+        same(&good, "", "an empty identity");
+        for at in 0..good.len() {
+            for flip in [0x01u8, 0x41, 0xff] {
+                let mut bad = good.clone();
+                bad[at] ^= flip;
+                same(&bad, &identity, &format!("byte {at} ^ {flip:#x}"));
+            }
+        }
+        for cut in 0..good.len() {
+            same(&good[..cut], &identity, &format!("cut at {cut}"));
+        }
+        let mut longer = good.clone();
+        longer.extend_from_slice(&[0u8; 700]);
+        same(&longer, &identity, "zeros after the end");
+        longer.push(1);
+        same(&longer, &identity, "junk after the end");
+        // A file larger than the chunk the stream hashes through.
+        let huge = vec![b' '; 2 << 20];
+        let (with_card, card_identity) = model_tar(&[
+            ("README.md", "card", &huge),
+            ("config.json", "config", b"{}"),
+            ("model.safetensors", "model", &WEIGHTS),
+            ("tokenizer.json", "tokenizer", b"{\"t\":1}"),
+        ]);
+        same(&with_card, &card_identity, "a large card");
+        assert!(compared > 3 * good.len() && errors > 2 * good.len());
+    }
+
+    #[test]
+    fn a_manifest_over_the_limit_is_named_as_before() {
+        // A tar whose only entry is a manifest over 1 MiB (not JSON: the size is checked first).
+        let size = (1u64 << 20) + 1;
+        let mut tar = crate::value::vector::embed::model_tar::header(MODEL_MANIFEST, size).to_vec();
+        tar.extend(std::iter::repeat_n(b'x', size as usize));
+        let padded = tar.len().next_multiple_of(512);
+        tar.resize(padded + 1024, 0);
+        let expected = reference_check(&tar, "x");
+        assert_eq!(
+            expected,
+            Err("is not a valid model tar: the manifest is too large".to_string())
+        );
+        assert_eq!(check_model_tar(tar.as_slice(), "x"), expected);
+    }
+
+    /// A source that records the largest read it was asked for and the bytes it gave.
+    struct Watched<'a> {
+        bytes: &'a [u8],
+        largest: usize,
+        given: usize,
+    }
+
+    impl Read for Watched<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.largest = self.largest.max(buf.len());
+            let n = self.bytes.read(buf)?;
+            self.given += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_large_model_is_checked_through_a_small_buffer() {
+        let weights = vec![3u8; 8 << 20];
+        let (tar, identity) = model_tar(&[
+            ("config.json", "config", b"{}"),
+            ("model.safetensors", "model", &weights),
+            ("tokenizer.json", "tokenizer", b"{\"t\":1}"),
+        ]);
+        let mut source = Watched {
+            bytes: &tar,
+            largest: 0,
+            given: 0,
+        };
+        assert_eq!(check_model_tar(&mut source, &identity), Ok(()));
+        assert_eq!(source.given, tar.len(), "read to the end");
+        assert!(
+            source.largest <= 64 * 1024,
+            "the largest read asked for {} bytes of a {} byte blob",
+            source.largest,
+            tar.len()
+        );
+        // Damaged weights are found the same way.
+        let mut bad = tar.clone();
+        let middle = bad.len() / 2;
+        bad[middle] ^= 1;
+        let mut source = Watched {
+            bytes: &bad,
+            largest: 0,
+            given: 0,
+        };
+        assert_eq!(
+            check_model_tar(&mut source, &identity),
+            Err("holds the file model.safetensors with another SHA-256 than listed".into())
+        );
+        assert!(source.largest <= 64 * 1024);
+    }
+
+    #[test]
+    fn damage_the_blob_check_finds_is_never_a_model_problem() {
+        let (good, identity) = small_model();
+        let hash: [u8; 32] = {
+            let hex = sha256_hex(&good);
+            std::array::from_fn(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+        };
+        let blob = BlobRef::new(
+            BlobHashAlgo::Sha256,
+            &hash,
+            good.len() as u64,
+            crate::persist::codec::crc(&good),
+        )
+        .unwrap();
+        let checked = |bytes: &[u8]| {
+            super::super::blobs::CheckedBlob::new(
+                std::io::Cursor::new(bytes.to_vec()),
+                &blob,
+                false,
+            )
+        };
+        assert_eq!(check_model_tar(checked(&good), &identity), Ok(()));
+        // Every flipped byte breaks the CRC-32C: the blob check reports it, as when the blob
+        // was read whole (its CRC-32C checked before the tar).
+        for at in (0..good.len()).step_by(7) {
+            let mut bad = good.clone();
+            bad[at] ^= 0x41;
+            assert_eq!(
+                check_model_tar(checked(&bad), &identity),
+                Ok(()),
+                "byte {at}"
+            );
         }
     }
 }
