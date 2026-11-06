@@ -7821,3 +7821,248 @@ mod read_only_serving {
         }
     }
 }
+
+/// `GET /api/mcp/stats` and the opt-in tool `usage_statistics`: the MCP endpoint's usage
+/// counters, in memory only, in both run modes.
+mod mcp_usage_statistics {
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+
+    use super::{JSON, McpClient, get, mcp_post, request, start};
+
+    fn stats(port: u16) -> Value {
+        let answer = get(port, "/api/mcp/stats");
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        answer.json()
+    }
+
+    fn row<'a>(list: &'a Value, name: &str) -> &'a Value {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("no row {name}: {list}"))
+    }
+
+    fn page_execute(port: u16, page: &str, script: &str) -> super::Answer {
+        let body = json!({ "script": script }).to_string();
+        let client = format!("X-Graphersal-Client: {page}");
+        request(port, "POST", "/api/execute", Some(&body), &[JSON, &client])
+    }
+
+    #[test]
+    fn the_stats_endpoint_counts_tools_errors_and_clients() {
+        let server = start(&["--graph", "modern"]);
+        assert_eq!(get(server.port, "/api/mcp/stats").status, 404);
+        drop(server);
+        let server = start(&["--graph", "modern", "--mcp"]);
+        let port = server.port;
+        let mut agent = McpClient::connect(port, &[]);
+        let (error, text) = agent.call("query", json!({"script": "g.v().count()"}));
+        assert!(!error, "{text}");
+        let (error, _) = agent.call("gql", json!({"query": "MATCH (n RETURN n"}));
+        assert!(error);
+        let (error, _) = agent.call("run_saved_query", json!({"name": "nope"}));
+        assert!(error);
+        // An unknown session is a refusal.
+        let lost = mcp_post(
+            port,
+            &["Mcp-Session-Id: 0123".to_string()],
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        );
+        assert_eq!(lost.status, 404);
+        // The tool is not offered without a configuration naming it.
+        assert!(!agent.tool_names().contains(&"usage_statistics".to_string()));
+        let stats = stats(port);
+        assert_eq!(stats["readOnly"], false);
+        assert_eq!(stats["statelessSessions"], false);
+        assert_eq!(stats["sessions"]["initialized"], 1, "{stats}");
+        assert_eq!(stats["sessions"]["activeLast5Min"], 1);
+        assert_eq!(stats["methods"]["tools/call"], 3);
+        assert_eq!(stats["methods"]["(notification)"], 1);
+        assert_eq!(stats["refusals"]["unknownSession"], 1);
+        assert_eq!(row(&stats["tools"], "query")["errors"], 0);
+        assert_eq!(row(&stats["tools"], "gql")["errors"], 1);
+        assert_eq!(row(&stats["savedQueries"], "nope")["errors"], 1);
+        let client = row(&stats["clients"], "test-agent");
+        assert_eq!(client["toolCalls"], 3);
+        assert_eq!(client["version"], "9");
+        assert!(stats["note"].as_str().unwrap().contains("memory only"));
+        // `/api/info` keeps its MCP status as it was.
+        let info = get(port, "/api/info").json();
+        assert_eq!(
+            info["mcp"],
+            json!({"endpoint": "/mcp", "readOnly": false,
+                "client": {"name": "test-agent", "version": "9"}})
+        );
+    }
+
+    #[test]
+    fn usage_statistics_is_a_tool_when_the_configuration_names_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "graphersal_srv_{}_usage_config",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("mcp.json");
+        std::fs::write(
+            &config,
+            r#"{"tools": {"include": ["gql", "usage_statistics"]}}"#,
+        )
+        .unwrap();
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--mcp-config",
+            config.to_str().unwrap(),
+        ]);
+        let mut agent = McpClient::connect(server.port, &[]);
+        assert_eq!(agent.tool_names(), ["gql", "usage_statistics"]);
+        let (error, text) = agent.call(
+            "gql",
+            json!({"query": "MATCH (p:person) RETURN p.name AS n"}),
+        );
+        assert!(!error, "{text}");
+        let (error, text) = agent.call("usage_statistics", json!({}));
+        assert!(!error, "{text}");
+        let answer: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(row(&answer["tools"], "gql")["calls"], 1, "{answer}");
+        assert_eq!(answer["sessions"]["initialized"], 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pool_refusals_of_mcp_requests_are_counted() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--workers",
+            "1",
+            "--queue",
+            "1",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let busy =
+            std::thread::spawn(move || page_execute(port, "a", "let n = 0; loop { n += 1; }"));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while get(port, "/api/info").json()["serving"]["running"] != 1 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let waiting = std::thread::spawn(move || page_execute(port, "b", "1 + 1"));
+        while get(port, "/api/info").json()["serving"]["queued"] != 1 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let agent = McpClient::connect(port, &[]);
+        let refused = agent.send(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"statistics","arguments":{}}}"#,
+        );
+        assert_eq!(refused.status, 503, "{}", refused.body);
+        let stats = stats(port);
+        assert_eq!(stats["readOnly"], true);
+        assert_eq!(stats["statelessSessions"], true);
+        assert_eq!(stats["refusals"]["queueFull"], 1, "{stats}");
+        assert_eq!(stats["requests"]["busy503"], 1);
+        assert_eq!(row(&stats["tools"], "statistics")["errors"], 1);
+        assert_eq!(row(&stats["clients"], "test-agent")["toolCalls"], 1);
+        let cancel = request(
+            port,
+            "POST",
+            "/api/cancel",
+            Some(""),
+            &["X-Graphersal-Client: a"],
+        );
+        assert_eq!(cancel.json()["cancelled"], true);
+        busy.join().unwrap();
+        waiting.join().unwrap();
+    }
+
+    /// Every entry below `dir` with its size, modification time and permissions.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            out.push(format!(
+                "{} {} {:?} {:?}",
+                path.display(),
+                meta.len(),
+                meta.modified().ok(),
+                meta.permissions()
+            ));
+            if meta.is_dir() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn set_writable(dir: &Path, writable: bool) {
+        let mode = if writable { "u+w" } else { "a-w" };
+        let status = Command::new("chmod")
+            .args(["-R", mode, dir.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// The read-only serving mode on a Store directory nobody may write: MCP calls, the
+    /// statistics, then the stop leave every file as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_serving_run_writes_nothing() {
+        let base = std::env::temp_dir().join(format!(
+            "graphersal_srv_{}_usage_nothing_written",
+            std::process::id()
+        ));
+        if base.exists() {
+            set_writable(&base, true);
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+        std::fs::create_dir_all(&base).unwrap();
+        let store = base.join("store");
+        let created = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(["--graph", store.to_str().unwrap(), "--create-store"])
+            .args(["-e", "g.add_v(\"person\").property(\"name\", \"a\").next()"])
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+        set_writable(&base, false);
+        let before = listing(&base);
+        {
+            let server = start(&[
+                "--graph",
+                store.to_str().unwrap(),
+                "--read-only",
+                "--mcp",
+                "--workers",
+                "2",
+            ]);
+            let mut agent = McpClient::connect(server.port, &[]);
+            let (error, text) = agent.call("query", json!({"script": "g.v().count()"}));
+            assert!(!error, "{text}");
+            let (error, _) = agent.call("gql", json!({"query": "INSERT (:x)"}));
+            assert!(error);
+            let stats = stats(server.port);
+            assert_eq!(row(&stats["tools"], "gql")["errors"], 1);
+            assert_eq!(get(server.port, "/api/statistics").status, 200);
+        }
+        let after = listing(&base);
+        set_writable(&base, true);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(before, after);
+    }
+}

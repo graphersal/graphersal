@@ -15,12 +15,13 @@
 
 use std::sync::atomic::Ordering;
 
-use graphersal_mcp::{ClientRef, Executor, Host, Job, McpError, McpRequest};
+use graphersal_mcp::{ClientRef, Executor, Host, Job, McpError, McpRequest, Refusal};
 use serde_json::{Value, json};
 use tiny_http::{Method, Request, Response};
 
 pub(super) use graphersal_mcp::Mcp;
 
+use super::pool::Refused;
 use super::store::current_view;
 use super::{Answer, Client, Context, HttpError, as_client, with_header, with_process_memory};
 
@@ -54,6 +55,34 @@ pub(super) fn status(context: &Context) -> Value {
         None => Value::Null,
         Some(mcp) => mcp.status(),
     }
+}
+
+/// `GET /api/mcp/stats`: the endpoint's usage statistics (memory only, since the start), or
+/// 404 without `--mcp`.
+pub(super) fn stats(context: &Context) -> Result<Answer, HttpError> {
+    let Some(mcp) = &context.mcp else {
+        return Err(HttpError(
+            404,
+            "the MCP endpoint is off: start the server with --mcp".into(),
+        ));
+    };
+    let mut answer = mcp
+        .stats()
+        .to_json()
+        .map_err(|err| HttpError(500, err.to_string()))?;
+    answer["readOnly"] = json!(mcp.read_only());
+    answer["statelessSessions"] = json!(mcp.stateless_sessions());
+    Ok(super::json_response(200, &answer))
+}
+
+/// Counts a refusal of the read-only serving mode's pool for an MCP request.
+pub(super) fn record_refusal(mcp: &Mcp, refused: Refused) {
+    mcp.stats().record_refusal(match refused {
+        Refused::QueueFull => Refusal::QueueFull,
+        Refused::Expired => Refusal::QueueTimeout,
+        Refused::ClientBusy => Refusal::ClientLimit,
+        Refused::Stopping => Refusal::Stopping,
+    });
 }
 
 /// Routes `/mcp` (after the Host/Origin checks of the HTTP API).
