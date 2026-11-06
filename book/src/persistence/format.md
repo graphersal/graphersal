@@ -361,9 +361,9 @@ so the bytes are deterministic; at most 1 MiB):
 No time stamp is part of the manifest or the definition (when a model was added is instance
 data, never part of the immutable model).
 
-**Reading.** A reader reads the blob whole into memory (after the memory check below) and the
-tar from it: every header's checksum is checked, sizes are bounded by the remaining bytes, names
-validated; an unknown type flag, a duplicate or unsorted name, more than 64 files besides the
+**Reading.** A reader reads the tar as a stream, entry by entry (this version's model load and
+`verify` never hold the whole blob in memory): every header's checksum is checked, sizes are
+bounded by the remaining bytes, names validated; an unknown type flag, a duplicate or unsorted name, more than 64 files besides the
 manifest, a manifest that does not list exactly the tar's files are invalid content of the
 model's blob (never damage of the store, 13). The files are used where they are (no extraction
 to disk).
