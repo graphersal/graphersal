@@ -14,7 +14,7 @@ use crate::host::McpError;
 use crate::sessions::ClientNames;
 
 /// Most tool names and most saved-query names counted each; calls of further names are counted
-/// under [`OTHER`].
+/// under `(other)`.
 pub const MAX_COUNTED_NAMES: usize = 1024;
 
 /// The entry of the names beyond [`MAX_COUNTED_NAMES`] (and of unknown tools: `(unknown)`).
@@ -147,7 +147,7 @@ impl Counters {
             "calls": calls,
             "errors": self.errors.load(Ordering::Relaxed),
             "totalMs": ms(total_us),
-            "meanMs": if calls == 0 { 0.0 } else { ms(total_us / calls) },
+            "meanMs": total_us.checked_div(calls).map_or(0.0, ms),
             "maxMs": ms(self.max_us.load(Ordering::Relaxed)),
             "histogram": self.histogram.iter().map(|b| b.load(Ordering::Relaxed)).collect::<Vec<_>>(),
             "answerChars": self.answer_chars.load(Ordering::Relaxed),
