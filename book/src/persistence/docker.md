@@ -10,7 +10,9 @@ The repository has a `Dockerfile` that builds the `graphersal` command line into
 the static Linux binary (the same build as the release binaries: default features, so the dev
 server, MCP, the AI Chat and [embedding models](store_models.md) are in) on
 `gcr.io/distroless/static`, running as a non-root user (uid 65532), with a `HEALTHCHECK`,
-`STOPSIGNAL SIGTERM` and port 8080. No image is published; build it from a checkout.
+`STOPSIGNAL SIGTERM` and port 8080. No image is published; build it from a checkout. To ship a
+knowledge base as one image without compiling anything, see
+[A knowledge base image](#a-knowledge-base-image).
 
 ## Serve a single-file database read-only with MCP
 
@@ -83,6 +85,240 @@ authenticating reverse proxy in front). Not available in this mode: the Store pa
 scheduled jobs, saving and every write.
 Without `--read-only`, a Store that cannot be opened for writing (no permission, a read-only
 file system) is served read-only anyway, with a note on stderr saying so.
+
+## A knowledge base image
+
+A knowledge base for AI agents ships best as ONE image: the binary, the Store and the MCP
+configuration baked in, served read-only, so an agent connects with a URL and nothing else.
+`docker/prebuilt/` builds such an image without compiling anything: the binary is a prebuilt
+release binary, downloaded once into a local cache.
+
+> **No authentication.** Whoever reaches the port reads the whole knowledge base, through MCP and
+> through the playground, without a token. The server is protected only by being read-only and
+> by the limits of the [read-only serving mode](dev_server.md#read-only-serving-mode). Run it on a
+> private network or behind a [reverse proxy](#behind-a-reverse-proxy).
+
+### 1. Fetch the binary
+
+```bash
+bin=$(docker/prebuilt/fetch-binary.sh v0.6.0)        # both architectures; or: ... v0.6.0 arm64
+```
+
+`fetch-binary.sh <source> [amd64|arm64 ...]` downloads the static Linux binaries of a GitHub
+Release (`v<version>`: the `graphersal-v<version>-linux-*.tar.gz` assets) and checks them against
+the release's `SHA256SUMS`. `run:<run-id>` takes the artifacts of a run of the "CLI binaries"
+workflow instead (a build of a branch before its release; needs the GitHub CLI `gh`), checked
+against that run's `SHA256SUMS`. The binaries land in
+`${GRAPHERSAL_CACHE:-~/.cache/graphersal}/bin/<v<version>|run-<run-id>>/linux-<amd64|arm64>/graphersal`
+next to `VERSION`, `SOURCE` and `SHA256SUMS`; the script prints that directory and nothing else
+on stdout. A cached binary whose checksum matches is not downloaded again (builds work offline);
+one that does not match is deleted and the script fails (run it again).
+
+### 2. Prepare the knowledge base
+
+```bash
+docker/prebuilt/prepare-kb.sh my.gstore kb-out --bin "$bin" \
+  --config mcp-config.json --instructions kb-instructions.md
+```
+
+The image gets a prepared copy of the store, never the live file: `prepare-kb.sh` runs
+`graphersal store fork <store> kb-out/graph.gstore`, which writes the latest state as one
+snapshot (no write-ahead log history, no attic, no marks, no free space, a new store id), with
+the store's [embedding models](store_models.md), closed cleanly; then `store verify` on the copy.
+The source is mounted read-only and may be in use by a running server (the copy is its last
+durable state). A store of 2.2 GiB (1.7 GiB live: 61 WAL segments of history, a 506 MiB model,
+560 MiB free space inside the file) became 565 MiB.
+
+The copy is made by **the same binary that goes into the image**, run in a container of the
+image's base (the binary of the Docker host's platform), never by a `graphersal` installed on the
+host: an older binary need not open a store written by a newer one, so the image always opens
+what it carries. The script writes into `kb-out/`:
+
+| File | What |
+|---|---|
+| `graph.gstore` | the prepared store |
+| `mcp-config.json` | `--config` ([MCP configuration](dev_server.md#the-mcp-configuration-file---mcp-config)); without it every reading tool with short descriptions |
+| `kb-instructions.md` | `--instructions`, under its own name (`.md` or `.txt`); the config's `instructions.file` names it |
+| `store-format-version` | the store's format version, for the image label |
+| `mcp-cost.out` | what the MCP prompt costs an agent (`graphersal mcp-cost`); it also proves that the configuration loads against the copy |
+
+A configuration for a knowledge base offers GQL, the schema and the saved queries of one folder
+as tools of their own, with short texts (the repository's
+`crates/graphersal-cli/examples/mcp-kb-readonly.json`):
+
+```json
+{
+  "server_name": "project-kb",
+  "instructions": { "mode": "replace", "file": "kb-instructions.md" },
+  "descriptions": "short",
+  "tools": { "include": ["gql", "get_schema", "run_saved_query"] },
+  "saved_query_tools": { "folders": ["kb"], "paging_params": false },
+  "resources": ["schema", "saved-queries", "gql-reference"],
+  "answer_limit_chars": 30000
+}
+```
+
+With 14 saved queries in the folder `kb` this prompt (instructions and tool list) costs an agent
+about 3.3 K tokens, against about 14 K for every tool with full descriptions.
+
+### 3. Build
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-context bin="$bin" --build-context kb=kb-out \
+  --build-arg GRAPHERSAL_VERSION="$(cat "$bin/VERSION")" \
+  --build-arg GRAPHERSAL_SOURCE="$(cat "$bin/SOURCE")" \
+  --build-arg STORE_FORMAT_VERSION="$(cat kb-out/store-format-version)" \
+  --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -f docker/prebuilt/Dockerfile -t my-kb:2026-11-06 --push docker/prebuilt
+```
+
+`docker/prebuilt/Dockerfile` has no build stage. The binary and the store come in as BuildKit
+named contexts (`bin`, `kb`), so neither is sent as a build context, and three layers are copied
+onto `gcr.io/distroless/static` (non-root user 65532, everything read-only for it): the binary,
+the configuration, the store. A new version of the knowledge base rebuilds and ships only the
+last layer. Building both platforms from a warm cache takes seconds (about 7 s when nothing
+changed, 25 s with a new store layer; the image is about 560 MB compressed per platform). The image's labels name the
+binary (`dev.graphersal.binary.version`, `dev.graphersal.binary.source`) and the store's format
+version (`dev.graphersal.store.format-version`); tag the image with the version of the knowledge
+base. `--push` sends it to your registry; `--load` instead keeps it in the local image store
+(Docker Desktop's containerd store keeps both platforms; with the classic store build one platform
+for `--load`).
+
+The command of the image is the read-only serving mode with read-only MCP:
+
+```text
+graphersal --graph /kb/graph.gstore --read-only --server --host 0.0.0.0 --port 8080 \
+  --mcp --mcp-read-only --mcp-config /kb/mcp-config.json
+```
+
+The health check is `graphersal health --ready`: the container turns healthy once the store and
+its models are loaded. Its start period is 60 s; the store above (565 MiB, a 506 MiB model) is
+ready in about 4 s on a laptop (also under amd64 emulation on an arm64 Mac; the model itself is
+loaded at its first use), so raise it only for a much larger knowledge base
+(`docker run --health-start-period 5m`, or the probes of your orchestrator).
+
+### 4. Run and connect
+
+```bash
+docker run --rm --read-only -p 127.0.0.1:8080:8080 my-kb:2026-11-06
+curl -s http://localhost:8080/readyz          # {"status":"ready"}
+```
+
+`--read-only` (a read-only root file system) is the intended way: the server writes no file at
+all, its usage statistics stay in memory (`GET /api/mcp/stats`), diagnostics go to stderr. Pass
+more options by repeating the whole command after the image name (the entry point is the
+binary), or set `GRAPHERSAL_ALLOWED_HOSTS` and `GRAPHERSAL_LOG` with `-e`. The limits of the
+read-only serving mode (`--workers`, `--queue`, `--timeout`, ...) are the defaults;
+`--memory-limit auto` follows the container's memory limit (`docker run --memory`).
+
+Connect an agent with the URL alone:
+
+```bash
+claude mcp add --transport http kb http://localhost:8080/mcp          # Claude Code
+```
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": { "kb": { "type": "remote", "url": "http://localhost:8080/mcp" } }
+}
+```
+
+(the second is `opencode.json` for opencode). Behind a proxy the URL is
+`https://kb.example.com/mcp`. The playground is at `http://localhost:8080/`.
+
+### Update the knowledge base
+
+Prepare the new state into a fresh directory and build again with a new tag: the binary and
+configuration layers come from the cache, only the store layer is new.
+
+```bash
+docker/prebuilt/prepare-kb.sh my.gstore kb-out-2 --bin "$bin" --config mcp-config.json \
+  --instructions kb-instructions.md
+docker buildx build ... --build-context kb=kb-out-2 ... -t my-kb:2026-11-13 --push docker/prebuilt
+```
+
+Replace the running container by the new image (`docker stop -t 30` lets running queries finish;
+see [Stopping](#stopping)). A new binary is a new `fetch-binary.sh` source; prepare the store
+again with it, since the copy must be written by the binary that serves it.
+
+### Behind a reverse proxy
+
+The server speaks plain HTTP. On a network, put a reverse proxy in front of it that:
+
+- ends **TLS** (the server has none);
+- closes **idle connections** and **caps the connections** to the server: the server keeps a
+  thread per open connection without an idle timeout of its own, and refuses requests beyond
+  `--max-connections` (512) with 503;
+- absorbs bursts of new connections (the server's listen backlog is 128).
+
+Name the proxy's public host names with `--allowed-host` or `GRAPHERSAL_ALLOWED_HOSTS`
+(comma-separated): the server refuses a fully qualified `Host` it does not know with 403
+(protection against DNS rebinding), and accepts an `https://` `Origin` of an allowed name, so the
+playground works through the proxy ([Safety](dev_server.md#safety)).
+
+```bash
+docker run -d --read-only --name kb -p 127.0.0.1:8080:8080 \
+  -e GRAPHERSAL_ALLOWED_HOSTS=kb.example.com my-kb:2026-11-06
+```
+
+Caddy (`Caddyfile`; certificates automatic):
+
+```text
+{
+    servers {
+        timeouts {
+            idle 2m
+        }
+    }
+}
+
+kb.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        transport http {
+            max_conns_per_host 256
+            keepalive 60s
+        }
+        flush_interval -1
+    }
+}
+```
+
+nginx:
+
+```text
+upstream graphersal {
+    server 127.0.0.1:8080 max_conns=256;
+    keepalive 32;
+    keepalive_timeout 60s;
+}
+limit_conn_zone $binary_remote_addr zone=kb_per_ip:10m;
+
+server {
+    listen 443 ssl;
+    server_name kb.example.com;
+    ssl_certificate     /etc/ssl/kb.example.com.crt;
+    ssl_certificate_key /etc/ssl/kb.example.com.key;
+    keepalive_timeout 65s;
+    client_body_timeout 30s;
+    limit_conn kb_per_ip 64;
+
+    location / {
+        proxy_pass http://graphersal;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_read_timeout 60s;
+        proxy_buffering off;
+    }
+}
+```
+
+`max_conns`/`max_conns_per_host` bound the connections to the server (keep them below
+`--max-connections`); `limit_conn` stops one client from taking them all. The proxy adds no
+authentication here; add one in the proxy if you need it (MCP clients then must send its
+credentials).
 
 ## Health checks
 
@@ -159,9 +395,10 @@ on `0.0.0.0`; the image passes `--host 0.0.0.0` anyway. Requests must name the s
 address, `localhost`, a name without a dot (a Service name such as `graphersal`) or the
 `--host` name: a fully qualified name such as `graphersal.default.svc.cluster.local` or an
 Ingress host is refused with 403 (DNS-rebinding protection, see
-[Listening address and Docker](dev_server.md#listening-address-and-docker)). A reverse proxy in
-front of it sets `Host` to an accepted name (nginx: `proxy_set_header Host localhost;`) and must
-not forward a foreign `Origin`. The process memory ceiling is on by default and follows the
+[Listening address and Docker](dev_server.md#listening-address-and-docker)) unless it is named
+with `--allowed-host` or `GRAPHERSAL_ALLOWED_HOSTS` (an `env` entry of the container): name the
+Ingress host there, and the `https://` origin of the playground behind it is accepted too
+([Behind a reverse proxy](#behind-a-reverse-proxy)). The process memory ceiling is on by default and follows the
 container's memory limit minus a headroom (`--memory-limit auto`, the default; `--memory-headroom`
 changes the headroom): a query that would exceed it fails and is rolled back instead of the pod
 being OOM-killed ([Resource Limits](../users_guide/resource_limits.md#the-process-memory-ceiling)).

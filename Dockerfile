@@ -12,6 +12,9 @@
 # (book: "Running in Docker"). The dev server has NO authentication: keep the port on a private
 # network or behind a reverse proxy that authenticates.
 #
+# A knowledge base image without compiling (a prebuilt release binary, the store and an MCP
+# configuration baked in): docker/prebuilt/ (book: "A knowledge base image").
+#
 # The base image versions are examples: bump them (and RUST_VERSION, at least the MSRV 1.88)
 # when you build.
 
