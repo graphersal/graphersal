@@ -251,7 +251,8 @@ by all pages.
 
 `GET /api/info` adds `serving`: the pool's settings, the queries running and waiting, and the
 requests refused so far (`refused.queueFull`, `expired`, `clientBusy`, `stopping`). The start
-banner's `serving` row shows the settings.
+banner's `serving` row shows the settings. How agents use the MCP endpoint (tools, saved
+queries, clients, refusals of MCP requests) is in [MCP usage statistics](#mcp-usage-statistics).
 
 The new flags need `--server --read-only` (`--max-connections` only `--server`: on a
 read-write server it caps the requests too, without a default); like every flag they can be
@@ -596,7 +597,7 @@ graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-read
 | `server_name` | The `serverInfo.name` of `initialize` (1 to 100 characters) | `graphersal-dev` |
 | `instructions` | `{"mode": "builtin" \| "append" \| "replace", "text": ".."}` or `{"mode": .., "file": "notes.md"}` (UTF-8, 1 to 20000 characters): `builtin` the built-in text (+ the read-only note), `append` the built-in text with the operator's text under "Notes from the operator of this server about this graph:" (what `--mcp-instructions` does), `replace` the operator's text only | `builtin` |
 | `descriptions` | `full` (the texts of [What the agent gets](#what-the-agent-gets)) or `short`: one or two hand-written sentences per built-in tool, with an example where it helps; the input schemas stay the same. The short `gql` description points to the resource `graphersal://gql-reference`, which holds the full GQL support list | `full` |
-| `tools.include` | The built-in tools offered (in their usual order); a tool not offered is not callable either | every tool of the mode |
+| `tools.include` | The built-in tools offered (in their usual order); a tool not offered is not callable either | every tool of the mode but `usage_statistics` (offered only when named here) |
 | `tools.exclude` | Built-in tools left out | none |
 | `tools.overrides` | `{"<tool>": {"description": ".."}}`: the operator's description instead of the built-in one (the input schema never changes) | none |
 | `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: false` leaves `offset`/`max_rows`/`max_items` out of their schemas (the defaults apply; a call may still pass them). With `descriptions: short` the paging parameters are left out unless `paging_params` is `true`, and the description is the query's own text without the "Folder: ..; Saved query (read-only); the same as run_saved_query." tail. `run_saved_query` still reaches every saved query | no saved-query tools |
@@ -727,6 +728,7 @@ The list is the same on every `--graph` source; there are no persistence tools:
 | `list_jobs` | The [scheduled jobs](scheduled_jobs.md) of a Store's graph: system jobs and jobs of users with schedule, switch, next time, last run, run counts, a user job's action and effects (reading; also in read-only mode; defining and changing jobs stays the user's) |
 | `advise` `{everything?}` | The [storage advisor](optimize.md)'s recommendations, each with its command, and their `groups` (`dedup: 74 keys, total -400.1 MiB` with the ids); changes nothing (also in read-only mode) |
 | `apply_recommendations` `{ids, everything?}` | Applies the recommendations the user picked (ids from `advise`) in ONE commit, all new compression rules in one pass over the data; all or nothing (an id no longer advised or a refused change applies nothing); refused in read-only mode |
+| `usage_statistics` `{max_rows?}` | Opt-in (only when `tools.include` of the [configuration](#the-mcp-configuration-file---mcp-config) names it): the endpoint's [usage statistics](#mcp-usage-statistics) since the server started (memory only) |
 | `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`, `answerLimitChars`) |
 
 ### Answer size and paging
@@ -792,6 +794,41 @@ lists the tools again to see a changed catalog. A saved query named like a built
 The agent's queries share everything with the browser: one query runs at a time, **Stop** in the
 browser also cancels a running agent query (it rolls back), a read-only view opened by either side
 is what both see, and the [limits](#limits) apply.
+
+### MCP usage statistics
+
+The endpoint counts how it is used since the server process started, in both run modes (the
+read-write session thread and the [read-only serving mode](#read-only-serving-mode)'s workers).
+The counters are kept **in the server's memory only**: nothing is written to the database or to
+any file (the process may run with a read-only root filesystem and no volume), and a restart
+starts from zero. The [workload statistics](workload_statistics.md) of a Store are a different
+thing (per query plan, kept in the Store; off in read-only mode).
+
+`GET /api/mcp/stats` (404 without `--mcp`) answers:
+
+| Key | What it counts |
+|---|---|
+| `startedAtMs`, `uptimeS` | When the counting started (milliseconds since the Unix epoch) and for how long |
+| `requests` | `total` JSON-RPC messages of a known (or no) session, `withoutSession`, `busy503` (answered `503` because the pool was busy) |
+| `methods` | Requests per JSON-RPC method (`initialize`, `tools/call`, ...; `(notification)`, `(other)`) |
+| `sessions` | `initialized`, and `activeLast5Min`: the distinct session ids seen in about the last five minutes (an estimate, `activeIsEstimate: true`; within a few percent) |
+| `refusals` | `queueFull`, `queueTimeout`, `clientLimit` (the [pool's limits](#read-only-serving-mode) for MCP requests), `tooManyConnections` (`--max-connections`, requests to `/mcp`), `stopping`, `unknownSession` (`404`), `unauthorized` (`--mcp-token`), `invalidRequest` (a wrong `Accept`, `Content-Type`, protocol version, size or JSON) |
+| `tools`, `savedQueries` | One row per tool and per saved query (run by `run_saved_query` or by its own tool): `calls`, `errors` (tool errors and refused calls), `totalMs`, `meanMs`, `maxMs`, `histogram` (calls below each bound of `latencyBucketsMs`, 1 ms to 10 s, the last entry the slower ones) and `answerChars`; most calls first. At most 1024 names each, further ones count as `(other)`; an unknown tool counts as `(unknown)` |
+| `clients` | One row per client name and version (the `clientInfo` of `initialize`): `initialized`, `requests`, `toolCalls`; the 4096 most recently initialized names are kept (`clientsKept`, `clientsMax`) |
+| `readOnly`, `statelessSessions` | The endpoint's mode |
+
+The playground shows the same in a dialog: click the **MCP** badge in the top bar (Refresh
+reads it again).
+
+The agent can read them too with the tool `usage_statistics` `{max_rows?}` (reading; at most
+50 rows per list unless `max_rows` says otherwise, `<list>_omitted` counts the rest). It is
+**opt-in**: it is never in the default tool list (nor the AI Chat's), and an endpoint offers it
+only when its [configuration](#the-mcp-configuration-file---mcp-config) names it in
+`tools.include`:
+
+```json
+{ "tools": { "include": ["gql", "get_schema", "run_saved_query", "usage_statistics"] } }
+```
 
 ### Live refresh in the browser
 
@@ -1083,6 +1120,7 @@ keys); the table below and the linked pages describe every answer.
 | `POST /api/layout/cancel` | `layoutCancel(job)`: ends the job, keeping the positions reached so far |
 | `GET /api/completions`, `GET /api/token-values`, `GET /api/memory` | `completions()`, `tokenValues()`, `memoryUsage()` |
 | `GET /api/statistics` | `statistics()`: `{statistics, memory, process, limits: {presets, defaults}}`. `process` is the memory the process holds beside the graph (`GraphStatistics` stays data counts): `memory` is the whole process (`liveHeapBytes`: the bytes the Rust allocator holds, from the CLI's tracking allocator; `rssBytes` and `peakRssBytes`: the resident set size, from `/proc/self/status` `VmRSS`/`VmHWM` on Linux and from `ps -o rss=` on macOS, where the peak is the highest value any report of this server has seen; no RSS on Windows or other platforms; each member is left out when unknown; `source` is `proc`, `ps`, `allocator` or `none`; the WebAssembly playground adds `wasmMemoryBytes`, the linear memory size, `source` `wasm`; beside them the process memory bar: `usedBytes` (the tracked live heap, else the sum of the known segments with `usedTracked` false), `limitBytes` and `usedPercent` (the process ceiling and the share used; absent with `--memory-limit none`), `limitSource` (`configured`, `cgroup`, `physical`, `wasm`, `none`, `unknown`), `segments` (`[{name, bytes}]`: `structure`, `properties`, `compressed`, `indexes`, `models`, then `other` when tracked), `compression {plainBytes, storedBytes}` when values are compressed or deduplicated, `estimateAboveHeap: true` when the graph's estimate exceeds the live heap, or `limitError` when the ceiling cannot be read; see [Seeing how full the process is](../users_guide/resource_limits.md#seeing-how-full-the-process-is)), `models` lists every loaded embedding model that reports its size (`name`, `model`, `dimension`, `bytes`, `default`; an estimate of the weights and the tokenizer), and `aiChat {conversations, historyBytes, historyUncompressedBytes}` (the bytes the stored chat history takes, compressed per finished turn, and the bytes it would take uncompressed) is added when the server runs with `--ai`. The MCP `statistics` tool returns the same |
+| `GET /api/mcp/stats` | The MCP endpoint's [usage statistics](#mcp-usage-statistics) (memory only, since the start; 404 without `--mcp`) |
 | `GET /api/workload[?history=minutes\|hours\|days]` | `workloadReport(history)`: the [workload statistics](workload_statistics.md) of the served graph (`{level, queries, properties, locks, jobs}`; level `off` outside a Store); with `history` every row's buckets of that tier (chart data; an unknown tier is a 422). Only the queries a page or an agent runs count (under `playground` / `mcp`); the page's drawing and panels are not counted |
 | `GET /api/journal?after=N&level=..&since=..&until=..&source=..&kind=..&limit=..` | `journal(spec)`: one page of the served graph's [system journal](system_journal.md) (`{records, next_after, next_before?, truncated, more, notes}`; page with `after` = the previous `next_after`; `newest_first=true` answers the newest records first, page backwards with `before` = the previous `next_before`; a bad parameter is a 422). Reading it is `Read` on the resource `Journal`. The MCP tool `journal` (reading) answers the same, at most 100 records unless `limit` says otherwise |
 | `GET /api/jobs`, `POST /api/jobs/define\|drop\|enable\|schedule\|run`, `GET /api/jobs/history?name=..&tier=..` | `jobs()`, `defineJob(spec)`, `dropJob(name)`, `setJobEnabled(name, on)`, `setJobSchedule(name, cron)`, `runJobNow(name)`, `jobHistory(name, tier)`: the [scheduled jobs](scheduled_jobs.md) (list, define with field errors, switch, a system job's schedule, run now, the runs per minute/hour/day); a backup job may name any directory here, never in the browser |
