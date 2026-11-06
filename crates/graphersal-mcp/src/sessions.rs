@@ -5,7 +5,8 @@
 //! replicas behind a load balancer), and no number of clients evicts another.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ring::{digest, hmac};
 use serde_json::Value;
@@ -16,8 +17,8 @@ use crate::host::McpError;
 /// again).
 const MAX_SESSIONS: usize = 64;
 
-/// Most client names (`clientInfo` of `initialize`) a stateless endpoint remembers for its
-/// statistics; the least recently initialized one is forgotten first.
+/// Most client names (`clientInfo` of `initialize`) an endpoint remembers for its statistics;
+/// the least recently initialized one is forgotten first (with its counters).
 pub const MAX_CLIENT_NAMES: usize = 4096;
 
 /// Bytes of the random nonce of a signed id.
@@ -72,26 +73,55 @@ impl std::fmt::Debug for SessionKey {
 
 /// The MCP sessions of an endpoint.
 pub(crate) enum Sessions {
-    /// Session id -> `clientInfo` of its `initialize`, in the order they were created.
-    Table(Mutex<Vec<(String, Value)>>),
+    /// Session id -> `clientInfo` of its `initialize`, in the order they were created; the
+    /// client names for the statistics.
+    Table {
+        ids: Mutex<Vec<(String, Value)>>,
+        clients: Arc<RwLock<ClientNames>>,
+    },
     /// Signed ids, checked without a table; the client names for the statistics.
     Signed {
         key: Box<hmac::Key>,
-        clients: Mutex<ClientNames>,
+        clients: Arc<RwLock<ClientNames>>,
     },
 }
 
 impl Sessions {
     /// The table of today's dev server.
     pub(crate) fn table() -> Self {
-        Self::Table(Mutex::new(Vec::new()))
+        Self::Table {
+            ids: Mutex::new(Vec::new()),
+            clients: Arc::default(),
+        }
     }
 
     /// Stateless ids signed with `key`.
     pub(crate) fn signed(key: &SessionKey) -> Self {
         Self::Signed {
             key: Box::new(hmac::Key::new(hmac::HMAC_SHA256, &key.0)),
-            clients: Mutex::new(ClientNames::default()),
+            clients: Arc::default(),
+        }
+    }
+
+    /// The client names (shared with the endpoint's statistics).
+    pub(crate) fn clients(&self) -> Arc<RwLock<ClientNames>> {
+        match self {
+            Self::Table { clients, .. } | Self::Signed { clients, .. } => clients.clone(),
+        }
+    }
+
+    /// The client digest of the known session `id` (for the statistics' per-client counts).
+    pub(crate) fn client_of(&self, id: &str) -> Option<u64> {
+        match self {
+            Self::Table { ids, .. } => ids.lock().ok().and_then(|ids| {
+                ids.iter()
+                    .find(|(known, _)| known == id)
+                    .map(|(_, client)| client_digest(client))
+            }),
+            Self::Signed { .. } => {
+                let hex = id.get(NONCE_BYTES * 2..(NONCE_BYTES + CLIENT_BYTES) * 2)?;
+                u64::from_str_radix(hex, 16).ok()
+            }
         }
     }
 
@@ -103,19 +133,22 @@ impl Sessions {
     /// A new session id for the client `client` (`{name, version}`).
     pub(crate) fn create(&self, client: &Value) -> String {
         match self {
-            Self::Table(sessions) => {
+            Self::Table { ids, clients } => {
                 let session = format!("{:032x}", rand::random::<u128>());
-                if let Ok(mut sessions) = sessions.lock() {
+                if let Ok(mut sessions) = ids.lock() {
                     if sessions.len() >= MAX_SESSIONS {
                         sessions.remove(0);
                     }
                     sessions.push((session.clone(), client.clone()));
                 }
+                if let Ok(mut clients) = clients.write() {
+                    clients.remember(client_digest(client), client.clone());
+                }
                 session
             }
             Self::Signed { key, clients } => {
                 let digest = client_digest(client);
-                if let Ok(mut clients) = clients.lock() {
+                if let Ok(mut clients) = clients.write() {
                     clients.remember(digest, client.clone());
                 }
                 let mut id = Vec::with_capacity(ID_BYTES);
@@ -131,7 +164,7 @@ impl Sessions {
     /// Whether `id` names a session of this endpoint (in the table, or signed by its key).
     pub(crate) fn knows(&self, id: &str) -> bool {
         match self {
-            Self::Table(sessions) => sessions
+            Self::Table { ids, .. } => ids
                 .lock()
                 .is_ok_and(|sessions| sessions.iter().any(|(known, _)| known == id)),
             Self::Signed { key, .. } => verify(key, id),
@@ -142,7 +175,7 @@ impl Sessions {
     /// (nothing is kept to forget); the client does not use it again.
     pub(crate) fn forget(&self, id: &str) -> bool {
         match self {
-            Self::Table(sessions) => sessions.lock().is_ok_and(|mut sessions| {
+            Self::Table { ids, .. } => ids.lock().is_ok_and(|mut sessions| {
                 let before = sessions.len();
                 sessions.retain(|(known, _)| known != id);
                 sessions.len() < before
@@ -155,11 +188,12 @@ impl Sessions {
     /// `(0, 0)` while a request holds the lock.
     pub(crate) fn memory_bytes(&self) -> (usize, u64) {
         match self {
-            Self::Table(sessions) => {
-                let Ok(sessions) = sessions.try_lock() else {
+            Self::Table { ids, clients } => {
+                let Ok(sessions) = ids.try_lock() else {
                     return (0, 0);
                 };
-                let bytes = sessions
+                let clients = clients.try_read().map_or(0, |clients| clients.bytes());
+                let bytes: u64 = sessions
                     .iter()
                     .map(|(id, value)| {
                         (std::mem::size_of::<(String, Value)>()
@@ -167,10 +201,10 @@ impl Sessions {
                             + value.to_string().len()) as u64
                     })
                     .sum();
-                (sessions.len(), bytes)
+                (sessions.len(), bytes + clients)
             }
             Self::Signed { clients, .. } => {
-                let Ok(clients) = clients.try_lock() else {
+                let Ok(clients) = clients.try_read() else {
                     return (0, 0);
                 };
                 (clients.names.len(), clients.bytes())
@@ -179,35 +213,97 @@ impl Sessions {
     }
 }
 
-/// The client names of a stateless endpoint, by client digest: at most
+/// The client names of an endpoint, by client digest, with their usage counters: at most
 /// [`MAX_CLIENT_NAMES`], the least recently initialized forgotten first.
 #[derive(Default)]
 pub(crate) struct ClientNames {
-    names: HashMap<u64, (Value, u64)>,
+    names: HashMap<u64, ClientEntry>,
     tick: u64,
+}
+
+/// One client name (`{name, version}`) and its counters.
+struct ClientEntry {
+    client: Value,
+    tick: u64,
+    initialized: AtomicU64,
+    requests: AtomicU64,
+    tool_calls: AtomicU64,
 }
 
 impl ClientNames {
     fn remember(&mut self, digest: u64, client: Value) {
         self.tick += 1;
-        if !self.names.contains_key(&digest) && self.names.len() >= MAX_CLIENT_NAMES {
+        if let Some(entry) = self.names.get_mut(&digest) {
+            entry.tick = self.tick;
+            entry.initialized.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.names.len() >= MAX_CLIENT_NAMES {
             let oldest = self
                 .names
                 .iter()
-                .min_by_key(|(_, (_, tick))| *tick)
+                .min_by_key(|(_, entry)| entry.tick)
                 .map(|(digest, _)| *digest);
             if let Some(oldest) = oldest {
                 self.names.remove(&oldest);
             }
         }
-        self.names.insert(digest, (client, self.tick));
+        self.names.insert(
+            digest,
+            ClientEntry {
+                client,
+                tick: self.tick,
+                initialized: AtomicU64::new(1),
+                requests: AtomicU64::new(0),
+                tool_calls: AtomicU64::new(0),
+            },
+        );
+    }
+
+    /// Counts a request (and a tool call) of the client `digest`, if it is remembered.
+    pub(crate) fn count_request(&self, digest: u64, tool_call: bool) {
+        if let Some(entry) = self.names.get(&digest) {
+            entry.requests.fetch_add(1, Ordering::Relaxed);
+            if tool_call {
+                entry.tool_calls.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// How many client names are remembered.
+    pub(crate) fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// The clients as `[{name, version, initialized, requests, toolCalls}]`, most requests
+    /// first.
+    pub(crate) fn to_json(&self) -> Vec<Value> {
+        let mut entries: Vec<&ClientEntry> = self.names.values().collect();
+        entries.sort_by(|a, b| {
+            b.requests
+                .load(Ordering::Relaxed)
+                .cmp(&a.requests.load(Ordering::Relaxed))
+                .then_with(|| a.client.to_string().cmp(&b.client.to_string()))
+        });
+        entries
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.client["name"],
+                    "version": entry.client["version"],
+                    "initialized": entry.initialized.load(Ordering::Relaxed),
+                    "requests": entry.requests.load(Ordering::Relaxed),
+                    "toolCalls": entry.tool_calls.load(Ordering::Relaxed),
+                })
+            })
+            .collect()
     }
 
     fn bytes(&self) -> u64 {
         self.names
             .values()
-            .map(|(client, _)| {
-                (std::mem::size_of::<(u64, Value, u64)>() + client.to_string().len()) as u64
+            .map(|entry| {
+                (std::mem::size_of::<(u64, ClientEntry)>() + entry.client.to_string().len()) as u64
             })
             .sum()
     }

@@ -103,6 +103,29 @@
         }
       }
     },
+    "/api/mcp/stats": {
+      "get": {
+        "tags": [
+          "MCP"
+        ],
+        "summary": "MCP usage statistics",
+        "description": "How the MCP endpoint (`--mcp`) was used since the process started, kept in memory only (nothing is written; a restart starts from zero): `{startedAtMs, uptimeS, note, requests: {total, withoutSession, busy503}, methods: {<JSON-RPC method>: n, (notification), (other)}, sessions: {initialized, activeLast5Min, activeIsEstimate}, refusals: {queueFull, queueTimeout, clientLimit, tooManyConnections, stopping, unknownSession, unauthorized, invalidRequest}, latencyBucketsMs, tools: [..], savedQueries: [..], clients: [{name, version, initialized, requests, toolCalls}], clientsKept, clientsMax, readOnly, statelessSessions}`; a tool or saved-query row is `{name, calls, errors, totalMs, meanMs, maxMs, histogram, answerChars}` (most calls first; `histogram[i]` counts calls below `latencyBucketsMs[i]`, the last entry the slower ones). 404 without `--mcp`.",
+        "operationId": "getApiMcpStats",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
     "/api/cancel": {
       "post": {
         "tags": [

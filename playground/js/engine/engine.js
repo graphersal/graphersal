@@ -791,6 +791,12 @@ export class Engine {
   async journal(spec) { throw notImplemented('journal'); }
 
   /**
+   * The usage statistics of the dev server's MCP endpoint (`GET /api/mcp/stats`, kept in the
+   * server's memory only); only the dev server with --mcp has them.
+   */
+  async mcpStats() { throw notImplemented('mcpStats'); }
+
+  /**
    * The storage advisor's recommendations for a spec of thresholds (`{}`: the defaults,
    * `{everything: true}`: every candidate): `{ok: true, advice: {workload_level, observed_since,
    * commit_seq, property_bytes, memory_bytes, graph_bytes, estimates, recommendations: [{id,

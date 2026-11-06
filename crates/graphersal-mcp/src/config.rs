@@ -324,10 +324,12 @@ impl McpConfig {
 
     /// Whether the built-in tool `name` is offered by this configuration (before the mode).
     pub(crate) fn offers(&self, name: &str) -> bool {
-        self.include
-            .as_ref()
-            .is_none_or(|include| include.iter().any(|n| n == name))
-            && !self.exclude.iter().any(|n| n == name)
+        let included = match &self.include {
+            Some(include) => include.iter().any(|n| n == name),
+            // Without `tools.include` every tool but the opt-in ones.
+            None => !OPT_IN_TOOLS.contains(&name),
+        };
+        included && !self.exclude.iter().any(|n| n == name)
     }
 
     /// The operator's description of the tool `name`, if any.
@@ -354,6 +356,10 @@ impl McpConfig {
             .unwrap_or(self.descriptions == Descriptions::Full)
     }
 }
+
+/// The built-in tools offered only when `tools.include` names them (never in the default
+/// listing, never to the AI Chat).
+pub(crate) const OPT_IN_TOOLS: [&str; 1] = ["usage_statistics"];
 
 /// Whether a tool of `kind` named `name` is offered on a read-only server (`query`, `gql` and
 /// `run_saved_query` run there under the read-only authorizer).

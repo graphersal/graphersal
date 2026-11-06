@@ -869,6 +869,12 @@ fn accept(server: &Server, serving: &Arc<Serving>) {
         if let Some(max) = serving.max_connections
             && serving.connections.load(Ordering::SeqCst) >= max
         {
+            if request.url().starts_with("/mcp")
+                && let Some(mcp) = serving.context.get().and_then(|c| c.mcp.as_ref())
+            {
+                mcp.stats()
+                    .record_refusal(graphersal_mcp::Refusal::TooManyConnections);
+            }
             let response = health(serving, &request).unwrap_or_else(|| {
                 with_header(
                     json_response(
@@ -1224,8 +1230,15 @@ impl Context {
                 }
             }
             Runner::Pool(pool) => {
-                pool.run(&key, job)
-                    .map_err(|refused| HttpError(503, refused.message(pool.config())))?;
+                pool.run(&key, job).map_err(|refused| {
+                    // The MCP endpoint's usage statistics count its refusals by kind.
+                    if key.starts_with("mcp")
+                        && let Some(mcp) = &self.mcp
+                    {
+                        mcp::record_refusal(mcp, refused);
+                    }
+                    HttpError(503, refused.message(pool.config()))
+                })?;
             }
         }
         answer
@@ -1411,6 +1424,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
     match (&method, endpoint) {
         (Method::Get, "info") => Ok(json_response(200, &info(context))),
         (Method::Get, "changes") => Ok(json_response(200, &changes(context))),
+        (Method::Get, "mcp/stats") => mcp::stats(context),
         // The read-only serving mode: Stop of a page cancels that page's running queries only.
         (Method::Post, "cancel") if context.pool().is_some() => {
             let key = CLIENT.with(|c| c.borrow().pool_key());
@@ -2025,12 +2039,62 @@ fn ai_status(context: &Context) -> Value {
     }
 }
 
+/// The `process.models` entries (`{name, model, dimension, bytes, measured, default}`, as
+/// `Session::process_memory` writes them for a Store) of the models the start found
+/// ([`crate::cli::served_models`]: a read-only store, a `.gsnap`) that the memory bar counts as
+/// loaded (an `embedding_model` part of its `models` segment, named by the model's identity).
+fn served_model_values(statistics: &Value) -> Vec<Value> {
+    let parts: Vec<&Value> = statistics["process"]["memory"]["segments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|segment| segment["name"] == "models")
+        .flat_map(|segment| segment["parts"].as_array().into_iter().flatten())
+        .filter(|part| part["name"] == "embedding_model")
+        .collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    crate::cli::served_models()
+        .models
+        .iter()
+        .filter_map(|model| {
+            let part = parts
+                .iter()
+                .find(|part| part["detail"].as_str() == Some(model.identity.as_str()))?;
+            Some(json!({
+                "name": model.repo,
+                "model": model.identity,
+                "dimension": model.dimension,
+                "bytes": part["bytes"],
+                "measured": true,
+                "default": model.default,
+            }))
+        })
+        .collect()
+}
+
 /// The session's statistics with the whole process (`Session::statistics_with_process`:
 /// `process.memory`, [`graphersal_session::process`]) and the dev server's own part added:
 /// `process.aiChat {conversations, historyBytes}` when the AI Chat is on
-/// ([`ai::process_memory`]). Served by `GET /api/statistics` and the MCP `statistics` tool.
-#[cfg_attr(not(feature = "ai"), allow(unused_mut))]
+/// ([`ai::process_memory`]), and without an open Store the database's loaded models in
+/// `process.models` ([`served_model_values`]). Served by `GET /api/statistics` and the MCP
+/// `statistics` tool.
 fn with_process_memory(context: &Context, mut statistics: Value) -> Value {
+    // Without an open Store (`--read-only`, a `.gsnap`) the session knows no store models, but
+    // the graph serves the database's models: list the ones the memory bar counts.
+    if context.store.is_none()
+        && statistics["process"]["models"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        let models = served_model_values(&statistics);
+        if !models.is_empty()
+            && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)
+        {
+            process.insert("models".to_string(), Value::Array(models));
+        }
+    }
     #[cfg(feature = "ai")]
     if let Some(chat) = ai::process_memory(context)
         && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)

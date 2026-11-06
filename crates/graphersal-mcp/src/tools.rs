@@ -12,6 +12,7 @@ use crate::catalog::{all_tools, offered_tools};
 use crate::config::{Descriptions, McpConfig};
 use crate::host::{ClientRef, Ctx, Host, McpError};
 use crate::protocol::MAX_TEXT_CHARS;
+use crate::stats::McpStats;
 
 /// Who calls a tool through [`call_tool`]: the MCP endpoint or an AI Chat conversation.
 #[derive(Clone, Debug)]
@@ -30,6 +31,8 @@ pub struct ToolCaller {
     /// The operator's configuration (`--mcp-config`); the default offers every tool of the
     /// mode with its full description.
     pub(crate) config: Arc<McpConfig>,
+    /// The endpoint's usage statistics (the `usage_statistics` tool); none for the AI Chat.
+    pub(crate) stats: Option<Arc<McpStats>>,
 }
 
 impl ToolCaller {
@@ -44,7 +47,14 @@ impl ToolCaller {
             cancel: None,
             max_chars: MAX_TEXT_CHARS,
             config: Arc::new(McpConfig::default()),
+            stats: None,
         }
+    }
+
+    /// Answers `usage_statistics` from the endpoint's `stats`.
+    pub(crate) fn with_stats(mut self, stats: Arc<McpStats>) -> Self {
+        self.stats = Some(stats);
+        self
     }
 
     /// Offers the tools, descriptions and saved-query tools of the operator's `config`
@@ -628,9 +638,32 @@ pub(crate) fn run_tool(
             info["answerLimitChars"] = json!(caller.max_chars);
             Ok(compact(&info))
         }
+        "usage_statistics" => {
+            let Some(stats) = &caller.stats else {
+                return Err("this caller has no usage statistics (the MCP endpoint has)".into());
+            };
+            let mut answer = stats.to_json().map_err(|err| err.to_string())?;
+            let max_rows = args
+                .get("max_rows")
+                .and_then(Value::as_u64)
+                .map_or(USAGE_ROWS, |n| n.max(1) as usize);
+            for list in ["tools", "savedQueries", "clients"] {
+                if let Some(rows) = answer.get_mut(list).and_then(Value::as_array_mut)
+                    && rows.len() > max_rows
+                {
+                    let omitted = rows.len() - max_rows;
+                    rows.truncate(max_rows);
+                    answer[format!("{list}_omitted")] = json!(omitted);
+                }
+            }
+            Ok(compact(&answer))
+        }
         other => Err(format!("unknown tool {other:?}")),
     }
 }
+
+/// Rows per list of `usage_statistics` unless `max_rows` says otherwise.
+const USAGE_ROWS: usize = 50;
 
 pub(crate) fn fallible<E: std::fmt::Display + Send + 'static>(
     context: &Ctx<'_>,
