@@ -191,6 +191,72 @@ budget; Stop is the way to end a runaway query.
 graphersal --graph large --server --timeout 5000 --memory-limit 4000000000
 ```
 
+## Read-only serving mode
+
+`--server --read-only` is the **read-only serving mode**: the data cannot change, so the server
+runs the queries of many browser pages and MCP clients **in parallel** instead of one after the
+other. It is meant for a knowledge base served to many agents and readers (a Docker image, a
+shared machine).
+
+**The server has no authentication.** Whoever reaches its port can read the whole graph and run
+any reading query. What protects it is that nothing can be written (every write is refused, the
+database file is never touched) and the limits below; keep the port on a network you trust or
+behind a reverse proxy that authenticates.
+
+```bash
+graphersal --graph kb.gstore --read-only --server --host 0.0.0.0 --port 8080 \
+  --mcp --mcp-read-only --workers 8
+```
+
+How it works:
+
+- **Workers**: `--workers N` threads (default: the machine's available parallelism) each own a
+  session over the SAME graph in memory (one copy of the data, one copy of each embedding
+  model). Every query of a page, of an MCP client and of the AI Chat goes to them through one
+  queue.
+- **Bounded queue**: at most `--queue N` jobs wait for a worker (default 4 x workers). A request
+  that finds the queue full, or that waited longer than `--queue-timeout S` seconds (default 10)
+  for a worker, is answered **`503` with `Retry-After: 1`**, so the client retries it a moment later (the
+  playground shows the error; run the query again).
+- **Fairness**: one client (an MCP session, a browser page) has at most
+  `--max-inflight-per-client N` queries running or waiting (default 4). A further one waits for
+  a slot of its own client, up to the queue timeout, then gets `503`: one looping agent cannot
+  take every worker.
+- **Connections**: at most `--max-connections N` requests are handled at once (default 512, a
+  thread each); beyond it the server answers `503` at once. The health probes `/healthz` and
+  `/readyz` are always answered.
+- **Stop**: the Stop button of a page cancels only that page's running query, never another
+  page's or an agent's.
+- **Graceful stop**: on SIGTERM (`docker stop`, Kubernetes) `/readyz` turns `503`, no new query
+  is taken, the running ones get `--drain-timeout S` seconds (default 20) to finish, then they
+  are cancelled and the process exits with code 0.
+- **Safe defaults**: unlike the read-write server (which runs like the playground, without
+  limits), every query runs under the SAFE script limits (`--safe-limits`), a 30 s timeout
+  (`--timeout 30000`) and a 256 MiB per-query memory limit
+  (`--max-materialized-bytes 268435456`). Each flag still overrides its own default
+  (`--timeout 0` turns the timeout off, `--max-operations 0` lifts the operation limit).
+- **MCP sessions** are stateless: the session id `initialize` answers is signed (HMAC-SHA256)
+  instead of being kept in a table, so any number of agents stay connected and none evicts
+  another. The key is random per process (after a restart the agents initialize again), or the
+  value of the environment variable `GRAPHERSAL_MCP_SESSION_KEY` (at least 32 characters, never
+  printed): several replicas behind a load balancer with the same key accept each other's
+  session ids.
+
+What is not available in this mode: the Store panel, views of past states, rollbacks and
+history (a Store is opened read-only, as a graph); "Save to file"; scheduled jobs (defining,
+switching or running one answers `409`); and every write (queries, schema, saved queries,
+indexes, compression rules), which the graph refuses as with `--read-only` alone. The change
+feed stays empty: nothing changes. Force layouts of the Graph panel work; their jobs are shared
+by all pages.
+
+`GET /api/info` adds `serving`: the pool's settings, the queries running and waiting, and the
+requests refused so far (`refused.queueFull`, `expired`, `clientBusy`, `stopping`). The start
+banner's `serving` row shows the settings.
+
+The new flags need `--server --read-only` (`--max-connections` only `--server`: on a
+read-write server it caps the requests too, without a default); like every flag they can be
+keys of an [arguments file](#arguments-from-a-file) (`"workers": 8`).
+
 ## Embedding models
 
 The server serves the embedding models of its database: the models imported into the `--graph`
