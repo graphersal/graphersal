@@ -281,15 +281,15 @@ impl Mcp {
             );
         }
         let session_id = request.header_value("Mcp-Session-Id").map(str::to_string);
-        if let Some(id) = &session_id {
-            if !self.sessions.knows(id) {
-                return rpc_error(
-                    404,
-                    Value::Null,
-                    INVALID_REQUEST,
-                    "unknown or expired MCP session (the server restarted?): initialize again",
-                );
-            }
+        if let Some(id) = &session_id
+            && !self.sessions.knows(id)
+        {
+            return rpc_error(
+                404,
+                Value::Null,
+                INVALID_REQUEST,
+                "unknown or expired MCP session (the server restarted?): initialize again",
+            );
         }
         let body = match request.text_body() {
             Ok(body) => body,

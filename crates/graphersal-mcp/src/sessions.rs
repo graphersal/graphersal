@@ -76,7 +76,7 @@ pub(crate) enum Sessions {
     Table(Mutex<Vec<(String, Value)>>),
     /// Signed ids, checked without a table; the client names for the statistics.
     Signed {
-        key: hmac::Key,
+        key: Box<hmac::Key>,
         clients: Mutex<ClientNames>,
     },
 }
@@ -90,7 +90,7 @@ impl Sessions {
     /// Stateless ids signed with `key`.
     pub(crate) fn signed(key: &SessionKey) -> Self {
         Self::Signed {
-            key: hmac::Key::new(hmac::HMAC_SHA256, &key.0),
+            key: Box::new(hmac::Key::new(hmac::HMAC_SHA256, &key.0)),
             clients: Mutex::new(ClientNames::default()),
         }
     }

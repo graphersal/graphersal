@@ -376,7 +376,7 @@ fn main() {
                             && serde_json::from_str::<Value>(&answer.body)
                                 .map(|v| v["result"]["isError"] == true || v["error"].is_object())
                                 .unwrap_or(true);
-                        if tool_error && n % 997 == 0 {
+                        if tool_error && n.is_multiple_of(997) {
                             eprintln!("tool error: {}", &answer.body[..answer.body.len().min(300)]);
                         }
                         stats.lock().unwrap().record(
@@ -421,7 +421,7 @@ fn main() {
             while Instant::now() < deadline {
                 n += 1;
                 let sent = Instant::now();
-                let (kind, answer) = if n % 2 == 0 {
+                let (kind, answer) = if n.is_multiple_of(2) {
                     let body = json!({"script": format!(
                         "g.v().has(\"level\", \"{}\").limit(20).values(\"id\")", n % 5)})
                     .to_string();
