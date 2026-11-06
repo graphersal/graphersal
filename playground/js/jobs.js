@@ -80,7 +80,7 @@ export function actionText(job) {
   }
 }
 
-/** One row of the jobs table. */
+/** One job of the jobs list (a block per job in the manager). */
 export function jobRow(job, now) {
   const last = job.last || null;
   const runs = job.runs && job.runs.last_two_days;
