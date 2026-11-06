@@ -146,6 +146,11 @@ export class HttpEngine extends Engine {
     return this.request('GET', 'changes');
   }
 
+  /** The MCP endpoint's usage statistics (`--mcp`; memory only, since the server started). */
+  async mcpStats() {
+    return this.request('GET', 'mcp/stats');
+  }
+
   /** AI Chat: a new conversation owned by this page; resolves to `{id}`. */
   async aiCreateConversation() {
     return this.request('POST', 'ai/conversations', '{}');

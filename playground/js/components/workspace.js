@@ -24,6 +24,7 @@ import { OptimizePanel } from './optimize.js';
 import { ShareDialog } from './share-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
 import { JournalToasts } from './journal-toasts.js';
+import { McpStatsDialog } from './mcp-stats.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -68,11 +69,12 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner, JournalToasts },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
     const shareDialog = ref(null);
+    const mcpStatsDialog = ref(null);
     onMounted(() => registerShareDialog(() => shareDialog.value && shareDialog.value.open()));
     onBeforeUnmount(() => registerShareDialog(null));
     const main = ref(null);
@@ -292,7 +294,8 @@ export const Workspace = {
     });
 
     return {
-      formatCount, shareDialog, openShareDialog, openOptimize,
+      formatCount, shareDialog, openShareDialog, openOptimize, mcpStatsDialog,
+      openMcpStats: () => mcpStatsDialog.value && mcpStatsDialog.value.open(),
       graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
       state, layout, main, left, right, narrow, leftCount, rightCount, PANELS,
       editorRef: panelRefs.editor, resultsRef: panelRefs.results, graphRef: panelRefs.graph,
@@ -324,8 +327,8 @@ export const Workspace = {
       <span v-if="state.versionLabel" class="version-label hide-narrow" :title="state.versionLabel.title">{{ state.versionLabel.text }}</span>
       <span v-if="serverMode" class="badge danger dev-badge"
             :title="'Connected to the dev server (graphersal --server) on ' + location.host + ': DEV mode, unstable, local only, not for production. ' + (state.engineInfo.store ? 'Queries run in that process on the graph of the Store directory ' + state.engineInfo.store + ': every commit is persisted and survives a restart.' : 'Queries run in that process on its in-memory graph' + (state.engineInfo.source ? ' (from ' + state.engineInfo.source + ')' : '') + '; nothing is saved unless you save it.')">DEV SERVER · unstable</span>
-      <span v-if="serverMode && state.engineInfo.mcp" class="badge accent mcp-badge"
-            :title="mcpBadgeTitle(state.engineInfo.mcp, location.host)">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></span>
+      <button v-if="serverMode && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
+            :title="mcpBadgeTitle(state.engineInfo.mcp, location.host) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
       <template v-if="state.graph">
         <span class="graph-name" :title="state.graph.name"><span v-if="graphName.dir" class="graph-name-dir"><bdi>{{ graphName.dir }}</bdi></span><span class="graph-name-base">{{ graphName.base }}</span></span>
         <span class="badge" :title="state.graph.vertexCount + ' vertices, ' + state.graph.edgeCount + ' edges'">
@@ -439,6 +442,7 @@ export const Workspace = {
     <journal-toasts></journal-toasts>
     <optimize-panel></optimize-panel>
     <share-dialog ref="shareDialog"></share-dialog>
+    <mcp-stats-dialog ref="mcpStatsDialog"></mcp-stats-dialog>
   </div>
   `,
 };
