@@ -547,13 +547,6 @@ export function chatToJson(items, meta = {}) {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-/** A code fence longer than any backtick run in `text` (at least three backticks). */
-export function fenceFor(text) {
-  let longest = 0;
-  for (const m of String(text).matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
-  return '`'.repeat(Math.max(3, longest + 1));
-}
-
 /** Plain text as a Markdown block quote (every line, empty ones included). */
 function quote(text) {
   return String(text).split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n');

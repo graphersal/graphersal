@@ -748,11 +748,8 @@ test('export: a tool result shortened in the stored transcript is marked; an int
   assert.equal(JSON.parse(chatToJson(chat.items)).turns[0].steps[0].resultTruncated, false);
 });
 
-test('export: fenceFor; a tool result with backtick runs stays out of the Markdown', async () => {
-  const { chatToMarkdown, fenceFor } = await import('../js/ai-chat.js');
-  assert.equal(fenceFor('plain'), '```');
-  assert.equal(fenceFor('a ``` b'), '````');
-  assert.equal(fenceFor('`````'), '``````');
+test('export: a tool result with backtick runs stays out of the Markdown', async () => {
+  const { chatToMarkdown } = await import('../js/ai-chat.js');
   const md = chatToMarkdown([
     { type: 'user', text: 'q', seq: 1 },
     { type: 'tool_call', id: 'a', name: 'query', args: { script: 'x' }, seq: 2 },
