@@ -624,6 +624,11 @@ pub fn run(cli: &Cli) -> i32 {
         #[cfg(feature = "ai")]
         ai,
     });
+    // The dev server's own parts of every memory report (MCP sessions, AI Chat
+    // conversations), held weakly by the engine: registered for as long as this function runs.
+    let server_memory: Arc<dyn graphersal::storage::MemorySource> =
+        Arc::new(ServerMemory(Arc::downgrade(&context)));
+    graphersal::storage::register_memory_source(&server_memory);
     start_job_ticker(&context);
     // From here on the requests reach the API (before: health endpoints and 503 answers).
     let _ = serving.context.set(context);
@@ -639,6 +644,35 @@ pub fn run(cli: &Cli) -> i32 {
         None => accept(&server, &serving),
     }
     EXIT_OK
+}
+
+/// The dev server's parts of a memory report (book page "Memory Usage"): `mcp` (the client
+/// sessions of `--mcp`) and `ai_chat` (the conversations of `--ai`), both estimated. Read
+/// without waiting on a lock a request may hold.
+struct ServerMemory(std::sync::Weak<Context>);
+
+impl graphersal::storage::MemorySource for ServerMemory {
+    fn memory_components(&self, components: &mut graphersal::storage::MemoryComponents) {
+        use graphersal::storage::MemoryComponent;
+        let Some(context) = self.0.upgrade() else {
+            return;
+        };
+        if let Some(mcp) = &context.mcp {
+            let (sessions, bytes) = mcp.memory_bytes();
+            components.push(
+                MemoryComponent::estimated("mcp", bytes)
+                    .with_detail(format!("{sessions} client session(s)")),
+            );
+        }
+        #[cfg(feature = "ai")]
+        if let Some(ai) = &context.ai {
+            let (conversations, bytes) = ai.memory_bytes();
+            components.push(
+                MemoryComponent::estimated("ai_chat", bytes)
+                    .with_detail(format!("{conversations} conversation(s)")),
+            );
+        }
+    }
 }
 
 /// How often the dev server ticks the scheduled jobs of the active store.
@@ -788,9 +822,10 @@ fn start_session(
             let started = position(&session)
                 .map_err(|err| err.to_string())
                 .and_then(|(_, seq)| {
-                    let mut statistics = session.statistics().map_err(|err| err.to_string())?;
                     // The banner's memory row shows the process against its ceiling.
-                    graphersal_session::process::add_to_statistics(&mut statistics);
+                    let statistics = session
+                        .statistics_with_process()
+                        .map_err(|err| err.to_string())?;
                     Ok((session.cancel_token(), seq, statistics))
                 });
             let failed = started.is_err();
@@ -1299,18 +1334,32 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             value(context.call_fallible(move |s| s.journal(&spec))?)
         }
         // The storage advisor (`graphersal_session::advisor`): POST a spec of thresholds (`{}`:
-        // the defaults); apply one recommendation by its id with the same spec.
+        // the defaults); apply one recommendation by its id (`{id, spec}`), or several at once
+        // in one commit (`{ids: [..], spec}`), with the same spec.
         (Method::Post, "advise") => {
             let body = json_body(request)?;
             value(context.call(move |s| s.advise(&body))?)
         }
         (Method::Post, "advise/apply") => {
             let body = json_body(request)?;
+            let spec = body.get("spec").cloned().unwrap_or(Value::Null);
+            if let Some(ids) = body.get("ids") {
+                let ids: Vec<String> = ids
+                    .as_array()
+                    .and_then(|ids| {
+                        ids.iter()
+                            .map(|id| id.as_str().map(str::to_string))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| {
+                        HttpError(400, "\"ids\" is a list of recommendation ids".to_string())
+                    })?;
+                return value(context.call(move |s| s.apply_recommendations(&ids, &spec))?);
+            }
             let id = body["id"]
                 .as_str()
                 .map(str::to_string)
-                .ok_or_else(|| HttpError(400, "the body needs \"id\"".to_string()))?;
-            let spec = body.get("spec").cloned().unwrap_or(Value::Null);
+                .ok_or_else(|| HttpError(400, "the body needs \"id\" or \"ids\"".to_string()))?;
             value(context.call(move |s| s.apply_recommendation(&id, &spec))?)
         }
         // `{id, days?}`: not recommended for `days` (without: for good); `{id}`: listed again.
@@ -1338,7 +1387,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Get, "statistics") => value(with_process_memory(
             context,
-            context.call_fallible(|s| s.statistics())?,
+            context.call_fallible(|s| s.statistics_with_process())?,
         )),
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
             let bytes = context.call_fallible(|s| s.save_snapshot())?;
@@ -1661,11 +1710,12 @@ fn ai_status(context: &Context) -> Value {
     }
 }
 
-/// The session's statistics (`Session::statistics`) with the dev server's own part of the
-/// process memory added: `process.memory` (the whole process, [`graphersal_session::process`]) and `process.aiChat {conversations, historyBytes}` when the AI Chat is on
+/// The session's statistics with the whole process (`Session::statistics_with_process`:
+/// `process.memory`, [`graphersal_session::process`]) and the dev server's own part added:
+/// `process.aiChat {conversations, historyBytes}` when the AI Chat is on
 /// ([`ai::process_memory`]). Served by `GET /api/statistics` and the MCP `statistics` tool.
+#[cfg_attr(not(feature = "ai"), allow(unused_mut))]
 fn with_process_memory(context: &Context, mut statistics: Value) -> Value {
-    graphersal_session::process::add_to_statistics(&mut statistics);
     #[cfg(feature = "ai")]
     if let Some(chat) = ai::process_memory(context)
         && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)

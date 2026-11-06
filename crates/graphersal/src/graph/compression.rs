@@ -6,23 +6,43 @@
 //! ([`CompressionDefinition`]): element kind + label + a jpath of names. A string stored at a
 //! rule's path is kept as [`ElementProperty::Compressed`] when it is at least
 //! [`CompressionDefinition::min_bytes`] long and its compressed form is at most 90 % of the plain
-//! size; every other stored value is plain (**the invariant**, D6). Under a `dedup` rule a string
-//! at the path is kept as [`ElementProperty::Deduped`] when it is at least `min_bytes` and longer
-//! than the inline capacity of a `CompactString` (24 bytes on 64-bit targets: a shorter string
-//! owns no heap to share), and it points to the ONE copy of its text in the rule's table. The
-//! graph keeps the rules' in-memory state here (`CompressionRules`: the parsed paths, the
-//! dictionaries and the dedup tables), derived from the catalog like an index:
+//! size; every other stored value is plain (**the invariant**, D6).
+//!
+//! A `dedup` rule on a TOP-LEVEL key (a path of one name) codes the values: every value at the
+//! key (any type; a string only when it is at least `min_bytes` long) is stored once in the
+//! rule's [`ValueDictionary`] and the element's row holds its `u32` code instead of the 32-byte
+//! value slot (`value/property_map.rs`, `Repr::Coded`; the row's [`Layout`] says which positions
+//! are coded by which dictionary, interned in the rules' layout table). Reads give the
+//! dictionary's value by reference. A `dedup` rule on a NESTED path keeps the string sharing of
+//! 0.2.1: a string at the path is kept as [`ElementProperty::Deduped`] when it is at least
+//! `min_bytes` and longer than the inline capacity of a `CompactString` (24 bytes on 64-bit
+//! targets: a shorter string owns no heap to share), and it points to the ONE copy of its text
+//! in the rule's table. The graph keeps the rules' in-memory state here (`CompressionRules`: the
+//! parsed paths, the lz4 dictionaries, the dedup tables and value dictionaries, the layouts),
+//! derived from the catalog like an index:
 //!
 //! - the write path normalizes the touched top-level key (D7), a label change the vertex;
 //! - a define, redefine or drop runs the **explicit pass** over the rule's `(element, label)`
 //!   (D8); `recompress` re-runs it and rebuilds the dictionary;
 //! - a rollback normalizes what it restores and re-runs the pass of an undone rule change (D10);
-//! - a load runs one pass over every rule after the elements and the catalog are in place (D11).
+//! - a load runs one pass over every rule after the elements and the catalog are in place (D11);
+//!   a snapshot load whose catalog arrives before its elements (every packed snapshot: the
+//!   manifest's definitions are restored first) codes the top-level `dedup` keys while the rows
+//!   enter the graph instead (stage V2, [`LoadCoding`]), so its end pass only covers the lz4
+//!   and nested-path rules.
 //!
 //! A dedup table entry that no element references any more (its value was overwritten or its
 //! element dropped) is swept lazily: when the table has doubled since its last sweep, after a
 //! rollback, by `recompress` and by a load (each table holds at most about twice its live
-//! entries).
+//! entries). A value dictionary is append-only; it is REBUILT (a new dictionary, the label's rows
+//! re-coded) at the end of an outermost unit (or after a write outside every unit) once its
+//! entries reach max(256, twice its entries at the last rebuild, the label's elements / 8), after
+//! a rollback that added entries, by `recompress`, `shrink_to_fit` and a load.
+//!
+//! Compatibility: a `dedup` rule is stored with its real `min_bytes` (0, the default since
+//! this version, included). Graphersal 0.5.2 and older refuse `min_bytes` 0 (they read a store
+//! holding such a rule as damaged); a store is upgraded with the engine (user decision
+//! 2026-11-04). This version reads every older rule (`min_bytes` 25) as it was written.
 //!
 //! The pass changes no logical data: it records nothing in the undo log and emits no mutation
 //! (a unit that only recompresses commits nothing).
@@ -38,15 +58,17 @@ use crate::graph::definition::{Definition, DefinitionBody, DefinitionKind};
 use crate::graph::schema::ElementKind;
 use crate::value::compressed::{CompressedText, CompressionDictionary, MAX_DICTIONARY_BYTES};
 use crate::value::deduped::{DEDUP_ENTRY_OVERHEAD, DedupedText};
+use crate::value::dictionary::{CODE_BYTES, DICTIONARY_ENTRY_BYTES, ValueDictionary};
 use crate::value::json_path::JsonPathSegment;
+use crate::value::property_map::{CODED_SLOT, Layout, Repr, Shape};
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
 
 /// The default [`CompressionDefinition::min_bytes`] of an `lz4` rule.
 pub const DEFAULT_MIN_BYTES: u32 = 256;
-/// The default [`CompressionDefinition::min_bytes`] of a `dedup` rule: one byte more than the
-/// inline capacity of a string on 64-bit targets (24 bytes), the shortest string that owns heap
-/// to share.
-pub const DEFAULT_DEDUP_MIN_BYTES: u32 = 25;
+/// The default [`CompressionDefinition::min_bytes`] of a `dedup` rule: 0, every string is coded
+/// (on a top-level key; under a nested path only a string longer than 24 bytes is shared).
+pub const DEFAULT_DEDUP_MIN_BYTES: u32 = 0;
+
 /// A string of at most this many bytes is stored inline (no heap): a `dedup` rule never shares
 /// it, whatever its `min_bytes` (24 on 64-bit targets).
 pub(crate) const INLINE_TEXT_BYTES: usize = std::mem::size_of::<CompactString>();
@@ -126,8 +148,8 @@ impl Codec {
 /// assert_eq!(rule.min_bytes(), 512);
 /// ```
 ///
-/// A `dedup` rule stores each distinct value once; its defaults are `min_bytes` 25 and no
-/// dictionary:
+/// A `dedup` rule stores each distinct value once (on a top-level key every value type, the
+/// element's row holding a 4-byte code); its defaults are `min_bytes` 0 and no dictionary:
 ///
 /// ```
 /// use graphersal::catalog::{Codec, CompressionDefinition};
@@ -136,7 +158,7 @@ impl Codec {
 /// let rule = CompressionDefinition::new(ElementKind::Vertex, "symbol", "path")
 ///     .unwrap()
 ///     .with_codec(Codec::Dedup);
-/// assert_eq!(rule.min_bytes(), 25);
+/// assert_eq!(rule.min_bytes(), 0);
 /// assert!(!rule.dictionary());
 /// ```
 ///
@@ -192,7 +214,7 @@ impl PartialEq for CompressionDefinition {
 impl CompressionDefinition {
     /// A rule for `element`s labelled `label` at `path` (a jpath of names: `"cv"`,
     /// `"details.career.cv"`, `"$.a['b c']"`), with the defaults `lz4`, `min_bytes` 256 and a
-    /// dictionary (a `dedup` rule, [`Self::with_codec`], defaults to `min_bytes` 25 and no
+    /// dictionary (a `dedup` rule, [`Self::with_codec`], defaults to `min_bytes` 0 and no
     /// dictionary). A path that does not parse is an error; an index segment or an empty path is
     /// rejected by [`Definition::validate`] (and by this constructor).
     pub fn new(
@@ -347,7 +369,8 @@ impl CompressionDefinition {
     }
 
     /// Strings shorter than this many UTF-8 bytes stay plain (the codec's default when not
-    /// set: 256 for `lz4`, 25 for `dedup`).
+    /// set: 256 for `lz4`, 0 for `dedup`). It applies to strings only: a `dedup` rule on a
+    /// top-level key codes every other value type whatever its size.
     pub fn min_bytes(&self) -> u32 {
         self.min_bytes
             .unwrap_or_else(|| self.codec.default_min_bytes())
@@ -535,7 +558,15 @@ impl CompressionDefinition {
             return Err(field("path", reason));
         }
         let min_bytes = self.min_bytes();
-        if min_bytes == 0 || min_bytes > MAX_MIN_BYTES {
+        if self.codec == Codec::Dedup && min_bytes > MAX_MIN_BYTES {
+            return Err(field(
+                "min_bytes",
+                format!(
+                    "{min_bytes} is above {MAX_MIN_BYTES} (the default traversal.max_string_bytes)"
+                ),
+            ));
+        }
+        if self.codec != Codec::Dedup && (min_bytes == 0 || min_bytes > MAX_MIN_BYTES) {
             return Err(field(
                 "min_bytes",
                 format!(
@@ -674,6 +705,180 @@ impl DedupTable {
     }
 }
 
+/// How a load through the persistence load sink (`PersistentStorage::load_definition`,
+/// `load_vertex`, `load_edge`, `finish_load`) codes the rows of the top-level `dedup` rules.
+///
+/// The packed snapshot restores the catalog before the elements: the rules are then built from
+/// the catalog when the first element arrives and every row is coded as it enters the graph
+/// (`insert_vertex_raw`/`insert_edge_raw`), straight into the rules' value dictionaries; no
+/// plain row of a coded key is kept until the end, and the end pass only normalizes the labels
+/// of the lz4 and nested-path rules. A compression rule restored after an element (no path of
+/// this version does that) falls back to the full end pass, which rebuilds every rule and
+/// re-codes every row: the same state either way.
+#[derive(Debug, Default)]
+pub(crate) enum LoadCoding {
+    /// No compression rule arrived through the load sink.
+    #[default]
+    Idle,
+    /// A compression rule arrived before any element: the rules are built at the first one.
+    Pending,
+    /// The rules were built at the first element; rows are coded as they enter, through the
+    /// plans of their `(labels, shape)`.
+    Direct(LoadPlans),
+    /// A compression rule arrived after an element: the end of the load runs the full pass.
+    Late,
+}
+
+thread_local! {
+    /// Set while [`TraversalGraph::with_load_post_pass`] runs (a test hook).
+    static LOAD_POST_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The labels of an element entering the graph during a direct load (part of a
+/// [`LoadPlans`] key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LoadLabels {
+    /// A vertex's interned label set.
+    Vertex(crate::graph::labels::LabelSetId),
+    /// An edge's interned label.
+    Edge(crate::graph::labels::LabelId),
+}
+
+/// The coding of the rows of one `(labels, shape)` during a direct load: what
+/// [`CompressionRules::code_row`] decides for a row whose every value its rule accepts, found
+/// once and kept for the load (a load codes millions of rows of a few hundred such pairs).
+struct LoadPlan {
+    /// The shape (its address is part of the key: held, so it is not reused while the plan
+    /// lives).
+    shape: Arc<Shape>,
+    /// Per position, an own value's index or [`CODED_SLOT`] | a code's index.
+    slots: Box<[u32]>,
+    /// One dictionary per code (empty: no position is coded).
+    dicts: Box<[Arc<ValueDictionary>]>,
+    /// Per position, the dictionary of the rule that covers its key.
+    rules: Box<[Option<Arc<ValueDictionary>>]>,
+    /// The interned layout, made by the first row that uses it (so the layout table holds
+    /// exactly the layouts of the rows, as after the whole-graph pass).
+    layout: Option<Arc<Layout>>,
+}
+
+/// The [`LoadPlan`]s of a direct load, by labels and shape address.
+#[derive(Default)]
+pub(crate) struct LoadPlans {
+    plans: HashMap<(LoadLabels, usize), LoadPlan, crate::graph::shape::Mix>,
+}
+
+impl std::fmt::Debug for LoadPlans {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadPlans")
+            .field("plans", &self.plans.len())
+            .finish()
+    }
+}
+
+impl LoadPlans {
+    /// Codes the row `map` of an element with `labels` entering the graph, as
+    /// [`CompressionRules::code_row`] would: through the plan of its labels and shape, or
+    /// through `code_row` itself for a row the plan does not cover (a value a rule does not
+    /// accept, an unadopted or already coded map, a full dictionary).
+    fn code(
+        &mut self,
+        rules: &CompressionRules,
+        element: ElementKind,
+        key: LoadLabels,
+        labels: &[CompactString],
+        map: &mut PropertyMap,
+    ) {
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+            rules.code_row(element, &labels, map);
+            return;
+        };
+        let plan = self
+            .plans
+            .entry((key, Arc::as_ptr(&shaped.shape) as usize))
+            .or_insert_with(|| {
+                let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+                rules.load_plan(element, &labels, &shaped.shape)
+            });
+        if plan.dicts.is_empty() {
+            return;
+        }
+        let accepted = plan.slots.len() == shaped.values.len()
+            && plan.slots.iter().zip(&shaped.values).all(|(slot, value)| {
+                slot & CODED_SLOT == 0
+                    || plan
+                        .dicts
+                        .get((slot & !CODED_SLOT) as usize)
+                        .is_some_and(|dictionary| dictionary.accepts(value))
+            });
+        if !accepted {
+            let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+            rules.code_row(element, &labels, map);
+            return;
+        }
+        let layout = match &plan.layout {
+            Some(layout) => layout,
+            None => plan.layout.insert(rules.layouts.lock().intern(
+                &plan.shape,
+                plan.slots.to_vec(),
+                plan.dicts.to_vec(),
+                plan.rules.to_vec(),
+            )),
+        };
+        let values = std::mem::take(&mut shaped.values);
+        let coded = layout.dicts.len();
+        let mut own = Vec::with_capacity(values.len() - coded);
+        let mut codes = Vec::with_capacity(coded);
+        let mut values = values.into_iter();
+        for (position, slot) in layout.slots.iter().enumerate() {
+            let Some(value) = values.next() else {
+                break;
+            };
+            if slot & CODED_SLOT == 0 {
+                own.push(value);
+                continue;
+            }
+            let interned = match layout.dicts.get((slot & !CODED_SLOT) as usize) {
+                Some(dictionary) => dictionary.intern(value),
+                None => Err(value),
+            };
+            match interned {
+                Ok(code) => codes.push(code),
+                Err(value) => {
+                    // A full dictionary (2^32 entries): the row is put back together plain
+                    // and coded the generic way, which keeps such a value in the row.
+                    let mut plain = Vec::with_capacity(layout.slots.len());
+                    let mut own = own.into_iter();
+                    for slot in layout.slots.iter().take(position) {
+                        let restored = if slot & CODED_SLOT == 0 {
+                            own.next()
+                        } else {
+                            let at = (slot & !CODED_SLOT) as usize;
+                            codes
+                                .get(at)
+                                .and_then(|code| layout.dicts.get(at)?.get(*code))
+                                .cloned()
+                        };
+                        plain.push(restored.unwrap_or(ElementProperty::Null));
+                    }
+                    plain.push(value);
+                    plain.extend(values);
+                    *map = PropertyMap::from_shaped(Arc::clone(&layout.shape), plain);
+                    let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+                    rules.code_row(element, &labels, map);
+                    return;
+                }
+            }
+        }
+        *map = PropertyMap::from_coded(
+            Arc::clone(layout),
+            own.into_boxed_slice(),
+            codes.into_boxed_slice(),
+        );
+    }
+}
+
 /// One active rule.
 #[derive(Debug, Clone)]
 pub(crate) struct Rule {
@@ -685,9 +890,131 @@ pub(crate) struct Rule {
     min_bytes: usize,
     use_dictionary: bool,
     dictionary: Option<Arc<CompressionDictionary>>,
-    /// The table of a `dedup` rule (`None` for `lz4`). Behind a mutex: the write path
-    /// normalizes under a shared borrow of the rules.
+    /// The table of a `dedup` rule on a nested path (`None` otherwise). Behind a mutex: the
+    /// write path normalizes under a shared borrow of the rules.
     dedup: Option<Arc<parking_lot::Mutex<DedupTable>>>,
+    /// The value dictionary of a `dedup` rule on a top-level key (`None` otherwise).
+    coded: Option<Arc<ValueDictionary>>,
+}
+
+/// The interned [`Layout`]s of coded rows: one per shape and coded positions with their
+/// dictionaries. Swept (layouts no row uses) when it has doubled.
+#[derive(Debug, Default)]
+pub(crate) struct LayoutTable {
+    layouts: HashMap<LayoutKey, Arc<Layout>>,
+    sweep_at: usize,
+    /// The layout interned last: a load and a pass code many rows of one shape alike, so it is
+    /// compared first (no key is built on a hit).
+    last: Option<Arc<Layout>>,
+}
+
+/// The identity of a layout: the shape's and the dictionaries' addresses (each held by the
+/// layout, so never reused while it is in the table) and the slots.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct LayoutKey {
+    shape: usize,
+    slots: Box<[u32]>,
+    /// Per position, the address of the covering rule's dictionary (0: none).
+    rules: Box<[usize]>,
+}
+
+impl std::fmt::Debug for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Layout")
+            .field("slots", &self.slots)
+            .finish()
+    }
+}
+
+/// The smallest size at which [`LayoutTable`] sweeps before an insertion.
+const LAYOUT_SWEEP_MIN: usize = 64;
+
+impl LayoutTable {
+    /// The interned layout of `shape` with `slots` and `dicts`.
+    fn intern(
+        &mut self,
+        shape: &Arc<Shape>,
+        slots: Vec<u32>,
+        dicts: Vec<Arc<ValueDictionary>>,
+        rules: Vec<Option<Arc<ValueDictionary>>>,
+    ) -> Arc<Layout> {
+        if let Some(last) = &self.last
+            && Arc::ptr_eq(&last.shape, shape)
+            && *last.slots == *slots
+            && last.rules.len() == rules.len()
+            && last.rules.iter().zip(&rules).all(|(a, b)| match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            })
+        {
+            return Arc::clone(last);
+        }
+        let layout = self.intern_new(shape, slots, dicts, rules);
+        self.last = Some(Arc::clone(&layout));
+        layout
+    }
+
+    /// [`Self::intern`] past the memo.
+    fn intern_new(
+        &mut self,
+        shape: &Arc<Shape>,
+        slots: Vec<u32>,
+        dicts: Vec<Arc<ValueDictionary>>,
+        rules: Vec<Option<Arc<ValueDictionary>>>,
+    ) -> Arc<Layout> {
+        // The coded positions' dictionaries are among `rules` (a coded position's rule codes
+        // it), so the slots and the rules identify the layout.
+        let key = LayoutKey {
+            shape: Arc::as_ptr(shape) as usize,
+            slots: slots.into_boxed_slice(),
+            rules: rules
+                .iter()
+                .map(|d| d.as_ref().map_or(0, |d| Arc::as_ptr(d) as usize))
+                .collect(),
+        };
+        if let Some(layout) = self.layouts.get(&key) {
+            return Arc::clone(layout);
+        }
+        if self.layouts.len() >= self.sweep_at {
+            self.sweep();
+        }
+        let layout = Arc::new(Layout {
+            shape: Arc::clone(shape),
+            slots: key.slots.clone(),
+            dicts: dicts.into_boxed_slice(),
+            rules: rules.into_boxed_slice(),
+            interned: true,
+        });
+        self.layouts.insert(key, Arc::clone(&layout));
+        layout
+    }
+
+    /// Drops every layout no row uses, and the table's spare capacity (so the table's size
+    /// after a sweep depends only on the layouts in use, not on the order they were made in).
+    pub(crate) fn sweep(&mut self) {
+        self.last = None;
+        self.layouts
+            .retain(|_, layout| Arc::strong_count(layout) > 1);
+        self.layouts.shrink_to_fit();
+        self.sweep_at = (2 * self.layouts.len()).max(LAYOUT_SWEEP_MIN);
+    }
+
+    /// The bytes of the table: every layout once, its key and the hash table.
+    fn heap_bytes(&self) -> u64 {
+        let entries: u64 = self
+            .layouts
+            .iter()
+            .map(|(key, layout)| {
+                layout.heap_bytes() + (key.slots.len() * 4 + key.rules.len() * 8) as u64
+            })
+            .sum();
+        entries
+            + crate::value::property_map::hash_table_heap_bytes(
+                self.layouts.capacity(),
+                std::mem::size_of::<(LayoutKey, Arc<Layout>)>(),
+            )
+    }
 }
 
 /// The rules of a graph, by element kind and label (derived from the catalog).
@@ -695,6 +1022,11 @@ pub(crate) struct Rule {
 pub(crate) struct CompressionRules {
     vertex: HashMap<CompactString, Vec<Rule>>,
     edge: HashMap<CompactString, Vec<Rule>>,
+    /// Whether any rule codes values (a top-level `dedup` rule).
+    has_coded: bool,
+    /// The layouts of the coded rows (kept across rule rebuilds: rows of unchanged rules keep
+    /// theirs).
+    layouts: Arc<parking_lot::Mutex<LayoutTable>>,
 }
 
 impl CompressionRules {
@@ -757,15 +1089,55 @@ impl CompressionRules {
         properties: &mut PropertyMap,
         force: bool,
     ) {
-        let applies = self.applies(element, labels);
-        for (key, value) in properties.iter_mut() {
-            if applies {
-                let rules = self.for_key(element, labels, key);
-                normalize_value(value, &rules, force);
-            } else {
-                value.make_logical();
+        let label_rules = self.label_rules(element, labels);
+        // Without rules, or with only rules that code top-level values, every value is plain
+        // (a coded row's own values; its coded ones are plain by construction).
+        if label_rules
+            .iter()
+            .all(|rules| rules.iter().all(|rule| rule.coded.is_some()))
+        {
+            match properties.coded_own_mut() {
+                Some(own) => own.iter_mut().for_each(ElementProperty::make_logical),
+                None => properties
+                    .values_mut()
+                    .for_each(ElementProperty::make_logical),
             }
+            self.code_row(element, labels, properties);
+            return;
         }
+        // A coded row whose every coded value is still coded by the rule that wins its key:
+        // only its own values are normalized (a coded value is plain by construction, and that
+        // rule leaves it as it is), so nothing coded is decoded and coded again.
+        if let Some(layout) = properties
+            .coded()
+            .map(|coded| Arc::clone(&coded.layout))
+            .filter(|layout| {
+                layout.shape.keys.iter().enumerate().all(|(position, key)| {
+                    layout.coded_at(position).is_none_or(|(_, have)| {
+                        coded_in(&label_rules, key).is_some_and(|want| Arc::ptr_eq(have, want))
+                    })
+                })
+            })
+        {
+            if let Some(own) = properties.coded_own_mut() {
+                for (key, slot) in layout.shape.keys.iter().zip(layout.slots.iter()) {
+                    if slot & CODED_SLOT != 0 {
+                        continue;
+                    }
+                    if let Some(value) = own.get_mut(*slot as usize) {
+                        let rules = self.for_key(element, labels, key);
+                        normalize_value(value, &rules, force);
+                    }
+                }
+            }
+            self.code_row(element, labels, properties);
+            return;
+        }
+        for (key, value) in properties.iter_mut() {
+            let rules = self.for_key(element, labels, key);
+            normalize_value(value, &rules, force);
+        }
+        self.code_row(element, labels, properties);
     }
 
     /// Normalizes the top-level key `key` of `properties`.
@@ -776,15 +1148,19 @@ impl CompressionRules {
         properties: &mut PropertyMap,
         key: &str,
     ) {
-        let Some(value) = properties.get_mut(key) else {
-            return;
-        };
-        if self.applies(element, labels) {
-            let rules = self.for_key(element, labels, key);
-            normalize_value(value, &rules, false);
-        } else {
-            value.make_logical();
+        // A coded value is plain by construction: only an own value is normalized (a coded row
+        // stays coded).
+        if let crate::value::property_map::StoredSlot::Value(value) =
+            properties.stored_value_mut(key)
+        {
+            if self.applies(element, labels) {
+                let rules = self.for_key(element, labels, key);
+                normalize_value(value, &rules, false);
+            } else {
+                value.make_logical();
+            }
         }
+        self.code_row(element, labels, properties);
     }
 
     /// Normalizes a value that is about to be stored under `key`.
@@ -818,6 +1194,289 @@ impl CompressionRules {
         self.normalize_incoming(ElementKind::Vertex, &labels, key, value);
     }
 
+    /// Whether any rule codes values (a top-level `dedup` rule).
+    #[inline]
+    pub(crate) fn has_coded(&self) -> bool {
+        self.has_coded
+    }
+
+    /// The dictionary that codes the top-level `key` of an element with these labels: the rule
+    /// of the first label (label order) with a rule on exactly `key`, when it is a top-level
+    /// `dedup` rule.
+    fn coded_dictionary(
+        &self,
+        element: ElementKind,
+        labels: &[&str],
+        key: &str,
+    ) -> Option<&Arc<ValueDictionary>> {
+        coded_in(&self.label_rules(element, labels), key)
+    }
+
+    /// The rule lists of these labels, in label order (one lookup per label, for a whole row).
+    fn label_rules(&self, element: ElementKind, labels: &[&str]) -> Vec<&[Rule]> {
+        let by_kind = self.by_kind(element);
+        // No rule of this element kind: no label is hashed.
+        if by_kind.is_empty() {
+            return Vec::new();
+        }
+        labels
+            .iter()
+            .filter_map(|label| by_kind.get(*label).map(Vec::as_slice))
+            .collect()
+    }
+
+    /// The [`LoadPlan`] of the rows of `shape` of an element with these labels: the layout
+    /// [`Self::code_row`] gives such a row when every value its rule covers is accepted.
+    fn load_plan(&self, element: ElementKind, labels: &[&str], shape: &Arc<Shape>) -> LoadPlan {
+        let label_rules = self.label_rules(element, labels);
+        let mut slots = Vec::with_capacity(shape.len());
+        let mut dicts: Vec<Arc<ValueDictionary>> = Vec::new();
+        let mut rules = Vec::with_capacity(shape.len());
+        let mut own = 0u32;
+        for key in shape.keys.iter() {
+            let rule = coded_in(&label_rules, key);
+            rules.push(rule.map(Arc::clone));
+            match rule {
+                Some(dictionary) => {
+                    slots.push(CODED_SLOT | dicts.len() as u32);
+                    dicts.push(Arc::clone(dictionary));
+                }
+                None => {
+                    slots.push(own);
+                    own += 1;
+                }
+            }
+        }
+        if !self.has_coded {
+            dicts.clear();
+        }
+        LoadPlan {
+            shape: Arc::clone(shape),
+            slots: slots.into_boxed_slice(),
+            dicts: dicts.into_boxed_slice(),
+            rules: rules.into_boxed_slice(),
+            layout: None,
+        }
+    }
+
+    /// Brings a stored map's row into the coding the rules ask for: every top-level value whose
+    /// key a `dedup` rule of these labels codes, and which its dictionary accepts, is coded,
+    /// every other value is own. An unadopted (`Indexed`) map is left alone.
+    pub(crate) fn code_row(&self, element: ElementKind, labels: &[&str], map: &mut PropertyMap) {
+        if !self.has_coded || !self.applies(element, labels) {
+            map.plain_mut();
+            return;
+        }
+        let Some(shape) = map.stored_shape().map(Arc::clone) else {
+            return;
+        };
+        let label_rules = self.label_rules(element, labels);
+        // A coded row already coded as the rules ask: nothing is built (the common case after
+        // an in-place write); a transient layout that codes rightly is only interned.
+        if let Some(coded) = map.coded() {
+            let layout = &coded.layout;
+            let same = |have: Option<&Arc<ValueDictionary>>,
+                        want: Option<&Arc<ValueDictionary>>| {
+                match (have, want) {
+                    (None, None) => true,
+                    (Some(have), Some(want)) => Arc::ptr_eq(have, want),
+                    _ => false,
+                }
+            };
+            let unchanged = shape.keys.iter().enumerate().all(|(position, key)| {
+                let rule = coded_in(&label_rules, key);
+                let want = rule.filter(|d| {
+                    coded
+                        .value_at(position)
+                        .is_some_and(|value| d.accepts(value))
+                });
+                same(layout.rules.get(position).and_then(Option::as_ref), rule)
+                    && same(layout.coded_at(position).map(|(_, d)| d), want)
+            });
+            if unchanged {
+                if !layout.interned {
+                    let interned = self.layouts.lock().intern(
+                        &shape,
+                        layout.slots.to_vec(),
+                        layout.dicts.to_vec(),
+                        layout.rules.to_vec(),
+                    );
+                    if let Repr::Coded(coded) = &mut map.0 {
+                        coded.layout = interned;
+                    }
+                }
+                return;
+            }
+        }
+        let mut target: Vec<Option<&Arc<ValueDictionary>>> = Vec::with_capacity(shape.len());
+        let mut rules: Vec<Option<Arc<ValueDictionary>>> = Vec::with_capacity(shape.len());
+        let mut any = false;
+        for (position, key) in shape.keys.iter().enumerate() {
+            let rule = coded_in(&label_rules, key);
+            rules.push(rule.map(Arc::clone));
+            let dictionary = rule.filter(|d| {
+                map.value_at_position(position)
+                    .is_some_and(|v| d.accepts(v))
+            });
+            any |= dictionary.is_some();
+            target.push(dictionary);
+        }
+        if !any {
+            map.plain_mut();
+            return;
+        }
+        if let Some(coded) = map.coded()
+            && coded.layout.interned
+            && target.iter().enumerate().all(|(position, want)| {
+                match (coded.layout.coded_at(position), want) {
+                    (None, None) => true,
+                    (Some((_, have)), Some(want)) => Arc::ptr_eq(have, want),
+                    _ => false,
+                }
+            })
+            && coded
+                .layout
+                .rules
+                .iter()
+                .zip(&rules)
+                .all(|(have, want)| match (have, want) {
+                    (None, None) => true,
+                    (Some(have), Some(want)) => Arc::ptr_eq(have, want),
+                    _ => false,
+                })
+        {
+            return;
+        }
+        if let Repr::Coded(coded) = &mut map.0 {
+            // A coded row is re-coded position by position: a code whose dictionary stays is
+            // kept, nothing is decoded that stays coded.
+            let old = Arc::clone(&coded.layout);
+            let codes = std::mem::take(&mut coded.codes);
+            let mut own_values: Vec<Option<ElementProperty>> = std::mem::take(&mut coded.own)
+                .into_vec()
+                .into_iter()
+                .map(Some)
+                .collect();
+            let mut own = Vec::new();
+            let mut new_codes = Vec::new();
+            let mut slots = Vec::with_capacity(target.len());
+            let mut dicts = Vec::new();
+            for (position, want) in target.into_iter().enumerate() {
+                let value = match old.coded_at(position) {
+                    Some((at, have)) => {
+                        let code = codes.get(at).copied().unwrap_or(u32::MAX);
+                        if let Some(want) = want
+                            && Arc::ptr_eq(have, want)
+                        {
+                            slots.push(CODED_SLOT | new_codes.len() as u32);
+                            new_codes.push(code);
+                            dicts.push(Arc::clone(want));
+                            continue;
+                        }
+                        have.get(code).cloned().unwrap_or(ElementProperty::Null)
+                    }
+                    None => old
+                        .slots
+                        .get(position)
+                        .and_then(|slot| own_values.get_mut(*slot as usize))
+                        .and_then(Option::take)
+                        .unwrap_or(ElementProperty::Null),
+                };
+                let value = match want {
+                    Some(want) => match want.intern(value) {
+                        Ok(code) => {
+                            slots.push(CODED_SLOT | new_codes.len() as u32);
+                            new_codes.push(code);
+                            dicts.push(Arc::clone(want));
+                            continue;
+                        }
+                        Err(value) => value,
+                    },
+                    None => value,
+                };
+                slots.push(own.len() as u32);
+                own.push(value);
+            }
+            *map = if new_codes.is_empty() {
+                PropertyMap::from_shaped(shape, own)
+            } else {
+                let layout = self.layouts.lock().intern(&shape, slots, dicts, rules);
+                PropertyMap::from_coded(
+                    layout,
+                    own.into_boxed_slice(),
+                    new_codes.into_boxed_slice(),
+                )
+            };
+            return;
+        }
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            return;
+        };
+        let values = std::mem::take(&mut shaped.values);
+        let mut own = Vec::new();
+        let mut codes = Vec::new();
+        let mut slots = Vec::with_capacity(values.len());
+        let mut dicts = Vec::new();
+        for (value, dictionary) in values.into_iter().zip(target) {
+            let value = match dictionary {
+                Some(dictionary) => match dictionary.intern(value) {
+                    Ok(code) => {
+                        slots.push(CODED_SLOT | codes.len() as u32);
+                        codes.push(code);
+                        dicts.push(Arc::clone(dictionary));
+                        continue;
+                    }
+                    Err(value) => value,
+                },
+                None => value,
+            };
+            slots.push(own.len() as u32);
+            own.push(value);
+        }
+        *map = if codes.is_empty() {
+            PropertyMap::from_shaped(shape, own)
+        } else {
+            let layout = self.layouts.lock().intern(&shape, slots, dicts, rules);
+            PropertyMap::from_coded(layout, own.into_boxed_slice(), codes.into_boxed_slice())
+        };
+    }
+
+    /// Whether `map`'s row is coded exactly as the rules ask (the invariant check).
+    fn coding_problem(
+        &self,
+        element: ElementKind,
+        labels: &[&str],
+        map: &PropertyMap,
+    ) -> Option<String> {
+        let Some(shape) = map.stored_shape() else {
+            return map
+                .coded()
+                .map(|_| "a coded row without a shape".to_string());
+        };
+        if map.coded().is_some_and(|coded| !coded.layout.interned) {
+            return Some("a coded row keeps a transient layout".to_string());
+        }
+        for (position, key) in shape.keys.iter().enumerate() {
+            let want = self.coded_dictionary(element, labels, key).filter(|d| {
+                map.value_at_position(position)
+                    .is_some_and(|v| d.accepts(v))
+            });
+            let have = map
+                .coded()
+                .and_then(|coded| coded.layout.coded_at(position).map(|(_, d)| d));
+            match (have, want) {
+                (None, None) => {}
+                (Some(have), Some(want)) if Arc::ptr_eq(have, want) => {}
+                (None, Some(_)) => return Some(format!("'{key}' should be coded")),
+                (Some(_), None) => return Some(format!("'{key}' is coded without a rule")),
+                (Some(_), Some(_)) => {
+                    return Some(format!("'{key}' is coded by another dictionary"));
+                }
+            }
+        }
+        None
+    }
+
     /// Normalizes a value about to be stored under the top-level edge key `key`.
     pub(crate) fn prepare_edge_value(
         &self,
@@ -838,7 +1497,10 @@ impl CompressionRules {
         definitions: impl Iterator<Item = &'a Definition>,
         previous: &CompressionRules,
     ) -> CompressionRules {
-        let mut rules = CompressionRules::default();
+        let mut rules = CompressionRules {
+            layouts: Arc::clone(&previous.layouts),
+            ..CompressionRules::default()
+        };
         for definition in definitions {
             let Some(rule) = definition.as_compression().filter(|rule| rule.is_served()) else {
                 continue;
@@ -853,6 +1515,7 @@ impl CompressionRules {
                 use_dictionary: rule.dictionary(),
                 dictionary: None,
                 dedup: None,
+                coded: None,
             };
             let kept = previous
                 .find(&state.name)
@@ -861,6 +1524,14 @@ impl CompressionRules {
                 state.dictionary = kept.and_then(|old| old.dictionary.clone());
             }
             match state.codec {
+                Codec::Dedup if state.path.len() == 1 => {
+                    let min_bytes = state.min_bytes;
+                    state.coded = Some(
+                        kept.and_then(|old| old.coded.clone())
+                            .unwrap_or_else(|| Arc::new(ValueDictionary::new(min_bytes))),
+                    );
+                    rules.has_coded = true;
+                }
                 Codec::Dedup => {
                     state.dedup = Some(kept.and_then(|old| old.dedup.clone()).unwrap_or_default());
                 }
@@ -903,12 +1574,36 @@ impl CompressionRules {
         }
     }
 
-    /// The summed heap bytes of the dedup tables (each table once).
+    /// The summed heap bytes of the dedup tables and value dictionaries (each once) and of
+    /// the layout table.
     pub(crate) fn dedup_table_bytes(&self) -> u64 {
-        self.iter()
+        let tables: u64 = self
+            .iter()
             .filter_map(|rule| rule.dedup.as_ref())
             .map(|table| table.lock().heap_bytes())
-            .sum()
+            .sum();
+        let dictionaries: u64 = self
+            .iter()
+            .filter_map(|rule| rule.coded.as_ref())
+            .map(|dictionary| dictionary.heap_bytes())
+            .sum();
+        let layouts = if self.has_coded || !self.layouts.lock().layouts.is_empty() {
+            self.layouts.lock().heap_bytes()
+        } else {
+            0
+        };
+        tables + dictionaries + layouts
+    }
+
+    /// The value dictionaries with their rule's name, element kind and label.
+    fn coded_rules(&self) -> impl Iterator<Item = (&Rule, &Arc<ValueDictionary>)> {
+        self.iter()
+            .filter_map(|rule| rule.coded.as_ref().map(|dictionary| (rule, dictionary)))
+    }
+
+    /// Sweeps the layout table (layouts no row uses).
+    pub(crate) fn sweep_layouts(&self) {
+        self.layouts.lock().sweep();
     }
 
     /// The summed size of the distinct dictionaries.
@@ -976,6 +1671,8 @@ fn normalize_value(value: &mut ElementProperty, rules: &[(&[CompactString], &Rul
     if let Some((_, rule)) = rules.iter().find(|(rest, _)| rest.is_empty()) {
         match rule.codec {
             Codec::Lz4 => normalize_lz4(value, rule, force),
+            // A coded key: the value is plain here, the row codes it (`code_row`).
+            Codec::Dedup if rule.coded.is_some() => value.make_logical(),
             Codec::Dedup => normalize_dedup(value, rule),
         }
         return;
@@ -1053,6 +1750,49 @@ fn normalize_dedup(value: &mut ElementProperty, rule: &Rule) {
         }
         _ => value.make_logical(),
     }
+}
+
+/// The heap a coded value is counted with by the stats and the estimate: a string's length when
+/// it is longer than the inline capacity (24 bytes), else what
+/// [`ElementProperty::estimated_heap_bytes`] says (a value's spare capacity is left out, so the
+/// estimate on the plain values equals the stats of the defined rule).
+pub(crate) fn coded_heap(value: &ElementProperty) -> u64 {
+    match value {
+        ElementProperty::String(text) if text.len() > INLINE_TEXT_BYTES => text.len() as u64,
+        ElementProperty::String(_) => 0,
+        other => other.estimated_heap_bytes(),
+    }
+}
+
+/// Whether a coded key with threshold `min_bytes` codes `value` (the rule's dictionary says the
+/// same: `ValueDictionary::accepts`).
+pub(crate) fn codes_value(value: &ElementProperty, min_bytes: usize) -> bool {
+    match value {
+        ElementProperty::String(text) => text.len() >= min_bytes,
+        ElementProperty::Compressed(text) => text.plain_len() >= min_bytes,
+        ElementProperty::Deduped(text) => text.len() >= min_bytes,
+        other => !other.holds_compressed(),
+    }
+}
+
+/// The dictionary that codes the top-level `key` under these labels' rule lists
+/// ([`CompressionRules::coded_dictionary`]): the first label with a rule on exactly `key` decides.
+fn coded_in<'a>(label_rules: &[&'a [Rule]], key: &str) -> Option<&'a Arc<ValueDictionary>> {
+    for rules in label_rules {
+        if let Some(rule) = rules
+            .iter()
+            .find(|rule| rule.path.len() == 1 && rule.path[0] == key)
+        {
+            return rule.coded.as_ref();
+        }
+    }
+    None
+}
+
+/// The bytes a value takes in a plain row: its slot (the plain size of a coded value is
+/// `slot + heap`, its stored size its code plus its share of the dictionary).
+pub(crate) fn plain_slot_bytes() -> u64 {
+    std::mem::size_of::<ElementProperty>() as u64
 }
 
 /// Whether a `dedup` rule with threshold `min_bytes` shares a string of `len` bytes: at least
@@ -1342,34 +2082,88 @@ impl TraversalGraph {
     /// before (`None`: nothing), the catalog already holds the new state. Rebuilds the rules,
     /// builds the dictionary of a new or changed rule and normalizes the affected labels.
     pub(crate) fn compression_after_change(&mut self, old: Option<&Definition>, name: &str) {
-        let new_rule = self
-            .definitions
-            .get(DefinitionKind::COMPRESSION, name)
-            .and_then(|definition| definition.as_compression().cloned())
-            .filter(CompressionDefinition::is_served);
-        let old_rule = old
-            .and_then(|definition| definition.as_compression().cloned())
-            .filter(CompressionDefinition::is_served);
-        if new_rule.is_none() && old_rule.is_none() {
-            return;
-        }
-        // A changed rule gets a new dictionary: drop the kept one first.
-        if let Some(rule) = self.compression.find_mut(name) {
-            rule.dictionary = None;
-        }
-        self.compression_rebuild_rules();
-        if new_rule.is_some() {
-            self.compression_build_dictionary(name);
-        }
+        self.compression_after_changes(&[(old, name)]);
+    }
+
+    /// The explicit pass after a catalog change of several compression rules at once
+    /// (`(what was stored before, name)` each; the catalog already holds the new state): the
+    /// rule state is rebuilt ONCE, the dictionary of every new or changed rule is built, and
+    /// every element of the labels the old and new rules name (vertices and edges) is
+    /// normalized ONCE (a vertex carrying two of the labels too): one walk for the whole set.
+    pub(crate) fn compression_after_changes(&mut self, changes: &[(Option<&Definition>, &str)]) {
         let mut targets: Vec<(ElementKind, String)> = Vec::new();
-        for rule in old_rule.iter().chain(new_rule.iter()) {
-            let target = (rule.element(), rule.label().to_string());
-            if !targets.contains(&target) {
-                targets.push(target);
+        let mut built: Vec<&str> = Vec::new();
+        for (old, name) in changes {
+            let new_rule = self
+                .definitions
+                .get(DefinitionKind::COMPRESSION, name)
+                .and_then(|definition| definition.as_compression().cloned())
+                .filter(CompressionDefinition::is_served);
+            let old_rule = old
+                .and_then(|definition| definition.as_compression().cloned())
+                .filter(CompressionDefinition::is_served);
+            if new_rule.is_none() && old_rule.is_none() {
+                continue;
+            }
+            // A changed rule gets a new dictionary: drop the kept one first.
+            if let Some(rule) = self.compression.find_mut(name) {
+                rule.dictionary = None;
+            }
+            if new_rule.is_some() {
+                built.push(name);
+            }
+            for rule in old_rule.iter().chain(new_rule.iter()) {
+                let target = (rule.element(), rule.label().to_string());
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
         }
+        if targets.is_empty() {
+            return;
+        }
+        self.compression_rebuild_rules();
+        for name in built {
+            self.compression_build_dictionary(name);
+        }
+        self.compression_normalize_targets(&targets);
+    }
+
+    /// Normalizes (`force`: re-encoded with the current dictionaries) every element of the
+    /// `(element, label)` targets once, in one walk: the handles of all targets are collected
+    /// first (a vertex with two of the labels is normalized once).
+    fn compression_normalize_targets(&mut self, targets: &[(ElementKind, String)]) {
+        #[cfg(test)]
+        TARGET_WALKS.with(|walks| walks.set(walks.get() + 1));
+        if let [(element, label)] = targets {
+            self.compression_normalize_label(*element, label, true);
+            return;
+        }
+        let mut nodes: Vec<crate::graph::VertexHandle> = Vec::new();
+        let mut edges: Vec<crate::graph::EdgeHandle> = Vec::new();
         for (element, label) in targets {
-            self.compression_normalize_label(element, &label, true);
+            match element {
+                ElementKind::Vertex => {
+                    nodes.extend(self.index.get_nodes_by_label(label).into_iter().flatten())
+                }
+                ElementKind::Edge => {
+                    edges.extend(self.index.get_edges_by_label(label).into_iter().flatten())
+                }
+            }
+        }
+        let label_kinds = targets
+            .iter()
+            .filter(|(e, _)| *e == ElementKind::Vertex)
+            .count();
+        if label_kinds > 1 {
+            nodes.sort_unstable_by_key(|node| node.index().index());
+            nodes.dedup();
+        }
+        for node in nodes {
+            self.compression_normalize_vertex_forced(node, true);
+        }
+        for edge in edges {
+            self.compression_normalize_edge_forced(edge, true);
         }
     }
 
@@ -1377,6 +2171,7 @@ impl TraversalGraph {
     /// and normalizes every rule's label. Nothing happens without rules.
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn compression_load_pass(&mut self) {
+        self.load_coding = LoadCoding::Idle;
         self.compression = CompressionRules::default();
         self.compression_rebuild_rules();
         if self.compression.is_empty() {
@@ -1386,16 +2181,404 @@ impl TraversalGraph {
         for name in &names {
             self.compression_build_dictionary(name);
         }
-        let mut targets: Vec<(ElementKind, CompactString)> = Vec::new();
+        let mut targets: Vec<(ElementKind, String)> = Vec::new();
         for rule in self.compression.iter() {
-            let target = (rule.element, rule.label.clone());
+            let target = (rule.element, rule.label.to_string());
             if !targets.contains(&target) {
                 targets.push(target);
             }
         }
-        for (element, label) in targets {
-            self.compression_normalize_label(element, &label, true);
+        self.compression_normalize_targets(&targets);
+        for (_, dictionary) in self.compression.coded_rules() {
+            dictionary.mark_rebuilt();
         }
+    }
+
+    /// A definition arrived through the load sink: a compression rule makes the rows that
+    /// follow be coded as they enter ([`LoadCoding`]).
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_load_definition(&mut self, kind: DefinitionKind) {
+        if kind != DefinitionKind::COMPRESSION {
+            return;
+        }
+        let elements = self.graph.node_count() + self.graph.edge_count();
+        let post_pass = LOAD_POST_PASS.with(std::cell::Cell::get);
+        self.load_coding = match self.load_coding {
+            LoadCoding::Idle | LoadCoding::Pending if elements == 0 && !post_pass => {
+                LoadCoding::Pending
+            }
+            LoadCoding::Idle | LoadCoding::Pending | LoadCoding::Direct(_) | LoadCoding::Late => {
+                LoadCoding::Late
+            }
+        };
+    }
+
+    /// An element arrives through the load sink: the rules of the catalog are built at the
+    /// first one after a rule arrived ([`LoadCoding::Pending`]), so its row and every later one
+    /// is coded as it enters the graph.
+    #[inline]
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_load_element(&mut self) {
+        if matches!(self.load_coding, LoadCoding::Pending) {
+            self.compression_start_direct_load();
+        }
+    }
+
+    /// Runs `run` with every load through the persistence load sink on this thread coding
+    /// its rows in the end pass over the whole graph, the way of the loads before rows were
+    /// coded as they enter: the reference of the tests that compare both ways. A test helper.
+    #[doc(hidden)]
+    pub fn with_load_post_pass<R>(run: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LOAD_POST_PASS.with(|flag| flag.set(self.0));
+            }
+        }
+        let _restore = Restore(LOAD_POST_PASS.with(|flag| flag.replace(true)));
+        run()
+    }
+
+    /// Runs `run` with every snapshot chunk decoded on this thread (and by the decoder threads
+    /// it starts) building its nested maps `Indexed`, the way of the loads before chunks built
+    /// them `Shaped`, so the graph converts each one when it stores it: the reference of the
+    /// tests that compare both ways. A test helper.
+    #[doc(hidden)]
+    #[cfg(feature = "persist")]
+    pub fn with_nested_maps_decoded_indexed<R>(run: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::persist::codec::set_nested_indexed(self.0);
+            }
+        }
+        let _restore = Restore(crate::persist::codec::set_nested_indexed(true));
+        run()
+    }
+
+    /// [`Self::compression_load_element`] at the first element (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_start_direct_load(&mut self) {
+        // Elements stored another way since the rule arrived (not through the sink): the end
+        // of the load codes them all.
+        if self.graph.node_count() + self.graph.edge_count() != 0 {
+            self.load_coding = LoadCoding::Late;
+            return;
+        }
+        self.compression = CompressionRules::default();
+        self.compression_rebuild_rules();
+        self.load_coding = LoadCoding::Direct(LoadPlans::default());
+    }
+
+    /// The compression pass at the end of a load through the sink: after a direct load
+    /// ([`LoadCoding::Direct`]) only the lz4 dictionaries are built and the labels of the
+    /// rules that do not code top-level values (lz4, nested-path `dedup`) are normalized (the
+    /// coded rows are final), else the full [`Self::compression_load_pass`].
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    pub(crate) fn compression_finish_load(&mut self) {
+        match std::mem::take(&mut self.load_coding) {
+            LoadCoding::Direct(_) => self.compression_finish_direct_load(),
+            LoadCoding::Idle | LoadCoding::Pending | LoadCoding::Late => {
+                self.compression_load_pass()
+            }
+        }
+    }
+
+    /// [`Self::compression_finish_load`] after a direct load.
+    fn compression_finish_direct_load(&mut self) {
+        if self.compression.is_empty() {
+            return;
+        }
+        let mut names: Vec<CompactString> = Vec::new();
+        let mut targets: Vec<(ElementKind, String)> = Vec::new();
+        for rule in self.compression.iter() {
+            if rule.coded.is_some() {
+                continue;
+            }
+            names.push(rule.name.clone());
+            let target = (rule.element, rule.label.to_string());
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        for name in &names {
+            self.compression_build_dictionary(name);
+        }
+        if !targets.is_empty() && !self.compression_normalize_targets_parallel(&targets) {
+            self.compression_normalize_targets(&targets);
+        }
+        for (_, dictionary) in self.compression.coded_rules() {
+            dictionary.mark_rebuilt();
+        }
+    }
+
+    /// [`Self::compression_normalize_targets`] of a direct load's end, in parallel threads
+    /// over disjoint runs of element slots (the lz4 encoding of every value of a rule is the
+    /// costly part of a load with lz4 rules). Every row comes out as the sequential pass
+    /// leaves it: a row is normalized from its own state and the rules alone; only the order
+    /// in which a nested-path `dedup` table gains its entries can differ, which nothing
+    /// reads. `false`: not run (one worker, or a thread could not be started or failed: the
+    /// sequential pass then runs over every row again, which leaves a normalized row as it
+    /// is).
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+    fn compression_normalize_targets_parallel(
+        &mut self,
+        targets: &[(ElementKind, String)],
+    ) -> bool {
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if workers < 2 {
+            return false;
+        }
+        let vertex_labels: Vec<&str> = targets
+            .iter()
+            .filter(|(element, _)| *element == ElementKind::Vertex)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        let edge_labels: Vec<&str> = targets
+            .iter()
+            .filter(|(element, _)| *element == ElementKind::Edge)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        let rules = &self.compression;
+        let names = &self.labels;
+        let (vertex_runs, edge_runs) = self.graph.weight_runs_mut(workers);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let mut started = true;
+            if !vertex_labels.is_empty() {
+                let vertex_labels = &vertex_labels;
+                for run in vertex_runs {
+                    let work = move || {
+                        for vertex in run {
+                            let set = names.set(vertex.1);
+                            if !set
+                                .iter()
+                                .any(|label| vertex_labels.contains(&label.as_str()))
+                            {
+                                continue;
+                            }
+                            let labels: Vec<&str> = set.iter().map(CompactString::as_str).collect();
+                            rules.normalize_element(
+                                ElementKind::Vertex,
+                                &labels,
+                                &mut vertex.2,
+                                true,
+                            );
+                        }
+                    };
+                    match std::thread::Builder::new().spawn_scoped(scope, work) {
+                        Ok(handle) => handles.push(handle),
+                        Err(_) => started = false,
+                    }
+                }
+            }
+            if !edge_labels.is_empty() {
+                let edge_labels = &edge_labels;
+                for run in edge_runs {
+                    let work = move || {
+                        for edge in run {
+                            let Some(label) = names.name_str(edge.1) else {
+                                continue;
+                            };
+                            if !edge_labels.contains(&label) {
+                                continue;
+                            }
+                            if let Some(properties) = edge.2.as_mut() {
+                                rules.normalize_element(
+                                    ElementKind::Edge,
+                                    &[label],
+                                    properties,
+                                    true,
+                                );
+                            }
+                        }
+                    };
+                    match std::thread::Builder::new().spawn_scoped(scope, work) {
+                        Ok(handle) => handles.push(handle),
+                        Err(_) => started = false,
+                    }
+                }
+            }
+            let joined = handles
+                .into_iter()
+                .fold(true, |all, handle| handle.join().is_ok() && all);
+            started && joined
+        })
+    }
+
+    /// Without threads (wasm32) the sequential pass runs.
+    #[cfg(not(all(feature = "persist", not(target_arch = "wasm32"))))]
+    fn compression_normalize_targets_parallel(
+        &mut self,
+        _targets: &[(ElementKind, String)],
+    ) -> bool {
+        false
+    }
+
+    /// Codes the row of an element that just entered the graph (its map adopted) with
+    /// `labels` (interned as `key`): through the plans of a direct load, else
+    /// [`CompressionRules::code_row`].
+    #[inline]
+    pub(crate) fn compression_code_row(
+        &mut self,
+        element: ElementKind,
+        key: LoadLabels,
+        labels: &[CompactString],
+        properties: &mut PropertyMap,
+    ) {
+        if self.compression.has_coded() {
+            self.compression_code_row_coded(element, key, labels, properties);
+        }
+    }
+
+    /// [`Self::compression_code_row`] with coding rules (out of line: an insert without
+    /// rules stays as small as before).
+    #[cold]
+    #[inline(never)]
+    fn compression_code_row_coded(
+        &mut self,
+        element: ElementKind,
+        key: LoadLabels,
+        labels: &[CompactString],
+        properties: &mut PropertyMap,
+    ) {
+        if let LoadCoding::Direct(plans) = &mut self.load_coding {
+            plans.code(&self.compression, element, key, labels, properties);
+            return;
+        }
+        let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+        self.compression.code_row(element, &labels, properties);
+    }
+
+    /// Codes the row of a vertex again after a write that turned it plain (a removed key);
+    /// nothing without coding rules.
+    #[inline]
+    pub(crate) fn compression_recode_vertex(&mut self, node: crate::graph::VertexHandle) {
+        if self.compression.has_coded() {
+            self.compression_recode_vertex_coded(node);
+        }
+    }
+
+    /// [`Self::compression_recode_vertex`] with coding rules (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_recode_vertex_coded(&mut self, node: crate::graph::VertexHandle) {
+        let Some(vertex) = self
+            .graph
+            .node_weight_mut(node.index())
+            .filter(|vertex| vertex.3 == node.generation())
+        else {
+            return;
+        };
+        let labels: Vec<&str> = self
+            .labels
+            .set(vertex.1)
+            .iter()
+            .map(CompactString::as_str)
+            .collect();
+        self.compression
+            .code_row(ElementKind::Vertex, &labels, &mut vertex.2);
+    }
+
+    /// Edge counterpart of [`Self::compression_recode_vertex`].
+    #[inline]
+    pub(crate) fn compression_recode_edge(&mut self, edge: crate::graph::EdgeHandle) {
+        if self.compression.has_coded() {
+            self.compression_recode_edge_coded(edge);
+        }
+    }
+
+    /// [`Self::compression_recode_edge`] with coding rules (out of line).
+    #[cold]
+    #[inline(never)]
+    fn compression_recode_edge_coded(&mut self, edge: crate::graph::EdgeHandle) {
+        let Some(weight) = self
+            .graph
+            .edge_weight_mut(edge.index())
+            .filter(|weight| weight.3.own == edge.generation())
+        else {
+            return;
+        };
+        let labels = edge_labels(self.labels.name_str(weight.1));
+        if let Some(properties) = weight.2.as_mut() {
+            self.compression
+                .code_row(ElementKind::Edge, &labels, properties);
+        }
+    }
+
+    /// Rebuilds the value dictionary of the top-level `dedup` rule `name`: a new dictionary,
+    /// every row of its label re-coded into it (the old one lives on while an undo entry holds
+    /// a code of it). `false`: no such rule.
+    fn compression_rebuild_coded(&mut self, name: &str) -> bool {
+        let Some(rule) = self.compression.find_mut(name) else {
+            return false;
+        };
+        let Some(old) = rule.coded.as_ref() else {
+            return false;
+        };
+        rule.coded = Some(Arc::new(ValueDictionary::new(old.min_bytes())));
+        let (element, label) = (rule.element, rule.label.clone());
+        self.compression_normalize_label(element, &label, true);
+        if let Some(dictionary) = self.compression.find(name).and_then(|r| r.coded.as_ref()) {
+            dictionary.mark_rebuilt();
+        }
+        self.compression.sweep_layouts();
+        true
+    }
+
+    /// The end of an outermost unit (`rolled_back`: by a rollback): rebuilds the value
+    /// dictionaries that grew past their threshold (module docs), after a rollback every one
+    /// that grew at all.
+    pub(crate) fn compression_after_unit(&mut self, rolled_back: bool) {
+        if !self.compression.has_coded() {
+            return;
+        }
+        let mut due: Vec<CompactString> = Vec::new();
+        for (rule, dictionary) in self.compression.coded_rules() {
+            let (appended, live) = dictionary.growth();
+            if appended == 0 {
+                continue;
+            }
+            // The entries now against max(256, twice the entries at the last rebuild, the
+            // label's elements / 8): the garbage stays bounded by the live entries and an
+            // eighth of the elements, and a rebuild (a walk of the label) is paid by at least
+            // that many new entries.
+            let elements = match rule.element {
+                ElementKind::Vertex => self.statistics.vertex_label_count(&rule.label),
+                ElementKind::Edge => self.statistics.edge_label_count(&rule.label),
+            };
+            let rebuild = rolled_back || live + appended >= (2 * live).max(256).max(elements / 8);
+            if rebuild {
+                due.push(rule.name.clone());
+            }
+        }
+        for name in due {
+            self.compression_rebuild_coded(&name);
+        }
+    }
+
+    /// After a write outside every unit (a direct trait call, a replay): the dictionaries are
+    /// checked as at the end of a unit (inside a unit the end of the outermost one does it).
+    #[inline]
+    pub(crate) fn compression_after_write(&mut self) {
+        if self.compression.has_coded() && self.undo_depth() == 0 {
+            self.compression_after_unit(false);
+        }
+    }
+
+    /// Rebuilds every value dictionary that grew since its last rebuild (`shrink_to_fit`).
+    pub(crate) fn compression_rebuild_grown(&mut self) {
+        let due: Vec<CompactString> = self
+            .compression
+            .coded_rules()
+            .filter(|(_, dictionary)| dictionary.growth().0 > 0)
+            .map(|(rule, _)| rule.name.clone())
+            .collect();
+        for name in due {
+            self.compression_rebuild_coded(&name);
+        }
+        self.compression.sweep_layouts();
     }
 
     /// Re-runs the pass of the compression rule `name`: rebuilds its dictionary from the
@@ -1406,6 +2589,10 @@ impl TraversalGraph {
             return false;
         };
         let (element, label) = (rule.element, rule.label.clone());
+        if rule.coded.is_some() {
+            // A value dictionary is rebuilt from what the label's rows hold.
+            return self.compression_rebuild_coded(name);
+        }
         self.compression_build_dictionary(name);
         self.compression_normalize_label(element, &label, true);
         // A dedup table keeps only what the label's values reference.
@@ -1415,12 +2602,42 @@ impl TraversalGraph {
         true
     }
 
-    /// How many entries the table of the `dedup` rule `name` holds, live or not yet swept
-    /// (`None`: no such rule, or not a dedup rule). A test helper.
+    /// How many entries the table (nested path) or value dictionary (top-level key) of the
+    /// `dedup` rule `name` holds, live or not yet swept or rebuilt (`None`: no such rule, or not
+    /// a dedup rule). A test helper.
     #[doc(hidden)]
     pub fn dedup_table_len(&self, name: &str) -> Option<usize> {
-        let table = self.compression.find(name)?.dedup.as_ref()?;
+        let rule = self.compression.find(name)?;
+        if let Some(dictionary) = rule.coded.as_ref() {
+            return Some(dictionary.len());
+        }
+        let table = rule.dedup.as_ref()?;
         Some(table.lock().len())
+    }
+
+    /// Whether the top-level property `key` of the element `id` is stored coded (its row holds a
+    /// code of a `dedup` rule's value dictionary). A test helper.
+    #[doc(hidden)]
+    pub fn is_dedup_coded(&self, element: ElementKind, id: &str, key: &str) -> bool {
+        let properties = match element {
+            ElementKind::Vertex => self
+                .index
+                .get_node(&self.graph, id)
+                .and_then(|handle| self.vertex_weight(handle))
+                .map(|vertex| &vertex.2),
+            ElementKind::Edge => self
+                .index
+                .get_edge(&self.graph, id)
+                .and_then(|handle| self.edge_weight(handle))
+                .and_then(|edge| edge.2.as_ref()),
+        };
+        properties
+            .and_then(PropertyMap::coded)
+            .and_then(|coded| {
+                let position = coded.layout.shape.position(key)?;
+                coded.layout.coded_at(position)
+            })
+            .is_some()
     }
 
     /// What the compression rule `name` holds right now (`None`: no such rule): the compressed
@@ -1432,21 +2649,45 @@ impl TraversalGraph {
             ..CompressionStats::default()
         };
         let mut seen: HashSet<*const u8> = HashSet::new();
-        let mut count = |properties: &PropertyMap| match value_at(properties, &rule.path) {
-            Some(ElementProperty::Compressed(text)) => {
-                stats.compressed_values += 1;
-                stats.plain_bytes += text.plain_len() as u64;
-                stats.stored_bytes += text.stored_len() as u64;
-            }
-            Some(ElementProperty::Deduped(text)) => {
-                stats.compressed_values += 1;
-                stats.plain_bytes += text.len() as u64;
-                if seen.insert(Arc::as_ptr(text.shared()).cast::<u8>()) {
-                    stats.distinct_values += 1;
-                    stats.stored_bytes += (text.len() + DEDUP_ENTRY_OVERHEAD) as u64;
+        let mut codes: HashSet<u32> = HashSet::new();
+        let coded_key = rule.coded.as_ref().zip(rule.path.first());
+        let mut count = |properties: &PropertyMap| {
+            if let Some((dictionary, key)) = coded_key {
+                // A coded key: each value costs its code, each distinct one its entry.
+                if let Some(coded) = properties.coded()
+                    && let Some(position) = coded.layout.shape.position(key)
+                    && let Some((at, used)) = coded.layout.coded_at(position)
+                    && Arc::ptr_eq(used, dictionary)
+                    && let Some(&code) = coded.codes.get(at)
+                    && let Some(value) = dictionary.get(code)
+                {
+                    let heap = coded_heap(value);
+                    stats.compressed_values += 1;
+                    stats.plain_bytes += plain_slot_bytes() + heap;
+                    stats.stored_bytes += CODE_BYTES;
+                    if codes.insert(code) {
+                        stats.distinct_values += 1;
+                        stats.stored_bytes += DICTIONARY_ENTRY_BYTES + heap;
+                    }
                 }
+                return;
             }
-            _ => {}
+            match value_at(properties, &rule.path) {
+                Some(ElementProperty::Compressed(text)) => {
+                    stats.compressed_values += 1;
+                    stats.plain_bytes += text.plain_len() as u64;
+                    stats.stored_bytes += text.stored_len() as u64;
+                }
+                Some(ElementProperty::Deduped(text)) => {
+                    stats.compressed_values += 1;
+                    stats.plain_bytes += text.len() as u64;
+                    if seen.insert(Arc::as_ptr(text.shared()).cast::<u8>()) {
+                        stats.distinct_values += 1;
+                        stats.stored_bytes += (text.len() + DEDUP_ENTRY_OVERHEAD) as u64;
+                    }
+                }
+                _ => {}
+            }
         };
         match rule.element {
             ElementKind::Vertex => {
@@ -1524,12 +2765,23 @@ impl TraversalGraph {
                 format!("{} '{id}', property '{key}': {reason}", element.as_str())
             })?;
         }
+        if let Some(reason) = self.compression.coding_problem(element, labels, properties) {
+            return Err(format!("{} '{id}': {reason}", element.as_str()));
+        }
         Ok(())
     }
 }
 
 fn check_value(value: &ElementProperty, rules: &[(&[CompactString], &Rule)]) -> Result<(), String> {
     if let Some((_, rule)) = rules.iter().find(|(rest, _)| rest.is_empty()) {
+        if rule.codec == Codec::Dedup && rule.coded.is_some() {
+            // A coded key holds plain values (coded or own: `coding_problem`).
+            return if value.holds_compressed() {
+                Err("a compressed or shared value at a coded key".to_string())
+            } else {
+                Ok(())
+            };
+        }
         if rule.codec == Codec::Dedup {
             return check_dedup_value(value, rule);
         }
@@ -1675,9 +2927,201 @@ impl Definition {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// How many target walks ran on this thread (tests: a batch of rules is one walk).
+    static TARGET_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::GraphStorage;
+
+    #[test]
+    fn a_set_of_rules_is_applied_in_one_walk_inside_one_unit() {
+        let mut graph = TraversalGraph::new();
+        for i in 0..20i64 {
+            let mut props = PropertyMap::default();
+            props.insert("kind", ElementProperty::from(i % 3));
+            props.insert("state", ElementProperty::from("open"));
+            let labels = if i % 2 == 0 {
+                vec!["a".into(), "b".into()]
+            } else {
+                vec!["b".into()]
+            };
+            graph
+                .insert_vertex(Some(format!("v{i}").into()), labels, props)
+                .unwrap();
+        }
+        for i in 0..10i64 {
+            let mut props = PropertyMap::default();
+            props.insert("w", ElementProperty::from(i % 2));
+            graph
+                .add_edge_by_ids(
+                    Some(format!("e{i}").into()),
+                    Some("rel".into()),
+                    &format!("v{i}"),
+                    &format!("v{}", i + 1),
+                    props,
+                )
+                .unwrap();
+        }
+        let dedup = |element, label: &str, key: &str| {
+            CompressionDefinition::new(element, label, key)
+                .unwrap()
+                .with_codec(Codec::Dedup)
+        };
+        let rules = vec![
+            Definition::compression("a_kind", dedup(ElementKind::Vertex, "a", "kind")),
+            Definition::compression("b_state", dedup(ElementKind::Vertex, "b", "state")),
+            Definition::compression("rel_w", dedup(ElementKind::Edge, "rel", "w")),
+        ];
+        let before = TARGET_WALKS.with(std::cell::Cell::get);
+        let mark = graph.begin_unit().unwrap();
+        graph.set_definitions_recorded(rules).unwrap();
+        graph.commit_unit(mark).unwrap();
+        assert_eq!(TARGET_WALKS.with(std::cell::Cell::get), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(
+            !graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"),
+            "v1 is not an a"
+        );
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        assert!(graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
+        // A failing rule in the set: the ones before it are rolled back with the unit.
+        let mark = graph.begin_unit().unwrap();
+        let bad = vec![
+            Definition::compression("b_kind", dedup(ElementKind::Vertex, "b", "kind")),
+            Definition::compression("again", dedup(ElementKind::Vertex, "a", "kind")),
+        ];
+        assert!(graph.set_definitions_recorded(bad).is_err());
+        graph
+            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+            .unwrap();
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "b_kind")
+                .is_none()
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"));
+    }
+
+    /// 20 vertices (`a`+`b` or `b`, keys `kind`, `state`) and 10 `rel` edges (key `w`).
+    fn two_label_graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for i in 0..20i64 {
+            let mut props = PropertyMap::default();
+            props.insert("kind", ElementProperty::from(i % 3));
+            props.insert("state", ElementProperty::from("open"));
+            let labels = if i % 2 == 0 {
+                vec!["a".into(), "b".into()]
+            } else {
+                vec!["b".into()]
+            };
+            graph
+                .insert_vertex(Some(format!("v{i}").into()), labels, props)
+                .unwrap();
+        }
+        for i in 0..10i64 {
+            let mut props = PropertyMap::default();
+            props.insert("w", ElementProperty::from(i % 2));
+            graph
+                .add_edge_by_ids(
+                    Some(format!("e{i}").into()),
+                    Some("rel".into()),
+                    &format!("v{i}"),
+                    &format!("v{}", i + 1),
+                    props,
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    fn dedup_rule(element: ElementKind, label: &str, key: &str) -> CompressionDefinition {
+        CompressionDefinition::new(element, label, key)
+            .unwrap()
+            .with_codec(Codec::Dedup)
+    }
+
+    fn walks() -> usize {
+        TARGET_WALKS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn the_trait_batch_is_one_unit_one_walk_and_its_rollback_one_walk_too() {
+        let mut graph = two_label_graph();
+        let seq = graph.undo.last_commit_seq;
+        let rules = vec![
+            Definition::compression("a_kind", dedup_rule(ElementKind::Vertex, "a", "kind")),
+            Definition::compression("b_state", dedup_rule(ElementKind::Vertex, "b", "state")),
+            Definition::compression("rel_w", dedup_rule(ElementKind::Edge, "rel", "w")),
+        ];
+        let before = walks();
+        // Outside any unit: a unit of its own, one commit, one walk.
+        GraphStorage::set_definitions(&mut graph, rules).unwrap();
+        assert_eq!(walks(), before + 1);
+        assert_eq!(
+            graph.undo.last_commit_seq,
+            seq + 1,
+            "one commit for the list"
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
+
+        // The rollback of a batch re-encodes its labels in one walk as well.
+        let mark = graph.begin_unit().unwrap();
+        graph
+            .set_definitions_recorded(vec![
+                Definition::compression("a_state", dedup_rule(ElementKind::Vertex, "a", "state")),
+                Definition::compression("b_kind", dedup_rule(ElementKind::Vertex, "b", "kind")),
+            ])
+            .ok();
+        // `b_kind` conflicts with nothing, `a_state` neither: both stored, then undone.
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "b_kind")
+                .is_some()
+        );
+        let before = walks();
+        graph
+            .rollback_unit(mark, &crate::graph::RollbackReason::failed(&"test"))
+            .unwrap();
+        assert_eq!(
+            walks(),
+            before + 1,
+            "one walk for the rollback of the batch"
+        );
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "b_kind")
+                .is_none()
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+
+        // A refused rule in a trait batch: nothing stays, nothing is committed.
+        let seq = graph.undo.last_commit_seq;
+        let bad = vec![
+            Definition::compression("rel_x", dedup_rule(ElementKind::Edge, "rel", "x")),
+            Definition::compression("again", dedup_rule(ElementKind::Vertex, "a", "kind")),
+        ];
+        assert!(GraphStorage::set_definitions(&mut graph, bad).is_err());
+        assert!(
+            graph
+                .definitions
+                .get(DefinitionKind::COMPRESSION, "rel_x")
+                .is_none()
+        );
+        assert_eq!(graph.undo.last_commit_seq, seq);
+        graph.check_compression_invariant().unwrap();
+    }
 
     fn cv(seed: usize) -> String {
         let words = [

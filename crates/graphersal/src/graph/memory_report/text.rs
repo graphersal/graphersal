@@ -69,6 +69,32 @@ impl fmt::Display for MemoryReport {
         }
         writeln!(f, "Took {:.1} ms", self.elapsed_micros as f64 / 1000.0)?;
 
+        if !self.components.is_empty() {
+            writeln!(f, "\nProcess memory: where it goes")?;
+            let mut parts: Vec<_> = self.components.iter().collect();
+            parts.sort_by_key(|part| std::cmp::Reverse(part.bytes));
+            for part in parts {
+                writeln!(
+                    f,
+                    "  {:<22} {:>10}  {:<9}  {}",
+                    part.name,
+                    human(part.bytes),
+                    if part.exact { "exact" } else { "estimated" },
+                    part.detail.as_deref().unwrap_or("")
+                )?;
+            }
+            if let Some(unattributed) = self.unattributed_bytes() {
+                writeln!(
+                    f,
+                    "  {:<22} {}{:>10}  of {} tracked",
+                    "unattributed",
+                    if unattributed < 0 { "-" } else { "" },
+                    human(unattributed.unsigned_abs()),
+                    human(self.tracked_live_bytes.unwrap_or(0))
+                )?;
+            }
+        }
+
         writeln!(
             f,
             "\nLabels ({}{}): elements, slots, properties",
@@ -225,14 +251,6 @@ impl fmt::Display for MemoryReport {
                 human(totals.dedup_table_bytes),
                 human(totals.compression_dictionary_bytes)
             )?;
-            if let Some(unattributed) = self.unattributed_bytes() {
-                writeln!(
-                    f,
-                    "  process heap minus estimate: {}{}",
-                    if unattributed < 0 { "-" } else { "" },
-                    human(unattributed.unsigned_abs())
-                )?;
-            }
         }
         Ok(())
     }

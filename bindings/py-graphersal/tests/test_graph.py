@@ -569,6 +569,18 @@ def test_the_memory_report_shows_where_the_memory_goes():
     assert small["sampled"] is True
 
 
+def test_the_memory_report_says_where_the_process_memory_goes():
+    graph = graphersal.Graph()
+    report = graph.memory_report()
+    parts = {c["name"]: c for c in report["components"]}
+    assert parts["graph"]["bytes"] == report["estimated_total_bytes"]
+    assert parts["graph"]["exact"] is False
+    # The binding installs the tracking allocator: the script engine is counted exactly.
+    assert parts["script_engine"]["exact"] is True
+    assert report["attributed_bytes"] == sum(c["bytes"] for c in report["components"])
+    assert report["unattributed_bytes"] == report["tracked_live_bytes"] - report["attributed_bytes"]
+
+
 def test_the_memory_report_keeps_the_largest_rows_and_counts_the_rest():
     graph = graphersal.Graph()
     graph.execute('for i in 0..40 { g.add_v("L" + i).property("name", "n" + i).to_list(); }')

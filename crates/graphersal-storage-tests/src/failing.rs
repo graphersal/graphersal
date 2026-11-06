@@ -310,6 +310,10 @@ impl GraphStorage for Failing {
         GraphStorage::set_definition(&mut self.inner, definition)
     }
 
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        GraphStorage::set_definitions(&mut self.inner, definitions)
+    }
+
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.inner, kind, name)
     }

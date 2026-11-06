@@ -787,12 +787,16 @@ fn decode_chunks<T: Send>(
             .min(chunks.len());
         if workers > 1 {
             let per = chunks.len().div_ceil(workers);
+            let nested_indexed = super::codec::nested_indexed();
             let results: Vec<Result<Vec<T>, DecodeError>> = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunks
                     .chunks(per)
                     .map(|group| {
                         let decode = &decode;
-                        scope.spawn(move || group.iter().map(decode).collect::<Result<Vec<T>, _>>())
+                        scope.spawn(move || {
+                            super::codec::set_nested_indexed(nested_indexed);
+                            group.iter().map(decode).collect::<Result<Vec<T>, _>>()
+                        })
                     })
                     .collect();
                 handles

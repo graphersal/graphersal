@@ -35,12 +35,12 @@ use crate::graph::definition::Definition;
 use crate::graph::schema::GraphSchema;
 use crate::graph::system_journal::{Event, catalogue};
 use crate::graph::{GraphStorage, Mutation, TraversalGraph};
-use crate::persist::model_tar::{
-    self, ManifestBase, ManifestFile, ModelManifest, TarContent, TarFile, TarStream,
-};
 use crate::persist::{PersistError, StoreFailure};
 use crate::value::vector::embed::identity::{
     FAMILY, IDENTITY_ROLES, identity_digest, identity_text, parse_identity,
+};
+use crate::value::vector::embed::model_tar::{
+    self, ManifestBase, ManifestFile, ModelManifest, TarContent, TarFile, TarStream,
 };
 
 /// The `INTENT` operation of an interrupted model migration (format spec 11.1).

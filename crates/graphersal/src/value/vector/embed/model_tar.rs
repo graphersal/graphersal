@@ -10,12 +10,22 @@
 //!   compact JSON, keys in a fixed order, no time stamps), which lists every other file with its
 //!   role, size and SHA-256.
 //!
-//! The reader works on the blob in memory (`&[u8]`) and returns the files as slices of it (no
-//! copy, never extracting to disk). A blob is hostile input (it may come from a foreign store):
+//! [`TarReader`] reads a model tar as a stream, entry by entry, so the whole blob is never held
+//! in memory: the model load decodes the files while they stream, verify ([`scan_tar`]) hashes
+//! them. [`read_tar`] (tests only) applies the same checks to an archive in memory and is the
+//! reference the stream is tested against: same result, same error text. Nothing extracts to
+//! disk. A blob is hostile input (it may come from a foreign store):
 //! every header checksum is checked, sizes are bounded by the remaining bytes, names are
 //! validated, an unknown entry type, a duplicate or an unsorted name, more than
 //! [`MAX_MODEL_FILES`] files and a manifest that does not match the entries are refused. Nothing
 //! here panics. No dependency; builds for wasm32.
+//!
+//! It lives beside the models, not in `persist`: a Store writes and verifies model tars, the
+//! model load (`model2vec`) reads them, and either feature may come without the other (issue
+//! #24).
+
+// The writer and the stream check (`scan_tar`) serve a Store only.
+#![cfg_attr(not(feature = "persist"), allow(dead_code))]
 
 use std::borrow::Cow;
 use std::io::{self, Read};
@@ -35,7 +45,7 @@ pub(crate) const MAX_FILE_NAME_BYTES: usize = 40;
 /// The largest file: what eleven octal digits of a ustar size field hold (8 GiB - 1).
 pub(crate) const MAX_MODEL_FILE_BYTES: u64 = (8 << 30) - 1;
 /// The largest manifest.
-const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 /// The ustar block size.
 const BLOCK: usize = 512;
 /// The JSON nesting a manifest may use.
@@ -488,18 +498,16 @@ impl Read for TarStream {
 // ---------------------------------------------------------------------------------------------
 
 /// A model tar read from a blob in memory: its manifest and its files as slices of the blob.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct ModelTar<'a> {
     pub(crate) manifest: ModelManifest,
     files: Vec<(&'a str, &'a [u8])>,
 }
 
+#[cfg(test)]
 impl<'a> ModelTar<'a> {
     /// The bytes of the file `name`.
-    #[cfg_attr(
-        not(all(feature = "model2vec", not(target_arch = "wasm32"))),
-        allow(dead_code)
-    )]
     pub(crate) fn file(&self, name: &str) -> Option<&'a [u8]> {
         self.files
             .iter()
@@ -508,10 +516,6 @@ impl<'a> ModelTar<'a> {
     }
 
     /// The bytes of the file of `role` (exactly one in the manifest).
-    #[cfg_attr(
-        not(all(feature = "model2vec", not(target_arch = "wasm32"))),
-        allow(dead_code)
-    )]
     pub(crate) fn file_of(&self, role: &str) -> Option<&'a [u8]> {
         self.manifest
             .file_of(role)
@@ -544,8 +548,84 @@ fn octal(field: &[u8]) -> Option<u64> {
     Some(value)
 }
 
+/// Checks one ustar header `block` at byte `at` of the archive against the rules of the module
+/// docs; `previous` is the name of the entry before it and `count` the number of entries before
+/// it. Returns the entry's name and size. Shared by [`read_tar`] and [`TarReader`].
+fn entry_of<'b>(
+    block: &'b [u8; BLOCK],
+    at: u64,
+    previous: Option<&str>,
+    count: usize,
+) -> Result<(&'b str, u64), String> {
+    if octal(&block[148..156]) != Some(checksum(block)) {
+        return Err(format!("the header at byte {at} has a wrong checksum"));
+    }
+    if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
+        return Err(format!("the header at byte {at} is not a ustar header"));
+    }
+    if block[156] != b'0' {
+        return Err(format!(
+            "the entry at byte {at} is not a regular file (type {:?})",
+            block[156] as char
+        ));
+    }
+    if block[345] != 0 || block[157] != 0 {
+        return Err(format!(
+            "the entry at byte {at} has a prefix or a link name"
+        ));
+    }
+    let name_end = block[..100].iter().position(|b| *b == 0).unwrap_or(100);
+    let name = std::str::from_utf8(&block[..name_end])
+        .map_err(|_| format!("the entry name at byte {at} is not UTF-8"))?;
+    if !(is_model_file_name(name) || name == MODEL_MANIFEST) {
+        return Err(format!("the entry name {name:?} is not allowed"));
+    }
+    if let Some(last) = previous
+        && last.as_bytes() >= name.as_bytes()
+    {
+        return Err(format!(
+            "the entry {name:?} is a duplicate or out of order (after {last:?})"
+        ));
+    }
+    if count > MAX_MODEL_FILES {
+        return Err(format!(
+            "the archive holds more than {MAX_MODEL_FILES} files and a manifest"
+        ));
+    }
+    let size = octal(&block[124..136])
+        .filter(|size| *size <= MAX_MODEL_FILE_BYTES)
+        .ok_or_else(|| format!("the size of {name:?} is not valid"))?;
+    Ok((name, size))
+}
+
+/// Parses the manifest of an archive and checks that it lists exactly its other entries
+/// (`entries`: every entry's name and size in archive order, the manifest's included).
+fn manifest_of(manifest_bytes: &[u8], entries: &[(&str, u64)]) -> Result<ModelManifest, String> {
+    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("the manifest is too large".into());
+    }
+    let manifest = ModelManifest::parse(manifest_bytes)?;
+    let others: Vec<(&str, u64)> = entries
+        .iter()
+        .filter(|(name, _)| *name != MODEL_MANIFEST)
+        .copied()
+        .collect();
+    let mut listed: Vec<(&str, u64)> = manifest
+        .files
+        .iter()
+        .map(|f| (f.name.as_str(), f.size))
+        .collect();
+    listed.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    if listed != others {
+        return Err("the manifest does not list exactly the files of the archive".into());
+    }
+    Ok(manifest)
+}
+
 /// Reads the model tar `bytes` (see the module docs for every check). The error says what is
-/// wrong; a caller treats it as content damage of the model's blob.
+/// wrong; a caller treats it as content damage of the model's blob. The in-memory reference of
+/// [`TarReader`] and [`scan_tar`] (tests only).
+#[cfg(test)]
 pub(crate) fn read_tar(bytes: &[u8]) -> Result<ModelTar<'_>, String> {
     let mut at = 0usize;
     let mut files: Vec<(&str, &[u8])> = Vec::new();
@@ -567,44 +647,7 @@ pub(crate) fn read_tar(bytes: &[u8]) -> Result<ModelTar<'_>, String> {
             }
             break;
         }
-        if octal(&block[148..156]) != Some(checksum(block)) {
-            return Err(format!("the header at byte {at} has a wrong checksum"));
-        }
-        if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
-            return Err(format!("the header at byte {at} is not a ustar header"));
-        }
-        if block[156] != b'0' {
-            return Err(format!(
-                "the entry at byte {at} is not a regular file (type {:?})",
-                block[156] as char
-            ));
-        }
-        if block[345] != 0 || block[157] != 0 {
-            return Err(format!(
-                "the entry at byte {at} has a prefix or a link name"
-            ));
-        }
-        let name_end = block[..100].iter().position(|b| *b == 0).unwrap_or(100);
-        let name = std::str::from_utf8(&block[..name_end])
-            .map_err(|_| format!("the entry name at byte {at} is not UTF-8"))?;
-        if !(is_model_file_name(name) || name == MODEL_MANIFEST) {
-            return Err(format!("the entry name {name:?} is not allowed"));
-        }
-        if let Some((last, _)) = files.last()
-            && last.as_bytes() >= name.as_bytes()
-        {
-            return Err(format!(
-                "the entry {name:?} is a duplicate or out of order (after {last:?})"
-            ));
-        }
-        if files.len() > MAX_MODEL_FILES {
-            return Err(format!(
-                "the archive holds more than {MAX_MODEL_FILES} files and a manifest"
-            ));
-        }
-        let size = octal(&block[124..136])
-            .filter(|size| *size <= MAX_MODEL_FILE_BYTES)
-            .ok_or_else(|| format!("the size of {name:?} is not valid"))?;
+        let (name, size) = entry_of(block, at as u64, files.last().map(|f| f.0), files.len())?;
         let start = at + BLOCK;
         let end = usize::try_from(size)
             .ok()
@@ -622,26 +665,326 @@ pub(crate) fn read_tar(bytes: &[u8]) -> Result<ModelTar<'_>, String> {
         .find(|(name, _)| *name == MODEL_MANIFEST)
         .map(|(_, data)| *data)
         .ok_or("the archive holds no manifest")?;
-    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err("the manifest is too large".into());
-    }
-    let manifest = ModelManifest::parse(manifest_bytes)?;
-    let others: Vec<(&str, u64)> = files
+    let entries: Vec<(&str, u64)> = files
         .iter()
-        .filter(|(name, _)| *name != MODEL_MANIFEST)
         .map(|(name, data)| (*name, data.len() as u64))
         .collect();
-    let listed: Vec<(&str, u64)> = manifest
-        .files
-        .iter()
-        .map(|f| (f.name.as_str(), f.size))
-        .collect();
-    let mut listed_sorted = listed.clone();
-    listed_sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    if listed_sorted != others {
-        return Err("the manifest does not list exactly the files of the archive".into());
-    }
+    let manifest = manifest_of(manifest_bytes, &entries)?;
     Ok(ModelTar { manifest, files })
+}
+
+/// Why reading a model tar as a stream failed.
+#[derive(Debug)]
+// Verify (`persist`) only tells the variants apart; the model load reads the source's error.
+#[cfg_attr(
+    not(all(feature = "model2vec", not(target_arch = "wasm32"))),
+    allow(dead_code)
+)]
+pub(crate) enum TarStreamError {
+    /// The source failed (a read error, or the source's own check of its bytes: a damaged
+    /// blob).
+    Read(io::Error),
+    /// The archive breaks a rule of the module docs.
+    Invalid(String),
+}
+
+impl From<io::Error> for TarStreamError {
+    fn from(err: io::Error) -> Self {
+        TarStreamError::Read(err)
+    }
+}
+
+/// A model tar read as a stream, entry by entry, with the checks of [`read_tar`]: the model load
+/// reads its blob through it, so the whole archive is never held in memory. [`Self::next_entry`]
+/// moves to the next entry (skipping what is left of the current one); the reader itself
+/// ([`Read`]) yields the current entry's data and ends with it. [`Self::finish`] checks the end
+/// blocks and that the source holds nothing but zeros after them; the manifest's check against
+/// the entries is [`Self::check_manifest`].
+pub(crate) struct TarReader<R> {
+    reader: R,
+    /// Archive bytes consumed so far.
+    at: u64,
+    /// The current entry's data bytes not read yet.
+    remaining: u64,
+    /// The current entry's name (for messages).
+    current: String,
+    /// The padding after the current entry's data, still to skip.
+    padding: usize,
+    /// Every entry so far: name and size, in archive order.
+    entries: Vec<(String, u64)>,
+    /// The first end block was read.
+    ended: bool,
+}
+
+#[cfg_attr(
+    not(any(
+        feature = "persist",
+        all(feature = "model2vec", not(target_arch = "wasm32"))
+    )),
+    allow(dead_code)
+)]
+impl<R: Read> TarReader<R> {
+    /// The archive read from `reader`.
+    pub(crate) fn new(reader: R) -> Self {
+        TarReader {
+            reader,
+            at: 0,
+            remaining: 0,
+            current: String::new(),
+            padding: 0,
+            entries: Vec::new(),
+            ended: false,
+        }
+    }
+
+    /// Reads exactly `buf.len()` bytes; `Ok(false)` when the source ends first.
+    fn fill(&mut self, buf: &mut [u8]) -> Result<bool, TarStreamError> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.reader.read(&mut buf[filled..]) {
+                Ok(0) => {
+                    // The bytes read count: the archive's length is in a message.
+                    self.at += filled as u64;
+                    return Ok(false);
+                }
+                Ok(n) => filled += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(TarStreamError::Read(err)),
+            }
+        }
+        self.at += buf.len() as u64;
+        Ok(true)
+    }
+
+    /// Skips `n` bytes of the source; `Ok(false)` when it ends first.
+    fn skip(&mut self, mut n: u64) -> Result<bool, TarStreamError> {
+        let mut buf = [0u8; BLOCK];
+        while n > 0 {
+            let take = usize::try_from(n.min(BLOCK as u64)).unwrap_or(BLOCK);
+            if !self.fill(&mut buf[..take])? {
+                return Ok(false);
+            }
+            n -= take as u64;
+        }
+        Ok(true)
+    }
+
+    /// Moves to the next entry: its name and size, or `None` at the archive's end (the first
+    /// end block; [`Self::finish`] checks the rest).
+    pub(crate) fn next_entry(&mut self) -> Result<Option<(String, u64)>, TarStreamError> {
+        if self.ended {
+            return Ok(None);
+        }
+        let rest = self.remaining;
+        if !self.skip(rest)? {
+            return Err(TarStreamError::Invalid(format!(
+                "the file {:?} reaches past the end of the archive",
+                self.current
+            )));
+        }
+        self.remaining = 0;
+        let pad = self.padding as u64;
+        if !self.skip(pad)? {
+            return Err(TarStreamError::Invalid(format!(
+                "the padding of {:?} reaches past the end",
+                self.current
+            )));
+        }
+        self.padding = 0;
+        let at = self.at;
+        let mut block = [0u8; BLOCK];
+        if !self.fill(&mut block)? {
+            // `at` is now the archive's length, as `read_tar` names it.
+            return Err(TarStreamError::Invalid(format!(
+                "the archive ends at byte {} inside a header (no end blocks)",
+                self.at
+            )));
+        }
+        if block.iter().all(|b| *b == 0) {
+            self.ended = true;
+            return Ok(None);
+        }
+        let previous = self.entries.last().map(|(name, _)| name.as_str());
+        let (name, size) =
+            entry_of(&block, at, previous, self.entries.len()).map_err(TarStreamError::Invalid)?;
+        let name = name.to_string();
+        self.entries.push((name.clone(), size));
+        self.current.clone_from(&name);
+        self.remaining = size;
+        self.padding = padding(size);
+        Ok(Some((name, size)))
+    }
+
+    /// Reads the current entry's data whole (at most `max` bytes, else an error naming it).
+    pub(crate) fn read_entry(&mut self, max: u64) -> Result<Vec<u8>, TarStreamError> {
+        if self.remaining > max {
+            return Err(TarStreamError::Invalid(format!(
+                "the file {:?} is larger than {max} bytes",
+                self.current
+            )));
+        }
+        let size = usize::try_from(self.remaining).map_err(|_| {
+            TarStreamError::Invalid(format!("the file {:?} is too large", self.current))
+        })?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(size).map_err(|_| {
+            TarStreamError::Invalid(format!(
+                "the file {:?} does not fit in memory",
+                self.current
+            ))
+        })?;
+        data.resize(size, 0);
+        if !self.fill(&mut data)? {
+            return Err(TarStreamError::Invalid(format!(
+                "the file {:?} reaches past the end of the archive",
+                self.current
+            )));
+        }
+        self.remaining = 0;
+        Ok(data)
+    }
+
+    /// Checks the archive's end (after [`Self::next_entry`] returned `None`): the second zero
+    /// block, then nothing but zeros to the end of the source.
+    pub(crate) fn finish(&mut self) -> Result<(), TarStreamError> {
+        let end = || TarStreamError::Invalid("the archive's end is not two zero blocks".into());
+        if !self.ended {
+            return Err(end());
+        }
+        let mut block = [0u8; BLOCK];
+        if !self.fill(&mut block)? || block.iter().any(|b| *b != 0) {
+            return Err(end());
+        }
+        loop {
+            match self.reader.read(&mut block) {
+                Ok(0) => return Ok(()),
+                Ok(n) if block[..n].iter().all(|b| *b == 0) => self.at += n as u64,
+                Ok(_) => return Err(end()),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(TarStreamError::Read(err)),
+            }
+        }
+    }
+
+    /// Reads the rest of the source and drops it: a source that checks its bytes at its end (a
+    /// blob's length and checksum) reports its damage here.
+    pub(crate) fn drain(&mut self) -> io::Result<()> {
+        io::copy(&mut self.reader, &mut io::sink()).map(|_| ())
+    }
+
+    /// Parses the manifest `bytes` (the entry [`MODEL_MANIFEST`], read whole) and checks it
+    /// against every entry of the archive: call it after [`Self::finish`].
+    pub(crate) fn check_manifest(&self, bytes: &[u8]) -> Result<ModelManifest, String> {
+        let entries: Vec<(&str, u64)> = self
+            .entries
+            .iter()
+            .map(|(name, size)| (name.as_str(), *size))
+            .collect();
+        manifest_of(bytes, &entries)
+    }
+
+    /// The SHA-256 (hex) of the current entry's data, read through a buffer of [`SCAN_CHUNK`]
+    /// bytes (the entry is never held whole).
+    fn hash_entry(&mut self) -> Result<String, TarStreamError> {
+        let mut hash = Sha256::new();
+        let mut buf = vec![0u8; SCAN_CHUNK];
+        while self.remaining > 0 {
+            let take = usize::try_from(self.remaining.min(SCAN_CHUNK as u64)).unwrap_or(SCAN_CHUNK);
+            if !self.fill(&mut buf[..take])? {
+                return Err(TarStreamError::Invalid(format!(
+                    "the file {:?} reaches past the end of the archive",
+                    self.current
+                )));
+            }
+            hash.update(&buf[..take]);
+            self.remaining -= take as u64;
+        }
+        Ok(hex(&hash.finish()))
+    }
+}
+
+/// The buffer [`scan_tar`] reads an entry's data through.
+const SCAN_CHUNK: usize = 64 * 1024;
+
+/// A model tar checked as a stream by [`scan_tar`].
+#[derive(Debug)]
+pub(crate) struct ScannedTar {
+    /// The manifest, checked against the entries.
+    pub(crate) manifest: ModelManifest,
+    /// Every entry's name and the SHA-256 (hex) of its data, in archive order (the manifest's
+    /// included).
+    pub(crate) hashes: Vec<(String, String)>,
+}
+
+/// Reads the model tar of `reader` to its end with every check of [`read_tar`] (same error
+/// texts, same order), hashing each entry while it streams: what `Store::verify` checks a
+/// model blob with, holding at most the manifest and one buffer of [`SCAN_CHUNK`] bytes. The
+/// source is always read to its end (a source that checks its bytes there, a blob's length and
+/// CRC-32C, reports its damage): when it fails after the archive broke a rule, the source's
+/// failure is returned ([`TarStreamError::Read`]), as the damage of the blob wins.
+pub(crate) fn scan_tar<R: Read>(reader: R) -> Result<ScannedTar, TarStreamError> {
+    let mut tar = TarReader::new(reader);
+    match scan_entries(&mut tar) {
+        Ok(scanned) => Ok(scanned),
+        Err(TarStreamError::Invalid(reason)) => match tar.drain() {
+            Err(err) => Err(TarStreamError::Read(err)),
+            Ok(()) => Err(TarStreamError::Invalid(reason)),
+        },
+        Err(err) => Err(err),
+    }
+}
+
+/// The walk of [`scan_tar`].
+fn scan_entries<R: Read>(tar: &mut TarReader<R>) -> Result<ScannedTar, TarStreamError> {
+    let mut hashes = Vec::new();
+    // The manifest's bytes; `None` inside: it is larger than `read_tar` accepts.
+    let mut manifest: Option<Option<Vec<u8>>> = None;
+    while let Some((name, size)) = tar.next_entry()? {
+        if name == MODEL_MANIFEST && size <= MAX_MANIFEST_BYTES {
+            let bytes = tar.read_entry(MAX_MANIFEST_BYTES)?;
+            hashes.push((name, sha256_hex(&bytes)));
+            manifest = Some(Some(bytes));
+        } else {
+            if name == MODEL_MANIFEST {
+                manifest = Some(None);
+            }
+            let hash = tar.hash_entry()?;
+            hashes.push((name, hash));
+        }
+    }
+    tar.finish()?;
+    let invalid = |reason: &str| TarStreamError::Invalid(reason.to_string());
+    let bytes = manifest
+        .ok_or_else(|| invalid("the archive holds no manifest"))?
+        .ok_or_else(|| invalid("the manifest is too large"))?;
+    let manifest = tar
+        .check_manifest(&bytes)
+        .map_err(TarStreamError::Invalid)?;
+    Ok(ScannedTar { manifest, hashes })
+}
+
+impl<R: Read> Read for TarReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = buf
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let n = self.reader.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "the file {:?} reaches past the end of the archive",
+                    self.current
+                ),
+            ));
+        }
+        self.remaining -= n as u64;
+        self.at += n as u64;
+        Ok(n)
+    }
 }
 
 /// The SHA-256 (hex) of `bytes`.
@@ -830,6 +1173,66 @@ mod tests {
         block[148..156].copy_from_slice(sum.as_bytes());
         big[..BLOCK].copy_from_slice(&block);
         assert!(read_tar(&big).unwrap_err().contains("past the end"));
+    }
+
+    /// `scan_tar` on `bytes`: its error text, or the manifest and hashes `read_tar` gives.
+    fn scan_matches_read(bytes: &[u8], what: &str) {
+        let scanned = scan_tar(bytes);
+        match (read_tar(bytes), scanned) {
+            (Ok(tar), Ok(scanned)) => {
+                assert_eq!(scanned.manifest, tar.manifest, "{what}");
+                let hashes: Vec<(String, String)> = tar
+                    .files()
+                    .map(|(name, data)| (name.to_string(), sha256_hex(data)))
+                    .collect();
+                assert_eq!(scanned.hashes, hashes, "{what}");
+            }
+            (Err(expected), Err(TarStreamError::Invalid(found))) => {
+                assert_eq!(found, expected, "{what}")
+            }
+            (expected, found) => panic!("{what}: {expected:?} but {found:?}"),
+        }
+    }
+
+    #[test]
+    fn the_stream_scan_refuses_what_read_tar_refuses_with_its_text() {
+        let good = tar_of(&FILES);
+        scan_matches_read(&good, "good");
+        for at in 0..good.len() {
+            let mut bad = good.clone();
+            bad[at] ^= 0x41;
+            scan_matches_read(&bad, &format!("byte {at}"));
+        }
+        for cut in 0..good.len() {
+            scan_matches_read(&good[..cut], &format!("cut at {cut}"));
+        }
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "duplicate",
+                raw_tar(&[("a.txt", b'0', b"1"), ("a.txt", b'0', b"2")]),
+            ),
+            (
+                "unsorted",
+                raw_tar(&[("b.txt", b'0', b"1"), ("a.txt", b'0', b"2")]),
+            ),
+            ("link", raw_tar(&[("a.txt", b'2', b"")])),
+            ("pax", raw_tar(&[("a.txt", b'x', b"")])),
+            ("path", raw_tar(&[("a/b", b'0', b"1")])),
+            ("no manifest", raw_tar(&[("a.txt", b'0', b"1")])),
+            ("junk after the end", {
+                let mut t = raw_tar(&[("a.txt", b'0', b"1")]);
+                t.push(1);
+                t
+            }),
+            ("half a header", {
+                let mut t = raw_tar(&[("a.txt", b'0', b"1")]);
+                t.truncate(2 * BLOCK + 100);
+                t
+            }),
+        ];
+        for (what, tar) in cases {
+            scan_matches_read(&tar, what);
+        }
     }
 
     #[test]

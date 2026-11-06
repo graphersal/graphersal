@@ -191,6 +191,7 @@
   - [date_trunc](traversal/steps/date_trunc.md)
   - [dedup](traversal/steps/dedup.md)
   - [define_compression](traversal/steps/define_compression.md)
+  - [define_compressions](traversal/steps/define_compressions.md)
   - [define_job](traversal/steps/define_job.md)
   - [define_queries](traversal/steps/define_queries.md)
   - [define_query](traversal/steps/define_query.md)

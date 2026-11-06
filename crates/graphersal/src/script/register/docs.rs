@@ -335,6 +335,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "define_compression":
         "Stores (or replaces) a compression rule #{name, label, path, element, codec, min_bytes, dictionary}: strings at that path are kept compressed in memory (codec \"lz4\") or stored once per distinct value (codec \"dedup\") and read plain (see the book page Compressed Properties).",
         "{ g.define_compression(#{name: \"n\", label: \"person\", path: \"name\"}); g.compressions().len() }" => "1";
+    "traversal" "define_compressions":
+        "Stores a list of compression rules in one commit and re-encodes their labels in one walk: each item a define_compression map, or #{label, paths: [..], codec, ..} for one rule per path named <label>_<path>; all or nothing, answers the number of rules stored (see the book page Compressed Properties).",
+        "{ g.define_compressions([#{label: \"person\", paths: [\"name\", \"age\"], codec: \"dedup\"}, #{name: \"sw_lang\", label: \"software\", path: \"lang\", codec: \"dedup\"}]); g.compressions().map(|r| r.name) }" => "[\"person_age\", \"person_name\", \"sw_lang\"]";
     "traversal" "define_queries":
         "Stores every function of a Rhai source as a saved query in a folder, described by its doc comment; params maps function name -> its parameter map (see the book page Saved Queries).",
         "{ g.define_queries(\"reports\", \"/** Persons. */ fn people() { g.v().has_label(\\\"person\\\") }\"); g.query(\"people\").count().next() }" => "4";
@@ -550,7 +553,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Yields the median of the numbers in the stream.",
         "g.v().values(\"age\").median().next()" => "30.5";
     "traversal" "memory_report":
-        "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted).",
+        "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots, and where the whole process memory goes (components: the graph, embedding models, the script engine, stores, the host's parts); #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted).",
         "g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)" => "[4, 2]";
     "traversal" "memory_usage":
         "Returns the graph's own memory footprint in bytes (structure, indexes, properties), with its workload statistics and loaded embedding models beside the total (workload_bytes, model_bytes).",

@@ -364,7 +364,7 @@ pub(crate) fn run_tool(
         }
         "statistics" => {
             Ok(compact(&context.host.add_process_statistics(
-                context.call(|s| s.statistics())??,
+                context.call(|s| s.statistics_with_process())??,
             )))
         }
         "workload_statistics" => {
@@ -430,6 +430,30 @@ pub(crate) fn run_tool(
                 compact(&answer)
             ))
         }
+        "apply_recommendations" => {
+            let ids: Vec<String> = args
+                .get("ids")
+                .and_then(Value::as_array)
+                .and_then(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or("missing argument \"ids\" (a list of recommendation ids from advise)")?;
+            let spec = json!({"everything": args.get("everything").and_then(Value::as_bool).unwrap_or(false)});
+            let answer = context.call(move |s| s.apply_recommendations(&ids, &spec))?;
+            if answer["ok"] == json!(true) {
+                Ok(format!(
+                    "Applied in one commit (memory_bytes: freed, negative = taken):\n{}",
+                    compact(&answer)
+                ))
+            } else {
+                Err(format!(
+                    "Nothing was applied:\n{}",
+                    answer["error"].as_str().unwrap_or_default()
+                ))
+            }
+        }
         "list_jobs" => Ok(format!(
             "Scheduled jobs (times in microseconds since the Unix epoch):\n{}",
             compact(&context.call(|s| s.jobs_view())??)
@@ -447,8 +471,8 @@ pub(crate) fn run_tool(
             let answer = context.call(move |s| s.memory_report(&spec))?;
             if answer["ok"] == json!(true) {
                 Ok(format!(
-                    "Memory report (the graph was not changed; bytes are estimates, rows sorted \
-                     by bytes):\n{}",
+                    "Memory report (the graph was not changed; row bytes are estimates, rows \
+                     sorted by bytes; components say which process figures are exact):\n{}",
                     compact(&answer["report"])
                 ))
             } else {

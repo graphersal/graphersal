@@ -452,6 +452,56 @@ fn has_catalog<S: GraphStorage>(storage: &mut S) -> bool {
     supported
 }
 
+/// `set_definitions` stores a list in order exactly like one `set_definition` per item (a name
+/// given twice: the last one wins); a refused item fails the call with its error, and inside a
+/// unit an atomic storage's rollback keeps nothing of the list. Needs a catalog and `atomic`.
+pub fn a_definition_list_is_stored_like_single_calls<S: GraphStorage>(storage: &mut S) {
+    if !storage.capabilities().unwrap().atomic || !has_catalog(storage) {
+        return;
+    }
+    let before = catalog(storage);
+    let replaced = Definition::query("listed_x", QueryDefinition::new("fn listed_x() { 2 }"));
+    storage
+        .set_definitions(vec![
+            sample_query("listed_x"),
+            sample_query("listed_y"),
+            replaced.clone(),
+        ])
+        .expect("a valid list is stored");
+    assert_eq!(
+        storage
+            .definition(DefinitionKind::QUERY, "listed_x")
+            .unwrap(),
+        Some(&replaced),
+        "the last definition of a name wins"
+    );
+    assert!(
+        storage
+            .definition(DefinitionKind::QUERY, "listed_y")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(catalog(storage).len(), before.len() + 2);
+    let stored = catalog(storage);
+    let mark = storage.begin_unit().unwrap();
+    let refused = storage.set_definitions(vec![
+        sample_query("listed_z"),
+        Definition::query("not valid", QueryDefinition::new("fn x() {}")),
+    ]);
+    assert!(
+        matches!(refused, Err(GraphError::Definition(_))),
+        "a refused item fails the list: {refused:?}"
+    );
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_eq!(
+        catalog(storage),
+        stored,
+        "the rollback keeps nothing of the list"
+    );
+}
+
 /// `atomic` with a catalog: rolling a unit back restores the catalog (a stored, a replaced and
 /// a removed definition); a savepoint undoes only its own change; `unit_changes` reports a
 /// catalog change as `definitions`, not as data or schema.

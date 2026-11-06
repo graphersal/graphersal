@@ -47,6 +47,14 @@ impl Read for CountingReader {
     }
 }
 
+/// The tokenizer of the fake model: a word-level vocabulary of two tokens, so the model loads
+/// (with `graphersal/model2vec` on, which Cargo's feature unification does when this crate is
+/// tested in one command with `graphersal-cli`, the import checks that it does).
+const TOKENIZER: &str = r#"{"version": "1.0", "truncation": null, "padding": null,
+    "added_tokens": [], "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+    "post_processor": null, "decoder": null,
+    "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "graph": 1}, "unk_token": "[UNK]"}}"#;
+
 impl StoreDir for Counting {
     fn location(&self) -> String {
         self.inner.location()
@@ -209,7 +217,7 @@ fn fill(store: &Store) {
                     .with_file(
                         "tokenizer.json",
                         ModelRole::Tokenizer,
-                        Cursor::new(vec![1; 50]),
+                        Cursor::new(TOKENIZER.as_bytes().to_vec()),
                     )
                     .with_file(
                         "model.safetensors",

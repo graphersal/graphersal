@@ -572,6 +572,8 @@ The list is the same on every `--graph` source; there are no persistence tools:
 | `run_saved_query` `{name, params?, offset?, max_rows?, max_items?}` | Runs `g.query(name, #{..})` like `query` (paged answer, the call text on its first line): the arguments are checked against the parameter schemas, omitted ones take their default, a wrong one is a tool error with its `Help:` line. A query that writes changes only its effects, as one transaction; with `--mcp-read-only` it is refused |
 | `workload_statistics` | The [workload statistics](workload_statistics.md) of a Store's graph: queries by normalized plan, property uses, lock times and jobs per channel (`max_rows` per list, default 50; `history`: `minutes`, `hours` or `days` adds every row's buckets; also in read-only mode) |
 | `list_jobs` | The [scheduled jobs](scheduled_jobs.md) of a Store's graph: system jobs and jobs of users with schedule, switch, next time, last run, run counts, a user job's action and effects (reading; also in read-only mode; defining and changing jobs stays the user's) |
+| `advise` `{everything?}` | The [storage advisor](optimize.md)'s recommendations, each with its command, and their `groups` (`dedup: 74 keys, total -400.1 MiB` with the ids); changes nothing (also in read-only mode) |
+| `apply_recommendations` `{ids, everything?}` | Applies the recommendations the user picked (ids from `advise`) in ONE commit, all new compression rules in one pass over the data; all or nothing (an id no longer advised or a refused change applies nothing); refused in read-only mode |
 | `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`, `answerLimitChars`) |
 
 ### Answer size and paging
@@ -690,9 +692,11 @@ own colour). Ask, for example, *"Who does marko know?"* or *"Which software was 
 than one person?"*. The transcript shows:
 
 - your messages and the agent's answers (Markdown: tables, lists, code);
-- per question, the steps that led to the answer in ONE collapsed group above it (e.g. "Worked:
-  2 tool calls (list_saved_queries, query)", "Working: running query" while the turn runs,
-  "Stopped after 1 tool call: list_saved_queries" when it failed); opened, it lists the agent's
+- per question, the steps that led to the answer in ONE collapsed group above it, with the time
+  the turn took (e.g. "Worked for 34 s: 2 tool calls (list_saved_queries, query)", "Working for
+  12 s: running query" while the turn runs, counting up every second, "Stopped after 5 s and 1
+  tool call: list_saved_queries" when it failed; a turn without tool calls shows "Working for
+  3 s…" at the bottom instead); opened, it lists the agent's
   interim texts and every tool call in order, each collapsible with its arguments, a result
   summary and the result text; a `query` call has **Open in a query tab** and **Run**;
 - a query the agent proposes in its answer (a fenced block) with **Copy** and **Run** (Run opens
@@ -715,9 +719,10 @@ conversation. Conversations live in the server's memory only (at most 64; a rest
 
 **Export ▾** in the chat's header downloads the transcript of this chat tab as a file named after
 the tab and the time (`graphersal-chat-2-20261027-090507.md`): **Markdown (.md)** (a title, the
-export time, model, server and graph, then per turn your question, the steps with each tool call's
-arguments as a JSON block, its result summary and result text, the answer as the model wrote it,
-errors with their help and the timing line) or **JSON (.json)** (`{"format":
+export time, model, server and graph, then per turn your question, the final answer as the model
+wrote it, errors with their help and one line with the time the turn took and its number of tool
+calls, e.g. `_Answered in 34 s · 5 tool calls_`; the steps, i.e. the interim texts and the tool
+calls with their arguments and results, are left out, the time when the server did not report it) or **JSON (.json)** (`{"format":
 "graphersal-ai-chat", "version": 1, "exportedAt", "meta": {chat, provider, model, readOnly,
 server, graph}, "preamble": [...], "turns": [{question, state, steps, answer, tail, done,
 timing}]}`, where `steps` are `{type: "text", text}` and `{type: "tool", id, name, args, ok,
@@ -725,8 +730,7 @@ summary, result, resultTruncated}`, `tail` holds `error {message, help}`, `notic
 {text}` and `stopped`, and `done` the turn's figures `elapsedMs`, `toolMs`, `llmCalls`,
 `inputTokens`, `outputTokens`, `cachedTokens`, `toolCalls`, `limitReached`, `stopped`). It holds
 what the page holds: a transcript restored after a reload keeps the newest 300 items and each tool
-result text shortened to 2000 characters (marked "shortened" in Markdown, `resultTruncated` in
-JSON).
+result text shortened to 2000 characters (`resultTruncated` in JSON).
 
 When the agent changes the graph, the page reloads it like after an MCP change: the change feed
 names the client `ai` (with the conversation id), and the other tabs' results are marked
@@ -960,7 +964,7 @@ keys); the table below and the linked pages describe every answer.
 | `POST /api/indexes/create` `{label, key, element?, name?, type?, transform?}` | `createIndex(spec)`: `{ok: true, index}` or `{ok: false, errors: [{field, message, help?}]}` (always 200; `field` is `name`, `element`, `label`, `key`, `type`, `transform` or `general`; an unknown `type` is an error of `type`, an unknown `transform` of `transform`, a key the schema declares as values the index cannot hold one of `key`); `name` defaults to `<label>_<key>` (`<label>_<key>_edge` for an edge index, then `_to_lower` with that transform), `type` to `memory-ordered`, `transform` to none (`"to_lower"`: case-insensitive search with `has(key, __.to_lower().is(..))`); an existing name is refused (drop it first) |
 | `POST /api/indexes/drop` `{name}` | `dropIndex(name)`: `{dropped}` |
 | `POST /api/memory/report` (a spec `{sample_every?, max_elements?, limit?, max_rows?, max_labels?}`, `{}`: a full walk, at most 500 rows per list) | `memoryReport(spec)`: the [memory report](../users_guide/memory_and_profiling.md), `{ok, report}` or `{ok: false, error}` |
-| `POST /api/advise` (thresholds, `{}`: the defaults), `POST /api/advise/apply` `{id, spec}`, `POST /api/advise/dismiss` `{id, days?}`, `POST /api/advise/restore` `{id}` | `advise(spec)`, `applyRecommendation(id, spec)`, `dismissRecommendation(id, days)`, `restoreRecommendation(id)`: the [storage advisor](optimize.md) |
+| `POST /api/advise` (thresholds, `{}`: the defaults), `POST /api/advise/apply` `{id, spec}` or `{ids, spec}` (several in one commit), `POST /api/advise/dismiss` `{id, days?}`, `POST /api/advise/restore` `{id}` | `advise(spec)`, `applyRecommendation(id, spec)`, `applyRecommendations(ids, spec)`, `dismissRecommendation(id, days)`, `restoreRecommendation(id)`: the [storage advisor](optimize.md) |
 | `GET /openapi.json`, `GET /api/openapi.json` | the OpenAPI description of this API, with this server's version |
 
 A `target` is `{"commit": N}`, `{"mark": "name"}` or `{"time": T}` with `T` an RFC 3339 date-time

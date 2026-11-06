@@ -586,6 +586,12 @@ without text queries.
 - **Layouts** an import reads: `config.json`, `tokenizer.json` and `model.safetensors` in the
   directory (the Model2Vec layout), or `config_sentence_transformers.json` beside them or beside
   a `0_StaticEmbedding` directory holding them (the sentence-transformers layout).
+- **Tokenizer**: a tokenizer with a Unigram model (the potion models) runs on Graphersal's
+  compact Unigram model, built from `tokenizer.json` when the model loads (flat arrays: about
+  25 MiB for the 500 000 tokens of `potion-multilingual-128M`, where the `tokenizers` crate's
+  own model takes 442 MiB), inside the `tokenizers` pipeline the file declares (normalizer,
+  pre-tokenizer, added tokens); the token ids and the vectors are the bits `tokenizers` and
+  `model2vec-rs` give. Every other tokenizer runs on `tokenizers`' own model.
 - **Info**: the model's dimension, `f32`, metric cosine, 256 texts per call, `local`, and
   `deterministic: false`: one build gives the same bits for the same text, but they depend on the
   versions of `model2vec-rs` and `tokenizers` it was built with.

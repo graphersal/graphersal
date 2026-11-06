@@ -336,6 +336,117 @@ pub(crate) fn read_blob(root: &DirPath, blob: &BlobRef) -> Result<Vec<u8>, BlobE
     Ok(bytes)
 }
 
+/// The error a [`CheckedBlob`] returns when the bytes it read are not the blob's.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlobFaultError(pub(crate) BlobFault);
+
+impl std::fmt::Display for BlobFaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the blob is damaged ({} check failed)", self.0.name())
+    }
+}
+
+impl std::error::Error for BlobFaultError {}
+
+impl BlobFaultError {
+    /// The fault behind `err`, when a [`CheckedBlob`] found one.
+    pub(crate) fn of(err: &std::io::Error) -> Option<BlobFault> {
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<BlobFaultError>())
+            .map(|found| found.0)
+    }
+}
+
+/// A blob's bytes as a stream that checks them when it ends: its length, CRC-32C and, when
+/// asked, SHA-256 against the reference; a mismatch is an `InvalidData` error carrying a
+/// [`BlobFaultError`] (the read that reaches the end returns it; a source longer than the blob
+/// fails as soon as it passes the length). What a reader of a blob uses when it must not hold the
+/// whole blob (the model load).
+pub(crate) struct CheckedBlob<R> {
+    reader: R,
+    length: u64,
+    crc32c: u32,
+    sha256: Option<([u8; 32], Sha256)>,
+    read: u64,
+    crc: u32,
+    checked: bool,
+}
+
+impl<R: Read> CheckedBlob<R> {
+    /// The bytes of `reader` checked against `blob` (the SHA-256 too when `hash`).
+    pub(crate) fn new(reader: R, blob: &BlobRef, hash: bool) -> Self {
+        let sha256 = (hash && blob.hash_algo() == BlobHashAlgo::Sha256)
+            .then(|| <[u8; 32]>::try_from(blob.hash()).ok())
+            .flatten()
+            .map(|expected| (expected, Sha256::new()));
+        CheckedBlob {
+            reader,
+            length: blob.length(),
+            crc32c: blob.crc32c(),
+            sha256,
+            read: 0,
+            crc: 0,
+            checked: false,
+        }
+    }
+
+    fn fault(fault: BlobFault) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, BlobFaultError(fault))
+    }
+}
+
+impl<R: Read> Read for CheckedBlob<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = self.reader.read(buf)?;
+        if n == 0 {
+            if !self.checked {
+                self.checked = true;
+                if self.read != self.length {
+                    return Err(Self::fault(BlobFault::Length));
+                }
+                if self.crc != self.crc32c {
+                    return Err(Self::fault(BlobFault::Crc));
+                }
+                if let Some((expected, sha)) = self.sha256.take() {
+                    note_hash();
+                    if sha.finish() != expected {
+                        return Err(Self::fault(BlobFault::Hash));
+                    }
+                }
+            }
+            return Ok(0);
+        }
+        self.read += n as u64;
+        if self.read > self.length {
+            return Err(Self::fault(BlobFault::Length));
+        }
+        self.crc = crc_append(self.crc, &buf[..n]);
+        if let Some((_, sha)) = &mut self.sha256 {
+            sha.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
+/// Opens `blob` in the store at `root` as a stream checked by its length and CRC-32C at its end
+/// ([`CheckedBlob`]): the length is checked before, nothing is held in memory.
+pub(crate) fn open_blob(
+    root: &DirPath,
+    blob: &BlobRef,
+) -> Result<CheckedBlob<Box<dyn Read + Send>>, BlobError> {
+    if blob.hash_algo() != BlobHashAlgo::Sha256 {
+        return Err(BlobError::Unsupported);
+    }
+    let path = blob_path(root, blob);
+    if path.len()? != blob.length() {
+        return Err(BlobError::Fault(BlobFault::Length));
+    }
+    Ok(CheckedBlob::new(path.open_read()?, blob, false))
+}
+
 /// Checks `blob` in the store at `root` by streaming it: length and CRC-32C, plus the SHA-256
 /// when `hash` (verify, foreign input). A blob of a newer version's algorithm is checked by
 /// length and CRC-32C only (its hash is never computed).
@@ -1110,6 +1221,22 @@ pub(crate) struct AtticBlobs {
 type AtticEntryBlobs = (Vec<(u64, u64)>, Vec<BlobRef>);
 
 impl AtticBlobs {
+    /// What the cache holds, estimated: per entry its id and lists (the memory report).
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        let Ok(entries) = self.entries.try_lock() else {
+            return 0;
+        };
+        entries
+            .iter()
+            .map(|(id, (segments, blobs))| {
+                (id.capacity()
+                    + std::mem::size_of::<(String, AtticEntryBlobs)>()
+                    + segments.capacity() * std::mem::size_of::<(u64, u64)>()
+                    + blobs.capacity() * std::mem::size_of::<BlobRef>()) as u64
+            })
+            .sum()
+    }
+
     /// The blobs the frames of attic entry `id` (WAL `segments`) reference: remembered in
     /// `cache` when given, else read.
     fn of_entry(cache: Option<&Self>, id: &str, segments: &[(u64, DirPath)]) -> Vec<BlobRef> {

@@ -82,6 +82,22 @@ impl Mcp {
         self
     }
 
+    /// The client sessions and their estimated bytes (ids and stored values as JSON text), for
+    /// the host's memory report; `(0, 0)` while a request holds the list.
+    pub fn memory_bytes(&self) -> (usize, u64) {
+        let Ok(sessions) = self.sessions.try_lock() else {
+            return (0, 0);
+        };
+        let bytes = sessions
+            .iter()
+            .map(|(id, value)| {
+                (std::mem::size_of::<(String, Value)>() + id.capacity() + value.to_string().len())
+                    as u64
+            })
+            .sum();
+        (sessions.len(), bytes)
+    }
+
     /// Whether the endpoint offers only reading tools.
     pub fn read_only(&self) -> bool {
         self.read_only

@@ -43,6 +43,9 @@
   --mem-compressed: #8a5cc7;
   --mem-indexes: #c98a12;
   --mem-models: #c94f7c;
+  --mem-live_graph: #5a8f3c;
+  --mem-store: #b5651d;
+  --mem-engine: #4f6d8a;
   --mem-other: #9aa3b2;
   --radius: 6px;
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -94,6 +97,9 @@
     --mem-compressed: #b69cff;
     --mem-indexes: #e3b341;
     --mem-models: #f08fb5;
+    --mem-live_graph: #8bc66a;
+    --mem-store: #e09552;
+    --mem-engine: #8fb0cf;
     --mem-other: #5d6879;
     color-scheme: dark;
   }
@@ -140,6 +146,9 @@
   --mem-compressed: #b69cff;
   --mem-indexes: #e3b341;
   --mem-models: #f08fb5;
+  --mem-live_graph: #8bc66a;
+  --mem-store: #e09552;
+  --mem-engine: #8fb0cf;
   --mem-other: #5d6879;
   color-scheme: dark;
 }
@@ -1861,6 +1870,8 @@ input.ve-null { color: var(--text-muted); }
 .op-rec { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
 .op-rec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .op-rec-line { margin-top: 4px; font-size: 13px; }
+.op-groups { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
+.op-selection { position: sticky; top: 0; z-index: 1; background: var(--surface); padding: 4px 0; }
 .op-rec-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .op-command { font-size: 12px; background: var(--accent-soft); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 .op-effect { font-size: 13px; font-weight: 600; }
@@ -1901,6 +1912,21 @@ input.ve-null { color: var(--text-muted); }
 .op-legend .sw.max { border-top: 2px dashed var(--warn); height: 0; }
 .op-totals { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
 .op-total { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 120px; font-size: 13px; }
+/* The Scheduled jobs manager (js/components/catalog.js JobsManager): one full-width block per
+   job that grows downwards (head with the actions, description, what it does, facts), never
+   sideways: long names, texts and paths wrap. */
+.cj-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); font-size: 13px; }
+.cj-job { display: flex; flex-direction: column; gap: 3px; padding: 8px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
+.cj-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.cj-name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.cj-head .catalog-actions { justify-content: flex-end; margin-left: auto; }
+.cj-text { overflow-wrap: anywhere; min-width: 0; }
+.cj-label { color: var(--text-muted); font-size: 12px; }
+.cj-label::after { content: ":"; }
+.cj-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 18px; overflow-wrap: anywhere; min-width: 0; }
+.cj-facts .num { font-family: var(--font-mono); }
+.cj-facts .field-error { padding: 1px 6px; border-radius: var(--radius); }
+.cj-on { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .cj-schedule { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .op-applied { background: var(--ok-soft); }
 .op-dismissed { margin-top: 10px; }

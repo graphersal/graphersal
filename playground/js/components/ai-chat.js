@@ -6,12 +6,13 @@
 // the per-tab controller are in js/ai-chat.js, the actions in store.js. Without `--ai` the tab
 // says how to start it; in the WebAssembly playground it is read-only (decision 6).
 
-import { ref, computed, watch, nextTick, onMounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import {
   state, aiChatMode, chatController, chatSubmit, chatStop, setChatDraft, openQueryTab,
 } from '../store.js';
 import {
   groupTurns, turnSummary, timingText, toolCallQuery, COMMAND_HINT, chatToMarkdown, chatToJson, chatExportFileName,
+  createClock, liveElapsedMs, thinkingText,
 } from '../ai-chat.js';
 import { downloadBlob } from '../export.js';
 import { AI_CHAT_UNAVAILABLE } from '../engine/engine.js';
@@ -51,6 +52,21 @@ export const AiChat = {
       return !(last && last.kind === 'turn' && last.state === 'running' && last.toolCalls);
     });
     const busy = computed(() => chat.value.running || chat.value.sending);
+
+    // The live clock of a running turn ("Working for 12 s"): ticks once a second while a turn this
+    // page sent runs; stops when it ends (done, error, Stop, /clear) and when the view goes.
+    const now = ref(Date.now());
+    const clock = createClock({ onTick: () => { now.value = Date.now(); } });
+    watch(() => chat.value.running && chat.value.startedAt != null, (ticking) => {
+      if (ticking) {
+        now.value = Date.now();
+        clock.start();
+      } else {
+        clock.stop();
+      }
+    }, { immediate: true });
+    onUnmounted(() => clock.stop());
+    const liveMs = computed(() => liveElapsedMs(chat.value, now.value));
     const bookUrl = LINKS.book ? new URL(BOOK_PAGE, LINKS.book).href : null;
 
     // The controller exists while the tab is shown in 'on' mode (Send creates it anyway).
@@ -135,7 +151,7 @@ export const AiChat = {
     }
 
     return {
-      exportChat, state, mode, ai, chat, entries, opened, toggle, turnSummary, timingText, thinking, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
+      exportChat, state, mode, ai, chat, entries, opened, toggle, turnSummary, timingText, thinking, thinkingText, liveMs, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
       AI_CHAT_UNAVAILABLE, send, onKey, stop: () => chatStop(props.tab.id), argsText, toolCallQuery, openQuery,
     };
   },
@@ -155,7 +171,7 @@ export const AiChat = {
         <template #trigger>Export ▾</template>
         <div class="menu-title">This chat as a file</div>
         <button class="menu-item" :disabled="!chat.items.length" @click="exportChat('md')"
-                title="The questions, the steps with tool calls and results, the answers, errors and timing as Markdown">Markdown (.md)</button>
+                title="The questions and the final answers as Markdown, each answer with its time and number of tool calls (no tool calls or results)">Markdown (.md)</button>
         <button class="menu-item" :disabled="!chat.items.length" @click="exportChat('json')"
                 title="The same transcript as JSON (format graphersal-ai-chat, version 1)">JSON (.json)</button>
       </drop-menu>
@@ -193,7 +209,7 @@ export const AiChat = {
                     :title="opened[en.key] ? 'Hide the steps of this turn' : 'Show the steps of this turn: interim texts, tool calls and their results'">
               <span class="chat-steps-chevron" aria-hidden="true">▸</span>
               <span v-if="en.state === 'running'" class="running-dot" aria-hidden="true"></span>
-              <span class="chat-steps-summary">{{ turnSummary(en) }}</span>
+              <span class="chat-steps-summary" :aria-live="en.state === 'running' ? 'off' : null">{{ turnSummary(en, liveMs) }}</span>
             </button>
             <div v-if="opened[en.key]" class="chat-steps-body" :id="'steps-' + tab.id + '-' + en.key">
               <template v-for="(it, i) in en.steps" :key="(it.seq || 'l') + ':' + i">
@@ -237,7 +253,7 @@ export const AiChat = {
 
       <div v-if="thinking" class="chat-thinking faint">
         <span class="running-dot" aria-hidden="true"></span>
-        {{ chat.stopping ? 'Stopping…' : chat.sending ? 'Sending…' : 'Working…' }}
+        <span aria-live="off">{{ thinkingText(chat, liveMs) }}</span>
       </div>
     </div>
 

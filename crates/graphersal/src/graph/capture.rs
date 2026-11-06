@@ -238,8 +238,9 @@ impl TraversalGraph {
                         continue;
                     };
                     let after = vertex.properties.get(key.as_str()).cloned();
+                    let old = crate::graph::undo::plain_old(old.clone());
                     let before = old.as_ref().map(|(_, value)| value.clone());
-                    restore_property(&mut vertex.properties, key, old.clone());
+                    restore_property(&mut vertex.properties, key, old);
                     out.extend(property_mutation(
                         ElementRef::vertex(id.as_str()),
                         key,
@@ -262,6 +263,7 @@ impl TraversalGraph {
                         .as_ref()
                         .and_then(|properties| properties.get(key.as_str()))
                         .cloned();
+                    let old = crate::graph::undo::plain_old(old.clone());
                     let before = old.as_ref().map(|(_, value)| value.clone());
                     if *map_was_none {
                         edge.properties = None;
@@ -269,7 +271,7 @@ impl TraversalGraph {
                         restore_property(
                             edge.properties.get_or_insert_with(PropertyMap::default),
                             key,
-                            old.clone(),
+                            old,
                         );
                     }
                     out.extend(property_mutation(

@@ -12,8 +12,9 @@
 //!
 //! Loading: a model the current schema needs is loaded eagerly at open (so the open can
 //! refuse); every other model lazily at the first query that embeds with it. Before a load the
-//! process memory ceiling is checked with the size the definition records (`blob length +
-//! load_bytes`): nothing is allocated when it does not fit. Two positions (or graphs) using the
+//! process memory ceiling is checked with the blob's length times [`LOAD_FACTOR`]
+//! ([`load_room`]): nothing is allocated when it does not fit. The load streams the blob (the
+//! whole tar is never held beside the model). Two positions (or graphs) using the
 //! same blob share ONE load through a process-wide cache of weak references; when the last
 //! holder goes, the model is unloaded (`model.unloaded`). Loading needs the `model2vec`
 //! feature on a native target; any other build registers the models but refuses to embed with
@@ -47,12 +48,21 @@ pub(crate) const MODEL_LOAD_OPERATION: &str = "model load";
 
 /// Where a registry reads a model's blob (a Store's `blobs/`).
 pub(crate) trait ModelBytes: Send + Sync {
-    /// The blob's bytes, checked by length and CRC-32C.
+    /// The blob's bytes as a stream (the load never holds the whole blob). The stream checks
+    /// what it read when it reaches the blob's end (its length and CRC-32C, and the SHA-256
+    /// where the source checks it): a damaged blob is an error of the read that ends it, which
+    /// [`Self::read_failure`] turns into the source's failure.
     #[cfg_attr(
         not(all(feature = "model2vec", not(target_arch = "wasm32"))),
         allow(dead_code)
     )]
-    fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, LoadFailure>;
+    fn open(&self, blob: &BlobRef) -> Result<Box<dyn std::io::Read + Send + '_>, LoadFailure>;
+    /// The failure of an error a stream of [`Self::open`] returned.
+    #[cfg_attr(
+        not(all(feature = "model2vec", not(target_arch = "wasm32"))),
+        allow(dead_code)
+    )]
+    fn read_failure(&self, err: std::io::Error) -> LoadFailure;
     /// Checks the blob's length and CRC-32C by streaming it (no allocation): a load another
     /// graph made of the same hash is used only when this store's copy is intact too.
     fn check(&self, blob: &BlobRef) -> Result<(), LoadFailure>;
@@ -136,7 +146,12 @@ pub(crate) enum ModelLoadState {
 pub(crate) struct LoadedModel {
     #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
     model: super::Model2Vec,
+    /// What it holds in memory: counted at its load when a tracking allocator is installed
+    /// ([`Self::exact`]), else the loader's estimate.
     bytes: u64,
+    /// `bytes` was counted by the tracking allocator (the live bytes the load left on its
+    /// thread), not estimated.
+    exact: bool,
     repo: String,
     identity: String,
     /// The texts per second a calibration batch ran at right after the load (the time
@@ -173,6 +188,26 @@ fn cache() -> &'static Mutex<HashMap<Vec<u8>, Weak<LoadedModel>>> {
 /// once): what the estimated memory figures add when no tracking allocator counts them.
 pub(crate) fn loaded_model_bytes() -> u64 {
     LOADED_BYTES.load(Ordering::Acquire)
+}
+
+/// The embedding models loaded in this process (each blob once), as memory report components
+/// (`embedding_model`, the identity as detail; exact when counted at the load).
+pub(crate) fn loaded_models() -> Vec<crate::graph::MemoryComponent> {
+    let mut models: Vec<_> = cache()
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .map(|model| {
+            let part = if model.exact {
+                crate::graph::MemoryComponent::exact("embedding_model", model.bytes)
+            } else {
+                crate::graph::MemoryComponent::estimated("embedding_model", model.bytes)
+            };
+            part.with_detail(model.identity.as_str())
+        })
+        .collect();
+    models.sort_by(|a, b| a.detail.cmp(&b.detail));
+    models
 }
 
 /// The texts per second the loaded model `identity` measured at its load, if it is loaded in
@@ -214,15 +249,49 @@ fn load(
     Ok(loaded)
 }
 
-/// The memory check of a load: `blob length + load_bytes` against the process ceiling, with
-/// the loaded models counted when no tracking allocator does.
+/// The memory a model takes loaded per byte of its blob, before it was loaded once (user
+/// decision 2026-11-04): with the compact Unigram tokenizer the 506.4 MiB blob of
+/// `minishlab/potion-multilingual-128M` takes 513.6 MiB loaded (1.01) and its load peaks
+/// 576 MiB above the heap before it (1.14); 1.6 keeps a reserve. The streaming load holds no
+/// copy of the blob beside it. An f16 or i8 matrix decodes to 2 or 4 times its bytes, which
+/// this factor does not cover in full.
+pub(crate) const LOAD_FACTOR: f64 = 1.6;
+
+/// The memory a load of `model` needs, before it is loaded: its blob's length times
+/// [`LOAD_FACTOR`]. Nothing about the size is stored: the definition's `load_bytes` (the
+/// import's estimate, kept for older versions) is not read.
+pub(crate) fn load_room(model: &ModelDefinition) -> u64 {
+    let needed = (model.blob().length() as f64 * LOAD_FACTOR).ceil();
+    if needed >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        needed as u64
+    }
+}
+
+/// The memory check of a load: [`load_room`] against the process ceiling, with the loaded
+/// models counted when no tracking allocator does.
 #[cfg_attr(
     not(all(feature = "model2vec", not(target_arch = "wasm32"))),
     allow(dead_code)
 )]
 pub(crate) fn check_room(model: &ModelDefinition) -> Result<(), GraphError> {
-    let needed = model.blob().length().saturating_add(model.load_bytes());
-    crate::traversal::memory_budget::ensure_room(MODEL_LOAD_OPERATION, needed, loaded_model_bytes())
+    crate::traversal::memory_budget::ensure_room(
+        MODEL_LOAD_OPERATION,
+        load_room(model),
+        loaded_model_bytes(),
+    )
+}
+
+/// The memory the model `identity` takes, measured at its load (counted by the tracking
+/// allocator, else the loader's estimate), when it is loaded in this process.
+pub(crate) fn loaded_bytes(identity: &str) -> Option<u64> {
+    cache()
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .find(|model| model.identity == identity)
+        .map(|model| model.bytes)
 }
 
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
@@ -233,32 +302,25 @@ fn load_uncached(
 ) -> Result<LoadedModel, LoadFailure> {
     check_room(model).map_err(LoadFailure::does_not_fit)?;
     let started = web_time::Instant::now();
-    let bytes = source.read(model.blob())?;
-    let tar = crate::persist::model_tar::read_tar(&bytes)
-        .map_err(|reason| LoadFailure::Damaged(format!("its tar is invalid: {reason}")))?;
-    let file = |role: &str| {
-        tar.file_of(role)
-            .ok_or_else(|| LoadFailure::Invalid(format!("it has no {role} file")))
-    };
-    let (config, tokenizer, weights) = (file("config")?, file("tokenizer")?, file("model")?);
     let options = super::Model2VecOptions::default().with_repo(model.repo());
-    let loaded = super::Model2Vec::load_bytes(
-        CompactString::from(model.repo()),
-        config,
-        tokenizer,
-        weights,
-        &options,
-        &format!("the model {} of the store", model.repo()),
-    )
-    .map_err(|err| LoadFailure::Invalid(err.to_string()))?;
+    // What the model holds is counted once, here, when a tracking allocator is installed (the
+    // estimate without one: the matrix plus the compact tokenizer's arrays, or the tokenizer
+    // file for a tokenizer on `tokenizers`' own model, whose in-memory form is many times it).
+    let live_before = crate::traversal::memory_budget::thread_live_bytes();
+    let loaded = load_streamed(model, source, &options)?;
     if loaded.info().model != identity {
         return Err(LoadFailure::Invalid(format!(
             "its files are the model {}, not {identity}",
             loaded.info().model
         )));
     }
-    drop(bytes);
-    let memory = Embedder::memory_bytes(&loaded).unwrap_or(model.load_bytes());
+    let counted = crate::traversal::memory_budget::tracked_live_bytes().and_then(|_| {
+        u64::try_from(crate::traversal::memory_budget::thread_live_bytes() - live_before).ok()
+    });
+    let memory = counted
+        .filter(|bytes| *bytes > 0)
+        .or_else(|| Embedder::memory_bytes(&loaded))
+        .unwrap_or_else(|| load_room(model));
     let texts_per_second = calibrate(&loaded);
     let journal = source.journal();
     if let Some(journal) = &journal {
@@ -274,11 +336,144 @@ fn load_uncached(
     Ok(LoadedModel {
         model: loaded,
         bytes: memory,
+        exact: counted.is_some_and(|bytes| bytes > 0),
         repo: model.repo().to_string(),
         identity: identity.to_string(),
         texts_per_second,
         source: Arc::downgrade(source),
     })
+}
+
+/// Loads the model of `model` from its blob read as a stream: the tar entry by entry
+/// (`model_tar::TarReader`), the weights decoded while they stream (`model2vec::read_weights`),
+/// the config and tokenizer files read whole (small), every other file skipped. The blob is
+/// read to its end, so the source's own check (length, CRC-32C) runs, BEFORE the tokenizer is
+/// parsed: a damaged blob is `Damaged`, never a parse failure. A failure while the blob streams
+/// reads the rest first: when the source then reports damage, that is the failure.
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+fn load_streamed(
+    model: &ModelDefinition,
+    source: &Arc<dyn ModelBytes>,
+    options: &super::Model2VecOptions,
+) -> Result<super::Model2Vec, LoadFailure> {
+    use super::model_tar::{MAX_MANIFEST_BYTES, MODEL_MANIFEST, TarReader, TarStreamError};
+    use super::model2vec::{WeightsError, read_weights};
+
+    let location = format!("the model {} of the store", model.repo());
+    let reader = source.open(model.blob())?;
+    let mut tar = TarReader::new(reader);
+    let invalid_tar =
+        |reason: String| LoadFailure::Damaged(format!("its tar is invalid: {reason}"));
+    // A failure while streaming: damage of the blob wins over what the bytes looked like.
+    let stream_failure = |tar: &mut TarReader<_>, failure: LoadFailure| match tar.drain() {
+        Err(err) => source.read_failure(err),
+        Ok(()) => failure,
+    };
+    let tar_error = |tar: &mut TarReader<_>, err: TarStreamError| match err {
+        TarStreamError::Read(err) => source.read_failure(err),
+        TarStreamError::Invalid(reason) => stream_failure(tar, invalid_tar(reason)),
+    };
+    // The entries before the manifest (sorted names: `config*.json`, a card, licences) are kept
+    // until it names their roles; after it, only the files of the three roles are read.
+    let mut early: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut manifest: Option<(Vec<u8>, super::model_tar::ModelManifest)> = None;
+    let mut config: Option<Vec<u8>> = None;
+    let mut tokenizer: Option<Vec<u8>> = None;
+    let mut weights: Option<super::model2vec::Weights> = None;
+    let role_of = |manifest: &super::model_tar::ModelManifest, name: &str| {
+        ["config", "tokenizer", "model"]
+            .into_iter()
+            .find(|role| manifest.file_of(role).is_some_and(|f| f.name == name))
+    };
+    let weights_failure = |err: WeightsError| match err {
+        WeightsError::Read(err) => source.read_failure(err),
+        other @ WeightsError::Invalid(_) => LoadFailure::Invalid(other_reason(other, &location)),
+    };
+    loop {
+        let entry = match tar.next_entry() {
+            Ok(entry) => entry,
+            Err(err) => return Err(tar_error(&mut tar, err)),
+        };
+        let Some((name, size)) = entry else {
+            break;
+        };
+        if name == MODEL_MANIFEST {
+            let bytes = match tar.read_entry(MAX_MANIFEST_BYTES) {
+                Ok(bytes) => bytes,
+                Err(err) => return Err(tar_error(&mut tar, err)),
+            };
+            // Checked against the entries at the end; parsed now for the roles.
+            let parsed = match super::model_tar::ModelManifest::parse(&bytes) {
+                Ok(parsed) => parsed,
+                Err(reason) => return Err(stream_failure(&mut tar, invalid_tar(reason))),
+            };
+            for (early_name, data) in std::mem::take(&mut early) {
+                match role_of(&parsed, &early_name) {
+                    Some("config") => config = Some(data),
+                    Some("tokenizer") => tokenizer = Some(data),
+                    Some(_) => match read_weights(&mut data.as_slice(), data.len() as u64) {
+                        Ok(read) => weights = Some(read),
+                        Err(err) => return Err(stream_failure(&mut tar, weights_failure(err))),
+                    },
+                    None => {}
+                }
+            }
+            manifest = Some((bytes, parsed));
+            continue;
+        }
+        let role = match &manifest {
+            Some((_, parsed)) => role_of(parsed, &name),
+            None => {
+                // Before the manifest: kept whole (never a large file in a tar this version
+                // writes).
+                match tar.read_entry(size) {
+                    Ok(data) => early.push((name, data)),
+                    Err(err) => return Err(tar_error(&mut tar, err)),
+                }
+                continue;
+            }
+        };
+        match role {
+            Some("model") => match read_weights(&mut tar, size) {
+                Ok(read) => weights = Some(read),
+                Err(err) => return Err(stream_failure(&mut tar, weights_failure(err))),
+            },
+            Some(role) => match tar.read_entry(size) {
+                Ok(data) if role == "config" => config = Some(data),
+                Ok(data) => tokenizer = Some(data),
+                Err(err) => return Err(tar_error(&mut tar, err)),
+            },
+            None => {}
+        }
+    }
+    if let Err(err) = tar.finish() {
+        return Err(tar_error(&mut tar, err));
+    }
+    // The blob was read to its end and checked by its source: what follows is about the
+    // model's files, not damage.
+    let Some((manifest_bytes, _)) = manifest else {
+        return Err(invalid_tar("the archive holds no manifest".to_string()));
+    };
+    tar.check_manifest(&manifest_bytes).map_err(invalid_tar)?;
+    let missing = |role: &str| LoadFailure::Invalid(format!("it has no {role} file"));
+    let config = config.ok_or_else(|| missing("config"))?;
+    let tokenizer = tokenizer.ok_or_else(|| missing("tokenizer"))?;
+    let weights = weights.ok_or_else(|| missing("model"))?;
+    super::Model2Vec::load_parts(
+        CompactString::from(model.repo()),
+        &config,
+        &tokenizer,
+        weights,
+        options,
+        &location,
+    )
+    .map_err(|err| LoadFailure::Invalid(err.to_string()))
+}
+
+/// The text of an invalid weights file at `location`.
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+fn other_reason(err: super::model2vec::WeightsError, location: &str) -> String {
+    err.into_embed_error(location).to_string()
 }
 
 /// The texts per second of a fixed calibration batch (64 short sentences, a few ms).
@@ -519,7 +714,7 @@ pub(crate) struct NeededFailure {
     pub(crate) repo: Option<String>,
     pub(crate) places: Vec<String>,
     pub(crate) failure: LoadFailure,
-    /// The definition's `blob length + load_bytes`.
+    /// The memory a load needs ([`load_room`]).
     pub(crate) needed: u64,
 }
 
@@ -548,8 +743,11 @@ impl ModelRegistry {
     pub(crate) fn of_embedders(embedders: Embedders) -> Arc<Self> {
         struct NoBytes;
         impl ModelBytes for NoBytes {
-            fn read(&self, _: &BlobRef) -> Result<Vec<u8>, LoadFailure> {
+            fn open(&self, _: &BlobRef) -> Result<Box<dyn std::io::Read + Send + '_>, LoadFailure> {
                 Err(LoadFailure::Missing)
+            }
+            fn read_failure(&self, err: std::io::Error) -> LoadFailure {
+                LoadFailure::Damaged(err.to_string())
             }
             fn check(&self, _: &BlobRef) -> Result<(), LoadFailure> {
                 Err(LoadFailure::Missing)
@@ -651,7 +849,7 @@ impl ModelRegistry {
                 }),
                 places: places.clone(),
                 failure,
-                needed: model.map_or(0, |m| m.blob().length().saturating_add(m.load_bytes())),
+                needed: model.map_or(0, load_room),
             };
             let Some(model) = model else {
                 failures.push(fail(LoadFailure::Missing));
@@ -807,4 +1005,34 @@ pub(crate) fn attached() -> Option<Arc<Embedders>> {
 #[allow(dead_code)]
 fn _name(name: &str) -> CompactString {
     CompactString::from(name)
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn a_load_asks_for_its_blob_times_the_load_factor() {
+        let blob = |length: u64| {
+            BlobRef::new(
+                crate::value::blob::BlobHashAlgo::Sha256,
+                &[7u8; 32],
+                length,
+                0,
+            )
+            .unwrap()
+        };
+        // The measured model: 506.4 MiB blob, 513.6 MiB loaded, the load peaking 576 MiB above
+        // the heap before it (1.14); 1.6 keeps a reserve.
+        let blob_bytes = (506.4 * 1024.0 * 1024.0) as u64;
+        let model = ModelDefinition::new(blob(blob_bytes), "minishlab/x").with_load_bytes(1);
+        let room = load_room(&model);
+        assert!(room >= (576.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(room, (blob_bytes as f64 * 1.6).ceil() as u64);
+        // The definition's stored estimate plays no part.
+        let other =
+            ModelDefinition::new(blob(blob_bytes), "minishlab/x").with_load_bytes(u64::MAX / 2);
+        assert_eq!(load_room(&other), room);
+        assert_eq!(load_room(&ModelDefinition::new(blob(0), "a/b")), 0);
+    }
 }

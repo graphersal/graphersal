@@ -76,17 +76,20 @@ pub struct MemoryStats {
     /// The entries of the property indexes (book page "Property Indexes"), an estimate; part
     /// of [`Self::total_bytes`]. Not part of [`Self::index_bytes`] (the id and label indexes).
     pub property_index_bytes: u64,
-    /// Strings shared through the tables of `dedup` compression rules (book page "Compressed
-    /// Properties", section "Deduplicating repeated values"): the references, one per stored
-    /// value. A reference owns no heap; the shared text is counted once, in
-    /// [`Self::dedup_table_bytes`].
+    /// Values stored through `dedup` compression rules (book page "Compressed Properties",
+    /// section "Deduplicating repeated values"): the coded values of top-level keys (a 4-byte
+    /// code in the element's row each) and the shared strings of nested paths (a reference in
+    /// its slot each). The values themselves are counted once, in [`Self::dedup_table_bytes`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub deduped_values: u64,
-    /// The plain size of the shared strings (every reference with its text's length), in bytes.
+    /// The plain size of those values, in bytes: a coded value with the 32-byte slot it would
+    /// take plus its heap, a shared string with its text's length.
     #[cfg_attr(feature = "serde", serde(default))]
     pub deduped_plain_bytes: u64,
-    /// The tables of the `dedup` rules, in bytes: every shared text once (its bytes and the
-    /// reference counts of its allocation, also an entry not swept yet) plus the tables' slots.
+    /// The `dedup` rules' storage, in bytes: the value dictionaries of top-level keys (every
+    /// distinct value once with its slot and heap, also an entry not rebuilt away yet, plus
+    /// their hash indexes), the coded rows' layouts, and the tables of nested paths (every
+    /// shared text once with the reference counts of its allocation plus the tables' slots).
     /// Part of [`Self::property_bytes`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub dedup_table_bytes: u64,
@@ -104,8 +107,10 @@ pub struct MemoryStats {
     #[cfg_attr(feature = "serde", serde(default))]
     pub workload_bytes: u64,
     /// The embedding models of the graph's catalog that are loaded (book page "Embedding
-    /// Models in a Store"): what each loaded model takes in memory, a model shared by several
-    /// positions counted once per graph that holds it. Filled in by the graph (`g.memory_usage()`,
+    /// Models in a Store"): what each loaded model takes in memory (counted at its load when a
+    /// tracking allocator is installed, else the loader's estimate, which leaves out most of
+    /// a tokenizer's in-memory form), a model shared by several positions counted once per
+    /// graph that holds it. Filled in by the graph (`g.memory_usage()`,
     /// the front ends' statistics), `0` from a storage alone. NOT part of
     /// [`Self::total_bytes`], which is the graph's own data; the process ceiling counts it.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -213,7 +218,7 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
         structure_bytes += string_heap(id);
         property_bytes += crate::value::estimated_element_heap_bytes(properties);
         if !graph.compression.is_empty() {
-            properties.values().for_each(|value| compressed.add(value));
+            compressed.add_map(properties);
         }
     }
 
@@ -222,7 +227,7 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
         if let Some(properties) = properties {
             property_bytes += crate::value::estimated_element_heap_bytes(properties);
             if !graph.compression.is_empty() {
-                properties.values().for_each(|value| compressed.add(value));
+                compressed.add_map(properties);
             }
         }
     }
@@ -231,7 +236,8 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
     structure_bytes += graph.node_generations.heap_bytes() + graph.edge_generations.heap_bytes();
 
     let index_bytes = graph.index.estimated_heap_bytes();
-    // The shared texts: once, in their tables (a reference counts 0 in the walk above).
+    // The shared texts and the coded values: once, in their tables and dictionaries (a
+    // reference counts 0 in the walk above, a code its 4 bytes).
     let dedup_table_bytes = graph.compression.dedup_table_bytes();
     property_bytes += dedup_table_bytes;
     // The shared key lists: once, in the shape table (a stored map counts its values only).
@@ -277,7 +283,7 @@ pub(crate) fn structure(graph: &super::TraversalGraph) -> super::StructureMemory
         super::GraphType::edge_slot_bytes() as u64,
     );
     let id_index = graph.index.id_index_heap_bytes();
-    let label_index = graph.index.estimated_heap_bytes().saturating_sub(id_index);
+    let label_index = graph.index.label_index_heap_bytes();
     super::StructureMemory::new(compute(graph))
         .with_slots(vertices, edges)
         .with_index_bytes(id_index, label_index)
@@ -295,6 +301,27 @@ pub(crate) struct CompressedCount {
 }
 
 impl CompressedCount {
+    /// Every value of a stored map: a coded value counts as deduplicated (its plain size: the
+    /// slot it would take and its heap), every other value through [`Self::add`].
+    pub(crate) fn add_map(&mut self, map: &crate::value::PropertyMap) {
+        match map.coded() {
+            Some(coded) => {
+                for position in 0..coded.len() {
+                    if coded.layout.coded_at(position).is_some() {
+                        if let Some(value) = coded.value_at(position) {
+                            self.deduped += 1;
+                            self.deduped_plain += crate::graph::compression::plain_slot_bytes()
+                                + value.estimated_heap_bytes();
+                        }
+                    } else if let Some(value) = coded.value_at(position) {
+                        self.add(value);
+                    }
+                }
+            }
+            None => map.values().for_each(|value| self.add(value)),
+        }
+    }
+
     pub(crate) fn add(&mut self, value: &crate::value::ElementProperty) {
         use crate::value::ElementProperty;
         match value {
@@ -313,16 +340,8 @@ impl CompressedCount {
     }
 }
 
-/// What one entry adds to an `IndexMap<K, V>` of the indexes, amortized: its bucket in the
-/// entries (`hash + key + value`) plus its index slot (a `usize` and one control byte). Spare
-/// capacity is not apportioned, so a full walk ([`compute`]) reports somewhat more.
-fn index_entry_bytes<K, V>() -> u64 {
-    use std::mem::size_of;
-    (size_of::<(usize, K, V)>() + size_of::<usize>() + 1) as u64
-}
-
 /// What one vertex adds to [`compute`]'s figure for a freshly loaded graph (its slot, id,
-/// labels, properties, id-index entry and label-bucket entries), without building the graph: a
+/// labels, properties, id-index entry and label-index entries), without building the graph: a
 /// merge checkpoint keeps the manifest's estimate (format spec 6.1, offset 128) current by
 /// subtracting the replaced elements and adding the new ones. Like [`compute`], an estimate.
 #[cfg_attr(not(feature = "persist"), allow(dead_code))]
@@ -333,11 +352,9 @@ pub(crate) fn loaded_vertex_bytes(
 ) -> u64 {
     use crate::value::compact_string_heap_bytes;
     let slot = super::GraphType::node_slot_bytes() as u64;
-    let mut bytes = slot
-        + super::index::id_entry_bytes::<super::VertexHandle>()
-        + compact_string_heap_bytes(id);
-    // The entry in each label's bucket set (the label itself lives once, in the label table).
-    bytes += labels.len() as u64 * index_entry_bytes::<super::VertexHandle, ()>();
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + compact_string_heap_bytes(id);
+    // The entries in the label index (the label itself lives once, in the label table).
+    bytes += super::index::label_memberships_bytes(labels.len());
     bytes + stored_properties_bytes(properties)
 }
 
@@ -370,10 +387,10 @@ pub(crate) fn loaded_edge_bytes(
             0
         }
     };
-    let mut bytes = slot + super::index::id_entry_bytes::<super::EdgeHandle>() + heap(id);
+    let mut bytes = slot + super::index::id_entry_bytes::<u32>() + heap(id);
     if label.is_some() {
-        // The label lives once, in the label table; the edge adds its bucket entry.
-        bytes += index_entry_bytes::<super::EdgeHandle, ()>();
+        // The label lives once, in the label table; the edge adds its label index entries.
+        bytes += super::index::label_memberships_bytes(1);
     }
     bytes + properties.map_or(0, stored_properties_bytes)
 }

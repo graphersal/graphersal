@@ -75,9 +75,11 @@
 //! 50 rows per list (most total time first) unless `max_rows` says otherwise. `list_jobs`
 //! (reading) answers the scheduled jobs (`Session::jobs_view`); defining, switching or running
 //! a job stays the user's. `advise` (reading) answers the storage advisor's recommendations
-//! (`Session::advise`), each with the command applying it through the catalog tools. `journal`
-//! (reading) answers one page of the graph's system journal (`Session::journal`, at most 100
-//! records unless `limit` says otherwise).
+//! (`Session::advise`), each with the command applying it through the catalog tools, and their
+//! `groups`; `apply_recommendations` (writing, refused in read-only mode) applies the ones the
+//! user picked by id in one commit (`Session::apply_recommendations`). `journal` (reading)
+//! answers one page of the graph's system journal (`Session::journal`, at most 100 records
+//! unless `limit` says otherwise).
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),

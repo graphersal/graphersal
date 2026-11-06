@@ -1234,6 +1234,9 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
         "bytes": model.bytes,
         "bytesText": bytes_text(model.bytes),
         "loadBytes": model.load_bytes,
+        // The size shown (user decision 2026-11-04): in memory when loaded, else on disk.
+        "memoryBytes": model.memory_bytes,
+        "sizeText": model_size_text(model),
         "state": model.state.name(),
         "stateReason": model.state.reason(),
         "neededBy": model.needed_by,
@@ -1243,6 +1246,15 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
             state => state.reason(),
         },
     })
+}
+
+/// The size a model list shows (user decision 2026-11-04): a loaded model its measured
+/// in-memory size, any other its size on disk.
+pub fn model_size_text(model: &ModelInfo) -> String {
+    match model.memory_bytes {
+        Some(bytes) => format!("{} in memory", bytes_text(bytes)),
+        None => bytes_text(model.bytes),
+    }
 }
 
 /// Whether the schema's model identity `named` (with or without a `?normalize=` suffix) is the
@@ -1688,7 +1700,10 @@ mod tests {
     }
 
     /// A `.gsnap` carrying one embedding model (format spec 4.5: a blob and its catalog
-    /// definition), and that model.
+    /// definition), and that model. The model is a real one (a word-level tokenizer of two
+    /// tokens, a 2 x 2 matrix): with `graphersal/model2vec` on (Cargo's feature unification when
+    /// this crate is tested in one command with `graphersal-cli`) the import checks that it
+    /// loads.
     fn packed_with_a_model() -> (Vec<u8>, graphersal::persist::ModelInfo) {
         use graphersal::persist::{ImportModelOptions, ModelRole, ModelSource, NewModel, Store};
         use std::io::Cursor;
@@ -1696,7 +1711,12 @@ mod tests {
             r#"{"embeddings": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}"#;
         let mut weights = (header.len() as u64).to_le_bytes().to_vec();
         weights.extend_from_slice(header.as_bytes());
-        weights.extend_from_slice(&[0u8; 16]);
+        weights.extend((1..=4).flat_map(|i| (i as f32).to_le_bytes()));
+        let tokenizer = r#"{"version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "graph": 1},
+            "unk_token": "[UNK]"}}"#;
         let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
         let model = store
             .import_model(
@@ -1710,7 +1730,7 @@ mod tests {
                         .with_file(
                             "tokenizer.json",
                             ModelRole::Tokenizer,
-                            Cursor::new(vec![1; 50]),
+                            Cursor::new(tokenizer.as_bytes().to_vec()),
                         )
                         .with_file(
                             "model.safetensors",

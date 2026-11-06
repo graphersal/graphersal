@@ -206,9 +206,9 @@ test('dedup: the form switches codec defaults, the spec has no dictionary, rows 
   assert.equal(dedup.minBytesText, String(m.DEFAULT_DEDUP_MIN_BYTES));
   assert.equal(dedup.dictionary, false);
   assert.deepEqual(m.draftToSpec({ ...dedup, dictionary: true }).spec, {
-    name: 'p', element: 'vertex', label: 'symbol', path: 'path', minBytes: 25, dictionary: false, codec: 'dedup',
+    name: 'p', element: 'vertex', label: 'symbol', path: 'path', minBytes: 0, dictionary: false, codec: 'dedup',
   });
-  assert.equal(m.draftToSpec({ ...dedup, minBytesText: '' }).spec.minBytes, 25);
+  assert.equal(m.draftToSpec({ ...dedup, minBytesText: '' }).spec.minBytes, 0);
   // Back to lz4: its defaults return; a threshold the user typed stays.
   const back = m.withCodec(dedup, 'lz4');
   assert.equal(back.minBytesText, String(m.DEFAULT_MIN_BYTES));

@@ -20,6 +20,21 @@
 //!   or [`ShapeTable::shift_insert`], and a write through a generic map helper (jpath writes) is
 //!   followed by [`ShapeTable::adopt`]. A map that missed adoption is still correct (`Indexed`),
 //!   it only does not share its keys.
+//! - **Nested maps** (stage V3): the maps inside a stored value (`ElementProperty::Object`, also
+//!   inside arrays) are shaped in the same table, down to [`NESTED_DEPTH`] container levels below
+//!   the element's own values (bounded, so the recursion stays shallow; deeper maps stay
+//!   `Indexed`). A nested key sequence gets a shape at its SECOND sighting (the table's
+//!   `seen_once` hashes; a shape that already exists is taken at once): a map whose keys never
+//!   repeat stays `Indexed`, which is smaller than a shape of its own. Entry points:
+//!   [`ShapeTable::adopt`] of a map that is not one of this table's yet, [`ShapeTable::insert_full`]
+//!   (`insert_full_plain`, `insert_full_coded`), [`ShapeTable::shaped_copy`] and
+//!   [`ShapeTable::shape_value`] (jpath writes, coded-row writes). A snapshot chunk decodes a
+//!   nested map `Shaped` over a chunk shape (owner [`DECODED`]) from the second sighting of its
+//!   key sequence in the chunk; the table applies its own second-sighting rule to it
+//!   (`shape_decoded_map`) and turns it `Indexed` when the rule says so, so the stored form does
+//!   not depend on the decode. Nested maps never take the transition caches: a key-changing
+//!   write inside a value turns that nested map `Indexed` (the public `PropertyMap` API), which
+//!   stays correct and is shaped again by the next write of the property.
 //! - **Sweep:** a shape no map references any more (only the table holds it) is removed by
 //!   [`ShapeTable::sweep`]: when the table has doubled since the last sweep (checked when a new
 //!   shape is interned), on `shrink_to_fit` and after a load. A shape referenced from anywhere (a
@@ -43,7 +58,7 @@ use crate::value::{ElementProperty, PropertyMap};
 /// A cheap hasher for the transition caches, whose keys are a shape address, a position and
 /// (for an insertion) a short key: one multiply per word instead of FNV's one per byte.
 #[derive(Default)]
-struct MixHasher(u64);
+pub(crate) struct MixHasher(u64);
 
 impl MixHasher {
     #[inline]
@@ -86,10 +101,27 @@ impl std::hash::Hasher for MixHasher {
     }
 }
 
-type Mix = BuildHasherDefault<MixHasher>;
+pub(crate) type Mix = BuildHasherDefault<MixHasher>;
 
 /// The last insertion transition: `(shape address, position, key print, key, next shape)`.
 type InsertMemo = (usize, usize, KeyPrint, CompactString, Arc<Shape>);
+
+/// How many container levels (objects and arrays) below an element's own values have their maps
+/// shaped: bounded so that shaping, and the recursive `Clone`/`PartialEq`/`Drop` of the values it
+/// shapes, add only a fixed number of frames (the 2 MiB test stack; values may nest up to
+/// `traversal.max_value_depth`). Deeper maps stay `Indexed`, as every nested map was before.
+pub(crate) const NESTED_DEPTH: usize = 8;
+
+/// The most nested key-sequence hashes remembered as seen once; the set is cleared when full
+/// (a sequence then needs two more sightings) and on [`ShapeTable::shrink_to_fit`].
+const NESTED_SEEN_MAX: usize = 1 << 16;
+
+/// The owner id of the shapes a snapshot chunk decodes (`persist::codec::ChunkShapes`); table
+/// ids start at 1.
+pub(crate) const DECODED: u64 = 0;
+
+/// Entries of the memo of decoded nested shapes ([`ShapeTable::shape_decoded_map`]).
+const DECODED_MEMO: usize = 64;
 
 /// The smallest shape count at which the table sweeps when it has doubled.
 const MIN_SWEEP_AT: usize = 64;
@@ -129,6 +161,18 @@ pub(crate) struct ShapeTable {
     last: Option<Arc<Shape>>,
     /// The shape count that triggers the next sweep.
     sweep_at: usize,
+    /// The nested shape interned or found last ([`Self::shape_value`]), kept apart from `last`
+    /// so that nested maps do not evict the element maps' memo.
+    last_nested: Option<Arc<Shape>>,
+    /// [`keys_hash`]es of nested key sequences seen once without a shape (see the module docs).
+    seen_once: std::collections::HashSet<u64, Mix>,
+    /// Decoded nested shape -> this table's shape, by the decoded shape's address (empty until
+    /// the first decoded nested map; cleared by a sweep). The decoded shape is held, so its
+    /// address is not reused while it is remembered.
+    decoded: Vec<Option<(Arc<Shape>, Arc<Shape>)>>,
+    /// Tests: leave nested maps as they are (the reference of the byte-identity test).
+    #[cfg(test)]
+    nested_off: bool,
 }
 
 impl Default for ShapeTable {
@@ -161,6 +205,11 @@ impl ShapeTable {
             empty: Arc::new(Shape::new(Box::new([]), id)),
             last: None,
             sweep_at: MIN_SWEEP_AT,
+            last_nested: None,
+            seen_once: std::collections::HashSet::default(),
+            decoded: Vec::new(),
+            #[cfg(test)]
+            nested_off: false,
         }
     }
 
@@ -240,25 +289,34 @@ impl ShapeTable {
         self.adopt_slow(map);
     }
 
-    /// [`Self::adopt`] of a map that is not one of this table's yet.
+    /// [`Self::adopt`] of a map that is not one of this table's yet. A coded row of this table
+    /// stays coded; one of another table (never expected: coded rows do not leave their graph)
+    /// turns plain first.
     fn adopt_slow(&mut self, map: &mut PropertyMap) {
+        if let Repr::Coded(coded) = &map.0 {
+            if self.owns(&coded.layout.shape) {
+                return;
+            }
+            map.plain_mut();
+        }
         match &mut map.0 {
             Repr::Shaped(shaped) => {
                 if let Some((theirs, ours)) = &self.last_foreign
                     && Arc::ptr_eq(theirs, &shaped.shape)
                 {
                     shaped.shape = Arc::clone(ours);
-                    return;
+                } else {
+                    let theirs = Arc::clone(&shaped.shape);
+                    shaped.shape = self
+                        .intern_keys(theirs.keys.iter().map(CompactString::as_str), || {
+                            theirs.keys.clone()
+                        });
+                    // Only a foreign shape is remembered: the memo never names one of ours.
+                    if !self.owns(&theirs) {
+                        self.last_foreign = Some((theirs, Arc::clone(&shaped.shape)));
+                    }
                 }
-                let theirs = Arc::clone(&shaped.shape);
-                shaped.shape = self
-                    .intern_keys(theirs.keys.iter().map(CompactString::as_str), || {
-                        theirs.keys.clone()
-                    });
-                // Only a foreign shape is remembered: the memo never names one of ours.
-                if !self.owns(&theirs) {
-                    self.last_foreign = Some((theirs, Arc::clone(&shaped.shape)));
-                }
+                self.shape_values(&mut shaped.values);
             }
             Repr::Indexed(indexed) => {
                 let shape = self.intern_keys(indexed.keys().map(CompactString::as_str), || {
@@ -269,8 +327,11 @@ impl ShapeTable {
                 let indexed = std::mem::take(indexed);
                 let mut values = Vec::with_capacity(indexed.len());
                 values.extend(indexed.into_values());
+                self.shape_values(&mut values);
                 map.0 = Repr::Shaped(Shaped { shape, values });
             }
+            // Turned plain above.
+            Repr::Coded(_) => {}
         }
     }
 
@@ -292,6 +353,21 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) -> (usize, Option<ElementProperty>) {
+        if map.is_coded() {
+            return self.insert_full_coded(map, key, value);
+        }
+        self.insert_full_plain(map, key, value)
+    }
+
+    /// [`Self::insert_full`] of a map known not to be a coded row.
+    #[inline]
+    pub(crate) fn insert_full_plain(
+        &mut self,
+        map: &mut PropertyMap,
+        key: CompactString,
+        mut value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
+        self.shape_value(&mut value);
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             return map.insert_full(key, value);
@@ -316,6 +392,9 @@ impl ShapeTable {
         map: &mut PropertyMap,
         key: &str,
     ) -> Option<(usize, CompactString, ElementProperty)> {
+        if map.is_coded() {
+            return self.shift_remove_coded(map, key);
+        }
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             return map.shift_remove_full(key);
@@ -330,6 +409,134 @@ impl ShapeTable {
         Some((position, stored, value))
     }
 
+    /// [`Self::insert_full`] of a coded row (out of line: plain maps never take it).
+    #[cold]
+    #[inline(never)]
+    fn insert_full_coded(
+        &mut self,
+        map: &mut PropertyMap,
+        key: CompactString,
+        mut value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
+        self.shape_value(&mut value);
+        // A new key of a coded row of this table: appended as an own value, the row stays
+        // coded (the caller codes it again: `CompressionRules::code_row`).
+        if let Repr::Coded(coded) = &mut map.0
+            && self.owns(&coded.layout.shape)
+            && coded.layout.shape.position(&key).is_none()
+        {
+            let position = coded.len();
+            let shape = self.with_key_at(&coded.layout.shape, position, key);
+            let layout = &coded.layout;
+            let mut slots = layout.slots.to_vec();
+            slots.push(coded.own.len() as u32);
+            let mut rules = layout.rules.to_vec();
+            rules.push(None);
+            coded.layout = Arc::new(crate::value::property_map::Layout {
+                shape,
+                slots: slots.into_boxed_slice(),
+                dicts: layout.dicts.clone(),
+                rules: rules.into_boxed_slice(),
+                interned: false,
+            });
+            let mut own = std::mem::take(&mut coded.own).into_vec();
+            own.push(value);
+            coded.own = own.into_boxed_slice();
+            return (position, None);
+        }
+        map.plain_mut();
+        self.insert_full(map, key, value)
+    }
+
+    /// [`Self::shift_remove_full`] of a coded row (out of line).
+    #[cold]
+    #[inline(never)]
+    fn shift_remove_coded(
+        &mut self,
+        map: &mut PropertyMap,
+        key: &str,
+    ) -> Option<(usize, CompactString, ElementProperty)> {
+        if let Repr::Coded(coded) = &mut map.0
+            && self.owns(&coded.layout.shape)
+        {
+            return self.coded_remove(coded, key);
+        }
+        map.plain_mut();
+        self.shift_remove_full(map, key)
+    }
+
+    /// [`Self::shift_remove_full`] of a coded row: the position leaves the layout (a transient
+    /// one, interned by the following `code_row`), an own value moves out, a coded one is
+    /// cloned out of its dictionary.
+    fn coded_remove(
+        &mut self,
+        coded: &mut crate::value::property_map::Coded,
+        key: &str,
+    ) -> Option<(usize, CompactString, ElementProperty)> {
+        use crate::value::property_map::CODED_SLOT;
+        let layout = Arc::clone(&coded.layout);
+        let position = layout.shape.position(key)?;
+        let stored = layout.shape.keys.get(position)?.clone();
+        let removed = *layout.slots.get(position)?;
+        let shape = self.without_position(&layout.shape, position);
+        let mut slots = Vec::with_capacity(layout.slots.len().saturating_sub(1));
+        for (at, slot) in layout.slots.iter().enumerate() {
+            if at == position {
+                continue;
+            }
+            let coded_slot = slot & CODED_SLOT != 0;
+            let index = slot & !CODED_SLOT;
+            // The indexes after the removed one of its kind move down by one.
+            let shifted =
+                if coded_slot == (removed & CODED_SLOT != 0) && index > (removed & !CODED_SLOT) {
+                    index - 1
+                } else {
+                    index
+                };
+            slots.push(if coded_slot {
+                CODED_SLOT | shifted
+            } else {
+                shifted
+            });
+        }
+        let mut dicts = layout.dicts.to_vec();
+        let mut rules = layout.rules.to_vec();
+        if position < rules.len() {
+            rules.remove(position);
+        }
+        // Checked before anything changes: a broken row is left as it is.
+        let at = (removed & !CODED_SLOT) as usize;
+        let is_coded = removed & CODED_SLOT != 0;
+        if (is_coded && (at >= coded.codes.len() || at >= dicts.len()))
+            || (!is_coded && at >= coded.own.len())
+        {
+            return None;
+        }
+        let value = if is_coded {
+            let mut codes = std::mem::take(&mut coded.codes).into_vec();
+            let code = codes.remove(at);
+            let dictionary = dicts.remove(at);
+            coded.codes = codes.into_boxed_slice();
+            dictionary
+                .get(code)
+                .cloned()
+                .unwrap_or(ElementProperty::Null)
+        } else {
+            let mut own = std::mem::take(&mut coded.own).into_vec();
+            let value = own.remove(at);
+            coded.own = own.into_boxed_slice();
+            value
+        };
+        coded.layout = Arc::new(crate::value::property_map::Layout {
+            shape,
+            slots: slots.into_boxed_slice(),
+            dicts: dicts.into_boxed_slice(),
+            rules: rules.into_boxed_slice(),
+            interned: false,
+        });
+        Some((position, stored, value))
+    }
+
     /// The in-graph positional insert of an absent `key` at `position` (clamped to the length):
     /// the undo log putting a removed key back where it was (transition cache). A present key is
     /// overwritten in place.
@@ -340,6 +547,7 @@ impl ShapeTable {
         key: CompactString,
         value: ElementProperty,
     ) {
+        map.plain_mut();
         self.adopt(map);
         let Repr::Shaped(shaped) = &mut map.0 else {
             map.shift_insert(position, key, value);
@@ -450,6 +658,8 @@ impl ShapeTable {
         self.last_remove = None;
         self.last_foreign = None;
         self.last = None;
+        self.last_nested = None;
+        self.decoded = Vec::new();
         let before = self.shapes.len();
         // Held by the table alone: one strong reference (the set's).
         self.shapes.retain(|shape| Arc::strong_count(shape) > 1);
@@ -460,6 +670,7 @@ impl ShapeTable {
     /// Sweeps and releases the spare capacity of the set and the caches.
     pub(crate) fn shrink_to_fit(&mut self) {
         self.sweep();
+        self.seen_once = std::collections::HashSet::default();
         self.shapes.shrink_to_fit(|shape| shape.hash);
         self.inserted.shrink_to_fit();
         self.removed.shrink_to_fit();
@@ -487,6 +698,190 @@ impl ShapeTable {
                 self.removed.capacity(),
                 size_of::<((usize, usize), Arc<Shape>)>(),
             )
+            + hash_table_heap_bytes(self.seen_once.capacity(), size_of::<u64>())
+    }
+
+    /// Shapes the maps nested in `value` (an object, or objects inside an array) in this table,
+    /// down to [`NESTED_DEPTH`] levels; any other value is left alone (one comparison).
+    #[inline]
+    pub(crate) fn shape_value(&mut self, value: &mut ElementProperty) {
+        #[cfg(test)]
+        if self.nested_off {
+            return;
+        }
+        if matches!(
+            value,
+            ElementProperty::Object(_) | ElementProperty::Array(_)
+        ) {
+            self.shape_nested(value, 0);
+        }
+    }
+
+    /// [`Self::shape_value`] of each of a stored map's values.
+    #[inline]
+    fn shape_values(&mut self, values: &mut [ElementProperty]) {
+        for value in values {
+            self.shape_value(value);
+        }
+    }
+
+    /// [`Self::shape_value`] of a container `depth` levels below an element's own values.
+    #[inline(never)]
+    fn shape_nested(&mut self, value: &mut ElementProperty, depth: usize) {
+        if depth >= NESTED_DEPTH {
+            return;
+        }
+        match value {
+            ElementProperty::Object(map) => {
+                self.shape_nested_map(map);
+                // Never a coded row (those do not leave their graph): `values_mut` changes no
+                // representation here.
+                for item in map.values_mut() {
+                    if matches!(item, ElementProperty::Object(_) | ElementProperty::Array(_)) {
+                        self.shape_nested(item, depth + 1);
+                    }
+                }
+            }
+            ElementProperty::Array(items) => {
+                for item in items.iter_mut() {
+                    if matches!(item, ElementProperty::Object(_) | ElementProperty::Array(_)) {
+                        self.shape_nested(item, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Gives the nested `map` a shape of this table: a foreign shape is re-interned, an
+    /// `Indexed` map is converted when its key sequence has a shape or was seen before; an empty
+    /// `Indexed` map stays (it owns no heap).
+    fn shape_nested_map(&mut self, map: &mut PropertyMap) {
+        match &mut map.0 {
+            Repr::Shaped(shaped) => {
+                if self.owns(&shaped.shape) {
+                    return;
+                }
+                if shaped.shape.owner == DECODED {
+                    self.shape_decoded_map(map);
+                    return;
+                }
+                let theirs = Arc::clone(&shaped.shape);
+                if let Some(ours) = self.nested_shape(
+                    theirs.keys.iter().map(CompactString::as_str),
+                    || theirs.keys.clone(),
+                    true,
+                ) {
+                    shaped.shape = ours;
+                }
+            }
+            Repr::Indexed(indexed) => {
+                if indexed.is_empty() {
+                    return;
+                }
+                let Some(shape) = self.nested_shape(
+                    indexed.keys().map(CompactString::as_str),
+                    || indexed.keys().cloned().collect(),
+                    false,
+                ) else {
+                    return;
+                };
+                let indexed = std::mem::take(indexed);
+                let mut values = Vec::with_capacity(indexed.len());
+                values.extend(indexed.into_values());
+                map.0 = Repr::Shaped(Shaped { shape, values });
+            }
+            // Never nested; left as it is.
+            Repr::Coded(_) => {}
+        }
+    }
+
+    /// [`Self::shape_nested_map`] of a nested map a snapshot chunk decoded `Shaped`
+    /// (`persist::codec::ChunkShapes`, owner [`DECODED`]): it gets this table's shape exactly
+    /// when the same map decoded `Indexed` would (the second sighting of its key sequence, see
+    /// the module docs), else it turns `Indexed`, so the stored form does not depend on how a
+    /// chunk was decoded. The decoded shape's answer is remembered (`decoded`), so the maps of
+    /// one chunk shape cost one pointer comparison each.
+    fn shape_decoded_map(&mut self, map: &mut PropertyMap) {
+        let Repr::Shaped(shaped) = &mut map.0 else {
+            return;
+        };
+        let slot = (address(&shaped.shape) >> 6) % DECODED_MEMO;
+        if let Some(Some((theirs, ours))) = self.decoded.get(slot)
+            && Arc::ptr_eq(theirs, &shaped.shape)
+        {
+            // `ours` is in the table: the memo holds it, and a sweep clears the memo first.
+            shaped.shape = Arc::clone(ours);
+            return;
+        }
+        let theirs = Arc::clone(&shaped.shape);
+        match self.nested_shape(
+            theirs.keys.iter().map(CompactString::as_str),
+            || theirs.keys.clone(),
+            false,
+        ) {
+            Some(ours) => {
+                shaped.shape = Arc::clone(&ours);
+                if self.decoded.is_empty() {
+                    self.decoded.resize(DECODED_MEMO, None);
+                }
+                if let Some(entry) = self.decoded.get_mut(slot) {
+                    *entry = Some((theirs, ours));
+                }
+            }
+            None => {
+                // The first sighting in this graph: `Indexed`, built as the decoder builds one.
+                let values = std::mem::take(&mut shaped.values);
+                let mut indexed = PropertyMap::with_capacity(values.len());
+                for (key, value) in theirs.keys.iter().zip(values) {
+                    indexed.insert(key.clone(), value);
+                }
+                *map = indexed;
+            }
+        }
+    }
+
+    /// The shape of a nested key sequence: the nested memo, then the table; a new sequence is
+    /// interned when `always` or at its second sighting (`None` at the first).
+    fn nested_shape<'a, I>(
+        &mut self,
+        keys: I,
+        build: impl FnOnce() -> Box<[CompactString]>,
+        always: bool,
+    ) -> Option<Arc<Shape>>
+    where
+        I: ExactSizeIterator<Item = &'a str> + Clone,
+    {
+        if keys.len() == 0 {
+            return Some(Arc::clone(&self.empty));
+        }
+        if let Some(last) = &self.last_nested
+            && last.has_keys(keys.clone())
+        {
+            return Some(Arc::clone(last));
+        }
+        let hash = keys_hash(keys.clone());
+        let found = self
+            .shapes
+            .find(hash, |shape| {
+                shape.hash == hash && shape.has_keys(keys.clone())
+            })
+            .map(Arc::clone);
+        let shape = match found {
+            Some(shape) => shape,
+            None => {
+                if !always && !self.seen_once.remove(&hash) {
+                    if self.seen_once.len() >= NESTED_SEEN_MAX {
+                        self.seen_once.clear();
+                    }
+                    self.seen_once.insert(hash);
+                    return None;
+                }
+                self.intern_new(build())
+            }
+        };
+        self.last_nested = Some(Arc::clone(&shape));
+        Some(shape)
     }
 
     /// The last shape interned or adopted, when its keys are exactly `keys` (no hashing).
@@ -519,6 +914,7 @@ impl ShapeTable {
         });
         let mut values = Vec::with_capacity(indexed.len());
         values.extend(indexed.values().cloned());
+        self.shape_values(&mut values);
         PropertyMap::from_shaped(shape, values)
     }
 }
@@ -845,6 +1241,7 @@ mod graph_tests {
         match &vertex.2.0 {
             Repr::Shaped(shaped) => Arc::clone(&shaped.shape),
             Repr::Indexed(_) => panic!("a stored map is shaped"),
+            Repr::Coded(coded) => Arc::clone(&coded.layout.shape),
         }
     }
 
@@ -997,6 +1394,304 @@ mod graph_tests {
         // Two short values per vertex: 2 x 32 bytes of slots each, no key bytes.
         let per_vertex = (large_stats.property_bytes - large_stats.shape_bytes) / 1000;
         assert_eq!(per_vertex, 2 * size_of::<ElementProperty>() as u64);
+    }
+}
+
+/// Nested maps (stage V3): shaped in the graph's table at their second sighting, down to
+/// [`NESTED_DEPTH`] levels; every read, comparison and hash is the same as for a plain map.
+#[cfg(test)]
+mod nested_tests {
+    use std::sync::Arc;
+
+    use super::NESTED_DEPTH;
+    use crate::TraversalGraph;
+    use crate::graph::{GraphStorage, Transactional, VertexHandle};
+    use crate::value::property_map::{Repr, Shape};
+    use crate::value::{ElementProperty, PropertyMap};
+
+    fn object(entries: &[(&str, ElementProperty)]) -> ElementProperty {
+        ElementProperty::Object(Box::new(
+            entries
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+                .collect(),
+        ))
+    }
+
+    fn hashes(tag: &str, value: &str) -> ElementProperty {
+        object(&[(tag, value.into())])
+    }
+
+    fn add(graph: &mut TraversalGraph, key: &str, value: ElementProperty) -> VertexHandle {
+        let props = PropertyMap::from([("name", ElementProperty::from("x")), (key, value)]);
+        graph
+            .insert_vertex(None, vec!["Method".into()], props)
+            .expect("insert")
+    }
+
+    fn nested(graph: &TraversalGraph, handle: VertexHandle, key: &str) -> ElementProperty {
+        graph
+            .vertex_properties(handle)
+            .unwrap()
+            .expect("live")
+            .get(key)
+            .expect("key")
+            .clone()
+    }
+
+    /// The shape of the map stored at `key` (`None`: `Indexed`).
+    fn nested_shape(graph: &TraversalGraph, handle: VertexHandle, key: &str) -> Option<Arc<Shape>> {
+        let props = graph.vertex_properties(handle).unwrap().expect("live");
+        match props.get(key) {
+            Some(ElementProperty::Object(map)) => match &map.0 {
+                Repr::Shaped(shaped) => Some(Arc::clone(&shaped.shape)),
+                Repr::Indexed(_) | Repr::Coded(_) => None,
+            },
+            _ => panic!("an object at {key}"),
+        }
+    }
+
+    #[test]
+    fn a_repeated_nested_key_sequence_shares_one_shape_from_its_second_sighting() {
+        let mut graph = TraversalGraph::new();
+        let first = add(&mut graph, "_hashes", hashes("ACM:3", "5e6d"));
+        let second = add(&mut graph, "_hashes", hashes("ACM:3", "002d"));
+        let third = add(&mut graph, "_hashes", hashes("ACM:3", "77aa"));
+        assert!(nested_shape(&graph, first, "_hashes").is_none());
+        let shape = nested_shape(&graph, second, "_hashes").expect("shaped");
+        assert!(Arc::ptr_eq(
+            &shape,
+            &nested_shape(&graph, third, "_hashes").unwrap()
+        ));
+        assert_eq!(shape.owner, graph.shapes.id);
+        // Reads, equality and order are those of the plain value.
+        assert_eq!(nested(&graph, second, "_hashes"), hashes("ACM:3", "002d"));
+        assert_ne!(
+            nested(&graph, second, "_hashes"),
+            nested(&graph, third, "_hashes")
+        );
+        assert_eq!(
+            format!("{:?}", nested(&graph, third, "_hashes")),
+            format!("{:?}", hashes("ACM:3", "77aa"))
+        );
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let hasher = BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default();
+        assert_eq!(
+            hasher.hash_one(nested(&graph, third, "_hashes")),
+            hasher.hash_one(hashes("ACM:3", "77aa"))
+        );
+        // The first map gets the shape when it is written again.
+        graph
+            .set_vertex_property(first, "_hashes".into(), hashes("ACM:3", "5e6d"))
+            .expect("set");
+        assert!(Arc::ptr_eq(
+            &shape,
+            &nested_shape(&graph, first, "_hashes").unwrap()
+        ));
+    }
+
+    #[test]
+    fn nested_keys_that_never_repeat_stay_indexed() {
+        let mut graph = TraversalGraph::new();
+        let before = graph.shapes.len();
+        let handles: Vec<VertexHandle> = (0..50)
+            .map(|i| add(&mut graph, "doc", object(&[(&format!("k{i}"), i.into())])))
+            .collect();
+        // One element shape (name, doc); no nested shape.
+        assert_eq!(graph.shapes.len(), before + 1);
+        for handle in handles {
+            assert!(nested_shape(&graph, handle, "doc").is_none());
+        }
+        graph.shrink_to_fit();
+        assert!(graph.shapes.seen_once.is_empty());
+    }
+
+    #[test]
+    fn objects_inside_arrays_are_shaped_and_compare_like_plain_ones() {
+        let mut graph = TraversalGraph::new();
+        let item = |n: i64| object(&[("line", n.into()), ("col", 1.into())]);
+        let list = ElementProperty::Array((0..4).map(item).collect());
+        let a = add(&mut graph, "calls", list.clone());
+        let stored = nested(&graph, a, "calls");
+        let ElementProperty::Array(items) = &stored else {
+            panic!("array")
+        };
+        let shapes: Vec<_> = items
+            .iter()
+            .map(|item| match item {
+                ElementProperty::Object(map) => map.shape().map(Arc::clone),
+                _ => None,
+            })
+            .collect();
+        assert!(shapes[0].is_none());
+        assert!(shapes[1..].iter().all(|shape| shape.is_some()));
+        assert_eq!(stored, list);
+        assert_eq!(
+            crate::value::compare_element_property(&stored, &list),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn maps_deeper_than_the_bound_stay_indexed_and_deep_values_survive_the_stack() {
+        let mut graph = TraversalGraph::new();
+        // 200 levels: the bound shapes the top ones, everything below stays `Indexed`.
+        let mut value = ElementProperty::from(1);
+        for _ in 0..200 {
+            value = object(&[("next", value)]);
+        }
+        let a = add(&mut graph, "deep", value.clone());
+        let b = add(&mut graph, "deep", value.clone());
+        let stored = nested(&graph, b, "deep");
+        let mut level = &stored;
+        let mut depth = 0;
+        while let ElementProperty::Object(map) = level {
+            let shaped = map.shape().is_some();
+            assert_eq!(shaped, depth < NESTED_DEPTH, "level {depth}");
+            level = map.get("next").expect("next");
+            depth += 1;
+        }
+        assert_eq!(depth, 200);
+        assert_eq!(stored, value);
+        assert_eq!(nested(&graph, a, "deep"), stored);
+        let copy = stored.clone();
+        drop(graph);
+        drop(stored);
+        assert_eq!(copy, value);
+    }
+
+    #[test]
+    fn a_path_write_inside_a_nested_map_reads_back_and_is_shaped_again() {
+        let mut graph = TraversalGraph::new();
+        let a = add(
+            &mut graph,
+            "attrs",
+            object(&[("description", "one".into())]),
+        );
+        let b = add(
+            &mut graph,
+            "attrs",
+            object(&[("description", "two".into())]),
+        );
+        let shape = nested_shape(&graph, b, "attrs").expect("shaped");
+        let path = "attrs.extra"
+            .parse::<crate::value::JsonPath>()
+            .expect("path");
+        graph
+            .set_vertex_property_path(b, &path, 7.into())
+            .expect("write");
+        assert_eq!(
+            nested(&graph, b, "attrs"),
+            object(&[("description", "two".into()), ("extra", 7.into())])
+        );
+        let path = "attrs.description"
+            .parse::<crate::value::JsonPath>()
+            .expect("path");
+        graph
+            .set_vertex_property_path(b, &path, "three".into())
+            .expect("write");
+        // A value write in place keeps the shape of the written map's key sequence.
+        graph
+            .set_vertex_property_path(a, &path, "uno".into())
+            .expect("write");
+        assert!(Arc::ptr_eq(
+            &shape,
+            &nested_shape(&graph, a, "attrs").unwrap()
+        ));
+        assert_eq!(
+            nested(&graph, a, "attrs"),
+            object(&[("description", "uno".into())])
+        );
+    }
+
+    #[test]
+    fn a_change_set_moves_nested_maps_into_the_other_graphs_table() {
+        let mut one = TraversalGraph::new();
+        let (_, changes) = one
+            .dry_run(|graph| -> Result<(), crate::graph::GraphError> {
+                for i in 0..3 {
+                    add(graph, "_hashes", hashes("ACM:3", &format!("h{i}")));
+                }
+                Ok(())
+            })
+            .expect("dry run");
+        let mut two = TraversalGraph::new();
+        two.apply_change_set(&changes).expect("apply");
+        let handles: Vec<VertexHandle> = two.vertices().unwrap().collect();
+        assert_eq!(handles.len(), 3);
+        let shaped: Vec<Arc<Shape>> = handles
+            .iter()
+            .filter_map(|handle| nested_shape(&two, *handle, "_hashes"))
+            .collect();
+        assert!(!shaped.is_empty());
+        assert!(shaped.iter().all(|shape| shape.owner == two.shapes.id));
+    }
+
+    /// The same elements with nested maps shaped (repeated key sequences) and with every nested
+    /// map `Indexed` encode to the same bytes (the snapshot differs only in its header's memory
+    /// estimate, `SnapshotInfo::memory_bytes`, which is smaller), and so does a reload.
+    #[cfg(feature = "persist")]
+    #[test]
+    fn a_snapshot_is_byte_identical_whatever_the_nested_representation() {
+        use crate::persist::codec::{InlineKeys, put_properties};
+        use crate::persist::{WriteOptions, read_snapshot_info, write_snapshot};
+        let build = |nested_off: bool| {
+            let mut graph = TraversalGraph::new().with_graph_id(7);
+            graph.shapes.nested_off = nested_off;
+            for i in 0..20 {
+                let mut value = object(&[("a", i.into()), ("b", "x".into())]);
+                if i % 3 == 0 {
+                    value = ElementProperty::Array(vec![value.clone(), value]);
+                }
+                add(&mut graph, "v", value);
+            }
+            // As a load ends: no spare slots (the reloaded graph is compared below).
+            graph.shrink_to_fit();
+            graph
+        };
+        let bytes_of = |graph: &TraversalGraph| {
+            let mut bytes = Vec::new();
+            write_snapshot(
+                graph,
+                &mut bytes,
+                &WriteOptions::default().with_created_at(1_700_000_000_000_000),
+            )
+            .expect("write");
+            bytes
+        };
+        // Per vertex id (a load may place the vertices in other slots).
+        let encoded = |graph: &TraversalGraph| {
+            let mut all = Vec::new();
+            for handle in graph.vertices().unwrap() {
+                let id = graph.vertex_weight(handle).expect("live").0.to_string();
+                let mut out = Vec::new();
+                let props = graph.vertex_properties(handle).unwrap();
+                put_properties(&mut out, props, &mut InlineKeys).expect("encode");
+                all.push((id, out));
+            }
+            all.sort();
+            all
+        };
+        let shaped = build(false);
+        let plain = build(true);
+        assert!(shaped.shapes.len() > plain.shapes.len());
+        assert_eq!(encoded(&shaped), encoded(&plain));
+        let bytes = bytes_of(&shaped);
+        let plain_bytes = bytes_of(&plain);
+        assert_eq!(bytes.len(), plain_bytes.len());
+        let info = read_snapshot_info(bytes.as_slice()).expect("info");
+        let plain_info = read_snapshot_info(plain_bytes.as_slice()).expect("info");
+        assert!(info.memory_bytes < plain_info.memory_bytes);
+        let loaded = TraversalGraph::read_snapshot(bytes.as_slice()).expect("read");
+        assert_eq!(encoded(&loaded), encoded(&shaped));
+        for handle in shaped.vertices().unwrap() {
+            let id = shaped.vertex_weight(handle).expect("live").0.clone();
+            let other = loaded.index.get_node(&loaded.graph, &id).expect("loaded");
+            assert_eq!(
+                shaped.vertex_properties(handle).unwrap(),
+                loaded.vertex_properties(other).unwrap()
+            );
+        }
     }
 }
 

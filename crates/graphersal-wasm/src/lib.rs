@@ -485,14 +485,13 @@ impl Playground {
         json_text(self.session.graph().memory_view())
     }
 
-    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` (see
-    /// [`Session::statistics`]).
+    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` with
+    /// the whole process in `process.memory` (see [`Session::statistics_with_process`]).
     pub fn statistics(&self) -> Result<String, JsError> {
-        let mut statistics = self
+        let statistics = self
             .session
-            .statistics()
+            .statistics_with_process()
             .map_err(|e| JsError::new(&e.to_string()))?;
-        graphersal_session::process::add_to_statistics(&mut statistics);
         Ok(to_text(&statistics))
     }
 
@@ -565,6 +564,16 @@ impl Playground {
     pub fn apply_recommendation(&mut self, id: &str, spec: &str) -> Result<String, JsError> {
         let spec = body_json(spec)?;
         Ok(to_text(&self.session.apply_recommendation(id, &spec)))
+    }
+
+    /// Applies the recommendations `ids` (a JSON list of ids) of the advice for `spec` in ONE
+    /// commit, all or nothing: `{ok, applied, memory_bytes}` or `{ok: false, error}`.
+    #[wasm_bindgen(js_name = applyRecommendations)]
+    pub fn apply_recommendations(&mut self, ids: &str, spec: &str) -> Result<String, JsError> {
+        let ids: Vec<String> = serde_json::from_str(ids)
+            .map_err(|e| JsError::new(&format!("ids is a JSON list of ids: {e}")))?;
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.apply_recommendations(&ids, &spec)))
     }
 
     /// Dismisses the recommendation `id` for `days` (`null`: for good): `{ok}` or `{ok: false,

@@ -353,11 +353,12 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             Kind::Read,
             "The compression rules of the graph: strings of one vertex or edge label at one \
              property path that are kept LZ4-compressed in memory (codec lz4) or stored once \
-             per distinct value (codec dedup); reads are always plain. Each has name, element, \
+             per distinct value (codec dedup; on a top-level property every value type, each \
+             element keeping a 4-byte code); reads are always plain. Each has name, element, \
              label, path, codec, minBytes, dictionary, served (false: the rule is kept but \
              not applied, values stay plain; reason says why, such as a codec of a newer \
              version) and its current stats (compressedValues, plainBytes, storedBytes, \
-             dictionaryBytes, distinctValues: the distinct texts of a dedup rule).",
+             dictionaryBytes, distinctValues: the distinct values of a dedup rule).",
             no_args(),
         ),
         tool(
@@ -368,7 +369,8 @@ pub(crate) fn all_tools() -> Vec<Tool> {
              would hold over the current values, WITHOUT changing the graph: lz4 with and \
              without a dictionary at minBytes 64, 128, 256, 512 and 1024 (or only the codec, \
              minBytes and dictionary given; codec [\"lz4\", \"dedup\"] also measures dedup at \
-             25, 64, 128 and 256), plus the rule that covers the path today. Answers \
+             0, 25, 64, 128 and 256; on a top-level property dedup counts every value type), \
+             plus the rule that covers the path today. Answers \
              valuesFound, stringValues, a size histogram, per candidate compressedValues, \
              plainBytes, storedBytes, dictionaryBytes, distinctValues (dedup), savedBytes, ratio \
              and the read (decode) speed, the best candidate's index and warnings (unknown \
@@ -382,13 +384,13 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                     "path": {"type": "string", "description": "The property path: a name or a jpath of names (details.career.cv)."},
                     "element": {"type": "string", "enum": ["vertex", "edge"], "description": "Default vertex."},
                     "codec": {
-                        "description": "Measure only this codec, or these codecs (default: lz4 only). dedup stores each distinct value once: long repeated values.",
+                        "description": "Measure only this codec, or these codecs (default: lz4 only). dedup stores each distinct value once: values repeated across many elements (any type on a top-level property).",
                         "oneOf": [
                             {"type": "string", "enum": ["lz4", "dedup"]},
                             {"type": "array", "items": {"type": "string", "enum": ["lz4", "dedup"]}},
                         ],
                     },
-                    "minBytes": {"type": "integer", "minimum": 1, "description": "Measure only this threshold (default: several)."},
+                    "minBytes": {"type": "integer", "minimum": 0, "description": "Measure only this threshold (default: several; 0 only for dedup)."},
                     "dictionary": {"type": "boolean", "description": "Measure only with (true) or without (false) a dictionary (default: both)."},
                 },
                 "required": ["label", "path"],
@@ -401,12 +403,16 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             "Stores (or replaces) a compression rule: strings of `element`s labelled `label` at \
              `path` (a jpath of names such as \"bio\" or \"details.career.cv\"; no index) are \
              kept compressed in memory when they are at least minBytes long and compress to at \
-             most 90 %, or (codec dedup) stored once per distinct value when they are at least \
-             minBytes and more than 24 bytes long. The label's existing values are re-encoded \
-             at once. lz4 is worth it for large text that queries rarely read (CVs, \
-             descriptions, document bodies; a read or a has() decompresses it); dedup for long \
-             values repeated across many elements (paths, URLs, addresses, category texts; \
-             reads cost nothing extra). One rule per element, label and path.",
+             most 90 %, or (codec dedup) stored once per distinct value: on a top-level property \
+             every value (strings of at least minBytes, default 0) is kept in the rule's \
+             dictionary and the element holds a 4-byte code instead of the 32-byte value; under \
+             a nested path strings of at least minBytes and more than 24 bytes are shared. The \
+             label's existing values are re-encoded at once. lz4 is worth it for large text that \
+             queries rarely read (CVs, descriptions, document bodies; a read or a has() \
+             decompresses it); dedup for values repeated across many elements (paths, kinds, \
+             flags, dates, small lists; reads cost nothing extra, writes look the value up). \
+             One rule per element, label and path. advise recommends dedup where at most one \
+             value in eight is distinct and it saves at least 1 MiB.",
             json!({
                 "type": "object",
                 "properties": {
@@ -415,7 +421,7 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                     "path": {"type": "string", "description": "The property path: a name or a jpath of names (details.career.cv)."},
                     "element": {"type": "string", "enum": ["vertex", "edge"], "description": "Default vertex."},
                     "codec": {"type": "string", "enum": ["lz4", "dedup"], "description": "lz4 (default) compresses each value; dedup stores each distinct value once."},
-                    "minBytes": {"type": "integer", "minimum": 1, "description": "Shorter strings stay plain (default 256 for lz4, 25 for dedup)."},
+                    "minBytes": {"type": "integer", "minimum": 0, "description": "Shorter strings stay plain (lz4: 1 or more, default 256; dedup: default 0, every string; dedup on a top-level key also stores every number, boolean, date, array or object value once)."},
                     "dictionary": {"type": "boolean", "description": "lz4 only: build a dictionary from the rule's values (default true; a dedup rule has none)."},
                     "replaces": {"type": "string", "description": "Rename: the rule this one replaces (dropped in the same commit)."},
                 },
@@ -644,18 +650,44 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             Kind::Read,
             "Recommendations of the storage advisor, WITHOUT changing anything: create a \
              property index for a key filtered often by a full scan, drop an index no query \
-             used, compress or deduplicate large strings (savings measured on the data), stop \
+             used, compress large strings or store repeated values once (dedup: at most one \
+             value in eight distinct, saving at least 1 MiB; savings measured on the data), stop \
              compressing a key read often. Each has evidence, cost, memory_bytes (freed; \
              negative = taken), impact (what it is worth: low, medium, high; for memory its \
              share of the graph), confidence (how much data it rests on) and the exact command \
              applying it (create_index, drop_index, define_compression, drop_compression: \
-             apply one only when the user asked for it). The list is ordered by impact. \
-             everything: true lists every candidate (small graphs).",
+             apply one only when the user asked for it). The list is ordered by impact. groups \
+             sums the recommendations per kind and codec (\"dedup: 74 keys, total -400.1 \
+             MiB\") with their ids, for apply_recommendations. Cost of dedup: on a deduped key \
+             adding a key new to an element and jpath writes into the value are about 30 % \
+             slower, plain overwrites about 5-9 %, reads mostly faster. everything: true lists \
+             every candidate (small graphs).",
             json!({
                 "type": "object",
                 "properties": {
                     "everything": {"type": "boolean", "description": "Report every candidate, ignoring the default thresholds (for small graphs)."},
                 },
+            }),
+        ),
+        tool(
+            "apply_recommendations",
+            "Apply recommendations",
+            Kind::Write,
+            "Applies the storage advisor's recommendations named by `ids` (the ids advise \
+             answered, such as the ids of one of its groups) in ONE commit: the advice is \
+             computed again with the same `everything`, then every index and compression rule \
+             they name is created or dropped together, and all new compression rules re-encode \
+             the data in one pass. All or nothing: an id no longer advised or a refused change \
+             (named in the error) applies nothing. Each change is reversible (drop_index, \
+             drop_compression). Apply only the recommendations the user picked: the user \
+             decides, never apply on your own.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "The recommendation ids from advise (recommendations[].id or groups[].ids)."},
+                    "everything": {"type": "boolean", "description": "The same value advise was called with (the advice is recomputed with it)."},
+                },
+                "required": ["ids"],
             }),
         ),
         tool(
@@ -688,7 +720,11 @@ pub(crate) fn all_tools() -> Vec<Tool> {
              keeps the property rows and the label rows with the most bytes (default 50), \
              max_rows and max_labels set one list each; the rows left out are counted with \
              their bytes (rows_omitted, rows_omitted_bytes, labels_omitted, \
-             labels_omitted_elements, labels_omitted_bytes), the totals cover everything.",
+             labels_omitted_elements, labels_omitted_bytes), the totals cover everything. \
+             components says where the whole process memory goes (the graph, embedding \
+             models, the script engine, the store, the dev server's MCP and AI Chat state, \
+             each with bytes and exact or estimated); unattributed_bytes is the tracked heap \
+             no component explains.",
             json!({
                 "type": "object",
                 "properties": {

@@ -86,7 +86,7 @@ pub use hooks::{
 };
 pub(crate) use index::GraphIndex;
 pub use memory::{MemoryStats, ShrinkReport};
-pub use memory_report::{MemoryReport, MemoryReportRequest, StructureMemory};
+pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
 pub use persistent::PersistentStorage;
 pub use property_index::{
@@ -167,6 +167,9 @@ pub struct TraversalGraph {
     /// The in-memory state of the compression rules of the catalog (see [`compression`]):
     /// derived from `definitions`, like an index.
     pub(crate) compression: compression::CompressionRules,
+    /// How the load through the persistence load sink codes the rows (see
+    /// [`compression::LoadCoding`]); `Idle` outside a load.
+    pub(crate) load_coding: compression::LoadCoding,
     /// The entries of the property indexes of the catalog (see [`property_index`]): derived
     /// from `definitions` and the data, never persisted.
     pub(crate) property_indexes: property_index::PropertyIndexes,
@@ -221,6 +224,7 @@ impl TraversalGraph {
             graph_id: std::sync::OnceLock::new(),
             definitions: definition::Catalog::default(),
             compression: compression::CompressionRules::default(),
+            load_coding: compression::LoadCoding::Idle,
             property_indexes: property_index::PropertyIndexes::default(),
             footprint: memory::FootprintCache::default(),
             shapes: shape::ShapeTable::new(),
@@ -385,6 +389,9 @@ impl TraversalGraph {
     pub fn shrink_to_fit(&mut self) {
         // The slot vectors: spare capacity above the last slot (vacant slots stay, indices are
         // stable). Every load ends here, so a loaded graph keeps no spare slots.
+        // Value dictionaries holding entries no row may use any more are rebuilt first (it
+        // re-codes rows, so it runs before the shapes are swept).
+        self.compression_rebuild_grown();
         self.graph.shrink_to_fit();
         self.index.shrink_to_fit();
         self.shapes.shrink_to_fit();

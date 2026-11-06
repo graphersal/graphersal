@@ -466,8 +466,29 @@ class Graph:
     ) -> None:
         """Stores (or replaces) a compression rule: strings of ``element``s labelled ``label``
         at ``path`` are kept compressed in memory (``codec="lz4"``, default: ``min_bytes`` 256,
-        a dictionary) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 25,
-        no dictionary) and read plain."""
+        a dictionary) or stored once per distinct value (``codec="dedup"``: ``min_bytes`` 0,
+        no dictionary; on a top-level key every value type) and read plain."""
+    def define_compressions(
+        self, rules: list[dict[str, Any]], *, policy: Optional[AccessPolicy] = None
+    ) -> int:
+        """Stores every compression rule of ``rules`` in ONE commit and re-encodes their labels
+        in one pass; each rule is ``define_compression``'s keys, or ``paths`` (a list) instead
+        of ``name`` and ``path`` for one rule per path named ``<label>_<path>``. All or nothing.
+        Returns the number of rules stored."""
+    def advise(
+        self, *, everything: bool = False, policy: Optional[AccessPolicy] = None
+    ) -> dict[str, Any]:
+        """The storage advisor's recommendations (with ``groups`` per kind and codec);
+        changes nothing."""
+    def apply_recommendations(
+        self,
+        ids: list[str],
+        *,
+        everything: bool = False,
+        policy: Optional[AccessPolicy] = None,
+    ) -> list[dict[str, Any]]:
+        """Applies the recommendations ``ids`` of the advice in ONE commit, all or nothing;
+        returns the applied ones (``id``, ``kind``, ``title``, ``memory_bytes``)."""
     def compressions(self, *, policy: Optional[AccessPolicy] = None) -> list[dict[str, Any]]:
         """The compression rules with their current stats; ``served`` is ``False`` (with a
         ``reason``) for a rule this version keeps but does not apply."""
@@ -487,7 +508,8 @@ class Graph:
         policy: Optional[AccessPolicy] = None,
     ) -> dict[str, Any]:
         """Where the graph's memory goes per label and top-level property (rows, labels,
-        shapes, indexes, compression rules, structure); changes nothing. ``max_elements`` /
+        shapes, indexes, compression rules, structure) and where the process memory goes
+        (``components``, ``attributed_bytes``, ``unattributed_bytes``); changes nothing. ``max_elements`` /
         ``sample_every`` sample; ``limit`` keeps the property rows and the label rows with the
         most bytes (default 500), ``max_rows`` / ``max_labels`` one list each; the rows left
         out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...)."""
@@ -755,8 +777,10 @@ class Store:
     def models(self) -> list[dict[str, Any]]:
         """The embedding models of the store's current position (catalog kind 5), each
         ``{"identity", "repo", "revision", "commit", "dimension", "license", "license_text",
-        "gated", "base_models", "default", "bytes", "load_bytes", "state", "needed_by",
-        "used_by_schema", "problem"}``. ``state``: ``loaded``, ``not_loaded``, ``damaged``,
+        "gated", "base_models", "default", "bytes", "load_bytes", "memory_bytes", "state",
+        "needed_by", "used_by_schema", "problem"}``. ``bytes``: the size on disk;
+        ``memory_bytes``: the memory measured at the load while it is loaded, else ``None``;
+        ``load_bytes``: the import's estimate kept for older versions. ``state``: ``loaded``, ``not_loaded``, ``damaged``,
         ``missing`` or ``unsupported``. Every copy of the store carries them: handing the store
         on redistributes them."""
     def import_model(

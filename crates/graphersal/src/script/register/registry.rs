@@ -13,6 +13,7 @@
 use std::any::TypeId;
 #[cfg(all(test, feature = "io", feature = "serde"))]
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rhai::packages::{Package, StandardPackage};
 use rhai::{Engine, FuncRegistration, Module, RhaiNativeFunc, Shared, Variant};
@@ -231,11 +232,57 @@ impl Registry {
 thread_local! {
     /// The registrations of this thread, built on first use. A `thread_local!` because `Shared`
     /// is an `Rc` without Rhai's `sync` feature; wasm32 has one thread anyway.
-    static SHARED: SharedRegistrations = {
+    static SHARED: Counted = {
+        // Counted once per thread, when built: the memory report's `script_engine` component.
+        let before = crate::traversal::memory_budget::thread_live_bytes();
         let mut registry = Registry::new();
         super::register_all(&mut registry);
-        registry.finish()
+        let inner = registry.finish();
+        let after = crate::traversal::memory_budget::thread_live_bytes();
+        let bytes = u64::try_from(after - before).unwrap_or(0);
+        REGISTRATION_THREADS.fetch_add(1, Ordering::Relaxed);
+        REGISTRATION_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        Counted { inner, bytes }
     };
+}
+
+/// The threads that hold the DSL's registrations now, and their bytes (counted at the build
+/// when a tracking allocator is installed): read by the memory report only.
+static REGISTRATION_THREADS: AtomicU64 = AtomicU64::new(0);
+static REGISTRATION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// A thread's registrations with the bytes their build left on the thread.
+struct Counted {
+    inner: SharedRegistrations,
+    bytes: u64,
+}
+
+impl std::ops::Deref for Counted {
+    type Target = SharedRegistrations;
+    fn deref(&self) -> &SharedRegistrations {
+        &self.inner
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        REGISTRATION_THREADS.fetch_sub(1, Ordering::Relaxed);
+        REGISTRATION_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+/// The memory report's `script_engine` component: the DSL's registrations (Rhai's standard
+/// library and every step), built once per thread that runs scripts and shared by its engines;
+/// `None` when no thread built them or no tracking allocator counted them.
+pub(crate) fn registration_memory() -> Option<crate::graph::MemoryComponent> {
+    let threads = REGISTRATION_THREADS.load(Ordering::Relaxed);
+    let bytes = REGISTRATION_BYTES.load(Ordering::Relaxed);
+    (threads > 0 && bytes > 0).then(|| {
+        crate::graph::MemoryComponent::exact("script_engine", bytes).with_detail(format!(
+            "the DSL's registrations, built on {threads} thread{}",
+            if threads == 1 { "" } else { "s" }
+        ))
+    })
 }
 
 /// A new engine with Rhai's standard library and every DSL registration attached by pointer

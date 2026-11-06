@@ -304,8 +304,11 @@ fn the_per_query_limit_counts_live_bytes_when_tracked() {
         matches!(root(&err), TraverserError::ResourceLimitExceeded { limit, .. } if limit == LIMIT),
         "{err}"
     );
-    // A query that adds 20 000 vertices one at a time: its own memory is far below what the
-    // graph gained.
+    // A query that adds 20 000 vertices one at a time: its own memory stays below what the
+    // graph gained. Not "far below": the unit's undo record (one entry per added vertex) is
+    // the run's memory until the commit frees it, and right after its Vec doubles the spare
+    // half of it (up to 112 bytes per added vertex) counts against the run; the graph's slots
+    // grow by 1/8, so its growth carries no doubling slack to hide that behind.
     let before = graph.memory_usage().unwrap().unwrap().total_bytes();
     let metrics = graph
         .traversal_mut()
@@ -325,7 +328,7 @@ fn the_per_query_limit_counts_live_bytes_when_tracked() {
     let peak = metrics.memory().unwrap().peak_bytes();
     assert!(grown > 1_000_000, "{grown}");
     assert!(
-        peak < grown / 2,
+        peak < grown,
         "the graph's growth is not the query's: {peak} vs {grown}"
     );
 }

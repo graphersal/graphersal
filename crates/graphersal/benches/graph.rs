@@ -1359,6 +1359,141 @@ mod element_properties {
         });
     }
 
+    /// `VERTICES` vertices like [`graph`] with 16 distinct values per key and a `dedup` rule
+    /// on every key: every value is coded (book "Compressed Properties").
+    fn coded_graph(width: usize) -> TraversalGraph {
+        use graphersal::catalog::{Codec, CompressionDefinition};
+        use graphersal::storage::ElementKind;
+        let mut graph = TraversalGraph::new();
+        let keys: Vec<String> = (0..width).map(|k| format!("k{k}")).collect();
+        for i in 0..VERTICES {
+            let props: PropertyMap = keys
+                .iter()
+                .enumerate()
+                .map(|(k, key)| (key.as_str(), ElementProperty::from(((i + k) % 16) as i64)))
+                .collect();
+            graph
+                .insert_vertex(None, vec!["item".into()], props)
+                .unwrap();
+        }
+        for key in &keys {
+            let rule = CompressionDefinition::new(ElementKind::Vertex, "item", key)
+                .unwrap()
+                .with_codec(Codec::Dedup);
+            graph.traversal_mut().define_compression(key, rule).unwrap();
+        }
+        graph
+    }
+
+    /// [`get_key`] on coded rows: the last key of every vertex read through its dictionary.
+    #[divan::bench(args = [1, 3, 25], sample_count = 20)]
+    fn get_key_coded(bencher: divan::Bencher, width: usize) {
+        let graph = coded_graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            handles
+                .iter()
+                .filter_map(|&v| {
+                    graph
+                        .vertex_properties(v)
+                        .unwrap()
+                        .and_then(|p| p.get(&key))
+                })
+                .count()
+        });
+    }
+
+    /// [`write_overwrite`] on coded rows: the value is looked up in the dictionary, the code
+    /// replaced in place.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn write_overwrite_coded(bencher: divan::Bencher, width: usize) {
+        let mut graph = coded_graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            for &v in &handles {
+                graph
+                    .set_vertex_property(v, key.as_str().into(), ElementProperty::from(7))
+                    .unwrap();
+            }
+        });
+    }
+
+    /// `VERTICES` vertices with `width` int keys and a `list` key (a two-element array, 16
+    /// distinct), plain or with a `dedup` rule on every key.
+    fn list_graph(width: usize, coded: bool) -> TraversalGraph {
+        use graphersal::catalog::{Codec, CompressionDefinition};
+        use graphersal::storage::ElementKind;
+        let mut graph = TraversalGraph::new();
+        let mut keys: Vec<String> = (0..width).map(|k| format!("k{k}")).collect();
+        for i in 0..VERTICES {
+            let mut props: PropertyMap = keys
+                .iter()
+                .enumerate()
+                .map(|(k, key)| (key.as_str(), ElementProperty::from(((i + k) % 16) as i64)))
+                .collect();
+            props.insert(
+                "list",
+                ElementProperty::Array(vec![((i % 16) as i64).into(), 1.into()]),
+            );
+            graph
+                .insert_vertex(None, vec!["item".into()], props)
+                .unwrap();
+        }
+        if coded {
+            keys.push("list".to_string());
+            for key in &keys {
+                let rule = CompressionDefinition::new(ElementKind::Vertex, "item", key)
+                    .unwrap()
+                    .with_codec(Codec::Dedup);
+                graph.traversal_mut().define_compression(key, rule).unwrap();
+            }
+        }
+        graph
+    }
+
+    /// Adds a new key to every vertex of a graph whose rows are coded (`coded`) or plain (a
+    /// fresh graph per sample).
+    #[divan::bench(args = [false, true], sample_count = 20)]
+    fn write_add_key_to_coded(bencher: divan::Bencher, coded: bool) {
+        bencher
+            .with_inputs(|| {
+                let graph = list_graph(10, coded);
+                let handles = handles(&graph);
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for &v in &handles {
+                    graph
+                        .set_vertex_property(v, "added".into(), ElementProperty::from(1))
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// Writes `list[0]` of every vertex through a jpath, the `list` key coded (`coded`) or
+    /// plain (a fresh graph per sample).
+    #[divan::bench(args = [false, true], sample_count = 20)]
+    fn write_jpath_coded(bencher: divan::Bencher, coded: bool) {
+        let path: JsonPath = "list[0]".parse().unwrap();
+        bencher
+            .with_inputs(|| {
+                let graph = list_graph(10, coded);
+                let handles = handles(&graph);
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for (i, &v) in handles.iter().enumerate() {
+                    graph
+                        .set_vertex_property_path(v, &path, ElementProperty::from((i % 64) as i64))
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
     /// Overwrites the last key of every vertex.
     #[divan::bench(args = [3, 25], sample_count = 20)]
     fn write_overwrite(bencher: divan::Bencher, width: usize) {
@@ -1443,6 +1578,139 @@ mod element_properties {
         use graphersal::persist::{self, WriteOptions};
         let mut bytes = Vec::new();
         persist::write_snapshot(&graph(width), &mut bytes, &WriteOptions::new()).unwrap();
+        bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
+    }
+
+    /// [`snapshot_load`] of [`coded_graph`]: a `dedup` rule on every key, every row coded by
+    /// the load. Needs `persist` (see [`snapshot_load`]).
+    #[cfg(feature = "persist")]
+    #[divan::bench(args = [3, 25], sample_count = 10)]
+    fn snapshot_load_coded(bencher: divan::Bencher, width: usize) {
+        use graphersal::persist::{self, WriteOptions};
+        let mut bytes = Vec::new();
+        persist::write_snapshot(&coded_graph(width), &mut bytes, &WriteOptions::new()).unwrap();
+        bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
+    }
+}
+
+/// Element properties holding nested objects, modelled on a code-index graph: each vertex has a
+/// `_hashes` object of one key (one of 50 key names) and an `attrs` array of two small objects.
+/// Stored nested maps share their key lists from the second sighting of a key sequence.
+mod nested_values {
+    use graphersal::prelude::*;
+    use graphersal::storage::VertexHandle;
+
+    /// Vertices per graph.
+    const VERTICES: usize = 10_000;
+
+    fn object(entries: Vec<(String, ElementProperty)>) -> ElementProperty {
+        ElementProperty::Object(Box::new(entries.into_iter().collect()))
+    }
+
+    fn hashes(i: usize) -> ElementProperty {
+        object(vec![(
+            format!("ACM:{}", i % 50),
+            ElementProperty::from(format!("{:016x}", i * 7919)),
+        )])
+    }
+
+    fn attrs(i: usize) -> ElementProperty {
+        ElementProperty::Array(
+            (0..2)
+                .map(|k| {
+                    object(vec![
+                        ("line".to_string(), ElementProperty::from((i + k) as i64)),
+                        ("kind".to_string(), ElementProperty::from("call")),
+                    ])
+                })
+                .collect(),
+        )
+    }
+
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for i in 0..VERTICES {
+            let props = PropertyMap::from([
+                ("name", ElementProperty::from(format!("m{i}"))),
+                ("_hashes", hashes(i)),
+                ("attrs", attrs(i)),
+            ]);
+            graph
+                .insert_vertex(None, vec!["Method".into()], props)
+                .unwrap();
+        }
+        graph
+    }
+
+    /// Builds the graph through `insert_vertex`.
+    #[divan::bench(sample_count = 20)]
+    fn insert_build(bencher: divan::Bencher) {
+        bencher.bench_local(graph);
+    }
+
+    /// Overwrites `_hashes` on every vertex (a fresh graph per sample).
+    #[divan::bench(sample_count = 20)]
+    fn write_object(bencher: divan::Bencher) {
+        bencher
+            .with_inputs(|| {
+                let graph = graph();
+                let handles: Vec<VertexHandle> = GraphStorage::vertices(&graph).unwrap().collect();
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for (i, &v) in handles.iter().enumerate() {
+                    graph
+                        .set_vertex_property(v, "_hashes".into(), hashes(i + 1))
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// `v().value_map().to_list()` (every nested map cloned out).
+    #[divan::bench(sample_count = 20)]
+    fn value_map(bencher: divan::Bencher) {
+        let graph = graph();
+        bencher.bench_local(|| graph.traversal().v(None).value_map(None).to_list());
+    }
+
+    /// `v().values("_hashes").dedup().count()` (nested maps hashed and compared).
+    #[divan::bench(sample_count = 20)]
+    fn dedup_objects(bencher: divan::Bencher) {
+        let graph = graph();
+        bencher.bench_local(|| {
+            graph
+                .traversal()
+                .v(None)
+                .values("_hashes")
+                .dedup()
+                .count()
+                .next()
+        });
+    }
+
+    /// `v().has("_hashes", <object>).count()` (stored nested maps compared with a plain one).
+    #[divan::bench(sample_count = 20)]
+    fn has_object(bencher: divan::Bencher) {
+        let graph = graph();
+        let wanted = hashes(4321);
+        bencher.bench_local(|| {
+            graph
+                .traversal()
+                .v(None)
+                .has("_hashes", wanted.clone())
+                .count()
+                .next()
+        });
+    }
+
+    /// `read_snapshot` of the graph. Needs `persist` (see `element_properties::snapshot_load`).
+    #[cfg(feature = "persist")]
+    #[divan::bench(sample_count = 10)]
+    fn snapshot_load(bencher: divan::Bencher) {
+        use graphersal::persist::{self, WriteOptions};
+        let mut bytes = Vec::new();
+        persist::write_snapshot(&graph(), &mut bytes, &WriteOptions::new()).unwrap();
         bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
     }
 }

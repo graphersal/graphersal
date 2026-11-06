@@ -3910,3 +3910,79 @@ fn a_vector_rule_needs_update_schema_and_its_derived_write_no_request() {
         .unwrap();
     assert_eq!(vectors.len(), 1);
 }
+
+/// `g.define_compressions([..])` (stage V1b) asks `Create` (`Update` for a stored name) on the
+/// definition of EACH rule before anything changes, like `define_compression` does for one: a
+/// denied rule anywhere in the list stores none of them.
+mod compression_lists {
+    use super::*;
+
+    fn rules(graph: &Arc<Graph>) -> usize {
+        graph
+            .read()
+            .traversal()
+            .list_definitions(Some(graphersal::catalog::DefinitionKind::COMPRESSION))
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn a_list_of_rules_is_denied_as_a_whole() {
+        let graph = modern();
+        let script = r#"g.define_compressions([
+            #{name: "person_name", label: "person", path: "name", codec: "dedup"},
+            #{label: "software", paths: ["lang"], codec: "dedup"},
+        ])"#;
+        assert_denied(
+            run(&graph, script, AccessPolicy::read_only()),
+            "define_compressions",
+            r#"Create Definition(compression "person_name")"#,
+        );
+        assert_eq!(rules(&graph), 0);
+        // Only the second rule denied: the first one is not stored either.
+        let second_denied = Recorder::denying(r#"Create Definition(compression "software_lang")"#);
+        assert_denied(
+            run(&graph, script, second_denied),
+            "define_compressions",
+            r#"Create Definition(compression "software_lang")"#,
+        );
+        assert_eq!(rules(&graph), 0);
+        assert_eq!(
+            run(&graph, script, AccessPolicy::allow_all())
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            2
+        );
+        assert_eq!(rules(&graph), 2);
+        // Stored names are updates now.
+        assert_denied(
+            run(
+                &graph,
+                script,
+                AccessPolicy::allow_all().deny(ActionKind::Update, ResourceKind::Definition),
+            ),
+            "define_compressions",
+            r#"Update Definition(compression "person_name")"#,
+        );
+    }
+
+    /// Denies the one request whose rendering starts with its text, allows the rest.
+    struct Recorder(&'static str);
+
+    impl Recorder {
+        fn denying(request: &'static str) -> Recorder {
+            Recorder(request)
+        }
+    }
+
+    impl Authorizer for Recorder {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            if request.to_string().starts_with(self.0) {
+                Err(Denied::new("not this rule"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}

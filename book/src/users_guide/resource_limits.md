@@ -330,7 +330,8 @@ the bytes (the rest of the process is not seen).
 
 **Embedding models of a store** (book page [Embedding Models in a
 Store](../persistence/store_models.md)) load under the ceiling too: before a load the blob's
-length plus the loaded size its definition records (`load_bytes`) are checked against what is in
+length times 1.6 (`potion-multilingual-128M` takes about 1.01 times its blob loaded and 1.14
+times at the load's peak, plus a reserve; the definition's stored `load_bytes` is not read) is checked against what is in
 use (the live heap with a tracking allocator, else the models already loaded), so nothing is read
 when it does not fit (operation `"model load"`). A model the schema NEEDS is loaded when the
 store opens: one that does not fit refuses the open with `StoreFailure::ModelDoesNotFit`, whose
@@ -345,10 +346,15 @@ the session layer):
 
 - **Playground**: the process memory bar in the Profile panel's Statistics tab and in
   Optimize -> Memory ([The Web Playground](web_playground.md)): used of the ceiling, its
-  source, the percentage, and the segments structure, properties, compressed, indexes, models and
-  other (the heap the graph's estimate does not explain). The segments use the figures of
-  `g.memory_usage()`: structure is `structure_bytes`, indexes is `index_bytes` (the id and label
-  indexes) plus `property_index_bytes`.
+  source, the percentage, and the segments structure, properties, compressed, indexes, models,
+  live_graph, store, engine and other (the heap no segment explains). The graph's segments use the
+  figures of `g.memory_usage()`: structure is `structure_bytes`, indexes is `index_bytes` (the id
+  and label indexes) plus `property_index_bytes`. The others are the process's components of the
+  [memory report](memory_and_profiling.md#where-the-process-memory-goes), read without its walk:
+  models are the `embedding_model` components (every model loaded in the process, once),
+  live_graph is `store_graph` (a store's live graph beside a view of a past state), store is
+  `store` + `store_files`, engine is the graph's `workload_bytes` plus every other component
+  (`script_engine`, `session`, `mcp`, `ai_chat`, a host's own); each is left out at 0.
 - **REPL**: `/memory` prints the bar as text before the memory report:
 
   ```text
@@ -361,7 +367,8 @@ the session layer):
 
 - **Dev server**: `GET /api/statistics` (and the MCP `statistics` tool) carries
   `process.memory.usedBytes`, `usedTracked`, `limitBytes`, `limitSource`, `usedPercent`,
-  `segments` and `compression`; the start banner's memory row ends with
+  `segments` (each `{name, bytes}`, the component segments with `parts: [{name, detail?, bytes}]`)
+  and `compression`; the start banner's memory row ends with
   `process 47 % of 3.4 GiB (cgroup)`.
 
 Without a tracking allocator (a host that did not install it) the used figure is the sum of the

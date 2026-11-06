@@ -43,6 +43,11 @@ pub(crate) trait StoreGraph: Send + Sync + 'static {
     /// The instance clock ([`Graph::clock`]): the Store times its checkpoint records with it
     /// and raises it at the open to the latest time its files hold. No lock.
     fn clock(&self) -> &CommitClock;
+    /// The address of the storage ([`Graph::storage_address`]): the memory report compares it
+    /// with the reported graph's.
+    fn storage_address(&self) -> usize;
+    /// The graph's estimated footprint without waiting ([`Graph::memory_total_now`]).
+    fn memory_total_now(&self) -> Option<u64>;
     /// The registry of the catalog's embedding models ([`Graph::model_registry`]).
     fn model_registry(&self) -> Option<Arc<crate::value::vector::embed::registry::ModelRegistry>>;
     /// Attaches the registry (set once).
@@ -118,6 +123,14 @@ impl<S: PersistentStorage + Default> StoreGraph for Graph<S> {
 
     fn clock(&self) -> &CommitClock {
         Graph::clock(self)
+    }
+
+    fn storage_address(&self) -> usize {
+        Graph::storage_address(self)
+    }
+
+    fn memory_total_now(&self) -> Option<u64> {
+        Graph::memory_total_now(self)
     }
 
     fn model_registry(&self) -> Option<Arc<crate::value::vector::embed::registry::ModelRegistry>> {
@@ -408,6 +421,15 @@ impl JournalCell {
     pub(crate) fn set(&self, journal: Option<Journal<WalWriter>>) {
         let old = std::mem::replace(&mut *self.0.lock(), journal);
         drop(old);
+    }
+
+    /// The journal's reusable record buffers, in bytes, without waiting (`None`: a commit is
+    /// writing, or no journal).
+    pub(crate) fn buffer_bytes_now(&self) -> Option<u64> {
+        self.0
+            .try_lock()?
+            .as_ref()
+            .map(|journal| journal.buffer_bytes())
     }
 
     /// Syncs the journal; `None` without one.

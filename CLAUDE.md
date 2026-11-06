@@ -118,7 +118,7 @@ for f in "--no-default-features" "--no-default-features --features script" \
          "--no-default-features --features script,io,display,serde,persist,gql"; do
   cargo check --package graphersal --target wasm32-unknown-unknown ${=f} || break; done
 ```
-Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown); do not add `std::thread`/`std::fs` use outside the `io` feature (on wasm32 `std::fs` returns errors; it must never panic); the exceptions are the parallel chunk decode of `persist` (`std::thread::scope`), `persist::FsDir` / `persist::SingleFileDir` (`std::fs`, `fd-lock`), `persist::ModelCache` and `persist::read_snapshot_file` (`std::fs`) and the crate-internal Model2Vec directory loader (`std::fs`, feature `model2vec`), all `cfg(not(target_arch = "wasm32"))`; the Store itself never touches `std::fs` (it goes through `StoreDir`).
+Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown); do not add `std::thread`/`std::fs` use outside the `io` feature (on wasm32 `std::fs` returns errors; it must never panic); the exceptions are the parallel chunk decode of `persist` and the parallel lz4 end pass of a `TraversalGraph` load (`graph/compression.rs` `compression_normalize_targets_parallel`, `cfg(feature = "persist")`) (`std::thread::scope`), `persist::FsDir` / `persist::SingleFileDir` (`std::fs`, `fd-lock`), `persist::ModelCache` and `persist::read_snapshot_file` (`std::fs`) and the crate-internal Model2Vec directory loader (`std::fs`, feature `model2vec`), all `cfg(not(target_arch = "wasm32"))`; the Store itself never touches `std::fs` (it goes through `StoreDir`).
 
 The playground engine and its tests:
 ```bash

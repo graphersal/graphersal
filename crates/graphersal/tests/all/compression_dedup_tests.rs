@@ -203,13 +203,15 @@ fn numbers(c: &CandidateEstimate) -> (u64, u64, u64, u64, u64) {
     )
 }
 
-/// Whether the stored value of vertex `id` at top-level `key` is a shared (dedup) value.
+/// Whether the stored value of vertex `id` at top-level `key` is a shared (dedup) value: coded
+/// in the row (a top-level key) or a shared reference.
 fn is_shared(graph: &TraversalGraph, id: &str, key: &str) -> bool {
     let v = graph.get_vertex_by_id(id).unwrap().unwrap();
-    matches!(
-        graph.vertex_properties(v).unwrap().unwrap().get(key),
-        Some(ElementProperty::Deduped(_))
-    )
+    graph.is_dedup_coded(ElementKind::Vertex, id, key)
+        || matches!(
+            graph.vertex_properties(v).unwrap().unwrap().get(key),
+            Some(ElementProperty::Deduped(_))
+        )
 }
 
 /// Asserts that every table holds only what elements reference (after a sweep).
@@ -239,17 +241,19 @@ fn a_dedup_rule_shares_long_repeated_values_and_reads_them_plain() {
     assert_eq!(std::mem::size_of::<ElementProperty>(), 32);
     let graph = deduped_graph(60);
     invariant(&graph);
-    // s2 has a long path: shared; s0 has "lib.rs" (inline, never shared); s1 a number.
+    // A top-level key codes every value: s2 a long path, s0 "lib.rs" (min_bytes 0), s1 a
+    // number.
     assert!(is_shared(&graph, "s2", "path"));
-    assert!(!is_shared(&graph, "s0", "path"));
-    assert!(!is_shared(&graph, "s1", "path"));
+    assert!(is_shared(&graph, "s0", "path"));
+    assert!(is_shared(&graph, "s1", "path"));
     assert!(!is_shared(&graph, "s2", "doc"), "no rule on doc");
-    // Two elements with the same text point to one copy: 7 distinct paths at most.
+    // Two elements with the same value share one entry: 7 distinct paths, "lib.rs" and 6
+    // numbers (s19 has no path).
     let stats = graph.compression_stats("path").unwrap();
     assert!(stats.compressed_values > 30, "{stats:?}");
-    assert_eq!(stats.distinct_values, 7, "{stats:?}");
+    assert_eq!(stats.distinct_values, 14, "{stats:?}");
     assert_eq!(stats.dictionary_bytes, 0);
-    assert!(stats.stored_bytes < stats.plain_bytes / 4, "{stats:?}");
+    assert!(stats.stored_bytes < stats.plain_bytes / 2, "{stats:?}");
     // Reads are plain.
     let read = graph
         .traversal()
@@ -308,21 +312,28 @@ fn a_dedup_rule_shares_long_repeated_values_and_reads_them_plain() {
     );
 }
 
+/// The stored value at `loc.file` of vertex `id` (a nested dedup path: a shared reference).
+fn stored_file(graph: &TraversalGraph, id: &str) -> ElementProperty {
+    let v = graph.get_vertex_by_id(id).unwrap().unwrap();
+    let Some(ElementProperty::Object(loc)) =
+        graph.vertex_properties(v).unwrap().unwrap().get("loc")
+    else {
+        panic!("loc of {id}");
+    };
+    loc.get("file").unwrap().clone()
+}
+
+fn file_path(i: usize) -> String {
+    format!("/home/user/projects/graphersal/crates/file_{}.rs", i % 3)
+}
+
 #[test]
 fn shared_values_compare_hash_and_order_as_their_strings() {
     let graph = deduped_graph(30);
-    let s2 = graph.get_vertex_by_id("s2").unwrap().unwrap();
-    // s11 holds source_path(4).
-    let s11 = graph.get_vertex_by_id("s11").unwrap().unwrap();
-    let stored = graph
-        .vertex_properties(s2)
-        .unwrap()
-        .unwrap()
-        .get("path")
-        .unwrap()
-        .clone();
+    // A nested dedup path keeps shared references (a top-level key is coded: reads are plain).
+    let stored = stored_file(&graph, "s2");
     assert!(matches!(stored, ElementProperty::Deduped(_)));
-    let plain = ElementProperty::from(source_path(2));
+    let plain = ElementProperty::from(file_path(2));
     let hash = |value: &ElementProperty| {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         value.hash(&mut hasher);
@@ -334,15 +345,11 @@ fn shared_values_compare_hash_and_order_as_their_strings() {
     assert_eq!(stored.clone(), stored);
     assert_eq!(stored.to_logical(), plain);
     assert!(matches!(stored.to_logical(), ElementProperty::String(_)));
-    assert_eq!(stored.text().as_deref(), Some(source_path(2).as_str()));
+    assert_eq!(stored.text().as_deref(), Some(file_path(2).as_str()));
     assert!(stored.is_text());
     assert!(stored.holds_compressed());
-    let other = graph
-        .vertex_properties(s11)
-        .unwrap()
-        .unwrap()
-        .get("path")
-        .unwrap();
+    // s10 holds file_path(1).
+    let other = &stored_file(&graph, "s10");
     assert_ne!(&stored, other);
     assert_ne!(stored, ElementProperty::from("lib.rs"));
     // A shared value against an lz4-compressed one of the same text.
@@ -375,22 +382,20 @@ fn shared_values_compare_hash_and_order_as_their_strings() {
     let mut dedup = TraversalGraph::new();
     dedup
         .traversal_mut()
-        .define_compression("p", dedup_rule(ElementKind::Vertex, "x", "p"))
+        .define_compression("p", dedup_rule(ElementKind::Vertex, "x", "o.p"))
         .unwrap();
     let w = dedup
         .add_vertex(
             None,
             vec!["x".into()],
-            props(vec![("p", long.as_str().into())]),
+            props(vec![("o", object(vec![("p", long.as_str().into())]))]),
         )
         .unwrap();
-    let deduped = dedup
-        .vertex_properties(w)
-        .unwrap()
-        .unwrap()
-        .get("p")
-        .unwrap()
-        .clone();
+    let Some(ElementProperty::Object(o)) = dedup.vertex_properties(w).unwrap().unwrap().get("o")
+    else {
+        panic!("o");
+    };
+    let deduped = o.get("p").unwrap().clone();
     assert!(matches!(deduped, ElementProperty::Deduped(_)));
     assert_eq!(compressed, deduped);
     assert_eq!(deduped, compressed);
@@ -528,14 +533,14 @@ fn dedup_and_lz4_side_by_side_and_dedup_is_exact_above_the_caps() {
             None,
         ));
     let estimate = graph.traversal().estimate_compression(&both).unwrap();
-    assert_eq!(estimate.candidates.len(), 10 + 4);
+    assert_eq!(estimate.candidates.len(), 10 + 5);
     let best = &estimate.candidates[estimate.best.unwrap()];
     assert_eq!(
         best.candidate.codec,
         Codec::Dedup,
         "repeated paths: dedup wins"
     );
-    assert_eq!(best.candidate.min_bytes, 25);
+    assert_eq!(best.candidate.min_bytes, 0);
     assert!(
         estimate.warnings.is_empty()
             || !estimate
@@ -568,7 +573,7 @@ fn dedup_and_lz4_side_by_side_and_dedup_is_exact_above_the_caps() {
         .unwrap();
     assert_eq!(estimate.candidates.len(), 11);
     let own = estimate.candidates.last().unwrap();
-    assert_eq!(own.candidate, CompressionCandidate::dedup(25));
+    assert_eq!(own.candidate, CompressionCandidate::dedup(0));
     assert!(own.current);
     let current = estimate.current.as_ref().unwrap();
     assert_eq!(current.stats.distinct_values, own.distinct_values);
@@ -1139,7 +1144,7 @@ fn the_dsl_defines_lists_and_estimates_dedup_in_both_spellings() {
     )
     .unwrap()
     .to_string();
-    assert_eq!(listed, r#"["dedup", 25, false, 7]"#);
+    assert_eq!(listed, r#"["dedup", 0, false, 14]"#);
     invariant(&graph.read());
     let estimate = eval_value(
         graph.clone(),
@@ -1149,7 +1154,7 @@ fn the_dsl_defines_lists_and_estimates_dedup_in_both_spellings() {
     )
     .unwrap()
     .to_string();
-    assert_eq!(estimate, r#"[14, "dedup", 3]"#);
+    assert_eq!(estimate, r#"[15, "dedup", 3]"#);
     let only = eval_value(
         graph.clone(),
         r#"g.estimate_compression(#{label: "symbol", path: "doc", codec: "dedup"}).warnings.map(|w| w.code)"#,

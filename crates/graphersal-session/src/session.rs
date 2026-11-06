@@ -208,10 +208,37 @@ pub struct Session {
     pub(crate) stores: Option<crate::store::Stores>,
     /// Every loaded graph becomes a store in memory ([`Self::set_memory_stores`]).
     pub(crate) memory_stores: bool,
-    /// The force layouts of the Graph panel: running jobs and finished ones ([`crate::layout`]).
-    layouts: crate::layout::LayoutJobs,
+    /// The force layouts of the Graph panel: running jobs and finished ones ([`crate::layout`]);
+    /// shared with the session's memory source ([`SessionMemory`]).
+    layouts: Arc<Mutex<crate::layout::LayoutJobs>>,
+    /// The session's part of every memory report, registered with the engine while the
+    /// session lives ([`graphersal::storage::register_memory_source`]).
+    #[allow(dead_code)]
+    memory: Arc<dyn graphersal::storage::MemorySource>,
     /// The scheduled jobs of the active store and the time zone they run in ([`crate::jobs`]).
     pub(crate) jobs: crate::jobs::SessionJobs,
+}
+
+/// The session's part of a memory report (`session`: its layout jobs and cached layouts,
+/// estimated). The graph it serves, the Stores and the script engine report themselves.
+struct SessionMemory {
+    layouts: std::sync::Weak<Mutex<crate::layout::LayoutJobs>>,
+}
+
+impl graphersal::storage::MemorySource for SessionMemory {
+    fn memory_components(&self, components: &mut graphersal::storage::MemoryComponents) {
+        let Some(layouts) = self.layouts.upgrade() else {
+            return;
+        };
+        // A layout slice holds the lock for a few milliseconds at most; never wait for it.
+        let Ok(layouts) = layouts.try_lock() else {
+            return;
+        };
+        components.push(
+            graphersal::storage::MemoryComponent::estimated("session", layouts.memory_bytes())
+                .with_detail("layout jobs and cached layouts"),
+        );
+    }
 }
 
 impl Default for Session {
@@ -356,6 +383,11 @@ impl Session {
             let elapsed = start.elapsed();
             (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
         });
+        let layouts = Arc::new(Mutex::new(crate::layout::LayoutJobs::default()));
+        let memory: Arc<dyn graphersal::storage::MemorySource> = Arc::new(SessionMemory {
+            layouts: Arc::downgrade(&layouts),
+        });
+        graphersal::storage::register_memory_source(&memory);
         Self {
             graph: factory.empty(),
             factory,
@@ -369,7 +401,8 @@ impl Session {
             run_cancel,
             stores: None,
             memory_stores: false,
-            layouts: crate::layout::LayoutJobs::default(),
+            layouts,
+            memory,
             jobs: crate::jobs::SessionJobs::default(),
         }
     }
@@ -659,29 +692,80 @@ impl Session {
     }
 
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
-    /// bytes, default}] }`, one entry per embedding model of the active store that is loaded
-    /// (its load size; the built-in `hash-ngram/1` holds none and is left out). A host adds its own
-    /// members: `memory`, the whole process ([`crate::process::add_to_statistics`]; volatile,
-    /// so `Session::statistics` itself stays deterministic), and the dev server's `aiChat`. Separate from `GraphStatistics`, which holds data
-    /// counts only.
+    /// bytes, measured, default}] }`, one entry per embedding model of the active store that is
+    /// loaded (the built-in `hash-ngram/1` holds none and is left out). `bytes` is the size
+    /// measured at the load (user decision 2026-11-04: a loaded model shows its measured
+    /// in-memory size): `measured: true` when the tracking allocator counted it (the process's
+    /// `embedding_model` component), else the loader's estimate (`ModelInfo::shown_bytes`,
+    /// `measured: false`). Never the definition's stored `load_bytes`. A host adds its own members: `memory`, the whole process
+    /// ([`Self::statistics_with_process`]; volatile, so `Session::statistics` itself stays
+    /// deterministic), and the dev server's `aiChat`. Separate from `GraphStatistics`, which
+    /// holds data counts only.
     pub fn process_memory(&self) -> Value {
-        let models: Vec<Value> = self
+        let loaded: Vec<graphersal::persist::ModelInfo> = self
             .active_store()
             .and_then(|store| store.models().ok())
             .unwrap_or_default()
-            .iter()
+            .into_iter()
             .filter(|model| model.state == graphersal::persist::ModelState::Loaded)
+            .collect();
+        // The measured sizes, only when a model is loaded (no source is asked otherwise).
+        let measured: Vec<graphersal::storage::MemoryComponent> = if loaded.is_empty() {
+            Vec::new()
+        } else {
+            self.graph
+                .process_memory_components()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|part| part.name == "embedding_model" && part.exact)
+                .collect()
+        };
+        let models: Vec<Value> = loaded
+            .iter()
             .map(|model| {
+                let counted = measured
+                    .iter()
+                    .find(|part| part.detail.as_deref() == Some(model.identity.as_str()))
+                    .map(|part| part.bytes);
                 json!({
                     "name": model.repo,
                     "model": model.identity,
                     "dimension": model.dimension,
-                    "bytes": model.load_bytes,
+                    "bytes": counted.unwrap_or_else(|| model.shown_bytes()),
+                    "measured": counted.is_some(),
                     "default": model.default,
                 })
             })
             .collect();
         json!({ "models": models })
+    }
+
+    /// [`Self::statistics`] with the whole process added, as the hosts serve it (the
+    /// WebAssembly module, the dev server): `process.memory`
+    /// ([`crate::process::add_to_statistics_with`]: the operating system's figures and the
+    /// memory bar, whose segments include the process's components
+    /// ([`graphersal::storage::AnyGraph::process_memory_components`], no memory report walk):
+    /// a store's live graph beside a view, the store, the engine). Volatile, unlike
+    /// [`Self::statistics`]. When the components cannot be read the bar is built without them
+    /// and `process.memory.componentsError` says why. Fails like [`Self::statistics`].
+    pub fn statistics_with_process(&self) -> Result<Value, SessionError> {
+        let mut statistics = self.statistics()?;
+        match self.graph.process_memory_components() {
+            Ok(components) => {
+                crate::process::add_to_statistics_with(&mut statistics, &components);
+            }
+            Err(err) => {
+                crate::process::add_to_statistics(&mut statistics);
+                if let Some(memory) = statistics
+                    .get_mut("process")
+                    .and_then(|process| process.get_mut("memory"))
+                    .and_then(Value::as_object_mut)
+                {
+                    memory.insert("componentsError".into(), json!(err.to_string()));
+                }
+            }
+        }
+        Ok(statistics)
     }
 
     /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}`
@@ -838,8 +922,15 @@ impl Session {
         budget_ms: f64,
     ) -> Result<Value, SessionError> {
         let options = request.options();
-        let job = self.layouts.start(request.input, options)?;
+        let job = self.layouts().start(request.input, options)?;
         self.layout_step(job, budget_ms)
+    }
+
+    /// The layout jobs, locked (only the session's memory source reads them besides).
+    fn layouts(&self) -> std::sync::MutexGuard<'_, crate::layout::LayoutJobs> {
+        self.layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// [`Self::layout_start`] with the request as JSON text.
@@ -860,21 +951,22 @@ impl Session {
     pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, SessionError> {
         self.cancel.reset();
         let budget = crate::layout::slice_budget(budget_ms);
-        self.layouts.step(job, budget, &self.cancel)
+        self.layouts().step(job, budget, &self.cancel)
     }
 
     /// Cancels layout `job`; it keeps the positions reached so far ([`Self::layout_positions`]).
     pub fn layout_cancel(&mut self, job: u64) -> Result<Value, SessionError> {
-        self.layouts.cancel(job)
+        self.layouts().cancel(job)
     }
 
     /// The positions of layout `job`: `x, y` per vertex, centred, the median edge 70 units long.
     /// A job that is no longer running is forgotten afterwards.
     pub fn layout_positions(&mut self, job: u64) -> Result<Vec<f32>, SessionError> {
-        let status = self.layouts.status(job)?;
-        let positions = self.layouts.positions(job)?;
+        let mut layouts = self.layouts();
+        let status = layouts.status(job)?;
+        let positions = layouts.positions(job)?;
         if status["state"] != "running" {
-            self.layouts.finish(job);
+            layouts.finish(job);
         }
         Ok(positions)
     }
@@ -2318,6 +2410,32 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_report_names_the_sessions_layouts_and_the_graph() {
+        let mut s = modern();
+        let request: crate::layout::LayoutRequest = serde_json::from_value(
+            json!({"vertexCount": 3, "edgeSource": [0, 1], "edgeTarget": [1, 2]}),
+        )
+        .unwrap();
+        s.layout_start(request, 5.0).unwrap();
+        let answer = s.memory_report(&Value::Null);
+        let components = answer["report"]["components"].as_array().unwrap().clone();
+        let named = |name: &str| components.iter().any(|c| c["name"] == name);
+        assert!(named("graph"), "{components:?}");
+        // Sessions run in parallel in this test binary: at least this one has a layout.
+        assert!(
+            components
+                .iter()
+                .any(|c| c["name"] == "session" && c["bytes"].as_u64().unwrap() > 0),
+            "{components:?}"
+        );
+        let sum: u64 = components
+            .iter()
+            .map(|c| c["bytes"].as_u64().unwrap())
+            .sum();
+        assert_eq!(answer["report"]["attributed_bytes"], sum);
+    }
+
+    #[test]
     fn the_memory_report_answers_the_report_or_an_error() {
         let s = modern();
         let full = s.memory_report(&Value::Null);
@@ -3347,6 +3465,47 @@ mod tests {
         if memory["usedTracked"] == json!(false) {
             assert_eq!(used, graph["total_bytes"].as_u64().unwrap(), "{memory}");
         }
+    }
+
+    /// `statistics_with_process` = the statistics plus `process.memory`, whose bar has its own
+    /// segment for the store's live graph while a view of a past state is served, and none after
+    /// going back to the live graph; the store's files (a store in memory) are a segment too.
+    #[test]
+    fn statistics_with_process_show_the_live_graph_beside_a_view() {
+        let mut s = Session::new();
+        s.set_memory_stores(true);
+        s.load_sample("modern").expect("modern");
+        let segment = |stats: &Value, name: &str| {
+            stats["process"]["memory"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == name)
+                .cloned()
+        };
+        let live = s.statistics_with_process().unwrap();
+        assert_eq!(live["statistics"], s.statistics().unwrap()["statistics"]);
+        assert!(segment(&live, "live_graph").is_none(), "{live}");
+        let store = segment(&live, "store").unwrap_or_else(|| panic!("a store segment: {live}"));
+        assert!(
+            store["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "store_files"),
+            "{store}"
+        );
+        s.execute("g.add_v(\"x\").iterate()", &Default::default());
+        s.store_open_view(&json!({"target": {"commit": 0}}))
+            .expect("view");
+        let view = s.statistics_with_process().unwrap();
+        let graph = segment(&view, "live_graph")
+            .unwrap_or_else(|| panic!("the live graph beside the view: {view}"));
+        assert!(graph["bytes"].as_u64().unwrap() > 0, "{graph}");
+        assert_eq!(graph["parts"][0]["name"], "store_graph", "{graph}");
+        s.store_close_view().expect("live");
+        let back = s.statistics_with_process().unwrap();
+        assert!(segment(&back, "live_graph").is_none(), "{back}");
     }
 
     /// The served graph's embedders reach every run: the `embed` step (also inside the MCP

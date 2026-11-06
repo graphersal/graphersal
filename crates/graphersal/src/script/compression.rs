@@ -197,6 +197,210 @@ pub(crate) fn estimate_entry(estimate: &CompressionEstimate) -> rhai::Map {
     map
 }
 
+/// The key of `define_compressions`' short form (one rule per path), besides [`KEYS`].
+const PATHS_KEY: &str = "paths";
+
+/// A path value (`"details.cv"` or a `jpath(..)`) as a jpath; `None` when it is neither.
+fn path_of(value: &Dynamic) -> Option<Result<crate::value::JsonPath, Box<EvalAltResult>>> {
+    if let Some(path) = value.read_lock::<crate::value::JsonPath>() {
+        Some(Ok(path.clone()))
+    } else if value.is_string() {
+        Some(
+            value
+                .to_string()
+                .parse()
+                .map_err(|err: crate::TraverserError| script_error(Box::new(err))),
+        )
+    } else {
+        None
+    }
+}
+
+/// The name of a rule of `paths` (`define_compressions`): `<label>_<path>` with the path's
+/// names joined by `_`, `_edge` added for an edge, characters a name may not hold as `_`.
+fn generated_name(element: ElementKind, label: &str, path: &crate::value::JsonPath) -> String {
+    let text = path.to_string();
+    let text = text.strip_prefix("$.").unwrap_or(&text);
+    crate::graph::advisor::suggested_name(element, label, text)
+}
+
+/// The rule definitions of one spec map (module docs; `define_compression`'s keys, and with
+/// `paths_allowed` also `paths: [..]` instead of `name` + `path`, one rule per path). Each
+/// definition is validated.
+fn rule_definitions(
+    operation: &str,
+    spec: Dynamic,
+    paths_allowed: bool,
+) -> Result<Vec<Definition>, Box<EvalAltResult>> {
+    let actual = type_name_of(&spec);
+    let mismatch = |expected: String, actual: String| {
+        fail(ScriptError::ArgumentMismatch {
+            step_name: operation.to_string(),
+            expected,
+            actual,
+        })
+    };
+    let Some(mut spec) = spec.try_cast::<rhai::Map>() else {
+        return Err(mismatch(
+            if paths_allowed {
+                "each rule as a map #{name, label, path, element?, codec?, min_bytes?, \
+                 dictionary?} or #{label, paths: [..], ..}"
+                    .into()
+            } else {
+                "a map #{name, label, path, element?, codec?, min_bytes?, dictionary?}".into()
+            },
+            actual,
+        ));
+    };
+    let allowed = |key: &str| KEYS.contains(&key) || (paths_allowed && key == PATHS_KEY);
+    if let Some(unknown) = spec.keys().find(|key| !allowed(key.as_str())) {
+        let mut keys = KEYS.join(", ");
+        if paths_allowed {
+            keys.push_str(", paths");
+        }
+        return Err(mismatch(
+            format!("only the keys {keys}"),
+            format!("the key '{unknown}'"),
+        ));
+    }
+    let mut take = |key: &str| spec.remove(key).unwrap_or(Dynamic::UNIT);
+    let name = optional_text(operation, "name", take("name"))?;
+    let path_value = take("path");
+    let paths_value = take(PATHS_KEY);
+    if paths_value.is_unit() && name.is_none() {
+        return Err(mismatch(
+            "the key name (the rule's name)".into(),
+            "no name".into(),
+        ));
+    }
+    let label = optional_text(operation, "label", take("label"))?.ok_or_else(|| {
+        mismatch(
+            "the key label (the vertex or edge label)".into(),
+            "no label".into(),
+        )
+    })?;
+    // `paths`: one rule per path, each under its generated name.
+    let paths: Vec<crate::value::JsonPath> = if !paths_value.is_unit() {
+        if !path_value.is_unit() || name.is_some() {
+            return Err(mismatch(
+                "either name and path (one rule) or paths without a name (one rule per path, \
+                 named <label>_<path>)"
+                    .into(),
+                if name.is_some() {
+                    "name with paths".into()
+                } else {
+                    "path with paths".into()
+                },
+            ));
+        }
+        let list_type = type_name_of(&paths_value);
+        let Some(list) = paths_value.try_cast::<rhai::Array>() else {
+            return Err(mismatch(
+                "paths as a list of paths [\"kind\", \"details.cv\"]".into(),
+                list_type,
+            ));
+        };
+        if list.is_empty() {
+            return Err(mismatch(
+                "paths as a list of at least one path".into(),
+                "an empty list".into(),
+            ));
+        }
+        let mut paths = Vec::with_capacity(list.len());
+        for item in &list {
+            match path_of(item) {
+                Some(path) => paths.push(path?),
+                None => {
+                    return Err(mismatch(
+                        "each path as a string (\"details.career.cv\") or a jpath(..)".into(),
+                        type_name_of(item),
+                    ));
+                }
+            }
+        }
+        paths
+    } else {
+        match path_of(&path_value) {
+            Some(path) => vec![path?],
+            None => {
+                return Err(mismatch(
+                    "the key path as a string (\"details.career.cv\") or a jpath(..)".into(),
+                    if path_value.is_unit() {
+                        "no path".to_string()
+                    } else {
+                        type_name_of(&path_value)
+                    },
+                ));
+            }
+        }
+    };
+    let element = match optional_text(operation, "element", take("element"))?.as_deref() {
+        None | Some("vertex") => ElementKind::Vertex,
+        Some("edge") => ElementKind::Edge,
+        Some(other) => {
+            return Err(mismatch(
+                "element \"vertex\" or \"edge\"".into(),
+                format!("\"{other}\""),
+            ));
+        }
+    };
+    let codec = match optional_text(operation, "codec", take("codec"))? {
+        Some(codec) => Some(Codec::from_name(&codec).ok_or_else(|| {
+            mismatch("codec \"lz4\" or \"dedup\"".into(), format!("\"{codec}\""))
+        })?),
+        None => None,
+    };
+    let min_bytes = take("min_bytes");
+    let min_bytes = if min_bytes.is_unit() {
+        None
+    } else {
+        Some(
+            min_bytes
+                .as_int()
+                .ok()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    mismatch(
+                        "min_bytes as an integer from 1 to 16777216".into(),
+                        dynamic_text(&min_bytes),
+                    )
+                })?,
+        )
+    };
+    let dictionary = take("dictionary");
+    let dictionary =
+        if dictionary.is_unit() {
+            None
+        } else {
+            Some(dictionary.as_bool().map_err(|_| {
+                mismatch("dictionary as a boolean".into(), type_name_of(&dictionary))
+            })?)
+        };
+    let mut definitions = Vec::with_capacity(paths.len());
+    for path in paths {
+        let rule_name = match &name {
+            Some(name) => name.clone(),
+            None => generated_name(element, &label, &path),
+        };
+        let mut rule = CompressionDefinition::with_path(element, label.as_str(), path);
+        if let Some(codec) = codec {
+            rule = rule.with_codec(codec);
+        }
+        if let Some(min_bytes) = min_bytes {
+            rule = rule.with_min_bytes(min_bytes);
+        }
+        if let Some(dictionary) = dictionary {
+            rule = rule.with_dictionary(dictionary);
+        }
+        let definition = Definition::compression(rule_name, rule);
+        definition
+            .validate()
+            .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
+        definitions.push(definition);
+    }
+    Ok(definitions)
+}
+
 impl ScriptGraphTraversalSource {
     /// Asks the session's authorizer for `action` on the compression rule `name` (`None`:
     /// every rule).
@@ -228,115 +432,69 @@ impl ScriptGraphTraversalSource {
     /// / `g.define_compression(..)`: stores (or replaces) a compression rule. `path` is a string
     /// read as a jpath (`"details.career.cv"`, because it IS a path) or a `jpath(..)`;
     /// `element` is `"vertex"` (default) or `"edge"`, `codec` `"lz4"` (default: `min_bytes`
-    /// 256, `dictionary` true) or `"dedup"` (each distinct value stored once: `min_bytes` 25,
+    /// 256, `dictionary` true) or `"dedup"` (each distinct value stored once: `min_bytes` 0,
     /// no dictionary; `dictionary: true` is refused). The explicit pass re-encodes the label's
     /// values in the same unit. Asks for `Create` on the rule (`Update` when it replaces one).
     pub fn define_compression(&mut self, spec: Dynamic) -> Result<(), Box<EvalAltResult>> {
         let operation = "define_compression";
-        let actual = type_name_of(&spec);
-        let mismatch = |expected: String, actual: String| {
-            fail(ScriptError::ArgumentMismatch {
+        let definitions = rule_definitions(operation, spec, false)?;
+        self.store_rules(operation, definitions)
+    }
+
+    /// `g.define_compressions([#{..}, ..])`: stores (or replaces) every rule of the list in ONE
+    /// unit (one commit) and re-encodes the values of all their labels in ONE walk (book page
+    /// "Compressed Properties", section "Several rules at once"). Each spec is
+    /// `define_compression`'s map, or `#{label, paths: [..], element?, codec?, min_bytes?,
+    /// dictionary?}` for one rule per path, each named `<label>_<path>` (`_edge` added for an
+    /// edge; characters a name may not hold become `_`). All or nothing: a refused rule fails
+    /// the list with its error and nothing is stored. Asks for `Create` (`Update`) on each
+    /// rule before anything changes. Answers the number of rules stored.
+    pub fn define_compressions(&mut self, specs: Dynamic) -> Result<i64, Box<EvalAltResult>> {
+        let operation = "define_compressions";
+        let actual = type_name_of(&specs);
+        let Some(specs) = specs.try_cast::<rhai::Array>() else {
+            return Err(fail(ScriptError::ArgumentMismatch {
                 step_name: operation.to_string(),
-                expected,
+                expected: "a list of rule maps [#{name, label, path, ..}, #{label, paths: [..], \
+                           ..}]"
+                    .into(),
                 actual,
-            })
+            }));
         };
-        let Some(mut spec) = spec.try_cast::<rhai::Map>() else {
-            return Err(mismatch(
-                "a map #{name, label, path, element?, codec?, min_bytes?, dictionary?}".into(),
-                actual,
-            ));
-        };
-        if let Some(unknown) = spec.keys().find(|key| !KEYS.contains(&key.as_str())) {
-            return Err(mismatch(
-                format!("only the keys {}", KEYS.join(", ")),
-                format!("the key '{unknown}'"),
-            ));
+        let mut definitions = Vec::new();
+        for spec in specs {
+            definitions.extend(rule_definitions(operation, spec, true)?);
         }
-        let mut take = |key: &str| spec.remove(key).unwrap_or(Dynamic::UNIT);
-        let name = optional_text(operation, "name", take("name"))?
-            .ok_or_else(|| mismatch("the key name (the rule's name)".into(), "no name".into()))?;
-        let label = optional_text(operation, "label", take("label"))?.ok_or_else(|| {
-            mismatch(
-                "the key label (the vertex or edge label)".into(),
-                "no label".into(),
-            )
-        })?;
-        let path_value = take("path");
-        let path: crate::value::JsonPath =
-            if let Some(path) = path_value.read_lock::<crate::value::JsonPath>() {
-                path.clone()
-            } else if path_value.is_string() {
-                path_value
-                    .to_string()
-                    .parse()
-                    .map_err(|err: crate::TraverserError| script_error(Box::new(err)))?
-            } else {
-                return Err(mismatch(
-                    "the key path as a string (\"details.career.cv\") or a jpath(..)".into(),
-                    if path_value.is_unit() {
-                        "no path".to_string()
-                    } else {
-                        type_name_of(&path_value)
-                    },
-                ));
-            };
-        let element = match optional_text(operation, "element", take("element"))?.as_deref() {
-            None | Some("vertex") => ElementKind::Vertex,
-            Some("edge") => ElementKind::Edge,
-            Some(other) => {
-                return Err(mismatch(
-                    "element \"vertex\" or \"edge\"".into(),
-                    format!("\"{other}\""),
-                ));
-            }
-        };
-        let mut rule = CompressionDefinition::with_path(element, label, path);
-        if let Some(codec) = optional_text(operation, "codec", take("codec"))? {
-            let codec = Codec::from_name(&codec).ok_or_else(|| {
-                mismatch("codec \"lz4\" or \"dedup\"".into(), format!("\"{codec}\""))
-            })?;
-            rule = rule.with_codec(codec);
-        }
-        let min_bytes = take("min_bytes");
-        if !min_bytes.is_unit() {
-            let value = min_bytes
-                .as_int()
-                .ok()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    mismatch(
-                        "min_bytes as an integer from 1 to 16777216".into(),
-                        dynamic_text(&min_bytes),
-                    )
-                })?;
-            rule = rule.with_min_bytes(value);
-        }
-        let dictionary = take("dictionary");
-        if !dictionary.is_unit() {
-            let value = dictionary.as_bool().map_err(|_| {
-                mismatch("dictionary as a boolean".into(), type_name_of(&dictionary))
-            })?;
-            rule = rule.with_dictionary(value);
-        }
-        let definition = Definition::compression(name.as_str(), rule);
-        definition
-            .validate()
-            .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
+        let count = definitions.len() as i64;
+        self.store_rules(operation, definitions)?;
+        Ok(count)
+    }
+
+    /// Asks for `Create` (`Update` when one of that name is stored or comes earlier in the
+    /// list) on each rule of `definitions`, then stores them all in one unit
+    /// ([`AnyGraph::set_definitions`]: one walk on a `TraversalGraph`).
+    fn store_rules(
+        &self,
+        operation: &str,
+        definitions: Vec<Definition>,
+    ) -> Result<(), Box<EvalAltResult>> {
         let graph = self.compression_graph(operation)?;
-        let exists = graph
-            .definition(DefinitionKind::COMPRESSION, &name)
-            .map_err(graph_fail)?
-            .is_some();
-        let action = if exists {
-            Action::Update
-        } else {
-            Action::Create
-        };
-        self.require_compression(operation, action, Some(&name))?;
-        graph
-            .set_definitions(vec![definition])
-            .map_err(script_error)
+        for (at, definition) in definitions.iter().enumerate() {
+            let name = definition.name();
+            let earlier = definitions[..at].iter().any(|d| d.name() == name);
+            let exists = earlier
+                || graph
+                    .definition(DefinitionKind::COMPRESSION, name)
+                    .map_err(graph_fail)?
+                    .is_some();
+            let action = if exists {
+                Action::Update
+            } else {
+                Action::Create
+            };
+            self.require_compression(operation, action, Some(name))?;
+        }
+        graph.set_definitions(definitions).map_err(script_error)
     }
 
     /// `g.estimate_compression(#{label, path, element?, codec?, min_bytes?, dictionary?})` /
@@ -345,7 +503,7 @@ impl ScriptGraphTraversalSource {
     /// Without `codec`/`min_bytes`/`dictionary` every default candidate is measured (`lz4`
     /// with and without a dictionary at 64, 128, 256, 512 and 1024 bytes, plus the current
     /// rule's parameters); each given key narrows the set. `codec` is `"lz4"`, `"dedup"` (at
-    /// 25, 64, 128 and 256 bytes) or a list of them (`["lz4", "dedup"]` compares both). Answers
+    /// 0, 25, 64, 128 and 256 bytes) or a list of them (`["lz4", "dedup"]` compares both). Answers
     /// a map
     /// (`estimate_entry`). Asks for `Read` on the data of that element kind and label.
     pub fn estimate_compression(&mut self, spec: Dynamic) -> Result<rhai::Map, Box<EvalAltResult>> {

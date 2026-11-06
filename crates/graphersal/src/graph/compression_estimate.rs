@@ -47,7 +47,7 @@ use crate::value::{ElementProperty, JsonPath};
 pub const DEFAULT_ESTIMATE_THRESHOLDS: [u32; 5] = [64, 128, 256, 512, 1024];
 /// The `min_bytes` thresholds a `dedup` estimate measures when none is given
 /// ([`CompressionCandidate::matching`] with codec `dedup`).
-pub const DEFAULT_DEDUP_ESTIMATE_THRESHOLDS: [u32; 4] = [25, 64, 128, 256];
+pub const DEFAULT_DEDUP_ESTIMATE_THRESHOLDS: [u32; 5] = [0, 25, 64, 128, 256];
 /// The default cap on the strings an estimate compresses; above it a sample is measured.
 pub const DEFAULT_ESTIMATE_MAX_VALUES: usize = 100_000;
 /// The default cap on the plain bytes an estimate compresses (16 MiB); above it a sample is
@@ -693,6 +693,10 @@ impl TraversalGraph {
         };
         let mut strings: Vec<&ElementProperty> = Vec::new();
         let mut lengths: Vec<usize> = Vec::new();
+        // A top-level key: a dedup candidate codes every value type (`code_row`).
+        let coded_key = names.len() == 1;
+        let any_dedup = candidates.iter().any(|c| c.codec == Codec::Dedup);
+        let mut top_values: Vec<&ElementProperty> = Vec::new();
         for (at, (_, properties)) in elements.iter().enumerate() {
             if cancelled(&token, at) {
                 return finish(estimate, true);
@@ -701,6 +705,9 @@ impl TraversalGraph {
                 continue;
             };
             estimate.values_found += 1;
+            if coded_key && any_dedup {
+                top_values.push(value);
+            }
             let len = match value {
                 ElementProperty::String(text) => text.len(),
                 ElementProperty::Compressed(text) => text.plain_len(),
@@ -789,7 +796,38 @@ impl TraversalGraph {
             .map(|c| c.min_bytes as usize)
             .min();
         let mut distinct: Vec<(usize, u64)> = Vec::new();
-        if let Some(dedup_floor) = dedup_floor {
+        // A top-level key: every value grouped by identity (the dictionary's sharing).
+        let mut coded_distinct: Vec<(&ElementProperty, u64)> = Vec::new();
+        if coded_key && any_dedup {
+            let mut table: hashbrown::HashTable<usize> = hashbrown::HashTable::new();
+            for (at, value) in top_values.iter().enumerate() {
+                if cancelled(&token, at) {
+                    return finish(estimate, true);
+                }
+                let hash = crate::value::identity::identity_hash_u64(value);
+                let found = table.find(hash, |&i| {
+                    coded_distinct
+                        .get(i)
+                        .is_some_and(|(seen, _)| crate::value::identity::identity_eq(seen, value))
+                });
+                match found {
+                    Some(&i) => {
+                        if let Some(entry) = coded_distinct.get_mut(i) {
+                            entry.1 += 1;
+                        }
+                    }
+                    None => {
+                        let i = coded_distinct.len();
+                        coded_distinct.push((value, 1));
+                        table.insert_unique(hash, i, |&i| {
+                            coded_distinct.get(i).map_or(0, |(seen, _)| {
+                                crate::value::identity::identity_hash_u64(seen)
+                            })
+                        });
+                    }
+                }
+            }
+        } else if let Some(dedup_floor) = dedup_floor {
             let mut counts: std::collections::HashMap<Cow<'_, str>, u64> =
                 std::collections::HashMap::new();
             for (at, (value, &len)) in strings.iter().zip(&lengths).enumerate() {
@@ -820,6 +858,12 @@ impl TraversalGraph {
                     dictionary.as_ref().map_or(0, |d| d.len() as u64),
                 ),
                 Codec::Lz4 => (plain_trial.as_ref(), 0),
+                Codec::Dedup if coded_key => {
+                    estimate
+                        .candidates
+                        .push(coded_estimate(*candidate, &coded_distinct, current));
+                    continue;
+                }
                 Codec::Dedup => {
                     estimate
                         .candidates
@@ -886,7 +930,8 @@ impl TraversalGraph {
             estimate.warnings.push(EstimateWarning::NoValues);
         }
         let not_strings = estimate.values_found - estimate.string_values;
-        if not_strings > 0 {
+        // A dedup candidate on a top-level key codes them too.
+        if not_strings > 0 && !(coded_key && any_dedup) {
             estimate.warnings.push(EstimateWarning::NotStrings {
                 values: not_strings,
             });
@@ -913,6 +958,45 @@ impl TraversalGraph {
             estimate.warnings.push(warning);
         }
         finish(estimate, false)
+    }
+}
+
+/// What a `dedup` candidate on a top-level key would hold, from the distinct values (by identity,
+/// with their occurrences): every value it codes costs its code (4 bytes) instead of its plain
+/// slot and heap, every distinct one its dictionary entry once, exactly as `compression_stats`
+/// counts a defined rule.
+fn coded_estimate(
+    candidate: CompressionCandidate,
+    distinct: &[(&ElementProperty, u64)],
+    current: Option<CompressionCandidate>,
+) -> CandidateEstimate {
+    use crate::graph::compression::{coded_heap, codes_value, plain_slot_bytes};
+    use crate::value::dictionary::{CODE_BYTES, DICTIONARY_ENTRY_BYTES};
+    let threshold = candidate.min_bytes as usize;
+    let (mut values, mut plain, mut stored, mut kinds) = (0u64, 0u64, 0u64, 0u64);
+    for &(value, count) in distinct {
+        if !codes_value(value, threshold) {
+            continue;
+        }
+        let heap = coded_heap(value);
+        values += count;
+        plain += count * (plain_slot_bytes() + heap);
+        stored += count * CODE_BYTES + DICTIONARY_ENTRY_BYTES + heap;
+        kinds += 1;
+    }
+    let saved =
+        i64::try_from(plain).unwrap_or(i64::MAX) - i64::try_from(stored).unwrap_or(i64::MAX);
+    CandidateEstimate {
+        candidate,
+        compressed_values: values,
+        plain_bytes: plain,
+        stored_bytes: stored,
+        dictionary_bytes: 0,
+        distinct_values: kinds,
+        saved_bytes: saved,
+        current: current == Some(candidate),
+        encode_bytes_per_sec: None,
+        decode_bytes_per_sec: None,
     }
 }
 

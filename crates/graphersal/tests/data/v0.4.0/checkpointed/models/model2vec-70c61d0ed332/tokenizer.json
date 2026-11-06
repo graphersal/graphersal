@@ -1,0 +1,1 @@
+{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [], "normalizer": {"type": "Lowercase"}, "pre_tokenizer": {"type": "Whitespace"}, "post_processor": null, "decoder": null, "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "graph": 1, "vector": 2, "model": 3}, "unk_token": "[UNK]"}}

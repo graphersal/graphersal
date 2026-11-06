@@ -504,6 +504,34 @@ struct Shared {
     operations: parking_lot::RwLock<()>,
 }
 
+/// The Store's parts of a memory report (`memory_report::components`): `store` (the journal's
+/// record buffers, the attic's blob cache), `store_files` (a store in memory: its files), and
+/// `store_graph` (the live graph, when the report is about another graph such as a view).
+impl crate::graph::memory_report::MemorySource for Shared {
+    fn memory_components(&self, components: &mut crate::graph::memory_report::MemoryComponents) {
+        use crate::graph::MemoryComponent;
+        let location = self.dir.display();
+        let buffers = self.journal.buffer_bytes_now().unwrap_or(0) + self.attic_blobs.heap_bytes();
+        components.push(MemoryComponent::estimated("store", buffers).with_detail(location.clone()));
+        if let Some(files) = self.dir.store_dir().memory_bytes() {
+            components
+                .push(MemoryComponent::exact("store_files", files).with_detail(location.clone()));
+        }
+        let reported = components.reported();
+        if reported.is_some_and(|reported| reported != self.graph.storage_address())
+            && let Some(bytes) = self.graph.memory_total_now()
+        {
+            components.push(MemoryComponent::estimated("store_graph", bytes).with_detail(location));
+        }
+    }
+}
+
+/// Registers a new store's [`Shared`] as a memory source (held weakly: gone with the store).
+fn register_memory(shared: &Arc<Shared>) {
+    let source: Arc<dyn crate::graph::memory_report::MemorySource> = shared.clone();
+    crate::graph::memory_report::register_memory_source(&source);
+}
+
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
 /// marks, point-in-time reads, fork, prune, verify and backup (the storage format spec).
 ///
@@ -1924,6 +1952,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
@@ -2230,6 +2259,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         let thread = if shared.options.checkpoint_after_bytes > 0 {
             spawn_checkpoint_thread(&shared)
         } else {
@@ -2306,6 +2336,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, started, true);
         Ok(StoreCore {
             shared,
@@ -2399,6 +2430,7 @@ impl StoreCore {
             operations: parking_lot::RwLock::new(()),
             system_journal,
         });
+        register_memory(&shared);
         shared.journal_opened(&report, web_time::Instant::now(), true);
         Ok(StoreCore {
             shared,
@@ -4867,23 +4899,23 @@ pub(super) fn new_journal(
                 .len()
                 .map_err(|err| PersistError::io("opening the last WAL segment", err))?;
             if *first == next {
-                // It holds no record (it starts at the next commit): replaced whole by a header
-                // of the current version under the same name, atomically.
-                if len > super::wal::WAL_HEADER_BYTES as u64 {
-                    return Err(PersistError::corrupt(
-                        path.display(),
-                        super::wal::WAL_HEADER_BYTES as u64,
-                        format!("it starts at commit {next}, which is not committed yet"),
-                    ));
-                }
+                // It holds no commit (it starts at the next commit), but it may hold mark and
+                // checkpoint records: a checkpoint rotates into a segment named by the next
+                // commit and writes its record there. It is replaced whole, atomically, by a
+                // header of the current version under the same name followed by those records
+                // (their frames do not depend on the format version); a torn tail after them
+                // is cut, as a recovery cuts it.
+                let records = carried_records(path, len, next)?;
                 let header = super::wal::WalHeader {
                     graph_id,
                     first_commit_seq: next,
                     created_at: crate::graph::undo::now_micros(),
                 };
-                path.write_atomic(&header.encode())
+                let mut bytes = header.encode();
+                bytes.extend_from_slice(&records);
+                path.write_atomic(&bytes)
                     .map_err(|err| PersistError::io("starting a WAL segment", err))?;
-                Some((*first, path.clone(), super::wal::WAL_HEADER_BYTES as u64))
+                Some((*first, path.clone(), bytes.len() as u64))
             } else {
                 None
             }
@@ -5274,6 +5306,53 @@ fn remove_tmp(dir: &DirPath) -> Result<usize, PersistError> {
 /// error, never "another lineage": the caller would otherwise start a new segment over it and
 /// report that follow-on failure instead of the read error.
 /// With the lineage, the file format version of the header (format spec 9.1, 15).
+/// The record bytes (after the header) of a WAL segment of an older format version that starts
+/// at commit `next`, the next commit of its lineage, for [`new_journal`]: its whole mark and
+/// checkpoint records, without a torn tail. A commit record in it is damage (the commit it
+/// holds is not committed yet: the store's state ends before it).
+fn carried_records(path: &DirPath, len: u64, next: u64) -> Result<Vec<u8>, PersistError> {
+    let start = super::wal::WAL_HEADER_BYTES as u64;
+    if len <= start {
+        return Ok(Vec::new());
+    }
+    let source = open_segment_reader(path, Some(len))?;
+    let mut reader =
+        super::wal::JournalReader::open(source, 0, crate::value::depth::DEFAULT_MAX_VALUE_DEPTH)
+            .map_err(|err| relocated(err, path))?;
+    let not_committed = |at: u64| {
+        PersistError::corrupt(
+            path.display(),
+            at,
+            format!("it starts at commit {next}, which is not committed yet"),
+        )
+    };
+    loop {
+        let at = reader.offset();
+        match reader.next_record() {
+            Ok(None) => break,
+            Ok(Some((_, _, super::wal::JournalRecord::Mark(_))))
+            | Ok(Some((_, _, super::wal::JournalRecord::Checkpoint { .. }))) => {}
+            Ok(Some((_, _, super::wal::JournalRecord::Commit(_))))
+            | Err(PersistError::UnsupportedContent { .. }) => return Err(not_committed(at)),
+            Err(err) => return Err(relocated(err, path)),
+        }
+    }
+    let end = reader.offset();
+    let keep = usize::try_from(end - start).map_err(|_| not_committed(start))?;
+    path.read_range(start, keep)
+        .map_err(|err| PersistError::io("reading the last WAL segment", err))
+}
+
+/// A reader's [`PersistError::Corrupt`] (which names `journal 0`) naming the segment `path`.
+fn relocated(err: PersistError, path: &DirPath) -> PersistError {
+    match err {
+        PersistError::Corrupt { offset, reason, .. } => {
+            PersistError::corrupt(path.display(), offset, reason)
+        }
+        other => other,
+    }
+}
+
 fn segment_lineage(path: &DirPath) -> Result<Option<(u128, u32)>, PersistError> {
     let source = open_segment_reader(path, Some(super::wal::WAL_HEADER_BYTES as u64))?;
     match super::wal::JournalReader::open(source, 0, 1) {

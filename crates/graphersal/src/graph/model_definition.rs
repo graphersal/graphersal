@@ -115,8 +115,10 @@ impl ModelDefinition {
         self
     }
 
-    /// The same model with the bytes it takes loaded (measured at import; the memory check of
-    /// a load uses it before reading the blob).
+    /// The same model with the import's estimate of the bytes it takes loaded (the f32
+    /// embedding matrix plus the tokenizer file). Kept in the payload for versions up to 0.5.2,
+    /// whose memory check of a load reads it; this version reads it nowhere (its check is the
+    /// blob's length times a fixed factor, its shown size the size measured at the load).
     pub fn with_load_bytes(mut self, bytes: u64) -> Self {
         self.load_bytes = bytes;
         self.original = None;
@@ -191,7 +193,9 @@ impl ModelDefinition {
         self.dimension
     }
 
-    /// The bytes the model takes loaded.
+    /// The import's estimate of the bytes the model takes loaded (see
+    /// [`Self::with_load_bytes`]: kept for older versions, not what this version checks or
+    /// shows).
     pub fn load_bytes(&self) -> u64 {
         self.load_bytes
     }

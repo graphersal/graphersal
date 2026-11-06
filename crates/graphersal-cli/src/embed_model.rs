@@ -161,6 +161,10 @@ pub fn run(args: &[String]) -> i32 {
                     errln!("Error: {message}");
                     EXIT_QUERY_ERROR
                 }
+                Err(DownloadError::Diagnostic(text)) => {
+                    errln!("{text}");
+                    EXIT_QUERY_ERROR
+                }
             }
         }
         "import" => {
@@ -192,6 +196,10 @@ pub fn run(args: &[String]) -> i32 {
                 Err(DownloadError::Usage(message)) => usage(&message),
                 Err(DownloadError::Failed(message)) => {
                     errln!("Error: {message}");
+                    EXIT_QUERY_ERROR
+                }
+                Err(DownloadError::Diagnostic(text)) => {
+                    errln!("{text}");
                     EXIT_QUERY_ERROR
                 }
             }
@@ -453,6 +461,9 @@ enum DownloadError {
     Usage(String),
     /// The download failed (exit 1).
     Failed(String),
+    /// The operation failed with a library error, already laid out by
+    /// `graphersal::error::format_diagnostic` (its `Error: ` headline included; exit 1).
+    Diagnostic(String),
 }
 
 fn failed(message: impl Into<String>) -> DownloadError {
@@ -812,7 +823,9 @@ fn add_to_store(
             }
             Ok(report.model)
         }
-        Err(err) => Err(failed(graphersal::error::format_diagnostic(&err))),
+        Err(err) => Err(DownloadError::Diagnostic(
+            graphersal::error::format_diagnostic(&err),
+        )),
     }
 }
 

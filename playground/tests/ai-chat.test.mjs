@@ -674,19 +674,20 @@ const EXPORT_META = Object.freeze({
   exportedAt: new Date(Date.UTC(2026, 9, 27, 12, 0, 0)),
 });
 
-test('export as Markdown: metadata, question, tool call with args and result, answer as is, error, timing', async () => {
+test('export as Markdown: metadata, question, answer as is, error, one time and tool-call line per turn; no steps', async () => {
   const { chatToMarkdown } = await import('../js/ai-chat.js');
   const md = chatToMarkdown(exportTranscript(), EXPORT_META);
   assert.ok(md.startsWith('# AI Chat: Chat 1\n\n- Exported: 2026-10-27T12:00:00.000Z\n- Model: model-x (anthropic API)\n- Server: 127.0.0.1:8080\n- Graph: modern\n'), md);
   assert.ok(md.includes('> Note: A new conversation.'));
   assert.ok(md.includes('## Turn 1\n\n**You:**\n\n> Who knows whom?\n> Only people.'));
-  assert.ok(md.includes('### Steps\n\nLet me look.\n\n**Tool call `query`**: ✓ 1 result'));
-  assert.ok(md.includes('Arguments:\n\n```json\n{\n  "script": "g.v().has_label(\\"person\\").count()"\n}\n```'));
-  assert.ok(md.includes('Result:\n\n```\n[4]\n```'));
-  // The answer is copied exactly (it is Markdown already).
-  assert.ok(md.includes('### Answer\n\nThere are **4** people:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n*12.4 s · tools 3.1 s · tokens 15.2k in (12k cached) / 830 out*'));
+  // The steps are not exported: no interim text, no tool call, its arguments or its result.
+  for (const left of ['### Steps', 'Let me look.', 'Tool call', 'Arguments', 'Result', 'g.v()', '[4]', 'tokens']) {
+    assert.ok(!md.includes(left), `${left} in\n${md}`);
+  }
+  // The answer is copied exactly (it is Markdown already), then its time and tool calls.
+  assert.ok(md.includes('### Answer\n\nThere are **4** people:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n_Answered in 12 s · 1 tool call_\n\n---'), md);
   assert.ok(md.includes('## Turn 2\n\n**You:**\n\n> And now?\n\n> **Error:** the provider answered 500\n>\n> Try again later.'));
-  assert.ok(md.includes('*900 ms · tokens not reported by the provider*'));
+  assert.ok(md.includes('_Ended with an error after <1 s · no tool calls_'), md);
   assert.ok(md.endsWith('\n') && !md.endsWith('\n\n'));
 });
 
@@ -739,25 +740,25 @@ test('export: a tool result shortened in the stored transcript is marked; an int
   assert.equal(doc.turns[0].done, null);
   assert.equal(doc.turns[0].timing, '');
   const md = chatToMarkdown(restored.items);
-  assert.ok(md.includes('Result (shortened in the stored transcript):'));
+  // The Markdown holds no tool results, so nothing is marked there; no done event: no time line.
+  assert.ok(!md.includes('Result') && !md.includes('xxx'), md);
   assert.ok(md.includes('*Interrupted: the turn has no end (the conversation ended).*'));
+  assert.ok(!md.includes('_Answered'), md);
   // The live (unshortened) text is not marked.
   assert.equal(JSON.parse(chatToJson(chat.items)).turns[0].steps[0].resultTruncated, false);
 });
 
-test('export: code fences are longer than any backtick run in their content', async () => {
-  const { chatToMarkdown, fenceFor } = await import('../js/ai-chat.js');
-  assert.equal(fenceFor('plain'), '```');
-  assert.equal(fenceFor('a ``` b'), '````');
-  assert.equal(fenceFor('`````'), '``````');
+test('export: a tool result with backtick runs stays out of the Markdown', async () => {
+  const { chatToMarkdown } = await import('../js/ai-chat.js');
   const md = chatToMarkdown([
     { type: 'user', text: 'q', seq: 1 },
     { type: 'tool_call', id: 'a', name: 'query', args: { script: 'x' }, seq: 2 },
     { type: 'tool_result', id: 'a', name: 'query', ok: false, summary: 'failed', text: 'see:\n````\ncode\n````', seq: 3 },
     { type: 'assistant', text: 'done', seq: 4 },
   ]);
-  assert.ok(md.includes('**Tool call `query`**: ✗ failed'));
-  assert.ok(md.includes('Result:\n\n`````\nsee:\n````\ncode\n````\n`````'), md);
+  // The tool result (with its backticks) is not in the Markdown; the answer is, as written.
+  assert.ok(!md.includes('Tool call') && !md.includes('see:'), md);
+  assert.ok(md.includes('### Answer\n\ndone\n'), md);
 });
 
 test('export: an empty transcript and the file name', async () => {
@@ -771,4 +772,185 @@ test('export: an empty transcript and the file name', async () => {
   assert.equal(chatExportFileName('Chat 2', 'md', at), 'graphersal-chat-2-20261027-090507.md');
   assert.equal(chatExportFileName('Sales / Q3: "people"', 'json', at), 'graphersal-chat-sales-q3-people-20261027-090507.json');
   assert.equal(chatExportFileName('', 'md', at), 'graphersal-chat-20261027-090507.md');
+});
+
+// ---- Thinking timer and the per-answer line (time + tool calls) -------------------------------
+
+test('secondsText: whole seconds, rounded down; minutes above 60 s', async () => {
+  const { secondsText } = await import('../js/ai-chat.js');
+  assert.equal(secondsText(0), '<1 s');
+  assert.equal(secondsText(999), '<1 s');
+  assert.equal(secondsText(1000), '1 s');
+  assert.equal(secondsText(12999), '12 s');
+  assert.equal(secondsText(59999), '59 s');
+  assert.equal(secondsText(60000), '1 min 0 s');
+  assert.equal(secondsText(125400), '2 min 5 s');
+  assert.equal(secondsText(-1), '');
+  assert.equal(secondsText(null), '');
+  assert.equal(secondsText(NaN), '');
+});
+
+test('the group summary carries the live time while running and the done time after', async () => {
+  const items = seqd([
+    { type: 'user', text: 'q' },
+    { type: 'tool_call', id: 'a', name: 'query', args: { script: 'g.v()' } },
+    { type: 'tool_result', id: 'a', name: 'query', ok: true, summary: '6 rows', text: '' },
+    { type: 'tool_call', id: 'b', name: 'list_saved_queries', args: {} },
+  ]);
+  const running = groupTurns(items, { running: true })[0];
+  assert.equal(turnSummary(running, 12400), 'Working for 12 s: running list_saved_queries (1 tool call done)');
+  assert.equal(turnSummary(running, 300), 'Working for <1 s: running list_saved_queries (1 tool call done)');
+  // Without a clock the line stays as before.
+  assert.equal(turnSummary(running), 'Working: running list_saved_queries (1 tool call done)');
+
+  const done = groupTurns([
+    ...items,
+    { type: 'tool_result', id: 'b', name: 'list_saved_queries', ok: true, summary: 'none', text: '', seq: 5 },
+    { type: 'assistant', text: 'Six.', seq: 6 },
+    { type: 'done', stopped: false, toolCalls: 2, elapsedMs: 34600, seq: 7 },
+  ])[0];
+  // A finished turn shows the server's time, whatever live value is passed.
+  assert.equal(turnSummary(done, 99000), 'Worked for 34 s: 2 tool calls (query, list_saved_queries)');
+
+  const stopped = groupTurns([...items, { type: 'done', stopped: true, toolCalls: null, elapsedMs: 5200, seq: 5 }])[0];
+  assert.equal(turnSummary(stopped), 'Stopped by you after 5 s and 1 tool call: query, list_saved_queries');
+  const early = groupTurns([
+    { type: 'user', text: 'q', seq: 1 },
+    { type: 'tool_call', id: 'a', name: 'query', args: {}, seq: 2 },
+    { type: 'done', stopped: true, elapsedMs: 2100, seq: 3 },
+  ])[0];
+  assert.equal(turnSummary(early), 'Stopped by you after 2 s during query (no tool call finished)');
+});
+
+test('liveElapsedMs and thinkingText: the bottom line of a turn without a group', async () => {
+  const { liveElapsedMs, thinkingText } = await import('../js/ai-chat.js');
+  const chat = createChat();
+  assert.equal(liveElapsedMs(chat, 5000), null, 'nothing runs');
+  chat.running = true;
+  assert.equal(liveElapsedMs(chat, 5000), null, 'no start time (not sent by this page)');
+  chat.startedAt = 1000;
+  assert.equal(liveElapsedMs(chat, 13500), 12500);
+  assert.equal(liveElapsedMs(chat, 500), 0, 'a clock going back never gives a negative time');
+  assert.equal(thinkingText(chat, 12500), 'Working for 12 s…');
+  assert.equal(thinkingText(chat, null), 'Working…');
+  assert.equal(thinkingText({ ...chat, sending: true }, 12500), 'Sending…');
+  assert.equal(thinkingText({ ...chat, stopping: true }, 12500), 'Stopping…');
+});
+
+test('createClock ticks between start and stop with one interval at most', async () => {
+  const { createClock, CLOCK_TICK_MS } = await import('../js/ai-chat.js');
+  const live = new Set();
+  let ticks = 0;
+  let ms = 0;
+  const clock = createClock({
+    onTick: () => { ticks++; },
+    setInterval: (fn, interval) => { ms = interval; const h = { fn }; live.add(h); return h; },
+    clearInterval: (h) => { live.delete(h); },
+  });
+  assert.equal(clock.running, false);
+  clock.stop(); // stopping a stopped clock does nothing
+  clock.start();
+  clock.start(); // no second interval
+  assert.equal(live.size, 1);
+  assert.equal(ms, CLOCK_TICK_MS);
+  assert.equal(CLOCK_TICK_MS, 1000);
+  for (const h of live) h.fn();
+  assert.equal(ticks, 1);
+  assert.equal(clock.running, true);
+  clock.stop();
+  assert.equal(live.size, 0, 'no interval left behind');
+  assert.equal(clock.running, false);
+});
+
+test('the controller starts the clock on Send and ends it on done, Stop, a gone conversation and /clear', async () => {
+  let t = 10000;
+  const now = () => t;
+  const server = new FakeServer();
+
+  // Done.
+  const chat = createChat();
+  const { c, timers } = controller(chat, server, 'p1', { now });
+  assert.equal(chat.startedAt, null);
+  await c.submit('how many?');
+  assert.equal(chat.startedAt, 10000);
+  t = 22000;
+  const { liveElapsedMs } = await import('../js/ai-chat.js');
+  assert.equal(liveElapsedMs(chat, t), 12000);
+  server.answer(chat.conversationId, 'Six.');
+  await timers.run();
+  assert.equal(chat.running, false);
+  assert.equal(chat.startedAt, null);
+  assert.equal(liveElapsedMs(chat, t), null);
+
+  // Stop.
+  await c.submit('again');
+  assert.equal(chat.startedAt, 22000);
+  await c.stop();
+  await timers.run();
+  assert.equal(chat.running, false);
+  assert.equal(chat.startedAt, null);
+
+  // A conversation that disappears while polling.
+  await c.submit('third');
+  server.conversations.delete(chat.conversationId);
+  await timers.run();
+  assert.equal(chat.running, false);
+  assert.equal(chat.startedAt, null);
+
+  // /clear while a turn runs.
+  await c.submit('fourth');
+  assert.ok(chat.startedAt != null);
+  await c.submit('/clear');
+  assert.equal(chat.startedAt, null);
+  assert.equal(chat.running, false);
+
+  // A failing Send never starts the clock.
+  const broken = createChat();
+  const b = new ChatController(broken, {
+    api: { ...server.api('p2'), create: async () => { throw new Error('offline'); } },
+    setTimer: () => null, clearTimer: () => {}, now,
+  });
+  await b.submit('hello');
+  assert.equal(broken.startedAt, null);
+  // The start time is runtime only: never persisted.
+  assert.equal('startedAt' in serializeChat(chat), false);
+});
+
+test('a restored transcript keeps each answer\'s time and tool calls (summary and export)', async () => {
+  const { chatToMarkdown } = await import('../js/ai-chat.js');
+  const chat = createChat();
+  chat.items = seqd([
+    { type: 'user', text: 'q' },
+    { type: 'tool_call', id: 'a', name: 'query', args: { script: 'g.v()' } },
+    { type: 'tool_result', id: 'a', name: 'query', ok: true, summary: '6 rows', text: '[..]' },
+    { type: 'assistant', text: 'Six.' },
+    { type: 'done', stopped: false, toolCalls: 1, elapsedMs: 34200, toolMs: 100 },
+  ]);
+  const restored = createChat(JSON.parse(JSON.stringify(serializeChat(chat))));
+  assert.equal(turnSummary(groupTurns(restored.items)[0]), 'Worked for 34 s: 1 tool call (query)');
+  assert.ok(chatToMarkdown(restored.items).includes('### Answer\n\nSix.\n\n_Answered in 34 s · 1 tool call_\n'));
+});
+
+test('export answer line: stopped, limit reached, no stored duration, tool calls counted from the steps', async () => {
+  const { chatToMarkdown, answerLine } = await import('../js/ai-chat.js');
+  const md = chatToMarkdown(seqd([
+    { type: 'user', text: 'one' },
+    { type: 'tool_call', id: 'a', name: 'query', args: {} },
+    { type: 'tool_result', id: 'a', name: 'query', ok: true, summary: 'ok', text: '' },
+    { type: 'done', stopped: true, toolCalls: 1, elapsedMs: 12000 },
+    { type: 'user', text: 'two' },
+    { type: 'assistant', text: 'Partial.' },
+    { type: 'done', stopped: false, toolCalls: 5, elapsedMs: 61000, limitReached: true },
+    { type: 'user', text: 'three' },
+    { type: 'assistant', text: 'Old answer.' },
+    { type: 'done', stopped: false },
+  ]));
+  assert.ok(md.includes('> one\n\n_Stopped by you after 12 s · 1 tool call_'), md);
+  assert.ok(!md.includes('*Stopped.*'), 'the line says it once');
+  assert.ok(md.includes('Partial.\n\n_Answered in 1 min 1 s · 5 tool calls · tool-call limit reached_'), md);
+  // An answer from a server without timing: the time is left out; the count comes from the steps.
+  assert.ok(md.includes('Old answer.\n\n_Answered · no tool calls_'), md);
+  assert.equal(answerLine({ state: 'done', steps: [{ type: 'tool' }, { type: 'tool' }], done: { elapsedMs: null, toolCalls: null } }),
+    'Answered · 2 tool calls');
+  assert.equal(answerLine({ state: 'interrupted', steps: [], done: null }), '');
 });

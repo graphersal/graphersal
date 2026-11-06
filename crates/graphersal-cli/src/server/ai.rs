@@ -294,6 +294,25 @@ impl State {
 }
 
 impl Ai {
+    /// The conversations and their estimated bytes (their histories), for the memory report;
+    /// a conversation whose state a turn holds counts its size without the history.
+    pub(super) fn memory_bytes(&self) -> (usize, u64) {
+        let Ok(conversations) = self.conversations.try_lock() else {
+            return (0, 0);
+        };
+        let bytes = conversations
+            .iter()
+            .map(|conversation| {
+                let history = conversation
+                    .state
+                    .try_lock()
+                    .map_or(0, |state| state.log.memory_bytes());
+                std::mem::size_of::<Conversation>() as u64 + history
+            })
+            .sum();
+        (conversations.len(), bytes)
+    }
+
     /// The AI Chat of `config`.
     pub(super) fn new(config: AiConfig) -> Self {
         Self {

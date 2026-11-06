@@ -3314,6 +3314,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "workload_statistics",
             "journal",
             "advise",
+            "apply_recommendations",
             "list_jobs",
             "memory_report",
             "graph_info",
@@ -5559,6 +5560,37 @@ fn the_statistics_list_a_loaded_model_in_the_process_memory() {
     let _ = std::fs::remove_dir_all(store.parent().unwrap());
 }
 
+/// The dev server runs with the tracking allocator: a loaded model's size in `process.models`
+/// is the size measured at its load (`measured: true`, user decision 2026-11-04), the same
+/// figure as the bar's `models` segment, which lists the model as its part.
+#[cfg(feature = "model2vec")]
+#[test]
+fn the_statistics_show_the_measured_size_of_a_loaded_model() {
+    let store = store_with_a_tiny_model("m2v_measured");
+    let server = start(&["--graph", store.to_str().unwrap()]);
+    let r = execute(
+        server.port,
+        r#"g.v().has_label("software").embed("name").to_list().len()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let stats = get(server.port, "/api/statistics").json();
+    let model = &stats["process"]["models"][0];
+    assert_eq!(model["measured"], true, "{stats}");
+    let bytes = model["bytes"].as_u64().unwrap();
+    let segments = stats["process"]["memory"]["segments"].as_array().unwrap();
+    let models = segments
+        .iter()
+        .find(|s| s["name"] == "models")
+        .unwrap_or_else(|| panic!("a models segment: {stats}"));
+    assert_eq!(models["bytes"].as_u64().unwrap(), bytes, "{stats}");
+    assert_eq!(models["parts"][0]["name"], "embedding_model", "{stats}");
+    assert_eq!(models["parts"][0]["detail"], model["model"], "{stats}");
+    // The engine group: at least the DSL's registrations, counted by the tracking allocator.
+    assert!(segments.iter().any(|s| s["name"] == "engine"), "{stats}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
+}
+
 /// Issue #12: `POST /api/compression/estimate` and the MCP tool `estimate_compression` answer
 /// the candidates and change nothing; the tool is a reading one, offered and allowed in
 /// read-only mode.
@@ -6461,6 +6493,101 @@ fn storage_advice_over_http_and_mcp() {
     assert_eq!(post(port, "/api/advise/dismiss", "{}").status, 400);
 }
 
+/// Several recommendations at once (stage V1b): `/api/advise/apply` with `ids` and the MCP
+/// tool `apply_recommendations` apply a pick in one commit, all or nothing; the read-only MCP
+/// mode does not offer the tool.
+#[test]
+fn several_recommendations_are_applied_at_once_over_http_and_mcp() {
+    let ui = ui_dir("advise-many");
+    let data = ui.parent().unwrap().join("advise-many-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let r = execute(
+        port,
+        r#"for i in 0..200 { g.add_v("file").property("kind", if i % 2 == 0 { "doc" } else { "img" }).property("size", i % 3).property("owner", "user-" + (i % 4)).iterate(); }"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let spec = serde_json::json!({"everything": true});
+    let advice = post(port, "/api/advise", &spec.to_string()).json();
+    let group = advice["advice"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["key"] == "add_compression:dedup")
+        .cloned()
+        .unwrap_or_else(|| panic!("{advice}"));
+    let ids: Vec<String> = group["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.len() >= 3, "{group}");
+    // HTTP: the first two, one commit.
+    let applied = post(
+        port,
+        "/api/advise/apply",
+        &serde_json::json!({"ids": &ids[..2], "spec": spec}).to_string(),
+    )
+    .json();
+    assert_eq!(applied["ok"], true, "{applied}");
+    assert_eq!(applied["applied"].as_array().unwrap().len(), 2);
+    assert_eq!(get(port, "/api/graph").json()["compressionRules"], 2);
+    assert_eq!(
+        post(port, "/api/advise/apply", r#"{"ids": "x"}"#).status,
+        400
+    );
+    // MCP: the rest, plus an id no longer advised: nothing applied.
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "apply_recommendations",
+        serde_json::json!({"ids": [&ids[0], &ids[2]], "everything": true}),
+    );
+    assert!(error, "{text}");
+    assert!(text.contains("not advised any more"), "{text}");
+    assert_eq!(get(port, "/api/graph").json()["compressionRules"], 2);
+    let (error, text) = mcp.call(
+        "apply_recommendations",
+        serde_json::json!({"ids": &ids[2..], "everything": true}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("Applied in one commit"), "{text}");
+    assert_eq!(
+        get(port, "/api/graph").json()["compressionRules"],
+        ids.len()
+    );
+    let (error, text) = mcp.call("apply_recommendations", serde_json::json!({}));
+    assert!(error, "{text}");
+    drop(server);
+    // Read-only MCP: no such tool.
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--mcp",
+        "--mcp-read-only",
+    ]);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    assert!(
+        !mcp.tool_names()
+            .iter()
+            .any(|n| n == "apply_recommendations"),
+        "{:?}",
+        mcp.tool_names()
+    );
+}
+
 /// The OpenAPI description (`openapi.json`, EXPERIMENTAL) is answered at `/openapi.json` and
 /// `/api/openapi.json` with the binary's version, carries the same version in the file, describes
 /// every route of the router (read from its source), and every operation it describes is routed.
@@ -7148,4 +7275,49 @@ fn the_journal_endpoint_answers_the_newest_records_first() {
     assert!(text.contains("next_before"), "{text}");
     drop(server);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The memory report over HTTP and MCP names where the server's process memory goes: the
+/// graph, the script engine, the playground session, the MCP client sessions; the remainder
+/// is what no component explains.
+#[test]
+fn the_memory_report_names_the_servers_components() {
+    let ui = ui_dir("memory-report-components");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let answer = post(port, "/api/memory/report", "{}").json();
+    assert_eq!(answer["ok"], true, "{answer}");
+    let report = &answer["report"];
+    let components = report["components"].as_array().unwrap();
+    let part = |name: &str| components.iter().find(|c| c["name"] == name);
+    for name in ["graph", "script_engine", "session", "mcp"] {
+        assert!(part(name).is_some(), "{name}: {report}");
+    }
+    assert_eq!(part("script_engine").unwrap()["exact"], true);
+    assert!(
+        part("mcp").unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 client session"),
+        "{report}"
+    );
+    let sum: u64 = components
+        .iter()
+        .map(|c| c["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(report["attributed_bytes"], sum);
+    let tracked = report["tracked_live_bytes"].as_u64().unwrap();
+    let unattributed = report["unattributed_bytes"].as_i64().unwrap();
+    assert_eq!(unattributed, tracked as i64 - sum as i64);
+
+    let (error, text) = mcp.call("memory_report", serde_json::json!({"limit": 1}));
+    assert!(!error, "{text}");
+    assert!(text.contains(r#""components":"#), "{text}");
 }

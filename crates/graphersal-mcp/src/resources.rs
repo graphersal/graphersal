@@ -73,7 +73,7 @@ pub(crate) fn read_resource(
         )?))),
         "graphersal://statistics" => {
             Ok(compact(&context.host.add_process_statistics(
-                context.call(|s| s.statistics())??,
+                context.call(|s| s.statistics_with_process())??,
             )))
         }
         "graphersal://dsl-reference" => {

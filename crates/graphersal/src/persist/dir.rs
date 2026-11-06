@@ -146,6 +146,13 @@ pub trait StoreDir: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// The bytes the directory's files take in this process's memory, for the memory report
+    /// (a store component): `None` (the default) for a directory whose files are elsewhere
+    /// (on disk); a directory in memory answers the bytes of its files.
+    fn memory_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// What `name` is: `None` when it does not exist.
     fn entry_kind(&self, name: &str) -> io::Result<Option<EntryKind>>;
 
@@ -1152,6 +1159,10 @@ impl Drop for MemLock {
 impl StoreDir for MemDir {
     fn location(&self) -> String {
         self.inner.name.clone()
+    }
+
+    fn memory_bytes(&self) -> Option<u64> {
+        Some(self.total_bytes())
     }
 
     fn is_volatile(&self) -> bool {

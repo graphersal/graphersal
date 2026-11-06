@@ -44,7 +44,7 @@
 //! assert_eq!(recovered.graph.vertex_count(), 7);
 //! ```
 
-mod codec;
+pub(crate) mod codec;
 mod definitions;
 mod dir;
 mod encoder;
@@ -53,7 +53,6 @@ mod journal;
 mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 mod model_cache;
-pub(crate) mod model_tar;
 mod recover;
 mod segment;
 #[cfg(not(target_arch = "wasm32"))]

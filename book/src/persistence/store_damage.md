@@ -117,12 +117,20 @@ if !report.is_lossless() { /* read report.lost_commits, lost_ranges, lost_elemen
 
 ```text
 $ graphersal store repair damaged2/ --to repaired2/
-1 damaged item(s); readable state: snapshot 1 + WAL at commit 3; a repair loses nothing
+1 damaged item(s); readable state: snapshot 1 + WAL at commit 3; a repair keeps all data
   DAMAGE snapshots/00000000000000000000/v-000000.seg at byte 64: chunk checksum mismatch; vertex ids "1"..="6"; donor: not needed: snapshot 1 covers it
   note: built on snapshot 1 (snapshots/00000000000000000001)
-Repaired store repaired2/ at commit 3 (graph 01a11a54-c795-7b87-ad5b-6e723413bc32): nothing lost
+Repaired store repaired2/ at commit 3 (graph 01a11a54-c795-7b87-ad5b-6e723413bc32): all data kept
   mark not carried: before-import @ commit 1
-ok: nothing lost. Use it: graphersal --graph repaired2/
+  not carried: the history before commit 3, 1 mark and the store id (backups start anew); the store it was built from keeps them
+
+ok: all data kept
+  not carried: the history before commit 3, 1 mark and the store id (backups start anew)
+  kept in: damaged2/ (keep it while you need them)
+  # open it in the REPL
+  graphersal --graph repaired2/
+  # or serve it to the browser playground
+  graphersal --graph repaired2/ --server
 ```
 
 - Damaged snapshot chunks are rebuilt from a donor: an older snapshot's intact chunks for the same
@@ -139,7 +147,12 @@ ok: nothing lost. Use it: graphersal --graph repaired2/
 - **Marks are not carried**: the repaired store starts without marks. `RepairReport::marks_not_carried`
   (CLI `mark not carried: name @ commit N`, Python `"marks_not_carried"`) lists the damaged store's
   marks at or before the repaired position (as far as its `marks` file or WAL still yields them).
-- Exit code of `graphersal store repair`: **0** when nothing was lost, **1** when data is lost or
+- **"All data kept" is about the data, not the history.** A repair writes the readable state as
+  one snapshot: the commits before it (rollback, views of past states, the attic), the marks and
+  the store id stay in the damaged store, so keep that one while you may need them. Every
+  report says so (`RepairReport::not_carried`, the line `not carried: ...`), also when no data
+  is lost.
+- Exit code of `graphersal store repair`: **0** when no data was lost, **1** when data is lost or
   diverged (the repaired store is still written: read the lists), **2** without `--to`.
 
 ## Runbook: "the disk started to fail"

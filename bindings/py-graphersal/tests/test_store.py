@@ -96,6 +96,21 @@ def test_rollback_attic_restore_and_repair(tmp_path):
         assert names(copy.graph) == ["ann", "bob"]
 
 
+def test_repair_names_what_it_never_carries(tmp_path):
+    path = str(tmp_path / "data")
+    with graphersal.Store.create(path) as store:
+        store.graph.execute('g.addV("person").property("name", "ann").next()')
+        store.mark("ann")
+        store.graph.execute('g.addV("person").property("name", "bob").next()')
+        repaired = store.repair_to(str(tmp_path / "repaired"))
+        assert repaired["lossless"]
+        assert repaired["not_carried"] == (
+            "the history before commit 2, 1 mark and the store id (backups start anew)"
+        )
+        assert "): all data kept\n" in repaired["report"]
+        assert "nothing lost" not in repaired["report"]
+
+
 def test_a_single_file_store_compacts_and_converts(tmp_path):
     path = str(tmp_path / "graph.gstore")
     with graphersal.Store.create(path) as store:

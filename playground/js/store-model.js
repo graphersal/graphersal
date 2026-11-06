@@ -399,7 +399,8 @@ export function modelRows(store) {
     identity: m.identity || m.id,
     repo: m.repo || '',
     isDefault: !!m.default,
-    size: m.bytesText || '',
+    // `sizeText`: in memory when loaded, else on disk (the session decides).
+    size: m.sizeText || m.bytesText || '',
     licence: m.licenseText === 'template'
       ? `${m.license || 'unknown'} (named in the model card)` : (m.license || 'unknown'),
     licenceText: licenceTextOf(m),

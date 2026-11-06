@@ -18,7 +18,8 @@
 //     current data (the graph is not changed): a table with a saving bar per candidate, the
 //     best one highlighted, and "Use" copying a candidate's codec, threshold and dictionary
 //     into the form.
-//   * Scheduled jobs: the system jobs and the jobs of users (catalog kind `job`) with their
+//   * Scheduled jobs: one full-width block per job (grows downwards, never sideways): the
+//     system jobs and the jobs of users (catalog kind `job`) with their
 //     schedule, next and last run (its error), runs in two days and a switch; Run now, Edit
 //     and Drop for a job of a user, a schedule of its own (or the built-in one again) for a
 //     system job; the form (name, action: a saved query with JSON arguments, a checkpoint or a
@@ -340,7 +341,7 @@ export const CompressionManager = {
     </div>
     <div class="dialog-body">
       <template v-if="!d.draft">
-        <p class="muted sq-note">A rule keeps the strings of one vertex or edge label at one property path LZ4-compressed in memory (codec lz4: when at least the minimum size and at most 90 % after compression; a read or a has() on such a field decompresses it), or stores each distinct value once and lets every element point to it (codec dedup: long values repeated across many elements, such as paths, URLs or category texts; strings of up to 24 bytes are stored inline and never shared). Reads are always plain. Files hold plain text. Rules travel with the catalog file and with a snapshot.</p>
+        <p class="muted sq-note">A rule keeps the strings of one vertex or edge label at one property path LZ4-compressed in memory (codec lz4: when at least the minimum size and at most 90 % after compression; a read or a has() on such a field decompresses it), or stores each distinct value once and lets every element point to it (codec dedup: values repeated across many elements, such as paths, URLs, kinds, flags, dates or small lists; on a top-level property every value type, the element keeping a 4-byte code instead of the 32-byte value). Reads are always plain. Files hold plain text. Rules travel with the catalog file and with a snapshot.</p>
         <div v-if="state.compressionsError" class="field-error">{{ state.compressionsError }}</div>
         <p v-else-if="!rows.length" class="muted">No compression rules yet. Large text that queries rarely read (a CV, a description, a document body) is the use case.</p>
         <div v-else class="catalog-table-wrap">
@@ -396,7 +397,7 @@ export const CompressionManager = {
           <select id="cc-codec" :value="d.draft.codec || 'lz4'" @change="setCodec($event.target.value)" :class="{ invalid: d.errors.codec }" style="justify-self:start">
             <option v-for="c in codecs" :key="c" :value="c">{{ c }}</option>
           </select>
-          <span class="hint">{{ (d.draft.codec || 'lz4') === 'dedup' ? 'Each distinct value stored once, every element points to it: for long values repeated across many elements. Reads cost nothing extra.' : 'Each value LZ4-compressed: for large text that queries rarely read.' }}</span>
+          <span class="hint">{{ (d.draft.codec || 'lz4') === 'dedup' ? 'Each distinct value stored once, every element keeps a 4-byte code: for values repeated across many elements (any type on a top-level property). Reads cost nothing extra; writes look the value up.' : 'Each value LZ4-compressed: for large text that queries rarely read.' }}</span>
           <label for="cc-min">Minimum size</label>
           <input id="cc-min" type="text" inputmode="numeric" v-model="d.draft.minBytesText" :class="{ invalid: d.errors.minBytes }" style="width:14ch;justify-self:start">
           <div v-for="m in d.errors.minBytes || []" class="field-error sq-span">{{ m }}</div>
@@ -782,34 +783,31 @@ export const JobsManager = {
         <p class="muted sq-note">Jobs run on a cron schedule ({{ view.timeZone || 'UTC' }}) in the store: the system jobs, and jobs you define (a saved query with fixed arguments, a checkpoint, a backup). A job runs with the rights it was defined with; a job of yours is part of the catalog and travels with the catalog file and backups.</p>
         <p v-if="state.jobs && !view.store" class="field-error">The graph is not in a store: jobs are kept but do not run.</p>
         <div v-if="state.jobsError" class="field-error">{{ state.jobsError }}</div>
-        <div v-else-if="rows.length" class="catalog-table-wrap">
-          <table class="data-table catalog-table">
-            <thead><tr>
-              <th>Name</th><th>Does</th><th>Schedule</th><th>On</th><th>Next</th><th>Last run</th>
-              <th class="num" title="Runs in the last two days (failed)">Runs (2 days)</th><th></th>
-            </tr></thead>
-            <tbody>
-              <tr v-for="{ job, row } in rows" :key="row.name">
-                <td class="code">{{ row.name }} <span v-if="row.system" class="badge" title="Comes with the store; can be switched and rescheduled, not dropped">system</span>
-                  <span v-if="!row.scheduled" class="badge" :title="row.reason">not running</span>
-                  <div v-if="row.description" class="muted cc-sub">{{ row.description }}</div></td>
-                <td>{{ row.action }}<div v-if="row.effects.length" class="muted cc-sub" title="What each run may write: the rights stored when the job was defined">may: {{ row.effects.join('; ') }}</div></td>
-                <td :title="row.schedule"><span class="code">{{ row.schedule }}</span><div class="muted cc-sub">{{ row.scheduleText !== row.schedule ? row.scheduleText : '' }}{{ row.changed ? ' (changed)' : '' }}</div></td>
-                <td><input type="checkbox" :checked="row.enabled" :disabled="d.busy || state.running" :aria-label="(row.enabled ? 'Switch off ' : 'Switch on ') + row.name" @change="toggle(job)"></td>
-                <td>{{ row.next }}</td>
-                <td>{{ row.last }}<span v-if="row.lastMs != null" class="muted"> · {{ row.lastMs }} ms</span>
-                  <div v-if="row.lastError" class="field-error cc-sub">{{ row.lastError }}</div></td>
-                <td class="num">{{ row.runs }}<span v-if="row.failed" class="field-error"> ({{ row.failed }})</span></td>
-                <td class="catalog-actions">
-                  <button type="button" class="btn small" :disabled="d.busy || state.running || !row.scheduled" @click="run(job)" title="Run it now, whatever its schedule">Run now</button>
-                  <button v-if="row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="reschedule(job)">Schedule…</button>
-                  <button v-if="!row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="startEdit(job)">Edit…</button>
-                  <button v-if="!row.system" type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(job)">Drop</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <ul v-else-if="rows.length" class="cj-list" aria-label="Scheduled jobs">
+          <li v-for="{ job, row } in rows" :key="row.name" class="cj-job">
+            <div class="cj-head">
+              <span class="cj-name code">{{ row.name }}</span>
+              <span v-if="row.system" class="badge" title="Comes with the store; can be switched and rescheduled, not dropped">system</span>
+              <span v-if="!row.scheduled" class="badge" :title="row.reason">not running</span>
+              <span class="catalog-actions">
+                <button type="button" class="btn small" :disabled="d.busy || state.running || !row.scheduled" @click="run(job)" title="Run it now, whatever its schedule">Run now</button>
+                <button v-if="row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="reschedule(job)">Schedule…</button>
+                <button v-if="!row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="startEdit(job)">Edit…</button>
+                <button v-if="!row.system" type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(job)">Drop</button>
+              </span>
+            </div>
+            <div v-if="row.description" class="muted cj-text">{{ row.description }}</div>
+            <div class="cj-text"><span class="cj-label">Does</span> {{ row.action }}<div v-if="row.effects.length" class="muted cc-sub" title="What each run may write: the rights stored when the job was defined">may: {{ row.effects.join('; ') }}</div></div>
+            <div class="cj-facts">
+              <span :title="row.schedule"><span class="cj-label">Schedule</span> <span class="code">{{ row.schedule }}</span><span class="muted">{{ row.scheduleText !== row.schedule ? ' · ' + row.scheduleText : '' }}{{ row.changed ? ' (changed)' : '' }}</span></span>
+              <label class="cj-on"><input type="checkbox" :checked="row.enabled" :disabled="d.busy || state.running" :aria-label="(row.enabled ? 'Switch off ' : 'Switch on ') + row.name" @change="toggle(job)"> On</label>
+              <span><span class="cj-label">Next</span> {{ row.next }}</span>
+              <span><span class="cj-label">Last run</span> {{ row.last }}<span v-if="row.lastMs != null" class="muted"> · {{ row.lastMs }} ms</span></span>
+              <span title="Runs in the last two days (failed)"><span class="cj-label">Runs (2 days)</span> <span class="num">{{ row.runs }}</span><span v-if="row.failed" class="field-error"> ({{ row.failed }})</span></span>
+            </div>
+            <div v-if="row.lastError" class="field-error cc-sub cj-text">{{ row.lastError }}</div>
+          </li>
+        </ul>
         <p v-else class="muted">No jobs.</p>
         <div class="sq-buttons">
           <button type="button" class="btn primary" :disabled="state.running" @click="startNew">New job…</button>

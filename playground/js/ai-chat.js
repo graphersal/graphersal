@@ -60,6 +60,10 @@ export function createChat(saved = null) {
     running: false, // a turn of this tab's conversation runs
     sending: false, // a Send or /clear is in progress
     stopping: false,
+    // Runtime only (not persisted): when this page sent the running turn's message (epoch ms) for
+    // the live "Working for N s" clock; null while no turn of this page runs. A finished turn
+    // keeps its duration in its `done` event (`elapsedMs`), which is persisted with the items.
+    startedAt: null,
     // Runtime only (not persisted): the turn keys (`groupTurns`) whose step group the person opened.
     openSteps: {},
   };
@@ -98,6 +102,7 @@ export function mergeEvents(chat, answer) {
   }
   const running = !!(answer && answer.running);
   chat.running = running;
+  if (!running) chat.startedAt = null;
   return { added, done: !running };
 }
 
@@ -269,28 +274,99 @@ function finishTurn(turn, running) {
 }
 
 /**
- * The one-line summary of a turn's collapsed group: how far it got, e.g. "Worked: 3 tool calls
- * (query, list_saved_queries)", "Working: running query (1 tool call done)", "Stopped after 1 tool
- * call: list_saved_queries". Empty for a turn without tool calls.
+ * The one-line summary of a turn's collapsed group: how far it got and how long it took, e.g.
+ * "Worked for 34 s: 3 tool calls (query, list_saved_queries)", "Working for 12 s: running query
+ * (1 tool call done)", "Stopped after 5 s and 1 tool call: list_saved_queries". The time of a
+ * finished turn is its `done` event's `elapsedMs`; a running turn's is `liveMs` (`liveElapsedMs`,
+ * ticking in the view). Without a time (an older server, an interrupted turn, no clock) the line
+ * has none: "Worked: 3 tool calls (...)". Empty for a turn without tool calls.
+ * @param {object} turn  A turn entry of `groupTurns`.
+ * @param {number|null} [liveMs]  How long the running turn runs so far.
  */
-export function turnSummary(turn) {
+export function turnSummary(turn, liveMs = null) {
   if (!turn || !turn.toolCalls) return '';
   const names = namesText(turn.names);
+  const ms = turn.state === 'running' ? liveMs : turn.elapsedMs;
+  const time = Number.isFinite(ms) && ms >= 0 ? secondsText(ms) : '';
   switch (turn.state) {
     case 'running': {
       const step = turn.current ? `running ${turn.current}` : 'waiting for the model';
-      return `Working: ${step} (${plural(turn.ran, 'tool call')} done)`;
+      return `Working${time ? ` for ${time}` : ''}: ${step} (${plural(turn.ran, 'tool call')} done)`;
     }
     case 'done':
-      return `Worked: ${plural(turn.ran, 'tool call')} (${names})`;
+      return `Worked${time ? ` for ${time}` : ''}: ${plural(turn.ran, 'tool call')} (${names})`;
     default: {
       const verb = turn.state === 'stopped' ? 'Stopped by you'
         : turn.state === 'interrupted' ? 'Interrupted' : 'Stopped';
       // No call finished: the turn ended while its first call(s) ran or were refused.
-      if (!turn.ran) return `${verb} during ${names} (no tool call finished)`;
-      return `${verb} after ${plural(turn.ran, 'tool call')}: ${names}`;
+      if (!turn.ran) {
+        return `${verb}${time ? ` after ${time}` : ''} during ${names} (no tool call finished)`;
+      }
+      return `${verb} after ${time ? `${time} and ` : ''}${plural(turn.ran, 'tool call')}: ${names}`;
     }
   }
+}
+
+/**
+ * A duration in whole seconds for the live clock, the group summary and the export: "<1 s",
+ * "12 s", "2 min 5 s" (rounded down: the clock counts up). '' for no duration.
+ */
+export function secondsText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return '<1 s';
+  const total = Math.floor(ms / 1000);
+  if (total < 60) return `${total} s`;
+  return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
+/** How often the live clock of a running turn ticks. */
+export const CLOCK_TICK_MS = 1000;
+
+/**
+ * How long this chat's running turn runs so far (`now - chat.startedAt`), or null when no turn of
+ * this page runs (nothing sent yet, finished, stopped, cleared, a restored chat).
+ */
+export function liveElapsedMs(chat, now) {
+  if (!chat || !chat.running || !Number.isFinite(chat.startedAt) || !Number.isFinite(now)) return null;
+  return Math.max(0, now - chat.startedAt);
+}
+
+/**
+ * The line at the bottom of the transcript while no group shows the turn's state (a turn without
+ * tool calls so far, sending, stopping): "Sending…", "Stopping…", "Working for 5 s…" (just
+ * "Working…" without a clock).
+ */
+export function thinkingText(chat, liveMs = null) {
+  if (chat && chat.stopping) return 'Stopping…';
+  if (chat && chat.sending) return 'Sending…';
+  const time = Number.isFinite(liveMs) && liveMs >= 0 ? secondsText(liveMs) : '';
+  return time ? `Working for ${time}…` : 'Working…';
+}
+
+/**
+ * The ticking clock of the view: calls `onTick` every `intervalMs` between `start()` and `stop()`
+ * (one interval at most; `start()` on a running clock and `stop()` on a stopped one do nothing).
+ * The timer functions are injectable for tests.
+ * @param {{onTick: () => void, intervalMs?: number, setInterval?: Function, clearInterval?: Function}} o
+ */
+export function createClock(o) {
+  const set = o.setInterval || ((fn, ms) => setInterval(fn, ms));
+  const clear = o.clearInterval || ((h) => clearInterval(h));
+  let handle = null;
+  return {
+    get running() {
+      return handle !== null;
+    },
+    start() {
+      if (handle !== null) return;
+      handle = set(() => o.onTick(), o.intervalMs || CLOCK_TICK_MS);
+    },
+    stop() {
+      if (handle === null) return;
+      clear(handle);
+      handle = null;
+    },
+  };
 }
 
 /** A duration for the answer's timing line: "840 ms", "12.4 s", "2 min 5 s". */
@@ -336,7 +412,9 @@ export function timingText(turn) {
 
 // ---- Export (issue #18): the transcript the page holds as a Markdown or JSON file ----------
 //
-// Both formats are derived from `groupTurns`, so they show the turns as the tab does. They hold
+// Both formats are derived from `groupTurns`, so they show the turns as the tab does (the Markdown
+// only the questions, the final answers and a time and tool-call line per turn; the JSON every
+// step as well). They hold
 // only what the page holds: a restored transcript keeps the newest `MAX_SAVED_ITEMS` items and
 // tool result texts cut to `MAX_SAVED_TEXT` characters (marked `resultTruncated`).
 
@@ -469,62 +547,19 @@ export function chatToJson(items, meta = {}) {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-/** A code fence longer than any backtick run in `text` (at least three backticks). */
-export function fenceFor(text) {
-  let longest = 0;
-  for (const m of String(text).matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
-  return '`'.repeat(Math.max(3, longest + 1));
-}
-
-function fenced(text, lang = '') {
-  const body = String(text);
-  const fence = fenceFor(body);
-  return `${fence}${lang}\n${body}${body.endsWith('\n') ? '' : '\n'}${fence}`;
-}
-
-/** Inline code that survives backticks in its text. */
-function inlineCode(text) {
-  const s = String(text);
-  let longest = 0;
-  for (const m of s.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
-  const ticks = '`'.repeat(longest + 1);
-  const pad = s.startsWith('`') || s.endsWith('`') ? ' ' : '';
-  return `${ticks}${pad}${s}${pad}${ticks}`;
-}
-
 /** Plain text as a Markdown block quote (every line, empty ones included). */
 function quote(text) {
   return String(text).split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n');
 }
 
-function argsJson(args) {
-  try {
-    return JSON.stringify(args, null, 2) ?? String(args);
-  } catch (e) {
-    return String(args);
-  }
-}
-
+/** A preamble or tail entry in Markdown; '' for one the Markdown leaves out (tool results). */
 function entryMarkdown(e) {
   switch (e.type) {
     case 'error': return quote(`**Error:** ${e.message}${e.help ? `\n\n${e.help}` : ''}`);
     case 'notice': return quote(`Note: ${e.text}`);
     case 'text': return e.text;
-    case 'stopped': return '*Stopped.*';
-    case 'tool': return toolMarkdown(e);
     default: return '';
   }
-}
-
-function toolMarkdown(t) {
-  const status = t.ok == null ? 'no result' : `${t.ok ? '✓' : '✗'} ${t.summary ?? ''}`.trim();
-  const parts = [`**Tool call ${inlineCode(t.name)}**: ${status}`];
-  if (t.args != null) parts.push(`Arguments:\n\n${fenced(argsJson(t.args), 'json')}`);
-  if (t.result) {
-    const label = t.resultTruncated ? 'Result (shortened in the stored transcript):' : 'Result:';
-    parts.push(`${label}\n\n${fenced(t.result)}`);
-  }
-  return parts.join('\n\n');
 }
 
 const STATE_NOTES = Object.freeze({
@@ -533,11 +568,36 @@ const STATE_NOTES = Object.freeze({
 });
 
 /**
- * The transcript as Markdown text (pure): a title, the metadata, then per turn the question (a
- * block quote), the steps (interim texts; tool calls with their arguments as a fenced JSON block,
- * the result summary and the stored result text, marked when the stored text was shortened), the
- * answer exactly as the model wrote it (it is Markdown already), errors with their help, notices,
- * and the timing line. Code fences are longer than any backtick run they enclose.
+ * The short line under a turn's answer in the Markdown export: how the turn ended, how long it
+ * took (its `done` event's `elapsedMs`, whole seconds as in the chat's group summary; left out when
+ * the event has none) and how many tool calls it made, e.g. "Answered in 34 s · 5 tool calls",
+ * "Stopped by you after 12 s · 1 tool call", "Ended with an error after 3 s · no tool calls",
+ * "· tool-call limit reached" added when the turn reached it. '' for a turn without a `done` event
+ * (running, interrupted: their state note says so).
+ * @param {object} t  A turn of `chatExportModel`.
+ */
+export function answerLine(t) {
+  const d = t && t.done;
+  if (!d) return '';
+  const time = d.elapsedMs != null ? secondsText(d.elapsedMs) : '';
+  let head;
+  if (t.state === 'stopped') head = `Stopped by you${time ? ` after ${time}` : ''}`;
+  else if (t.state === 'error') head = `Ended with an error${time ? ` after ${time}` : ''}`;
+  else head = `Answered${time ? ` in ${time}` : ''}`;
+  const calls = d.toolCalls != null ? d.toolCalls
+    : (t.steps || []).filter((s) => s.type === 'tool').length;
+  const parts = [head, calls ? plural(calls, 'tool call') : 'no tool calls'];
+  if (d.limitReached) parts.push('tool-call limit reached');
+  return parts.join(' · ');
+}
+
+/**
+ * The transcript as Markdown text (pure), the conversation as a person reads it: a title, the
+ * metadata, then per turn the question (a block quote), the final answer exactly as the model
+ * wrote it (it is Markdown already), errors with their help, notices, and one short line with how
+ * the turn ended, its time and its number of tool calls (`answerLine`). The turn's internal steps
+ * (interim texts between tool calls, tool calls with their arguments and results) are left out:
+ * the chat shows them only in the collapsed group; the JSON export (`chatToJson`) keeps them.
  * @param {Array} items  The chat's transcript (chat.items).
  * @param {object} [meta]  As for `chatToJson`.
  */
@@ -555,14 +615,11 @@ export function chatToMarkdown(items, meta = {}) {
   if (!model.turns.length && !model.preamble.length) out.push('*The transcript is empty.*');
   model.turns.forEach((t, i) => {
     out.push('---', `## Turn ${i + 1}`, `**You:**\n\n${quote(t.question)}`);
-    if (t.steps.length) {
-      out.push('### Steps');
-      for (const s of t.steps) out.push(entryMarkdown(s));
-    }
     if (t.answer != null) out.push('### Answer', t.answer);
     for (const e of t.tail) out.push(entryMarkdown(e));
     if (STATE_NOTES[t.state]) out.push(STATE_NOTES[t.state]);
-    if (t.timing) out.push(`*${t.timing}*`);
+    const line = answerLine(t);
+    if (line) out.push(`_${line}_`);
   });
   return `${out.filter((s) => s !== '').join('\n\n')}\n`;
 }
@@ -595,9 +652,9 @@ function messageOf(err) {
  *   events: (id:string, after:number) => Promise<{events:Array, running:boolean, last:number}>,
  *   stop: (id:string) => Promise<any>, remove: (id:string) => Promise<any>},
  *   onChange?: () => void, isVisible?: () => boolean, setTimer?: Function, clearTimer?: Function,
- *   intervalMs?: number}} o
+ *   intervalMs?: number, now?: () => number}} o
  *   `api` errors carry the HTTP status as `status`; `onChange` is called after every change that
- *   should be persisted.
+ *   should be persisted; `now` is the clock of `chat.startedAt` (default `Date.now`).
  */
 export class ChatController {
   constructor(chat, o) {
@@ -606,6 +663,7 @@ export class ChatController {
     this.onChange = o.onChange || (() => {});
     this.timers = { isVisible: o.isVisible, setTimer: o.setTimer, clearTimer: o.clearTimer };
     this.intervalMs = o.intervalMs || CHAT_POLL_MS;
+    this.now = o.now || (() => Date.now());
     this.poller = null;
     this.generation = 0; // bumped by /clear and dispose: answers of an older loop are dropped
     this.disposed = false;
@@ -662,6 +720,7 @@ export class ChatController {
         await this.api.send(id, message);
       }
       this.chat.running = true;
+      this.chat.startedAt = this.now();
       this.chat.draft = '';
       this.startPolling();
       return true;
@@ -715,6 +774,7 @@ export class ChatController {
         if (answer && answer.gone) {
           poller.stop();
           this.chat.running = false;
+          this.chat.startedAt = null;
           this.chat.conversationId = null;
           this.chat.owned = false;
           this.localError(answer.message, 'The next message starts a new conversation.');
@@ -756,6 +816,7 @@ export class ChatController {
       if (status === 403 || status === 404) {
         this.stopPolling();
         this.chat.running = false;
+        this.chat.startedAt = null;
         this.chat.conversationId = null;
       }
       this.localError(messageOf(err), 'The next message starts a new conversation if this one is gone.');
@@ -797,6 +858,7 @@ export class ChatController {
       this.chat.items.splice(0, this.chat.items.length);
       this.chat.openSteps = {};
       this.chat.running = false;
+      this.chat.startedAt = null;
       this.chat.stopping = false;
       this.chat.sending = false;
       this.onChange();

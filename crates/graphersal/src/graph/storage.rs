@@ -588,6 +588,28 @@ pub trait GraphStorage: Send + Sync {
         })
     }
 
+    /// Stores every definition of `definitions`, in order, each like [`Self::set_definition`]
+    /// (validated and checked against the catalog with the ones before it stored; a list may
+    /// name a definition twice, the last one wins). A refused definition returns its error with
+    /// the ones before it stored: run it inside a unit ([`Transactional::transaction`]) so
+    /// that the unit's rollback takes them back (all or nothing).
+    ///
+    /// The batch entry of a bulk catalog change (several compression rules, several advisor
+    /// recommendations): [`TraversalGraph`] applies the explicit pass of every compression
+    /// rule among them in ONE walk over the elements of their labels instead of one walk per
+    /// rule, and, outside any unit, makes the whole list one unit of its own (one commit).
+    ///
+    /// Default: [`Self::set_definition`] for each definition in turn (an override must keep
+    /// the same result).
+    ///
+    /// [`Transactional::transaction`]: crate::graph::Transactional::transaction
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        for definition in definitions {
+            self.set_definition(definition)?;
+        }
+        Ok(())
+    }
+
     /// Removes the definition of `kind` named `name`; `false` when there is none (nothing
     /// changes). Recorded, captured and a unit of its own like [`Self::set_definition`].
     /// Default: [`GraphError::Unsupported`].
@@ -1628,6 +1650,301 @@ impl UnitMark {
     }
 }
 
+impl TraversalGraph {
+    /// [`GraphStorage::set_vertex_property`] in a graph with coding rules (out of line: a
+    /// graph without them never takes it).
+    #[inline(never)]
+    fn set_vertex_property_ruled(
+        &mut self,
+        node: VertexHandle,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        check_property_value(&key, &value)?;
+        self.check_derived_vertex(node, &key)?;
+        let Some(index) = self.resolve_vertex(node) else {
+            return Err(GraphError::vertex_removed());
+        };
+        match self.graph.node_weight_mut(index) {
+            Some(node_ref) => {
+                let value = {
+                    let schema = self.schema.read();
+                    // All labels, in label order: coercion follows the first label that declares
+                    // the key, validation checks every label that declares it.
+                    crate::graph::schema::SchemaValidator::validate_element_property(
+                        &schema,
+                        "vertex",
+                        self.labels.set(node_ref.1),
+                        &key,
+                        value,
+                    )?
+                };
+                let mut value = value;
+                self.compression.prepare_vertex_value(
+                    self.labels.set(node_ref.1),
+                    &key,
+                    &mut value,
+                );
+                let undo_key = self.undo.is_recording().then(|| key.clone());
+                // The property indexes on `key`: the old entry out, the new one in.
+                let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
+                if index_key.is_some() {
+                    self.property_indexes.vertex_entries(
+                        false,
+                        node,
+                        self.labels.set(node_ref.1),
+                        &node_ref.2,
+                        Some(&key),
+                    );
+                }
+                // A coded row takes an existing key in place (a code for a coded key); any
+                // other write goes through the shape table and the row is coded again.
+                let (position, old, grown) =
+                    if node_ref.2.is_coded() || self.compression.has_coded() {
+                        let label_set = node_ref.1;
+                        let labels = &self.labels;
+                        store_value(
+                            &mut self.shapes,
+                            &self.compression,
+                            crate::graph::schema::ElementKind::Vertex,
+                            || {
+                                labels
+                                    .set(label_set)
+                                    .iter()
+                                    .map(CompactString::as_str)
+                                    .collect()
+                            },
+                            &mut node_ref.2,
+                            key,
+                            value,
+                        )
+                    } else {
+                        // No coding rule anywhere: the plain write of `main`.
+                        let (position, old) =
+                            self.shapes.insert_full_plain(&mut node_ref.2, key, value);
+                        (
+                            position,
+                            old.map(crate::graph::undo::OldValue::Plain),
+                            false,
+                        )
+                    };
+                if let Some(index_key) = &index_key {
+                    self.property_indexes.vertex_entries(
+                        true,
+                        node,
+                        self.labels.set(node_ref.1),
+                        &node_ref.2,
+                        Some(index_key),
+                    );
+                }
+                if let Some(key) = undo_key {
+                    self.undo.record(UndoEntry::VertexProperty {
+                        id: node_ref.0.clone(),
+                        key,
+                        old: old.map(|value| (position, value)),
+                    });
+                }
+                if grown {
+                    self.compression_after_write();
+                }
+                Ok(())
+            }
+            None => Err(GraphError::vertex_removed()),
+        }
+    }
+
+    /// [`GraphStorage::set_edge_property`] in a graph with coding rules (out of line).
+    #[inline(never)]
+    fn set_edge_property_ruled(
+        &mut self,
+        edge: EdgeHandle,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        check_property_value(&key, &value)?;
+        self.check_derived_edge(edge, &key)?;
+        let Some(index) = self.resolve_edge(edge) else {
+            return Err(GraphError::edge_removed());
+        };
+        match self.graph.edge_weight_mut(index) {
+            Some(edge_ref) => {
+                let value = {
+                    let schema = self.schema.read();
+                    crate::graph::schema::SchemaValidator::validate_element_property(
+                        &schema,
+                        "edge",
+                        self.labels.name_slice(edge_ref.1),
+                        &key,
+                        value,
+                    )?
+                };
+                let mut value = value;
+                self.compression.prepare_edge_value(
+                    self.labels.name_str(edge_ref.1),
+                    &key,
+                    &mut value,
+                );
+                let undo_key = self.undo.is_recording().then(|| key.clone());
+                let map_was_none = edge_ref.2.is_none();
+                // The property indexes on `key`: the old entry out, the new one in.
+                let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
+                if index_key.is_some() {
+                    self.property_indexes.edge_entries(
+                        false,
+                        edge,
+                        self.labels.name_str(edge_ref.1),
+                        edge_ref.2.as_ref(),
+                        Some(&key),
+                    );
+                }
+                let map = edge_ref.2.get_or_insert_with(PropertyMap::default);
+                let (position, old, grown) = if map.is_coded() || self.compression.has_coded() {
+                    let label = edge_ref.1;
+                    let labels = &self.labels;
+                    store_value(
+                        &mut self.shapes,
+                        &self.compression,
+                        crate::graph::schema::ElementKind::Edge,
+                        || labels.name_str(label).into_iter().collect(),
+                        map,
+                        key,
+                        value,
+                    )
+                } else {
+                    let (position, old) = self.shapes.insert_full_plain(map, key, value);
+                    (
+                        position,
+                        old.map(crate::graph::undo::OldValue::Plain),
+                        false,
+                    )
+                };
+                if let Some(index_key) = &index_key {
+                    self.property_indexes.edge_entries(
+                        true,
+                        edge,
+                        self.labels.name_str(edge_ref.1),
+                        edge_ref.2.as_ref(),
+                        Some(index_key),
+                    );
+                }
+                if let Some(key) = undo_key {
+                    self.undo.record(UndoEntry::EdgeProperty {
+                        id: edge_ref.0.clone(),
+                        key,
+                        old: old.map(|value| (position, value)),
+                        map_was_none,
+                    });
+                }
+                if grown {
+                    self.compression_after_write();
+                }
+                Ok(())
+            }
+            None => Err(GraphError::edge_removed()),
+        }
+    }
+}
+
+/// The in-graph write of the top-level `key` of a stored map: `(position, old value, whether a
+/// value dictionary may have grown)`. A plain map takes the shape table's write (and is coded
+/// when the rules code values); a coded row the in-place code or own value
+/// ([`store_coded_value`]).
+#[inline]
+fn store_value<'l>(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    rules: &crate::graph::compression::CompressionRules,
+    element: crate::graph::schema::ElementKind,
+    labels: impl FnOnce() -> Vec<&'l str>,
+    map: &mut PropertyMap,
+    key: CompactString,
+    value: ElementProperty,
+) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    if map.is_coded() {
+        return store_coded_value(shapes, rules, element, labels, map, key, value);
+    }
+    let (position, old) = shapes.insert_full_plain(map, key, value);
+    let mut grown = false;
+    if rules.has_coded() {
+        rules.code_row(element, &labels(), map);
+        grown = true;
+    }
+    (
+        position,
+        old.map(crate::graph::undo::OldValue::Plain),
+        grown,
+    )
+}
+
+/// [`store_value`] of a coded row (out of line: a graph without dedup rules never takes it).
+#[cold]
+#[inline(never)]
+fn store_coded_value<'l>(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    rules: &crate::graph::compression::CompressionRules,
+    element: crate::graph::schema::ElementKind,
+    labels: impl FnOnce() -> Vec<&'l str>,
+    map: &mut PropertyMap,
+    key: CompactString,
+    mut value: ElementProperty,
+) -> (usize, Option<crate::graph::undo::OldValue>, bool) {
+    shapes.shape_value(&mut value);
+    match map.coded_replace(&key, value) {
+        Ok((position, replaced, added)) => (
+            position,
+            Some(crate::graph::undo::OldValue::from(replaced)),
+            added,
+        ),
+        Err(value) => {
+            let (position, old) = shapes.insert_full(map, key, value);
+            rules.code_row(element, &labels(), map);
+            (position, old.map(crate::graph::undo::OldValue::Plain), true)
+        }
+    }
+}
+
+/// A jpath write in place on a stored map: a coded row gets the new top-level value through
+/// [`PropertyMap::coded_replace`] (a copy of the coded value written at the path; the row stays
+/// coded), any other map through [`write_path_in`] and a re-adoption.
+fn write_path_stored(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    map: &mut PropertyMap,
+    path: &crate::value::JsonPath,
+    value: ElementProperty,
+) -> Result<(), GraphError> {
+    // A write into an object member may add a key to a nested map (which turns it `Indexed`) or
+    // create one, and a written object or array is a new nested value: the property's nested
+    // maps are shaped again then (an array element overwritten with a scalar needs nothing).
+    let reshape = matches!(
+        value,
+        ElementProperty::Object(_) | ElementProperty::Array(_)
+    ) || path
+        .segments()
+        .iter()
+        .skip(1)
+        .any(|segment| matches!(segment, crate::value::JsonPathSegment::Key(_)));
+    if map.coded().is_some() {
+        let name = path_property_name(path)?;
+        let (key, mut resulting) =
+            crate::graph::write_checks::write_path(map.get(name.as_str()), path, value)?;
+        if reshape {
+            shapes.shape_value(&mut resulting);
+        }
+        if let Err(resulting) = map.coded_replace(&key, resulting) {
+            shapes.insert_full(map, key, resulting);
+        }
+        return Ok(());
+    }
+    let written = write_path_in(map, path, value);
+    shapes.adopt(map);
+    if reshape
+        && let Ok(name) = path_property_name(path)
+        && let Some(value) = map.get_mut(name.as_str())
+    {
+        shapes.shape_value(value);
+    }
+    written
+}
+
 impl GraphStorage for TraversalGraph {
     type VertexId = VertexHandle;
     type EdgeId = EdgeHandle;
@@ -2139,6 +2456,11 @@ impl GraphStorage for TraversalGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
+        // A graph with coding rules takes the out-of-line copy that keeps coded rows coded;
+        // without them this is the plain write.
+        if self.compression.has_coded() {
+            return self.set_vertex_property_ruled(node, key, value);
+        }
         check_property_value(&key, &value)?;
         self.check_derived_vertex(node, &key)?;
         let Some(index) = self.resolve_vertex(node) else {
@@ -2190,7 +2512,8 @@ impl GraphStorage for TraversalGraph {
                     self.undo.record(UndoEntry::VertexProperty {
                         id: node_ref.0.clone(),
                         key,
-                        old: old.map(|value| (position, value)),
+                        old: old
+                            .map(|value| (position, crate::graph::undo::OldValue::Plain(value))),
                     });
                 }
                 Ok(())
@@ -2206,6 +2529,9 @@ impl GraphStorage for TraversalGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
+        if self.compression.has_coded() {
+            return self.set_edge_property_ruled(edge, key, value);
+        }
         check_property_value(&key, &value)?;
         self.check_derived_edge(edge, &key)?;
         let Some(index) = self.resolve_edge(edge) else {
@@ -2260,7 +2586,8 @@ impl GraphStorage for TraversalGraph {
                     self.undo.record(UndoEntry::EdgeProperty {
                         id: edge_ref.0.clone(),
                         key,
-                        old: old.map(|value| (position, value)),
+                        old: old
+                            .map(|value| (position, crate::graph::undo::OldValue::Plain(value))),
                         map_was_none,
                     });
                 }
@@ -2289,9 +2616,7 @@ impl GraphStorage for TraversalGraph {
             self.pindex_vertex(node, false, Some(name));
             let written = self
                 .with_vertex_map(node, |shapes, map| {
-                    let written = write_path_in(map, path, value);
-                    shapes.adopt(map);
-                    written
+                    write_path_stored(shapes, map, path, value)
                 })
                 .unwrap_or_else(|| Err(GraphError::vertex_removed()));
             self.compression_normalize_vertex_key(node, name);
@@ -2350,10 +2675,12 @@ impl GraphStorage for TraversalGraph {
             self.pindex_edge(edge, false, Some(name));
             let written = self
                 .with_edge_map(edge, |shapes, map| {
-                    let properties = map.get_or_insert_with(PropertyMap::default);
-                    let written = write_path_in(properties, path, value);
-                    shapes.adopt(properties);
-                    written
+                    write_path_stored(
+                        shapes,
+                        map.get_or_insert_with(PropertyMap::default),
+                        path,
+                        value,
+                    )
                 })
                 .unwrap_or_else(|| Err(GraphError::edge_removed()));
             self.compression_normalize_edge_key(edge, name);
@@ -2444,6 +2771,7 @@ impl GraphStorage for TraversalGraph {
                     shapes.adopt(map);
                 })
                 .ok_or_else(GraphError::vertex_removed);
+            self.compression_recode_vertex(node);
             if let Some(top) = &top {
                 self.pindex_vertex(node, true, Some(top));
             }
@@ -2474,6 +2802,7 @@ impl GraphStorage for TraversalGraph {
                 self.with_vertex_map(node, |shapes, map| {
                     shapes.insert_full(map, key.clone(), resulting)
                 });
+                self.compression_recode_vertex(node);
                 self.pindex_vertex(node, true, Some(&key));
                 Ok(())
             }
@@ -2528,6 +2857,7 @@ impl GraphStorage for TraversalGraph {
                     }
                 })
                 .ok_or_else(GraphError::edge_removed);
+            self.compression_recode_edge(edge);
             if let Some(top) = &top {
                 self.pindex_edge(edge, true, Some(top));
             }
@@ -2560,6 +2890,7 @@ impl GraphStorage for TraversalGraph {
                         resulting,
                     )
                 });
+                self.compression_recode_edge(edge);
                 self.pindex_edge(edge, true, Some(&key));
                 Ok(())
             }
@@ -2606,13 +2937,14 @@ impl GraphStorage for TraversalGraph {
                 .map(|(position, key, value)| UndoEntry::VertexProperty {
                     id: vertex.0.clone(),
                     key,
-                    old: Some((position, value)),
+                    old: Some((position, crate::graph::undo::OldValue::Plain(value))),
                 }),
             None => return Err(GraphError::vertex_removed()),
         };
         if let Some(entry) = entry {
             self.undo.record(entry);
         }
+        self.compression_recode_vertex(node);
         Ok(())
     }
 
@@ -2655,7 +2987,7 @@ impl GraphStorage for TraversalGraph {
                 .map(|(position, key, value)| UndoEntry::EdgeProperty {
                     id: edge_weight.0.clone(),
                     key,
-                    old: Some((position, value)),
+                    old: Some((position, crate::graph::undo::OldValue::Plain(value))),
                     map_was_none: false,
                 }),
             None => return Err(GraphError::edge_removed()),
@@ -2663,6 +2995,7 @@ impl GraphStorage for TraversalGraph {
         if let Some(entry) = entry {
             self.undo.record(entry);
         }
+        self.compression_recode_edge(edge);
         Ok(())
     }
 
@@ -2687,6 +3020,10 @@ impl GraphStorage for TraversalGraph {
 
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         self.in_own_unit(|this| this.set_definition_recorded(definition))
+    }
+
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        self.in_own_unit(|this| this.set_definitions_recorded(definitions))
     }
 
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
@@ -3192,6 +3529,11 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
+    fn set_definitions(&mut self, _definitions: Vec<Definition>) -> Result<(), GraphError> {
+        Err(read_only_view_error())
+    }
+
+    #[inline]
     fn remove_definition(
         &mut self,
         _kind: DefinitionKind,
@@ -3617,6 +3959,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         (**self).set_definition(definition)
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        (**self).set_definitions(definitions)
     }
 
     #[inline]
@@ -4103,6 +4450,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         (**self).set_definition(definition)
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        (**self).set_definitions(definitions)
     }
 
     #[inline]
@@ -4712,6 +5064,16 @@ impl GraphStorage for Arc<TraversalGraph> {
     fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         match Arc::get_mut(self) {
             Some(graph) => GraphStorage::set_definition(graph, definition),
+            None => Err(GraphError::InvalidElementState {
+                reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
+            }),
+        }
+    }
+
+    #[inline]
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        match Arc::get_mut(self) {
+            Some(graph) => GraphStorage::set_definitions(graph, definitions),
             None => Err(GraphError::InvalidElementState {
                 reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
             }),

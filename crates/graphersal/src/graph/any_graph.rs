@@ -15,9 +15,7 @@ use crate::graph::compression::CompressionStats;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::Mark;
 use crate::graph::schema::{GraphSchema, SchemaDiff, SchemaPatch, SchemaValidation};
-use crate::graph::{
-    Graph, GraphStatistics, GraphStorage, MemoryStats, StorageCapabilities, Transactional,
-};
+use crate::graph::{Graph, GraphStatistics, GraphStorage, MemoryStats, StorageCapabilities};
 use crate::traversal::GraphTraversalSource;
 
 #[cfg(feature = "io")]
@@ -129,7 +127,9 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     /// The memory report of the storage
     /// ([`GraphTraversalSource::memory_report`](crate::GraphTraversalSource::memory_report)),
-    /// computed under one read lock. Fails for an invalid request and when cancelled (the
+    /// computed under one read lock, with the graph's workload statistics and the process's
+    /// components ([`MemoryReport::components`](crate::graph::MemoryReport::components))
+    /// added after the lock is released (a Store whose live graph is not this one lists it). Fails for an invalid request and when cancelled (the
     /// request's or the running thread's [`CancelToken`](crate::CancelToken)). Unauthorized:
     /// the front end asks its authorizer first.
     fn memory_report(
@@ -137,12 +137,32 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport>;
 
+    /// The process's parts of a memory report without the report's walk: the components
+    /// [`memory_report`](Self::memory_report) adds beside the graph's own (`graph`,
+    /// `workload_statistics`): the embedding models loaded in the process, the script engine's
+    /// registrations, every Store (its live graph when it is not this graph, such as beside a
+    /// view of a past state) and what hosts register
+    /// ([`register_memory_source`](crate::graph::memory_report::register_memory_source)). Cheap
+    /// enough for a statistics refresh: no element is read, no lock is waited for (a source
+    /// whose lock is busy leaves its part out). Cannot fail today; a `Result` so that it can.
+    fn process_memory_components(&self) -> Result<Vec<crate::graph::MemoryComponent>, GraphError>;
+
     /// [`Graph::advise`]: the storage advisor's recommendations. Unauthorized: the front end
     /// asks its authorizer first.
     fn advise(
         &self,
         request: &crate::graph::advisor::AdviceRequest,
     ) -> TraverserResult<crate::graph::advisor::Advice>;
+
+    /// [`Graph::apply_recommendations`]: applies several recommendations of the advice for
+    /// `request` in one unit (one commit), all or nothing; `authorizer` (`None`: everything
+    /// allowed) is asked first.
+    fn apply_recommendations(
+        &self,
+        ids: &[String],
+        request: &crate::graph::advisor::AdviceRequest,
+        authorizer: Option<std::sync::Arc<dyn crate::graph::Authorizer>>,
+    ) -> TraverserResult<Vec<crate::graph::advisor::Recommendation>>;
 
     /// The graph as one value, `{"vertices": [..], "edges": [..]}`, with at most `keep`
     /// vertices and `keep` edges (all with `None`): what a script host shows for a graph value
@@ -190,11 +210,12 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         name: &str,
     ) -> Result<Option<Definition>, GraphError>;
 
-    /// Stores every definition of `definitions` ([`GraphTraversalSource::set_definition`],
-    /// each replacing the one of the same kind and name) in ONE unit
-    /// ([`Transactional::transaction`]): on an atomic storage either all of them or none. A
-    /// compression rule is stored like any other definition on every storage; only a storage
-    /// with compressed properties ([`TraversalGraph`](crate::TraversalGraph)) applies it.
+    /// Stores every definition of `definitions` ([`GraphTraversalSource::set_definitions`],
+    /// each replacing the one of the same kind and name) in ONE unit: on an atomic storage
+    /// either all of them or none. Goes through [`GraphStorage::set_definitions`], so a
+    /// [`TraversalGraph`](crate::TraversalGraph) applies all compression rules among them in
+    /// one walk. A compression rule is stored like any other definition on every storage; only
+    /// a storage with compressed properties applies it.
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()>;
 
     /// [`GraphTraversalSource::remove_definition`]; `false` when there is none.
@@ -374,7 +395,30 @@ where
         &self,
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport> {
-        GraphTraversalSource::new(&*self.read_checked()?).memory_report(request)
+        let mut report = {
+            let guard = self.read_checked()?;
+            GraphTraversalSource::new(&*guard).memory_report_walk(request)?
+        };
+        // The lock is released: a Store's source may read its own live graph.
+        if let Some(workload) = Graph::workload_stats(self) {
+            report
+                .components
+                .push(crate::graph::MemoryComponent::estimated(
+                    "workload_statistics",
+                    workload.memory_bytes(),
+                ));
+        }
+        crate::graph::memory_report::components::collect(
+            &mut report,
+            Some(Graph::storage_address(self)),
+        );
+        Ok(report)
+    }
+
+    fn process_memory_components(&self) -> Result<Vec<crate::graph::MemoryComponent>, GraphError> {
+        Ok(crate::graph::memory_report::components::process_components(
+            Some(Graph::storage_address(self)),
+        ))
     }
 
     fn advise(
@@ -382,6 +426,15 @@ where
         request: &crate::graph::advisor::AdviceRequest,
     ) -> TraverserResult<crate::graph::advisor::Advice> {
         Graph::advise(self, request)
+    }
+
+    fn apply_recommendations(
+        &self,
+        ids: &[String],
+        request: &crate::graph::advisor::AdviceRequest,
+        authorizer: Option<std::sync::Arc<dyn crate::graph::Authorizer>>,
+    ) -> TraverserResult<Vec<crate::graph::advisor::Recommendation>> {
+        Graph::apply_recommendations(self, ids, request, authorizer)
     }
 
     fn listing(&self, keep: Option<usize>) -> TraverserResult<crate::value::ElementProperty> {
@@ -434,12 +487,9 @@ where
     }
 
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()> {
-        self.write_checked()?.transaction(|unit| {
-            for definition in definitions {
-                GraphTraversalSource::new(&mut *unit).set_definition(definition)?;
-            }
-            Ok(())
-        })
+        // One unit, and on a `TraversalGraph` one walk for all compression rules
+        // (`GraphStorage::set_definitions`).
+        GraphTraversalSource::new(&mut *self.write_checked()?).set_definitions(definitions)
     }
 
     fn remove_definition(&self, kind: DefinitionKind, name: &str) -> TraverserResult<bool> {

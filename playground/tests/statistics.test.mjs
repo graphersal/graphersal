@@ -208,3 +208,17 @@ test('the workload statistics of a store are shown after the total, not in it', 
   // A graph without statistics: no row.
   assert.ok(!statisticsModel(WASM).memory.some((r) => r.name === 'Workload statistics'));
 });
+
+test('a model size is marked as an estimate only when it was not measured', async () => {
+  const { processMemoryRows } = await import('../js/statistics.js');
+  const rows = processMemoryRows({
+    models: [
+      { name: 'a/measured', bytes: 931 * 1024 * 1024, dimension: 256, default: true, measured: true },
+      { name: 'b/estimated', bytes: 531 * 1024 * 1024, dimension: 256, default: false, measured: false },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => r.text), [
+    '931 MiB (256 dimensions, default)',
+    '531 MiB (256 dimensions, estimate)',
+  ]);
+});

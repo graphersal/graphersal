@@ -31,20 +31,26 @@ its slot, not a list of strings, and `vertex_labels()` still returns a slice. A 
 element (a vertex or edge value in a result) keeps its stored map's shape: the copy is the shared
 key list and the values, no key is hashed.
 
-The vectors grow by doubling, so a graph built element by element can carry up to half its slots
-as spare capacity. A snapshot load reserves the slots from the manifest's counts, and every load
+The vectors grow by 1/8 of their capacity at a time once they hold more than 512 slots (below,
+by doubling, as `Vec` does; `topology::growth_step`), so a graph built element by element carries
+at most about 1/9 of its slots as spare capacity, and the first insert after a load adds 1/8 of
+the slots instead of doubling them (the generations, the label index's member lists and its
+per-slot positions follow the same rule; the id index is a power-of-two table and keeps its own
+spare room after a load). The growth stays geometric, so an insert is amortized O(1).
+A snapshot load reserves the slots from the manifest's counts, and every load
 (snapshot, Store, GraphSON, GraphML) ends with `shrink_to_fit`, which releases the spare capacity
 (vacant slots stay: indices are stable). The memory report shows `live`, `tombstoned` (vacant) and
 `spare` slots per kind.
 
-## Property maps: `Indexed` and `Shaped`
+## Property maps: `Indexed`, `Shaped` and `Coded`
 
-`PropertyMap` is a newtype over a crate-internal `Repr` with two variants:
+`PropertyMap` is a newtype over a crate-internal `Repr` with three variants:
 
 | Variant | Holds | Used for |
 |---|---|---|
-| `Indexed` | an `IndexMap<CompactString, ElementProperty>` (FNV) | every free-standing map: nested objects, catalog payloads, change sets, results, schema values, every map a caller builds |
-| `Shaped` | `Arc<Shape>` (the ordered key list, shared) + `Vec<ElementProperty>` (this element's values, in key order) | every map a `TraversalGraph` stores per vertex or edge |
+| `Indexed` | an `IndexMap<CompactString, ElementProperty>` (FNV) | every free-standing map: catalog payloads, change sets, results, schema values, every map a caller builds; a stored nested object whose key sequence was seen once or that sits deeper than eight levels |
+| `Shaped` | `Arc<Shape>` (the ordered key list, shared) + `Vec<ElementProperty>` (this element's values, in key order) | every map a `TraversalGraph` stores per vertex or edge, and the objects nested in its values (see Nested maps below) |
+| `Coded` | `Arc<Layout>` (shape, per position own value or code, the `dedup` rules' dictionaries, shared) + `Box<[ElementProperty]>` (own values) + `Box<[u32]>` (codes) | a stored map with values at the top-level keys of `dedup` rules ([Compressed Properties](../users_guide/compressed_properties.md#deduplicating-repeated-values)) |
 
 An `IndexMap` slot costs a cached hash, the key and the value (64 bytes) plus its share of the hash
 index and spare capacity, about 84 to 132 bytes per property. A `Shaped` slot is the value alone
@@ -66,6 +72,18 @@ outside the graph (a clone handed out to a caller who then inserts a new key) fi
 uses the positional helpers (`insert_full`, `shift_remove_full`, `get_full`, `shift_insert`,
 `insert_if_absent`, `indexed_mut`). The hot read paths match `Indexed` first and keep the `Shaped`
 arm out of line, so free-standing maps pay nothing for the second variant.
+
+A `Coded` row exists only under a `dedup` rule on a top-level key: the `Layout` (interned per
+shape, coded positions and rules, in the compression rules' layout table) says for each position
+whether the row holds the value itself or a 4-byte code into the rule's `ValueDictionary`
+(`value/dictionary.rs`: append-only segments of `OnceLock` slots that never move, so a read gives
+`&ElementProperty` without a lock; appends under a mutex; safe Rust only). A coded row never leaves
+the graph: `Clone`, the owned iteration and every mutation through the generic methods turn it into
+a plain `Shaped` row first; the graph's write path replaces an existing key in place (a new code,
+the undo log keeping the old code with its dictionary) and runs every other write on the plain row
+and codes it again (`CompressionRules::code_row`). A graph without `dedup` rules never builds one,
+and the `Shaped` read path has no extra check. The own values and the codes are two boxes (no
+`unsafe` single allocation, user decision 2026-11-04).
 
 ## The shape table
 
@@ -90,6 +108,28 @@ integer comparison. Loads, replay, undo restores, damage repair, checkpoint merg
 `TraversalGraph::with_vertex_map` / `with_edge_map` (which hand the table and the element's map
 out side by side). A write through a generic map helper (the jpath writes) is followed by `adopt`.
 A map that missed adoption is still correct, it only does not share its keys.
+
+**Nested maps.** The objects inside a stored value (`ElementProperty::Object`, also inside arrays)
+are shaped in the same table, down to eight container levels below the element's own values
+(`NESTED_DEPTH`); deeper maps stay `Indexed`, so the recursive clone, comparison and drop of a
+deeply nested value keep the frames of a plain `IndexMap` below that bound. A nested key sequence
+gets a shape at its second sighting: a key sequence that already has a shape takes it at once, a new
+one is remembered by its hash (`seen_once`, at most 65 536 hashes, cleared by `shrink_to_fit` and
+so at the end of every load) and interned when it comes again. A map whose keys never repeat (a
+JSON document keyed by ids) therefore stays `Indexed`, which is smaller than a shape of its own.
+Nested maps are shaped by `adopt` (a map that is not one of this table's yet), by `insert_full`
+(the value written), by `shaped_copy` (change sets) and after a jpath write of the property; they
+keep their own one-entry memo, so they do not evict the element maps' last shape. They never take
+the transition caches: a key-changing write inside a value (through the public `PropertyMap` API)
+turns that nested map `Indexed`, which stays correct and is shaped again by the next write of the
+property. Two `Shaped` maps of one shape compare their value vectors directly. A snapshot chunk
+builds a nested map `Shaped` over a shape of its own from the second sighting of its key sequence
+in the chunk (no `IndexMap`); the graph swaps in its own shape when it stores the value, by the same
+second-sighting rule, and turns the map `Indexed` in the rare case the rule says the graph has not
+seen the sequence before, so the stored form does not depend on how the chunk was decoded. On a
+real code index graph (534k vertices, 2.3M edges) nested shapes save 91 MiB of property memory
+(7.7 %) and the open takes about 1 % longer; the snapshot bytes are the same except the header's
+memory estimate.
 
 **Sweep.** `ShapeTable::sweep` removes every shape that only the table still refers to (strong
 count 1) and clears the transition caches and memos, which are keyed by shape address. It runs when
@@ -130,28 +170,55 @@ its values' heap to `property_bytes`; `shape_bytes` is included in `property_byt
 ## The ID index
 
 The ID index (`graph/index.rs`, `GraphIndex.nodes` / `edges`) maps an element id to its handle
-without storing the id a second time. Each table is a `hashbrown::HashTable<(Handle, u32)>`: the
-handle plus a cached 32-bit FNV-1a hash of the id, 12 bytes per bucket and one control byte. The
-id itself lives once, in the element's weight in the graph.
+without storing the id a second time. Each table is a `hashbrown::HashTable<(u32, u32)>`: the
+element's slot plus a cached 32-bit FNV-1a hash of the id, 8 bytes per bucket and one control
+byte. The id itself lives once, in the element's weight in the graph, and so does the slot's
+generation.
 
-- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at the
-  handle's slot: the slot must be occupied, carry the handle's generation, and hold the id asked
-  for. Lookups therefore take the graph as an argument.
-- **Removal** matches by handle and reads nothing from the graph.
+- **Lookup** probes with the cached hash and confirms a candidate by reading the weight at its
+  slot: the slot must be occupied and hold the id asked for; the handle returned carries the
+  generation the weight holds. Lookups therefore take the graph as an argument.
+- **Removal** matches by slot and reads nothing from the graph.
 - **Growth** re-places entries from the cached hash alone (the probe hash is derived from the
   32-bit value), so growing the table during a bulk load does no random reads into the graph.
 
 The invariant that makes this sound, kept by the raw insert and remove helpers of `graph/undo.rs`
 (the only writers of the ID index):
 
-- every handle in the ID index points to a live slot whose weight carries the handle's generation
-  and the id the entry was hashed from;
+- every slot in the ID index is a live slot whose weight carries the id the entry was hashed
+  from (so a slot is in the index at most once);
 - an element's id never changes after insert.
 
-An entry is inserted after its slot's generation is patched and removed by handle right after the
-element left the graph. Cloning the index together with the graph keeps it valid, since a
+An entry is inserted after its slot's generation is patched and removed by slot right after the
+element left the graph, before the slot can be reused. Cloning the index together with the graph keeps it valid, since a
 topology clone keeps every slot. Nothing iterates the ID index; it serves point lookups only,
 so it keeps no insertion order.
+
+## The label index
+
+The label index (`graph/index.rs`, `GraphIndex.node_labels` / `edge_labels`, one `LabelIndex` per
+element kind) answers `vertices_by_label` / `edges_by_label`, the scans behind `has_label` and
+`hasLabel`-led starts:
+
+- per label, its members as a `Vec` of handles in bucket order: insertion order, and a removal
+  moves the last member into the removed one's place (`swap_remove`), the order the earlier
+  `IndexSet` per label gave, so label scans return elements in the same order as before;
+- per slot, one `u32`: the position of the slot's first recorded membership in its label's list,
+  so a removal is O(1) without a hash set per label;
+- a small `(slot, label number) -> position` map for every further label of a multi-label vertex.
+  A membership is recorded in exactly one of the two places, and the map is asked first; a
+  per-slot position is confirmed against the list (the member at that position has the slot),
+  since it may belong to another label of the same slot.
+
+Every member is a live element, since the raw insert and remove helpers of `graph/undo.rs` keep the
+label index in step with the slots, as they do for the ID index; a member's handle stays current
+because a slot's generation changes only when its element is removed, which removes its
+memberships first. Removal is by slot and reads nothing from the graph. An element costs 12 bytes
+(its handle and its position) plus about 21 bytes for each label beyond its first, against about
+30 bytes per label membership with a hash set per label (on a graph of 534 thousand vertices and
+2.3 million edges: 89 MB before, 34 MB after). Keeping bare slots (8 bytes per element) and
+building the handles from the slot generations at scan time would save 11 MB more there, but made
+label scans of that graph 6 to 10 % slower.
 
 ## Measured effect
 

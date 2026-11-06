@@ -361,9 +361,9 @@ so the bytes are deterministic; at most 1 MiB):
 No time stamp is part of the manifest or the definition (when a model was added is instance
 data, never part of the immutable model).
 
-**Reading.** A reader reads the blob whole into memory (after the memory check below) and the
-tar from it: every header's checksum is checked, sizes are bounded by the remaining bytes, names
-validated; an unknown type flag, a duplicate or unsorted name, more than 64 files besides the
+**Reading.** A reader reads the tar as a stream, entry by entry (this version's model load and
+`verify` never hold the whole blob in memory): every header's checksum is checked, sizes are
+bounded by the remaining bytes, names validated; an unknown type flag, a duplicate or unsorted name, more than 64 files besides the
 manifest, a manifest that does not list exactly the tar's files are invalid content of the
 model's blob (never damage of the store, 13). The files are used where they are (no extraction
 to disk).
@@ -374,7 +374,8 @@ a backup, a view of a past position). A needed model that is not in the catalog 
 position, whose blob is missing or damaged, or whose files do not load refuses the open
 (`model_unavailable`), with the commands that bring it back; one whose load would take the
 process over its memory ceiling refuses it too (`model_does_not_fit`): the check uses the blob's
-`length` plus the definition's `load_bytes` before anything is read, and the message names the
+`length` times 1.6 before anything is read (versions up to 0.5.2: `length` plus the definition's
+`load_bytes`), and the message names the
 smallest ceiling that fits. A writable open records the refusal in the journal (`model.load_failed`,
 4.7) best effort. A model of a family or blob algorithm the reader does not know opens the store
 read-only (16 rule 9); a reader that cannot run models at all (no Model2Vec loader, such as the
@@ -732,7 +733,7 @@ order, followed by the keys the writer does not know:
 | `repo` | string: the repository, the model's user-visible name (required) |
 | `revision`, `commit` | strings (optional) |
 | `dimension` | int64: the vector dimension |
-| `load_bytes` | int64: the memory the loaded model takes (measured at import; the memory check of a load uses it before reading the blob) |
+| `load_bytes` | int64: the import's estimate of the memory the loaded model takes (the f32 embedding matrix plus the tokenizer file). Still written; read by the memory check of versions up to 0.5.2 only (later versions check the blob's `length` times 1.6 and show the size measured at the load) |
 | `license`, `license_text` | strings, as the manifest's (4.5) |
 | `base_models` | array of `{repo, license?}` |
 | `gated` | boolean |
@@ -775,12 +776,12 @@ order, followed by the unknown keys:
 | `element` | string: `"vertex"` or `"edge"` |
 | `label` | string: the label |
 | `path` | string: canonical jpath text of object keys only (`$.details.career.cv`) |
-| `codec` | string: `"lz4"` (each value compressed) or `"dedup"` (each distinct value held once in memory; since 0.2.1) |
-| `min_bytes` | int64: strings shorter than this (UTF-8 bytes) stay plain, 1 to 16777216 |
+| `codec` | string: `"lz4"` (each value compressed) or `"dedup"` (each distinct value held once in memory; since 0.2.1; on a top-level key every value type since the version after 0.5.2) |
+| `min_bytes` | int64: strings shorter than this (UTF-8 bytes) stay plain, 1 to 16777216 (`lz4`), 0 to 16777216 (`dedup`; 0 since the version after 0.5.2, which 0.5.2 and older refuse) |
 | `dictionary` | boolean: whether the load builds a dictionary from the rule's values (`lz4` only; `true` with `"dedup"` is invalid) |
 
 `label` and `path` are required; `element` defaults to `"vertex"`, `codec` to `"lz4"`,
-`min_bytes` to 256 (`lz4`) or 25 (`dedup`), `dictionary` to `true` (`lz4`) or `false` (`dedup`);
+`min_bytes` to 256 (`lz4`) or 0 (`dedup`; 25 before this version, whose rules always stored it), `dictionary` to `true` (`lz4`) or `false` (`dedup`);
 writers always write `min_bytes` and `dictionary`. A `codec` or an `element` the reader does not
 know, or a `path` it cannot parse (a newer writer's), is NOT damage and needs no new format
 version (16 rules 1 and 9): the reader keeps the definition, writes its payload back exactly as
@@ -1648,7 +1649,8 @@ single record: such a commit is small) and the next open replays it like any com
    (9.7) and write `GRAPH` without it, remove an unstarted last segment and cut a torn tail
    (9.6), complete the `marks` file (10) and the blob ledger (10.1).
 4. The commit continues the last segment unless it is of an older file format version (never
-   continued, 15) or past the segment size: then a new segment (9.7, `wal_head`). Its time is
+   continued; one that starts at this commit is rewritten in the current version with its
+   records, 15.1) or past the segment size: then a new segment (9.7, `wal_head`). Its time is
    at least every time the files hold (commits, marks, checkpoint records, the system journal's
    tail). It is synced before anything follows; a failed write is cut off again or its cut
    recorded (9.7). Then its ledger frames.
@@ -2035,8 +2037,13 @@ After an upgrade the files of file format version 1 stay where they are: snapsho
 and the attic keep their bytes, so the history is exactly what was written. A writer MUST NOT
 append to a WAL segment of an older file format version: when the newest segment of the
 lineage is older, the next record goes into a new segment of the current version (9.8:
-`wal_head` names it); a segment of an older version that holds no record (it starts at the next
-commit) is replaced whole by one of the current version under the same name.
+`wal_head` names it); a segment of an older version that holds no commit (it starts at the next
+commit) is replaced whole, atomically, by one of the current version under the same name that
+holds the same records. Such a segment is no rarity: a checkpoint taken while the store is open
+starts a segment named by the next commit and writes its Checkpoint record there (9.7), and a
+mark set afterwards adds its Mark record. Those records keep their bytes (their frames do not
+depend on the file format version), a torn tail after them is cut (9.6), and a commit record in
+the segment is damage (it holds a commit the store's state does not).
 
 A new FILE format version alone needs no upgrade and no table row: a store of store format
 version 3 written by 0.2.x (files of version 2) was opened and continued as it is by a reader of

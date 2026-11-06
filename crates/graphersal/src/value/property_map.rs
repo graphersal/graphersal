@@ -31,6 +31,7 @@ use fnv::FnvHasher;
 use indexmap::{IndexMap, IndexSet};
 
 use super::ElementProperty;
+use super::dictionary::{CODE_BYTES, DictRef, ValueDictionary};
 
 /// The `IndexMap` behind an `Indexed` [`PropertyMap`] (crate-internal).
 pub(crate) type PropertyMapInner =
@@ -207,12 +208,144 @@ pub(crate) struct Shaped {
     pub(crate) values: Vec<ElementProperty>,
 }
 
+/// The high bit of a [`Layout`] slot: the position is coded (the low bits index the codes);
+/// without it the slot indexes the row's own values.
+pub(crate) const CODED_SLOT: u32 = 1 << 31;
+
+/// Where each value of a coded row lives (crate-internal, interned per graph by the compression
+/// rules): per position of the shape, the index of an own value or [`CODED_SLOT`] | the index
+/// of a code, and per code the dictionary of the `dedup` rule that codes that key. Own values
+/// keep the position order, so do codes.
+pub(crate) struct Layout {
+    /// The keys.
+    pub(crate) shape: Arc<Shape>,
+    /// One slot per position.
+    pub(crate) slots: Box<[u32]>,
+    /// One dictionary per code.
+    pub(crate) dicts: Box<[Arc<ValueDictionary>]>,
+    /// Per position, the dictionary of the rule that covers its key, also for an own value (a
+    /// string below the rule's `min_bytes`): an in-place write of a value the rule would code
+    /// takes the generic path, which codes it.
+    pub(crate) rules: Box<[Option<Arc<ValueDictionary>>]>,
+    /// Whether the layout table holds this layout (a key-adding or key-removing write of a
+    /// coded row makes a transient one, which the following `code_row` interns).
+    pub(crate) interned: bool,
+}
+
+impl Layout {
+    /// The bytes of this layout (its `Arc` allocation, the slots, the dictionary pointers).
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        use std::mem::size_of;
+        (2 * size_of::<usize>()
+            + size_of::<Self>()
+            + self.slots.len() * size_of::<u32>()
+            + self.dicts.len() * size_of::<Arc<ValueDictionary>>()
+            + self.rules.len() * size_of::<Option<Arc<ValueDictionary>>>()) as u64
+    }
+
+    /// The code index and dictionary of `position` when it is coded.
+    #[inline]
+    pub(crate) fn coded_at(&self, position: usize) -> Option<(usize, &Arc<ValueDictionary>)> {
+        let slot = *self.slots.get(position)?;
+        if slot & CODED_SLOT == 0 {
+            return None;
+        }
+        let at = (slot & !CODED_SLOT) as usize;
+        Some((at, self.dicts.get(at)?))
+    }
+}
+
+/// A row with coded values (crate-internal): the layout, the own values and the codes, each in
+/// position order. Only a graph's compression rules make one; it never leaves the graph (a
+/// clone, an owned iteration and every mutation through the public API turn it into a plain
+/// `Shaped` row first).
+pub(crate) struct Coded {
+    pub(crate) layout: Arc<Layout>,
+    pub(crate) own: Box<[ElementProperty]>,
+    pub(crate) codes: Box<[u32]>,
+}
+
+/// The value a read of a broken coded row gives (never expected: the layout and the row are
+/// built together).
+static MISSING: ElementProperty = ElementProperty::Null;
+
+impl Coded {
+    /// The number of entries.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.layout.shape.len()
+    }
+
+    /// The value at `position`: an own value, or the entry of its code in its dictionary.
+    #[inline]
+    pub(crate) fn value_at(&self, position: usize) -> Option<&ElementProperty> {
+        let slot = *self.layout.slots.get(position)?;
+        if slot & CODED_SLOT == 0 {
+            self.own.get(slot as usize)
+        } else {
+            let at = (slot & !CODED_SLOT) as usize;
+            self.layout.dicts.get(at)?.get(*self.codes.get(at)?)
+        }
+    }
+
+    /// Every value in position order, cloned.
+    fn materialized(&self) -> Vec<ElementProperty> {
+        (0..self.len())
+            .map(|position| self.value_at(position).unwrap_or(&MISSING).clone())
+            .collect()
+    }
+
+    /// Every value in position order: the own values moved out, the coded ones cloned.
+    fn take_values(&mut self) -> Vec<ElementProperty> {
+        let mut own = std::mem::take(&mut self.own).into_vec().into_iter();
+        let mut values = Vec::with_capacity(self.len());
+        for position in 0..self.len() {
+            let value = match self.layout.coded_at(position) {
+                None => own.next().unwrap_or(ElementProperty::Null),
+                Some((at, dictionary)) => self
+                    .codes
+                    .get(at)
+                    .and_then(|code| dictionary.get(*code))
+                    .cloned()
+                    .unwrap_or(ElementProperty::Null),
+            };
+            values.push(value);
+        }
+        values
+    }
+
+    /// The row's own storage in bytes: its own values and its codes.
+    pub(crate) fn row_bytes(&self) -> u64 {
+        shaped_values_bytes(self.own.len()) + self.codes.len() as u64 * CODE_BYTES
+    }
+}
+
+/// A stored value reached without turning a coded row plain ([`PropertyMap::stored_value_mut`]).
+pub(crate) enum StoredSlot<'a> {
+    /// The key is absent.
+    Absent,
+    /// The value the map holds itself.
+    Value(&'a mut ElementProperty),
+    /// A coded value (it lives in its dictionary, plain by construction).
+    Coded,
+}
+
+/// What an in-place write of a coded row replaced ([`PropertyMap::coded_replace`]).
+pub(crate) enum Replaced {
+    /// An own value.
+    Own(ElementProperty),
+    /// A coded value: its dictionary and code.
+    Code(DictRef),
+}
+
 /// The representation of a [`PropertyMap`] (crate-internal; see the module docs).
 pub(crate) enum Repr {
     /// A free-standing map.
     Indexed(PropertyMapInner),
     /// A map stored in a `TraversalGraph`: shared keys, own values.
     Shaped(Shaped),
+    /// A map stored in a `TraversalGraph` with values coded by `dedup` rules (see [`Coded`]).
+    Coded(Coded),
 }
 
 impl Default for Repr {
@@ -247,8 +380,9 @@ impl Eq for PropertyMap {}
 // `Clone` and `PartialEq` recurse through nested values (`ElementProperty::Object` holds a
 // `PropertyMap`); `#[inline(always)]` keeps the wrapper from adding a stack frame per nesting
 // level in unoptimized builds, where the deepest values (`traversal.max_value_depth`) run close to
-// the 2 MiB test-thread stack. The match is written out here (no helper call), and nested maps are
-// always `Indexed`, so the recursion goes through the same frames as a plain `IndexMap`.
+// the 2 MiB test-thread stack. The match is written out here (no helper call). A stored value's
+// nested maps are `Shaped` only down to `graph::shape::NESTED_DEPTH` levels (deeper ones stay
+// `Indexed`), so the frames of a deep recursion are those of a plain `IndexMap` below that bound.
 impl Clone for PropertyMap {
     #[inline(always)]
     fn clone(&self) -> Self {
@@ -258,6 +392,7 @@ impl Clone for PropertyMap {
                 shape: Arc::clone(&shaped.shape),
                 values: shaped.values.clone(),
             })),
+            Repr::Coded(coded) => Self::materialized_copy(coded),
         }
     }
 
@@ -302,6 +437,7 @@ impl PropertyMap {
         match &self.0 {
             Repr::Indexed(map) => map.len(),
             Repr::Shaped(shaped) => shaped.values.len(),
+            Repr::Coded(coded) => coded.len(),
         }
     }
 
@@ -320,18 +456,25 @@ impl PropertyMap {
                 .shape
                 .position(key)
                 .and_then(|position| shaped.values.get(position)),
+            Repr::Coded(coded) => coded
+                .layout
+                .shape
+                .position(key)
+                .and_then(|position| coded.value_at(position)),
         }
     }
 
     /// The value of `key`, mutably, if present.
     #[inline]
     pub fn get_mut(&mut self, key: &str) -> Option<&mut ElementProperty> {
+        self.plain_mut();
         match &mut self.0 {
             Repr::Indexed(map) => map.get_mut(key),
             Repr::Shaped(shaped) => shaped
                 .shape
                 .position(key)
                 .and_then(|position| shaped.values.get_mut(position)),
+            Repr::Coded(_) => None,
         }
     }
 
@@ -341,6 +484,7 @@ impl PropertyMap {
         match &self.0 {
             Repr::Indexed(map) => map.contains_key(key),
             Repr::Shaped(shaped) => shaped.shape.position(key).is_some(),
+            Repr::Coded(coded) => coded.layout.shape.position(key).is_some(),
         }
     }
 
@@ -354,7 +498,7 @@ impl PropertyMap {
     ) -> Option<ElementProperty> {
         match &mut self.0 {
             Repr::Indexed(map) => map.insert(key.into(), value),
-            Repr::Shaped(_) => self.insert_full_shaped(key.into(), value).1,
+            Repr::Shaped(_) | Repr::Coded(_) => self.insert_full_shaped(key.into(), value).1,
         }
     }
 
@@ -363,7 +507,9 @@ impl PropertyMap {
     pub fn shift_remove(&mut self, key: &str) -> Option<ElementProperty> {
         match &mut self.0 {
             Repr::Indexed(map) => map.shift_remove(key),
-            Repr::Shaped(_) => self.shift_remove_full(key).map(|(_, _, value)| value),
+            Repr::Shaped(_) | Repr::Coded(_) => {
+                self.shift_remove_full(key).map(|(_, _, value)| value)
+            }
         }
     }
 
@@ -375,17 +521,22 @@ impl PropertyMap {
             Repr::Shaped(shaped) => {
                 Either::Shaped(shaped.shape.keys.iter().zip(shaped.values.iter()))
             }
+            Repr::Coded(coded) => {
+                Either::Coded(coded.layout.shape.keys.iter().zip(CodedValues::of(coded)))
+            }
         })
     }
 
     /// The entries in order, values mutable.
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_> {
+        self.plain_mut();
         IterMut(match &mut self.0 {
             Repr::Indexed(map) => Either::Indexed(map.iter_mut()),
             Repr::Shaped(shaped) => {
                 Either::Shaped(shaped.shape.keys.iter().zip(shaped.values.iter_mut()))
             }
+            Repr::Coded(_) => Either::Coded(std::iter::empty()),
         })
     }
 
@@ -395,6 +546,7 @@ impl PropertyMap {
         Keys(match &self.0 {
             Repr::Indexed(map) => Either::Indexed(map.keys()),
             Repr::Shaped(shaped) => Either::Shaped(shaped.shape.keys.iter()),
+            Repr::Coded(coded) => Either::Shaped(coded.layout.shape.keys.iter()),
         })
     }
 
@@ -404,15 +556,18 @@ impl PropertyMap {
         Values(match &self.0 {
             Repr::Indexed(map) => Either::Indexed(map.values()),
             Repr::Shaped(shaped) => Either::Shaped(shaped.values.iter()),
+            Repr::Coded(coded) => Either::Coded(CodedValues::of(coded)),
         })
     }
 
     /// The values in order, mutable.
     #[inline]
     pub fn values_mut(&mut self) -> ValuesMut<'_> {
+        self.plain_mut();
         ValuesMut(match &mut self.0 {
             Repr::Indexed(map) => Either::Indexed(map.values_mut()),
             Repr::Shaped(shaped) => Either::Shaped(shaped.values.iter_mut()),
+            Repr::Coded(_) => Either::Coded(std::iter::empty()),
         })
     }
 
@@ -421,7 +576,7 @@ impl PropertyMap {
     pub fn clear(&mut self) {
         match &mut self.0 {
             Repr::Indexed(map) => map.clear(),
-            Repr::Shaped(_) => self.0 = Repr::default(),
+            Repr::Shaped(_) | Repr::Coded(_) => self.0 = Repr::default(),
         }
     }
 }
@@ -432,6 +587,27 @@ impl PropertyMap {
     /// Order-independent equality across representations (the same rule as `IndexMap`'s).
     #[inline(never)]
     fn eq_mixed(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            // Two maps of one shape (stored maps, nested values of one graph): their values in
+            // order.
+            (Repr::Shaped(a), Repr::Shaped(b)) if Arc::ptr_eq(&a.shape, &b.shape) => {
+                return a.values == b.values;
+            }
+            // A stored map and a free-standing one (a `has()` constant, a query's value): each
+            // entry of the hash map found in the shape (key prints, no hashing).
+            (Repr::Shaped(shaped), Repr::Indexed(map))
+            | (Repr::Indexed(map), Repr::Shaped(shaped)) => {
+                return shaped.values.len() == map.len()
+                    && map.iter().all(|(key, value)| {
+                        shaped
+                            .shape
+                            .position(key)
+                            .and_then(|position| shaped.values.get(position))
+                            .is_some_and(|stored| stored == value)
+                    });
+            }
+            _ => {}
+        }
         self.len() == other.len()
             && self
                 .iter()
@@ -442,13 +618,13 @@ impl PropertyMap {
     /// the step before a key-changing mutation outside the graph's shape table.
     #[inline]
     pub(crate) fn indexed_mut(&mut self) -> &mut PropertyMapInner {
-        if let Repr::Shaped(_) = self.0 {
+        if let Repr::Shaped(_) | Repr::Coded(_) = self.0 {
             self.unshape();
         }
         match self.0 {
             Repr::Indexed(ref mut map) => map,
             // Not reached: converted above. Starting over from an empty map keeps this total.
-            Repr::Shaped(_) => {
+            Repr::Shaped(_) | Repr::Coded(_) => {
                 self.0 = Repr::default();
                 self.indexed_mut()
             }
@@ -460,6 +636,7 @@ impl PropertyMap {
     #[cold]
     #[inline(never)]
     fn unshape(&mut self) {
+        self.plain_mut();
         if let Repr::Shaped(shaped) = &mut self.0 {
             let values = std::mem::take(&mut shaped.values);
             let map: PropertyMapInner = shaped.shape.keys.iter().cloned().zip(values).collect();
@@ -486,15 +663,199 @@ impl PropertyMap {
     pub(crate) fn as_indexed(&self) -> Option<&PropertyMapInner> {
         match &self.0 {
             Repr::Indexed(map) => Some(map),
-            Repr::Shaped(_) => None,
+            Repr::Shaped(_) | Repr::Coded(_) => None,
         }
     }
 
     /// The shape and the values of a `Shaped` map (the memory report aggregates by shape).
     pub(crate) fn shaped_parts(&self) -> Option<(&Arc<Shape>, &[ElementProperty])> {
         match &self.0 {
-            Repr::Indexed(_) => None,
+            Repr::Indexed(_) | Repr::Coded(_) => None,
             Repr::Shaped(shaped) => Some((&shaped.shape, &shaped.values)),
+        }
+    }
+
+    /// The value of `key` for an in-place update that keeps a coded row coded: an own value
+    /// mutably, a coded one as [`StoredSlot::Coded`]; any other map as [`Self::get_mut`].
+    pub(crate) fn stored_value_mut(&mut self, key: &str) -> StoredSlot<'_> {
+        match &mut self.0 {
+            Repr::Coded(coded) => {
+                let Some(position) = coded.layout.shape.position(key) else {
+                    return StoredSlot::Absent;
+                };
+                if coded.layout.coded_at(position).is_some() {
+                    return StoredSlot::Coded;
+                }
+                let at = coded
+                    .layout
+                    .slots
+                    .get(position)
+                    .copied()
+                    .unwrap_or(u32::MAX) as usize;
+                match coded.own.get_mut(at) {
+                    Some(value) => StoredSlot::Value(value),
+                    None => StoredSlot::Absent,
+                }
+            }
+            Repr::Indexed(map) => match map.get_mut(key) {
+                Some(value) => StoredSlot::Value(value),
+                None => StoredSlot::Absent,
+            },
+            Repr::Shaped(shaped) => match shaped
+                .shape
+                .position(key)
+                .and_then(|position| shaped.values.get_mut(position))
+            {
+                Some(value) => StoredSlot::Value(value),
+                None => StoredSlot::Absent,
+            },
+        }
+    }
+
+    /// The value at `position` (insertion order), in any representation.
+    #[inline]
+    pub(crate) fn value_at_position(&self, position: usize) -> Option<&ElementProperty> {
+        match &self.0 {
+            Repr::Indexed(map) => map.get_index(position).map(|(_, value)| value),
+            Repr::Shaped(shaped) => shaped.values.get(position),
+            Repr::Coded(coded) => coded.value_at(position),
+        }
+    }
+
+    /// The own values of a coded row, mutably (`None`: not a coded row).
+    #[inline]
+    pub(crate) fn coded_own_mut(&mut self) -> Option<&mut [ElementProperty]> {
+        match &mut self.0 {
+            Repr::Coded(coded) => Some(&mut coded.own),
+            Repr::Indexed(_) | Repr::Shaped(_) => None,
+        }
+    }
+
+    /// Whether this is a coded row.
+    #[inline]
+    pub(crate) fn is_coded(&self) -> bool {
+        matches!(self.0, Repr::Coded(_))
+    }
+
+    /// The row of a coded map.
+    #[inline]
+    pub(crate) fn coded(&self) -> Option<&Coded> {
+        match &self.0 {
+            Repr::Coded(coded) => Some(coded),
+            Repr::Indexed(_) | Repr::Shaped(_) => None,
+        }
+    }
+
+    /// The shape of a stored map (`Shaped` or coded).
+    #[inline]
+    pub(crate) fn stored_shape(&self) -> Option<&Arc<Shape>> {
+        match &self.0 {
+            Repr::Indexed(_) => None,
+            Repr::Shaped(shaped) => Some(&shaped.shape),
+            Repr::Coded(coded) => Some(&coded.layout.shape),
+        }
+    }
+
+    /// A coded map of `layout` with its own values and codes (in position order).
+    pub(crate) fn from_coded(
+        layout: Arc<Layout>,
+        own: Box<[ElementProperty]>,
+        codes: Box<[u32]>,
+    ) -> Self {
+        Self(Repr::Coded(Coded { layout, own, codes }))
+    }
+
+    /// Turns a coded map into a plain `Shaped` one of the same shape (the step before every
+    /// mutation of its keys or values through a generic path).
+    #[inline]
+    pub(crate) fn plain_mut(&mut self) {
+        if let Repr::Coded(_) = self.0 {
+            self.uncode();
+        }
+    }
+
+    /// [`Self::plain_mut`] of a coded map (kept out of line).
+    #[cold]
+    #[inline(never)]
+    fn uncode(&mut self) {
+        if let Repr::Coded(coded) = &mut self.0 {
+            let shape = Arc::clone(&coded.layout.shape);
+            let values = coded.take_values();
+            self.0 = Repr::Shaped(Shaped { shape, values });
+        }
+    }
+
+    /// A plain copy of a coded map (its `Clone`).
+    #[cold]
+    #[inline(never)]
+    fn materialized_copy(coded: &Coded) -> Self {
+        Self(Repr::Shaped(Shaped {
+            shape: Arc::clone(&coded.layout.shape),
+            values: coded.materialized(),
+        }))
+    }
+
+    /// The in-place write of an existing key of a coded map: an own position takes `value`, a
+    /// coded position takes the code of `value` when its dictionary accepts it. `Err(value)`
+    /// when neither applies (no coded map, an absent key, a value its coded position does not
+    /// accept, a full dictionary): the caller takes the generic path.
+    #[inline]
+    pub(crate) fn coded_replace(
+        &mut self,
+        key: &str,
+        value: ElementProperty,
+    ) -> Result<(usize, Replaced, bool), ElementProperty> {
+        let Repr::Coded(coded) = &mut self.0 else {
+            return Err(value);
+        };
+        let Some(position) = coded.layout.shape.position(key) else {
+            return Err(value);
+        };
+        match coded.layout.coded_at(position) {
+            None => {
+                // A rule that would code the new value: the generic path codes it.
+                if coded
+                    .layout
+                    .rules
+                    .get(position)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|dictionary| dictionary.accepts(&value))
+                {
+                    return Err(value);
+                }
+                let Some(own) = coded
+                    .layout
+                    .slots
+                    .get(position)
+                    .and_then(|slot| coded.own.get_mut(*slot as usize))
+                else {
+                    return Err(value);
+                };
+                Ok((
+                    position,
+                    Replaced::Own(std::mem::replace(own, value)),
+                    false,
+                ))
+            }
+            Some((at, dictionary)) => {
+                if !dictionary.accepts(&value) {
+                    return Err(value);
+                }
+                let dictionary = Arc::clone(dictionary);
+                let Some(slot) = coded.codes.get_mut(at) else {
+                    return Err(value);
+                };
+                let (code, added) = dictionary.intern_reporting(value)?;
+                let old = std::mem::replace(slot, code);
+                Ok((
+                    position,
+                    Replaced::Code(DictRef {
+                        dictionary,
+                        code: old,
+                    }),
+                    added,
+                ))
+            }
         }
     }
 
@@ -504,6 +865,7 @@ impl PropertyMap {
         match &self.0 {
             Repr::Indexed(_) => None,
             Repr::Shaped(shaped) => Some(&shaped.shape),
+            Repr::Coded(coded) => Some(&coded.layout.shape),
         }
     }
 
@@ -517,7 +879,7 @@ impl PropertyMap {
     ) -> (usize, Option<ElementProperty>) {
         match &mut self.0 {
             Repr::Indexed(map) => map.insert_full(key, value),
-            Repr::Shaped(_) => self.insert_full_shaped(key, value),
+            Repr::Shaped(_) | Repr::Coded(_) => self.insert_full_shaped(key, value),
         }
     }
 
@@ -529,6 +891,7 @@ impl PropertyMap {
         key: CompactString,
         value: ElementProperty,
     ) -> (usize, Option<ElementProperty>) {
+        self.plain_mut();
         if let Repr::Shaped(shaped) = &mut self.0
             && let Some(position) = shaped.shape.position(&key)
             && let Some(slot) = shaped.values.get_mut(position)
@@ -549,6 +912,10 @@ impl PropertyMap {
                 shaped.shape.position(key)?;
                 self.indexed_mut().shift_remove_full(key)
             }
+            Repr::Coded(coded) => {
+                coded.layout.shape.position(key)?;
+                self.indexed_mut().shift_remove_full(key)
+            }
         }
     }
 
@@ -562,6 +929,14 @@ impl PropertyMap {
                     position,
                     shaped.shape.keys.get(position)?,
                     shaped.values.get(position)?,
+                ))
+            }
+            Repr::Coded(coded) => {
+                let position = coded.layout.shape.position(key)?;
+                Some((
+                    position,
+                    coded.layout.shape.keys.get(position)?,
+                    coded.value_at(position)?,
                 ))
             }
         }
@@ -593,7 +968,8 @@ impl PropertyMap {
     /// The heap bytes of the map's own storage, without the values' heap: for an `Indexed` map
     /// its two allocations sized from its capacity ([`index_map_heap_bytes`]) and each
     /// heap-allocated key; for a `Shaped` map its value slice alone (the shared shape is counted
-    /// once, by the shape table: `MemoryStats::shape_bytes`).
+    /// once, by the shape table: `MemoryStats::shape_bytes`); for a coded map its own values and
+    /// its codes (the coded values are counted once, in their dictionaries).
     pub(crate) fn own_heap_bytes(&self) -> u64 {
         match &self.0 {
             Repr::Indexed(map) => {
@@ -604,7 +980,18 @@ impl PropertyMap {
                         .sum::<u64>()
             }
             Repr::Shaped(shaped) => shaped_values_bytes(shaped.values.capacity()),
+            Repr::Coded(coded) => coded.row_bytes(),
         }
+    }
+
+    /// The values the map holds itself: every value, except the coded values of a coded map
+    /// (they live in their dictionaries).
+    pub(crate) fn own_values(&self) -> impl Iterator<Item = &ElementProperty> {
+        let (all, own) = match &self.0 {
+            Repr::Coded(coded) => (None, Some(coded.own.iter())),
+            Repr::Indexed(_) | Repr::Shaped(_) => (Some(self.values()), None),
+        };
+        all.into_iter().flatten().chain(own.into_iter().flatten())
     }
 }
 
@@ -664,13 +1051,16 @@ impl IntoIterator for PropertyMap {
 
     #[inline]
     fn into_iter(self) -> IntoIter {
-        IntoIter(match self.0 {
+        let mut this = self;
+        this.plain_mut();
+        IntoIter(match this.0 {
             Repr::Indexed(map) => Either::Indexed(map.into_iter()),
             Repr::Shaped(Shaped { shape, values }) => Either::Shaped(ShapedIntoIter {
                 keys: 0..shape.len(),
                 shape,
                 values: values.into_iter(),
             }),
+            Repr::Coded(_) => Either::Coded(std::iter::empty()),
         })
     }
 }
@@ -695,14 +1085,18 @@ impl<'a> IntoIterator for &'a mut PropertyMap {
     }
 }
 
-/// The iterator of one representation or the other (crate-internal).
+/// The iterator of one representation or another (crate-internal). The mutable and owned
+/// iterators never take the `Coded` arm (a coded map turns plain first): theirs is empty.
 #[derive(Clone)]
-enum Either<I, S> {
+enum Either<I, S, C> {
     Indexed(I),
     Shaped(S),
+    Coded(C),
 }
 
-impl<T, I: Iterator<Item = T>, S: Iterator<Item = T>> Iterator for Either<I, S> {
+impl<T, I: Iterator<Item = T>, S: Iterator<Item = T>, C: Iterator<Item = T>> Iterator
+    for Either<I, S, C>
+{
     type Item = T;
 
     #[inline]
@@ -710,6 +1104,7 @@ impl<T, I: Iterator<Item = T>, S: Iterator<Item = T>> Iterator for Either<I, S> 
         match self {
             Either::Indexed(iter) => iter.next(),
             Either::Shaped(iter) => iter.next(),
+            Either::Coded(iter) => iter.next(),
         }
     }
 
@@ -718,21 +1113,79 @@ impl<T, I: Iterator<Item = T>, S: Iterator<Item = T>> Iterator for Either<I, S> 
         match self {
             Either::Indexed(iter) => iter.size_hint(),
             Either::Shaped(iter) => iter.size_hint(),
+            Either::Coded(iter) => iter.size_hint(),
         }
     }
 }
 
-impl<T, I: DoubleEndedIterator<Item = T>, S: DoubleEndedIterator<Item = T>> DoubleEndedIterator
-    for Either<I, S>
+impl<
+    T,
+    I: DoubleEndedIterator<Item = T>,
+    S: DoubleEndedIterator<Item = T>,
+    C: DoubleEndedIterator<Item = T>,
+> DoubleEndedIterator for Either<I, S, C>
 {
     #[inline]
     fn next_back(&mut self) -> Option<T> {
         match self {
             Either::Indexed(iter) => iter.next_back(),
             Either::Shaped(iter) => iter.next_back(),
+            Either::Coded(iter) => iter.next_back(),
         }
     }
 }
+
+/// The values of a coded map in position order.
+#[derive(Clone)]
+pub(crate) struct CodedValues<'a> {
+    coded: &'a Coded,
+    front: usize,
+    back: usize,
+}
+
+impl<'a> CodedValues<'a> {
+    #[inline]
+    fn of(coded: &'a Coded) -> Self {
+        Self {
+            coded,
+            front: 0,
+            back: coded.len(),
+        }
+    }
+}
+
+impl<'a> Iterator for CodedValues<'a> {
+    type Item = &'a ElementProperty;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a ElementProperty> {
+        if self.front >= self.back {
+            return None;
+        }
+        let value = self.coded.value_at(self.front).unwrap_or(&MISSING);
+        self.front += 1;
+        Some(value)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.back - self.front;
+        (n, Some(n))
+    }
+}
+
+impl DoubleEndedIterator for CodedValues<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        Some(self.coded.value_at(self.back).unwrap_or(&MISSING))
+    }
+}
+
+impl ExactSizeIterator for CodedValues<'_> {}
 
 /// The owned entries of a `Shaped` map: the keys are cloned out of the shared shape.
 struct ShapedIntoIter {
@@ -804,6 +1257,7 @@ pub struct Iter<'a>(
     Either<
         indexmap::map::Iter<'a, CompactString, ElementProperty>,
         std::iter::Zip<KeySlice<'a>, std::slice::Iter<'a, ElementProperty>>,
+        std::iter::Zip<KeySlice<'a>, CodedValues<'a>>,
     >,
 );
 wrap_iter!(Iter<'a>, (&'a CompactString, &'a ElementProperty));
@@ -819,6 +1273,7 @@ pub struct IterMut<'a>(
     Either<
         indexmap::map::IterMut<'a, CompactString, ElementProperty>,
         std::iter::Zip<KeySlice<'a>, std::slice::IterMut<'a, ElementProperty>>,
+        std::iter::Empty<(&'a CompactString, &'a mut ElementProperty)>,
     >,
 );
 wrap_iter!(IterMut<'a>, (&'a CompactString, &'a mut ElementProperty));
@@ -833,7 +1288,13 @@ impl fmt::Debug for IterMut<'_> {
 
 /// The keys of a [`PropertyMap`] in order ([`PropertyMap::keys`]).
 #[derive(Clone)]
-pub struct Keys<'a>(Either<indexmap::map::Keys<'a, CompactString, ElementProperty>, KeySlice<'a>>);
+pub struct Keys<'a>(
+    Either<
+        indexmap::map::Keys<'a, CompactString, ElementProperty>,
+        KeySlice<'a>,
+        std::iter::Empty<&'a CompactString>,
+    >,
+);
 wrap_iter!(Keys<'a>, &'a CompactString);
 
 impl fmt::Debug for Keys<'_> {
@@ -848,6 +1309,7 @@ pub struct Values<'a>(
     Either<
         indexmap::map::Values<'a, CompactString, ElementProperty>,
         std::slice::Iter<'a, ElementProperty>,
+        CodedValues<'a>,
     >,
 );
 wrap_iter!(Values<'a>, &'a ElementProperty);
@@ -863,6 +1325,7 @@ pub struct ValuesMut<'a>(
     Either<
         indexmap::map::ValuesMut<'a, CompactString, ElementProperty>,
         std::slice::IterMut<'a, ElementProperty>,
+        std::iter::Empty<&'a mut ElementProperty>,
     >,
 );
 wrap_iter!(ValuesMut<'a>, &'a mut ElementProperty);
@@ -877,7 +1340,11 @@ impl fmt::Debug for ValuesMut<'_> {
 
 /// The entries of a [`PropertyMap`] by value, in order (its `IntoIterator`).
 pub struct IntoIter(
-    Either<indexmap::map::IntoIter<CompactString, ElementProperty>, ShapedIntoIter>,
+    Either<
+        indexmap::map::IntoIter<CompactString, ElementProperty>,
+        ShapedIntoIter,
+        std::iter::Empty<(CompactString, ElementProperty)>,
+    >,
 );
 wrap_iter!(IntoIter, (CompactString, ElementProperty));
 
