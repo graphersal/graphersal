@@ -1,0 +1,23 @@
+[package]
+name = "graphersal-mcp"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal Model Context Protocol endpoint (tools, resources, answers) over a Graphersal session, shared by the servers of graphersal-cli; independent of any HTTP library; no stability guarantees"
+readme = "README.md"
+keywords = ["graph", "gremlin", "mcp"]
+categories = ["database"]
+include = ["/src/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
+
+[dependencies]
+graphersal = { workspace = true }
+# The session every tool wraps (one method per tool), its authorizers and the saved-query and
+# GQL call texts.
+graphersal-session = { workspace = true }
+serde_json = { workspace = true }
+# Unguessable MCP session ids (already in the tree through graphersal).
+rand = { workspace = true }

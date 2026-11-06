@@ -141,6 +141,9 @@ jobs:
         run: cargo test --package graphersal-cli
       - name: graphersal-session
         run: cargo test --package graphersal-session
+      # The MCP endpoint without HTTP (unit tests and tests/handle_tests.rs).
+      - name: graphersal-mcp
+        run: cargo test --package graphersal-mcp
       - name: graphersal-storage-tests
         run: cargo test --package graphersal-storage-tests --features persist
       # The playground engine's session logic, natively (the wasm32 run is in `playground`).

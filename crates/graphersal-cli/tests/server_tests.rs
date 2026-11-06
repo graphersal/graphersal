@@ -6998,7 +6998,7 @@ fn mcp_set_schema_refused_for_confirm_lock_is_a_tool_error() {
 /// MCP schema tools and vector rules (book page "Vector Rules"): a fill below the
 /// confirmation threshold is applied with the session's warning text as a note; the tool
 /// descriptions name the lock and `confirm_lock` (the refusal above the threshold is a unit
-/// test of `server/mcp.rs`: a fill of a second needs 200,000 hash-ngram texts).
+/// test of `graphersal-mcp`: a fill of a second needs 200,000 hash-ngram texts).
 #[test]
 fn mcp_set_schema_with_a_vector_rule_notes_the_fill() {
     let ui = ui_dir("vector-rule");

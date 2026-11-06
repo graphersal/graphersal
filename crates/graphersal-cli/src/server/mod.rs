@@ -576,7 +576,7 @@ pub fn run(cli: &Cli) -> i32 {
     server_section.row("limits", presets_summary(&presets_json));
     server_section.unwrapped("UI", ui.banner());
     if let Some(mcp) = &mcp {
-        let (endpoint, connect) = mcp.banner(&plan.url_host(), port);
+        let (endpoint, connect) = mcp::banner(mcp, &plan.url_host(), port);
         server_section.row("MCP", endpoint);
         server_section.unwrapped("connect", connect);
     }

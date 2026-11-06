@@ -16,7 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `crates/graphersal/src/gql/CLAUDE.md` | GQL query language (feature `gql`): stage layout, parser rules, lowering into the pipeline |
 | `crates/graphersal/tests/tinkerpop/CLAUDE.md` | TinkerPop conformance suite |
 | `crates/graphersal/tests/opencypher/CLAUDE.md` | openCypher TCK (GQL), vendored data, attribution wording rule |
-| `crates/graphersal-cli/CLAUDE.md` | REPL, output rules, dev server, MCP, AI Chat, `embed-model` |
+| `crates/graphersal-cli/CLAUDE.md` | REPL, output rules, dev server, MCP host adapter, AI Chat, `embed-model` |
+| `crates/graphersal-mcp/CLAUDE.md` | MCP endpoint: protocol, transport/host boundary, tool catalog and handlers, answer shaping, instructions |
 | `crates/graphersal-session/CLAUDE.md` | session modules, any-storage session |
 | `playground/CLAUDE.md` | playground UI structure |
 | `bindings/py-graphersal/CLAUDE.md` | Python binding, GIL rule |
@@ -28,6 +29,7 @@ Nested files under `crates/graphersal/src/` are kept out of the published crate 
 
 - `crates/graphersal`: the core library. Almost all work happens here.
 - `crates/graphersal-cli`: the REPL, a one-shot scriptable query runner, `graphersal store ...`, and `--server`: the DEV server serving the embedded playground with this process as the engine, optionally with MCP (`--mcp`) and the AI Chat (`--ai`).
+- `crates/graphersal-mcp`: the MCP endpoint (protocol, tools, resources, answer shaping) over a `graphersal-session` session, independent of any HTTP library: the host adapts its requests to `McpRequest`/`McpResponse` and runs the session jobs through its `Executor` (today the dev server; its AI Chat calls the same tools). Publishable but internal, EXPERIMENTAL.
 - `crates/graphersal-session`: the playground session logic (JSON in, JSON out), shared by `graphersal-wasm` and the dev server; serves any storage. Publishable but internal.
 - `crates/graphersal-wasm`: the engine as WebAssembly (wasm-bindgen, `publish = false`), a thin wrapper of `graphersal-session`; its JS API is internal to the playground (an npm package is planned).
 - `playground/`: the static browser playground (Vue, no bundler) on `graphersal-wasm` in a Web Worker, or on the dev server.
