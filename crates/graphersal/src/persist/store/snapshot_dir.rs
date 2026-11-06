@@ -556,6 +556,10 @@ impl DirSnapshotReader {
         models: Vec<super::models::PackedModelFile>,
     ) -> Result<Self, PersistError> {
         let (manifest_bytes, manifest) = read_manifest(snapshot)?;
+        // Where the snapshot's own rows lie, by the paths of the STORED manifest: a reference
+        // (`<seq>/<file>`, an incremental snapshot) names a file of another snapshot, which the
+        // plain name of the packed manifest below does not.
+        let stored_paths: Vec<String> = manifest.segments.iter().map(|s| s.path.clone()).collect();
         // A packed snapshot is self-contained: references become plain names (the segment
         // sections are the referenced files' bytes).
         let manifest_bytes = self_contained_manifest(manifest_bytes, &manifest);
@@ -622,8 +626,16 @@ impl DirSnapshotReader {
                 });
                 continue;
             }
-            let location = format!("{}/{}", snapshot.display(), entry.path);
-            let path = segment_path(snapshot, &entry.path)
+            // The file by the stored path (the packed manifest may name it otherwise).
+            let stored = stored_paths.get(number).ok_or_else(|| {
+                PersistError::corrupt(
+                    format!("{}/{MANIFEST_FILE}", snapshot.display()),
+                    0,
+                    "a segment row the stored manifest does not have",
+                )
+            })?;
+            let location = format!("{}/{stored}", snapshot.display());
+            let path = segment_path(snapshot, stored)
                 .ok_or_else(|| PersistError::corrupt(&location, 0, "unsafe segment path"))?;
             let len = path
                 .len()

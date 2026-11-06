@@ -501,3 +501,75 @@ fn the_gsnap_notes_put_the_graph_into_a_store_first() {
         "{notes}"
     );
 }
+
+/// A snapshot that references a segment file of an older snapshot (an incremental snapshot,
+/// format spec 6.2, 12.3) exports WITH its models: the packed manifest names the referenced
+/// file by a plain name, but its bytes are read from where the stored manifest says (it failed
+/// with "No such file or directory", which the dev server answered 404).
+#[test]
+fn an_incremental_snapshot_exports_with_its_models() {
+    let temp = Temp::new("packed-incremental");
+    let store = Store::create(temp.join("s"), options()).unwrap();
+    import(&store, 1, "acme/tiny");
+    let write = |script: &str| {
+        let graph = store.graph().clone();
+        let mut engine = graphersal::script::engine();
+        graphersal::script::set_engine_graph(&mut engine, graph.clone());
+        let mut scope = graphersal::script::graph_scope(graph);
+        if let Err(err) =
+            engine.eval_with_scope::<graphersal::script::rhai::Dynamic>(&mut scope, script)
+        {
+            panic!("{script}: {err}");
+        }
+    };
+    write(
+        r#"g.add_v("person").property("name", "a").as("a").add_v("person").property("name", "b").add_e("knows").from("a").iterate()"#,
+    );
+    store.checkpoint(None).unwrap();
+    // Only vertices change from here on: the edge segment stays as it is. The second
+    // checkpoint copies it (no twin yet), the third references the copy's twin.
+    write(r#"g.add_v("person").property("name", "c").iterate()"#);
+    store.checkpoint(None).unwrap();
+    write(r#"g.add_v("person").property("name", "d").iterate()"#);
+    let latest = store.checkpoint(None).unwrap().commit_seq;
+    let snapshot = temp
+        .join("s")
+        .join("snapshots")
+        .join(format!("{latest:020}"));
+    assert!(
+        snapshot.join("v-000000.seg").exists() && !snapshot.join("e-000000.seg").exists(),
+        "the newest snapshot must reference its edge segment (the case under test): {:?}",
+        std::fs::read_dir(&snapshot)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    for (file, models) in [
+        ("with.gsnap", ModelCopy::Include),
+        ("without.gsnap", ModelCopy::Exclude),
+    ] {
+        let path = temp.join(file);
+        store
+            .export_packed_with(Some(latest), std::fs::File::create(&path).unwrap(), models)
+            .unwrap_or_else(|err| panic!("{file}: {err}"));
+        let (graph, report) = load(&path);
+        assert_eq!(
+            run(&graph, r#"[g.v().count().next(), g.e().count().next()]"#),
+            "[4, 1]",
+            "{file}"
+        );
+        assert_eq!(
+            run(
+                &graph,
+                r#"g.v().has("name", "a").out("knows").values("name").next()"#
+            ),
+            "b",
+            "{file}"
+        );
+        // The model's definition travels either way; its blob only with the models.
+        assert_eq!(report.models.len(), 1, "{file}");
+        let carried = report.models[0].state != ModelState::Missing;
+        assert_eq!(carried, models == ModelCopy::Include, "{file}");
+    }
+    store.close().unwrap();
+}

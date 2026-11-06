@@ -20,7 +20,7 @@ use graphersal::changes::{ChangeSet, CommitHook, HookError, HookRefusal, Mutatio
 use graphersal::persist::{
     BackupMarker, BackupMode, CompactionAdvice, DamageReport, ForkReport, FoundDamage, MemDir,
     ModelCopy, ModelInfo, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir,
-    StoreInfo, StoreOptions,
+    StoreFailure, StoreInfo, StoreOptions,
 };
 use serde_json::{Value, json};
 
@@ -519,7 +519,8 @@ impl Session {
     }
 
     /// The packed snapshot (`.gsnap`) of the stored snapshot at `commit` (`None`: the latest):
-    /// `(bytes, its commit)`; a stored snapshot is copied as it is (404 when there is none).
+    /// `(bytes, its commit)`; a stored snapshot is copied as it is (404 when there is none,
+    /// 422 when the store refuses it, 500 when a file cannot be read).
     pub fn store_snapshot(&self, commit: Option<u64>) -> Result<(Vec<u8>, u64), StoreError> {
         self.store_snapshot_with(commit, ModelCopy::Include)
     }
@@ -536,13 +537,18 @@ impl Session {
         let mut bytes = Vec::new();
         let info = store
             .export_packed_with(commit, &mut bytes as &mut dyn std::io::Write, models)
-            .map_err(|err| match err {
-                PersistError::Corrupt { .. } => StoreError::refused(err),
-                err => StoreError {
-                    status: 404,
-                    message: graphersal::error::format_diagnostic(&err),
-                    data: None,
-                },
+            .map_err(|err| {
+                let status = match &err {
+                    // Only a snapshot that is not there is "not found".
+                    PersistError::Store {
+                        cause: StoreFailure::NoSnapshot,
+                        ..
+                    } => 404,
+                    PersistError::Io { .. } => 500,
+                    // Damage, a missing or damaged blob or model, the memory ceiling, ...
+                    _ => return StoreError::refused(err),
+                };
+                StoreError::new(status, graphersal::error::format_diagnostic(&err))
             })?;
         Ok((bytes, info.commit_seq))
     }
