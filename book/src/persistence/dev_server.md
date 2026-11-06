@@ -232,8 +232,8 @@ How it works:
   are cancelled and the process exits with code 0.
 - **Safe defaults**: unlike the read-write server (which runs like the playground, without
   limits), every query runs under the SAFE script limits (`--safe-limits`), a 30 s timeout
-  (`--timeout 30000`) and a 256 MiB per-query memory limit
-  (`--max-materialized-bytes 268435456`). Each flag still overrides its own default
+  (`--timeout 30000`) and a 500 MiB per-query memory limit
+  (`--max-materialized-bytes 524288000`). Each flag still overrides its own default
   (`--timeout 0` turns the timeout off, `--max-operations 0` lifts the operation limit).
 - **MCP sessions** are stateless: the session id `initialize` answers is signed (HMAC-SHA256)
   instead of being kept in a table, so any number of agents stay connected and none evicts

@@ -76,7 +76,7 @@ made for many readers: the queries of all browser pages and MCP agents run in pa
 pool of workers (`--workers`, default the container's CPUs), behind a bounded queue
 (`--queue`, `--queue-timeout`; a full queue answers `503` with `Retry-After: 1`), at most
 `--max-inflight-per-client` queries per agent or page and `--max-connections` requests at once,
-under safe default limits (SAFE script limits, a 30 s timeout, 256 MiB per query). MCP session
+under safe default limits (SAFE script limits, a 30 s timeout, 500 MiB per query). MCP session
 ids are stateless. **It has no authentication**: the server is protected only by being
 read-only and by these limits, so publish the port where you trust who can reach it (or put an
 authenticating reverse proxy in front). Not available in this mode: the Store panel, history,

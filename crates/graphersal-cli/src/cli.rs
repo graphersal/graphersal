@@ -292,7 +292,7 @@ OPTIONS:
                            parallel on a pool of workers (--workers, --queue, --queue-timeout,
                            --max-inflight-per-client, --max-connections, --drain-timeout),
                            under the SAFE script limits, --timeout 30000 and
-                           --max-materialized-bytes 268435456 unless those flags say otherwise.
+                           --max-materialized-bytes 524288000 unless those flags say otherwise.
         --on-damage <P>    With --create-store: the damage policy of the new store, fixed for
                            its life: "maintenance" (the default: damage found on disk while it
                            is open makes it read-only) or "continue" (it keeps committing and
@@ -1228,8 +1228,8 @@ pub const DEFAULT_DRAIN_TIMEOUT_S: u64 = 20;
 /// Default `--timeout` of the read-only serving mode, in milliseconds.
 pub const SERVING_TIMEOUT_MS: u64 = 30_000;
 /// Default `--max-materialized-bytes` of the read-only serving mode (the per-query memory
-/// limit): 256 MiB.
-pub const SERVING_MAX_MATERIALIZED_BYTES: u64 = 256 * 1024 * 1024;
+/// limit): 500 MiB.
+pub const SERVING_MAX_MATERIALIZED_BYTES: u64 = 500 * 1024 * 1024;
 /// Default `--ui-dir`: the playground directory of a repository checkout, relative to the
 /// current directory; used only when it exists (the embedded UI serves everything else).
 #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
