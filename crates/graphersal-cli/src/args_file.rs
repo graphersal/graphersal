@@ -69,6 +69,12 @@ const KEYS: &[(&str, Kind)] = &[
     ("mcp-max-chars", Kind::Value),
     ("mcp-config", Kind::Path),
     ("ai", Kind::Path),
+    ("workers", Kind::Value),
+    ("queue", Kind::Value),
+    ("queue-timeout", Kind::Value),
+    ("max-connections", Kind::Value),
+    ("max-inflight-per-client", Kind::Value),
+    ("drain-timeout", Kind::Value),
 ];
 
 /// The flags that take the next argument as their value (long and short spellings), so the
@@ -105,6 +111,12 @@ const VALUE_FLAGS: &[&str] = &[
     "--mcp-max-chars",
     "--mcp-config",
     "--ai",
+    "--workers",
+    "--queue",
+    "--queue-timeout",
+    "--max-connections",
+    "--max-inflight-per-client",
+    "--drain-timeout",
 ];
 
 const EXAMPLE: &str =

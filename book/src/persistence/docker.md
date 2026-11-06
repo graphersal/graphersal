@@ -70,6 +70,17 @@ these work:
   image belongs to root).
 
 The server shows no Store panel and no history then (it serves the latest state as a graph).
+
+`--server --read-only` is the [read-only serving mode](dev_server.md#read-only-serving-mode),
+made for many readers: the queries of all browser pages and MCP agents run in parallel on a
+pool of workers (`--workers`, default the container's CPUs), behind a bounded queue
+(`--queue`, `--queue-timeout`; a full queue answers `503` with `Retry-After: 1`), at most
+`--max-inflight-per-client` queries per agent or page and `--max-connections` requests at once,
+under safe default limits (SAFE script limits, a 30 s timeout, 256 MiB per query). MCP session
+ids are stateless. **It has no authentication**: the server is protected only by being
+read-only and by these limits, so publish the port where you trust who can reach it (or put an
+authenticating reverse proxy in front). Not available in this mode: the Store panel, history,
+scheduled jobs, saving and every write.
 Without `--read-only`, a Store that cannot be opened for writing (no permission, a read-only
 file system) is served read-only anyway, with a note on stderr saying so.
 
@@ -136,7 +147,11 @@ spec:
 ```
 
 Every pod serves its own copy of the graph in memory; with `--read-only` replicas are
-independent and can scale. A read-write Store belongs to one pod (`replicas: 1`, a
+independent and can scale. Give them the same `GRAPHERSAL_MCP_SESSION_KEY` (a secret of at
+least 32 characters, e.g. from a Kubernetes Secret; never printed) so an agent's MCP session id
+from one replica is accepted by every other one behind the Service; without it each process
+signs with a random key of its own and an agent switched to another replica initializes again.
+A read-write Store belongs to one pod (`replicas: 1`, a
 `ReadWriteOnce` volume): its lock refuses a second writer.
 
 The server counts a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set) as a container and listens
@@ -160,7 +175,11 @@ container memory) it needs.
 without a signal handler ignores SIGTERM (and is killed after the grace period); the server
 handles it:
 
-- without a Store (or read-only): the running query is cancelled, `/readyz` turns 503, and the
+- `--read-only` (the read-only serving mode): `/readyz` turns 503 and no new query is taken; the
+  running queries get `--drain-timeout` seconds (default 20) to finish, then they are cancelled
+  and the process exits with code 0 (give the container a grace period above the drain
+  timeout: `docker stop -t 30`, `terminationGracePeriodSeconds: 30`);
+- without a Store otherwise: the running query is cancelled, `/readyz` turns 503, and the
   process exits at once with exit code 0;
 - with a read-write Store: the same, then the store is closed cleanly (its write-ahead log
   synced, marked closed) before the exit; a second signal exits at once (code 130).

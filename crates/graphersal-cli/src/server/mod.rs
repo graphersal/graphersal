@@ -65,6 +65,7 @@ mod bind;
 mod cost;
 mod layout;
 mod mcp;
+mod pool;
 mod start_stats;
 
 pub use cost::run as mcp_cost;
@@ -108,9 +109,20 @@ const READ_ONLY_BANNER: &str = "\
 
 type Job = Box<dyn FnOnce(&mut Session) + Send>;
 
+/// Where the session jobs run.
+enum Runner {
+    /// The read-write server: one session thread runs them one after the other.
+    Session(Mutex<Sender<Job>>),
+    /// The read-only serving mode: a pool of workers, each with its own session over the same
+    /// graph ([`pool`]).
+    Pool(Arc<pool::Pool>),
+}
+
 /// What every request handler shares.
 struct Context {
-    jobs: Mutex<Sender<Job>>,
+    runner: Runner,
+    /// The session-wide token of the session thread (`POST /api/cancel` of the read-write
+    /// server); the pool cancels per client instead.
     cancel: CancelToken,
     running: AtomicUsize,
     /// The playground UI: a directory over the embedded copy.
@@ -168,6 +180,8 @@ struct FeedEntry {
 pub(crate) struct Client {
     name: String,
     detail: Option<String>,
+    /// Which client of the name, for the pool's fairness and cancellation: an MCP session id.
+    key: Option<String>,
 }
 
 impl Client {
@@ -176,6 +190,24 @@ impl Client {
         Self {
             name: name.to_string(),
             detail: detail.map(str::to_string),
+            key: None,
+        }
+    }
+
+    /// The same client told apart from others of its name by `key` (an MCP session id).
+    pub(crate) fn with_key(mut self, key: Option<&str>) -> Self {
+        self.key = key.map(str::to_string);
+        self
+    }
+
+    /// The key the pool counts and cancels this client's jobs by: `mcp` (+ its MCP session
+    /// id), `ai` + the conversation id, or `page` + a browser page's `X-Graphersal-Client`.
+    fn pool_key(&self) -> String {
+        match (self.name.as_str(), &self.key, &self.detail) {
+            ("mcp", Some(key), _) => format!("mcp:{key}"),
+            ("mcp", None, _) => "mcp".to_string(),
+            ("ai", _, detail) => format!("ai:{}", detail.as_deref().unwrap_or_default()),
+            (name, _, _) => format!("page:{name}"),
         }
     }
 }
@@ -268,6 +300,36 @@ impl HttpError {
 
 /// Runs the dev server until the process is stopped; returns the exit code of a failed start.
 pub fn run(cli: &Cli) -> i32 {
+    // `--server --read-only`: the read-only serving mode, a pool of workers under safe default
+    // limits (each overridable by its flag).
+    let serving_defaults;
+    let cli = if cli.read_only_serving() {
+        serving_defaults = cli.with_serving_defaults();
+        &serving_defaults
+    } else {
+        cli
+    };
+    let pool = cli
+        .read_only_serving()
+        .then(|| Arc::new(pool::Pool::new(pool_config(cli))));
+    // The stateless MCP session ids of the serving mode: signed with the operator's key (the
+    // same on every replica) or a random key of this process. The key is never printed.
+    let session_key = match (&pool, std::env::var_os(SESSION_KEY_VAR)) {
+        (None, _) => None,
+        (Some(_), None) => Some(graphersal_mcp::SessionKey::random()),
+        (Some(_), Some(raw)) => match graphersal_mcp::SessionKey::new(raw.as_encoded_bytes()) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                errln!(
+                    "Error: {SESSION_KEY_VAR}: {err}\nHelp: set it to a random secret of at \
+                     least {} characters, the same on every replica (e.g. openssl rand -hex 32), \
+                     or leave it unset for a random key of this process.",
+                    graphersal_mcp::SessionKey::MIN_BYTES
+                );
+                return EXIT_USAGE_ERROR;
+            }
+        },
+    };
     // --host (or the container default): an address that does not resolve is a usage error.
     let plan = match bind::BindPlan::new(cli.host.as_deref(), bind::in_container()) {
         Ok(plan) => plan,
@@ -360,6 +422,10 @@ pub fn run(cli: &Cli) -> i32 {
     let serving = Arc::new(Serving {
         context: OnceLock::new(),
         stop: stop.clone(),
+        max_connections: cli.max_connections.or(pool
+            .is_some()
+            .then_some(crate::cli::DEFAULT_MAX_CONNECTIONS)),
+        connections: AtomicUsize::new(0),
     });
     let has_v6 = server_v6.is_some();
     if let Some(server_v6) = server_v6 {
@@ -422,20 +488,55 @@ pub fn run(cli: &Cli) -> i32 {
     let shared = store
         .as_ref()
         .map(|store| (store.clone(), store.location()));
-    let (jobs, cancel, commit_seq, statistics) =
-        match start_session(&cli.graph, source.as_deref(), presets, shared, preloaded) {
-            Ok(started) => started,
-            Err(message) => {
-                errln!("{message}");
-                return EXIT_USAGE_ERROR;
-            }
-        };
+    let (jobs, cancel, commit_seq, statistics) = match start_session(
+        &cli.graph,
+        source.as_deref(),
+        presets,
+        shared,
+        preloaded,
+        pool.clone(),
+    ) {
+        Ok(started) => started,
+        Err(message) => {
+            errln!("{message}");
+            return EXIT_USAGE_ERROR;
+        }
+    };
     let load_time = load_started.elapsed();
-    // Ctrl+C / SIGTERM: the running query is cancelled and the store closed cleanly.
+    // Ctrl+C / SIGTERM: the running query is cancelled and the store closed cleanly; in the
+    // read-only serving mode the running queries get the drain timeout first.
     if let Some(store) = &store {
         stop.set_store(store.clone());
     }
-    stop.set_cancel(cancel.clone());
+    match &pool {
+        None => stop.set_cancel(cancel.clone()),
+        Some(pool) => {
+            let pool = pool.clone();
+            let answering = serving.clone();
+            let timeout = std::time::Duration::from_secs(
+                cli.drain_timeout_s
+                    .unwrap_or(crate::cli::DEFAULT_DRAIN_TIMEOUT_S),
+            );
+            stop.set_drain(Arc::new(move || {
+                errln!(
+                    "Stopping: no new queries; the running ones get {} s to finish.",
+                    timeout.as_secs()
+                );
+                let cancelled = pool.drain(timeout);
+                if cancelled > 0 {
+                    errln!("{cancelled} running queries were cancelled after the drain timeout.");
+                }
+                // The answers of the jobs that ended are still being written: give the request
+                // threads a moment (new requests are answered 503 at once meanwhile).
+                let grace = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while answering.connections.load(Ordering::SeqCst) > 0
+                    && std::time::Instant::now() < grace
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }));
+        }
+    }
     let banner = if store.is_some() {
         STORE_BANNER
     } else if read_only {
@@ -574,17 +675,39 @@ pub fn run(cli: &Cli) -> i32 {
         errln!("Error: --mcp-config: {err}");
         return EXIT_USAGE_ERROR;
     }
-    let mcp = cli.mcp.then(|| match &cli.mcp_config {
-        // The configuration carries the shorthand flags already (`Cli::parse`).
-        Some(config) => {
-            mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), false).with_config(config.clone())
+    let mcp = cli.mcp.then(|| {
+        let mcp = match &cli.mcp_config {
+            // The configuration carries the shorthand flags already (`Cli::parse`).
+            Some(config) => mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), false)
+                .with_config(config.clone()),
+            None => mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), cli.mcp_query_tools)
+                .with_operator_notes(cli.mcp_instructions.clone())
+                .with_max_chars(cli.mcp_max_chars),
+        };
+        match session_key.clone() {
+            Some(key) => mcp.with_session_key(key),
+            None => mcp,
         }
-        None => mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), cli.mcp_query_tools)
-            .with_operator_notes(cli.mcp_instructions.clone())
-            .with_max_chars(cli.mcp_max_chars),
     });
     let mut server_section = crate::sections::Section::new("Server");
     server_section.row("limits", presets_summary(&presets_json));
+    if let Some(pool) = &pool {
+        let config = pool.config();
+        server_section.row(
+            "serving",
+            format!(
+                "read-only serving mode: {} workers in parallel, at most {} queries waiting \
+                 (up to {} s), {} per client, {} requests at once; SIGTERM drains for {} s",
+                config.workers,
+                config.queue,
+                config.queue_timeout.as_secs(),
+                config.max_inflight_per_client,
+                serving.max_connections.unwrap_or_default(),
+                cli.drain_timeout_s
+                    .unwrap_or(crate::cli::DEFAULT_DRAIN_TIMEOUT_S)
+            ),
+        );
+    }
     server_section.unwrapped("UI", ui.banner());
     if let Some(mcp) = &mcp {
         let (endpoint, connect) = mcp::banner(mcp, &plan.url_host(), port);
@@ -614,8 +737,12 @@ pub fn run(cli: &Cli) -> i32 {
         crate::sections::render(&[store_section, graph_section, models_section, server_section])
     );
     let url = plan.url(port);
+    let runner = match &pool {
+        Some(pool) => Runner::Pool(pool.clone()),
+        None => Runner::Session(Mutex::new(jobs)),
+    };
     let context = Arc::new(Context {
-        jobs: Mutex::new(jobs),
+        runner,
         cancel,
         running: AtomicUsize::new(0),
         ui,
@@ -640,7 +767,11 @@ pub fn run(cli: &Cli) -> i32 {
     let server_memory: Arc<dyn graphersal::storage::MemorySource> =
         Arc::new(ServerMemory(Arc::downgrade(&context)));
     graphersal::storage::register_memory_source(&server_memory);
-    start_job_ticker(&context);
+    // No scheduled jobs in the read-only serving mode: they belong to a Store, which it does
+    // not open.
+    if pool.is_none() {
+        start_job_ticker(&context);
+    }
     // From here on the requests reach the API (before: health endpoints and 503 answers).
     let _ = serving.context.set(context);
     // The address is the only line on stdout (tests and scripts read it), printed once the
@@ -720,21 +851,88 @@ fn start_job_ticker(context: &Arc<Context>) {
 struct Serving {
     context: OnceLock<Arc<Context>>,
     stop: Arc<crate::signals::Stop>,
+    /// `--max-connections` (the read-only serving mode's default without it): the requests
+    /// handled at once; `None`: no cap.
+    max_connections: Option<usize>,
+    /// The requests being handled.
+    connections: AtomicUsize,
 }
 
 /// Accepts the requests of `server`, each on a thread of its own; every listener (IPv4 and
 /// IPv6 loopback) feeds the same handler and session queue.
+///
+/// With a connection cap (`--max-connections`), a request beyond it is answered 503 with
+/// `Retry-After: 1` here, on the accept thread, without a thread of its own; the health probes
+/// are answered here too then (they never wait).
 fn accept(server: &Server, serving: &Arc<Serving>) {
     for request in server.incoming_requests() {
+        if let Some(max) = serving.max_connections
+            && serving.connections.load(Ordering::SeqCst) >= max
+        {
+            let response = health(serving, &request).unwrap_or_else(|| {
+                with_header(
+                    json_response(
+                        503,
+                        &json!({ "error": format!(
+                            "the server is busy: it handles {max} requests at once \
+                             (--max-connections); retry in a moment"
+                        ) }),
+                    ),
+                    "Retry-After",
+                    "1",
+                )
+            });
+            let _ = request.respond(response);
+            continue;
+        }
+        serving.connections.fetch_add(1, Ordering::SeqCst);
         let serving = serving.clone();
+        let counted = serving.clone();
         let spawned = std::thread::Builder::new()
             .name("graphersal-http".to_string())
-            .spawn(move || handle(&serving, request));
+            .spawn(move || {
+                let _done = Counted(serving.clone());
+                handle(&serving, request)
+            });
         if let Err(err) = spawned {
+            counted.connections.fetch_sub(1, Ordering::SeqCst);
             errln!("warning: cannot start a request thread: {err}");
         }
     }
 }
+
+/// A request being handled: counted down however its handler ends.
+struct Counted(Arc<Serving>);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The pool settings of the read-only serving mode from the command line and the defaults.
+fn pool_config(cli: &Cli) -> pool::PoolConfig {
+    let workers = cli.workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4)
+    });
+    pool::PoolConfig {
+        workers,
+        queue: cli.queue.unwrap_or(workers.saturating_mul(4)),
+        queue_timeout: std::time::Duration::from_secs(
+            cli.queue_timeout_s
+                .unwrap_or(crate::cli::DEFAULT_QUEUE_TIMEOUT_S),
+        ),
+        max_inflight_per_client: cli
+            .max_inflight_per_client
+            .unwrap_or(crate::cli::DEFAULT_MAX_INFLIGHT_PER_CLIENT),
+    }
+}
+
+/// The environment variable of the key that signs the stateless MCP session ids of the
+/// read-only serving mode (the same on every replica behind a load balancer).
+const SESSION_KEY_VAR: &str = "GRAPHERSAL_MCP_SESSION_KEY";
 
 /// The session presets of `--server`: the limit options the command line gave. Only what was
 /// given is set, so a server started without them runs like the playground (no Rhai limits, the
@@ -783,17 +981,29 @@ fn presets_summary(presets: &Value) -> String {
 /// cancellation token, the commit position of the loaded graph and its statistics
 /// ([`Session::statistics`] with `process.memory` added, printed at start), or the diagnostic
 /// of a graph that could not be loaded.
+///
+/// With a `pool` (the read-only serving mode) the thread loads the graph, then serves as the
+/// pool's first worker; the other workers start here, each with a session of its own over the
+/// same graph ([`Session::template`]).
 fn start_session(
     spec: &GraphSpec,
     source: Option<&Path>,
     presets: SessionPresets,
     shared: Option<(Arc<Store>, String)>,
     preloaded: Option<(Arc<graphersal::prelude::Graph>, String)>,
+    pool: Option<Arc<pool::Pool>>,
 ) -> Result<(Sender<Job>, CancelToken, u64, Value), String> {
+    type Started = (
+        CancelToken,
+        u64,
+        Value,
+        Option<graphersal_session::SessionTemplate>,
+    );
     let (jobs, queue) = channel::<Job>();
-    let (ready, started) = channel::<Result<(CancelToken, u64, Value), String>>();
+    let (ready, started) = channel::<Result<Started, String>>();
     let spec = spec.clone();
     let source = source.map(Path::to_path_buf);
+    let first_worker = pool.clone();
     std::thread::Builder::new()
         .name("graphersal-session".to_string())
         .stack_size(SESSION_STACK_BYTES)
@@ -837,11 +1047,32 @@ fn start_session(
                     let statistics = session
                         .statistics_with_process()
                         .map_err(|err| err.to_string())?;
-                    Ok((session.cancel_token(), seq, statistics))
+                    // The pool's other workers serve the same graph; the force-layout jobs
+                    // are shared by every page.
+                    let template = match &first_worker {
+                        None => None,
+                        Some(pool) => {
+                            // The graph refuses every write (--read-only): runs need no
+                            // whole-run unit, which would let one run at a time.
+                            session
+                                .set_read_only_runs(true)
+                                .map_err(|err| err.to_string())?;
+                            let template = session.template().map_err(|err| err.to_string())?;
+                            session
+                                .set_layout_job_limit(SHARED_LAYOUT_JOBS.max(pool.config().workers))
+                                .map_err(|err| err.to_string())?;
+                            Some(template)
+                        }
+                    };
+                    Ok((session.cancel_token(), seq, statistics, template))
                 });
             let failed = started.is_err();
             let _ = ready.send(started);
             if failed {
+                return;
+            }
+            if let Some(pool) = first_worker {
+                pool.work(&mut session);
                 return;
             }
             for job in queue {
@@ -852,11 +1083,34 @@ fn start_session(
             }
         })
         .map_err(|err| format!("Error: cannot start the session thread: {err}"))?;
-    started
+    let (cancel, commit_seq, statistics, template) = started
         .recv()
-        .map_err(|_| "Error: the session thread stopped while loading the graph".to_string())?
-        .map(|(cancel, commit_seq, statistics)| (jobs, cancel, commit_seq, statistics))
+        .map_err(|_| "Error: the session thread stopped while loading the graph".to_string())??;
+    if let (Some(pool), Some(template)) = (pool, template) {
+        for worker in 1..pool.config().workers {
+            let pool = pool.clone();
+            let template = template.clone();
+            std::thread::Builder::new()
+                .name(format!("graphersal-worker-{worker}"))
+                .stack_size(SESSION_STACK_BYTES)
+                .spawn(move || {
+                    graphersal::workload::set_thread_default(
+                        graphersal::workload::Channel::Playground,
+                        true,
+                    );
+                    match template.session() {
+                        Ok(mut session) => pool.work(&mut session),
+                        Err(err) => errln!("warning: a worker cannot start its session: {err}"),
+                    }
+                })
+                .map_err(|err| format!("Error: cannot start a worker thread: {err}"))?;
+        }
+    }
+    Ok((jobs, cancel, commit_seq, statistics))
 }
+
+/// Force-layout jobs the pages of the read-only serving mode share (at least one per worker).
+const SHARED_LAYOUT_JOBS: usize = 64;
 
 /// The title the session shows for the graph of `spec`: the file name of a file, the sample's
 /// title (`Session::sample_graphs`) of a sample.
@@ -939,6 +1193,7 @@ impl Context {
             "mcp" | "ai" => graphersal::workload::Channel::Mcp,
             _ => graphersal::workload::Channel::Playground,
         };
+        let key = client.pool_key();
         let job: Job = Box::new(move |session| {
             let before = position(session);
             let out = graphersal::workload::scope(channel, true, || job(session));
@@ -958,16 +1213,32 @@ impl Context {
             }
             let _ = reply.send(out);
         });
-        let sent = match self.jobs.lock() {
-            Ok(jobs) => jobs.send(job).is_ok(),
-            Err(_) => false,
-        };
-        if !sent {
-            return Err(HttpError(500, "the session is not running".to_string()));
+        match &self.runner {
+            Runner::Session(jobs) => {
+                let sent = match jobs.lock() {
+                    Ok(jobs) => jobs.send(job).is_ok(),
+                    Err(_) => false,
+                };
+                if !sent {
+                    return Err(HttpError(500, "the session is not running".to_string()));
+                }
+            }
+            Runner::Pool(pool) => {
+                pool.run(&key, job)
+                    .map_err(|refused| HttpError(503, refused.message(pool.config())))?;
+            }
         }
         answer
             .recv()
             .map_err(|_| HttpError(500, "the request failed inside the session".to_string()))
+    }
+
+    /// The pool of the read-only serving mode, if this is that mode.
+    fn pool(&self) -> Option<&Arc<pool::Pool>> {
+        match &self.runner {
+            Runner::Pool(pool) => Some(pool),
+            Runner::Session(_) => None,
+        }
     }
 
     /// A session method that fails with a diagnostic: the failure is a 422 answer.
@@ -1042,6 +1313,12 @@ fn handle(serving: &Serving, mut request: Request) {
     CLIENT.with(|c| *c.borrow_mut() = Client::with_detail(&client, None));
     let response = match route(context, &mut request) {
         Ok(response) => response,
+        // Busy (the pool of the read-only serving mode): the client retries.
+        Err(HttpError(503, message)) => with_header(
+            json_response(503, &json!({ "error": message })),
+            "Retry-After",
+            "1",
+        ),
         Err(HttpError(status, message)) => json_response(status, &json!({ "error": message })),
     };
     let _ = request.respond(response);
@@ -1134,6 +1411,17 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
     match (&method, endpoint) {
         (Method::Get, "info") => Ok(json_response(200, &info(context))),
         (Method::Get, "changes") => Ok(json_response(200, &changes(context))),
+        // The read-only serving mode: Stop of a page cancels that page's running queries only.
+        (Method::Post, "cancel") if context.pool().is_some() => {
+            let key = CLIENT.with(|c| c.borrow().pool_key());
+            let cancelled = context.pool().is_some_and(|pool| pool.cancel_client(&key));
+            Ok(json_response(200, &json!({ "cancelled": cancelled })))
+        }
+        // Scheduled jobs belong to a Store, which the read-only serving mode does not open.
+        (
+            Method::Post,
+            "jobs/define" | "jobs/drop" | "jobs/enable" | "jobs/schedule" | "jobs/run",
+        ) if context.pool().is_some() => Err(HttpError(409, NOT_SERVING.to_string())),
         (Method::Post, "cancel") => {
             let running = context.running.load(Ordering::SeqCst) > 0;
             if running {
@@ -1609,8 +1897,24 @@ fn openapi() -> Value {
     spec
 }
 
+/// The answer of what the read-only serving mode does not offer.
+const NOT_SERVING: &str = "not available in the read-only serving mode (--server --read-only): \
+    scheduled jobs, the Store menu, views, saving and every write belong to a server started \
+    without --read-only";
+
 /// `GET /api/info`: what the UI needs to switch to this server; answered without the session.
 fn info(context: &Context) -> Value {
+    let mut info = info_fields(context);
+    // The read-only serving mode: the pool's settings and load (only then, so the read-write
+    // server's answer is unchanged).
+    if let Some(pool) = context.pool() {
+        info["serving"] = pool.status();
+    }
+    info
+}
+
+/// The fields of `GET /api/info` every server answers.
+fn info_fields(context: &Context) -> Value {
     json!({
         "server": SERVER_ID,
         "name": "server",

@@ -217,6 +217,8 @@ pub struct Session {
     memory: Arc<dyn graphersal::storage::MemorySource>,
     /// The scheduled jobs of the active store and the time zone they run in ([`crate::jobs`]).
     pub(crate) jobs: crate::jobs::SessionJobs,
+    /// Runs open no whole-run unit ([`Self::set_read_only_runs`]).
+    read_only_runs: bool,
 }
 
 /// The session's part of a memory report (`session`: its layout jobs and cached layouts,
@@ -238,6 +240,36 @@ impl graphersal::storage::MemorySource for SessionMemory {
             graphersal::storage::MemoryComponent::estimated("session", layouts.memory_bytes())
                 .with_detail("layout jobs and cached layouts"),
         );
+    }
+}
+
+/// Everything a [`Session`] needs to serve another session's graph on another thread
+/// ([`Session::template`]): `Send` and `Sync`, unlike the session itself (its Rhai engine is
+/// neither), so a host builds one session from it on each of its worker threads
+/// ([`Self::session`]).
+#[derive(Clone)]
+pub struct SessionTemplate {
+    graph: Arc<dyn SessionGraph>,
+    factory: Arc<dyn GraphFactory>,
+    name: String,
+    kind: String,
+    presets: SessionPresets,
+    warnings: Vec<String>,
+    layouts: Arc<Mutex<crate::layout::LayoutJobs>>,
+    /// The memory source of the template's session, shared and registered once: the layout
+    /// jobs are counted once however many sessions share them.
+    memory: Arc<dyn graphersal::storage::MemorySource>,
+    read_only_runs: bool,
+}
+
+impl SessionTemplate {
+    /// A new session serving the template's graph: its own engine (built here, with the
+    /// presets' limits), cancellation token and run state; the shared layout jobs; no stores
+    /// and no scheduled jobs.
+    ///
+    /// Fails when the session cannot be built (reserved; it does not fail today).
+    pub fn session(&self) -> Result<Session, SessionError> {
+        Ok(Session::assemble(self.clone()))
     }
 }
 
@@ -348,6 +380,38 @@ impl Session {
         factory: Arc<dyn GraphFactory>,
         presets: SessionPresets,
     ) -> Self {
+        let layouts = Arc::new(Mutex::new(crate::layout::LayoutJobs::default()));
+        let memory: Arc<dyn graphersal::storage::MemorySource> = Arc::new(SessionMemory {
+            layouts: Arc::downgrade(&layouts),
+        });
+        graphersal::storage::register_memory_source(&memory);
+        Self::assemble(SessionTemplate {
+            graph: factory.empty(),
+            factory,
+            name: "Empty graph".to_string(),
+            kind: "empty".to_string(),
+            presets,
+            warnings: Vec::new(),
+            layouts,
+            memory,
+            read_only_runs: false,
+        })
+    }
+
+    /// A session of `parts`: its own engine (with the presets' limits), cancellation token and
+    /// run state; the graph, storage, layout jobs and memory source as `parts` hold them.
+    fn assemble(parts: SessionTemplate) -> Self {
+        let SessionTemplate {
+            graph,
+            factory,
+            name,
+            kind,
+            presets,
+            warnings,
+            layouts,
+            memory,
+            read_only_runs,
+        } = parts;
         let cancel = CancelToken::new();
         let mut engine = graphersal::script::engine_with_options(
             &presets.limits,
@@ -383,20 +447,15 @@ impl Session {
             let elapsed = start.elapsed();
             (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
         });
-        let layouts = Arc::new(Mutex::new(crate::layout::LayoutJobs::default()));
-        let memory: Arc<dyn graphersal::storage::MemorySource> = Arc::new(SessionMemory {
-            layouts: Arc::downgrade(&layouts),
-        });
-        graphersal::storage::register_memory_source(&memory);
         Self {
-            graph: factory.empty(),
+            graph,
             factory,
-            name: "Empty graph".to_string(),
-            kind: "empty".to_string(),
+            name,
+            kind,
             engine,
             presets,
             started,
-            warnings: Vec::new(),
+            warnings,
             cancel,
             run_cancel,
             stores: None,
@@ -404,7 +463,60 @@ impl Session {
             layouts,
             memory,
             jobs: crate::jobs::SessionJobs::default(),
+            read_only_runs,
         }
+    }
+
+    /// Declares that the served graph never changes while this session (and the sessions of
+    /// its [`Self::template`]) serve it: the host refuses every write, e.g. with a commit hook
+    /// that vetoes every unit (the dev server's `--read-only`). A run then opens no whole-run
+    /// unit: such a unit holds the graph's lock upgradable, which one thread at a time may do,
+    /// so sessions over the same graph would run their queries one after the other. Without
+    /// it every traversal of a run is still a unit of its own, so a write in a run is refused by
+    /// the graph as before; what is lost is only the rollback of a run's EARLIER statements
+    /// when a later one fails, which a graph that refuses every write never needs. A run that
+    /// changed the graph anyway (a host that did not refuse the write) reports it in
+    /// `changes.data`.
+    ///
+    /// Fails when the setting cannot be applied (reserved; it does not fail today).
+    pub fn set_read_only_runs(&mut self, read_only: bool) -> Result<(), SessionError> {
+        self.read_only_runs = read_only;
+        Ok(())
+    }
+
+    /// What another session needs to serve THIS session's graph on another thread (a host that
+    /// runs several sessions over one immutable graph in parallel: the dev server's read-only
+    /// serving mode with its pool of worker threads): the same graph (the same `Arc`, so its
+    /// embedding models and statistics are shared, never loaded twice), storage, name, presets
+    /// and the SAME force-layout jobs (a layout started through one session continues through
+    /// another). A session built from it ([`SessionTemplate::session`]) has its own engine and
+    /// cancellation token, and no stores and no scheduled jobs: the Store menu and the jobs
+    /// stay with this session.
+    ///
+    /// Fails when the session's parts cannot be shared (reserved; it does not fail today).
+    pub fn template(&self) -> Result<SessionTemplate, SessionError> {
+        Ok(SessionTemplate {
+            graph: self.graph.clone(),
+            factory: self.factory.clone(),
+            name: self.name.clone(),
+            kind: self.kind.clone(),
+            presets: self.presets.clone(),
+            warnings: self.warnings.clone(),
+            layouts: self.layouts.clone(),
+            memory: self.memory.clone(),
+            read_only_runs: self.read_only_runs,
+        })
+    }
+
+    /// Keeps at most `jobs` force-layout jobs (running, or finished but not read yet) in the
+    /// layout jobs this session shares through [`Self::template`]; the oldest is forgotten
+    /// first. The default, 4, suits one browser page; a host serving many pages from sessions
+    /// that share the jobs raises it. At least 1.
+    ///
+    /// Fails when the layout jobs cannot be locked (reserved; a poisoned lock is used as it is).
+    pub fn set_layout_job_limit(&self, jobs: usize) -> Result<(), SessionError> {
+        self.layouts().set_limit(jobs);
+        Ok(())
     }
 
     /// The token that cancels the running [`Self::execute`] from another thread: the query
@@ -1104,19 +1216,26 @@ impl Session {
         // it, and it commits only when the run is reported as `ok`, so a run that shows an
         // error leaves nothing behind. The session is single-threaded and owns the graph, so
         // nobody else writes between the statements.
-        let mark = match self.graph.begin_run() {
-            Ok(mark) => mark,
-            Err(err) => {
-                let diagnostic = format_diagnostic(&TraverserError::from(err));
-                let out = Outcome::failed("unknown", &error_of_diagnostic(&diagnostic));
-                return self.response_of_refused_run(out, started);
+        // A session over a graph that never changes ([`Self::set_read_only_runs`]) opens no
+        // whole-run unit: a unit holds the graph's lock upgradable, which only one thread may
+        // do at a time, so sessions over the same graph could not run in parallel.
+        let mark = if self.read_only_runs {
+            None
+        } else {
+            match self.graph.begin_run() {
+                Ok(mark) => Some(mark),
+                Err(err) => {
+                    let diagnostic = format_diagnostic(&TraverserError::from(err));
+                    let out = Outcome::failed("unknown", &error_of_diagnostic(&diagnostic));
+                    return self.response_of_refused_run(out, started);
+                }
             }
         };
         // A panic in the run (an engine bug; the dev server catches it and keeps the session)
         // rolls the unit back, so the thread does not keep holding it.
         let unwind_guard = RunUnitGuard {
             graph: self.graph.clone(),
-            mark: Some(mark),
+            mark,
         };
         let mut out = match self.engine.eval_with_scope::<Dynamic>(&mut scope, script) {
             Ok(value) => self.classify(value, hint, options, &render),
@@ -1135,7 +1254,12 @@ impl Session {
         // The first failed read after the run: it turns the answer into an error (the
         // `changes` and `mutated` fields still say what was committed), never an empty part.
         let mut read_error: Option<GraphError> = None;
-        if out.ok {
+        if let (true, None) = (out.ok, mark) {
+            // No run unit: every traversal was a unit of its own, a write refused by the graph.
+            if self.graph.last_commit_seq().ok() != Some(seq_before) {
+                changes.data = true;
+            }
+        } else if let (true, Some(mark)) = (out.ok, mark) {
             let committed = self.graph.run_changes(mark).and_then(|unit| {
                 changes = Changes {
                     data: unit.data,
@@ -1162,9 +1286,10 @@ impl Session {
                     (Err(err), _) | (_, Err(err)) => read_error = Some(err),
                 }
             }
-        } else if let Err(err) = self
-            .graph
-            .rollback_run(mark, &RollbackReason::failed(&"the playground run failed"))
+        } else if let Some(mark) = mark
+            && let Err(err) = self
+                .graph
+                .rollback_run(mark, &RollbackReason::failed(&"the playground run failed"))
         {
             read_error.get_or_insert(err);
         }
