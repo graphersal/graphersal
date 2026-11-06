@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use crate::catalog::all_tools;
+use crate::catalog::is_built_in;
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::resources::{RESOURCES, read_resource};
@@ -426,7 +426,7 @@ impl Mcp {
                 let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                 // A built-in tool by its name; a saved query's own tool ran when the call was
                 // not refused; any other name is an unknown tool.
-                let built_in = all_tools().iter().any(|t| t.name == name);
+                let built_in = is_built_in(name);
                 let (tool, saved_query) = match (&called, built_in) {
                     (_, true) if name == "run_saved_query" => (
                         Some(name),

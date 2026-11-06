@@ -774,6 +774,15 @@ pub(crate) fn all_tools() -> Vec<Tool> {
     ]
 }
 
+/// Whether `name` is a built-in tool, without building the catalog (the statistics ask it on
+/// every call; [`all_tools`] builds every description and schema).
+pub(crate) fn is_built_in(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| all_tools().iter().map(|t| t.name).collect())
+        .contains(&name)
+}
+
 /// The tools offered: all of them, only the reading ones (and `query`, `gql`,
 /// `run_saved_query`, which run under the read-only authorizer there) when `read_only`
 /// (`--mcp-read-only`, an `--ai` file's `read_only`).
