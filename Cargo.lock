@@ -651,6 +651,7 @@ version = "0.5.2"
 dependencies = [
  "ctrlc",
  "graphersal",
+ "graphersal-mcp",
  "graphersal-session",
  "lz4_flex",
  "rand 0.8.8",
@@ -662,6 +663,16 @@ dependencies = [
  "tiny_http",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "graphersal-mcp"
+version = "0.5.2"
+dependencies = [
+ "graphersal",
+ "graphersal-session",
+ "rand 0.8.8",
+ "serde_json",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 //!
 //! The loop runs in this process (the API key never reaches the page): a turn sends the
 //! conversation to the configured provider ([`crate::ai::client::Client`]), runs the tool calls
-//! it asks for through the SAME handlers as the MCP endpoint ([`mcp::call_tool`], in process,
+//! it asks for through the SAME handlers as the MCP endpoint ([`graphersal_mcp::call_tool`], in process,
 //! without the MCP transport; they queue on the session thread like every browser and MCP call,
 //! and the change feed records their commits with the client `ai` and the conversation id as
 //! `detail`), sends the results back, and repeats until the model answers without a tool call
@@ -61,8 +61,10 @@ use crate::ai::client::{
 use crate::ai::config::{AiConfig, Provider};
 use crate::ai::history::History;
 
-use super::mcp::{self, ToolCaller};
-use super::{Answer, Client, Context, HttpError, json_body, json_response, query_number, value};
+use graphersal_mcp::{ClientRef, ToolCaller};
+
+use super::mcp;
+use super::{Answer, Context, HttpError, json_body, json_response, query_number, value};
 
 /// Most conversations kept; creating one more drops the oldest (its turn stopped).
 const MAX_CONVERSATIONS: usize = 64;
@@ -367,9 +369,10 @@ impl Ai {
         if let Some(prefix) = self.prefix.get() {
             return Ok(prefix.clone());
         }
-        let reference = mcp::dsl_reference_text(context)?;
+        let reference = graphersal_mcp::dsl_reference_text(context, &mcp::current_client())
+            .map_err(|err| err.to_string())?;
         let mut prefix = String::new();
-        prefix.push_str(mcp::instructions());
+        prefix.push_str(graphersal_mcp::instructions());
         prefix.push_str("\n\n");
         prefix.push_str(AGENT_RULES);
         prefix.push_str("\n\n");
@@ -613,13 +616,12 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
     };
     let config = ai.config();
     let max_calls = config.max_tool_calls_per_turn;
-    let caller = ToolCaller {
-        read_only: config.read_only,
-        query_tools: false,
-        client: Client::with_detail("ai", Some(&conversation.id)),
-        cancel: Some(cancel),
-        max_chars: mcp::MAX_TEXT_CHARS,
-    };
+    let caller = ToolCaller::new(
+        ClientRef::new("ai", Some(&conversation.id)),
+        config.read_only,
+    )
+    .with_cancel(cancel)
+    .with_max_chars(graphersal_mcp::MAX_TEXT_CHARS);
     // Ends the turn with an error event, unless it was stopped meanwhile.
     let fail = |message: String, help: String, calls: u32| {
         if let Ok(mut state) = conversation.state.lock()
@@ -629,7 +631,7 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
             state.finish(false, calls, false);
         }
     };
-    let tools = match mcp::tool_listings(context, config.read_only, false) {
+    let tools = match graphersal_mcp::tool_listings(context, &caller) {
         Ok(listed) => listed.iter().map(tool_definition).collect::<Vec<_>>(),
         Err(err) => {
             return fail(
@@ -908,7 +910,7 @@ fn run_call(context: &Context, caller: &ToolCaller, call: &ToolCall) -> (String,
             );
         }
     };
-    match mcp::call_tool(context, caller, &call.name, &args) {
+    match graphersal_mcp::call_tool(context, caller, &call.name, &args) {
         Ok(outcome) => (outcome.text, outcome.is_error),
         Err(refused) => (refused.message().to_string(), true),
     }

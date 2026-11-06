@@ -46,14 +46,15 @@ path = "src/main.rs"
 [features]
 default = ["dev-server", "ai", "model2vec"]
 # `graphersal --server`: the playground UI over HTTP on 127.0.0.1 (DEV mode, unstable).
-# `--mcp` adds the MCP endpoint `/mcp`; `rand` (already in the tree through graphersal) makes
-# its session ids unguessable.
-dev-server = ["dep:tiny_http", "dep:rand"]
+# `--mcp` adds the MCP endpoint `/mcp` (the crate `graphersal-mcp`, adapted to `tiny_http` in
+# `src/server/mcp.rs`).
+dev-server = ["dep:tiny_http", "dep:graphersal-mcp"]
 # `--ai FILE`: the AI Chat of the dev server, an LLM agent working on the served graph
 # (EXPERIMENTAL). `ureq` calls the provider (OpenAI-compatible Chat Completions or Anthropic
 # Messages) over HTTPS; `lz4_flex` (already in the tree through graphersal's `persist`)
-# compresses the stored chat history.
-ai = ["dev-server", "dep:ureq", "dep:lz4_flex"]
+# compresses the stored chat history; `rand` (already in the tree through graphersal) makes the
+# conversation ids unguessable.
+ai = ["dev-server", "dep:ureq", "dep:lz4_flex", "dep:rand"]
 # Real embedding models: the engine runs the Model2Vec models a database keeps (graphersal's
 # `model2vec` feature, pure Rust), and `graphersal embed-model download <repo>` fetches one
 # from Hugging Face over HTTPS (`ureq`, SHA-256 checked with `ring`, the manifest
@@ -73,6 +74,8 @@ tracing = { workspace = true }
 # server's session.
 graphersal-session = { workspace = true }
 tiny_http = { workspace = true, optional = true }
+# The MCP endpoint of the dev server (`--mcp`) and the tools of its AI Chat.
+graphersal-mcp = { workspace = true, optional = true }
 # Always built: `--args-file` reads JSON (already in the tree through graphersal).
 serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
