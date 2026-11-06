@@ -422,9 +422,9 @@ pub fn run(cli: &Cli) -> i32 {
     let serving = Arc::new(Serving {
         context: OnceLock::new(),
         stop: stop.clone(),
-        max_connections: cli
-            .max_connections
-            .or(pool.is_some().then_some(crate::cli::DEFAULT_MAX_CONNECTIONS)),
+        max_connections: cli.max_connections.or(pool
+            .is_some()
+            .then_some(crate::cli::DEFAULT_MAX_CONNECTIONS)),
         connections: AtomicUsize::new(0),
     });
     let has_v6 = server_v6.is_some();
@@ -512,6 +512,7 @@ pub fn run(cli: &Cli) -> i32 {
         None => stop.set_cancel(cancel.clone()),
         Some(pool) => {
             let pool = pool.clone();
+            let answering = serving.clone();
             let timeout = std::time::Duration::from_secs(
                 cli.drain_timeout_s
                     .unwrap_or(crate::cli::DEFAULT_DRAIN_TIMEOUT_S),
@@ -524,6 +525,14 @@ pub fn run(cli: &Cli) -> i32 {
                 let cancelled = pool.drain(timeout);
                 if cancelled > 0 {
                     errln!("{cancelled} running queries were cancelled after the drain timeout.");
+                }
+                // The answers of the jobs that ended are still being written: give the request
+                // threads a moment (new requests are answered 503 at once meanwhile).
+                let grace = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while answering.connections.load(Ordering::SeqCst) > 0
+                    && std::time::Instant::now() < grace
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             }));
         }
@@ -984,7 +993,12 @@ fn start_session(
     preloaded: Option<(Arc<graphersal::prelude::Graph>, String)>,
     pool: Option<Arc<pool::Pool>>,
 ) -> Result<(Sender<Job>, CancelToken, u64, Value), String> {
-    type Started = (CancelToken, u64, Value, Option<graphersal_session::SessionTemplate>);
+    type Started = (
+        CancelToken,
+        u64,
+        Value,
+        Option<graphersal_session::SessionTemplate>,
+    );
     let (jobs, queue) = channel::<Job>();
     let (ready, started) = channel::<Result<Started, String>>();
     let spec = spec.clone();
@@ -1400,9 +1414,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         // The read-only serving mode: Stop of a page cancels that page's running queries only.
         (Method::Post, "cancel") if context.pool().is_some() => {
             let key = CLIENT.with(|c| c.borrow().pool_key());
-            let cancelled = context
-                .pool()
-                .is_some_and(|pool| pool.cancel_client(&key));
+            let cancelled = context.pool().is_some_and(|pool| pool.cancel_client(&key));
             Ok(json_response(200, &json!({ "cancelled": cancelled })))
         }
         // Scheduled jobs belong to a Store, which the read-only serving mode does not open.

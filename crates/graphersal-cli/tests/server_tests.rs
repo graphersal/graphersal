@@ -7415,3 +7415,409 @@ fn a_writing_tool_in_the_mcp_config_of_a_read_only_server_stops_the_start() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// The read-only serving mode (`--server --read-only`): a pool of workers, each with its own
+/// session over the same graph; a bounded queue, a per-client limit, cancellation per page,
+/// stateless MCP session ids and a graceful stop.
+mod read_only_serving {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+
+    use super::{Answer, DevServer, JSON, McpClient, execute, get, mcp_post, post, request, start};
+
+    /// A query of the page `page` (`X-Graphersal-Client`).
+    fn page_execute(port: u16, page: &str, script: &str) -> Answer {
+        let body = json!({ "script": script }).to_string();
+        let client = format!("X-Graphersal-Client: {page}");
+        request(port, "POST", "/api/execute", Some(&body), &[JSON, &client])
+    }
+
+    fn page_cancel(port: u16, page: &str) -> Value {
+        let client = format!("X-Graphersal-Client: {page}");
+        request(port, "POST", "/api/cancel", Some(""), &[&client]).json()
+    }
+
+    /// Waits until the pool runs `running` jobs.
+    fn wait_running(port: u16, running: u64) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while get(port, "/api/info").json()["serving"]["running"] != running {
+            assert!(
+                Instant::now() < deadline,
+                "the pool never ran {running} jobs"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A query that runs until it is cancelled (with `--max-operations 0`).
+    const ENDLESS: &str = "let n = 0; loop { n += 1; }";
+
+    fn header(answer: &Answer, name: &str) -> Option<String> {
+        answer.headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    /// Starts a server with `env` set; its port from the stdout address line.
+    fn start_with_env(args: &[&str], env: &[(&str, &str)]) -> DevServer {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_graphersal"));
+        command
+            .args(args)
+            .args(["--server", "--port", "0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("graphersal starts");
+        let port = port_of(&mut child);
+        DevServer { child, port }
+    }
+
+    fn port_of(child: &mut Child) -> u16 {
+        use std::io::BufRead;
+        let stdout = child.stdout.take().expect("stdout");
+        let mut line = String::new();
+        std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .unwrap();
+        line.trim()
+            .trim_end_matches('/')
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("no address on stdout: {line:?}"))
+    }
+
+    #[test]
+    fn mcp_calls_run_in_parallel_on_the_workers() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--workers",
+            "3",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let slow = json!({"script": "let s = 0; for i in 0..1500000 { s += i; } s"});
+        let mut one = McpClient::connect(port, &[]);
+        let started = Instant::now();
+        let (error, text) = one.call("query", slow.clone());
+        assert!(!error, "{text}");
+        let single = started.elapsed();
+        let started = Instant::now();
+        let calls: Vec<_> = (0..3)
+            .map(|_| {
+                let slow = slow.clone();
+                std::thread::spawn(move || {
+                    let mut client = McpClient::connect(port, &[]);
+                    client.call("query", slow)
+                })
+            })
+            .collect();
+        for call in calls {
+            let (error, text) = call.join().unwrap();
+            assert!(!error && text.contains("1124999250000"), "{text}");
+        }
+        let parallel = started.elapsed();
+        // One after the other would take three times as long.
+        assert!(
+            parallel < single * 2,
+            "3 queries in parallel took {parallel:?}, one {single:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_answers_503_with_retry_after() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--workers",
+            "1",
+            "--queue",
+            "1",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let busy = std::thread::spawn(move || page_execute(port, "a", ENDLESS));
+        wait_running(port, 1);
+        let waiting = std::thread::spawn(move || page_execute(port, "b", "1 + 1"));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while get(port, "/api/info").json()["serving"]["queued"] != 1 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let refused = page_execute(port, "c", "1 + 1");
+        assert_eq!(refused.status, 503, "{}", refused.body);
+        assert_eq!(header(&refused, "Retry-After").as_deref(), Some("1"));
+        assert!(refused.json()["error"].as_str().unwrap().contains("busy"));
+        // The health probes never wait.
+        assert_eq!(get(port, "/readyz").status, 200);
+        assert_eq!(page_cancel(port, "a")["cancelled"], true);
+        assert!(busy.join().unwrap().body.contains("cancelled"));
+        assert_eq!(waiting.join().unwrap().json()["ok"], true);
+        let info = get(port, "/api/info").json();
+        assert_eq!(info["serving"]["refused"]["queueFull"], 1, "{info}");
+    }
+
+    #[test]
+    fn one_client_cannot_take_every_worker() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--workers",
+            "4",
+            "--max-inflight-per-client",
+            "1",
+            "--queue-timeout",
+            "1",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let busy = std::thread::spawn(move || page_execute(port, "a", ENDLESS));
+        wait_running(port, 1);
+        // The page's second query waits for its own slot, then is refused...
+        let started = Instant::now();
+        let refused = page_execute(port, "a", "1 + 1");
+        assert_eq!(refused.status, 503, "{}", refused.body);
+        assert_eq!(header(&refused, "Retry-After").as_deref(), Some("1"));
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        // ... while another page is served at once.
+        assert_eq!(page_execute(port, "b", "1 + 1").json()["ok"], true);
+        // An MCP session's slots are its own: a busy session gets 503 for its tool call.
+        let agent = McpClient::connect(port, &[]);
+        let endless = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "query", "arguments": {"script": ENDLESS}}})
+        .to_string();
+        let session = agent.headers();
+        let looping = {
+            let session = session.clone();
+            let endless = endless.clone();
+            std::thread::spawn(move || mcp_post(port, &session, &endless))
+        };
+        wait_running(port, 2);
+        let busy_call = mcp_post(port, &session, &endless.replace("\"id\":5", "\"id\":6"));
+        assert_eq!(busy_call.status, 503, "{}", busy_call.body);
+        assert_eq!(header(&busy_call, "Retry-After").as_deref(), Some("1"));
+        let mut other = McpClient::connect(port, &[]);
+        let (error, text) = other.call("query", json!({"script": "g.v().count()"}));
+        assert!(!error, "{text}");
+        assert_eq!(page_cancel(port, "a")["cancelled"], true);
+        busy.join().unwrap();
+        // The agent's endless call ends with the evaluation timeout or the server's stop.
+        drop(server);
+        let _ = looping.join();
+    }
+
+    #[test]
+    fn stop_of_one_page_cancels_only_its_own_query() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--workers",
+            "2",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let a = std::thread::spawn(move || page_execute(port, "a", ENDLESS));
+        let b = std::thread::spawn(move || page_execute(port, "b", ENDLESS));
+        wait_running(port, 2);
+        // A page with nothing running cancels nothing.
+        assert_eq!(page_cancel(port, "c")["cancelled"], false);
+        assert_eq!(page_cancel(port, "a")["cancelled"], true);
+        let a = a.join().unwrap().json();
+        assert_eq!(a["ok"], false, "{a}");
+        assert!(a.to_string().contains("cancelled"), "{a}");
+        // "b" still runs.
+        wait_running(port, 1);
+        assert!(!b.is_finished());
+        assert_eq!(page_cancel(port, "b")["cancelled"], true);
+        assert_eq!(b.join().unwrap().json()["ok"], false);
+    }
+
+    #[test]
+    fn writes_are_refused_and_what_is_not_served_says_so() {
+        let server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--workers",
+            "2",
+        ]);
+        let port = server.port;
+        let info = get(port, "/api/info").json();
+        assert_eq!(info["readOnly"], true, "{info}");
+        assert_eq!(info["serving"]["workers"], 2, "{info}");
+        // The safe defaults of the mode.
+        assert_eq!(
+            info["presets"]["options"]["evaluationTimeout"], 30000,
+            "{info}"
+        );
+        assert_eq!(
+            info["presets"]["scriptLimits"]["max_operations"], 10000000,
+            "{info}"
+        );
+        let write = execute(port, r#"g.add_v("person").iterate()"#);
+        assert_eq!(write["ok"], false, "{write}");
+        assert!(write.to_string().contains("read-only"), "{write}");
+        assert_eq!(get(port, "/api/graph").json()["vertexCount"], 6);
+        let mut agent = McpClient::connect(port, &[]);
+        let (error, text) = agent.call("gql", json!({"query": "INSERT (:tag {name: 'a'})"}));
+        assert!(error, "{text}");
+        let job = post(port, "/api/jobs/define", r#"{"name": "x"}"#);
+        assert_eq!(job.status, 409, "{}", job.body);
+        assert!(job.body.contains("read-only serving mode"), "{}", job.body);
+        assert_eq!(get(port, "/api/store").json()["store"], Value::Null);
+        assert_eq!(post(port, "/api/save", "{}").status, 409);
+        // Reads work.
+        assert_eq!(execute(port, "g.v().count().next()")["ok"], true);
+        let (error, text) = agent.call(
+            "gql",
+            json!({"query": "MATCH (p:person) RETURN p.name AS n ORDER BY n LIMIT 1"}),
+        );
+        assert!(!error && text.contains("josh"), "{text}");
+    }
+
+    #[test]
+    fn stateless_mcp_session_ids_hold_across_servers_with_the_same_key() {
+        let key = "0123456789abcdef0123456789abcdef-test-key";
+        let args = [
+            "--graph",
+            "modern",
+            "--read-only",
+            "--mcp",
+            "--workers",
+            "1",
+        ];
+        let one = start_with_env(&args, &[("GRAPHERSAL_MCP_SESSION_KEY", key)]);
+        let two = start_with_env(&args, &[("GRAPHERSAL_MCP_SESSION_KEY", key)]);
+        let other = start_with_env(
+            &args,
+            &[(
+                "GRAPHERSAL_MCP_SESSION_KEY",
+                "another key that is also long enough to be accepted",
+            )],
+        );
+        let mut first = McpClient::connect(one.port, &[]);
+        // More than the 64 sessions the read-write server remembers: none is evicted.
+        for _ in 0..70 {
+            McpClient::connect(one.port, &[]);
+        }
+        let (error, text) = first.call("query", json!({"script": "g.v().count()"}));
+        assert!(!error, "{text}");
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let headers = first.headers();
+        assert_eq!(mcp_post(two.port, &headers, ping).status, 200);
+        let refused = mcp_post(other.port, &headers, ping);
+        assert_eq!(refused.status, 404, "{}", refused.body);
+        // A made-up id is unknown too.
+        let made_up = ["Mcp-Session-Id: 00ff".to_string()];
+        assert_eq!(mcp_post(one.port, &made_up, ping).status, 404);
+        // A key that is too short is a usage error; it is never printed.
+        let output = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(args)
+            .args(["--server", "--port", "0"])
+            .env("GRAPHERSAL_MCP_SESSION_KEY", "short-secret")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("GRAPHERSAL_MCP_SESSION_KEY"), "{stderr}");
+        assert!(!stderr.contains("short-secret"), "{stderr}");
+    }
+
+    #[test]
+    fn sigterm_drains_the_running_queries_then_exits_0() {
+        let mut server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--workers",
+            "2",
+            "--drain-timeout",
+            "2",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        // One query finishes within the drain timeout, one would never finish.
+        let short = std::thread::spawn(move || {
+            page_execute(port, "a", "let s = 0; for i in 0..1500000 { s += i; } s")
+        });
+        let endless = std::thread::spawn(move || page_execute(port, "b", ENDLESS));
+        wait_running(port, 2);
+        let started = Instant::now();
+        let status = Command::new("kill")
+            .args(["-TERM", &server.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::thread::sleep(Duration::from_millis(100));
+        // Not ready any more, and no new query is taken.
+        assert_eq!(get(port, "/readyz").status, 503);
+        assert_eq!(page_execute(port, "c", "1 + 1").status, 503);
+        assert_eq!(short.join().unwrap().json()["ok"], true);
+        let endless = endless.join().unwrap().json();
+        assert!(endless.to_string().contains("cancelled"), "{endless}");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let exit = loop {
+            if let Some(exit) = server.child.try_wait().unwrap() {
+                break exit;
+            }
+            assert!(Instant::now() < deadline, "the server did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(exit.success(), "{exit:?}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_pool_flags_need_server_and_read_only() {
+        for args in [
+            &["--graph", "modern", "--server", "--workers", "2"][..],
+            &[
+                "--graph",
+                "modern",
+                "--server",
+                "--read-only",
+                "--workers",
+                "0",
+            ],
+            &[
+                "--graph",
+                "modern",
+                "--server",
+                "--read-only",
+                "--queue",
+                "x",
+            ],
+            &["--graph", "modern", "--drain-timeout", "3", "-e", "1"],
+            &["--graph", "modern", "--max-connections", "3", "-e", "1"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+                .args(args)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+        }
+    }
+}

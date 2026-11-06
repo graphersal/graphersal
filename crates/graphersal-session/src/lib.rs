@@ -65,7 +65,8 @@ pub mod views;
 
 pub use error::SessionError;
 pub use session::{
-    RunOptions, Session, SessionPresets, SessionTemplate, playground_authorizer, read_only_authorizer,
+    RunOptions, Session, SessionPresets, SessionTemplate, playground_authorizer,
+    read_only_authorizer,
 };
 pub use storage::{
     GraphFactory, IntoSessionGraph, SessionGraph, SessionStore, StorageKind, StoreView,

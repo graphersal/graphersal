@@ -206,7 +206,9 @@ impl ClientNames {
     fn bytes(&self) -> u64 {
         self.names
             .values()
-            .map(|(client, _)| (std::mem::size_of::<(u64, Value, u64)>() + client.to_string().len()) as u64)
+            .map(|(client, _)| {
+                (std::mem::size_of::<(u64, Value, u64)>() + client.to_string().len()) as u64
+            })
             .sum()
     }
 }

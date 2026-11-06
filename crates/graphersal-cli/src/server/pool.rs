@@ -386,7 +386,11 @@ mod tests {
             assert_eq!(thread.join().unwrap(), Ok(()));
         }
         assert_eq!(ran.load(Ordering::SeqCst), 4);
-        assert!(started.elapsed() < Duration::from_millis(1100), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_millis(1100),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -407,8 +411,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         // The worker runs "a", "b" waits: the queue of one is full.
         assert_eq!(pool.run("c", sleeper(1, &ran)), Err(Refused::QueueFull));
-        // "a" has 1 of 2 slots... a second job of "a" would queue; with "a" at its limit
-        // (one running + one more waiting for a slot) the third waits and is refused.
         assert_eq!(busy.join().unwrap(), Ok(()));
         // "b" waited 700 ms > 300 ms for the worker: refused as expired.
         assert_eq!(queued.join().unwrap(), Err(Refused::Expired));

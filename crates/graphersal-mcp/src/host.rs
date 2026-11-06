@@ -141,7 +141,9 @@ pub(crate) fn clear_busy() {
 
 /// The busy refusal of a job this thread ran since [`clear_busy`], if any.
 pub(crate) fn take_busy() -> Option<String> {
-    BUSY.try_with(|busy| busy.borrow_mut().take()).ok().flatten()
+    BUSY.try_with(|busy| busy.borrow_mut().take())
+        .ok()
+        .flatten()
 }
 
 /// A host and the client its jobs run for: what every tool handler gets.

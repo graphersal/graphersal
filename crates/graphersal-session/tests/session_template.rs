@@ -40,7 +40,10 @@ fn sessions_of_a_template_serve_the_same_graph_on_other_threads() {
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(presets["scriptTimeoutMs"], 5000, "{presets}");
     }
-    assert_eq!(first.info().unwrap()["name"], template.session().unwrap().info().unwrap()["name"]);
+    assert_eq!(
+        first.info().unwrap()["name"],
+        template.session().unwrap().info().unwrap()["name"]
+    );
 }
 
 #[test]
@@ -76,5 +79,8 @@ fn layout_jobs_are_shared_and_their_limit_is_raised() {
         );
         second.layout_start_json(&request, 0.0).unwrap();
     }
-    assert!(second.layout_step(job, 1.0).is_ok(), "the first job is still kept");
+    assert!(
+        second.layout_step(job, 1.0).is_ok(),
+        "the first job is still kept"
+    );
 }

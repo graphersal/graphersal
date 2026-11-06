@@ -1460,9 +1460,7 @@ impl Cli {
                     cli.timeout_ms = (ms > 0).then_some(ms);
                     cli.timeout_given = true;
                 }
-                "--workers" => {
-                    cli.workers = Some(parse_positive("--workers", &value(&mut args)?)?)
-                }
+                "--workers" => cli.workers = Some(parse_positive("--workers", &value(&mut args)?)?),
                 "--queue" => cli.queue = Some(parse_positive("--queue", &value(&mut args)?)?),
                 "--queue-timeout" => {
                     cli.queue_timeout_s =
@@ -1473,12 +1471,13 @@ impl Cli {
                         Some(parse_positive("--max-connections", &value(&mut args)?)?)
                 }
                 "--max-inflight-per-client" => {
-                    cli.max_inflight_per_client =
-                        Some(parse_positive("--max-inflight-per-client", &value(&mut args)?)?)
+                    cli.max_inflight_per_client = Some(parse_positive(
+                        "--max-inflight-per-client",
+                        &value(&mut args)?,
+                    )?)
                 }
                 "--drain-timeout" => {
-                    cli.drain_timeout_s =
-                        Some(parse_count("--drain-timeout", &value(&mut args)?)?)
+                    cli.drain_timeout_s = Some(parse_count("--drain-timeout", &value(&mut args)?)?)
                 }
                 "--max-rows" => cli.max_rows = Some(parse_limit("--max-rows", &value(&mut args)?)?),
                 "--max-items" => {
@@ -1650,7 +1649,10 @@ impl Cli {
             ("--workers", cli.workers.is_some()),
             ("--queue", cli.queue.is_some()),
             ("--queue-timeout", cli.queue_timeout_s.is_some()),
-            ("--max-inflight-per-client", cli.max_inflight_per_client.is_some()),
+            (
+                "--max-inflight-per-client",
+                cli.max_inflight_per_client.is_some(),
+            ),
             ("--drain-timeout", cli.drain_timeout_s.is_some()),
         ]
         .into_iter()
