@@ -692,9 +692,11 @@ own colour). Ask, for example, *"Who does marko know?"* or *"Which software was 
 than one person?"*. The transcript shows:
 
 - your messages and the agent's answers (Markdown: tables, lists, code);
-- per question, the steps that led to the answer in ONE collapsed group above it (e.g. "Worked:
-  2 tool calls (list_saved_queries, query)", "Working: running query" while the turn runs,
-  "Stopped after 1 tool call: list_saved_queries" when it failed); opened, it lists the agent's
+- per question, the steps that led to the answer in ONE collapsed group above it, with the time
+  the turn took (e.g. "Worked for 34 s: 2 tool calls (list_saved_queries, query)", "Working for
+  12 s: running query" while the turn runs, counting up every second, "Stopped after 5 s and 1
+  tool call: list_saved_queries" when it failed; a turn without tool calls shows "Working for
+  3 s…" at the bottom instead); opened, it lists the agent's
   interim texts and every tool call in order, each collapsible with its arguments, a result
   summary and the result text; a `query` call has **Open in a query tab** and **Run**;
 - a query the agent proposes in its answer (a fenced block) with **Copy** and **Run** (Run opens
@@ -717,9 +719,10 @@ conversation. Conversations live in the server's memory only (at most 64; a rest
 
 **Export ▾** in the chat's header downloads the transcript of this chat tab as a file named after
 the tab and the time (`graphersal-chat-2-20261027-090507.md`): **Markdown (.md)** (a title, the
-export time, model, server and graph, then per turn your question, the steps with each tool call's
-arguments as a JSON block, its result summary and result text, the answer as the model wrote it,
-errors with their help and the timing line) or **JSON (.json)** (`{"format":
+export time, model, server and graph, then per turn your question, the final answer as the model
+wrote it, errors with their help and one line with the time the turn took and its number of tool
+calls, e.g. `_Answered in 34 s · 5 tool calls_`; the steps, i.e. the interim texts and the tool
+calls with their arguments and results, are left out, the time when the server did not report it) or **JSON (.json)** (`{"format":
 "graphersal-ai-chat", "version": 1, "exportedAt", "meta": {chat, provider, model, readOnly,
 server, graph}, "preamble": [...], "turns": [{question, state, steps, answer, tail, done,
 timing}]}`, where `steps` are `{type: "text", text}` and `{type: "tool", id, name, args, ok,
@@ -727,8 +730,7 @@ summary, result, resultTruncated}`, `tail` holds `error {message, help}`, `notic
 {text}` and `stopped`, and `done` the turn's figures `elapsedMs`, `toolMs`, `llmCalls`,
 `inputTokens`, `outputTokens`, `cachedTokens`, `toolCalls`, `limitReached`, `stopped`). It holds
 what the page holds: a transcript restored after a reload keeps the newest 300 items and each tool
-result text shortened to 2000 characters (marked "shortened" in Markdown, `resultTruncated` in
-JSON).
+result text shortened to 2000 characters (`resultTruncated` in JSON).
 
 When the agent changes the graph, the page reloads it like after an MCP change: the change feed
 names the client `ai` (with the conversation id), and the other tabs' results are marked
