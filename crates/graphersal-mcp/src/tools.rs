@@ -6,7 +6,10 @@ use graphersal_session::{RunOptions, Session, playground_authorizer, read_only_a
 use serde_json::{Value, json};
 
 use crate::answer::{PAGING_ARGS, Page, compact, fit, page_of, paging_properties, query_text};
-use crate::catalog::{all_tools, tools};
+use std::sync::Arc;
+
+use crate::catalog::{all_tools, offered_tools};
+use crate::config::{Descriptions, McpConfig};
 use crate::host::{ClientRef, Ctx, Host, McpError};
 use crate::protocol::MAX_TEXT_CHARS;
 
@@ -24,6 +27,9 @@ pub struct ToolCaller {
     pub(crate) cancel: Option<CancelToken>,
     /// The largest answer text in characters (`--mcp-max-chars`, [`MAX_TEXT_CHARS`]).
     pub(crate) max_chars: usize,
+    /// The operator's configuration (`--mcp-config`); the default offers every tool of the
+    /// mode with its full description.
+    pub(crate) config: Arc<McpConfig>,
 }
 
 impl ToolCaller {
@@ -37,7 +43,20 @@ impl ToolCaller {
             client,
             cancel: None,
             max_chars: MAX_TEXT_CHARS,
+            config: Arc::new(McpConfig::default()),
         }
+    }
+
+    /// Offers the tools, descriptions and saved-query tools of the operator's `config`
+    /// (its saved-query selection wins over [`ToolCaller::with_query_tools`]).
+    pub fn with_config(mut self, config: Arc<McpConfig>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Whether saved queries are tools of their own (query tools or the configuration).
+    fn has_query_tools(&self) -> bool {
+        self.query_tools || self.config.has_saved_query_tools()
     }
 
     /// Lists every saved query as a tool of its own (`--mcp-query-tools`).
@@ -97,16 +116,18 @@ impl CallRefused {
 /// MCP endpoint and the AI Chat agent list the same catalog.
 pub fn tool_listings(host: &dyn Host, caller: &ToolCaller) -> Result<Vec<Value>, McpError> {
     let read_only = caller.read_only;
-    let mut listed: Vec<Value> = tools(read_only)
+    let mut listed: Vec<Value> = offered_tools(read_only, &caller.config)
         .into_iter()
         .map(|tool| tool.listing(read_only))
         .collect();
-    if caller.query_tools {
+    if caller.has_query_tools() {
         let context = Ctx {
             host,
             client: &caller.client,
         };
-        listed.extend(query_tool_listings(&context, read_only).map_err(McpError::Failed)?);
+        listed.extend(
+            query_tool_listings(&context, read_only, &caller.config).map_err(McpError::Failed)?,
+        );
     }
     Ok(listed)
 }
@@ -145,14 +166,22 @@ fn call_tool_with(
             is_error: true,
         },
     };
-    let Some(tool) = tools(caller.read_only).into_iter().find(|t| t.name == name) else {
-        if caller.query_tools && !all_tools().iter().any(|t| t.name == name) {
+    let Some(tool) = offered_tools(caller.read_only, &caller.config)
+        .into_iter()
+        .find(|t| t.name == name)
+    else {
+        if caller.has_query_tools() && !all_tools().iter().any(|t| t.name == name) {
             let wanted = name.to_string();
             let entry = context
                 .call(move |s| s.get_query(&wanted))
                 .map_err(CallRefused::Internal)?
                 .map_err(|err| CallRefused::Internal(err.to_string()))?;
-            if !entry.is_null() {
+            let selected = caller
+                .config
+                .saved_query_tools
+                .as_ref()
+                .is_none_or(|s| s.selects(name, entry["folder"].as_str()));
+            if !entry.is_null() && selected {
                 let Some(given) = args.as_object() else {
                     return Err(CallRefused::Params("arguments must be an object".into()));
                 };
@@ -177,10 +206,12 @@ fn call_tool_with(
                 return Ok(outcome(run_saved_query(context, caller, &call)));
             }
         }
-        let why = if all_tools().iter().any(|t| t.name == name) {
-            " (read-only: only reading tools)"
-        } else {
+        let why = if !all_tools().iter().any(|t| t.name == name) {
             ""
+        } else if !caller.config.offers(name) {
+            " (not offered by this server's configuration)"
+        } else {
+            " (read-only: only reading tools)"
         };
         return Err(CallRefused::Params(format!("unknown tool {name:?}{why}")));
     };
@@ -728,13 +759,21 @@ pub(crate) fn run_saved_query(
 pub(crate) fn query_tool_listings(
     context: &Ctx<'_>,
     read_only: bool,
+    config: &McpConfig,
 ) -> Result<Vec<Value>, String> {
     let list = saved_queries(context, None, None, read_only)?;
+    let short = config.descriptions == Descriptions::Short;
+    let paging = config.saved_query_paging();
     Ok(list
         .iter()
         .filter_map(|entry| {
             let name = entry["name"].as_str()?;
             if all_tools().iter().any(|t| t.name == name) {
+                return None;
+            }
+            if let Some(selection) = &config.saved_query_tools
+                && !selection.selects(name, entry["folder"].as_str())
+            {
                 return None;
             }
             let mut properties = serde_json::Map::new();
@@ -752,9 +791,12 @@ pub(crate) fn query_tool_listings(
                     required.push(json!(param_name));
                 }
             }
-            // Paging like run_saved_query's, unless a parameter has the name.
-            for (key, value) in paging_properties("results") {
-                properties.entry(key).or_insert(value);
+            // Paging like run_saved_query's, unless a parameter has the name (left out with
+            // `paging_params: false`, the defaults apply).
+            if paging {
+                for (key, value) in paging_properties("results") {
+                    properties.entry(key).or_insert(value);
+                }
             }
             let mut description = entry["description"]
                 .as_str()
@@ -762,7 +804,9 @@ pub(crate) fn query_tool_listings(
             if !description.trim_end().ends_with(['.', '!', '?']) {
                 description.push('.');
             }
-            if let Some(folder) = entry["folder"].as_str() {
+            if let Some(folder) = entry["folder"].as_str()
+                && !short
+            {
                 description.push_str(&format!(" Folder: {folder}."));
             }
             let writes = entry["writes"].as_bool().unwrap_or(false);
@@ -778,7 +822,7 @@ pub(crate) fn query_tool_listings(
                      that change. The same as run_saved_query.",
                     effects.join(", ")
                 ));
-            } else {
+            } else if !short {
                 description.push_str(" Saved query (read-only); the same as run_saved_query.");
             }
             if let Some(error) = entry["error"].as_str() {

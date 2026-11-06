@@ -4,6 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::answer::with_paging;
+use crate::config::{Descriptions, McpConfig, offered_read_only};
 use crate::tools::confirm_lock_arg;
 
 /// What a tool does, for its annotations and for `--mcp-read-only`.
@@ -757,10 +758,148 @@ pub(crate) fn all_tools() -> Vec<Tool> {
 pub(crate) fn tools(read_only: bool) -> Vec<Tool> {
     all_tools()
         .into_iter()
-        .filter(|t| {
-            !read_only
-                || t.kind == Kind::Read
-                || matches!(t.name, "query" | "gql" | "run_saved_query")
+        .filter(|t| !read_only || offered_read_only(t.name, t.kind))
+        .collect()
+}
+
+/// The tools a configured endpoint offers: [`tools`] of the mode, only those the
+/// configuration offers, each with its description (the operator's override, else the short
+/// one with `descriptions: short`, else the full one).
+pub(crate) fn offered_tools(read_only: bool, config: &McpConfig) -> Vec<Tool> {
+    tools(read_only)
+        .into_iter()
+        .filter(|t| config.offers(t.name))
+        .map(|mut t| {
+            if let Some(text) = config.override_of(t.name) {
+                t.description = text.to_string();
+            } else if config.descriptions == Descriptions::Short {
+                t.description = short_description(t.name).to_string();
+            }
+            t
         })
         .collect()
+}
+
+/// The hand-written short description of every built-in tool (`descriptions: short`): one or
+/// two sentences and one example where it helps. The input schemas stay the same.
+pub(crate) fn short_description(name: &str) -> &'static str {
+    match name {
+        "query" => {
+            "Run a Graphersal script (Gremlin in Rhai syntax: `__.` for child traversals, \
+             tokens such as P.gt(30), Order.desc) as one transaction; compact JSON, paged \
+             (offset, max_rows, max_items). Prefer the gql tool for plain reads and writes; \
+             every step: resource graphersal://dsl-reference. Example: \
+             g.v().has_label(\"person\").values(\"name\")"
+        }
+        "gql" => {
+            "Run a GQL query (ISO graph query language; Cypher spellings accepted), the text as \
+             it is, $name values from params: one JSON object per row, paged (offset, max_rows). \
+             A write (INSERT/CREATE, SET, REMOVE, DELETE, MERGE) is one transaction. What is \
+             supported: resource graphersal://gql-reference. Example: MATCH \
+             (p:person)-[:knows]->(f) WHERE f.age > $min RETURN p.name AS who, f.name AS \
+             friend ORDER BY who, params {\"min\": 30}"
+        }
+        "list_saved_queries" => {
+            "The saved queries stored in the graph (name, folder, description, parameters, \
+             language, writes and effects). Check them before writing a new query."
+        }
+        "run_saved_query" => {
+            "Run a saved query by name with named parameters (checked against their schemas; \
+             defaults fill the rest), paged like gql. Run one with writes: true only when the \
+             user asked for that change. Example: {\"name\": \"older\", \"params\": \
+             {\"min\": 30}}"
+        }
+        "list_compressions" => {
+            "The compression rules of the graph (element, label, path, codec lz4 or dedup, \
+             served, stats)."
+        }
+        "estimate_compression" => {
+            "Measure candidate compression rules for one label and property path on the \
+             current data, changing nothing (sizes, ratio, read speed, the best candidate). Run \
+             it before define_compression."
+        }
+        "define_compression" => {
+            "Store or replace a compression rule: strings of one label at one property path \
+             kept LZ4-compressed (large, rarely read text) or stored once per distinct value \
+             (codec dedup); existing values are re-encoded at once."
+        }
+        "drop_compression" => {
+            "Remove a compression rule; its values are decompressed (no data changes)."
+        }
+        "recompress" => {
+            "Rebuild a compression rule's dictionary from the current values; no data changes."
+        }
+        "list_indexes" => {
+            "The property indexes of the graph (element, label, key, type, transform, served, \
+             stats)."
+        }
+        "create_index" => {
+            "Create a property index on one label's top-level property, so has_label(label) \
+             with has(key, ..) (equality, P.within, ranges) reads only the matching elements; \
+             results never change. Example: {\"label\": \"person\", \"key\": \"name\"}"
+        }
+        "drop_index" => "Remove a property index (no data changes; queries scan again).",
+        "get_schema" => {
+            "The schema stored in the graph (JSON), or null (then infer_schema shows what the \
+             data has)."
+        }
+        "infer_schema" => {
+            "The schema the data satisfies now (labels, properties, types, edge topology); \
+             stores nothing."
+        }
+        "validate_schema" => {
+            "Check a proposed schema against the data without applying it: violations, the \
+             diff from the stored schema, backward compatibility."
+        }
+        "validate_schema_patch" => {
+            "validate_schema of the stored schema with a JSON Merge Patch applied; applies \
+             nothing."
+        }
+        "diff_schema" => {
+            "The changes from the stored schema to a proposed one, each marked backward \
+             compatible or not."
+        }
+        "set_schema" => {
+            "Store a schema, replacing the stored one; in mode open/closed the data is \
+             validated first and nothing changes on a violation. Run validate_schema first."
+        }
+        "patch_schema" => {
+            "Apply a JSON Merge Patch to the stored schema, validated like set_schema. Example: \
+             {\"vertices\": {\"person\": {\"schema\": {\"properties\": {\"email\": \
+             {\"type\": \"string\"}}}}}}"
+        }
+        "statistics" => {
+            "Counts of the graph per label, its memory footprint, the query limits and the \
+             memory of the process."
+        }
+        "workload_statistics" => {
+            "Which queries ran and how the properties were used, per channel and time window \
+             (a graph in a store only)."
+        }
+        "journal" => {
+            "One page of the system journal: operational events (store opened, checkpoints, \
+             backups, damage, denials), oldest first unless newest_first."
+        }
+        "advise" => {
+            "The storage advisor's recommendations (indexes, compression), each with its \
+             evidence, impact and the command applying it; changes nothing."
+        }
+        "apply_recommendations" => {
+            "Apply the advisor's recommendations named by ids in one commit; only the ones the \
+             user picked."
+        }
+        "list_jobs" => {
+            "The scheduled jobs of the graph's store, their schedules and last runs (the user \
+             defines them)."
+        }
+        "memory_report" => {
+            "Where the memory goes per label and property (bytes, types, compression, indexes) \
+             and per process component; changes nothing."
+        }
+        "graph_info" => {
+            "What the server serves: the graph's name, counts, schema mode, source, a \
+             read-only view the user opened, and answerLimitChars."
+        }
+        _ => "",
+    }
 }

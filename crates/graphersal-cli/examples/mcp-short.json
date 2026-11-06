@@ -1,0 +1,16 @@
+{
+  "_comment": "Every data tool with short descriptions, without the storage administration tools (compression, indexes, advisor, jobs, journal, memory and workload reports), the built-in instructions plus the operator's notes: graphersal --graph modern --server --mcp --mcp-config examples/mcp-short.json",
+  "instructions": {
+    "mode": "append",
+    "file": "operator-notes.md"
+  },
+  "descriptions": "short",
+  "tools": {
+    "exclude": [
+      "list_compressions", "estimate_compression", "define_compression", "drop_compression",
+      "recompress", "list_indexes", "create_index", "drop_index", "advise",
+      "apply_recommendations", "list_jobs", "journal", "memory_report", "workload_statistics"
+    ]
+  },
+  "saved_query_tools": {}
+}

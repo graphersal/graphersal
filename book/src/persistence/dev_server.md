@@ -144,7 +144,7 @@ graphersal --args-file args.json -e 'g.v().count()'   # a repeatable flag adds t
   A number is written as a number (`"port": 8080`), a string as a string. `eval` repeats: a string
   or an array of strings. Every flag of `graphersal --help` is a key except
   `help`, `version` and `args-file`.
-- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`) resolve against the
+- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`, `mcp-config`) resolve against the
   directory of the args file, not the working directory. The sample names (`modern`, `empty`,
   `large`, `tree`) stay as written.
 - **The command line wins.** The file's arguments come first, as if typed before the others: a flag
@@ -499,6 +499,93 @@ graphersal --graph data/ --server --mcp --mcp-max-chars 30000
 The options combine (`--mcp --mcp-read-only --mcp-token ... --mcp-query-tools`), and the
 [limit options](#limits) apply to the agent's queries as to the browser's.
 
+### The MCP configuration file: `--mcp-config`
+
+Every tool, its description and the instructions take room in the agent's context before its
+first call: about 12.5 K tokens for the full read-write endpoint, 10 K read-only, and more with
+every saved query as a tool. `--mcp-config FILE` lets the operator choose what the agent sees:
+
+```bash
+graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-readonly.json
+```
+
+```json
+{
+  "_comment": "a key starting with _ is a comment",
+  "server_name": "project-kb",
+  "instructions": { "mode": "replace", "text": "A read-only knowledge graph of this project. ..." },
+  "descriptions": "short",
+  "tools": {
+    "include": ["gql", "get_schema", "run_saved_query"],
+    "overrides": { "gql": { "description": "Read-only GQL over the project graph. ..." } }
+  },
+  "saved_query_tools": { "folders": ["kb"], "paging_params": false },
+  "resources": ["schema", "saved-queries", "gql-reference"],
+  "answer_limit_chars": 30000
+}
+```
+
+| Key | Meaning | Default |
+|---|---|---|
+| `server_name` | The `serverInfo.name` of `initialize` (1 to 100 characters) | `graphersal-dev` |
+| `instructions` | `{"mode": "builtin" \| "append" \| "replace", "text": ".."}` or `{"mode": .., "file": "notes.md"}` (UTF-8, 1 to 20000 characters): `builtin` the built-in text (+ the read-only note), `append` the built-in text with the operator's text under "Notes from the operator of this server about this graph:" (what `--mcp-instructions` does), `replace` the operator's text only | `builtin` |
+| `descriptions` | `full` (the texts of [What the agent gets](#what-the-agent-gets)) or `short`: one or two hand-written sentences per built-in tool, with an example where it helps; the input schemas stay the same. The short `gql` description points to the resource `graphersal://gql-reference`, which holds the full GQL support list | `full` |
+| `tools.include` | The built-in tools offered (in their usual order); a tool not offered is not callable either | every tool of the mode |
+| `tools.exclude` | Built-in tools left out | none |
+| `tools.overrides` | `{"<tool>": {"description": ".."}}`: the operator's description instead of the built-in one (the input schema never changes) | none |
+| `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: false` leaves `offset`/`max_rows`/`max_items` out of their schemas (the defaults apply; a call may still pass them). With `descriptions: short` the paging parameters are left out unless `paging_params` is `true`, and the description is the query's own text without the "Folder: ..; Saved query (read-only); the same as run_saved_query." tail. `run_saved_query` still reaches every saved query | no saved-query tools |
+| `resources` | The resources listed by `resources/list`, by name: `schema`, `statistics`, `dsl-reference`, `examples`, `saved-queries`, `gql-reference`. Every resource stays readable | the first five |
+| `answer_limit_chars` | The largest tool answer in characters (at least 1000), like `--mcp-max-chars` | 60000 |
+
+The file is checked at start (exit 2 with the reason): JSON, an unknown key is an error with a
+did-you-mean (a key starting with `_` is a comment at every level), an unknown tool or resource
+name is an error, a relative instructions `file` resolves against the configuration file, and
+**read-only always wins**: a writing tool named in `tools.include` or `tools.overrides` of a
+read-only server (`--mcp-read-only`, `--read-only`, or a Store that could only be opened
+read-only) is an error rather than a silently missing tool. The flags `--mcp-instructions`,
+`--mcp-query-tools` and `--mcp-max-chars` stay as shorthands; the same setting given by a flag
+and in the file is an error (there is no precedence to remember). In an [args file](#arguments-from-a-file)
+the key is `mcp-config`. Nothing in the file is a built-in profile: without it the endpoint offers
+exactly what it always did. Two examples ship in `crates/graphersal-cli/examples/`:
+`mcp-kb-readonly.json` (a read-only knowledge graph: `gql`, `get_schema`, `run_saved_query`, the
+saved queries of the folder `kb` as tools, short descriptions and instructions) and
+`mcp-short.json` (the data tools with short descriptions, the storage administration tools left
+out, the operator's notes appended).
+
+The [AI Chat](#ai-chat) does not read `--mcp-config`: it keeps the full tool set of its mode and
+the built-in instructions.
+
+#### What a configuration costs: `graphersal mcp-cost`
+
+`graphersal mcp-cost` prints what the prompt of an endpoint costs, without starting a server: the
+characters of the instructions and of every `tools/list` entry, and a rough token estimate
+(characters / 4; a real tokenizer counts differently). It takes `--graph` (default `modern`; the
+saved queries of a store become tools with `--mcp-query-tools` or `saved_query_tools`),
+`--mcp-config`, `--read-only` (measure the read-only endpoint), `--mcp-query-tools` and
+`--mcp-instructions`. The graph is always opened read-only (nothing is written, a Store's lock is
+not taken), so a store a running server holds can be measured.
+
+```bash
+graphersal mcp-cost --graph kb.gstore --read-only --mcp-config mcp-kb-readonly.json
+```
+
+```text
+MCP prompt cost of kb.gstore (read-only, with --mcp-config)
+  instructions: 427 chars, ~107 tokens
+  tools: 17: 12774 chars, ~3194 tokens
+  total: 13201 chars, ~3301 tokens
+  estimate: tokens = characters / 4, a rough estimate (a real tokenizer counts differently)
+
+Tools (characters of each tools/list entry, largest first)
+  gql:                1546 chars  ~387 tokens
+  references_to:      1275 chars  ~319 tokens
+  run_saved_query:    1181 chars  ~296 tokens
+  ...
+```
+
+The same knowledge graph without the file (`--read-only --mcp-query-tools`) costs about 14 K
+tokens.
+
 ### Schema changes that fill vectors: `confirm_lock`
 
 `set_schema` and `patch_schema` run the schema preview first when the schema names a
@@ -838,7 +925,8 @@ The text is placed in the system prompt after the agent's rules and before the D
 under the line "Notes from the operator of this server about this graph:". It is trusted text of
 the operator, but it comes after the rules and does not lift them: tool results stay data, never
 instructions. It applies to the AI Chat only; the [MCP](#mcp-an-ai-agent-on-the-same-graph)
-instructions are unchanged (and the `--mcp-instructions` notes are not added). The prompt prefix stays fixed for the conversation, so the provider's
+instructions are unchanged (and the `--mcp-instructions` notes are not added; the chat does not
+read `--mcp-config` either: it keeps the full tool set and the built-in instructions). The prompt prefix stays fixed for the conversation, so the provider's
 prompt cache still works.
 
 ### What data leaves the machine

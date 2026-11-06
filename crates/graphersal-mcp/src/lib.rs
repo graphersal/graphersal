@@ -24,6 +24,16 @@
 //! [`ToolCaller`] carrying its own cancellation token), [`instructions`] and
 //! [`dsl_reference_text`].
 //!
+//! # Configuration
+//!
+//! The operator chooses what an agent sees with an [`McpConfig`] ([`Mcp::with_config`], the
+//! CLI's `--mcp-config FILE`): the server name, the instructions (built-in, appended to,
+//! replaced), full or short ([`Descriptions`]) tool descriptions, the built-in tools offered
+//! and their descriptions, which saved queries are tools of their own, the resources listed and
+//! the answer limit. There are no built-in profiles; without a configuration the endpoint
+//! offers every tool of its mode with its full description. [`Mcp::prompt_cost`] measures what
+//! the instructions and the tool list cost an agent's context.
+//!
 //! # Protocol
 //!
 //! MCP Streamable HTTP of the initialize-based protocol revisions (`2025-03-26` to
@@ -96,6 +106,7 @@
 
 mod answer;
 mod catalog;
+mod config;
 mod host;
 mod protocol;
 mod resources;
@@ -105,7 +116,12 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
+pub use config::{
+    Descriptions, MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError,
+};
 pub use host::{ClientRef, Executor, Host, Job, McpError};
-pub use protocol::{MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, dsl_reference_text, instructions};
+pub use protocol::{
+    MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
+};
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};
 pub use transport::{McpRequest, McpResponse};

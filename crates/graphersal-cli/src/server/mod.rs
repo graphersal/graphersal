@@ -62,9 +62,12 @@ use crate::cli::{Cli, DEFAULT_UI_DIR, EXIT_OK, EXIT_USAGE_ERROR, GraphSpec, Scri
 #[cfg(feature = "ai")]
 mod ai;
 mod bind;
+mod cost;
 mod layout;
 mod mcp;
 mod start_stats;
+
+pub use cost::run as mcp_cost;
 mod store;
 mod ui;
 
@@ -562,15 +565,23 @@ pub fn run(cli: &Cli) -> i32 {
     for note in &served.notes {
         models_section.note("note", note);
     }
-    let mcp = cli.mcp.then(|| {
-        mcp::Mcp::new(
-            // A read-only graph offers the agent no writing tool either.
-            cli.mcp_read_only || read_only,
-            cli.mcp_token.clone(),
-            cli.mcp_query_tools,
-        )
-        .with_operator_notes(cli.mcp_instructions.clone())
-        .with_max_chars(cli.mcp_max_chars)
+    // A read-only graph offers the agent no writing tool either.
+    let mcp_read_only = cli.mcp_read_only || read_only;
+    if let Some(config) = cli.mcp.then_some(cli.mcp_config.as_ref()).flatten()
+        && let Err(err) = config.check(mcp_read_only)
+    {
+        // A Store that turned out read-only at open (no write permission).
+        errln!("Error: --mcp-config: {err}");
+        return EXIT_USAGE_ERROR;
+    }
+    let mcp = cli.mcp.then(|| match &cli.mcp_config {
+        // The configuration carries the shorthand flags already (`Cli::parse`).
+        Some(config) => {
+            mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), false).with_config(config.clone())
+        }
+        None => mcp::Mcp::new(mcp_read_only, cli.mcp_token.clone(), cli.mcp_query_tools)
+            .with_operator_notes(cli.mcp_instructions.clone())
+            .with_max_chars(cli.mcp_max_chars),
     });
     let mut server_section = crate::sections::Section::new("Server");
     server_section.row("limits", presets_summary(&presets_json));

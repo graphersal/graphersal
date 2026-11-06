@@ -6775,3 +6775,56 @@ fn the_memory_report_attributes_the_process_heap() {
         res.stdout
     );
 }
+
+#[cfg(feature = "dev-server")]
+#[test]
+fn mcp_cost_prints_the_prompt_size_without_a_server() {
+    let res = run(&["mcp-cost"], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let mut blocks = res.stdout.split("\n\n");
+    let head = blocks.next().unwrap_or_default();
+    assert!(
+        head.starts_with("MCP prompt cost of Modern (TinkerPop) (read-write, built-in configuration)\n  instructions: "),
+        "{head}"
+    );
+    assert!(head.contains("\n  tools: 27: "), "{head}");
+    assert!(
+        head.contains("\n  total: ") && head.contains("characters / 4"),
+        "{head}"
+    );
+    let tools = blocks.next().unwrap_or_default();
+    assert!(
+        tools.starts_with("Tools (characters of each tools/list entry, largest first)\n  gql: "),
+        "{tools}"
+    );
+    assert_eq!(tools.trim_end().lines().count(), 28, "{tools}");
+
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/mcp-kb-readonly.json");
+    let res = run(&["mcp-cost", "--read-only", "--mcp-config", example], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains("(read-only, with --mcp-config)\n"),
+        "{}",
+        res.stdout
+    );
+    assert!(res.stdout.contains("\n  tools: 3: "), "{}", res.stdout);
+    // The example names no writing tool; a read-write measure of it works as well.
+    let res = run(&["mcp-cost", "--mcp-config", example], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+
+    let res = run(&["mcp-cost", "--nope"], "");
+    assert_eq!(res.code, 2);
+    assert!(
+        res.stderr.contains("Unknown mcp-cost option: --nope"),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        res.stderr.contains("graphersal mcp-cost --help"),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["mcp-cost", "--help"], "");
+    assert_eq!(res.code, 0);
+    assert!(res.stdout.contains("characters / 4"), "{}", res.stdout);
+}

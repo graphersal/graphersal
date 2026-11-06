@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use crate::answer::compact;
+use crate::catalog::GQL_DESCRIPTION;
 use crate::host::Ctx;
 use crate::tools::saved_queries;
 
@@ -17,7 +18,7 @@ pub(crate) struct Resource {
     pub(crate) mime: &'static str,
 }
 
-pub(crate) const RESOURCES: [Resource; 5] = [
+pub(crate) const RESOURCES: [Resource; 6] = [
     Resource {
         uri: "graphersal://schema",
         name: "schema",
@@ -57,6 +58,17 @@ pub(crate) const RESOURCES: [Resource; 5] = [
                       them: check them before writing a new query.",
         mime: "application/json",
     },
+    // Listed only when the configuration names it (`resources`), but always readable: the
+    // short `gql` description points to it.
+    Resource {
+        uri: "graphersal://gql-reference",
+        name: "gql-reference",
+        title: "GQL reference",
+        description: "What the gql tool supports: clauses, patterns, expressions, functions, \
+                      what is not supported yet, and examples (the full gql tool description, \
+                      about 12 KB).",
+        mime: "text/markdown",
+    },
 ];
 
 /// The text of the resource `uri`; `read_only` leaves the saved queries that write out of
@@ -68,6 +80,7 @@ pub(crate) fn read_resource(
 ) -> Result<String, String> {
     match uri {
         "graphersal://schema" => Ok(context.call(|s| s.get_schema_text())??),
+        "graphersal://gql-reference" => Ok(format!("# GQL reference\n\n{GQL_DESCRIPTION}\n")),
         "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,
         )?))),
