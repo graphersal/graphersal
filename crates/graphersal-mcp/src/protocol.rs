@@ -3,13 +3,16 @@
 //! instructions.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::catalog::all_tools;
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::resources::{RESOURCES, read_resource};
 use crate::sessions::{SessionKey, Sessions};
+use crate::stats::{McpStats, Refusal};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
 use crate::transport::{McpRequest, McpResponse};
 
@@ -46,6 +49,8 @@ pub struct Mcp {
     /// The MCP sessions: a bounded table (the default) or stateless signed ids
     /// ([`Mcp::with_session_key`]).
     sessions: Sessions,
+    /// The usage statistics (memory only, since the endpoint was built).
+    stats: Arc<McpStats>,
     /// The `clientInfo` of the last `initialize` (the playground's top bar names it).
     client: Mutex<Option<Value>>,
 }
@@ -59,11 +64,13 @@ impl Mcp {
         if query_tools {
             config.saved_query_tools = Some(SavedQueryTools::all());
         }
+        let sessions = Sessions::table();
         Self {
             read_only,
             token,
             config: Arc::new(config),
-            sessions: Sessions::table(),
+            stats: Arc::new(McpStats::new(sessions.clients())),
+            sessions,
             client: Mutex::new(None),
         }
     }
@@ -77,7 +84,15 @@ impl Mcp {
     /// are kept for the statistics, at most [`crate::MAX_CLIENT_NAMES`].
     pub fn with_session_key(mut self, key: SessionKey) -> Self {
         self.sessions = Sessions::signed(&key);
+        self.stats = Arc::new(McpStats::new(self.sessions.clients()));
         self
+    }
+
+    /// The usage statistics of the endpoint since it was built: in process memory only, never
+    /// written anywhere, lost on a restart ([`McpStats::to_json`] for `GET /api/mcp/stats`; the
+    /// host adds its own refusals with [`McpStats::record_refusal`]).
+    pub fn stats(&self) -> &McpStats {
+        &self.stats
     }
 
     /// Whether the session ids are stateless ([`Mcp::with_session_key`]).
@@ -119,7 +134,8 @@ impl Mcp {
     /// (ids and stored values as JSON text), for the host's memory report; `(0, 0)` while a
     /// request holds the list.
     pub fn memory_bytes(&self) -> (usize, u64) {
-        self.sessions.memory_bytes()
+        let (count, bytes) = self.sessions.memory_bytes();
+        (count, bytes + self.stats.bytes())
     }
 
     /// Whether the endpoint offers only reading tools.
@@ -166,6 +182,7 @@ impl Mcp {
         ToolCaller::new(client, self.read_only)
             .with_config(self.config.clone())
             .with_max_chars(self.max_chars())
+            .with_stats(self.stats.clone())
     }
 
     /// The `tools/list` entries an agent gets now (saved-query tools read through `host`).
@@ -217,6 +234,7 @@ impl Mcp {
                 .and_then(|v| v.trim().strip_prefix("Bearer "))
                 .map(str::trim);
             if !given.is_some_and(|given| same_secret(given, token)) {
+                self.stats.record_refusal(Refusal::Unauthorized);
                 let answer = rpc_error(
                     401,
                     Value::Null,
@@ -252,8 +270,19 @@ impl Mcp {
         }
     }
 
-    /// One `POST /mcp`: a JSON-RPC request, notification or response.
+    /// One `POST /mcp`: a JSON-RPC request, notification or response; a `4xx` answer before
+    /// the message is dispatched counts as a refusal (unknown session or invalid request).
     fn post(&self, host: &dyn Host, request: &mut McpRequest<'_>) -> McpResponse {
+        let answer = self.post_message(host, request);
+        match answer.status() {
+            404 => self.stats.record_refusal(Refusal::UnknownSession),
+            400..=499 => self.stats.record_refusal(Refusal::InvalidRequest),
+            _ => {}
+        }
+        answer
+    }
+
+    fn post_message(&self, host: &dyn Host, request: &mut McpRequest<'_>) -> McpResponse {
         if let Some(accept) = request.header_value("Accept") {
             let accept = accept.to_ascii_lowercase();
             if !accept.contains("application/json") && !accept.contains("*/*") {
@@ -330,6 +359,15 @@ impl Mcp {
                 )
             };
         };
+        let client_digest = session_id
+            .as_deref()
+            .and_then(|id| self.sessions.client_of(id));
+        self.stats.record_request(
+            id.is_some().then_some(method),
+            session_id.as_deref(),
+            client_digest,
+            method == "tools/call" && id.is_some(),
+        );
         let Some(id) = id else {
             // A notification (`notifications/initialized`, `notifications/cancelled`, ...).
             return empty(202);
@@ -344,6 +382,7 @@ impl Mcp {
         // The host could not take a job now (queue full, waited too long, too many jobs of this
         // client, stopping): the whole request is `503`, so the client retries it.
         if let Some(message) = take_busy() {
+            self.stats.record_busy();
             return rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1");
         }
         match dispatched {
@@ -351,7 +390,10 @@ impl Mcp {
                 let answer =
                     rpc_answer(200, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
                 match new_session {
-                    Some(session) => answer.with_header("Mcp-Session-Id", &session),
+                    Some(session) => {
+                        self.stats.record_initialize(&session);
+                        answer.with_header("Mcp-Session-Id", &session)
+                    }
                     None => answer,
                 }
             }
@@ -379,7 +421,28 @@ impl Mcp {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                match call_tool(host, &caller, name, &args) {
+                let started = Instant::now();
+                let called = call_tool(host, &caller, name, &args);
+                let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                // A built-in tool by its name; a saved query's own tool ran when the call was
+                // not refused; any other name is an unknown tool.
+                let built_in = all_tools().iter().any(|t| t.name == name);
+                let (tool, saved_query) = match (&called, built_in) {
+                    (_, true) if name == "run_saved_query" => (
+                        Some(name),
+                        args.get("name").and_then(Value::as_str).map(str::trim),
+                    ),
+                    (_, true) => (Some(name), None),
+                    (Ok(_), false) => (Some(name), Some(name)),
+                    (Err(_), false) => (None, None),
+                };
+                let (is_error, chars) = match &called {
+                    Ok(outcome) => (outcome.is_error, outcome.text.chars().count() as u64),
+                    Err(_) => (true, 0),
+                };
+                self.stats
+                    .record_tool(tool, saved_query, elapsed_us, is_error, chars);
+                match called {
                     Ok(outcome) => plain(tool_result(outcome.text, outcome.is_error)),
                     Err(CallRefused::Internal(message)) => Err((INTERNAL_ERROR, message)),
                     Err(CallRefused::Params(message)) => {

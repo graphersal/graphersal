@@ -91,6 +91,16 @@
 //! answers one page of the graph's system journal (`Session::journal`, at most 100 records
 //! unless `limit` says otherwise).
 //!
+//! Usage statistics ([`McpStats`], [`Mcp::stats`]): counters since the process started, in
+//! memory only (nothing is written anywhere; a restart starts from zero), cheap under parallel
+//! load (atomics; read locks to find a name's entry): requests per JSON-RPC method, tool calls
+//! per tool and per saved query (calls, errors, total and largest latency, a latency
+//! histogram, answer characters), requests per client name (at most [`MAX_CLIENT_NAMES`]),
+//! sessions initialized and active in about the last five minutes (an estimate), refusals by
+//! kind ([`Refusal`]; the host reports its own). The host serves [`McpStats::to_json`] (the dev
+//! server: `GET /api/mcp/stats`); the tool `usage_statistics` (reading) answers the same, but
+//! only when the configuration's `tools.include` names it (never in the default listing).
+//!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
 //! `define_compression`, `drop_compression` and `recompress` (refused in read-only mode) wrap
@@ -111,6 +121,7 @@ mod host;
 mod protocol;
 mod resources;
 mod sessions;
+mod stats;
 mod tools;
 mod transport;
 
@@ -125,5 +136,6 @@ pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
 };
 pub use sessions::{MAX_CLIENT_NAMES, SessionKey};
+pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};
 pub use transport::{McpRequest, McpResponse};

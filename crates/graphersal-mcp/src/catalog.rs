@@ -738,6 +738,28 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "usage_statistics",
+            "Usage statistics",
+            Kind::Read,
+            "How this MCP endpoint has been used since the server process started (kept in \
+             memory only, lost on a restart, never written): requests per JSON-RPC method, \
+             tool calls per tool and per saved query (calls, errors, totalMs, meanMs, maxMs, a \
+             latency histogram over the buckets latencyBucketsMs (each count below its bound, \
+             the last one above the largest), answerChars), requests and tool calls per client \
+             name (clientInfo of initialize, at most clientsMax kept), sessions initialized \
+             and active in about the last 5 minutes (an estimate), and refusals by kind \
+             (queueFull, queueTimeout, clientLimit, tooManyConnections, stopping, \
+             unknownSession, unauthorized, invalidRequest). Lists are sorted by calls; \
+             max_rows keeps that many rows per list (default 50), <list>_omitted counts the \
+             rest. Offered only when the server's configuration names it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Rows per list (tools, savedQueries, clients), most calls first (default 50)."},
+                },
+            }),
+        ),
+        tool(
             "graph_info",
             "Graph info",
             Kind::Read,
@@ -895,6 +917,10 @@ pub(crate) fn short_description(name: &str) -> &'static str {
         "memory_report" => {
             "Where the memory goes per label and property (bytes, types, compression, indexes) \
              and per process component; changes nothing."
+        }
+        "usage_statistics" => {
+            "How this MCP endpoint was used since the server started (memory only): calls, \
+             errors and latency per tool and saved query, clients, sessions, refusals."
         }
         "graph_info" => {
             "What the server serves: the graph's name, counts, schema mode, source, a \
