@@ -104,8 +104,7 @@ fn read_only_runs_of_two_sessions_overlap() {
             std::thread::spawn(move || {
                 let mut session = template.session().unwrap();
                 let answer: Value =
-                    serde_json::from_str(&session.execute(script, &RunOptions::default()))
-                        .unwrap();
+                    serde_json::from_str(&session.execute(script, &RunOptions::default())).unwrap();
                 answer["ok"] == true
             })
         })

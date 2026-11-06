@@ -16,8 +16,8 @@
 //! 503 is counted and retried after its `Retry-After`. With `--pid` it samples the server's
 //! RSS, thread count and CPU time (`ps`). Prints one JSON summary on stdout.
 //!
-//! The calls assume a graph with the saved queries `load.by_level(level)` and
-//! `load.children(id)` over vertices with the properties `id` and `level` (the `large`
+//! The calls assume a graph with the saved queries `by_level(level)` and
+//! `children(id)` (folder `load`) over vertices with the properties `id` and `level` (the `large`
 //! sample exported to a `.gsnap` with those two queries defined: see the stage report).
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -35,6 +35,11 @@ struct Options {
     tabs: usize,
     seconds: u64,
     pid: Option<u32>,
+    /// Keep the idle sessions' connections open (1, the worst case) or close them after
+    /// `initialize` (0, what clients with a keep-alive timeout do).
+    hold_idle: bool,
+    /// Milliseconds between two connects (0: all at once).
+    stagger_ms: u64,
 }
 
 fn options() -> Options {
@@ -45,6 +50,8 @@ fn options() -> Options {
         tabs: 5,
         seconds: 60,
         pid: None,
+        hold_idle: true,
+        stagger_ms: 0,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -57,6 +64,8 @@ fn options() -> Options {
             "--tabs" => options.tabs = value.parse().unwrap_or(options.tabs),
             "--seconds" => options.seconds = value.parse().unwrap_or(options.seconds),
             "--pid" => options.pid = value.parse().ok(),
+            "--hold-idle" => options.hold_idle = value != "0",
+            "--stagger-ms" => options.stagger_ms = value.parse().unwrap_or(0),
             other => eprintln!("unknown option {other}"),
         }
         i += 2;
@@ -82,7 +91,7 @@ impl Connection {
     fn open(port: u16) -> std::io::Result<Self> {
         let stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         Ok(Self {
             port,
             reader: BufReader::new(stream),
@@ -233,12 +242,12 @@ fn call_body(n: u64, id: u64) -> (&'static str, Value) {
         0 => (
             "run_saved_query",
             json!({"name": "run_saved_query", "arguments": {
-                "name": "load.by_level", "params": {"level": level}}}),
+                "name": "by_level", "params": {"level": level}}}),
         ),
         1 => (
             "run_saved_query",
             json!({"name": "run_saved_query", "arguments": {
-                "name": "load.children", "params": {"id": format!("V_2_{}", n % 100)}}}),
+                "name": "children", "params": {"id": format!("V_2_{}", n % 100)}}}),
         ),
         2 => (
             "gql",
@@ -268,9 +277,9 @@ fn sample(pid: u32) -> Option<(u64, u64, f64)> {
     let rss = fields.next()?.parse().ok()?;
     let time = fields.next()?;
     // [[hh:]mm:]ss.cc
-    let cpu = time
-        .split(':')
-        .fold(0.0, |acc, part| acc * 60.0 + part.parse::<f64>().unwrap_or(0.0));
+    let cpu = time.split(':').fold(0.0, |acc, part| {
+        acc * 60.0 + part.parse::<f64>().unwrap_or(0.0)
+    });
     let threads = std::process::Command::new("ps")
         .args(["-M", "-p", &pid.to_string()])
         .output()
@@ -286,12 +295,16 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(Mutex::new(Stats::default()));
     let failures = Arc::new(AtomicU64::new(0));
+    // Requests that got no answer within the read timeout (30 s).
+    let stalled = Arc::new(AtomicU64::new(0));
 
     // Background sessions: initialize, then hold the connection idle.
     let started = Instant::now();
     let mut idle = Vec::new();
     let opened = Arc::new(AtomicU64::new(0));
+    let hold_idle = options.hold_idle;
     for i in 0..options.idle {
+        std::thread::sleep(Duration::from_millis(options.stagger_ms));
         let stop = stop.clone();
         let opened = opened.clone();
         let failures = failures.clone();
@@ -303,6 +316,9 @@ fn main() {
                 match connected {
                     Ok(connection) => {
                         opened.fetch_add(1, Ordering::SeqCst);
+                        if !hold_idle {
+                            return;
+                        }
                         while !stop.load(Ordering::SeqCst) {
                             std::thread::sleep(Duration::from_millis(200));
                         }
@@ -319,9 +335,7 @@ fn main() {
             Err(err) => eprintln!("idle thread {i}: {err}"),
         }
     }
-    while opened.load(Ordering::SeqCst) + failures.load(Ordering::SeqCst)
-        < options.idle as u64
-    {
+    while opened.load(Ordering::SeqCst) + failures.load(Ordering::SeqCst) < options.idle as u64 {
         std::thread::sleep(Duration::from_millis(50));
     }
     let idle_setup = started.elapsed();
@@ -331,8 +345,10 @@ fn main() {
     let deadline = Instant::now() + Duration::from_secs(options.seconds);
     let mut workers = Vec::new();
     for client in 0..options.active {
+        std::thread::sleep(Duration::from_millis(options.stagger_ms));
         let stats = stats.clone();
         let failures = failures.clone();
+        let stalled = stalled.clone();
         workers.push(std::thread::spawn(move || {
             let Ok(mut connection) = Connection::open(port) else {
                 failures.fetch_add(1, Ordering::SeqCst);
@@ -377,6 +393,7 @@ fn main() {
                     }
                     Err(err) => {
                         failures.fetch_add(1, Ordering::SeqCst);
+                        stalled.fetch_add(1, Ordering::SeqCst);
                         eprintln!("active {client}: {err}");
                         match Connection::open(port) {
                             Ok(c) => connection = c,
@@ -408,14 +425,20 @@ fn main() {
                     let body = json!({"script": format!(
                         "g.v().has(\"level\", \"{}\").limit(20).values(\"id\")", n % 5)})
                     .to_string();
-                    ("page execute", connection.send("POST", "/api/execute", &headers, &body))
+                    (
+                        "page execute",
+                        connection.send("POST", "/api/execute", &headers, &body),
+                    )
                 } else {
-                    ("page changes", connection.send("GET", "/api/changes", &headers, ""))
+                    (
+                        "page changes",
+                        connection.send("GET", "/api/changes", &headers, ""),
+                    )
                 };
                 match answer {
                     Ok(answer) => {
-                        let error = kind == "page execute"
-                            && !answer.body.starts_with("{\"ok\":true");
+                        let error =
+                            kind == "page execute" && !answer.body.starts_with("{\"ok\":true");
                         stats.lock().unwrap().record(
                             kind,
                             sent.elapsed().as_micros() as u64,
@@ -492,6 +515,8 @@ fn main() {
         "idleSetupS": idle_setup.as_secs_f64(),
         "active": options.active, "tabs": options.tabs, "seconds": options.seconds,
         "connectionFailures": failures.load(Ordering::SeqCst),
+        "stalledRequests": stalled.load(Ordering::SeqCst),
+        "holdIdle": options.hold_idle, "staggerMs": options.stagger_ms,
         "okCalls": total,
         "throughputPerS": (total as f64 / options.seconds as f64).round(),
         "mcp": {
