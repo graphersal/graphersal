@@ -84,3 +84,38 @@ fn layout_jobs_are_shared_and_their_limit_is_raised() {
         "the first job is still kept"
     );
 }
+
+/// With read-only runs the sessions of a template run their queries at the same time; a run
+/// unit would let one thread at a time hold the graph.
+#[test]
+fn read_only_runs_of_two_sessions_overlap() {
+    let mut first = Session::new();
+    first.load_sample("modern").unwrap();
+    first.set_read_only_runs(true).unwrap();
+    let template = first.template().unwrap();
+    let script = "let s = 0; for i in 0..400000 { s += i; } g.v().count().next() + s";
+    let started = std::time::Instant::now();
+    first.execute(script, &RunOptions::default());
+    let single = started.elapsed();
+    let started = std::time::Instant::now();
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let template = template.clone();
+            std::thread::spawn(move || {
+                let mut session = template.session().unwrap();
+                let answer: Value =
+                    serde_json::from_str(&session.execute(script, &RunOptions::default()))
+                        .unwrap();
+                answer["ok"] == true
+            })
+        })
+        .collect();
+    for run in runs {
+        assert!(run.join().unwrap());
+    }
+    let both = started.elapsed();
+    assert!(
+        both < single * 9 / 5,
+        "two runs took {both:?}, one {single:?}"
+    );
+}
