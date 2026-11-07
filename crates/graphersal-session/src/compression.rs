@@ -514,8 +514,8 @@ impl Session {
     /// the engine's caps) and cancellable through [`Self::cancel_token`].
     pub fn estimate_compression(&self, spec: &Value) -> Value {
         let answer = estimate_request(spec).and_then(|request| {
+            self.reset_cancel();
             let cancel = self.cancel_token();
-            cancel.reset();
             self.graph
                 .estimate_compression_json(&request.with_cancel(cancel))
                 .map_err(|message| vec![FieldError::new("general", message.to_string())])

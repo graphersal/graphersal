@@ -139,8 +139,8 @@ impl Session {
 
     fn advice(&self, spec: &Value) -> Result<graphersal::advisor::Advice, SessionError> {
         let request = advice_request(spec)?;
+        self.reset_cancel();
         let cancel = self.cancel_token();
-        cancel.reset();
         cancel
             .scope(|| self.graph.advise(&request))
             .map_err(|err| graphersal::error::format_diagnostic(&*err))
@@ -248,8 +248,8 @@ impl Session {
             Ok(request) => request,
             Err(error) => return json!({"ok": false, "error": error.to_string()}),
         };
+        self.reset_cancel();
         let cancel = self.cancel_token();
-        cancel.reset();
         let applied = cancel.scope(|| self.graph.apply_recommendations(ids, &request, None));
         match applied {
             Ok(applied) => {

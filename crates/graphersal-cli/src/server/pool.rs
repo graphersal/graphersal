@@ -12,7 +12,10 @@
 //!   queued; a further job waits for a slot of ITS client, up to `--queue-timeout`, then 503.
 //! - **Cancellation per client**: a worker registers its session's cancellation token for the
 //!   client of the job it runs; `POST /api/cancel` of a page cancels the tokens of that page's
-//!   running jobs only ([`Pool::cancel_client`]).
+//!   running jobs only ([`Pool::cancel_client`]). The worker resets the token when it registers
+//!   it, under the pool's lock, and the session leaves it alone
+//!   ([`Session::set_cancel_reset_by_host`]): a cancel of a registered job is never lost, also
+//!   when the job's query has not started yet, and never reaches the worker's next job.
 //! - **Graceful stop** ([`Pool::drain`]): no new job is taken, the running and queued ones get
 //!   the drain timeout, then the running ones are cancelled.
 
@@ -215,6 +218,7 @@ impl Pool {
     /// The loop of one worker thread: takes the queued jobs and runs them on `session` until
     /// the process ends.
     pub(super) fn work(&self, session: &mut Session) {
+        session.set_cancel_reset_by_host(true);
         let cancel = session.cancel_token();
         loop {
             let (id, queued) = {
@@ -238,6 +242,8 @@ impl Pool {
                 }
                 state.next += 1;
                 let id = state.next;
+                // Under the lock of every cancel: clears only a cancel of the job before.
+                cancel.reset();
                 state
                     .running
                     .insert(id, (queued.key.clone(), cancel.clone()));
@@ -533,6 +539,74 @@ mod tests {
         cancel_until_done("b", &b);
         let b = b.join().unwrap();
         assert!(b.contains("ancel"), "{b}");
+    }
+
+    /// A job that holds the window between its registration and the start of its query open
+    /// until the returned sender is dropped, and answers the query's response.
+    fn query_after_release() -> (Job, Sender<()>, std::sync::mpsc::Receiver<String>) {
+        let (reply, answer) = channel();
+        let (release, released) = channel::<()>();
+        let job: Job = Box::new(move |session| {
+            let _ = released.recv();
+            let text = session.execute(
+                "let s = 0; for i in 0..200000 { s += i; } s",
+                &graphersal_session::RunOptions::default(),
+            );
+            let _ = reply.send(text);
+        });
+        (job, release, answer)
+    }
+
+    #[test]
+    fn a_cancel_before_the_query_starts_stops_it() {
+        let pool = pool(1, 4, 4, 60_000);
+        let (job, release, answer) = query_after_release();
+        let thread = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        assert!(pool.cancel_client("a"));
+        drop(release);
+        let text = answer.recv().unwrap();
+        thread.join().unwrap().unwrap();
+        assert!(text.contains("ancel"), "{text}");
+    }
+
+    #[test]
+    fn a_cancel_of_one_job_does_not_reach_the_workers_next_job() {
+        let pool = pool(1, 4, 4, 60_000);
+        let (job, release, answer) = query_after_release();
+        let thread = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        assert!(pool.cancel_client("a"));
+        drop(release);
+        let text = answer.recv().unwrap();
+        thread.join().unwrap().unwrap();
+        assert!(text.contains("ancel"), "{text}");
+
+        let (job, release, answer) = query_after_release();
+        drop(release);
+        let thread = submit(&pool, "a", job);
+        let text = answer.recv().unwrap();
+        thread.join().unwrap().unwrap();
+        assert!(!text.contains("ancel"), "{text}");
+    }
+
+    #[test]
+    fn a_drain_past_its_timeout_stops_a_query_that_has_not_started() {
+        let pool = pool(1, 4, 4, 60_000);
+        let (job, release, answer) = query_after_release();
+        let thread = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        let drained = {
+            let pool = pool.clone();
+            std::thread::spawn(move || pool.drain(Duration::ZERO))
+        };
+        // With no timeout to wait for, the drain cancels in the same lock hold that sets the flag.
+        wait_until(&pool, |state| state.draining);
+        drop(release);
+        let text = answer.recv().unwrap();
+        thread.join().unwrap().unwrap();
+        assert_eq!(drained.join().unwrap(), 1);
+        assert!(text.contains("ancel"), "{text}");
     }
 
     #[test]
