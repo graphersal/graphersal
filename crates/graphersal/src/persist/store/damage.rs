@@ -1854,6 +1854,8 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
     let mut seen: BTreeSet<(u8, String)> = BTreeSet::new();
     let mut lineage = graph.graph_id();
     let lineages = wal.lineages.clone();
+    // The rule changes in a row take one walk, across commits, as in an open.
+    graph.defer_rule_passes();
     let replayed = wal.for_each_commit(base_seq, u64::MAX, max_depth, |changes| {
         // A later lineage (an in-place rollback) continues under its id.
         if let Some((id, _)) = lineages
@@ -1887,6 +1889,7 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
             }
         }
     });
+    graph.load_outside_units(TraversalGraph::run_deferred_rule_passes);
     if let Err(reason) = replayed {
         notes.push(format!("the WAL replay stopped: {reason}"));
     }

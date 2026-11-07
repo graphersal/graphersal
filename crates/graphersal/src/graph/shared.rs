@@ -863,9 +863,11 @@ impl<S: GraphStorage> Graph<S> {
                 source = source.with_authorizer(authorizer);
             }
             source.atomically(|unit| {
-                for (kind, name) in &removals {
-                    unit.remove_definition(*kind, name)?;
-                }
+                let removals: Vec<(DefinitionKind, &str)> = removals
+                    .iter()
+                    .map(|(kind, name)| (*kind, name.as_ref()))
+                    .collect();
+                unit.remove_definitions(&removals)?;
                 unit.set_definitions(definitions)
             })?;
         }
