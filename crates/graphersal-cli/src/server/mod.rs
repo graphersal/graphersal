@@ -14,6 +14,9 @@
 //! health probes `GET /healthz` / `/readyz` ([`health`]) never wait for the session thread, so Stop works while a query runs: it cancels the session's
 //! [`CancelToken`], the query stops at its next check and its unit rolls back.
 //!
+//! Scheduled jobs do not run on the session thread: it only hands their runs out and takes the
+//! results back, the work happens on [`job_workers`] threads.
+//!
 //! Safety for a local endpoint without authentication: the sockets bind the loopback
 //! (127.0.0.1, and `[::1]` on the same port when the system has IPv6) unless `--host` names
 //! another address or the process runs in a container (then `0.0.0.0`, with a warning on
@@ -63,6 +66,7 @@ use crate::cli::{Cli, DEFAULT_UI_DIR, EXIT_OK, EXIT_USAGE_ERROR, GraphSpec, Scri
 mod ai;
 mod bind;
 mod cost;
+mod job_workers;
 mod layout;
 mod mcp;
 mod pool;
@@ -147,6 +151,8 @@ struct Context {
     view: Mutex<Option<Value>>,
     /// The change feed (`GET /api/changes`), updated by the session jobs.
     feed: Arc<Mutex<Feed>>,
+    /// The threads that do the work of the scheduled jobs ([`job_workers`]).
+    job_workers: job_workers::JobWorkers,
     /// The MCP endpoint (`--mcp`), or `None`.
     mcp: Option<mcp::Mcp>,
     /// The AI Chat (`--ai FILE`), or `None`.
@@ -274,6 +280,31 @@ fn position(session: &Session) -> Result<(usize, u64), graphersal::error::GraphE
         Arc::as_ptr(graph) as *const () as usize,
         graph.last_commit_seq()?,
     ))
+}
+
+impl Context {
+    /// Gives a job's finished run back to the session. A commit made on the job's thread is in
+    /// no session job's before and after, so it is recorded in the change feed here, when the
+    /// position moved since `before` and the feed does not know the new one yet.
+    fn finish_job_run(
+        &self,
+        before: Option<(usize, u64)>,
+        finished: graphersal::jobs::JobFinished,
+    ) {
+        let feed = self.feed.clone();
+        let client = CLIENT.with(|c| c.borrow().clone());
+        let _ = self.call(move |session| {
+            session.finish_job_run(finished);
+            if let (Some(before), Ok(after)) = (before, position(session))
+                && before.0 == after.0
+                && before.1 != after.1
+                && let Ok(mut feed) = feed.lock()
+                && feed.commit_seq != after.1
+            {
+                feed.record(client, after.1);
+            }
+        });
+    }
 }
 
 /// The `X-Graphersal-Client` id of a request: up to 64 letters, digits, `-` and `_`.
@@ -767,6 +798,7 @@ pub fn run(cli: &Cli) -> i32 {
             commit_seq,
             ..Feed::default()
         })),
+        job_workers: job_workers::JobWorkers::default(),
         mcp,
         #[cfg(feature = "ai")]
         ai,
@@ -830,7 +862,8 @@ impl graphersal::storage::MemorySource for ServerMemory {
 const JOB_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Ticks the session's scheduled jobs (book page "Scheduled Jobs") from a thread of its own,
-/// in the instance's local time zone; each tick is a session job like a browser call.
+/// in the instance's local time zone. Each tick is a short session job like a browser call that
+/// only decides what is due; the work happens on [`job_workers`] threads.
 fn start_job_ticker(context: &Arc<Context>) {
     if let Some(zone) = crate::cli::local_time_zone() {
         let _ = context.call(move |session| session.set_time_zone(&zone));
@@ -844,9 +877,22 @@ fn start_job_ticker(context: &Arc<Context>) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_micros() as i64);
-                if context.call(move |session| session.tick_jobs(now)).is_err() {
+                let due = context.call(move |session| {
+                    let before = position(session).ok();
+                    session
+                        .start_due_jobs(now)
+                        .map(|runs| (before, runs))
+                        .map_err(|err| tracing::warn!(%err, "cannot start the scheduled jobs"))
+                });
+                match due {
                     // The session thread is gone: the server is stopping.
-                    break;
+                    Err(_) => break,
+                    Ok(Err(())) => {}
+                    Ok(Ok((before, runs))) => {
+                        for run in runs {
+                            job_workers::start(&context, before, run, None);
+                        }
+                    }
                 }
             }
         });
@@ -1617,7 +1663,18 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Post, "jobs/run") => {
             let name = body_name(&json_body(request)?)?;
-            value(context.call_fallible(move |s| s.run_job_now(&name))?)
+            // The caller waits for the run, the session does not.
+            let job = name.clone();
+            let (before, run) = context.call_fallible(move |s| {
+                let before = position(s).ok();
+                s.start_job_now(&job).map(|run| (before, run))
+            })?;
+            let (done, finished) = channel();
+            job_workers::start(context, before, run, Some(done));
+            finished
+                .recv()
+                .map_err(|_| HttpError(500, "the session is not running".to_string()))?;
+            value(context.call_fallible(move |s| s.job_entry(&name))?)
         }
         // `?name=<job>&tier=minutes|hours|days` (default minutes): the job's run buckets.
         (Method::Get, "jobs/history") => {

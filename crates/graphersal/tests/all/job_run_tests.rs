@@ -151,6 +151,103 @@ fn a_query_that_now_writes_more_than_the_job_was_allowed_fails_and_changes_nothi
     assert!(error.contains("define the job again"), "{error}");
 }
 
+/// Issue #26: a run handed out works on another thread with the store's jobs. A reading query job
+/// holds no unit, so a write goes through while it runs; jobs of one type do not overlap.
+#[test]
+fn a_reading_query_job_on_another_thread_keeps_no_writer_waiting() {
+    let store = store("memory:job-run-thread");
+    run(
+        &store,
+        r#"g.define_query(#{name: "slow", body: "fn slow() { let n = 0; for i in 0..100000000 { n += g.v().count().next(); } n }"});
+           g.define_job(#{name: "reader", schedule: "* * * * *", action: "query", query: "slow", timeout_ms: 2000});
+           g.define_job(#{name: "second", schedule: "* * * * *", action: "query", query: "slow", timeout_ms: 1});
+           g.define_job(#{name: "cp", schedule: "* * * * *", action: "checkpoint"})"#,
+    );
+    let mut scheduler = scheduler(&store);
+    let mut runs = scheduler.start_due(T0 + MINUTE);
+    let names: Vec<&str> = runs.iter().map(|run| run.name()).collect();
+    assert_eq!(
+        names,
+        ["stats_flush", "cp", "reader"],
+        "'second' waits: a query job runs"
+    );
+    let reader = runs.remove(2);
+    assert_eq!(reader.group(), "query");
+    let worker = std::thread::spawn(move || reader.run());
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // A commit during the run, and the other jobs beside it.
+    run(
+        &store,
+        r#"g.add_v("person").property("name", "ann").iterate()"#,
+    );
+    assert!(!worker.is_finished(), "the write did not wait for the job");
+    for run in runs {
+        let finished = run.run();
+        assert_eq!(finished.record().error, None, "{}", finished.name());
+        scheduler.finish(finished);
+    }
+    assert!(
+        scheduler.start_due(T0 + MINUTE).is_empty(),
+        "'second' still waits"
+    );
+
+    let finished = worker.join().unwrap();
+    let error = finished.record().error.as_deref().unwrap();
+    assert!(error.contains("evaluationTimeout"), "{error}");
+    scheduler.finish(finished);
+    let info = scheduler.jobs();
+    let reader = info.iter().find(|job| job.name == "reader").unwrap();
+    assert!(!reader.running);
+    assert!(reader.last.is_some());
+    assert!(
+        store
+            .workload_stats()
+            .report(T0 + 2 * MINUTE)
+            .jobs
+            .iter()
+            .any(|(name, _)| name == "reader")
+    );
+    // The time of the job that waited is not lost.
+    let due = scheduler.start_due(T0 + MINUTE);
+    let names: Vec<&str> = due.iter().map(|run| run.name()).collect();
+    assert_eq!(names, ["second"]);
+    for run in due {
+        scheduler.finish(run.run());
+    }
+}
+
+/// A reading job may still not write: its query changed to write fails with nothing changed.
+#[test]
+fn a_query_job_without_write_effects_cannot_write() {
+    let store = store("memory:job-run-no-write");
+    run(
+        &store,
+        r#"g.define_query(#{name: "reads", body: "fn reads() { g.v().count() }"});
+           g.define_job(#{name: "reader", schedule: "* * * * *", action: "query", query: "reads"})"#,
+    );
+    let mut scheduler = scheduler(&store);
+    scheduler.run_now("reader", T0).unwrap();
+    let last = |scheduler: &Scheduler| {
+        let jobs = scheduler.jobs();
+        jobs.iter()
+            .find(|job| job.name == "reader")
+            .unwrap()
+            .last
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(last(&scheduler).error, None);
+
+    run(
+        &store,
+        r#"g.define_query(#{name: "reads", body: "fn reads() { g.v().drop() }"})"#,
+    );
+    scheduler.run_now("reader", T0 + 1).unwrap();
+    assert!(last(&scheduler).error.is_some());
+    assert_eq!(store.graph().read().vertex_count(), 6);
+}
+
 #[test]
 fn checkpoint_and_backup_jobs_work_on_the_store() {
     let store = store("memory:job-run-store");

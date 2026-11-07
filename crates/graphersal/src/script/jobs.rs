@@ -413,7 +413,10 @@ impl ScriptGraphTraversalSource {
 
 /// One run of a `query` job (`Store::user_jobs`): calls the saved query `query` with `args` as
 /// one unit carrying `{job: <job>}` in its commit metadata, under an authorizer limited to the
-/// job's stored `effects`; a traversal the query returns runs inside the unit.
+/// job's stored `effects`; a traversal the query returns runs inside the unit. A job whose
+/// effects write nothing (the authorizer refuses any write) needs no unit: a unit would hold the
+/// graph's lock upgradable for the whole run and keep every other writer and script run waiting;
+/// each traversal locks for itself instead, like the per-traversal units of the CLI.
 #[cfg(feature = "persist")]
 pub(crate) fn run_query_job(
     graph: Arc<dyn AnyGraph>,
@@ -428,15 +431,20 @@ pub(crate) fn run_query_job(
         "job_args".to_string(),
         ElementProperty::Object(Box::new(args.clone())),
     );
+    let writes = effects.iter().any(|effect| {
+        !matches!(
+            effect.as_request().action,
+            crate::graph::Action::Read | crate::graph::Action::Execute
+        )
+    });
     let authorizer = Arc::new(crate::graph::jobs::JobAuthorizer::new(job, effects));
+    let script = "g.query(job_query, job_args)";
+    let limits = ScriptLimits::default();
+    if !writes {
+        return super::eval::eval_job_reading(graph, script, params, &limits, authorizer)
+            .map_err(|err| err.to_string());
+    }
     let metadata = crate::graph::CommitMetadata::new().with_attribute("job", job);
-    super::eval::eval_job_unit(
-        graph,
-        "g.query(job_query, job_args)",
-        params,
-        &ScriptLimits::default(),
-        authorizer,
-        metadata,
-    )
-    .map_err(|err| err.to_string())
+    super::eval::eval_job_unit(graph, script, params, &limits, authorizer, metadata)
+        .map_err(|err| err.to_string())
 }

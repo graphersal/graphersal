@@ -14,7 +14,7 @@ current time, and the scheduler runs the jobs that are due.
 |---|---|
 | Dev server (`graphersal --server`) | a thread, every 5 seconds, in the machine's time zone (`TZ` or `/etc/localtime`) |
 | Browser playground | a timer in the engine's worker, every 5 seconds, in the browser's time zone |
-| Your own program | call `Scheduler::tick(now)` yourself |
+| Your own program | call `Scheduler::tick(now)` yourself, or the two-phase form of [Your own thread stays free](#your-own-thread-stays-free) |
 
 The CLI (a script or the REPL on a store) and the Python binding do not tick: a store opened
 there runs no jobs (its workload statistics are still written when it closes). Open the store
@@ -24,9 +24,25 @@ with the dev server, or tick a `Scheduler` in your own program, to run them.
 on the day the clocks go forward (02:30 in most of Europe) runs right after the gap (03:00); a
 time that happens twice when they go back runs once, at its first occurrence.
 
-A job never overlaps itself: due jobs run one after another. A time missed while nothing ticked
-(the process was stopped) is skipped: the job runs at its next scheduled time. A failing job
-(an error, a panic) is recorded and runs again at its next time.
+A job never overlaps itself. A time missed while nothing ticked (the process was stopped) or while
+the job ran is skipped: the job runs at its next scheduled time. A failing job (an error, a panic)
+is recorded and runs again at its next time.
+
+**Requests go on while a job runs.** The dev server does a job's work on a thread of its own: its
+session thread, which answers every request, only decides what is due and takes the result back,
+each a short step. Jobs of one type (`query`, `checkpoint`, `backup`) never run at the same time:
+a due job waits for the one running and starts at the first tick after it, its time is not missed.
+Other jobs run beside it. In the browser playground there is no such thread: a job runs in the
+engine's worker and its requests wait.
+
+While a job of a user runs, the operations of the Store menu that move, remove or write the
+store's files (checkpoint, backup, rollback, attic restore and remove, compact, closing a database)
+answer `409` and change nothing: try again when it has finished. What the graph itself cannot
+offer, a job does not offer either: a `query` job that writes holds the graph's write lock from its
+first write until it commits, as any query does, and the system job `compact` holds it while it
+runs, so other queries wait for that time. Keep such jobs short with a
+[timeout](#limits-per-run). A job whose saved query only reads holds no lock between its
+traversals, so writes go on beside it; each traversal sees the graph as it is at that moment.
 
 ## Limits per run
 
@@ -135,18 +151,40 @@ list shows the runs of the last two days, **Optimize ▸ Workload ▸ Jobs** dra
 
 | Dev server | What it does |
 |---|---|
-| `GET /api/jobs` | every job: the system jobs, then the jobs of users: schedule, on or off, next time, last run, the run counts of the last hour, two days and 90 days, whether it runs (and why not), a user job's action, arguments and effects |
+| `GET /api/jobs` | every job: the system jobs, then the jobs of users: schedule, on or off, next time, whether a run is under way, last run, the run counts of the last hour, two days and 90 days, whether it runs (and why not), a user job's action, arguments and effects |
 | `POST /api/jobs/define` | defines or replaces a job from the keys of `g.define_job`; a refused job answers the wrong fields |
 | `POST /api/jobs/drop` | `{name}`: removes a job of a user |
 | `POST /api/jobs/enable` | `{name, enabled}`: switches a job on or off (a user job's definition keeps its effects) |
 | `POST /api/jobs/schedule` | `{name, schedule}`: a system job's schedule (`null`: the built-in one); a user job is defined again instead |
-| `POST /api/jobs/run` | `{name}`: runs a job now, whatever its schedule |
+| `POST /api/jobs/run` | `{name}`: runs a job now, whatever its schedule, and answers when it has finished (other requests go on meanwhile); refused while it or a job of its type runs |
 | `GET /api/jobs/history?name=..&tier=minutes\|hours\|days` | the job's runs per minute, hour or day: count, failures, total and longest time |
 
 The dev server's user owns the machine's files, so a backup job defined there may name any
 directory; the browser playground has no files and refuses backup jobs.
 
 ## In your own program
+
+### Your own thread stays free
+
+`Scheduler::tick` does the work on the calling thread. When that thread must stay free, split it:
+`start_due(now)` does the bookkeeping and hands out one `JobRun` per due job (`start_now(name, now)`
+for one on demand), `JobRun::run()` does the work on any thread, `Scheduler::finish` takes the
+result back. Until then the job and its group count as running; `Job::with_group` puts jobs that
+must not run together into one group (`Store::user_jobs` does it by type). A run that cannot be
+started (no thread) is given up with `JobRun::abandon(reason)`, a failed run like any other.
+
+```rust,ignore
+for run in scheduler.start_due(now) {
+    let results = results.clone();
+    std::thread::spawn(move || results.send(run.run()));
+}
+// ... later, on the thread that owns the scheduler:
+for finished in finished_runs.try_iter() {
+    scheduler.finish(finished);
+}
+```
+
+### The whole program
 
 ```rust
 use graphersal::jobs::{Job, JobKind, JobLimits, Scheduler};

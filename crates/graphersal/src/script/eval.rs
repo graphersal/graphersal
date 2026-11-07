@@ -513,6 +513,20 @@ pub(crate) fn eval_job_unit(
         .map(|_| ())
 }
 
+/// [`eval_job_unit`] for a job that may not write: no unit around the script, each traversal
+/// locks for itself, a traversal it returns runs too.
+#[cfg(feature = "persist")]
+pub(crate) fn eval_job_reading(
+    shared: Arc<dyn AnyGraph>,
+    script: &str,
+    params: std::collections::HashMap<String, ElementProperty>,
+    limits: &ScriptLimits,
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+) -> Result<(), Box<rhai::EvalAltResult>> {
+    let value = eval_in_unit(&shared, script, params, limits, authorizer)?;
+    materialize_traversals(value, limits.effective_max_value_depth()).map(|_| ())
+}
+
 /// Runs a script like [`eval_value_atomic`] and then ALWAYS rolls everything back: a preview
 /// of what the script would change, the script-side counterpart of
 /// [`Transactional::dry_run`](crate::graph::Transactional::dry_run). Returns the script's result

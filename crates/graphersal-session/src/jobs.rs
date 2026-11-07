@@ -1,16 +1,18 @@
 //! The scheduled jobs of the session's active store (book page "Scheduled Jobs"): the host
 //! ticks [`Session::tick_jobs`] (the dev server from a thread every few seconds, the playground
 //! from a timer in its worker); the session keeps one [`Scheduler`] for the active store and
-//! builds a new one when the active store changes. Without a store nothing runs. The
-//! operations behind the playground's Catalog ▸ Jobs manager, the dev server's `/api/jobs*`
+//! builds a new one when the active store changes. Without a store nothing runs. A host with
+//! threads keeps the session free of the work: [`Session::start_due_jobs`] and
+//! [`Session::start_job_now`] hand out [`JobRun`]s to run anywhere, and
+//! [`Session::finish_job_run`] takes each result back. The operations behind the playground's Catalog ▸ Jobs manager, the dev server's `/api/jobs*`
 //! endpoints and the MCP tool `list_jobs`.
 //!
 //! JSON forms:
 //!
 //! - **List** ([`Session::jobs_view`]): `{timeZone, store, jobs: [entry]}`, the system jobs
 //!   first, then the jobs of users (the catalog's, by name). An **entry**: `{name, kind:
-//!   "system"|"user", schedule, enabled, nextAt, last: {startedAt, micros, error} | null,
-//!   timeoutMs, memoryLimit, scheduled, reason, runs}` (times in microseconds since the Unix
+//!   "system"|"user", schedule, enabled, nextAt, running, last: {startedAt, micros, error} |
+//!   null, timeoutMs, memoryLimit, scheduled, reason, runs}` (times in microseconds since the Unix
 //!   epoch; `scheduled` false with a `reason` when the job does not run: the graph is not in a
 //!   store, this version does not run it, a system job has its name; `runs` the workload
 //!   statistics' `{last_hour, last_two_days, last_ninety_days}` counts of its runs, `null`
@@ -27,7 +29,7 @@ use crate::error::SessionError;
 use std::sync::{Arc, Weak};
 
 use graphersal::catalog::{Definition, DefinitionKind, JobDefinition, JobTask};
-use graphersal::jobs::{CronSchedule, JobInfo, JobKind, Scheduler};
+use graphersal::jobs::{CronSchedule, JobFinished, JobInfo, JobKind, JobRun, Scheduler};
 use graphersal::workload::{JobOverride, JobRunRecord};
 use serde_json::{Map, Value, json};
 
@@ -43,6 +45,10 @@ pub struct SessionJobs {
     /// The scheduler and the store it belongs to (a `Weak` keeps the allocation, so a new
     /// store never takes the old one's address and is mistaken for it).
     current: Option<(Weak<dyn SessionStore>, Scheduler)>,
+    /// The schedulers of stores no longer active with runs still under way: kept until those
+    /// finish, and used again when their store becomes active meanwhile, so a job never overlaps
+    /// a run started before the switch.
+    parked: Vec<(Weak<dyn SessionStore>, Scheduler)>,
     /// The catalog's job definitions the scheduler's user jobs were built from.
     user_jobs: Vec<graphersal::catalog::Definition>,
     /// The job definitions of the catalog the store does not schedule, with the reason
@@ -58,9 +64,22 @@ impl Session {
             .with_time_zone(name)
             .map_err(|err| err.to_string())?;
         self.jobs.time_zone = Some(name.to_string());
-        // Rebuilt in the new zone at the next tick.
-        self.jobs.current = None;
+        // In place: a run under way stays known to its scheduler.
+        for (_, scheduler) in self.jobs.current.iter_mut().chain(&mut self.jobs.parked) {
+            scheduler
+                .set_time_zone(name)
+                .map_err(|err| err.to_string())?;
+        }
         Ok(())
+    }
+
+    /// Puts the current scheduler aside when a run of it is under way; else it is dropped.
+    fn retire_scheduler(&mut self) {
+        if let Some((store, scheduler)) = self.jobs.current.take()
+            && scheduler.running().next().is_some()
+        {
+            self.jobs.parked.push((store, scheduler));
+        }
     }
 
     /// The scheduler of the active store, built when the active store changed (`None`: no
@@ -68,7 +87,7 @@ impl Session {
     /// before no longer resolves, or a system job is refused by the scheduler.
     fn scheduler(&mut self) -> Result<Option<&mut Scheduler>, SessionError> {
         let Some(store) = self.active_store() else {
-            self.jobs.current = None;
+            self.retire_scheduler();
             return Ok(None);
         };
         let same = self
@@ -77,20 +96,32 @@ impl Session {
             .as_ref()
             .is_some_and(|(known, _)| std::ptr::addr_eq(known.as_ptr(), Arc::as_ptr(&store)));
         if !same {
-            // The zone was checked when it was set ([`Self::set_time_zone`]): one that no
-            // longer resolves is an error, never a silent UTC.
-            let scheduler = match &self.jobs.time_zone {
-                Some(zone) => Scheduler::new()
-                    .with_time_zone(zone)
-                    .map_err(|err| SessionError::failed(err.to_string()))?,
-                None => Scheduler::new(),
+            self.retire_scheduler();
+            let parked = self
+                .jobs
+                .parked
+                .iter()
+                .position(|(known, _)| std::ptr::addr_eq(known.as_ptr(), Arc::as_ptr(&store)));
+            let scheduler = match parked {
+                Some(index) => self.jobs.parked.swap_remove(index).1,
+                None => {
+                    // The zone was checked when it was set ([`Self::set_time_zone`]): one that
+                    // no longer resolves is an error, never a silent UTC.
+                    let scheduler = match &self.jobs.time_zone {
+                        Some(zone) => Scheduler::new()
+                            .with_time_zone(zone)
+                            .map_err(|err| SessionError::failed(err.to_string()))?,
+                        None => Scheduler::new(),
+                    };
+                    let mut scheduler = scheduler.with_stats(store.workload_stats());
+                    for job in store.system_jobs() {
+                        scheduler
+                            .add(job)
+                            .map_err(|err| SessionError::failed(err.to_string()))?;
+                    }
+                    scheduler
+                }
             };
-            let mut scheduler = scheduler.with_stats(store.workload_stats());
-            for job in store.system_jobs() {
-                scheduler
-                    .add(job)
-                    .map_err(|err| SessionError::failed(err.to_string()))?;
-            }
             self.jobs.current = Some((Arc::downgrade(&store), scheduler));
             self.jobs.user_jobs.clear();
             self.jobs.not_scheduled.clear();
@@ -126,6 +157,68 @@ impl Session {
             let _ = store.flush_journal();
         }
         Ok(ran)
+    }
+
+    /// [`Self::tick_jobs`] without the work: the runs of the jobs due at `now`, for the host to
+    /// run on threads of its own; each result goes back to [`Self::finish_job_run`]. A job that
+    /// is running, or another job of its type, waits. Fails like [`Self::tick_jobs`].
+    pub fn start_due_jobs(&mut self, now: i64) -> Result<Vec<JobRun>, SessionError> {
+        let runs = self
+            .scheduler()?
+            .map_or_else(Vec::new, |scheduler| scheduler.start_due(now));
+        if let Some(store) = self.active_store() {
+            // Best effort, as in `tick_jobs`.
+            let _ = store.flush_journal();
+        }
+        Ok(runs)
+    }
+
+    /// [`Self::run_job_now`] without the work: the run for the host to run; its result goes back
+    /// to [`Self::finish_job_run`], then [`Self::job_entry`] answers the job's entry. Fails like
+    /// it, and when the job or another job of its type is running.
+    pub fn start_job_now(&mut self, name: &str) -> Result<JobRun, SessionError> {
+        let now = now_micros();
+        let scheduler = self
+            .scheduler()?
+            .ok_or_else(|| SessionError::invalid(NO_STORE))?;
+        Ok(scheduler
+            .start_now(name, now)
+            .map_err(|err| err.to_string())?)
+    }
+
+    /// Takes the result of a run handed out by [`Self::start_due_jobs`] or
+    /// [`Self::start_job_now`] back to the scheduler that handed it out.
+    pub fn finish_job_run(&mut self, finished: JobFinished) {
+        if let Some((_, scheduler)) = &mut self.jobs.current
+            && finished.belongs_to(scheduler)
+        {
+            scheduler.finish(finished);
+            return;
+        }
+        if let Some(index) = self
+            .jobs
+            .parked
+            .iter()
+            .position(|(_, scheduler)| finished.belongs_to(scheduler))
+        {
+            let (_, scheduler) = &mut self.jobs.parked[index];
+            scheduler.finish(finished);
+            if scheduler.running().next().is_none() {
+                self.jobs.parked.swap_remove(index);
+            }
+        }
+    }
+
+    /// The name of a job of a user with a run under way, in any store of the session. System
+    /// jobs do not count: they touch nothing a store operation works on, and are short.
+    pub(crate) fn running_user_job(&self) -> Option<String> {
+        self.jobs
+            .current
+            .iter()
+            .chain(&self.jobs.parked)
+            .flat_map(|(_, scheduler)| scheduler.running())
+            .find(|(_, kind)| *kind == JobKind::User)
+            .map(|(name, _)| name.to_string())
     }
 
     /// The jobs of the served graph (module docs, "List"): the active store's system jobs, then
@@ -188,6 +281,7 @@ impl Session {
             entry["scheduled"] = json!(running.is_some());
             entry["reason"] = json!(reason);
             entry["nextAt"] = json!(running.and_then(|info| info.next_at));
+            entry["running"] = json!(running.is_some_and(|info| info.running));
             entry["last"] = running
                 .and_then(|info| info.last.as_ref())
                 .map_or(Value::Null, run_json);
@@ -471,6 +565,7 @@ fn scheduler_entry(job: &JobInfo) -> Value {
         "schedule": job.schedule,
         "enabled": job.enabled,
         "nextAt": job.next_at,
+        "running": job.running,
         "last": job.last.as_ref().map_or(Value::Null, run_json),
         "timeoutMs": job.limits.timeout.map(|t| t.as_millis() as u64),
         "memoryLimit": job.limits.memory_limit,
@@ -923,6 +1018,76 @@ mod tests {
         assert!(s.drop_job("nightly_purge").unwrap());
         assert!(!s.drop_job("nightly_purge").unwrap());
         assert!(s.job_entry("nightly_purge").unwrap().is_null());
+    }
+
+    /// A store session with the checkpoint job `cp` due every minute, and its run handed out
+    /// (the other jobs due then have finished).
+    fn session_with_a_run_out() -> (Session, JobRun) {
+        let mut session = store_session();
+        let answer = session
+            .define_job(&json!({"name": "cp", "schedule": "* * * * *", "action": "checkpoint"}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        session.start_due_jobs(T0).unwrap();
+        let mut runs = session.start_due_jobs(T0 + 10 * MINUTE).unwrap();
+        let index = runs.iter().position(|run| run.name() == "cp").unwrap();
+        let run = runs.swap_remove(index);
+        for other in runs {
+            session.finish_job_run(other.run());
+        }
+        (session, run)
+    }
+
+    #[test]
+    fn a_run_handed_out_shows_as_running_and_comes_back() {
+        let (mut session, run) = session_with_a_run_out();
+        let entry = session.job_entry("cp").unwrap();
+        assert_eq!(entry["running"], true, "{entry}");
+        assert_eq!(entry["last"], Value::Null);
+        // No overlap, by the schedule or on demand.
+        let due = session.start_due_jobs(T0 + 11 * MINUTE).unwrap();
+        assert!(due.iter().all(|run| run.name() != "cp"));
+        let refused = session.start_job_now("cp").unwrap_err().to_string();
+        assert!(refused.contains("running"), "{refused}");
+        assert!(session.run_job_now("cp").is_err());
+
+        let worker = std::thread::spawn(move || run.run());
+        session.finish_job_run(worker.join().unwrap());
+        let entry = session.job_entry("cp").unwrap();
+        assert_eq!(entry["running"], false, "{entry}");
+        assert_eq!(entry["last"]["error"], Value::Null, "{entry}");
+        let again = session.start_job_now("cp").unwrap();
+        session.finish_job_run(again.run());
+    }
+
+    #[test]
+    fn a_store_operation_waits_for_a_users_job_but_not_for_a_system_job() {
+        let (mut session, run) = session_with_a_run_out();
+        let refused = session.store_checkpoint("").err().expect("refused");
+        assert_eq!(refused.status, 409);
+        assert!(refused.message.contains("'cp'"), "{}", refused.message);
+        session.finish_job_run(run.run());
+        session.store_checkpoint("").unwrap();
+
+        // A system job never refuses anything.
+        let flush = session.start_job_now("stats_flush").unwrap();
+        session.store_checkpoint("").unwrap();
+        session.finish_job_run(flush.run());
+    }
+
+    #[test]
+    fn a_run_survives_a_change_of_the_time_zone_and_of_the_scheduler() {
+        let (mut session, run) = session_with_a_run_out();
+        session.set_time_zone("Europe/Berlin").unwrap();
+        assert_eq!(session.job_entry("cp").unwrap()["running"], true);
+        // The store is left: its scheduler is kept for the run, and found again.
+        session.retire_scheduler();
+        assert!(session.jobs.current.is_none());
+        assert_eq!(session.job_entry("cp").unwrap()["running"], true);
+        assert!(session.start_job_now("cp").is_err());
+        session.retire_scheduler();
+        session.finish_job_run(run.run());
+        assert!(session.jobs.parked.is_empty());
+        assert_eq!(session.running_user_job(), None);
     }
 
     #[test]

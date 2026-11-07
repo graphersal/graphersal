@@ -6575,6 +6575,131 @@ fn scheduled_jobs_over_http() {
     let _ = std::fs::remove_dir_all(&backups);
 }
 
+/// Issue #26: while a job runs, every other request is answered; the job's limits still apply, it
+/// does not overlap itself and store operations that would disturb it are refused.
+#[test]
+fn a_running_job_holds_up_no_other_request() {
+    let ui = ui_dir("job-off-session");
+    let data = ui.parent().unwrap().join("job-off-session-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&["--graph", &data_arg, "--ui-dir", &ui_arg, "--create-store"]);
+    let port = server.port;
+    let execute = |script: &str| {
+        post(
+            port,
+            "/api/execute",
+            &serde_json::json!({ "script": script }).to_string(),
+        )
+        .json()
+    };
+    let running = |name: &str| {
+        let jobs = get(port, "/api/jobs").json();
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["name"] == name)
+            .unwrap()["running"]
+            .as_bool()
+            .unwrap()
+    };
+    // Reads until its timeout stops it: well over what the requests below take.
+    assert_eq!(
+        execute(
+            r#"g.add_v("person").iterate();
+               g.define_query(#{name: "slow", body: "fn slow() { let n = 0; for i in 0..100000000 { n += g.v().count().next(); } n }"})"#
+        )["ok"],
+        true
+    );
+    let spec = serde_json::json!({
+        "name": "slow_job", "schedule": "0 3 1 1 *", "action": "query", "query": "slow",
+        "timeout_ms": 3000,
+    });
+    assert_eq!(
+        post(port, "/api/jobs/define", &spec.to_string()).json()["job"]["running"],
+        false
+    );
+
+    let runner = std::thread::spawn(move || post(port, "/api/jobs/run", r#"{"name": "slow_job"}"#));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !running("slow_job") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the job never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Long enough for the run to hold what it holds.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // A script run, a write and a panel are all answered during the run.
+    assert_eq!(execute("1 + 1")["ok"], true);
+    assert_eq!(execute(r#"g.add_v("person").iterate()"#)["ok"], true);
+    assert_eq!(get(port, "/api/statistics").status, 200);
+    // No overlap, and no store operation that would disturb the run.
+    let again = post(port, "/api/jobs/run", r#"{"name": "slow_job"}"#);
+    assert_eq!(again.status, 422);
+    assert!(again.json()["error"].as_str().unwrap().contains("running"));
+    let checkpoint = post(port, "/api/store/checkpoint", r#"{"name": ""}"#);
+    assert_eq!(checkpoint.status, 409);
+    assert!(
+        checkpoint.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("slow_job")
+    );
+    assert!(running("slow_job"), "everything above came during the run");
+
+    // The caller of `jobs/run` waited for the run, whose timeout stopped it.
+    let ran = runner.join().unwrap().json();
+    assert_eq!(ran["running"], false, "{ran}");
+    let error = ran["last"]["error"].as_str().unwrap();
+    assert!(error.contains("evaluationTimeout"), "{error}");
+    assert!(
+        ran["last"]["micros"].as_u64().unwrap() >= 3_000_000,
+        "{ran}"
+    );
+    let history = get(port, "/api/jobs/history?name=slow_job&tier=hours").json();
+    assert_eq!(history["buckets"][0]["count"], 1, "{history}");
+    assert_eq!(history["buckets"][0]["failed"], 1, "{history}");
+    assert_eq!(
+        post(port, "/api/store/checkpoint", r#"{"name": ""}"#).status,
+        200
+    );
+
+    // A job's commit, made away from the session, reaches the change feed.
+    let before = get(port, "/api/changes").json();
+    assert_eq!(
+        execute(
+            r#"g.define_query(#{name: "grow", body: "fn grow() { g.add_v(\"grown\").iterate(); 1 }"})"#
+        )["ok"],
+        true
+    );
+    let spec = serde_json::json!({
+        "name": "grow_job", "schedule": "0 3 1 1 *", "action": "query", "query": "grow",
+    });
+    assert_eq!(
+        post(port, "/api/jobs/define", &spec.to_string()).json()["job"]["running"],
+        false
+    );
+    let defined = get(port, "/api/changes").json();
+    assert!(defined["commitSeq"].as_u64() > before["commitSeq"].as_u64());
+    let ran = post(port, "/api/jobs/run", r#"{"name": "grow_job"}"#).json();
+    assert!(ran["last"]["error"].is_null(), "{ran}");
+    let after = get(port, "/api/changes").json();
+    assert_eq!(
+        after["commitSeq"].as_u64().unwrap(),
+        defined["commitSeq"].as_u64().unwrap() + 1,
+        "{after}"
+    );
+    assert_eq!(
+        execute(r#"g.v().has_label("grown").count().next()"#)["ok"],
+        true
+    );
+}
+
 /// The storage advisor over HTTP (`/api/advise*`) and MCP (`advise`): a key filtered often is
 /// advised an index; applying the recommendation by its id creates it, and the advice is gone.
 #[test]

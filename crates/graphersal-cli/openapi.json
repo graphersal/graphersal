@@ -2587,7 +2587,7 @@
           "Jobs"
         ],
         "summary": "Run a job now",
-        "description": "Runs a job now: its entry (`last` = this run).",
+        "description": "Runs a job now and answers when it has finished: its entry (`last` = this run). Other requests are served meanwhile; 422 while the job or another job of its type runs.",
         "operationId": "postApiJobsRun",
         "requestBody": {
           "required": true,

@@ -133,8 +133,10 @@ impl<S: PersistentStorage> Store<S> {
                 JobKind::System,
                 schedule,
                 move |_| {
-                    // The batched records of the system journal go to its files too.
-                    flush.shared.system_journal.sync();
+                    // The batched records of the system journal go to its files too, unless
+                    // another store operation runs (a backup job beside this one): the journal
+                    // never writes in the middle of one, the flusher retries.
+                    flush.shared.write_journal_batch();
                     flush
                         .flush_workload()
                         .map(|_| ())
@@ -255,6 +257,13 @@ impl<S: PersistentStorage + Default> Store<S> {
             .parse()
             .map_err(|err| format!("its schedule {:?} does not parse: {err}", job.schedule()))?;
         let job_name = name.to_string();
+        // Jobs of one type never run at the same time.
+        let group = match job.action() {
+            JobTask::Query { .. } => "query",
+            JobTask::Checkpoint => "checkpoint",
+            JobTask::Backup { .. } => "backup",
+            JobTask::Unknown(_) => "unknown",
+        };
         let action: crate::graph::jobs::JobAction = match job.action() {
             JobTask::Query { name: query, args } => {
                 self.query_action(&job_name, query, args, job.effects())
@@ -285,7 +294,9 @@ impl<S: PersistentStorage + Default> Store<S> {
                 return Err("its action is not known to this version".into());
             }
         };
-        let mut built = Job::new(name, JobKind::User, schedule, action).with_limits(job.limits());
+        let mut built = Job::new(name, JobKind::User, schedule, action)
+            .with_group(group)
+            .with_limits(job.limits());
         if !job.enabled() {
             built = built.disabled();
         }
