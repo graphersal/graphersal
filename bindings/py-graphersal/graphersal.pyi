@@ -497,6 +497,11 @@ class Graph:
     def drop_compression(self, name: str, *, policy: Optional[AccessPolicy] = None) -> bool:
         """Removes the compression rule and decompresses its values; ``False`` when there is
         none."""
+    def drop_compressions(
+        self, names: list[str], *, policy: Optional[AccessPolicy] = None
+    ) -> int:
+        """Removes every compression rule of ``names`` in ONE commit and decompresses their
+        values in ONE pass; a name not stored is skipped. Returns the number removed."""
     def recompress(self, name: str, *, policy: Optional[AccessPolicy] = None) -> None:
         """Rebuilds the rule's dictionary from the current values and re-encodes them."""
     def memory_report(
