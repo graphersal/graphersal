@@ -1867,6 +1867,8 @@ input.ve-null { color: var(--text-muted); }
 .op-tabs.small button { padding: 3px 8px; font-size: 12px; }
 .op-bar { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .op-check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.op-note { display: flex; align-items: center; gap: 12px; margin: 8px 0; padding: 8px 12px; font-size: 13px; background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 8px; }
+.op-note .btn { flex: none; }
 .op-rec { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
 .op-rec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .op-rec-line { margin-top: 4px; font-size: 13px; }

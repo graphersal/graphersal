@@ -216,6 +216,11 @@ changes.
 The [advisor](../persistence/optimize.md#applying-several-at-once) groups its recommendations the
 same way (`dedup: 74 keys, total -400.1 MiB`) and applies a picked group in one commit too.
 
+**On a store, write a snapshot after changing rules** (`graphersal store checkpoint <DIR>`, or the
+playground's Store menu): until one holds them, every open re-encodes the labels of the rules, which
+can make a start several times slower. See
+[Optimize](../persistence/optimize.md#after-applying-compression-rules-write-a-snapshot).
+
 ## A rule from a newer version
 
 A store (or a catalog file, a change set) written by a newer Graphersal may hold a rule whose
