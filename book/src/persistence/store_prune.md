@@ -36,7 +36,8 @@ graphersal store prune data/                 # refused: "needs --up-to <COMMIT> 
 
 Every snapshot it keeps is verified (read back, every checksum) **before** anything is deleted,
 and the removal runs under an `INTENT` file (an interruption is completed at the next open).
-Prune is refused while a backup is copying the store's files, and on a store open elsewhere
+Prune is refused while a backup, a verification, a fork or an export reads the store's files, and
+on a store open elsewhere
 ("in use": use the dev server's Store menu > Compact, which prunes up to the current commit).
 
 After a prune, [point-in-time](store_point_in_time.md) targets before the oldest kept snapshot are

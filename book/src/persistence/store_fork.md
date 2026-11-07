@@ -1,7 +1,9 @@
 # Fork
 
 A fork makes a past (or the current) state of a store into a **new, writable store** in another
-directory. The source store is not changed; to undo a fork, delete the new directory.
+directory. The source store is not changed; to undo a fork, delete the new directory. A fork of an
+open store waits while a rollback moves files; while it runs a rollback or a prune of that store is
+refused.
 
 ```rust,no_run
 use graphersal::persist::{RecoveryTarget, Store, StoreOptions};

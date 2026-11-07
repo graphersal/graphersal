@@ -35,7 +35,7 @@ graphersal store info data/
 data/
 ├── GRAPH, GRAPH.copy        identity, lineage, state (two copies of the same small file)
 ├── LOCK                     held by the one writer (an operating-system lock)
-├── BACKUP                   the backup pin: held shared while a backup copies, prune waits for it
+├── BACKUP                   the backup pin: shared while a backup, verify, fork or export reads
 ├── INTENT                   only while a multi-file operation runs (rollback, prune, ...)
 ├── marks                    the marks, rebuilt from the WAL when lost
 ├── snapshots/

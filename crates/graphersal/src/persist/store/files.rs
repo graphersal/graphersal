@@ -937,8 +937,8 @@ impl DirLock {
     }
 }
 
-/// The backup pin: shared while a backup or a verification reads files (any number of them, in
-/// this or another process), exclusive while `prune` deletes files or a rollback or an attic change
+/// The backup pin: shared while a backup, a verification, a fork or an export reads files (any
+/// number of them, in this or another process), exclusive while `prune` deletes files or a rollback or an attic change
 /// moves them. A reader takes it BEFORE it reads the durable end of the WAL: a rollback in between
 /// would make that position point at files that moved, which reads as damage.
 pub(crate) struct BackupPin {
@@ -971,21 +971,23 @@ impl BackupPin {
             Ok(None) => Err(PersistError::store(
                 "prune the store",
                 StoreFailure::BackupRunning,
-                "a backup or a verification is reading its files; prune again when it has finished",
+                "a backup, a verification, a fork or an export is reading its files; prune again \
+                 when it has finished",
             )),
             Err(err) => Err(PersistError::io("opening the store's BACKUP file", err)),
         }
     }
 
-    /// The side of a rollback or an attic change (`operation`): fails at once while a backup or a
-    /// verification holds the pin.
+    /// The side of a rollback or an attic change (`operation`): fails at once while a backup, a
+    /// verification, a fork or an export holds the pin.
     pub(crate) fn moving(dir: &DirPath, operation: &'static str) -> Result<Self, PersistError> {
         match dir.store_dir().lock(LockKind::BackupExclusive) {
             Ok(Some(lock)) => Ok(Self { _lock: lock }),
             Ok(None) => Err(PersistError::store(
                 operation,
                 StoreFailure::FilesInUse,
-                "a backup or a verification is reading its files; try again when it has finished",
+                "a backup, a verification, a fork or an export is reading its files; try again \
+                 when it has finished",
             )),
             Err(err) => Err(PersistError::io("opening the store's BACKUP file", err)),
         }

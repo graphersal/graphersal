@@ -1400,8 +1400,8 @@ honours a recorded WAL cut, applies the checks of 9.8, and appends no Checkpoint
 on, plus the base snapshot of every attic entry; it verifies each kept snapshot first, then
 removes the older snapshots and the WAL segments before the replay set of the oldest kept one,
 under an `INTENT` (`prune`). The last two verified snapshots and the WAL between them always stay
-(the donors of 13.4). Nothing is ever removed implicitly. Prune is refused while a backup holds
-the pin (12.10). Marks before the oldest kept snapshot become unreachable (10); a prune reports
+(the donors of 13.4). Nothing is ever removed implicitly. Prune is refused while the pin is held
+shared (12.10). Marks before the oldest kept snapshot become unreachable (10); a prune reports
 them, from the `marks` file only.
 
 Files that a kept snapshot or a snapshot of an attic entry references (6.2) stay: of a removed
@@ -1600,10 +1600,12 @@ checked by length and CRC-32C only, with a note that its hash was not checked.
   system advisory lock (`flock` / `LockFileEx`) on `LOCK`, held while the store is open
   read-write; in a container file it is the lock on the file itself (14.5). Read-only loads,
   verification, listing, export, fork and out-of-process backups take none.
-- **Backup pin**: a backup holds the `BACKUP` lock shared while it copies, and so does a
-  verification of a writable store while it reads; each waits while the lock is held exclusively,
-  and takes it before it reads the durable end of the WAL. A prune, a rollback, and an attic restore
-  or removal take it exclusively and without blocking, and are refused while it is held shared.
+- **Backup pin**: a backup holds the `BACKUP` lock shared while it copies, and so do a
+  verification, a fork and a packed export of a writable open store while they read (the forms on a
+  closed directory, `fork_dir` and `export_packed_dir`, take no lock); each waits while the lock is
+  held exclusively, and takes it before it reads the durable end of the WAL. A prune, a rollback,
+  and an attic restore or removal take it exclusively and without blocking, and are refused while
+  it is held shared.
 
 ### 12.11 Backups from memory
 
