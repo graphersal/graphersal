@@ -32,7 +32,9 @@ export const DropMenu = {
     /** Sets `aria-busy` on the trigger (the Store button while a store action runs). */
     busy: { type: Boolean, default: false },
   },
-  setup(props) {
+  /** `open`: the menu has just opened, by its button or by `show()`; a close sends nothing. */
+  emits: ['open'],
+  setup(props, { emit }) {
     const open = ref(false);
     const trigger = ref(null);
     const pop = ref(null);
@@ -122,6 +124,7 @@ export const DropMenu = {
       openMenu = close;
       pos.value = { top: '0px', left: '0px', visibility: 'hidden' };
       open.value = true;
+      emit('open');
       listen(true);
       observer = new ResizeObserver(() => place());
       if (trigger.value) observer.observe(trigger.value);
