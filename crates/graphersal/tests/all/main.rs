@@ -239,6 +239,7 @@ mod storage_contract_regression_tests;
 mod storage_wrapper_tests;
 mod store_error_tests;
 mod store_models_tests;
+mod store_overlap_tests;
 mod store_robustness_tests;
 mod store_tests;
 mod store_upgrade_tests;

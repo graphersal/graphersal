@@ -1600,8 +1600,10 @@ checked by length and CRC-32C only, with a note that its hash was not checked.
   system advisory lock (`flock` / `LockFileEx`) on `LOCK`, held while the store is open
   read-write; in a container file it is the lock on the file itself (14.5). Read-only loads,
   verification, listing, export, fork and out-of-process backups take none.
-- **Backup pin**: a backup holds the `BACKUP` lock shared while it copies (waiting while a prune
-  holds it); prune takes it exclusively and without blocking, and is refused while a backup runs.
+- **Backup pin**: a backup holds the `BACKUP` lock shared while it copies, and so does a
+  verification of a writable store while it reads; each waits while the lock is held exclusively,
+  and takes it before it reads the durable end of the WAL. A prune, a rollback, and an attic restore
+  or removal take it exclusively and without blocking, and are refused while it is held shared.
 
 ### 12.11 Backups from memory
 

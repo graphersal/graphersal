@@ -1782,7 +1782,9 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// (commit hooks the application registered on it are kept).
     ///
     /// Fails when the target is not before the current commit, when no snapshot at or before
-    /// it is left, or when the WAL after it cannot be read.
+    /// it is left, or when the WAL after it cannot be read; refused at once with
+    /// [`StoreFailure::FilesInUse`] while a backup or a verification reads the files (they wait
+    /// for a rollback under way).
     pub fn rollback_to(
         &self,
         target: RecoveryTarget,
@@ -2976,6 +2978,7 @@ impl StoreCore {
 
     pub fn verify(&self) -> Result<VerifyReport, PersistError> {
         let _quiet = self.shared.operations.read();
+        let _pin = self.pin_files("verify the store")?;
         let report = match maintenance::verify(&self.shared.dir, self.durable_position()) {
             Ok(report) => report,
             // Both GRAPH copies unusable: damage of the open store's files too.
@@ -3012,6 +3015,17 @@ impl StoreCore {
             .count("notes", report.notes.len() as u64),
         );
         Ok(report)
+    }
+
+    /// Keeps a rollback or an attic change off the files while they are read for damage (what
+    /// moves would read as damage and freeze the store). To be taken before the durable end is
+    /// read. `None` for a store that cannot change them, which writes nothing either (no pin file
+    /// in a read-only directory).
+    fn pin_files(&self, operation: &'static str) -> Result<Option<files::BackupPin>, PersistError> {
+        if self.writable(operation).is_err() {
+            return Ok(None);
+        }
+        files::BackupPin::shared_for(&self.shared.dir, operation).map(Some)
     }
 
     fn tracks_damage(&self) -> bool {
@@ -3057,11 +3071,14 @@ impl StoreCore {
         let _quiet = self.shared.operations.read();
         let target = DirPath::root(target_dir.into_store_dir());
         let full = !files::has_entries(&target);
-        let result = backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode)
-            .map(|mut report| {
-                report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
-                report
-            });
+        let result = self.pin_files("back up the store").and_then(|_pin| {
+            backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode).map(
+                |mut report| {
+                    report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+                    report
+                },
+            )
+        });
         let mode = if full { "full" } else { "increment" };
         self.after_backup(result, &target.display(), mode)
     }
@@ -3202,18 +3219,21 @@ impl StoreCore {
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
         let _quiet = self.shared.operations.read();
-        let result = maintenance::backup_to_zip(
-            &self.shared.dir,
-            self.durable_position(),
-            &mut archive,
-            models,
-        )
-        .map(|mut report| {
-            if models == ModelCopy::Include {
-                report.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
-                    .unwrap_or_default();
-            }
-            report
+        let result = self.pin_files("back up the store").and_then(|_pin| {
+            maintenance::backup_to_zip(
+                &self.shared.dir,
+                self.durable_position(),
+                &mut archive,
+                models,
+            )
+            .map(|mut report| {
+                if models == ModelCopy::Include {
+                    report.models =
+                        model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
+                            .unwrap_or_default();
+                }
+                report
+            })
         });
         self.after_backup(result, "a ZIP archive", "zip")
     }
@@ -3245,6 +3265,7 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
+        let _pin = files::BackupPin::moving(&self.shared.dir, "roll the store back")?;
         let mut graph = self.shared.graph.write();
         if let Some(Err(err)) = self.shared.journal.sync_now() {
             return Err(PersistError::store(
@@ -3353,6 +3374,7 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
+        let _pin = files::BackupPin::moving(&self.shared.dir, "restore the attic entry")?;
         let mut graph = self.shared.graph.write();
         if let Some(Err(err)) = self.shared.journal.sync_now() {
             return Err(PersistError::store(
@@ -3404,6 +3426,7 @@ impl StoreCore {
                 "a store lock is poisoned",
             )
         })?;
+        let _pin = files::BackupPin::moving(&self.shared.dir, "remove the attic entry")?;
         rollback::attic_remove(&self.shared.dir, id)?;
         self.shared.collect_blobs("attic_remove");
         self.shared.system_journal.emit(
