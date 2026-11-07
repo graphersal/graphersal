@@ -57,6 +57,29 @@ promises of the others of the same call as kept, so its outcome under *Applied* 
 while the promises hold (a deviation of the whole call from its promises shows on every outcome
 of the call alike).
 
+## After applying compression rules: write a snapshot
+
+**Write a snapshot right after adding or dropping compression rules on a store:**
+`graphersal store checkpoint <DIR>` on a closed store, **Write a snapshot now** in the playground,
+`Store::checkpoint` in Rust.
+
+Rules cost almost nothing in the WAL (74 rules: about 2 KiB), so the
+[automatic checkpoint](store_checkpoints.md), which goes by WAL size, does not run because of them.
+Until a snapshot holds them, every open replays the change and re-encodes the labels of the rules,
+one rule at a time. A snapshot that holds the rules loads about as fast as one without them: its
+rows are coded as they enter the graph. Measured on a real graph (2.8 million elements, 74 `dedup`
+rules, `--release`):
+
+| The store | Open | Memory |
+|---|---|---|
+| without the rules | 9.6 s | 1573 MiB |
+| rules only in the WAL | 25.1 s, at every open | 1172 MiB |
+| rules in a snapshot (the checkpoint took 1 s) | 8.4-10.6 s | 1172 MiB |
+
+The cost grows with the number of rules times the elements of their labels: 90 rules on a graph of
+about 3 GB in memory took an open from 14 s to 111 s. The data is safe either way, and the
+rules work from the first commit: only the start is slower.
+
 ## Dismissing, and what an applied one did
 
 A recommendation can be **snoozed** for 7 days or **dismissed** for good; it is then listed under
@@ -78,7 +101,9 @@ The top bar's **Optimize** opens one panel with three tabs:
   recommendation each has a checkbox, and **Select all** names the groups (`dedup: 74 keys,
   total -400.1 MiB`); nothing is ticked when the panel opens (a human picks). **Apply selected**
   shows what the selection frees and the titles, asks for confirmation and applies them in one
-  commit, all or nothing.
+  commit, all or nothing. After a change of compression rules on a store, a note with **Write a
+  snapshot now** stays until a snapshot holds that commit (see
+  [above](#after-applying-compression-rules-write-a-snapshot)).
 - **Workload**: the workload statistics as tables (queries, properties, locks, jobs) for a window
   (the last hour, 2 days or 90 days) and a channel, with a sparkline of the runs per row; a row
   opens its chart: runs per minute, hour or day with the failed part, and the mean and the

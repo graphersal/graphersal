@@ -167,6 +167,22 @@ export function selectionSummary(advice, selected) {
   return { count, bytes, text, confirm };
 }
 
+/** Whether applied recommendations of these kinds changed compression rules (a pass per open). */
+export function changesCompressionRules(kinds) {
+  return (kinds || []).some((kind) => kind === 'add_compression' || kind === 'drop_compression');
+}
+
+/**
+ * Whether to recommend a snapshot after compression rules changed at commit `rulesCommit`: while
+ * no snapshot holds that commit, every open of the store replays the rule changes and re-encodes
+ * their labels (book page "Optimize"). `store` is the Store menu's summary, null without a store.
+ */
+export function checkpointDue(store, rulesCommit) {
+  if (!store || rulesCommit == null) return false;
+  const newest = Math.max(0, ...(store.snapshots || []).map((s) => Number(s.commitSeq) || 0));
+  return newest < rulesCommit;
+}
+
 /** The days a "Snooze" dismisses a recommendation for. */
 export const SNOOZE_DAYS = 7;
 

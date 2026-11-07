@@ -7,7 +7,9 @@
 //   command. "Every candidate" lowers the thresholds (small graphs). Several at once: a checkbox
 //   per recommendation, "Select all" per group (kind and codec: "dedup: 74 keys, total -400.1
 //   MiB"), nothing selected by default; "Apply selected" asks for confirmation and applies
-//   them in ONE commit (`applyRecommendations`), all or nothing.
+//   them in ONE commit (`applyRecommendations`), all or nothing. After a change of compression
+//   rules on a store, a note recommends a snapshot ("Write a snapshot now") until one holds that
+//   commit (`checkpointDue`): until then every open replays the change and re-encodes the data.
 // - Workload: the workload statistics per list (queries, properties, locks, jobs) in a window
 //   (hour, 2 days, 90 days) for a channel, a sparkline per row; a row opens a detail chart
 //   (runs per bucket with the failed part, mean and max time) with the tier switch.
@@ -16,10 +18,11 @@
 //   (its components and the unattributed rest), properties and labels, the most bytes first.
 
 import { ref, reactive, computed, watch, nextTick } from 'vue';
-import { state, toast, optimizeApplied } from '../store.js';
+import { state, toast, optimizeApplied, runStoreTask } from '../store.js';
 import {
   WINDOWS, TIERS, LISTS, MIN_TIMES, SNOOZE_DAYS, sortsDescending, recommendationRows, dismissedRows, appliedRows, adviceSummary, channels, workloadRows, sparkPath,
   recommendationGroups, pruneSelection, groupSelected, toggleGroup, toggleRecommendation, selectionSummary,
+  changesCompressionRules, checkpointDue,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, memoryOmitted, memoryReportSpec,
   memoryComponents,
 } from '../optimize.js';
@@ -39,7 +42,9 @@ export const OptimizePanel = {
     const dlg = ref(null);
     const tab = ref('advice');
     // `selected`: the ids ticked for "Apply selected" (none by default: a human picks).
-    const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null, selected: [] });
+    // `rulesCommit`: the commit of the last compression rule change applied here; `checkpointDue`:
+    // no snapshot holds it yet.
+    const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null, selected: [], rulesCommit: null, checkpointDue: false });
     const work = reactive({
       report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total', desc: true,
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
@@ -62,6 +67,7 @@ export const OptimizePanel = {
         if (answer && answer.ok) {
           advice.data = answer.advice;
           advice.selected = pruneSelection(advice.data, advice.selected);
+          await checkCheckpointDue();
         } else advice.error = (answer && answer.error) || 'The advice failed.';
       } catch (err) {
         advice.error = message(err);
@@ -147,6 +153,41 @@ export const OptimizePanel = {
     // Recommendations.
     const recRows = computed(() => recommendationRows(advice.data));
     const summary = computed(() => adviceSummary(advice.data));
+    // The snapshot note: asks the store each time the advice loads, so a snapshot written
+    // another way (the Store menu, an automatic checkpoint) ends it too.
+    async function checkCheckpointDue() {
+      if (advice.rulesCommit == null) return;
+      const e = engine();
+      try {
+        const store = e.storeSummary ? await e.storeSummary() : e.storeInfo ? await e.storeInfo() : null;
+        advice.checkpointDue = checkpointDue(store, advice.rulesCommit);
+      } catch (err) {
+        advice.checkpointDue = false; // no store, or it cannot answer: nothing to recommend
+      }
+    }
+    async function rulesApplied(kinds) {
+      if (!changesCompressionRules(kinds) || !advice.data) return;
+      advice.rulesCommit = advice.data.commit_seq;
+      await checkCheckpointDue();
+    }
+    async function writeSnapshot() {
+      try {
+        const res = await runStoreTask('checkpoint', () => engine().checkpoint(''));
+        if (res.refused) {
+          toast('Not written: a query or another store action is running.', 'error', 6000);
+          return;
+        }
+        toast(`Snapshot written at commit ${res.value.commitSeq}: the next start loads the rules from it.`, 'info', 7000);
+        await checkCheckpointDue();
+      } catch (err) {
+        toast(`Checkpoint failed: ${message(err)}`, 'error', 12000);
+      }
+    }
+    // Another graph: its store has nothing to do with the rules applied here.
+    watch(() => state.graphEpoch, () => {
+      advice.rulesCommit = null;
+      advice.checkpointDue = false;
+    });
     async function apply(row) {
       advice.applying = row.id;
       try {
@@ -155,6 +196,7 @@ export const OptimizePanel = {
           toast(`Applied: ${row.title}.`, 'info', 5000);
           await optimizeApplied();
           await loadAdvice();
+          await rulesApplied([res.kind]);
           memory.report = null;
         } else {
           toast(`Not applied: ${(res && res.error) || 'refused'}`, 'error', 9000);
@@ -203,6 +245,7 @@ export const OptimizePanel = {
           advice.selected = [];
           await optimizeApplied();
           await loadAdvice();
+          await rulesApplied((res.applied || []).map((a) => a.kind));
           memory.report = null;
         } else {
           toast(`Nothing applied: ${(res && res.error) || 'refused'}`, 'error', 12000);
@@ -275,7 +318,7 @@ export const OptimizePanel = {
 
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
-      recRows, summary, apply, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
+      recRows, summary, apply, writeSnapshot, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
       groups, selection, isSelected, isGroupSelected, toggle, toggleAll, clearSelection, applySelected,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
       memRows, memLabels, memTotals, memComponents, memRowsOmitted, memLabelsOmitted,
@@ -303,6 +346,10 @@ export const OptimizePanel = {
           <span class="muted">{{ advice.loading ? 'Computing…' : summary }}</span>
           <span class="spacer"></span>
           <label class="op-check" title="Lower every threshold: shows candidates on small graphs too"><input type="checkbox" v-model="advice.everything"> Every candidate</label>
+        </div>
+        <div v-if="advice.checkpointDue" class="op-note" role="status">
+          <span><strong>Write a snapshot now.</strong> The new compression rules are only in the write-ahead log, so every start of this store repeats the re-encoding and takes much longer. A snapshot holds them: the store then starts about as fast as before.</span>
+          <button type="button" class="btn small primary" :disabled="!!state.storeTask || state.storeBusy || state.running" @click="writeSnapshot">{{ state.storeTask && state.storeTask.id === 'checkpoint' ? 'Writing…' : 'Write a snapshot now' }}</button>
         </div>
         <div v-if="advice.error" class="field-error">{{ advice.error }}</div>
         <p v-else-if="advice.data && !recRows.length" class="muted">Nothing to recommend now. Recommendations come from frequent full-scan filters on large labels, large strings that repeat or compress well, unused indexes and compressed keys read often. Tick "Every candidate" to look at a small graph.</p>

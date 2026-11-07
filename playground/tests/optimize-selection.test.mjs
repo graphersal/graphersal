@@ -6,7 +6,27 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   recommendationGroups, pruneSelection, groupSelected, toggleGroup, toggleRecommendation, selectionSummary,
+  changesCompressionRules, checkpointDue,
 } from '../js/optimize.js';
+
+test('only a change of compression rules asks for a snapshot', () => {
+  assert.equal(changesCompressionRules(['add_compression']), true);
+  assert.equal(changesCompressionRules(['create_index', 'drop_compression']), true);
+  assert.equal(changesCompressionRules(['create_index', 'drop_index']), false);
+  assert.equal(changesCompressionRules([]), false);
+  assert.equal(changesCompressionRules(undefined), false);
+});
+
+test('a snapshot is due until one holds the commit of the rules', () => {
+  const store = { snapshots: [{ commitSeq: 12429 }, { commitSeq: 12076 }] };
+  assert.equal(checkpointDue(store, 12431), true);
+  assert.equal(checkpointDue(store, 12429), false);
+  assert.equal(checkpointDue({ snapshots: [{ commitSeq: 12076 }, { commitSeq: 12431 }] }, 12431), false);
+  assert.equal(checkpointDue({ snapshots: [] }, 1), true);
+  // No store, or no rule change: nothing to recommend.
+  assert.equal(checkpointDue(null, 12431), false);
+  assert.equal(checkpointDue(store, null), false);
+});
 
 const MIB = 1024 * 1024;
 

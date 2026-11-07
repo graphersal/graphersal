@@ -106,6 +106,11 @@ the middle). See [Commits and Durability](store_commits.md).
 WAL and cuts an interrupted last write; stderr notes that the store was not closed cleanly, which
 is harmless. Ctrl+C closes it cleanly in the first place.
 
+**The store takes much longer to start since I added compression rules.** Write a snapshot:
+`graphersal store checkpoint <DIR>`. Until one holds the rules, every open re-encodes their labels;
+from a snapshot the store starts about as fast as before. See
+[Optimize](optimize.md#after-applying-compression-rules-write-a-snapshot).
+
 **Why does the store keep growing?** Nothing is deleted implicitly: every commit is in the WAL and
 every checkpoint adds a snapshot until you [prune](store_prune.md). `store compact-advice` tells
 you what a prune and a compaction would give back.
