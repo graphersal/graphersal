@@ -258,3 +258,25 @@ def test_a_gsnap_without_a_store_serves_its_models(tmp_path):
     assert [e["name"] for e in bare.embedders()] == ["hash-ngram/1", "acme/tiny"]
     with pytest.raises(graphersal.GraphersalError, match="blob is missing"):
         bare.query('g.v().nearest("emb", "graph", 1).values("text").to_list()')
+
+
+def test_graph_save_keeps_the_models_of_its_file(tmp_path):
+    """Graph.load + save over the same file: the embedding models stay in it (the file is replaced
+    only when the write has finished, because the models are read from it)."""
+    path = tmp_path / "state.gsnap"
+    with graphersal.Store.create(str(tmp_path / "data")) as store:
+        put_model(store, tmp_path)
+        store.checkpoint()
+        store.export(str(path))
+    size = path.stat().st_size
+
+    graph = graphersal.Graph.load(str(path))
+    graph.execute('g.add_v("later").to_list()')
+    saved = graph.save(str(path))
+    assert saved["blobs_not_carried"] == []
+    assert path.stat().st_size >= size
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+    # The running graph finds the model at its new place, and so does a new load.
+    assert graph.execute('embed("graph", #{embedder: "acme/tiny"}).dimension') == 3
+    again = graphersal.Graph.load(str(path))
+    assert again.execute('embed("graph", #{embedder: "acme/tiny"}).dimension') == 3

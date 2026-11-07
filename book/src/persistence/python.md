@@ -11,7 +11,7 @@ journal and recovery on `graphersal.Graph`, and the Store as `graphersal.Store`.
 import graphersal
 
 graph = graphersal.Graph.tinkerpop_modern()
-graph.save("g.gsnap")                                     # {"commit_seq", "vertex_count", "edge_count"}; name= optional
+graph.save("g.gsnap")                                     # {"commit_seq", "vertex_count", "edge_count", "blobs_not_carried"}; name= optional; keeps its embedding models
 graph = graphersal.Graph.load("g.gsnap")                  # no schema re-validation, checksummed; a snapshot over
                                                           # the process memory ceiling (graphersal.set_memory_limit) is refused
                                                           # before reading (Store.open too)

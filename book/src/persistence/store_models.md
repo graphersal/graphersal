@@ -181,7 +181,9 @@ keep the blobs the retained history references.
 ## A `.gsnap` without a store
 
 A packed snapshot exported from a store (`graphersal store export`, the playground's "Save
-graph") carries the blobs of its models. Loaded WITHOUT a store (`graphersal --graph
+graph") carries the blobs of its models, and so does what a graph serving models writes itself
+(`g.export_snapshot`, Python `graph.save`, the dev server's Save to file), also over the very file it
+was loaded from. Loaded WITHOUT a store (`graphersal --graph
 file.gsnap`, `GraphSource::from_file`, Python `Graph.load`; in Rust
 `persist::read_snapshot_file`, which also returns a `SnapshotLoadReport`) the graph serves those
 models: `embed()`, `embed(text)`, text queries, vector rules and `g.embedders()` use them as a

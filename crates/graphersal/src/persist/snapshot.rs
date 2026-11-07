@@ -51,7 +51,7 @@ pub(crate) fn extra_file_prefix(name: &str) -> Vec<u8> {
 pub(crate) const COPY_BUFFER: usize = 64 << 10;
 
 /// The largest manifest and `schema.json` section a reader accepts (256 MiB each).
-const MAX_META_SECTION_BYTES: u64 = 256 << 20;
+pub(crate) const MAX_META_SECTION_BYTES: u64 = 256 << 20;
 
 /// Options of a snapshot write.
 #[derive(Debug, Clone)]
@@ -277,6 +277,10 @@ pub struct SnapshotInfo {
     pub chunk_bytes: u32,
     /// The number of segments.
     pub segment_count: u32,
+    /// The model blobs a write that carries them could not carry, because the graph does not hold
+    /// them (a file written without models): their names in a store (`blobs/sha256/...`). Empty
+    /// otherwise, also when the write was asked to leave the models out.
+    pub blobs_not_carried: Vec<String>,
 }
 
 impl SnapshotInfo {
@@ -307,6 +311,7 @@ impl SnapshotInfo {
             memory_bytes: f.memory_bytes,
             chunk_bytes: f.chunk_bytes,
             segment_count: f.segment_count,
+            blobs_not_carried: Vec::new(),
         }
     }
 }
@@ -363,11 +368,106 @@ pub fn write_snapshot<S: PersistentStorage + ?Sized, W: Write>(
     write_packed(graph, writer, options).map(|(info, _)| info)
 }
 
+/// [`write_snapshot`] of a shared graph with the embedding models its catalog references (format
+/// spec 4.6, 8), read from where the graph serves them (its store, the `.gsnap` it was loaded from),
+/// as [`Store::export_packed`](crate::persist::Store::export_packed) carries them, unless `models`
+/// is [`ModelCopy::Exclude`](crate::persist::ModelCopy::Exclude). A blob the graph does not hold (a
+/// file written without models) is named in [`SnapshotInfo::blobs_not_carried`]; a damaged one
+/// fails the write. The blobs are streamed too, under the graph's read lock.
+pub fn write_graph_snapshot<S: PersistentStorage>(
+    graph: &crate::graph::Graph<S>,
+    writer: impl Write,
+    options: &WriteOptions,
+    models: crate::persist::ModelCopy,
+) -> Result<SnapshotInfo, PersistError> {
+    let registry = graph.model_registry();
+    let carry = CarryBlobs::of(models, registry.as_deref());
+    let storage = graph.read_checked().map_err(PersistError::Graph)?;
+    write_packed_carrying(&*storage, writer, options, carry).map(|(info, _)| info)
+}
+
+/// What a snapshot write does with the model blobs its catalog references.
+#[derive(Clone, Copy)]
+pub(crate) enum CarryBlobs<'a> {
+    /// Leaves them out: the catalog names them, the file does not hold them.
+    No,
+    /// Carries what this source holds (`None`: a graph serving no models holds none).
+    From(Option<&'a dyn crate::value::vector::embed::registry::ModelBytes>),
+}
+
+impl<'a> CarryBlobs<'a> {
+    /// The choice `models` for a graph with the model registry `registry`.
+    pub(crate) fn of(
+        models: crate::persist::ModelCopy,
+        registry: Option<&'a crate::value::vector::embed::registry::ModelRegistry>,
+    ) -> Self {
+        match models {
+            crate::persist::ModelCopy::Include => CarryBlobs::From(registry.map(|r| r.bytes())),
+            crate::persist::ModelCopy::Exclude => CarryBlobs::No,
+        }
+    }
+}
+
+/// The blobs of `manifest` that `carry` holds, each checked in full before anything is written,
+/// added to its segment table as the ignorable rows of format spec 8.
+fn carried_blobs(
+    manifest: &mut Vec<u8>,
+    info: &mut SnapshotInfo,
+    carry: CarryBlobs<'_>,
+) -> Result<Vec<crate::value::BlobRef>, PersistError> {
+    use super::store::blobs::{PACKED_BLOB_KIND, blob_name};
+    use crate::value::vector::embed::registry::LoadFailure;
+    let CarryBlobs::From(source) = carry else {
+        return Ok(Vec::new());
+    };
+    let mut table = Manifest::decode(manifest)
+        .map_err(|err| err.at("the snapshot being written".to_string(), 0))?;
+    let mut carried = Vec::new();
+    for blob in table.blobs.iter().map(|(blob, _)| blob) {
+        match source.map_or(Err(LoadFailure::Missing), |source| source.check(blob)) {
+            Ok(()) => carried.push(blob.clone()),
+            Err(LoadFailure::Missing) => info.blobs_not_carried.push(blob_name(blob)),
+            Err(failure) => {
+                return Err(PersistError::store(
+                    "write the snapshot with its models",
+                    super::error::StoreFailure::ModelUnavailable,
+                    format!("{}: {}", blob_name(blob), failure.reason()),
+                ));
+            }
+        }
+    }
+    if !carried.is_empty() {
+        for blob in &carried {
+            table.segments.push(super::manifest::SegmentEntry {
+                kind: PACKED_BLOB_KIND,
+                path: blob.hash_hex(),
+                first_id: blob.hash_algo().name().into(),
+                last_id: "".into(),
+                count: 0,
+                byte_len: blob.length(),
+                crc: blob.crc32c(),
+            });
+        }
+        *manifest = table.encode();
+    }
+    Ok(carried)
+}
+
 /// [`write_snapshot`], also returning the encoder's own memory figures.
 pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
     graph: &S,
     writer: W,
     options: &WriteOptions,
+) -> Result<(SnapshotInfo, EncodeStats), PersistError> {
+    write_packed_carrying(graph, writer, options, CarryBlobs::No)
+}
+
+/// [`write_packed`] with the model blobs `carry` holds, after the graph's own sections.
+pub(crate) fn write_packed_carrying<S: PersistentStorage + ?Sized, W: Write>(
+    graph: &S,
+    writer: W,
+    options: &WriteOptions,
+    carry: CarryBlobs<'_>,
 ) -> Result<(SnapshotInfo, EncodeStats), PersistError> {
     let encoder = SnapshotEncoder::new(graph, options, SNAPSHOT_WRITE)?;
     let mut plans = Vec::new();
@@ -381,13 +481,14 @@ pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
     })?;
     let schema = encoder.schema()?;
     let index: Vec<_> = plans.iter().map(|plan| plan.index()).collect();
-    let (_, manifest, info) = encoder.manifest(
+    let (_, mut manifest, mut info) = encoder.manifest(
         &index,
         vertices.property_count,
         edges.property_count,
         &schema,
     )?;
     drop(index);
+    let carried = carried_blobs(&mut manifest, &mut info, carry)?;
     let mut out = CrcWriter {
         inner: writer,
         crc: 0,
@@ -395,13 +496,38 @@ pub(crate) fn write_packed<S: PersistentStorage + ?Sized, W: Write>(
     let mut head = Vec::with_capacity(16);
     head.extend_from_slice(PACKED_MAGIC);
     head.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    head.extend_from_slice(&(2 + plans.len() as u32).to_le_bytes());
+    head.extend_from_slice(&(2 + plans.len() as u32 + carried.len() as u32).to_le_bytes());
     out.put(&head)?;
     out.section(SECTION_MANIFEST, &manifest)?;
     out.section(SECTION_SCHEMA, &schema)?;
     for plan in &plans {
         out.section_head(section_kind(plan.entry.kind), plan.entry.byte_len)?;
         encoder.emit(plan, &mut out)?;
+    }
+    if let CarryBlobs::From(Some(source)) = carry {
+        for blob in &carried {
+            let prefix = extra_file_prefix(&blob.hash_hex());
+            let kind = section_kind(super::store::blobs::PACKED_BLOB_KIND);
+            out.section_head(kind, prefix.len() as u64 + blob.length())?;
+            out.put(&prefix)?;
+            let failed = |failure: crate::value::vector::embed::registry::LoadFailure| {
+                PersistError::store(
+                    "write the snapshot with its models",
+                    super::error::StoreFailure::ModelUnavailable,
+                    failure.reason(),
+                )
+            };
+            let mut reader = source.open(blob).map_err(failed)?;
+            let mut buffer = vec![0u8; COPY_BUFFER];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => out.put(&buffer[..n])?,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(err) => return Err(failed(source.read_failure(err))),
+                }
+            }
+        }
     }
     let trailer = out.crc.to_le_bytes();
     out.inner

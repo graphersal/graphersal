@@ -303,10 +303,26 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`PersistentStorage`](crate::graph::PersistentStorage)) and every
     /// [`Graph<TraversalGraph>`](Graph); any other graph fails with [`PersistError::Graph`]
     /// holding [`GraphError::Unsupported`] (the dyn boundary cannot test
-    /// `S: PersistentStorage` itself).
+    /// `S: PersistentStorage` itself). The embedding models the graph serves go with it
+    /// ([`Self::write_snapshot_with`]).
     #[cfg(feature = "persist")]
-    fn write_snapshot(&self, writer: &mut dyn std::io::Write)
-    -> Result<SnapshotInfo, PersistError>;
+    fn write_snapshot(
+        &self,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<SnapshotInfo, PersistError> {
+        self.write_snapshot_with(writer, crate::persist::ModelCopy::Include)
+    }
+
+    /// [`Self::write_snapshot`] with the embedding models its catalog references, read from where
+    /// the graph serves them (its store, the `.gsnap` it was loaded from), or without them
+    /// ([`ModelCopy::Exclude`](crate::persist::ModelCopy::Exclude)). A blob the graph does not hold
+    /// is named in [`SnapshotInfo::blobs_not_carried`]; a damaged one fails the write.
+    #[cfg(feature = "persist")]
+    fn write_snapshot_with(
+        &self,
+        writer: &mut dyn std::io::Write,
+        models: crate::persist::ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError>;
 
     // ---- script ---------------------------------------------------------------------------
 
@@ -566,20 +582,26 @@ where
     }
 
     #[cfg(feature = "persist")]
-    fn write_snapshot(
+    fn write_snapshot_with(
         &self,
         writer: &mut dyn std::io::Write,
+        models: crate::persist::ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
+        let registry = Graph::model_registry(self);
+        let carry = crate::persist::snapshot::CarryBlobs::of(models, registry.as_deref());
         // The writer of `Graph::new_persistent` (design 5.3); a `TraversalGraph` wrapped by
         // plain `Graph::new` is persistent all the same, so it is written without one.
         if let Some(write) = self.snapshot_writer() {
-            return write(&*self.read_checked().map_err(PersistError::Graph)?, writer);
+            let storage = self.read_checked().map_err(PersistError::Graph)?;
+            return write(&*storage, writer, carry);
         }
         match self.as_any().downcast_ref::<Graph<crate::TraversalGraph>>() {
-            Some(graph) => graph
-                .read_checked()
-                .map_err(PersistError::Graph)?
-                .write_snapshot(writer),
+            Some(graph) => {
+                let storage = graph.read_checked().map_err(PersistError::Graph)?;
+                let options = crate::persist::WriteOptions::new();
+                crate::persist::snapshot::write_packed_carrying(&*storage, writer, &options, carry)
+                    .map(|(info, _)| info)
+            }
             None => Err(PersistError::Graph(GraphError::unsupported("snapshots"))),
         }
     }

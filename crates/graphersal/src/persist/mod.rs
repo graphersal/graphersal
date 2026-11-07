@@ -50,14 +50,14 @@ mod dir;
 mod encoder;
 mod error;
 mod journal;
-mod manifest;
+pub(crate) mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 mod model_cache;
 mod recover;
 mod segment;
 #[cfg(not(target_arch = "wasm32"))]
 mod single_file;
-mod snapshot;
+pub(crate) mod snapshot;
 pub(crate) mod store;
 mod wal;
 
@@ -79,7 +79,7 @@ pub use segment::{DEFAULT_CHUNK_BYTES, DEFAULT_SEGMENT_BYTES};
 pub use single_file::{SINGLE_FILE_EXTENSION, SingleFileDir};
 pub use snapshot::{
     ReadOptions, SnapshotInfo, WriteOptions, read_snapshot, read_snapshot_info, read_snapshot_into,
-    write_snapshot,
+    write_graph_snapshot, write_snapshot,
 };
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 

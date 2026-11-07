@@ -532,6 +532,7 @@ pub(crate) type SnapshotWriter<S> =
     fn(
         &S,
         &mut dyn std::io::Write,
+        crate::persist::snapshot::CarryBlobs<'_>,
     ) -> Result<crate::persist::SnapshotInfo, crate::persist::PersistError>;
 
 /// Shared read access to the storage of a [`Graph`] ([`Graph::read`]); dereferences to `S`.
@@ -1780,8 +1781,11 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
         fn write<S: crate::graph::PersistentStorage>(
             storage: &S,
             writer: &mut dyn std::io::Write,
+            carry: crate::persist::snapshot::CarryBlobs<'_>,
         ) -> Result<crate::persist::SnapshotInfo, crate::persist::PersistError> {
-            crate::persist::write_snapshot(storage, writer, &crate::persist::WriteOptions::new())
+            let options = crate::persist::WriteOptions::new();
+            crate::persist::snapshot::write_packed_carrying(storage, writer, &options, carry)
+                .map(|(info, _)| info)
         }
         // A storage without a clock of its own: the graph's starts at its last commit time.
         let clock = storage_clock(&storage).unwrap_or_else(|| {

@@ -8373,3 +8373,103 @@ fn the_current_state_download_takes_the_models_choice() {
         400
     );
 }
+
+/// "Save to file" of a served `.gsnap` keeps its embedding models: the file is where they are kept.
+#[test]
+fn save_to_file_keeps_the_models_of_a_served_snapshot() {
+    let ui = ui_dir("gsnap-models");
+    let base = ui.parent().unwrap().to_path_buf();
+    let model = base.join("model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("config.json"), "{}").unwrap();
+    std::fs::write(
+        model.join("tokenizer.json"),
+        r#"{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"}, "post_processor": null,
+            "decoder": null, "model": {"type": "WordLevel",
+            "vocab": {"[UNK]": 0, "graph": 1}, "unk_token": "[UNK]"}}"#,
+    )
+    .unwrap();
+    let header = r#"{"embeddings": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}"#;
+    let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+    weights.extend_from_slice(header.as_bytes());
+    weights.extend((1..=4).flat_map(|i| (i as f32).to_le_bytes()));
+    std::fs::write(model.join("model.safetensors"), weights).unwrap();
+    std::fs::write(model.join("README.md"), "---\nlicense: mit\n---\n").unwrap();
+
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let os = |text: &'static str| std::ffi::OsStr::new(text);
+    let store = base.join("store");
+    let file = base.join("served.gsnap");
+    run(&[os("store"), os("create"), store.as_os_str()]);
+    run(&[
+        os("embed-model"),
+        os("import"),
+        model.as_os_str(),
+        os("--into"),
+        store.as_os_str(),
+        os("--repo"),
+        os("acme/tiny"),
+        os("--license"),
+        os("mit"),
+    ]);
+    run(&[os("store"), os("checkpoint"), store.as_os_str()]);
+    run(&[
+        os("store"),
+        os("export"),
+        store.as_os_str(),
+        file.as_os_str(),
+    ]);
+    let size = std::fs::metadata(&file).unwrap().len();
+
+    let server = start(&["--graph", file.to_str().unwrap()]);
+    for _ in 0..2 {
+        execute(server.port, r#"g.add_v("later").to_list()"#);
+        let saved = post(server.port, "/api/save", "{}");
+        assert_eq!(saved.status, 200, "{}", saved.body);
+        assert_eq!(
+            saved.json()["warnings"],
+            serde_json::json!([]),
+            "{}",
+            saved.body
+        );
+        assert!(std::fs::metadata(&file).unwrap().len() >= size);
+    }
+    let copy = get(server.port, "/api/export?format=gsnap");
+    assert_eq!(copy.status, 200);
+    assert!(copy.body.len() as u64 >= size);
+    // The model was not loaded before the saves: it loads from its new place in the file.
+    let embedded = execute(
+        server.port,
+        r#"embed("graph", #{embedder: "acme/tiny"}).dimension"#,
+    );
+    assert_eq!(
+        embedded["execution"]["results"],
+        serde_json::json!([2]),
+        "{embedded}"
+    );
+    drop(server);
+
+    let again = base.join("again");
+    run(&[
+        os("store"),
+        os("create"),
+        again.as_os_str(),
+        os("--from"),
+        file.as_os_str(),
+    ]);
+    let info = run(&[os("store"), os("info"), again.as_os_str()]);
+    assert!(info.contains("model2vec/acme/tiny"), "{info}");
+    assert!(!info.contains("its blob is missing"), "{info}");
+}

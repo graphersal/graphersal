@@ -2270,7 +2270,16 @@ fn save_to_source(context: &Context, path: PathBuf) -> Result<Value, HttpError> 
     };
     let (bytes, mut saved) = context.call_fallible(move |s| match format {
         // The snapshot is lossless: the schema and the saved queries travel with the data.
-        "gsnap" => s.save_snapshot().map(|bytes| (bytes, json!({}))),
+        // The embedding models it serves too: this file is where they are kept.
+        "gsnap" => s
+            .save_snapshot_noting(graphersal::persist::ModelCopy::Include)
+            .map(|(bytes, not_carried)| {
+                let warnings: Vec<String> = not_carried
+                    .iter()
+                    .map(|blob| format!("the embedding model blob {blob} is not in the file"))
+                    .collect();
+                (bytes, json!({ "warnings": warnings }))
+            }),
         "graphson" => s.save_graphson().map(text_save),
         _ => s.save_graphml().map(text_save),
     })?;

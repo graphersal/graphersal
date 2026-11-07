@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use graphersal::persist::{
-    ModelCopy, ModelState, ReadOptions, SnapshotLoadReport, Store, read_snapshot_file,
+    ModelCopy, ModelState, ReadOptions, SnapshotInfo, SnapshotLoadReport, Store, read_snapshot_file,
 };
 use graphersal::prelude::*;
 use graphersal::storage::AnyGraph;
@@ -574,63 +574,164 @@ fn an_incremental_snapshot_exports_with_its_models() {
     store.close().unwrap();
 }
 
-/// Issue #23: a state written by `write_snapshot` names the models in its catalog but carries no
-/// blob; `Store::pack_with_models` adds them from the store.
-#[test]
-fn a_written_state_gets_its_models_from_the_store() {
-    let temp = Temp::new("packed-state");
+/// The bytes the shared graph writes.
+fn written(graph: &dyn AnyGraph, models: ModelCopy) -> (Vec<u8>, SnapshotInfo) {
+    let mut bytes = Vec::new();
+    let info = graph.write_snapshot_with(&mut bytes, models).unwrap();
+    (bytes, info)
+}
+
+/// A store with the tiny model and a schema naming it, and the model's identity.
+fn store_with_a_model(temp: &Temp) -> (Store, String) {
     let store = Store::create(temp.join("s"), options()).unwrap();
     let identity = import(&store, 1, "acme/tiny").model.identity;
     store.set_default_model(Some("acme/tiny")).unwrap();
     set_schema(&store, &identity);
-    let mut plain = Vec::new();
-    let written = store.graph().read().write_snapshot(&mut plain).unwrap();
+    (store, identity)
+}
 
-    let mut with = Vec::new();
-    let info = store.pack_with_models(plain.as_slice(), &mut with).unwrap();
-    assert_eq!(info.commit_seq, written.commit_seq);
-    assert_eq!(info.graph_id, written.graph_id);
-    assert!(with.len() > plain.len());
+/// A shared graph writes the models it serves: a state with no stored snapshot, from its store.
+#[test]
+fn a_graph_of_a_store_writes_its_models() {
+    let temp = Temp::new("write-store");
+    let (store, identity) = store_with_a_model(&temp);
+    let (with, info) = written(&**store.graph(), ModelCopy::Include);
+    let (without, none) = written(&**store.graph(), ModelCopy::Exclude);
+    assert!(info.blobs_not_carried.is_empty() && none.blobs_not_carried.is_empty());
+    assert_eq!(info.commit_seq, none.commit_seq);
+    assert!(with.len() > without.len());
 
-    // A store made from it holds the model, as one made from the plain state does not.
-    let from_with = Store::create_from_packed(temp.join("with"), with.as_slice(), options());
-    let models = from_with.unwrap().models().unwrap();
+    // A store made from it holds the model; the one without does not open: its schema needs it.
+    let models = Store::create_from_packed(temp.join("with"), with.as_slice(), options())
+        .unwrap()
+        .models()
+        .unwrap();
     assert_eq!(models[0].identity, identity);
     assert_ne!(models[0].state, ModelState::Missing, "{:?}", models[0]);
-    let from_plain = Store::create_from_packed(temp.join("plain"), plain.as_slice(), options());
-    let Err(err) = from_plain else {
-        panic!("the schema needs a model the plain state does not carry");
+    let Err(err) = Store::create_from_packed(temp.join("bare"), without.as_slice(), options())
+    else {
+        panic!("the schema needs a model the file does not carry");
     };
     assert!(err.to_string().contains("acme/tiny"), "{err}");
 
-    // Without a store too: the file serves the model on its own.
+    // So does a file loaded without a store, and a read of it checks out.
     let path = temp.join("with.gsnap");
     std::fs::write(&path, &with).unwrap();
     let (graph, report) = load(&path);
     assert_eq!(report.models.len(), 1);
     assert!(embedder_names(&graph).contains("acme/tiny"));
-
-    // A foreign file is checked, nothing is written for it.
-    let mut out = Vec::new();
-    let mut broken = plain.clone();
-    let last = broken.len() - 1;
-    broken[last] ^= 0xFF;
-    assert!(store.pack_with_models(broken.as_slice(), &mut out).is_err());
-    assert!(store.pack_with_models(&b"nonsense"[..], &mut out).is_err());
-    assert!(out.is_empty());
 }
 
-/// A blob the store cannot hand on refuses the copy with the models, never a file without them.
+/// A damaged blob fails the write, never a file without it.
 #[test]
-fn a_damaged_model_refuses_the_state_with_models() {
-    let temp = Temp::new("packed-state-damaged");
-    let path = temp.join("s");
-    let store = Store::create(&path, options()).unwrap();
-    let identity = import(&store, 1, "acme/tiny").model.identity;
-    let mut plain = Vec::new();
-    store.graph().read().write_snapshot(&mut plain).unwrap();
-    crate::model_fixture::flip_byte(&crate::model_fixture::blob_path(&path, &store, &identity));
-    let mut out = Vec::new();
-    assert!(store.pack_with_models(plain.as_slice(), &mut out).is_err());
-    assert!(out.is_empty());
+fn a_damaged_model_fails_the_write() {
+    let temp = Temp::new("write-damaged");
+    let (store, identity) = store_with_a_model(&temp);
+    crate::model_fixture::flip_byte(&crate::model_fixture::blob_path(
+        &temp.join("s"),
+        &store,
+        &identity,
+    ));
+    let mut bytes = Vec::new();
+    let err = store.graph().write_snapshot(&mut bytes).unwrap_err();
+    assert!(err.to_string().contains("damaged"), "{err}");
+    assert!(bytes.is_empty(), "nothing is written before the check");
+    written(&**store.graph(), ModelCopy::Exclude);
+}
+
+/// A file without models stays one: its save works and names what it does not hold.
+#[test]
+fn a_file_without_models_is_saved_naming_the_blob() {
+    let temp = Temp::new("write-bare");
+    let (path, _) = exported(&temp, "bare.gsnap", ModelCopy::Exclude);
+    let (graph, _) = load(&path);
+    let (_, info) = written(&*graph, ModelCopy::Include);
+    assert_eq!(info.blobs_not_carried.len(), 1, "{info:?}");
+    assert!(info.blobs_not_carried[0].starts_with("blobs/"));
+    let text = run(
+        &graph,
+        &format!("g.export_snapshot({:?})", path.display().to_string()),
+    );
+    assert!(text.contains("does not hold the embedding model"), "{text}");
+}
+
+/// The way models were lost: a graph from a `.gsnap` saved over that file, again and again, with
+/// changes moving the blob's bytes. The model stays loadable throughout and in the file.
+#[test]
+fn a_save_over_the_file_keeps_its_models() {
+    let temp = Temp::new("write-over");
+    let (path, _) = exported(&temp, "over.gsnap", ModelCopy::Include);
+    let size = std::fs::metadata(&path).unwrap().len();
+    let (graph, _) = load(&path);
+    let export = format!("g.export_snapshot({:?})", path.display().to_string());
+    for round in 0..3 {
+        run(
+            &graph,
+            r#"g.add_v("later").property("text", "padding padding").to_list()"#,
+        );
+        run(&graph, &export);
+        assert!(
+            std::fs::metadata(&path).unwrap().len() >= size,
+            "round {round}"
+        );
+        // The model the running graph has not loaded yet is found at its new place.
+        assert_eq!(
+            written(&*graph, ModelCopy::Include).1.blobs_not_carried,
+            Vec::<String>::new()
+        );
+    }
+    let (again, report) = load(&path);
+    assert_eq!(report.models.len(), 1);
+    assert_eq!(again.read().vertex_count(), graph.read().vertex_count());
+    assert_eq!(embedder_names(&again), embedder_names(&graph));
+    // No temporary file is left beside it.
+    let names: Vec<_> = std::fs::read_dir(temp.join("."))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|name| name.ends_with(".tmp")),
+        "{names:?}"
+    );
+}
+
+/// A failed export leaves the file at its path as it was.
+#[test]
+fn a_failed_export_keeps_the_file_at_its_path() {
+    let temp = Temp::new("write-failed");
+    let (path, _) = exported(&temp, "kept.gsnap", ModelCopy::Include);
+    let before = std::fs::read(&path).unwrap();
+    let (graph, _) = load(&path);
+    // Another file with the blob's bytes damaged at the served path: the write fails.
+    let mut damaged = before.clone();
+    let middle = damaged.len() - 100;
+    damaged[middle] ^= 0xFF;
+    std::fs::write(&path, &damaged).unwrap();
+    let export = format!("g.export_snapshot({:?})", path.display().to_string());
+    let mut engine = graphersal::script::engine();
+    graphersal::script::set_engine_graph(&mut engine, graph.clone());
+    let mut scope = graphersal::script::graph_scope(graph.clone());
+    assert!(
+        engine
+            .eval_with_scope::<graphersal::script::rhai::Dynamic>(&mut scope, &export)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+}
+
+/// A converted 0.4.0 model (built again from the file's rows) is written as a blob.
+#[test]
+fn a_converted_040_model_is_written_as_a_blob() {
+    let temp = Temp::new("write-040");
+    let source = temp.join("old.gsnap");
+    std::fs::copy(v040("snapshot.gsnap"), &source).unwrap();
+    let (graph, report) = load(&source);
+    assert!(!report.models.is_empty());
+    let (bytes, info) = written(&*graph, ModelCopy::Include);
+    assert!(info.blobs_not_carried.is_empty(), "{info:?}");
+    let path = temp.join("new.gsnap");
+    std::fs::write(&path, &bytes).unwrap();
+    let (again, report) = load(&path);
+    assert!(report.models_converted.is_empty());
+    assert_eq!(embedder_names(&again), embedder_names(&graph));
 }

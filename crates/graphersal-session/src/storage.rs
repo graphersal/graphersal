@@ -983,12 +983,6 @@ pub trait SessionStore: Send + Sync {
         writer: &mut dyn Write,
         models: graphersal::persist::ModelCopy,
     ) -> Result<SnapshotInfo, PersistError>;
-    /// [`Store::pack_with_models`].
-    fn pack_with_models(
-        &self,
-        packed: &mut dyn Read,
-        writer: &mut dyn Write,
-    ) -> Result<SnapshotInfo, PersistError>;
     /// [`Store::models`].
     fn models(&self) -> Result<Vec<graphersal::persist::ModelInfo>, PersistError>;
     /// [`Store::import_models_from_packed`].
@@ -1122,13 +1116,6 @@ where
         models: graphersal::persist::ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
         Store::<S>::export_packed_with(self, commit_seq, writer, models)
-    }
-    fn pack_with_models(
-        &self,
-        packed: &mut dyn Read,
-        writer: &mut dyn Write,
-    ) -> Result<SnapshotInfo, PersistError> {
-        Store::<S>::pack_with_models(self, packed, writer)
     }
     fn models(&self) -> Result<Vec<graphersal::persist::ModelInfo>, PersistError> {
         Store::<S>::models(self)
