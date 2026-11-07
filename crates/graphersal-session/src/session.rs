@@ -204,6 +204,9 @@ pub struct Session {
     /// The token the running script checks in its progress callback: [`Self::cancel`], or the
     /// caller's token of [`Self::execute_with_cancel`].
     run_cancel: Arc<Mutex<CancelToken>>,
+    /// The host resets [`Self::cancel`], not this session's operations
+    /// ([`Self::set_cancel_reset_by_host`]).
+    cancel_reset_by_host: bool,
     /// The stores the session serves ([`crate::store`]): `None` without a store.
     pub(crate) stores: Option<crate::store::Stores>,
     /// Every loaded graph becomes a store in memory ([`Self::set_memory_stores`]).
@@ -458,6 +461,7 @@ impl Session {
             warnings,
             cancel,
             run_cancel,
+            cancel_reset_by_host: false,
             stores: None,
             memory_stores: false,
             layouts,
@@ -522,9 +526,29 @@ impl Session {
     /// The token that cancels the running [`Self::execute`] from another thread: the query
     /// stops at its next check with a "cancelled" error and its unit rolls back (the response
     /// is `ok: false`). `execute` resets the token when it starts, so a cancel reaches only the
-    /// run in progress.
+    /// run in progress. A host that registers the token before it starts the run says so with
+    /// [`Self::set_cancel_reset_by_host`], or a cancel in between is lost.
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
+    }
+
+    /// With `true`, the session's operations no longer reset [`Self::cancel_token`] when they
+    /// start: the host resets it itself, before it makes the token reachable for the next piece
+    /// of work (the dev server's reader pool, which registers a worker's token for a job before
+    /// the job runs). A cancel from then on stops the work, also one that arrives before the
+    /// query starts, and everything else the same job runs on this session.
+    ///
+    /// A token left cancelled stops every later operation until the host resets it.
+    pub fn set_cancel_reset_by_host(&mut self, by_host: bool) {
+        self.cancel_reset_by_host = by_host;
+    }
+
+    /// Clears a cancel of an earlier operation when one starts, unless the host does
+    /// ([`Self::set_cancel_reset_by_host`]).
+    pub(crate) fn reset_cancel(&self) {
+        if !self.cancel_reset_by_host {
+            self.cancel.reset();
+        }
     }
 
     /// The sample graphs this engine can build.
@@ -951,8 +975,8 @@ impl Session {
     /// [`Self::cancel_token`]. Read-only.
     pub fn memory_report(&self, spec: &Value) -> Value {
         let answer = crate::views::memory_report_request(spec).and_then(|request| {
+            self.reset_cancel();
             let cancel = self.cancel_token();
-            cancel.reset();
             self.graph
                 .memory_report(&request.with_cancel(cancel))
                 .map_err(|err| graphersal::error::format_diagnostic(&*err))
@@ -1020,7 +1044,7 @@ impl Session {
     pub fn neighbourhood(&self, request: &str) -> Result<Value, SessionError> {
         let request: crate::selection::NeighbourhoodRequest = serde_json::from_str(request)
             .map_err(|e| format!("invalid neighbourhood request: {e}"))?;
-        self.cancel.reset();
+        self.reset_cancel();
         let view = self.graph.neighbourhood(&request, &self.cancel)?;
         serde_json::to_value(view)
             .map_err(|e| e.to_string())
@@ -1034,7 +1058,7 @@ impl Session {
     pub fn label_sample(&self, request: &str) -> Result<Value, SessionError> {
         let request: crate::selection::SampleRequest =
             serde_json::from_str(request).map_err(|e| format!("invalid sample request: {e}"))?;
-        self.cancel.reset();
+        self.reset_cancel();
         let view = self.graph.label_sample(&request, &self.cancel)?;
         serde_json::to_value(view)
             .map_err(|e| e.to_string())
@@ -1044,7 +1068,7 @@ impl Session {
     /// The label meta-graph ([`crate::selection::MetaGraph`]): vertex labels with their counts
     /// and the label pairs of the edges with theirs. Cancellable like [`Self::neighbourhood`].
     pub fn meta_graph(&self) -> Result<Value, SessionError> {
-        self.cancel.reset();
+        self.reset_cancel();
         let meta = self.graph.meta_graph(&self.cancel)?;
         serde_json::to_value(meta)
             .map_err(|e| e.to_string())
@@ -1091,7 +1115,7 @@ impl Session {
     /// ([`Self::cancel_token`], the dev server's Stop) ends it as `cancelled`; like
     /// [`Self::execute`], a slice resets the token when it starts.
     pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, SessionError> {
-        self.cancel.reset();
+        self.reset_cancel();
         let budget = crate::layout::slice_budget(budget_ms);
         self.layouts().step(job, budget, &self.cancel)
     }
@@ -1162,8 +1186,8 @@ impl Session {
         options: &RunOptions,
         authorizer: Arc<dyn Authorizer>,
     ) -> String {
+        self.reset_cancel();
         let cancel = self.cancel.clone();
-        cancel.reset();
         self.execute_with_cancel(script, options, authorizer, &cancel)
     }
 
@@ -3463,6 +3487,33 @@ mod tests {
         }
         // `execute` resets the token: the next run is not cancelled.
         assert_eq!(run(&mut session, "g.v().count().next()")["ok"], true);
+    }
+
+    /// With the host resetting the token, a cancel that arrives before an operation starts stops
+    /// it, and stays until the host resets it.
+    #[test]
+    fn a_token_the_host_resets_keeps_a_cancel_from_before_the_run() {
+        let mut session = modern();
+        let run = |session: &mut Session| -> Value {
+            serde_json::from_str(&session.execute("g.v().count().next()", &RunOptions::default()))
+                .unwrap()
+        };
+        let token = session.cancel_token();
+
+        // The default: the operation resets the token.
+        token.cancel();
+        assert_eq!(run(&mut session)["ok"], true);
+
+        session.set_cancel_reset_by_host(true);
+        token.cancel();
+        let r = run(&mut session);
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r.to_string().contains("ancel"), "{r}");
+        let r = run(&mut session);
+        assert_eq!(r["ok"], false, "still cancelled: {r}");
+
+        token.reset();
+        assert_eq!(run(&mut session)["ok"], true);
     }
 
     /// `execute_with_cancel` is stopped by the caller's token only: the session's token does
