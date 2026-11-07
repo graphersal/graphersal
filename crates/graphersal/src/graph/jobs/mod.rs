@@ -3,7 +3,12 @@
 //! host drives the clock (the dev server and the CLI with a thread, the playground with a timer
 //! in its worker, an embedding host by calling `tick` itself).
 //!
-//! - A job never overlaps itself: `tick` runs due jobs one after another, synchronously.
+//! - A job never overlaps itself, nor another job of its group ([`Job::with_group`]): `tick` runs
+//!   due jobs one after another, synchronously.
+//! - A host with threads keeps its own thread free of the work: [`Scheduler::start_due`] (short
+//!   bookkeeping, on the thread that owns the scheduler) hands out [`JobRun`]s, [`JobRun::run`]
+//!   does the work on any thread, [`Scheduler::finish`] takes the result back. `tick` is exactly
+//!   these three on one thread.
 //! - A missed time is skipped: after a pause (the process was stopped, the host ticked late) a due
 //!   job runs once and its next time is computed from now.
 //! - Every run is recorded in the [`WorkloadStats`] the scheduler was given (the job block).
@@ -23,6 +28,7 @@ mod definition;
 pub(crate) mod limits;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use cron::{CronError, CronSchedule};
 pub use definition::{
@@ -73,14 +79,17 @@ pub struct JobContext {
 /// The action of a job: called with the run's [`JobContext`]; an `Err` is the run's error text.
 pub type JobAction = Box<dyn FnMut(&JobContext) -> Result<(), String> + Send>;
 
-/// A job: its name, kind, schedule, limits, switch and action.
+/// A job: its name, kind, group, schedule, limits, switch and action.
 pub struct Job {
     name: String,
     kind: JobKind,
+    /// The jobs that never run at the same time as this one; `None`: only itself.
+    group: Option<String>,
     schedule: CronSchedule,
     limits: JobLimits,
     enabled: bool,
-    action: JobAction,
+    /// `None` only while a [`JobRun`] of this job holds it.
+    action: Option<JobAction>,
 }
 
 impl std::fmt::Debug for Job {
@@ -105,11 +114,20 @@ impl Job {
         Job {
             name: name.into(),
             kind,
+            group: None,
             schedule,
             limits: JobLimits::default(),
             enabled: true,
-            action: Box::new(action),
+            action: Some(Box::new(action)),
         }
+    }
+
+    /// The same job in `group`: while a job of a group runs, the other due jobs of the group
+    /// wait for it and run at the first tick after it (their time is not missed). Without a
+    /// group a job only never overlaps itself.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
     }
 
     /// The same job with `limits` per run (a timeout, a memory limit).
@@ -161,6 +179,11 @@ impl Job {
         &self.name
     }
 
+    /// The job's group ([`Self::with_group`]); without one, its name.
+    pub fn group(&self) -> &str {
+        self.group.as_deref().unwrap_or(&self.name)
+    }
+
     /// The job's schedule.
     pub fn schedule(&self) -> &CronSchedule {
         &self.schedule
@@ -188,8 +211,10 @@ pub struct JobInfo {
     pub enabled: bool,
     /// When it runs next (microseconds since the Unix epoch), `None` when off or never.
     pub next_at: Option<i64>,
-    /// Its last run in this process.
+    /// Its last finished run in this process.
     pub last: Option<JobRunRecord>,
+    /// Whether a run of it is under way ([`Scheduler::start_due`]).
+    pub running: bool,
 }
 
 /// Why a scheduler refused a change.
@@ -202,6 +227,8 @@ pub enum JobError {
     Unknown(String),
     /// The time zone name is not an IANA zone.
     TimeZone(String),
+    /// The job, or another job of its group, is running.
+    Running(String),
 }
 
 impl std::fmt::Display for JobError {
@@ -212,6 +239,11 @@ impl std::fmt::Display for JobError {
             JobError::TimeZone(name) => write!(
                 f,
                 "'{name}' is not an IANA time zone (use a name such as 'Europe/Berlin' or 'UTC')"
+            ),
+            JobError::Running(name) => write!(
+                f,
+                "the job '{name}' or another job of its group is running: try again when it has \
+                 finished"
             ),
         }
     }
@@ -224,6 +256,161 @@ struct Entry {
     next_at: Option<i64>,
     last: Option<JobRunRecord>,
 }
+
+/// A run handed out and not finished yet. Kept apart from the entries: a job redefined or dropped
+/// while it runs must not overlap the run still under way.
+struct RunningJob {
+    name: String,
+    group: String,
+    kind: JobKind,
+}
+
+/// One run of a job, handed out by [`Scheduler::start_due`] or [`Scheduler::start_now`]: `Send`,
+/// so the work can happen on any thread. Give the result of [`Self::run`] (or [`Self::abandon`])
+/// back to [`Scheduler::finish`]: until then the job and its group count as running.
+#[must_use = "a job run stays running until its result is given to `Scheduler::finish`"]
+pub struct JobRun {
+    scheduler: u64,
+    name: String,
+    group: String,
+    action: JobAction,
+    limits: JobLimits,
+    started_at: i64,
+    manual: bool,
+    stats: Option<Arc<WorkloadStats>>,
+}
+
+impl std::fmt::Debug for JobRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobRun")
+            .field("name", &self.name)
+            .field("group", &self.group)
+            .field("started_at", &self.started_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`JobRun::run`] leaves for [`Scheduler::finish`].
+#[must_use = "a job run stays running until its result is given to `Scheduler::finish`"]
+pub struct JobFinished {
+    scheduler: u64,
+    name: String,
+    action: JobAction,
+    manual: bool,
+    record: JobRunRecord,
+}
+
+impl std::fmt::Debug for JobFinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobFinished")
+            .field("name", &self.name)
+            .field("record", &self.record)
+            .finish_non_exhaustive()
+    }
+}
+
+impl JobFinished {
+    /// The job's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What the run did.
+    pub fn record(&self) -> &JobRunRecord {
+        &self.record
+    }
+
+    /// Whether `scheduler` handed this run out (a host with several schedulers finds the one to
+    /// give it back to).
+    pub fn belongs_to(&self, scheduler: &Scheduler) -> bool {
+        self.scheduler == scheduler.id
+    }
+}
+
+impl JobRun {
+    /// The job's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The job's group ([`Job::with_group`]).
+    pub fn group(&self) -> &str {
+        &self.group
+    }
+
+    /// Does the work on the calling thread and records the run in the statistics: every
+    /// traversal of the run checks its cancellation token, gets the job's limits and counts
+    /// under the `job` channel; a panicking action is a failed run, never a failed host.
+    pub fn run(mut self) -> JobFinished {
+        let started = web_time::Instant::now();
+        let limits = self.limits;
+        let context = JobContext {
+            started_at: self.started_at,
+            cancel: CancelToken::new(),
+            limits,
+        };
+        let run_limits = limits::RunLimits {
+            deadline: limits.timeout.and_then(|t| started.checked_add(t)),
+            memory_limit: limits.memory_limit,
+        };
+        let action = &mut self.action;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::graph::workload::scope::scope(
+                crate::graph::workload::Channel::Job,
+                false,
+                || {
+                    context
+                        .cancel
+                        .scope(|| limits::scope(run_limits, || action(&context)))
+                },
+            )
+        }))
+        .unwrap_or_else(|_| Err("the job panicked".to_string()));
+        let elapsed = started.elapsed();
+        // An action that does not check its limits and runs past its timeout still finishes;
+        // the run is recorded as over time.
+        let error = match (result, limits.timeout) {
+            (Err(error), _) => Some(error),
+            (Ok(()), Some(timeout)) if elapsed > timeout => Some(format!(
+                "finished after {} ms, over its timeout of {} ms",
+                elapsed.as_millis(),
+                timeout.as_millis()
+            )),
+            (Ok(()), _) => None,
+        };
+        self.finished(elapsed.as_micros() as u64, error)
+    }
+
+    /// Gives the run up without doing the work (the host could not start a thread for it): a
+    /// failed run with the error `reason`, recorded like any other.
+    pub fn abandon(self, reason: impl Into<String>) -> JobFinished {
+        self.finished(0, Some(reason.into()))
+    }
+
+    fn finished(self, micros: u64, error: Option<String>) -> JobFinished {
+        let record = JobRunRecord {
+            started_at: self.started_at,
+            micros,
+            error,
+        };
+        if let Some(error) = &record.error {
+            tracing::warn!(job = %self.name, %error, "scheduled job failed");
+        }
+        if let Some(stats) = &self.stats {
+            stats.record_job_run(&self.name, record.clone());
+        }
+        JobFinished {
+            scheduler: self.scheduler,
+            name: self.name,
+            action: self.action,
+            manual: self.manual,
+            record,
+        }
+    }
+}
+
+/// The ids that tell schedulers apart ([`JobFinished::belongs_to`]).
+static NEXT_SCHEDULER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Holds jobs and runs the due ones on [`Self::tick`] (module docs).
 ///
@@ -246,9 +433,11 @@ struct Entry {
 /// assert_eq!(runs.load(Ordering::Relaxed), 1);
 /// ```
 pub struct Scheduler {
+    id: u64,
     zone: jiff::tz::TimeZone,
     zone_name: String,
     entries: Vec<Entry>,
+    running: Vec<RunningJob>,
     stats: Option<Arc<WorkloadStats>>,
 }
 
@@ -271,9 +460,11 @@ impl Scheduler {
     /// An empty scheduler in UTC without statistics.
     pub fn new() -> Self {
         Scheduler {
+            id: NEXT_SCHEDULER_ID.fetch_add(1, Ordering::Relaxed),
             zone: jiff::tz::TimeZone::UTC,
             zone_name: "UTC".to_string(),
             entries: Vec::new(),
+            running: Vec::new(),
             stats: None,
         }
     }
@@ -282,10 +473,20 @@ impl Scheduler {
     /// instance's local zone: `TZ` or `/etc/localtime` natively, the browser's zone in the
     /// playground).
     pub fn with_time_zone(mut self, name: &str) -> Result<Self, JobError> {
+        self.set_time_zone(name)?;
+        Ok(self)
+    }
+
+    /// Evaluates schedules in the IANA time zone `name` from now on: every job is planned again
+    /// by the next [`Self::tick`]; runs under way go on.
+    pub fn set_time_zone(&mut self, name: &str) -> Result<(), JobError> {
         self.zone =
             jiff::tz::TimeZone::get(name).map_err(|_| JobError::TimeZone(name.to_string()))?;
         self.zone_name = name.to_string();
-        Ok(self)
+        for entry in &mut self.entries {
+            entry.next_at = None;
+        }
+        Ok(())
     }
 
     /// The same scheduler recording every run into `stats`.
@@ -399,109 +600,141 @@ impl Scheduler {
     }
 
     /// Runs every enabled job whose time has come at `now` (microseconds since the Unix epoch),
-    /// one after another, and plans each one's next time; a job not planned yet (just added,
-    /// re-scheduled or switched on) is planned from `now` without running. Returns the names of
-    /// the jobs that ran.
+    /// one after another on this thread, and plans each one's next time; a job not planned yet
+    /// (just added, re-scheduled or switched on) is planned from `now` without running. A job
+    /// with a run under way ([`Self::start_due`]) is left alone. Returns the names of the jobs
+    /// that ran.
     pub fn tick(&mut self, now: i64) -> Vec<String> {
         let mut ran = Vec::new();
         for index in 0..self.entries.len() {
-            let Some(entry) = self.entries.get_mut(index) else {
-                continue;
-            };
-            if !entry.job.enabled {
-                continue;
-            }
-            match entry.next_at {
-                None => {
-                    entry.next_at = entry.job.schedule.next_after(now, &self.zone);
-                }
-                Some(at) if at <= now => {
-                    let name = entry.job.name.clone();
-                    self.run_entry(index, now);
-                    ran.push(name);
-                }
-                Some(_) => {}
+            if self.is_due(index, now)
+                && let Some(run) = self.start_entry(index, now, false)
+            {
+                let finished = run.run();
+                ran.push(finished.name.clone());
+                self.finish(finished);
             }
         }
         ran
     }
 
-    /// Runs job `name` now, whatever its schedule (its next time stays planned).
+    /// [`Self::tick`] without the work: plans what is not planned yet and hands out one
+    /// [`JobRun`] per job whose time has come, for the host to run on threads of its own. A job
+    /// that is running, or whose group is, stays due. Each run's result goes back to
+    /// [`Self::finish`].
+    pub fn start_due(&mut self, now: i64) -> Vec<JobRun> {
+        let mut runs = Vec::new();
+        for index in 0..self.entries.len() {
+            if self.is_due(index, now)
+                && let Some(run) = self.start_entry(index, now, false)
+            {
+                runs.push(run);
+            }
+        }
+        runs
+    }
+
+    /// Runs job `name` now on this thread, whatever its schedule (its next time stays planned).
+    /// Fails when it or its group is running.
     pub fn run_now(&mut self, name: &str, now: i64) -> Result<(), JobError> {
+        let run = self.start_now(name, now)?;
+        self.finish(run.run());
+        Ok(())
+    }
+
+    /// [`Self::run_now`] without the work: the [`JobRun`] for the host to run, whose result goes
+    /// back to [`Self::finish`]. Fails when the job or its group is running.
+    pub fn start_now(&mut self, name: &str, now: i64) -> Result<JobRun, JobError> {
         let index = self
             .entries
             .iter()
             .position(|e| e.job.name == name)
             .ok_or_else(|| JobError::Unknown(name.to_string()))?;
-        let next = self.entries.get(index).and_then(|e| e.next_at);
-        self.run_entry(index, now);
-        if let Some(entry) = self.entries.get_mut(index)
-            && next.is_some_and(|at| at > now)
-        {
-            entry.next_at = next;
-        }
-        Ok(())
+        self.start_entry(index, now, true)
+            .ok_or_else(|| JobError::Running(name.to_string()))
     }
 
-    /// Runs entry `index`, records the run, plans the next time from the end of the run (times
-    /// missed meanwhile are skipped).
-    fn run_entry(&mut self, index: usize, now: i64) {
-        let Some(entry) = self.entries.get_mut(index) else {
+    /// Takes the result of a run back: the job is free again, its last run recorded and its next
+    /// time planned from the end of the run (times missed meanwhile are skipped). A job
+    /// redefined or dropped while it ran keeps its new form. A run of another scheduler is
+    /// ignored ([`JobFinished::belongs_to`]).
+    pub fn finish(&mut self, finished: JobFinished) {
+        if !finished.belongs_to(self) {
+            return;
+        }
+        if let Some(position) = self.running.iter().position(|r| r.name == finished.name) {
+            self.running.swap_remove(position);
+        }
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.job.name == finished.name)
+        else {
             return;
         };
-        let started = web_time::Instant::now();
-        let limits = entry.job.limits;
-        let context = JobContext {
-            started_at: now,
-            cancel: CancelToken::new(),
-            limits,
-        };
-        let run_limits = limits::RunLimits {
-            deadline: limits.timeout.and_then(|t| started.checked_add(t)),
-            memory_limit: limits.memory_limit,
-        };
-        // Every traversal of the run checks the run's token, gets the job's limits and counts
-        // under the `job` channel; a panicking action is a failed run, never a failed host.
-        let action = &mut entry.job.action;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::graph::workload::scope::scope(
-                crate::graph::workload::Channel::Job,
-                false,
-                || {
-                    context
-                        .cancel
-                        .scope(|| limits::scope(run_limits, || action(&context)))
-                },
-            )
-        }))
-        .unwrap_or_else(|_| Err("the job panicked".to_string()));
-        let elapsed = started.elapsed();
-        let micros = elapsed.as_micros() as u64;
-        // An action that does not check its limits and runs past its timeout still finishes;
-        // the run is recorded as over time.
-        let error = match (result, limits.timeout) {
-            (Err(error), _) => Some(error),
-            (Ok(()), Some(timeout)) if elapsed > timeout => Some(format!(
-                "finished after {} ms, over its timeout of {} ms",
-                elapsed.as_millis(),
-                timeout.as_millis()
-            )),
-            (Ok(()), _) => None,
-        };
-        let run = JobRunRecord {
-            started_at: now,
-            micros,
-            error,
-        };
-        if let Some(error) = &run.error {
-            tracing::warn!(job = %entry.job.name, %error, "scheduled job failed");
+        if entry.job.action.is_none() {
+            entry.job.action = Some(finished.action);
         }
-        let end = now.saturating_add(micros as i64);
-        entry.next_at = entry.job.schedule.next_after(end, &self.zone);
-        if let Some(stats) = &self.stats {
-            stats.record_job_run(&entry.job.name, run.clone());
+        let record = finished.record;
+        // A run on demand leaves the planned time alone while it is still ahead.
+        let keep = finished.manual && entry.next_at.is_some_and(|at| at > record.started_at);
+        if !keep {
+            let end = record.started_at.saturating_add(record.micros as i64);
+            entry.next_at = entry.job.schedule.next_after(end, &self.zone);
         }
-        entry.last = Some(run);
+        entry.last = Some(record);
+    }
+
+    /// The runs under way: the job's name and kind (a job dropped meanwhile is still listed).
+    pub fn running(&self) -> impl Iterator<Item = (&str, JobKind)> {
+        self.running.iter().map(|r| (r.name.as_str(), r.kind))
+    }
+
+    /// Whether entry `index` is enabled, free and its time has come at `now`; a job not planned
+    /// yet is planned here.
+    fn is_due(&mut self, index: usize, now: i64) -> bool {
+        let Some(entry) = self.entries.get_mut(index) else {
+            return false;
+        };
+        if !entry.job.enabled {
+            return false;
+        }
+        match entry.next_at {
+            None => {
+                entry.next_at = entry.job.schedule.next_after(now, &self.zone);
+                false
+            }
+            Some(at) => at <= now,
+        }
+    }
+
+    /// The run of entry `index`, `None` when it or its group is running.
+    fn start_entry(&mut self, index: usize, now: i64, manual: bool) -> Option<JobRun> {
+        let entry = self.entries.get_mut(index)?;
+        let group = entry.job.group().to_string();
+        if self
+            .running
+            .iter()
+            .any(|r| r.name == entry.job.name || r.group == group)
+        {
+            return None;
+        }
+        let action = entry.job.action.take()?;
+        self.running.push(RunningJob {
+            name: entry.job.name.clone(),
+            group: group.clone(),
+            kind: entry.job.kind,
+        });
+        Some(JobRun {
+            scheduler: self.id,
+            name: entry.job.name.clone(),
+            group,
+            action,
+            limits: entry.job.limits,
+            started_at: now,
+            manual,
+            stats: self.stats.clone(),
+        })
     }
 
     /// Every job, in the order they were added.
@@ -516,6 +749,7 @@ impl Scheduler {
                 enabled: e.job.enabled,
                 next_at: e.next_at.filter(|_| e.job.enabled),
                 last: e.last.clone(),
+                running: self.running.iter().any(|r| r.name == e.job.name),
             })
             .collect()
     }
@@ -523,7 +757,7 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, mpsc};
 
     use super::*;
     use crate::graph::workload::WorkloadLevel;
@@ -718,6 +952,193 @@ mod tests {
 
     /// An action that does not check its limits still finishes; the run is recorded as over
     /// its timeout.
+    /// A job whose action reports its start and then waits until the test lets it go.
+    fn gated(name: &str) -> (Job, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, on_start) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let job = Job::new(
+            name,
+            JobKind::User,
+            "* * * * *".parse().unwrap(),
+            move |_| {
+                let _ = started.send(());
+                gate.recv().map_err(|err| err.to_string())
+            },
+        );
+        (job, on_start, release)
+    }
+
+    #[test]
+    fn a_run_handed_out_works_on_another_thread_and_comes_back() {
+        fn assert_send<T: Send>() {}
+        assert_send::<JobRun>();
+        assert_send::<JobFinished>();
+        let stats = Arc::new(WorkloadStats::new(WorkloadLevel::Memory));
+        let mut scheduler = Scheduler::new().with_stats(stats.clone());
+        let (job, on_start, release) = gated("slow");
+        scheduler.add(job).unwrap();
+        assert!(scheduler.start_due(T0).is_empty(), "planned, not run");
+        let mut runs = scheduler.start_due(T0 + MIN);
+        assert_eq!(runs.len(), 1);
+        let run = runs.pop().unwrap();
+        let worker = std::thread::spawn(move || run.run());
+        on_start.recv().unwrap();
+
+        // The scheduler is free meanwhile; the job is running and does not overlap itself.
+        let info = &scheduler.jobs()[0];
+        assert!(info.running);
+        assert!(info.last.is_none());
+        assert!(scheduler.start_due(T0 + 2 * MIN).is_empty());
+        assert!(scheduler.tick(T0 + 2 * MIN).is_empty());
+        assert_eq!(
+            scheduler.run_now("slow", T0 + 2 * MIN),
+            Err(JobError::Running("slow".to_string()))
+        );
+        assert_eq!(scheduler.running().count(), 1);
+
+        release.send(()).unwrap();
+        let finished = worker.join().unwrap();
+        assert!(finished.record().error.is_none());
+        assert_eq!(finished.name(), "slow");
+        assert!(finished.belongs_to(&scheduler));
+        scheduler.finish(finished);
+        let info = &scheduler.jobs()[0];
+        assert!(!info.running);
+        assert_eq!(info.last.as_ref().unwrap().started_at, T0 + MIN);
+        // Recorded at once in the statistics, and planned from the end of the run: the times
+        // missed meanwhile are skipped, the job runs again at its next one.
+        assert_eq!(stats.report(T0 + 3 * MIN).jobs.len(), 1);
+        assert_eq!(scheduler.start_due(T0 + 3 * MIN).len(), 1);
+    }
+
+    #[test]
+    fn a_job_of_a_busy_group_waits_and_is_not_missed() {
+        let mut scheduler = Scheduler::new();
+        let (first, _on_start, release) = gated("first");
+        let (second, _on_second, release_second) = gated("second");
+        let (other, _on_other, release_other) = gated("other");
+        scheduler.add(first.with_group("backup")).unwrap();
+        scheduler.add(second.with_group("backup")).unwrap();
+        scheduler.add(other).unwrap();
+        assert!(scheduler.start_due(T0).is_empty());
+
+        let runs = scheduler.start_due(T0 + MIN);
+        let names: Vec<&str> = runs.iter().map(JobRun::name).collect();
+        assert_eq!(names, ["first", "other"], "one per group, other groups too");
+        assert_eq!(runs[0].group(), "backup");
+        assert_eq!(runs[1].group(), "other");
+        assert_eq!(
+            scheduler.start_now("second", T0 + MIN).err(),
+            Some(JobError::Running("second".to_string()))
+        );
+        assert!(scheduler.start_due(T0 + MIN).is_empty());
+
+        drop(release_other);
+        let mut runs = runs.into_iter();
+        let (first_run, other_run) = (runs.next().unwrap(), runs.next().unwrap());
+        scheduler.finish(other_run.run());
+        release.send(()).unwrap();
+        scheduler.finish(first_run.run());
+
+        // The waiting job runs at the first tick after its group is free.
+        let runs = scheduler.start_due(T0 + MIN + 1);
+        let names: Vec<&str> = runs.iter().map(JobRun::name).collect();
+        assert_eq!(names, ["second"]);
+        drop(release_second);
+        for run in runs {
+            scheduler.finish(run.run());
+        }
+    }
+
+    #[test]
+    fn a_job_redefined_or_dropped_while_it_runs_does_not_overlap() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut scheduler = Scheduler::new();
+        scheduler.add(recording(&log, "kept")).unwrap();
+        scheduler.add(recording(&log, "dropped")).unwrap();
+        assert!(scheduler.start_due(T0).is_empty());
+        let runs = scheduler.start_due(T0 + 5 * MIN);
+        assert_eq!(runs.len(), 2);
+
+        // The same names defined again meanwhile: one kept, one dropped and added back later.
+        scheduler.sync_user_jobs(vec![recording(&log, "kept")]);
+        assert_eq!(scheduler.jobs().len(), 1);
+        assert_eq!(
+            scheduler.running().count(),
+            2,
+            "the dropped run is under way"
+        );
+        scheduler.sync_user_jobs(vec![recording(&log, "kept"), recording(&log, "dropped")]);
+        assert!(scheduler.start_due(T0 + 6 * MIN).is_empty());
+        assert!(scheduler.start_due(T0 + 10 * MIN).is_empty());
+        assert!(scheduler.start_now("dropped", T0 + 10 * MIN).is_err());
+
+        for run in runs {
+            scheduler.finish(run.run());
+        }
+        assert_eq!(scheduler.running().count(), 0);
+        assert_eq!(log.lock().unwrap().len(), 2);
+        // The jobs as defined now run on.
+        let mut ran = scheduler.tick(T0 + 20 * MIN);
+        ran.sort();
+        assert_eq!(ran, ["dropped", "kept"]);
+        assert_eq!(log.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_run_on_demand_keeps_the_planned_time_and_a_given_up_run_is_a_failed_one() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let stats = Arc::new(WorkloadStats::new(WorkloadLevel::Memory));
+        let mut scheduler = Scheduler::new().with_stats(stats.clone());
+        scheduler.add(recording(&log, "job")).unwrap();
+        scheduler.tick(T0);
+        let planned = scheduler.jobs()[0].next_at;
+        let run = scheduler.start_now("job", T0 + 1).unwrap();
+        scheduler.finish(run.run());
+        assert_eq!(scheduler.jobs()[0].next_at, planned);
+
+        let run = scheduler.start_now("job", T0 + 2).unwrap();
+        let finished = run.abandon("no thread");
+        assert_eq!(finished.record().error.as_deref(), Some("no thread"));
+        scheduler.finish(finished);
+        let info = &scheduler.jobs()[0];
+        assert_eq!(
+            info.last.as_ref().unwrap().error.as_deref(),
+            Some("no thread")
+        );
+        assert_eq!(info.next_at, planned);
+        // The action came back: the job still runs.
+        scheduler.run_now("job", T0 + 3).unwrap();
+        assert_eq!(log.lock().unwrap().len(), 2);
+
+        // A run of another scheduler changes nothing here.
+        let finished = scheduler.start_now("job", T0 + 4).unwrap().run();
+        let mut other = Scheduler::new();
+        other.add(recording(&log, "job")).unwrap();
+        other.finish(finished);
+        assert!(other.jobs()[0].last.is_none());
+    }
+
+    #[test]
+    fn a_new_time_zone_plans_again_and_keeps_the_run_under_way() {
+        let (job, _on_start, release) = gated("slow");
+        let mut scheduler = Scheduler::new();
+        scheduler.add(job).unwrap();
+        scheduler.tick(T0);
+        let mut runs = scheduler.start_due(T0 + MIN);
+        scheduler.set_time_zone("Europe/Berlin").unwrap();
+        assert_eq!(scheduler.time_zone(), "Europe/Berlin");
+        assert!(matches!(
+            scheduler.set_time_zone("Mars/Base"),
+            Err(JobError::TimeZone(_))
+        ));
+        assert_eq!(scheduler.jobs()[0].next_at, None);
+        assert!(scheduler.jobs()[0].running);
+        assert!(scheduler.start_due(T0 + 2 * MIN).is_empty());
+        drop(release);
+        scheduler.finish(runs.pop().unwrap().run());
+    }
+
     #[test]
     fn an_action_past_its_timeout_is_recorded_over_time() {
         use std::time::Duration;

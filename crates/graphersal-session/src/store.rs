@@ -490,10 +490,24 @@ impl Session {
         Ok(answer)
     }
 
+    /// Refuses an operation that moves, removes or writes store files while a job of a user runs
+    /// on another thread (a backup beside a rollback would read files moving away, and take that
+    /// for damage; a checkpoint would keep this thread waiting). 409, nothing changed.
+    fn refuse_while_job_runs(&self, operation: &str) -> Result<(), StoreError> {
+        match self.running_user_job() {
+            Some(job) => Err(StoreError::conflict(format!(
+                "cannot {operation} while the scheduled job '{job}' runs: try again when it has \
+                 finished"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Checkpoint: `{snapshot}`. Refused in a view.
     pub fn store_checkpoint(&mut self, name: &str) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
         self.refuse_in_view("write a snapshot")?;
+        self.refuse_while_job_runs("write a snapshot")?;
         let name = name.trim();
         let info = store
             .checkpoint((!name.is_empty()).then_some(name))
@@ -705,6 +719,7 @@ impl Session {
     /// afterwards. `{rollback, graph, store}`.
     pub fn store_rollback(&mut self, body: &Value) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
+        self.refuse_while_job_runs("roll the store back")?;
         let target = target_of(body)?;
         let mode = if body.get("delete").and_then(Value::as_bool) == Some(true) {
             RollbackMode::Delete
@@ -762,6 +777,7 @@ impl Session {
     /// `{restored: {commitSeq}, graph, store}`.
     pub fn store_attic_restore(&mut self, id: &str) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
+        self.refuse_while_job_runs("restore the attic entry")?;
         self.serve_live()?;
         let restored = store.attic_restore(id);
         let graph = self.info();
@@ -797,6 +813,7 @@ impl Session {
     /// Deletes attic entry `id` for good. `{removed}`.
     pub fn store_attic_remove(&mut self, id: &str) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
+        self.refuse_while_job_runs("remove the attic entry")?;
         store.attic_remove(id).map_err(StoreError::refused)?;
         Ok(json!({ "removed": id }))
     }
@@ -822,6 +839,7 @@ impl Session {
     pub fn store_compact(&mut self, drop_marks: bool) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
         self.refuse_in_view("compact the store")?;
+        self.refuse_while_job_runs("compact the store")?;
         if !drop_marks {
             let advice = store.compaction_advice().map_err(StoreError::refused)?;
             let lost = advice.prune.marks_unreachable;
@@ -865,6 +883,7 @@ impl Session {
         from_memory: bool,
     ) -> Result<Value, StoreError> {
         let store = self.store_or_409()?;
+        self.refuse_while_job_runs("back the store up")?;
         let location = into.location();
         let mode = if full {
             BackupMode::Full
@@ -936,6 +955,7 @@ impl Session {
     /// Closes database `id` (not the active one): the store is closed and its memory freed.
     /// `{closed, store}`.
     pub fn store_close(&mut self, id: &str) -> Result<Value, StoreError> {
+        self.refuse_while_job_runs("close a database")?;
         let stores = self
             .stores
             .as_mut()
