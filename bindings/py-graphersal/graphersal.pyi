@@ -305,10 +305,12 @@ class Graph:
     def export_graphml(self, path: str) -> None:
         """Writes this graph out as GraphML. GraphML carries no schema: save it separately and
         set it on the target before importing to restore declared types (uuid, array, object)."""
-    def save(self, path: str, *, name: Optional[str] = None) -> dict[str, int]:
+    def save(self, path: str, *, name: Optional[str] = None) -> dict[str, Any]:
         """Writes this graph as a packed snapshot (lossless binary, ``.gsnap``): data, schema,
-        lineage id, commit position and auto-id sequences. Returns ``{"commit_seq",
-        "vertex_count", "edge_count"}``."""
+        lineage id, commit position, auto-id sequences and the embedding models it serves. The
+        file is replaced only when the write has finished, so ``path`` may be the file the graph
+        was loaded from. Returns ``{"commit_seq", "vertex_count", "edge_count",
+        "blobs_not_carried"}`` (the model blobs the graph does not hold)."""
     @staticmethod
     def load(path: str) -> Graph:
         """Reads a packed snapshot (``save``, ``Store.export``; no schema validation; damage

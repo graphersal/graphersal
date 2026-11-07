@@ -108,8 +108,13 @@ graphersal store create data2/ --from data.gsnap      # a new Store from a .gsna
   file; the Store menu downloads any stored snapshot as `.gsnap`.
 - Dev server: `GET /api/export?format=gsnap` downloads the current state, with the store's
   embedding models unless `&models=without`.
-- Rust: `write_snapshot` writes no model blobs, only the catalog's references to them;
-  `store.pack_with_models(packed, writer)` copies such a file with the blobs from the store.
+- Embedding models: a shared graph's writers (`g.export_snapshot`, `AnyGraph::write_snapshot`,
+  `persist::write_graph_snapshot`, Python `graph.save`, the dev server's Save to file) carry the
+  models it serves, from its store or the `.gsnap` it was loaded from; `write_snapshot_with(..,
+  ModelCopy::Exclude)` leaves them out. A blob the graph does not hold is named in
+  `SnapshotInfo::blobs_not_carried`, a damaged one fails the write. The storage-level
+  `persist::write_snapshot` and `TraversalGraph::write_snapshot` have no source for the blobs: they
+  write only the catalog's references.
 
 The byte layout is section 8 of the [format specification](format.md#8-the-packed-snapshot): a
 packed file holds exactly the files of a Store's snapshot directory, so the Store imports and

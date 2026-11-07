@@ -627,30 +627,39 @@ impl Session {
         self.save_snapshot_with(graphersal::persist::ModelCopy::Include)
     }
 
-    /// [`Self::save_snapshot`] with the active store's embedding models
-    /// ([`ModelCopy::Include`](graphersal::persist::ModelCopy), what `save_snapshot` does; a model
-    /// the store cannot hand on refuses it) or without them (`Exclude`): the choice of "Download
-    /// current state". A session without a store has none to carry.
+    /// [`Self::save_snapshot`] with the embedding models the graph serves
+    /// ([`ModelCopy::Include`](graphersal::persist::ModelCopy), what `save_snapshot` does) or
+    /// without them (`Exclude`): the choice of "Download current state".
     pub fn save_snapshot_with(
         &self,
         models: graphersal::persist::ModelCopy,
     ) -> Result<Vec<u8>, SessionError> {
+        self.save_snapshot_noting(models).map(|(bytes, _)| bytes)
+    }
+
+    /// [`Self::save_snapshot_with`], also answering the model blobs the file does not hold. With a
+    /// store, one it does not hold refuses the save with models, as its stored snapshots' export
+    /// does. A graph served from a file saves what it has: a file without models stays one.
+    pub fn save_snapshot_noting(
+        &self,
+        models: graphersal::persist::ModelCopy,
+    ) -> Result<(Vec<u8>, Vec<String>), SessionError> {
         let mut bytes = Vec::new();
-        self.graph
-            .write_snapshot(&mut bytes)
+        let info = self
+            .graph
+            .write_snapshot_with(&mut bytes, models)
             .map_err(|err| format_diagnostic(&err))?;
-        if models == graphersal::persist::ModelCopy::Include
-            && let Some(store) = self.active_store()
-        {
-            let mut with_models = Vec::new();
-            store
-                .pack_with_models(&mut bytes.as_slice(), &mut with_models)
-                .map_err(|err| format_diagnostic(&err))?;
-            bytes = with_models;
+        if !info.blobs_not_carried.is_empty() && self.active_store().is_some() {
+            return Err(format!(
+                "Error: the store does not hold the embedding model blob(s) {}: download without \
+                 the models",
+                info.blobs_not_carried.join(", ")
+            )
+            .into());
         }
         graphersal::persist::read_snapshot_info(bytes.as_slice())
             .map_err(|err| format_diagnostic(&err))?;
-        Ok(bytes)
+        Ok((bytes, info.blobs_not_carried))
     }
 
     /// Sets the graph's schema from its JSON text in the schema format ("Load schema",

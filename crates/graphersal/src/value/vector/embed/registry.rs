@@ -737,6 +737,12 @@ impl ModelRegistry {
         registry
     }
 
+    /// Where this registry reads its models' blobs (a snapshot of the graph carries them).
+    #[cfg(feature = "persist")]
+    pub(crate) fn bytes(&self) -> &dyn ModelBytes {
+        &*self.source
+    }
+
     /// A registry serving `embedders` as they are (crate unit tests: a mock embedder attached to
     /// a graph like a database's model).
     #[cfg(test)]

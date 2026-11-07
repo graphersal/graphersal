@@ -522,8 +522,9 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.export_snapshot(path)`: writes this source's graph as a
-    /// packed snapshot (`.gsnap`: data, schema, lineage id, commit position; read it back
-    /// with `GraphSource::file(path)`). Asks for `Read` on `Data` and `Create` on the `File`
+    /// packed snapshot (`.gsnap`: data, schema, lineage id, commit position, the embedding models
+    /// it serves; read it back with `GraphSource::file(path)`). The file is replaced only when
+    /// the write has finished, so `path` may be the file the graph was loaded from. Asks for `Read` on `Data` and `Create` on the `File`
     /// (resolved under the host's file root, if any).
     #[cfg(all(feature = "io", feature = "persist"))]
     pub fn export_snapshot(&mut self, path: String) -> Result<String, Box<rhai::EvalAltResult>> {
@@ -547,34 +548,50 @@ impl ScriptGraphTraversalSource {
                 rhai::Position::NONE,
             )));
         };
-        let out = std::fs::File::create(&file).map_err(|source| {
+        let target = std::path::Path::new(&file);
+        let temp = target.with_file_name(format!(
+            ".{}.graphersal-{}.tmp",
+            target
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let write_failed = |source| {
+            let _ = std::fs::remove_file(&temp);
             fail(crate::error::IOError::FileWrite {
                 path: path.clone(),
                 source,
             })
-        })?;
+        };
+        let out = std::fs::File::create(&temp).map_err(write_failed)?;
         let mut writer = std::io::BufWriter::new(out);
         let info = match g.write_snapshot(&mut writer) {
             Ok(info) => info,
             Err(source) => {
-                // A refused or failed snapshot (a storage without snapshots) leaves no partial
-                // file behind.
+                // A refused or failed snapshot (a storage without snapshots, a damaged model)
+                // leaves no partial file behind and what was at `path` as it was.
                 drop(writer);
-                let _ = std::fs::remove_file(&file);
+                let _ = std::fs::remove_file(&temp);
                 return Err(fail(crate::error::IOError::Snapshot {
                     path: path.clone(),
                     source: Box::new(source),
                 }));
             }
         };
-        std::io::Write::flush(&mut writer).map_err(|source| {
-            fail(crate::error::IOError::FileWrite {
-                path: path.clone(),
-                source,
-            })
-        })?;
+        std::io::Write::flush(&mut writer).map_err(write_failed)?;
+        drop(writer);
+        std::fs::rename(&temp, target).map_err(write_failed)?;
+        let not_carried = if info.blobs_not_carried.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; the graph does not hold the embedding model blob(s) {}",
+                info.blobs_not_carried.join(", ")
+            )
+        };
         Ok(format!(
-            "Exported a snapshot to {path} ({} vertices, {} edges, commit {})",
+            "Exported a snapshot to {path} ({} vertices, {} edges, commit {}{not_carried})",
             info.vertex_count, info.edge_count, info.commit_seq
         ))
     }

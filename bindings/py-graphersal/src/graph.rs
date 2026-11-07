@@ -325,27 +325,51 @@ impl Graph {
         let target = path.to_string();
         let info = py
             .detach(move || -> Result<_, String> {
-                let file = std::fs::File::create(&target)
+                // Replaced only when the write has finished: the embedding models may be read
+                // from the very file being replaced.
+                let path = std::path::Path::new(&target);
+                let temp = path.with_file_name(format!(
+                    ".{}.graphersal-{}.tmp",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default(),
+                    std::process::id()
+                ));
+                let file = std::fs::File::create(&temp)
                     .map_err(|err| format!("Error: cannot create '{target}': {err}"))?;
                 let mut options = persist::WriteOptions::new();
                 if let Some(name) = name {
                     options = options.with_name(name);
                 }
-                let mut writer = std::io::BufWriter::new(file);
-                let info = persist::write_snapshot(&*graph.read(), &mut writer, &options)
+                let written = (|| {
+                    let mut writer = std::io::BufWriter::new(file);
+                    let info = persist::write_graph_snapshot(
+                        &graph,
+                        &mut writer,
+                        &options,
+                        persist::ModelCopy::Include,
+                    )
                     .map_err(|err| format_diagnostic(&err))?;
-                writer
-                    .into_inner()
-                    .map_err(|err| format!("Error: cannot write '{target}': {err}"))?
-                    .sync_all()
-                    .map_err(|err| format!("Error: cannot sync '{target}': {err}"))?;
-                Ok(info)
+                    writer
+                        .into_inner()
+                        .map_err(|err| format!("Error: cannot write '{target}': {err}"))?
+                        .sync_all()
+                        .map_err(|err| format!("Error: cannot sync '{target}': {err}"))?;
+                    std::fs::rename(&temp, path)
+                        .map_err(|err| format!("Error: cannot write '{target}': {err}"))?;
+                    Ok(info)
+                })();
+                if written.is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                }
+                written
             })
             .map_err(|text| map_diagnostic(py, &text))?;
         let dict = PyDict::new(py);
         dict.set_item("commit_seq", info.commit_seq)?;
         dict.set_item("vertex_count", info.vertex_count)?;
         dict.set_item("edge_count", info.edge_count)?;
+        dict.set_item("blobs_not_carried", &info.blobs_not_carried)?;
         Ok(dict.into_any().unbind())
     }
 

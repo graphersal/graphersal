@@ -204,7 +204,10 @@ mod file {
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
     use std::path::PathBuf;
-    use std::sync::{Arc, OnceLock, Weak};
+
+    use crate::persist::error::PersistError;
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    use std::time::SystemTime;
 
     use super::super::blobs::{BlobFaultError, CheckedBlob};
     use super::super::migrate_models::{LegacyFileSource, LegacyTar, hash_stream};
@@ -216,8 +219,8 @@ mod file {
     /// Where the model blobs of a packed snapshot lie in its file.
     pub(super) struct PackedFileModels {
         pub(super) path: PathBuf,
-        /// The blob rows (kind 4): the blob and the offset of its bytes.
-        pub(super) blobs: Vec<(BlobRef, u64)>,
+        /// The blob rows (kind 4) as last read from the file.
+        pub(super) located: Mutex<Located>,
         /// The 0.4.0 model rows (kind 3): row name, offset, length, CRC-32C.
         pub(super) rows: Vec<(String, u64, u64, u32)>,
         /// The converted 0.4.0 models: how each tar is built again.
@@ -225,11 +228,90 @@ mod file {
         pub(super) journal: OnceLock<Weak<SystemJournal>>,
     }
 
+    /// Where the blobs lay when the file looked like `stamp`: each blob and the offset of its
+    /// bytes.
+    pub(super) struct Located {
+        pub(super) stamp: Option<(u64, Option<SystemTime>)>,
+        pub(super) blobs: Vec<(BlobRef, u64)>,
+    }
+
+    /// What tells a rewritten file from the one that was read: its length and time.
+    pub(super) fn stamp_of(path: &std::path::Path) -> Option<(u64, Option<SystemTime>)> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.len(), meta.modified().ok()))
+    }
+
+    /// The blob rows of the packed file at `path` and where their bytes lie, by the section heads
+    /// alone (format spec 8: a section's length is in its head; nothing else is read).
+    fn scan_blobs(path: &std::path::Path) -> Result<Vec<(BlobRef, u64)>, PersistError> {
+        use crate::persist::manifest::Manifest;
+        use crate::persist::snapshot::extra_file_prefix;
+        let bad = |what: &str| PersistError::corrupt(path.display().to_string(), 0, what);
+        let io = |err| PersistError::io("reading a packed snapshot", err);
+        let mut file = std::io::BufReader::new(File::open(path).map_err(io)?);
+        let mut head = [0u8; 16];
+        file.read_exact(&mut head).map_err(io)?;
+        if !head.starts_with(crate::persist::snapshot::PACKED_MAGIC) {
+            return Err(bad("it is not a packed snapshot"));
+        }
+        let section = |file: &mut std::io::BufReader<File>| -> Result<u64, PersistError> {
+            let mut head = [0u8; 9];
+            file.read_exact(&mut head).map_err(io)?;
+            let mut len = [0u8; 8];
+            len.copy_from_slice(&head[1..]);
+            Ok(u64::from_le_bytes(len))
+        };
+        let len = section(&mut file)?;
+        if len > crate::persist::snapshot::MAX_META_SECTION_BYTES {
+            return Err(bad("its manifest is too large"));
+        }
+        let mut bytes = vec![0u8; len as usize];
+        file.read_exact(&mut bytes).map_err(io)?;
+        let manifest = Manifest::decode(&bytes).map_err(|_| bad("its manifest does not decode"))?;
+        let schema = section(&mut file)?;
+        file.seek_relative(schema as i64).map_err(io)?;
+        let mut found = Vec::new();
+        for entry in &manifest.segments {
+            let len = section(&mut file)?;
+            let at = file.stream_position().map_err(io)?;
+            if entry.kind == super::super::blobs::PACKED_BLOB_KIND {
+                let blob = super::super::blobs::packed_blob_ref(entry, &manifest.blobs)?;
+                found.push((blob, at + extra_file_prefix(&entry.path).len() as u64));
+            }
+            file.seek(SeekFrom::Start(at + len)).map_err(io)?;
+        }
+        Ok(found)
+    }
+
     impl PackedFileModels {
+        /// Where `blob` lies now. A save over the file (the dev server's "Save to file", an export
+        /// to this path) moves its bytes, so the file is read again when it changed; a blob it no
+        /// longer lists keeps its old place, whose read then fails naming the changed file.
+        fn offset_of(&self, blob: &BlobRef) -> Option<u64> {
+            let mut located = self
+                .located
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stamp = stamp_of(&self.path);
+            if stamp.is_some() && stamp != located.stamp {
+                located.stamp = stamp;
+                for (found, at) in scan_blobs(&self.path).unwrap_or_default() {
+                    match located.blobs.iter_mut().find(|(known, _)| *known == found) {
+                        Some((_, known_at)) => *known_at = at,
+                        None => located.blobs.push((found, at)),
+                    }
+                }
+            }
+            located
+                .blobs
+                .iter()
+                .find(|(known, _)| known == blob)
+                .map(|(_, at)| *at)
+        }
+
         /// Whether the file can serve `blob` (it lists it).
         pub(super) fn holds(&self, blob: &BlobRef) -> bool {
-            self.blobs.iter().any(|(b, _)| b == blob)
-                || self.converted.iter().any(|t| &t.blob == blob)
+            self.offset_of(blob).is_some() || self.converted.iter().any(|t| &t.blob == blob)
         }
 
         fn failure(&self, what: impl std::fmt::Display) -> LoadFailure {
@@ -242,10 +324,10 @@ mod file {
 
         /// The bytes `blob` streams from: a blob row, or a converted model's tar built again.
         fn stream(&self, blob: &BlobRef) -> Result<Box<dyn Read + Send>, LoadFailure> {
-            if let Some((_, at)) = self.blobs.iter().find(|(b, _)| b == blob) {
+            if let Some(at) = self.offset_of(blob) {
                 let mut file = File::open(&self.path)
                     .map_err(|err| self.failure(format_args!("cannot be read: {err}")))?;
-                file.seek(SeekFrom::Start(*at))
+                file.seek(SeekFrom::Start(at))
                     .map_err(|err| self.failure(format_args!("cannot be read: {err}")))?;
                 return Ok(Box::new(file.take(blob.length())));
             }
@@ -318,9 +400,9 @@ mod file {
 /// it again only when the model loads (checked by its length, CRC-32C and SHA-256, the buffer
 /// dropped after the load), so the graph keeps no copy of a blob. The 0.4.0 model rows are
 /// converted (their tar streamed once through its hashes at the load, built again from the rows
-/// when the model loads). The file is never written; it must stay as it was while the graph
-/// serves its models (a changed, truncated or removed file makes the model unavailable, naming
-/// the file).
+/// when the model loads). This load never writes the file; a save of this graph over it keeps
+/// the models, which are then found at their new place; any other changed, truncated or removed
+/// file makes the model unavailable, naming the file.
 ///
 /// This is how a `.gsnap` without a Store is served (`GraphSource::from_file`, CLI
 /// `--graph file.gsnap`, Python `Graph.load`): `embed()`, `embed(text)`, text queries and
@@ -442,7 +524,10 @@ pub fn read_snapshot_file(
     }
     let source = Arc::new(file::PackedFileModels {
         path: path.to_path_buf(),
-        blobs,
+        located: std::sync::Mutex::new(file::Located {
+            stamp: file::stamp_of(path),
+            blobs,
+        }),
         rows,
         converted,
         journal: std::sync::OnceLock::new(),
