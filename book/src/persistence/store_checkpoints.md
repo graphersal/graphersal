@@ -166,6 +166,7 @@ graphersal store create copy/ --from data.gsnap       # a new store from a .gsna
 ```
 
 `store.export_packed(commit, writer)` and `Store::create_from_packed(dir, reader, options)` do the
-same in Rust; the dev server's Store menu offers each snapshot as a `.gsnap` download. A
+same in Rust (an export waits while a rollback moves files; while it runs, a slow writer included, a
+rollback or a prune is refused); the dev server's Store menu offers each snapshot as a `.gsnap` download. A
 `.gsnap` of a state that has no snapshot: open it read-only at that target and write it with
 `write_snapshot`, or download **Download current state (.gsnap)** from a read-only view.

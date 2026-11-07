@@ -1428,7 +1428,9 @@ impl<S: PersistentStorage + Default> Store<S> {
     }
 
     /// Writes the packed snapshot (`.gsnap`) of the stored snapshot at `commit_seq` (`None`:
-    /// the latest) to `writer` by copying its files, without any graph lock.
+    /// the latest) to `writer` by copying its files, without any graph lock. Waits while a rollback
+    /// or an attic change moves files; while it runs (a slow `writer` included) they and a prune
+    /// are refused.
     pub fn export_packed(
         &self,
         commit_seq: Option<u64>,
@@ -1566,7 +1568,8 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// Branches the state at `target` into a NEW store in `new_dir` (format spec 12.5): a new
     /// lineage id with this store's as parent, its first snapshot at the target. This store is
     /// not changed. Marks are not carried (the new lineage starts without any):
-    /// [`ForkReport::marks_not_carried`] lists the ones of the forked history.
+    /// [`ForkReport::marks_not_carried`] lists the ones of the forked history. Waits while a
+    /// rollback or an attic change moves files; while it runs they and a prune are refused.
     pub fn fork(
         &self,
         target: RecoveryTarget,
@@ -1579,7 +1582,7 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// nothing is ever deleted implicitly). Kept: the newest snapshot at or before `up_to`,
     /// everything after it, and always the last two snapshots and the WAL between them (donor
     /// retention, format spec 12.4); the kept snapshots are verified before anything is deleted.
-    /// Fails while a backup copies the store's files. Runs under an `INTENT`, so an
+    /// Fails while a backup, a verification, a fork or an export reads the store's files. Runs under an `INTENT`, so an
     /// interruption is completed at the next open.
     pub fn prune(&self, up_to: u64) -> Result<PruneReport, PersistError> {
         self.core.prune(up_to)
@@ -1783,8 +1786,8 @@ impl<S: PersistentStorage + Default> Store<S> {
     ///
     /// Fails when the target is not before the current commit, when no snapshot at or before
     /// it is left, or when the WAL after it cannot be read; refused at once with
-    /// [`StoreFailure::FilesInUse`] while a backup or a verification reads the files (they wait
-    /// for a rollback under way).
+    /// [`StoreFailure::FilesInUse`] while a backup, a verification, a fork or an export reads the
+    /// files (they wait for a rollback under way).
     pub fn rollback_to(
         &self,
         target: RecoveryTarget,
@@ -2819,6 +2822,7 @@ impl StoreCore {
         models: ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
         let _quiet = self.shared.operations.read();
+        let _pin = self.pin_files("export the snapshot")?;
         export_packed_from(&self.shared.dir, commit_seq, writer, models)
     }
 
@@ -2828,6 +2832,7 @@ impl StoreCore {
         new_dir: impl IntoStoreDir,
     ) -> Result<ForkReport, PersistError> {
         let _quiet = self.shared.operations.read();
+        let _pin = self.pin_files("fork the store")?;
         Self::fork_at(
             &self.shared.dir,
             target,
@@ -3017,9 +3022,9 @@ impl StoreCore {
         Ok(report)
     }
 
-    /// Keeps a rollback or an attic change off the files while they are read for damage (what
-    /// moves would read as damage and freeze the store). To be taken before the durable end is
-    /// read. `None` for a store that cannot change them, which writes nothing either (no pin file
+    /// Keeps a rollback, an attic change or a prune off the files while they are read: what moves
+    /// would read as damage and freeze the store, or fail a fork or an export with an I/O error. To
+    /// be taken before the durable end is read. `None` for a store that cannot change them, which writes nothing either (no pin file
     /// in a read-only directory).
     fn pin_files(&self, operation: &'static str) -> Result<Option<files::BackupPin>, PersistError> {
         if self.writable(operation).is_err() {
@@ -3409,6 +3414,7 @@ impl StoreCore {
         id: &str,
         new_dir: impl IntoStoreDir,
     ) -> Result<ForkReport, PersistError> {
+        let _pin = self.pin_files("fork the attic entry")?;
         rollback::attic_fork(
             &self.shared.dir,
             id,

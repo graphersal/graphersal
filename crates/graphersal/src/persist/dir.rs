@@ -96,7 +96,8 @@ impl DirEntry {
 pub enum LockKind {
     /// The one writer (an open read-write `Store`): exclusive, never waits.
     Writer,
-    /// A backup or a verification pins the files (shared; waits while the exclusive pin is held).
+    /// A backup, a verification, a fork or an export pins the files (shared; waits while the
+    /// exclusive pin is held).
     BackupShared,
     /// A prune deletes files, or a rollback or an attic change moves them (exclusive; never waits:
     /// `None` while the shared pin is held).

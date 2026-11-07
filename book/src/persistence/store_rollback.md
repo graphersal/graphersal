@@ -40,11 +40,11 @@ Keep it as a new store instead: graphersal store attic data/ fork 20261008T07051
   the state at the target, and the commit hooks you registered on it stay.
 - `RollbackMode::Delete` (CLI `--delete`) deletes the history instead: there is no undo.
 - The rollback runs under an `INTENT` file with idempotent steps: a crash in the middle is
-  completed at the next open, never left half done. Commits wait while it runs. A backup or a
-  verification started meanwhile waits for it too.
-- A rollback, an attic restore and an attic remove are refused at once (`FilesInUse`) while a backup
-  or a verification reads the store's files, in this or another process: they would move files
-  away under it. Nothing was changed; run it again when that has finished.
+  completed at the next open, never left half done. Commits wait while it runs. A backup, a
+  verification, a fork or an export started meanwhile waits for it too.
+- A rollback, an attic restore and an attic remove are refused at once (`FilesInUse`) while a
+  backup, a verification, a fork or an export reads the store's files, in this or another process:
+  they would move files away under it. Nothing was changed; run it again when that has finished.
 - Refused: a target at or after the current commit ("there is nothing after commit N"), a target
   before the oldest retained snapshot, a store that is a backup, read-only or in maintenance
   mode. From the CLI the store must not be open elsewhere ("in use"); with a dev server running,

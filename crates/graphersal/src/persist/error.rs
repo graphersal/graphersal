@@ -411,8 +411,8 @@ pub enum StoreFailure {
     BackupRunning,
     /// A backup was asked while a prune deletes the store's files.
     PruneRunning,
-    /// A rollback or an attic change was asked while a backup or a verification reads the store's
-    /// files.
+    /// A rollback or an attic change was asked while a backup, a verification, a fork or an export
+    /// reads the store's files.
     FilesInUse,
     /// A rollback target at or after the current commit (or no commit after it in the WAL):
     /// there is nothing to roll back.
@@ -592,7 +592,8 @@ impl StoreFailure {
             ),
             StoreFailure::BackupRunning => help_text(
                 "A backup is copying the store's files, and a prune would delete some of them. \
-                 Prune again when the backup has finished (Store::prune).",
+                 Prune again when the backup has finished (Store::prune). A verification, a fork \
+                 or an export holds a prune off the same way.",
                 &[(
                     "prune again once the backup has finished",
                     "graphersal store prune <dir> --up-to <commit>",
@@ -600,15 +601,15 @@ impl StoreFailure {
             ),
             StoreFailure::PruneRunning => help_text(
                 "A prune or a rollback is changing files of the store. Back up again when it has \
-                 finished (Store::backup).",
+                 finished (Store::backup); the same for a verification, a fork or an export.",
                 &[(
                     "back up again once the prune has finished",
                     "graphersal store backup <dir> <backup_dir>",
                 )],
             ),
             StoreFailure::FilesInUse => help_text(
-                "A backup or a verification is reading the store's files, and this operation would \
-                 move or remove some of them. Nothing was changed: run it again when that has \
+                "A backup, a verification, a fork or an export is reading the store's files, and \
+                 this operation would move or remove some of them. Nothing was changed: run it again when that has \
                  finished.",
                 &[],
             ),
