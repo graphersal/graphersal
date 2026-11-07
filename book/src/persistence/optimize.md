@@ -59,27 +59,29 @@ of the call alike).
 
 ## After applying compression rules: write a snapshot
 
-**Write a snapshot right after adding or dropping compression rules on a store** (a bulk drop
-offers it in its message)**:**
-`graphersal store checkpoint <DIR>` on a closed store, **Write a snapshot now** in the playground,
-`Store::checkpoint` in Rust.
+**Write a snapshot after adding or dropping compression rules on a store** (a bulk drop offers it
+in its message)**:** `graphersal store checkpoint <DIR>` on a closed store, **Write a snapshot now**
+in the playground, `Store::checkpoint` in Rust. It is an optimization, not a requirement: the data
+is safe either way, and the rules work from the first commit.
 
 Rules cost almost nothing in the WAL (74 rules: about 2 KiB), so the
 [automatic checkpoint](store_checkpoints.md), which goes by WAL size, does not run because of them.
-Until a snapshot holds them, every open replays the change and re-encodes the labels of the rules,
-one rule at a time. A snapshot that holds the rules loads about as fast as one without them: its
-rows are coded as they enter the graph. Measured on a real graph (2.8 million elements, 74 `dedup`
-rules, `--release`):
+Until a snapshot holds them, every open replays the change: it loads the rows as they are in the
+snapshot, then re-encodes the labels of the rules, in one walk for all the rules in a row, even
+over many commits. A snapshot that holds the rules codes each row as it enters the graph, so the
+plain rows never fill memory. Measured on a real graph (2.8 million elements, 74 `dedup` rules,
+`--release`):
 
-| The store | Open | Memory |
-|---|---|---|
-| without the rules | 9.6 s | 1573 MiB |
-| rules only in the WAL | 25.1 s, at every open | 1172 MiB |
-| rules in a snapshot (the checkpoint took 1 s) | 8.4-10.6 s | 1172 MiB |
+| The store | Open | Peak memory of the process | Graph after the open |
+|---|---|---|---|
+| rules only in the WAL | 8.5-10.5 s | 2.2-2.9 GiB | 1172 MiB |
+| rules in a snapshot (the checkpoint took 1 s) | 8.4-11.4 s | 2.0 GiB | 1172 MiB |
 
-The cost grows with the number of rules times the elements of their labels: 90 rules on a graph of
-about 3 GB in memory took an open from 14 s to 111 s. The data is safe either way, and the
-rules work from the first commit: only the start is slower.
+The start takes about the same here: the walk is paid for by the coding it spares. The cost of the
+walk grows with the elements of the labels the rules name, so the peak is what a snapshot saves on
+a graph that barely fits. Graphersal 0.5.2 and older walk once per rule and again per rule at the
+end of the open: the same store took 25.1 s, and 90 rules on a graph of about 3 GB in memory took
+an open from 14 s to 111 s. There a snapshot is what brings the start back.
 
 ## Dismissing, and what an applied one did
 

@@ -2123,10 +2123,22 @@ impl TraversalGraph {
             return;
         }
         self.compression_rebuild_rules();
+        // A value dictionary that starts this walk empty ends it holding only what the rows use:
+        // nothing for `compression_after_unit` or `shrink_to_fit` to rebuild. A rule kept from
+        // before (same parameters) may hold older entries, so it stays counted as grown.
+        let mut filled: Vec<Arc<ValueDictionary>> = Vec::new();
         for name in built {
             self.compression_build_dictionary(name);
+            if let Some(dictionary) = self.compression.find(name).and_then(|r| r.coded.as_ref())
+                && dictionary.len() == 0
+            {
+                filled.push(Arc::clone(dictionary));
+            }
         }
         self.compression_normalize_targets(&targets);
+        for dictionary in filled {
+            dictionary.mark_rebuilt();
+        }
     }
 
     /// Normalizes (`force`: re-encoded with the current dictionaries) every element of the
@@ -2511,20 +2523,40 @@ impl TraversalGraph {
     /// every row of its label re-coded into it (the old one lives on while an undo entry holds
     /// a code of it). `false`: no such rule.
     fn compression_rebuild_coded(&mut self, name: &str) -> bool {
-        let Some(rule) = self.compression.find_mut(name) else {
-            return false;
-        };
-        let Some(old) = rule.coded.as_ref() else {
-            return false;
-        };
-        rule.coded = Some(Arc::new(ValueDictionary::new(old.min_bytes())));
-        let (element, label) = (rule.element, rule.label.clone());
-        self.compression_normalize_label(element, &label, true);
-        if let Some(dictionary) = self.compression.find(name).and_then(|r| r.coded.as_ref()) {
-            dictionary.mark_rebuilt();
+        self.compression_rebuild_coded_all(&[CompactString::from(name)]) > 0
+    }
+
+    /// Rebuilds the value dictionaries of the top-level `dedup` rules `names`, in ONE walk over
+    /// the elements of their labels (a name without a value dictionary is skipped). Answers how
+    /// many were rebuilt.
+    fn compression_rebuild_coded_all(&mut self, names: &[CompactString]) -> usize {
+        let mut targets: Vec<(ElementKind, String)> = Vec::new();
+        let mut rebuilt = 0;
+        for name in names {
+            let Some(rule) = self.compression.find_mut(name) else {
+                continue;
+            };
+            let Some(old) = rule.coded.as_ref() else {
+                continue;
+            };
+            rule.coded = Some(Arc::new(ValueDictionary::new(old.min_bytes())));
+            rebuilt += 1;
+            let target = (rule.element, rule.label.to_string());
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        if rebuilt == 0 {
+            return 0;
+        }
+        self.compression_normalize_targets(&targets);
+        for name in names {
+            if let Some(dictionary) = self.compression.find(name).and_then(|r| r.coded.as_ref()) {
+                dictionary.mark_rebuilt();
+            }
         }
         self.compression.sweep_layouts();
-        true
+        rebuilt
     }
 
     /// The end of an outermost unit (`rolled_back`: by a rollback): rebuilds the value
@@ -2553,9 +2585,7 @@ impl TraversalGraph {
                 due.push(rule.name.clone());
             }
         }
-        for name in due {
-            self.compression_rebuild_coded(&name);
-        }
+        self.compression_rebuild_coded_all(&due);
     }
 
     /// After a write outside every unit (a direct trait call, a replay): the dictionaries are
@@ -2575,9 +2605,7 @@ impl TraversalGraph {
             .filter(|(_, dictionary)| dictionary.growth().0 > 0)
             .map(|(rule, _)| rule.name.clone())
             .collect();
-        for name in due {
-            self.compression_rebuild_coded(&name);
-        }
+        self.compression_rebuild_coded_all(&due);
         self.compression.sweep_layouts();
     }
 
@@ -3212,5 +3240,170 @@ mod tests {
             graph.vertex_properties(v).unwrap().unwrap().get("bio"),
             Some(ElementProperty::String(_))
         ));
+    }
+
+    /// One commit of `mutations` at position `seq`.
+    #[cfg(feature = "persist")]
+    fn commit_of(seq: u64, mutations: Vec<crate::graph::Mutation>) -> crate::graph::ChangeSet {
+        let mut builder = crate::graph::ChangeSet::builder(seq, seq as i64);
+        for mutation in mutations {
+            builder.push(mutation);
+        }
+        builder.build().unwrap()
+    }
+
+    /// The mutation storing the `dedup` rule `name` (nothing before it).
+    #[cfg(feature = "persist")]
+    fn stored(name: &str, element: ElementKind, label: &str, key: &str) -> crate::graph::Mutation {
+        crate::graph::Mutation::set_definition(
+            DefinitionKind::COMPRESSION,
+            name,
+            None,
+            Some(Definition::compression(
+                name,
+                dedup_rule(element, label, key),
+            )),
+        )
+    }
+
+    #[cfg(feature = "persist")]
+    #[test]
+    fn a_replay_walks_once_for_the_rules_of_many_commits_and_the_shrink_adds_none() {
+        use crate::graph::PersistentStorage;
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let commits = [
+            commit_of(
+                start + 1,
+                vec![
+                    stored("a_kind", ElementKind::Vertex, "a", "kind"),
+                    stored("b_state", ElementKind::Vertex, "b", "state"),
+                ],
+            ),
+            commit_of(
+                start + 2,
+                vec![stored("rel_w", ElementKind::Edge, "rel", "w")],
+            ),
+        ];
+        let before = walks();
+        graph.begin_replay().unwrap();
+        for commit in &commits {
+            PersistentStorage::replay(&mut graph, commit, true).unwrap();
+        }
+        assert_eq!(walks(), before, "the pass waits for the end of the replay");
+        graph.finish_replay().unwrap();
+        assert_eq!(walks(), before + 1);
+        graph.shrink_to_fit();
+        assert_eq!(
+            walks(),
+            before + 1,
+            "a dictionary just filled is not rebuilt"
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        assert!(graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
+    }
+
+    #[cfg(feature = "persist")]
+    #[test]
+    fn an_element_write_in_a_replay_meets_the_rules_stored_before_it() {
+        use crate::graph::{ElementRef, Mutation, PersistentStorage};
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let set_state = Mutation::SetProperty {
+            element: ElementRef {
+                kind: ElementKind::Vertex,
+                id: "v1".to_string(),
+            },
+            key: "state".to_string(),
+            before: Some(ElementProperty::from("open")),
+            after: ElementProperty::from("closed"),
+        };
+        let commit = commit_of(
+            start + 1,
+            vec![
+                stored("b_state", ElementKind::Vertex, "b", "state"),
+                set_state,
+                stored("a_kind", ElementKind::Vertex, "a", "kind"),
+            ],
+        );
+        let before = walks();
+        graph.begin_replay().unwrap();
+        PersistentStorage::replay(&mut graph, &commit, true).unwrap();
+        assert_eq!(
+            walks(),
+            before + 1,
+            "the write ran the pass of the rule before it"
+        );
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        graph.finish_replay().unwrap();
+        assert_eq!(walks(), before + 2);
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        let v1 = graph.get_vertex_by_id("v1").unwrap().0;
+        assert_eq!(
+            graph.vertex_properties(v1).unwrap().unwrap().get("state"),
+            Some(&ElementProperty::from("closed"))
+        );
+    }
+
+    #[cfg(feature = "persist")]
+    #[test]
+    fn a_rule_stored_and_removed_in_one_replay_walks_nothing() {
+        use crate::graph::PersistentStorage;
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let stored_rule = stored("a_kind", ElementKind::Vertex, "a", "kind");
+        let removed = crate::graph::Mutation::set_definition(
+            DefinitionKind::COMPRESSION,
+            "a_kind",
+            Some(Definition::compression(
+                "a_kind",
+                dedup_rule(ElementKind::Vertex, "a", "kind"),
+            )),
+            None,
+        );
+        let before = walks();
+        graph.begin_replay().unwrap();
+        PersistentStorage::replay(&mut graph, &commit_of(start + 1, vec![stored_rule]), true)
+            .unwrap();
+        PersistentStorage::replay(&mut graph, &commit_of(start + 2, vec![removed]), true).unwrap();
+        graph.finish_replay().unwrap();
+        assert_eq!(walks(), before);
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+    }
+
+    #[test]
+    fn dictionaries_that_grew_on_one_label_are_rebuilt_in_one_walk() {
+        let mut graph = two_label_graph();
+        graph
+            .set_definitions(vec![
+                Definition::compression("b_state", dedup_rule(ElementKind::Vertex, "b", "state")),
+                Definition::compression("b_kind", dedup_rule(ElementKind::Vertex, "b", "kind")),
+            ])
+            .unwrap();
+        // Values no row holds any more stay in both dictionaries until the rebuild.
+        let v1 = graph.get_vertex_by_id("v1").unwrap().0;
+        for i in 0..3i64 {
+            graph
+                .set_vertex_property(v1, "state".into(), format!("s{i}").into())
+                .unwrap();
+            graph
+                .set_vertex_property(v1, "kind".into(), (100 + i).into())
+                .unwrap();
+        }
+        assert_eq!(graph.dedup_table_len("b_state"), Some(4));
+        assert_eq!(graph.dedup_table_len("b_kind"), Some(6));
+        let before = walks();
+        graph.shrink_to_fit();
+        assert_eq!(walks(), before + 1);
+        assert_eq!(graph.dedup_table_len("b_state"), Some(2));
+        assert_eq!(graph.dedup_table_len("b_kind"), Some(4));
+        graph.check_compression_invariant().unwrap();
+        graph.shrink_to_fit();
+        assert_eq!(walks(), before + 1, "nothing grew since");
     }
 }

@@ -417,6 +417,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
         // open (every 4096 replayed mutations and at the end).
         let operation = options.operation.unwrap_or(RECOVERY_OPERATION);
         let mut budget = crate::traversal::memory_budget::UnitBudget::start(&*graph, operation)?;
+        graph.begin_replay()?;
         let mut stopped = matches!(target, RecoveryTarget::CommitSeq(seq) if seq == snapshot_seq);
         let mut mark_found = false;
         let journal_count = journals.len();
@@ -591,6 +592,7 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
                 report.torn_tail = Some(torn);
             }
         }
+        graph.finish_replay()?;
         crate::traversal::memory_budget::check(&budget, &*graph)?;
         report.reached_end = !stopped;
         match &target {
