@@ -22,6 +22,30 @@ const SCHEMA: &str = r#"{"mode": "open", "vertices": {"person": {"schema": {"typ
     "properties": {"age": {"type": "integer"}}}}}}"#;
 
 #[test]
+fn a_list_of_removals_takes_the_default_loop_on_a_foreign_storage() {
+    let mut foreign = Foreign(TraversalGraph::new());
+    let query = |name: &str| {
+        Definition::query(
+            name,
+            QueryDefinition::new(format!("fn {name}() {{ g.v() }}")),
+        )
+    };
+    GraphStorage::set_definition(&mut foreign, query("a")).unwrap();
+    GraphStorage::set_definition(&mut foreign, query("b")).unwrap();
+    let removed = GraphStorage::remove_definitions(
+        &mut foreign,
+        &[
+            (DefinitionKind::QUERY, "a"),
+            (DefinitionKind::QUERY, "none"),
+            (DefinitionKind::QUERY, "b"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(GraphStorage::definitions(&foreign).unwrap().count(), 0);
+}
+
+#[test]
 fn identity_and_downcast() {
     let (graph, any) = modern();
     let same = any.as_any().downcast_ref::<Graph<TraversalGraph>>();

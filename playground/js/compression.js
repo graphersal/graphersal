@@ -113,6 +113,126 @@ export function ruleRow(rule) {
   };
 }
 
+/** The bytes a rule saves: plain minus stored (0 without stats or when it saves nothing). */
+export function ruleSaved(rule) {
+  const s = (rule && rule.stats) || {};
+  return Math.max(0, (s.plainBytes || 0) - (s.storedBytes || 0));
+}
+
+/** What the rules table sorts by (column -> value of a rule); text columns start ascending. */
+const SORT_VALUES = Object.freeze({
+  name: (rule) => rule.name || '',
+  codec: (rule) => rule.codec || 'lz4',
+  values: (rule) => (rule.stats && rule.stats.compressedValues) || 0,
+  plain: (rule) => (rule.stats && rule.stats.plainBytes) || 0,
+  ratio: (rule) => (rule.stats && rule.stats.plainBytes ? rule.stats.storedBytes / rule.stats.plainBytes : 1),
+  saved: ruleSaved,
+});
+
+/** Whether a first click on the rules table's column `key` sorts it descending. */
+export function ruleSortStartsDescending(key) {
+  return key === 'values' || key === 'plain' || key === 'saved';
+}
+
+/** The rules sorted by column `key`; ties by name, always ascending, so the order is stable. */
+export function sortRules(rules, key = 'saved', desc = true) {
+  const value = SORT_VALUES[key] || SORT_VALUES.saved;
+  const sign = desc ? -1 : 1;
+  return [...(rules || [])].sort((a, b) => {
+    const x = value(a);
+    const y = value(b);
+    const order = typeof x === 'string' ? x.localeCompare(y) : x - y;
+    return (order ? sign * order : 0) || String(a.name).localeCompare(String(b.name));
+  });
+}
+
+/** The ways to group the rules table: `Group by` choices. */
+export const RULE_GROUPINGS = Object.freeze([
+  { key: 'codec', text: 'Codec' },
+  { key: 'label', text: 'Label' },
+  { key: 'none', text: 'Nothing' },
+]);
+
+/** A group with more rules than this starts collapsed (its totals say what it holds). */
+export const COLLAPSE_ABOVE = 12;
+
+/**
+ * The rules as groups: `[{key, title, rules, names, count, saved}]`, the group that saves the
+ * most first, its rules sorted by `sort` (see `sortRules`). `by` is a `RULE_GROUPINGS` key;
+ * `none` gives one group without a title.
+ */
+export function groupRules(rules, by = 'codec', sort = 'saved', desc = true) {
+  const keyOf = (rule) => {
+    if (by === 'codec') return rule.codec || 'lz4';
+    if (by === 'label') return `${rule.element || 'vertex'} ${rule.label}`;
+    return '';
+  };
+  const groups = new Map();
+  for (const rule of sortRules(rules, sort, desc)) {
+    const key = keyOf(rule);
+    if (!groups.has(key)) groups.set(key, { key, title: key, rules: [], names: [], count: 0, saved: 0 });
+    const group = groups.get(key);
+    group.rules.push(rule);
+    group.names.push(rule.name);
+    group.count += 1;
+    group.saved += ruleSaved(rule);
+  }
+  return [...groups.values()].sort((a, b) => b.saved - a.saved || a.key.localeCompare(b.key));
+}
+
+/** Whether `group` is collapsed: the user's choice (`choices`: key -> boolean), else by its size. */
+export function groupCollapsed(group, choices) {
+  const chosen = choices && choices[group.key];
+  return chosen === undefined ? group.count > COLLAPSE_ABOVE : chosen;
+}
+
+/** `all`, `some` or `none` of `names` are in `selected`. */
+export function selectionState(names, selected) {
+  const chosen = new Set(selected || []);
+  const count = (names || []).filter((name) => chosen.has(name)).length;
+  if (!count) return 'none';
+  return count === names.length ? 'all' : 'some';
+}
+
+/** `selected` with `names` ticked, or unticked when all of them already are. */
+export function toggleNames(selected, names) {
+  const chosen = new Set(selected || []);
+  const add = selectionState(names, selected) !== 'all';
+  for (const name of names || []) {
+    if (add) chosen.add(name);
+    else chosen.delete(name);
+  }
+  return [...chosen];
+}
+
+/** `selected` without the names no rule of `rules` has any more. */
+export function pruneRuleSelection(rules, selected) {
+  const names = new Set((rules || []).map((rule) => rule.name));
+  return (selected || []).filter((name) => names.has(name));
+}
+
+/**
+ * The selection for "Drop selected": `{count, saved, text, confirm}`. `saved` is what the rules
+ * save now, so what dropping them gives back to the values; `confirm` is the question asked first.
+ */
+export function dropSelection(rules, selected) {
+  const chosen = new Set(selected || []);
+  const picked = (rules || []).filter((rule) => chosen.has(rule.name));
+  const saved = picked.reduce((sum, rule) => sum + ruleSaved(rule), 0);
+  const count = picked.length;
+  const these = count === 1 ? 'this compression rule' : `these ${count} compression rules`;
+  const titles = picked.slice(0, 5).map((rule) => `• ${rule.name}`);
+  if (count > 5) titles.push(`• … and ${count - 5} more`);
+  return {
+    count,
+    saved,
+    text: count ? `${count} selected · saves ${formatBytes(saved)} now` : 'nothing selected',
+    confirm: count
+      ? `Drop ${these} in one commit? Their values are stored in full again, so the memory grows by about ${formatBytes(saved)}. No data changes.\n\n${titles.join('\n')}\n\nAll or nothing: if it fails, every rule stays.`
+      : '',
+  };
+}
+
 /** The totals of all rules: values, plain, stored and dictionary bytes. */
 export function totals(rules) {
   const t = { compressedValues: 0, plainBytes: 0, storedBytes: 0, dictionaryBytes: 0 };

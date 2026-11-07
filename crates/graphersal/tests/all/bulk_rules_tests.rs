@@ -447,6 +447,193 @@ fn the_dsl_list_asks_for_each_rule_before_anything_changes() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Dropping a list: `remove_definitions`, `g.drop_compressions([..])`
+// ---------------------------------------------------------------------------------------------
+
+/// The `(kind, name)` list of the three rules.
+const THREE_NAMES: [(DefinitionKind, &str); 3] = [
+    (DefinitionKind::COMPRESSION, "file_kind"),
+    (DefinitionKind::COMPRESSION, "file_owner"),
+    (DefinitionKind::COMPRESSION, "link_rel"),
+];
+
+#[test]
+fn dropping_a_list_is_one_commit_and_turns_the_rows_plain_with_reads_unchanged() {
+    let mut graph = files(60);
+    let oracle = content(&graph);
+    graph
+        .traversal_mut()
+        .define_compressions(three_rules())
+        .unwrap();
+    let commits: Arc<Mutex<Vec<ChangeSet>>> = Arc::default();
+    graph
+        .register_commit_hook(Box::new(Commits(commits.clone())))
+        .unwrap();
+    let seq = graph.last_commit_seq();
+    let removed = graph
+        .traversal_mut()
+        .remove_definitions(&[
+            THREE_NAMES[0],
+            (DefinitionKind::COMPRESSION, "no_such_rule"),
+            THREE_NAMES[1],
+            THREE_NAMES[2],
+        ])
+        .unwrap();
+    assert_eq!(removed, 3, "a name not stored is skipped");
+    assert_eq!(graph.last_commit_seq(), seq + 1, "one commit");
+    let seen = commits.lock().unwrap();
+    assert_eq!(seen.len(), 1, "a hook sees one unit");
+    let dropped: Vec<&str> = seen[0]
+        .mutations()
+        .iter()
+        .filter_map(|m| match m {
+            Mutation::SetDefinition {
+                name, after: None, ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dropped, ["file_kind", "file_owner", "link_rel"]);
+    drop(seen);
+    assert!(rule_names(&graph).is_empty());
+    invariant(&graph);
+    assert_eq!(content(&graph), oracle, "reads never change");
+    let first = first_vertex(&graph);
+    assert!(!graph.is_dedup_coded(ElementKind::Vertex, &first, "kind"));
+    assert!(!graph.is_dedup_coded(ElementKind::Vertex, &first, "owner"));
+}
+
+#[test]
+fn an_outer_rollback_brings_a_dropped_list_back() {
+    let mut graph = files(40);
+    let oracle = content(&graph);
+    graph
+        .traversal_mut()
+        .define_compressions(three_rules())
+        .unwrap();
+    let result: Result<(), GraphError> = graph.transaction(|unit| {
+        GraphTraversalSource::new(&mut *unit)
+            .remove_definitions(&THREE_NAMES)
+            .map_err(|err| GraphError::unsupported(Box::leak(err.to_string().into_boxed_str())))?;
+        Err(GraphError::unsupported("rolled back on purpose"))
+    });
+    assert!(result.is_err());
+    assert_eq!(rule_names(&graph).len(), 3);
+    invariant(&graph);
+    assert_eq!(content(&graph), oracle);
+    let first = first_vertex(&graph);
+    assert!(graph.is_dedup_coded(ElementKind::Vertex, &first, "kind"));
+}
+
+#[test]
+fn a_dropped_list_reaches_the_storage_through_the_front_end() {
+    let graph = Arc::new(Graph::new(files(10)));
+    let oracle = content(&graph.read());
+    graph
+        .write()
+        .traversal_mut()
+        .define_compressions(three_rules())
+        .unwrap();
+    let any: Arc<dyn graphersal::storage::AnyGraph> = graph.clone();
+    assert_eq!(any.remove_definitions(&THREE_NAMES).unwrap(), 3);
+    assert!(rule_names(&graph.read()).is_empty());
+    assert_eq!(content(&graph.read()), oracle);
+}
+
+#[cfg(feature = "persist")]
+#[test]
+fn a_dropped_list_is_one_wal_commit_and_stays_dropped_after_a_reopen() {
+    use graphersal::persist::{MemDir, Store, StoreOptions};
+    let dir = MemDir::new();
+    let store = Store::create_with(&dir, files(50), StoreOptions::new()).unwrap();
+    let oracle = content(&store.graph().read());
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .define_compressions(three_rules())
+        .unwrap();
+    let seq = store.graph().read().last_commit_seq();
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .remove_definitions(&THREE_NAMES)
+        .unwrap();
+    assert_eq!(store.graph().read().last_commit_seq(), seq + 1);
+    store.close().unwrap();
+    let store = Store::open(&dir, StoreOptions::new()).unwrap();
+    invariant(&store.graph().read());
+    assert!(rule_names(&store.graph().read()).is_empty());
+    assert_eq!(content(&store.graph().read()), oracle);
+    store.close().unwrap();
+}
+
+#[test]
+fn the_dsl_drops_a_list_and_refuses_a_bad_one() {
+    let graph = Arc::new(Graph::new(files(20)));
+    let oracle = content(&graph.read());
+    let stored = eval_value(
+        graph.clone(),
+        r#"g.define_compressions([#{label: "file", paths: ["kind", "owner"], codec: "dedup"}])"#,
+    )
+    .unwrap();
+    assert_eq!(stored.to_string(), "2");
+    for bad in [
+        r#"g.drop_compressions("file_kind")"#,
+        "g.drop_compressions([1])",
+    ] {
+        let err = eval_value(graph.clone(), bad).unwrap_err().to_string();
+        assert!(err.contains("drop_compressions"), "{err}");
+    }
+    assert_eq!(rule_names(&graph.read()).len(), 2, "nothing dropped");
+    let seq = graph.read().last_commit_seq();
+    let count = eval_value(
+        graph.clone(),
+        r#"g.drop_compressions(["file_kind", "file_owner", "none"])"#,
+    )
+    .unwrap();
+    assert_eq!(count.to_string(), "2");
+    assert_eq!(graph.read().last_commit_seq(), seq + 1, "one commit");
+    assert!(rule_names(&graph.read()).is_empty());
+    assert_eq!(content(&graph.read()), oracle);
+}
+
+#[test]
+fn the_dsl_list_of_drops_is_refused_in_a_saved_query() {
+    let graph = Arc::new(Graph::new(files(5)));
+    let err = eval_value(
+        graph.clone(),
+        r#"g.define_query(#{name: "bulk", body: "fn bulk() { g.drop_compressions([]) }"})"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("drop_compressions"), "{err}");
+}
+
+#[test]
+fn a_denied_rule_drops_nothing_of_the_list() {
+    let graph = Arc::new(Graph::new(files(10)));
+    graph
+        .write()
+        .traversal_mut()
+        .define_compressions(three_rules())
+        .unwrap();
+    let policy = AccessPolicy::allow_all().deny(ActionKind::Delete, ResourceKind::Definition);
+    let err = graphersal::script::eval_value_with_limits(
+        graph.clone(),
+        r#"g.drop_compressions(["file_kind", "file_owner"])"#,
+        Default::default(),
+        &ScriptLimits::default(),
+        Arc::new(policy),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("file_kind"), "{err}");
+    assert_eq!(rule_names(&graph.read()).len(), 3, "nothing dropped");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Several advisor recommendations at once
 // ---------------------------------------------------------------------------------------------
 

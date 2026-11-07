@@ -2085,6 +2085,53 @@
         }
       }
     },
+    "/api/compression/drop-many": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Drop several compression rules in one commit",
+        "description": "`{dropped}`: how many; a name not stored is skipped.",
+        "operationId": "postApiCompressionDropMany",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "names"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
     "/api/compression/drop": {
       "post": {
         "tags": [

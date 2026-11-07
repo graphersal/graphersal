@@ -3007,6 +3007,23 @@ mod tests {
         );
         graph.check_compression_invariant().unwrap();
         assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "kind"));
+        // Dropping the set: one walk too, and the rows are plain again.
+        let before = TARGET_WALKS.with(std::cell::Cell::get);
+        let mark = graph.begin_unit().unwrap();
+        let removed = graph.remove_definitions_recorded(&[
+            (DefinitionKind::COMPRESSION, "a_kind"),
+            (DefinitionKind::COMPRESSION, "missing"),
+            (DefinitionKind::COMPRESSION, "b_state"),
+            (DefinitionKind::COMPRESSION, "rel_w"),
+            (DefinitionKind::COMPRESSION, "a_kind"),
+        ]);
+        graph.commit_unit(mark).unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(TARGET_WALKS.with(std::cell::Cell::get), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        assert!(!graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
     }
 
     /// 20 vertices (`a`+`b` or `b`, keys `kind`, `state`) and 10 `rel` edges (key `w`).

@@ -463,6 +463,12 @@ export class WasmEngine extends Engine {
     return res;
   }
 
+  async dropCompressions(names) {
+    const res = await this.call('dropCompressions', plain(names || []));
+    await this.catalogChanged();
+    return res;
+  }
+
   async recompress(name) {
     return this.call('recompress', name);
   }

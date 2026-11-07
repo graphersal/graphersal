@@ -1633,6 +1633,26 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         self.atomically(|this| Ok(this.storage.remove_definition(kind, name)?))
     }
 
+    /// Removes every definition of `definitions` (kind and name) in ONE unit (one commit), and
+    /// on a [`TraversalGraph`](crate::TraversalGraph) the compression rules among them in ONE
+    /// walk over the elements of their labels. A name that is not stored is skipped. Asks an
+    /// attached authorizer for `Delete` on each one before anything changes. Answers how many
+    /// were removed.
+    pub fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> TraverserResult<usize> {
+        for (kind, name) in definitions {
+            self.authorize_definition(
+                "remove_definitions",
+                crate::graph::Action::Delete,
+                Some(*kind),
+                Some(name),
+            )?;
+        }
+        self.atomically(|this| Ok(this.storage.remove_definitions(definitions)?))
+    }
+
     /// [`Self::set_definition`] of the compression rule `rule` named `name` (book page
     /// "Compressed Properties"): strings at the rule's path are kept compressed in memory. The
     /// explicit pass runs in the same unit: every value of the rule's `(element, label)` is

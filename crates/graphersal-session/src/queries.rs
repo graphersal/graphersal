@@ -818,6 +818,18 @@ pub fn remove_definition_in<S: GraphStorage>(
         .map_err(SessionError::from)
 }
 
+/// Removes the definitions of `definitions` from `g` in one commit: how many were removed (a
+/// name not stored is skipped); an error as its diagnostic text.
+pub fn remove_definitions_in<S: GraphStorage>(
+    g: &mut S,
+    definitions: &[(DefinitionKind, &str)],
+) -> Result<usize, SessionError> {
+    GraphTraversalSource::new(g)
+        .remove_definitions(definitions)
+        .map_err(|err| format_diagnostic(&*err))
+        .map_err(SessionError::from)
+}
+
 /// Moves the saved query `name` of `g` into `folder` (`None`: the root), one commit; an error
 /// as its diagnostic text.
 pub fn move_query_in<S: GraphStorage>(

@@ -896,6 +896,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","docComments":["/// Releases the spare capacity a graph built by write queries keeps (slots and index room past the data) and returns its memory total before and after (before_bytes, after_bytes, released_bytes; measured false when the storage reports no figures); changes no data.","///","/// Example: `{ g.inject(1).repeat(__.add_v(\"p\")).times(100).iterate(); g.shrink_to_fit().released_bytes > 0 }` returns `true`"],"name":"shrink_to_fit","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a compression rule and decompresses its values; false when there is none.","///","/// Example: `{ g.define_compression(#{name: \"bio\", label: \"person\", path: \"bio\"}); g.drop_compression(\"bio\") }` returns `true`"],"name":"drop_compression","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a label from the label set of each incoming vertex and passes it on; the last one leaves it unlabeled (Graphersal extension).","///","/// Example: `g.v(1).drop_label(\"person\").labels().next()` returns `[]`"],"name":"drop_label","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"GraphTraversalSource"}
+{"access":"public","docComments":["/// Removes a list of compression rules in one commit and decompresses their values in one walk; a name not stored is skipped, answers the number of rules removed (see the book page Compressed Properties).","///","/// Example: `{ g.define_compressions([#{label: \"person\", paths: [\"name\", \"age\"], codec: \"dedup\"}]); g.drop_compressions([\"person_name\", \"person_age\", \"none\"]) }` returns `2`"],"name":"drop_compressions","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a saved query; false when there is none.","///","/// Example: `{ g.define_query(#{name: \"n\", body: \"fn n() { 1 }\"}); g.drop_query(\"n\") }` returns `true`"],"name":"drop_query","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes a scheduled job; false when there is none (Graphersal extension).","///","/// Example: `{ g.define_job(#{name: \"nightly\", schedule: \"0 3 * * *\", action: \"checkpoint\"}); g.drop_job(\"nightly\") }` returns `true`"],"name":"drop_job","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"string"}],"returnType":"core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Removes duplicates, optionally by a by() key or by the values of path labels; with Scope.local inside each collection.","///","/// Example: `g.v().out().dedup().values(\"name\").to_list()` returns `[\"josh\", \"lop\", \"vadas\", \"ripple\"]`"],"name":"dedup","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"GraphTraversalSource"}
@@ -2343,6 +2344,7 @@ disjunct(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::resu
 domain_name(_: &mut Fake) -> string
 drop(_: &mut GraphTraversalSource) -> GraphTraversalSource
 drop_compression(_: &mut GraphTraversalSource, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+drop_compressions(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 drop_index(_: &mut GraphTraversalSource, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 drop_job(_: &mut GraphTraversalSource, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 drop_label(_: &mut GraphTraversalSource, _: string) -> GraphTraversalSource
@@ -3769,6 +3771,7 @@ disjunct
 domain_name
 drop
 drop_compression
+drop_compressions
 drop_index
 drop_job
 drop_label

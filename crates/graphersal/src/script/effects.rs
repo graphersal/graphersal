@@ -187,6 +187,7 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
                 "define_compression",
                 "define_compressions",
                 "drop_compression",
+                "drop_compressions",
                 "recompress",
                 "define_job",
                 "drop_job",

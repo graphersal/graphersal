@@ -620,6 +620,28 @@ pub trait GraphStorage: Send + Sync {
         })
     }
 
+    /// Removes every definition of `definitions` (kind and name), in order, each like
+    /// [`Self::remove_definition`]; a name that is not stored is skipped. Answers how many
+    /// were removed.
+    ///
+    /// The batch entry of a bulk catalog removal: [`TraversalGraph`] runs the explicit pass of
+    /// every compression rule among them in ONE walk over the elements of their labels instead
+    /// of one walk per rule, and, outside any unit, makes the whole list one unit of its own
+    /// (one commit).
+    ///
+    /// Default: [`Self::remove_definition`] for each definition in turn (an override must keep
+    /// the same result).
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        let mut removed = 0;
+        for (kind, name) in definitions {
+            removed += usize::from(self.remove_definition(*kind, name)?);
+        }
+        Ok(removed)
+    }
+
     /// Re-runs the explicit pass of the compression rule `name` (book page "Compressed
     /// Properties"): rebuilds its dictionary from the current values and re-encodes the values
     /// at its path. Changes no logical data, records and captures nothing. `Ok(false)`: no such
@@ -3030,6 +3052,13 @@ impl GraphStorage for TraversalGraph {
         self.in_own_unit(|this| Ok(this.remove_definition_recorded(kind, name)))
     }
 
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        self.in_own_unit(|this| Ok(this.remove_definitions_recorded(definitions)))
+    }
+
     fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
         Ok(self.recompress_rule(name))
     }
@@ -3971,6 +4000,13 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         (**self).remove_definition(kind, name)
     }
 
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        (**self).remove_definitions(definitions)
+    }
+
     #[inline]
     fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
         (**self).recompress(name)
@@ -4460,6 +4496,13 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         (**self).remove_definition(kind, name)
+    }
+
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        (**self).remove_definitions(definitions)
     }
 
     #[inline]
@@ -5084,6 +5127,19 @@ impl GraphStorage for Arc<TraversalGraph> {
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         match Arc::get_mut(self) {
             Some(graph) => GraphStorage::remove_definition(graph, kind, name),
+            None => Err(GraphError::InvalidElementState {
+                reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
+            }),
+        }
+    }
+
+    #[inline]
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        match Arc::get_mut(self) {
+            Some(graph) => GraphStorage::remove_definitions(graph, definitions),
             None => Err(GraphError::InvalidElementState {
                 reason: "Cannot mutate shared Arc<TraversalGraph>".to_string(),
             }),

@@ -972,6 +972,42 @@ impl TraversalGraph {
         }
     }
 
+    /// Removes every definition of `definitions` and records it (a name not stored is skipped):
+    /// the batch form of [`Self::remove_definition_recorded`], the pass of all the compression
+    /// rules among them is ONE walk (`compression_after_changes`). Answers how many were removed.
+    pub(crate) fn remove_definitions_recorded(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> usize {
+        let mut removed = 0;
+        let mut compressions: Vec<(Definition, CompactString)> = Vec::new();
+        for (kind, name) in definitions {
+            let Some(old) = self.definitions.remove(*kind, name) else {
+                continue;
+            };
+            removed += 1;
+            let name = CompactString::from(*name);
+            if *kind == DefinitionKind::COMPRESSION {
+                compressions.push((old.clone(), name.clone()));
+            } else {
+                self.catalog_after_change(*kind, Some(&old), &name);
+            }
+            self.undo.record(UndoEntry::Definition {
+                kind: *kind,
+                name,
+                old: Some(Box::new(old)),
+            });
+        }
+        if !compressions.is_empty() {
+            let changes: Vec<(Option<&Definition>, &str)> = compressions
+                .iter()
+                .map(|(old, name)| (Some(old), name.as_str()))
+                .collect();
+            self.compression_after_changes(&changes);
+        }
+        removed
+    }
+
     /// The derived state of a catalog change of `kind` (`old`: what was stored before, the
     /// catalog already holds the new state): a compression rule runs its pass, a property index
     /// is rebuilt from the data.

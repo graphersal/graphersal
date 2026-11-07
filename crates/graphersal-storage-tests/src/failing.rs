@@ -317,6 +317,12 @@ impl GraphStorage for Failing {
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.inner, kind, name)
     }
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        GraphStorage::remove_definitions(&mut self.inner, definitions)
+    }
 
     fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
         GraphStorage::recompress(&mut self.inner, name)

@@ -202,6 +202,7 @@
   - [disjunct](traversal/steps/disjunct.md)
   - [drop](traversal/steps/drop.md)
   - [drop_compression](traversal/steps/drop_compression.md)
+  - [drop_compressions](traversal/steps/drop_compressions.md)
   - [drop_index](traversal/steps/drop_index.md)
   - [drop_job](traversal/steps/drop_job.md)
   - [drop_label](traversal/steps/drop_label.md)

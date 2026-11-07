@@ -59,7 +59,8 @@ of the call alike).
 
 ## After applying compression rules: write a snapshot
 
-**Write a snapshot right after adding or dropping compression rules on a store:**
+**Write a snapshot right after adding or dropping compression rules on a store** (a bulk drop
+offers it in its message)**:**
 `graphersal store checkpoint <DIR>` on a closed store, **Write a snapshot now** in the playground,
 `Store::checkpoint` in Rust.
 

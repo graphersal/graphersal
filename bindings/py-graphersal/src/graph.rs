@@ -1177,6 +1177,28 @@ impl Graph {
         )
     }
 
+    /// ``graph.drop_compressions(names, *, policy=None)``: removes every compression rule of
+    /// ``names`` in ONE commit and decompresses their values in ONE pass, like the DSL's
+    /// ``g.drop_compressions([..])``. A name not stored is skipped. Returns the number removed.
+    #[pyo3(signature = (names, *, policy=None))]
+    fn drop_compressions(
+        &self,
+        py: Python<'_>,
+        names: Vec<String>,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        // A script parameter is a scalar: one per name.
+        let params = PyDict::new(py);
+        let mut list = Vec::with_capacity(names.len());
+        for (at, name) in names.iter().enumerate() {
+            let param = format!("rule_{at}");
+            params.set_item(&param, name)?;
+            list.push(param);
+        }
+        let script = format!("g.drop_compressions([{}])", list.join(", "));
+        self.run(py, &script, Some(&params), false, policy.as_deref())
+    }
+
     /// ``graph.recompress(name, *, policy=None)``: rebuilds the rule's dictionary from the
     /// current values and re-encodes them; changes no data.
     #[pyo3(signature = (name, *, policy=None))]

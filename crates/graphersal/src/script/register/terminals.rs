@@ -152,6 +152,11 @@ pub(super) fn register(registry: &mut Registry) {
             &["drop_compression"],
             ScriptGraphTraversalSource::drop_compression,
         )
+        // A Graphersal extension added after the twins were removed: snake_case only.
+        .register_fn(
+            "drop_compressions",
+            ScriptGraphTraversalSource::drop_compressions,
+        )
         .register_fn("recompress", ScriptGraphTraversalSource::recompress)
         .register_fn_as(
             &["estimate_compression"],

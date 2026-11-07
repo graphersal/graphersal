@@ -365,6 +365,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "drop_compression":
         "Removes a compression rule and decompresses its values; false when there is none.",
         "{ g.define_compression(#{name: \"bio\", label: \"person\", path: \"bio\"}); g.drop_compression(\"bio\") }" => "true";
+    "traversal" "drop_compressions":
+        "Removes a list of compression rules in one commit and decompresses their values in one walk; a name not stored is skipped, answers the number of rules removed (see the book page Compressed Properties).",
+        "{ g.define_compressions([#{label: \"person\", paths: [\"name\", \"age\"], codec: \"dedup\"}]); g.drop_compressions([\"person_name\", \"person_age\", \"none\"]) }" => "2";
     "traversal" "drop_index":
         "Drops a property index; false when there is none.",
         "{ g.create_index(#{label: \"person\", key: \"age\"}); g.drop_index(\"person_age\") }" => "true";
