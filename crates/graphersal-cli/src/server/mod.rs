@@ -1784,6 +1784,20 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             let dropped = context.call_fallible(move |s| s.drop_compression(&name))?;
             value(json!({ "dropped": dropped }))
         }
+        (Method::Post, "compression/drop-many") => {
+            let body = json_body(request)?;
+            let names: Vec<String> = body["names"]
+                .as_array()
+                .and_then(|names| {
+                    names
+                        .iter()
+                        .map(|name| name.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| HttpError(400, "\"names\" is a list of rule names".to_string()))?;
+            let dropped = context.call_fallible(move |s| s.drop_compressions(&names))?;
+            value(json!({ "dropped": dropped }))
+        }
         (Method::Post, "compression/recompress") => {
             let name = body_name(&json_body(request)?)?;
             value(context.call_fallible(move |s| s.recompress(&name))?)
@@ -1898,6 +1912,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "compression/define"
             | "compression/estimate"
             | "compression/drop"
+            | "compression/drop-many"
             | "compression/recompress"
             | "indexes"
             | "indexes/create"

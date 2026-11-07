@@ -221,6 +221,11 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`GraphTraversalSource::remove_definition`]; `false` when there is none.
     fn remove_definition(&self, kind: DefinitionKind, name: &str) -> TraverserResult<bool>;
 
+    /// [`GraphTraversalSource::remove_definitions`]: every definition of the list in ONE unit,
+    /// and on a [`TraversalGraph`](crate::TraversalGraph) one walk for all the compression
+    /// rules among them. Answers how many were removed (a name not stored is skipped).
+    fn remove_definitions(&self, definitions: &[(DefinitionKind, &str)]) -> TraverserResult<usize>;
+
     /// [`GraphTraversalSource::move_query`]: moves the saved query `name` into `folder`.
     fn move_query(&self, name: &str, folder: Option<&str>) -> TraverserResult<()>;
 
@@ -494,6 +499,10 @@ where
 
     fn remove_definition(&self, kind: DefinitionKind, name: &str) -> TraverserResult<bool> {
         GraphTraversalSource::new(&mut *self.write_checked()?).remove_definition(kind, name)
+    }
+
+    fn remove_definitions(&self, definitions: &[(DefinitionKind, &str)]) -> TraverserResult<usize> {
+        GraphTraversalSource::new(&mut *self.write_checked()?).remove_definitions(definitions)
     }
 
     fn move_query(&self, name: &str, folder: Option<&str>) -> TraverserResult<()> {

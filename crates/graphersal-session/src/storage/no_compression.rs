@@ -129,6 +129,12 @@ impl GraphStorage for NoCompression {
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.0, kind, name)
     }
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        GraphStorage::remove_definitions(&mut self.0, definitions)
+    }
 
     fn insert_vertex(
         &mut self,

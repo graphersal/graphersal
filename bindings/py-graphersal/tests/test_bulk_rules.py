@@ -24,6 +24,17 @@ def rule_names(graph):
     return sorted(rule["name"] for rule in graph.compressions())
 
 
+def test_a_list_of_rules_is_dropped_in_one_call():
+    graph = files_graph()
+    kinds = sorted(graph.execute('g.v().values("kind").to_list()'))
+    graph.define_compressions(
+        [{"label": "file", "paths": ["kind", "owner"], "codec": "dedup"}]
+    )
+    assert graph.drop_compressions(["file_kind", "file_owner", "none"]) == 2
+    assert rule_names(graph) == []
+    assert sorted(graph.execute('g.v().values("kind").to_list()')) == kinds
+
+
 def test_a_list_of_rules_is_stored_in_one_call_with_paths():
     graph = files_graph()
     kinds = sorted(graph.execute('g.v().values("kind").dedup().to_list()'))

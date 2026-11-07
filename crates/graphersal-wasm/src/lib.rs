@@ -924,6 +924,17 @@ impl Playground {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Drops the compression rules of `names` (a JSON list) in one commit: `{dropped}`, how many.
+    #[wasm_bindgen(js_name = dropCompressions)]
+    pub fn drop_compressions(&mut self, names: &str) -> Result<String, JsError> {
+        let names: Vec<String> = serde_json::from_str(names)
+            .map_err(|e| JsError::new(&format!("names is a JSON list of rule names: {e}")))?;
+        self.session
+            .drop_compressions(&names)
+            .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Rebuilds the rule's dictionary and re-encodes its values (no data change): its entry.
     #[wasm_bindgen(js_name = recompress)]
     pub fn recompress(&mut self, name: &str) -> Result<String, JsError> {

@@ -410,6 +410,10 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'compression/drop', JSON.stringify({ name }));
   }
 
+  async dropCompressions(names) {
+    return this.request('POST', 'compression/drop-many', JSON.stringify({ names }));
+  }
+
   async recompress(name) {
     return this.request('POST', 'compression/recompress', JSON.stringify({ name }));
   }

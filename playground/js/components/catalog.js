@@ -36,9 +36,9 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import {
   state, toast, openCatalog, saveCatalogFile, loadCatalogFile, refreshSavedQueries, refreshCompressions,
-  defineCompressionRule, dropCompressionRule, recompressRule, estimateCompressionRule, dropSavedQuery,
+  defineCompressionRule, dropCompressionRule, dropCompressionRules, recompressRule, estimateCompressionRule, dropSavedQuery,
   refreshIndexes, createPropertyIndex, dropPropertyIndex,
-  refreshJobs, defineUserJob, dropUserJob, switchJob, scheduleSystemJob, runJobNow, isServerMode,
+  refreshJobs, defineUserJob, dropUserJob, switchJob, scheduleSystemJob, runJobNow, isServerMode, runStoreTask,
 } from '../store.js';
 import {
   jobsMenuItem, jobRows, newJobDraft, draftFromJob, jobDraftToSpec, queryChoices, argsSkeleton,
@@ -48,6 +48,8 @@ import {
   ruleRow, totals, newDraft, draftFromRule, draftToSpec, labelSuggestions,
   canEstimate, draftToEstimateSpec, estimateView, estimateSummary, histogramRows, applyCandidate,
   CODECS, ESTIMATE_CODECS, withCodec,
+  groupRules, groupCollapsed, selectionState, toggleNames, pruneRuleSelection, dropSelection,
+  ruleSortStartsDescending, RULE_GROUPINGS,
 } from '../compression.js';
 import {
   queryTree, signatureText, errorsByField, accessBadge, languageBadge, draftFromScript, draftFromGql,
@@ -199,9 +201,39 @@ export const CompressionManager = {
       estimate: null, // the engine's estimate for the form's element, label and path
       estimating: false,
       estimateErrors: [],
+      // The list's view (kept while the dialog is closed): sorted by what a rule saves,
+      // grouped by codec, nothing selected; `collapsed`: the groups the user opened or closed.
+      sort: 'saved',
+      desc: true,
+      groupBy: 'codec',
+      collapsed: {},
+      selected: [],
+      dropping: false,
     });
-    const rows = computed(() => (state.compressions || []).map((rule) => ({ rule, row: ruleRow(rule) })));
-    const sum = computed(() => totals(state.compressions || []));
+    const rules = computed(() => state.compressions || []);
+    const groups = computed(() => groupRules(rules.value, d.groupBy, d.sort, d.desc).map((group) => ({
+      ...group,
+      rows: group.rules.map((rule) => ({ rule, row: ruleRow(rule) })),
+      savedText: formatBytes(group.saved),
+      collapsed: group.title !== '' && groupCollapsed(group, d.collapsed),
+      selection: selectionState(group.names, d.selected),
+    })));
+    const allNames = computed(() => rules.value.map((rule) => rule.name));
+    const allSelection = computed(() => selectionState(allNames.value, d.selected));
+    const selection = computed(() => dropSelection(rules.value, d.selected));
+    const sum = computed(() => totals(rules.value));
+    // A rule dropped or renamed leaves the selection.
+    watch(rules, (now) => { d.selected = pruneRuleSelection(now, d.selected); });
+    function sortBy(key) {
+      if (d.sort === key) d.desc = !d.desc;
+      else Object.assign(d, { sort: key, desc: ruleSortStartsDescending(key) });
+    }
+    const sortClass = (key) => (d.sort === key ? ['active', d.desc ? 'desc' : 'asc'] : []);
+    const ariaSort = (key) => (d.sort === key ? (d.desc ? 'descending' : 'ascending') : 'none');
+    const toggleGroup = (group) => { d.selected = toggleNames(d.selected, group.names); };
+    const toggleAll = () => { d.selected = toggleNames(d.selected, allNames.value); };
+    const toggleRule = (name) => { d.selected = toggleNames(d.selected, [name]); };
+    const toggleCollapsed = (group) => { d.collapsed = { ...d.collapsed, [group.key]: !group.collapsed }; };
     const suggestions = computed(() => (d.draft ? d.labels[d.draft.element] || [] : []));
     const estimateTable = computed(() => estimateView(d.estimate));
     const estimateText = computed(() => estimateSummary(d.estimate));
@@ -327,9 +359,49 @@ export const CompressionManager = {
         d.busy = false;
       }
     }
+    // Rules changed on a store: the next start repeats their pass until a snapshot holds them
+    // (book page "Optimize"), so the toast offers one.
+    async function snapshotAction() {
+      const e = state.engine;
+      try {
+        if (!e.storeSummary || !(await e.storeSummary())) return null;
+      } catch (err) {
+        return null;
+      }
+      return {
+        label: 'Write a snapshot',
+        run: async () => {
+          try {
+            const res = await runStoreTask('checkpoint', () => e.checkpoint(''));
+            if (res.refused) toast('Not written: a query or another store action is running.', 'error', 6000);
+            else toast(`Snapshot written at commit ${res.value.commitSeq}.`, 'info', 5000);
+          } catch (err) {
+            toast(`Checkpoint failed: ${message(err)}`, 'error', 12000);
+          }
+        },
+      };
+    }
+    async function dropSelected() {
+      const chosen = selection.value;
+      if (d.busy || !chosen.count || !window.confirm(chosen.confirm)) return;
+      Object.assign(d, { busy: true, dropping: true });
+      try {
+        const res = await dropCompressionRules([...d.selected]);
+        d.selected = [];
+        const n = res.dropped;
+        const action = await snapshotAction();
+        const hint = action ? ' Write a snapshot, or every start repeats the work.' : '';
+        toast(`Dropped ${n} compression rule${n === 1 ? '' : 's'} in one commit.${hint}`, 'info', action ? 15000 : 5000, action);
+      } catch (err) {
+        toast(`Nothing dropped: ${message(err)}`, 'error', 12000);
+      } finally {
+        Object.assign(d, { busy: false, dropping: false });
+      }
+    }
     expose({ open, close });
     return {
-      state, dlg, d, rows, sum, suggestions, formatBytes, close, startNew, startEdit, cancelForm, save, recompress, drop,
+      state, dlg, d, rules, groups, allSelection, selection, sum, suggestions, formatBytes, close, startNew, startEdit, cancelForm, save, recompress, drop,
+      sortBy, sortClass, ariaSort, toggleGroup, toggleAll, toggleRule, toggleCollapsed, dropSelected, RULE_GROUPINGS,
       estimateTable, estimateText, histogram, estimable, estimate, useCandidate, setCodec, codecs: CODECS,
     };
   },
@@ -343,25 +415,62 @@ export const CompressionManager = {
       <template v-if="!d.draft">
         <p class="muted sq-note">A rule keeps the strings of one vertex or edge label at one property path LZ4-compressed in memory (codec lz4: when at least the minimum size and at most 90 % after compression; a read or a has() on such a field decompresses it), or stores each distinct value once and lets every element point to it (codec dedup: values repeated across many elements, such as paths, URLs, kinds, flags, dates or small lists; on a top-level property every value type, the element keeping a 4-byte code instead of the 32-byte value). Reads are always plain. Files hold plain text. Rules travel with the catalog file and with a snapshot.</p>
         <div v-if="state.compressionsError" class="field-error">{{ state.compressionsError }}</div>
-        <p v-else-if="!rows.length" class="muted">No compression rules yet. Large text that queries rarely read (a CV, a description, a document body) is the use case.</p>
-        <div v-else class="catalog-table-wrap">
-          <table class="data-table catalog-table">
+        <p v-else-if="!rules.length" class="muted">No compression rules yet. Large text that queries rarely read (a CV, a description, a document body) is the use case.</p>
+        <div v-else>
+          <div class="op-bar cc-bar-row">
+            <label class="cc-group-by">Group by
+              <select v-model="d.groupBy" aria-label="Group the rules by">
+                <option v-for="g in RULE_GROUPINGS" :key="g.key" :value="g.key">{{ g.text }}</option>
+              </select>
+            </label>
+            <span class="spacer"></span>
+            <span :class="selection.count ? '' : 'muted'">{{ selection.text }}</span>
+            <button type="button" class="btn small" :disabled="!selection.count || d.busy" @click="d.selected = []">Clear</button>
+            <button type="button" class="btn small danger" :disabled="!selection.count || d.busy || state.running" @click="dropSelected"
+                    title="Drop every ticked rule in one commit and one pass over the data (asks first; all or nothing)">{{ d.dropping ? 'Dropping…' : 'Drop selected' }}</button>
+          </div>
+          <table class="data-table catalog-table cc-rules">
             <thead><tr>
-              <th>Name</th><th>Codec</th><th>Applies to</th><th>Path</th><th>Min. size</th><th>Dictionary</th>
-              <th class="num" title="dedup: also the distinct texts the shared values hold">Values</th><th>Plain → stored</th><th class="num">Ratio</th><th class="num">Saved</th><th></th>
+              <th class="cc-check"><input type="checkbox" :checked="allSelection === 'all'" :indeterminate.prop="allSelection === 'some'" :disabled="d.busy" @change="toggleAll" aria-label="Select every rule"></th>
+              <th class="op-sort" :class="sortClass('name')" :aria-sort="ariaSort('name')" @click="sortBy('name')" title="Sort by name">Rule</th>
+              <th class="op-sort" :class="sortClass('codec')" :aria-sort="ariaSort('codec')" @click="sortBy('codec')" title="Sort by codec">Codec</th>
+              <th class="num op-sort" :class="sortClass('values')" :aria-sort="ariaSort('values')" @click="sortBy('values')" title="Sort by values (dedup: also the distinct texts the shared values hold)">Values</th>
+              <th class="cc-mid-hide op-sort" :class="sortClass('plain')" :aria-sort="ariaSort('plain')" @click="sortBy('plain')" title="Sort by the plain size">Plain → stored</th>
+              <th class="num cc-narrow-hide op-sort" :class="sortClass('ratio')" :aria-sort="ariaSort('ratio')" @click="sortBy('ratio')" title="Sort by the stored share of the plain size">Ratio</th>
+              <th class="num op-sort" :class="sortClass('saved')" :aria-sort="ariaSort('saved')" @click="sortBy('saved')" title="Sort by the bytes saved">Saved</th>
+              <th></th>
             </tr></thead>
-            <tbody>
-              <tr v-for="{ rule, row } in rows" :key="rule.name">
-                <td class="code">{{ row.name }} <span v-if="!row.served" class="badge" :title="row.reason">not applied</span></td><td>{{ row.codec }}<div v-if="!row.served && row.reason" class="muted cc-reason">{{ row.reason }}</div></td><td>{{ row.target }}</td><td class="code">{{ row.path }}</td>
-                <td>{{ row.threshold }}</td><td>{{ row.dictionary }}</td><td class="num">{{ row.values }}<div v-if="row.distinct !== '—'" class="muted cc-sub">{{ row.distinct }} distinct</div></td>
-                <td>{{ row.sizes }}</td><td class="num">{{ row.ratio }}</td><td class="num">{{ row.saved }}</td>
-                <td class="catalog-actions">
-                  <button type="button" class="btn small" :disabled="d.busy || state.running || !row.served" @click="startEdit(rule)">Edit…</button>
-                  <button type="button" class="btn small" :disabled="d.busy || state.running || !row.served" @click="recompress(rule)"
-                          title="Rebuild the dictionary from the current values and re-encode them (after much data was added; a dedup rule drops the texts no element uses any more); changes no data">Recompress</button>
-                  <button type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(rule)">Drop</button>
+            <tbody v-for="group in groups" :key="group.key">
+              <tr v-if="group.title" class="cc-group">
+                <td class="cc-check"><input type="checkbox" :checked="group.selection === 'all'" :indeterminate.prop="group.selection === 'some'" :disabled="d.busy" @change="toggleGroup(group)" :aria-label="'Select every rule of ' + group.title"></td>
+                <td colspan="3">
+                  <button type="button" class="cc-group-toggle" :aria-expanded="!group.collapsed" @click="toggleCollapsed(group)">
+                    <span aria-hidden="true">{{ group.collapsed ? '▸' : '▾' }}</span> <strong>{{ group.title }}</strong> <span class="muted">{{ group.count }} rule{{ group.count === 1 ? '' : 's' }}</span>
+                  </button>
                 </td>
+                <td class="cc-mid-hide"></td><td class="cc-narrow-hide"></td>
+                <td class="num"><strong>{{ group.savedText }}</strong></td>
+                <td></td>
               </tr>
+              <template v-if="!group.collapsed">
+                <tr v-for="{ rule, row } in group.rows" :key="rule.name">
+                  <td class="cc-check"><input type="checkbox" :checked="d.selected.includes(rule.name)" :disabled="d.busy" @change="toggleRule(rule.name)" :aria-label="'Select ' + rule.name"></td>
+                  <td class="cc-rule">
+                    <span class="code">{{ row.name }}</span> <span v-if="!row.served" class="badge" :title="row.reason">not applied</span>
+                    <div class="muted cc-sub">{{ row.target }} · <span class="code">{{ row.path }}</span></div>
+                    <div v-if="!row.served && row.reason" class="muted cc-reason">{{ row.reason }}</div>
+                  </td>
+                  <td>{{ row.codec }}<div class="muted cc-sub">{{ row.threshold }}<template v-if="row.dictionary !== '—'"> · dictionary {{ row.dictionary }}</template></div></td>
+                  <td class="num">{{ row.values }}<div v-if="row.distinct !== '—'" class="muted cc-sub">{{ row.distinct }} distinct</div></td>
+                  <td class="cc-mid-hide">{{ row.sizes }}</td><td class="num cc-narrow-hide">{{ row.ratio }}</td><td class="num">{{ row.saved }}</td>
+                  <td><div class="catalog-actions">
+                    <button type="button" class="btn small" :disabled="d.busy || state.running || !row.served" @click="startEdit(rule)">Edit…</button>
+                    <button type="button" class="btn small" :disabled="d.busy || state.running || !row.served" @click="recompress(rule)"
+                            title="Rebuild the dictionary from the current values and re-encode them (after much data was added; a dedup rule drops the texts no element uses any more); changes no data">Recompress</button>
+                    <button type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(rule)">Drop</button>
+                  </div></td>
+                </tr>
+              </template>
             </tbody>
           </table>
           <p class="muted sq-note">Together: {{ sum.compressedValues }} values, {{ formatBytes(sum.plainBytes) }} plain stored as {{ formatBytes(sum.storedBytes) }}, dictionaries {{ formatBytes(sum.dictionaryBytes) }}.</p>

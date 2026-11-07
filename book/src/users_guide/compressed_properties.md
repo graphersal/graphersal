@@ -213,6 +213,16 @@ names joined by `_`, `_edge` added for an edge rule, characters a name may not h
 stored and asks for `Create` (`Update` for a name already stored) on each rule before anything
 changes.
 
+**Dropping a list** is the way back: one commit, one walk over the elements of all the labels, and
+the values are stored in full again. A name that is not stored is skipped; the call answers the
+number of rules removed and asks for `Delete` on each rule before anything changes. In the
+playground: **Catalog ▾ ▸ Compression**, tick a group or some rules, **Drop selected**.
+
+```rhai,graph=modern,script
+g.define_compressions([#{label: "person", paths: ["name", "age"], codec: "dedup"}]);
+g.drop_compressions(["person_name", "person_age"])
+```
+
 The [advisor](../persistence/optimize.md#applying-several-at-once) groups its recommendations the
 same way (`dedup: 74 keys, total -400.1 MiB`) and applies a picked group in one commit too.
 
@@ -379,7 +389,10 @@ reading a `dedup` rule with `min_bytes` 0), reports the definition as damage; dr
 before opening a store with an older version.
 
 In the playground, **Catalog ▾ ▸ Compression** lists the rules with their statistics (here 400
-customer biographies, about 1 KiB each) and defines, edits, recompresses and drops them:
+customer biographies, about 1 KiB each) and defines, edits, recompresses and drops them. The table
+sorts by any column (at first by the bytes saved) and groups the rules by codec or by label, with
+the total each group saves; a group of many rules starts collapsed. A checkbox per rule and per
+group selects them for **Drop selected**, which asks first and drops them all in one commit:
 
 ![The compression manager: a rule with its values, plain and stored size, ratio and the bytes saved](../images/playground/compression-manager.png)
 

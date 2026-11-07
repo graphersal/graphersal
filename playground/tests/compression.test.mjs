@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import {
   CATALOG_KINDS, DEFAULT_MIN_BYTES, catalogItems, catalogTotal, catalogCountsText, ratioText,
   ruleRow, totals, newDraft, draftFromRule, draftToSpec, labelSuggestions,
+  ruleSaved, sortRules, ruleSortStartsDescending, groupRules, groupCollapsed, COLLAPSE_ABOVE,
+  selectionState, toggleNames, pruneRuleSelection, dropSelection,
 } from '../js/compression.js';
 
 const RULE = {
@@ -19,6 +21,79 @@ const RULE = {
   dictionary: true,
   stats: { compressedValues: 3, plainBytes: 3000, storedBytes: 1200, dictionaryBytes: 2048 },
 };
+
+const stats = (compressedValues, plainBytes, storedBytes) => ({ compressedValues, plainBytes, storedBytes });
+const RULES = [
+  { name: 'b_kind', codec: 'dedup', element: 'vertex', label: 'b', stats: stats(10, 1000, 100) },
+  { name: 'a_kind', codec: 'dedup', element: 'edge', label: 'a', stats: stats(50, 3000, 300) },
+  { name: 'b_text', codec: 'lz4', element: 'vertex', label: 'b', stats: stats(5, 500, 400) },
+  { name: 'new_one', codec: 'future', element: 'vertex', label: 'b', served: false, stats: null },
+];
+const names = (rules) => rules.map((rule) => rule.name);
+
+test('the rules sort by every column, ties by name, a rule without stats counting as nothing', () => {
+  assert.equal(ruleSaved(RULES[0]), 900);
+  assert.equal(ruleSaved(RULES[3]), 0);
+  assert.equal(ruleSaved({ stats: stats(1, 100, 200) }), 0, 'a rule that saves nothing is not negative');
+  assert.deepEqual(names(sortRules(RULES)), ['a_kind', 'b_kind', 'b_text', 'new_one']);
+  assert.deepEqual(names(sortRules(RULES, 'saved', false)), ['new_one', 'b_text', 'b_kind', 'a_kind']);
+  assert.deepEqual(names(sortRules(RULES, 'name', false)), ['a_kind', 'b_kind', 'b_text', 'new_one']);
+  assert.deepEqual(names(sortRules(RULES, 'values')), ['a_kind', 'b_kind', 'b_text', 'new_one']);
+  assert.deepEqual(names(sortRules(RULES, 'ratio', false)), ['a_kind', 'b_kind', 'b_text', 'new_one']);
+  assert.deepEqual(names(sortRules(RULES, 'codec', false)), ['a_kind', 'b_kind', 'new_one', 'b_text']);
+  assert.deepEqual(names(RULES).slice(0, 2), ['b_kind', 'a_kind'], 'the input stays as it was');
+  assert.equal(ruleSortStartsDescending('saved'), true);
+  assert.equal(ruleSortStartsDescending('name'), false);
+});
+
+test('the rules group by codec or label, the group that saves the most first', () => {
+  const byCodec = groupRules(RULES);
+  assert.deepEqual(byCodec.map((g) => g.key), ['dedup', 'lz4', 'future']);
+  assert.deepEqual(byCodec[0].names, ['a_kind', 'b_kind']);
+  assert.equal(byCodec[0].count, 2);
+  assert.equal(byCodec[0].saved, 3600);
+  const byLabel = groupRules(RULES, 'label');
+  assert.deepEqual(byLabel.map((g) => g.title), ['edge a', 'vertex b']);
+  assert.deepEqual(byLabel[1].names, ['b_kind', 'b_text', 'new_one']);
+  const flat = groupRules(RULES, 'none', 'name', false);
+  assert.equal(flat.length, 1);
+  assert.equal(flat[0].title, '');
+  assert.deepEqual(flat[0].names, ['a_kind', 'b_kind', 'b_text', 'new_one']);
+  assert.deepEqual(groupRules([]), []);
+});
+
+test('a large group starts collapsed until the user chooses', () => {
+  assert.equal(groupCollapsed({ key: 'x', count: COLLAPSE_ABOVE }, {}), false);
+  assert.equal(groupCollapsed({ key: 'x', count: COLLAPSE_ABOVE + 1 }, {}), true);
+  assert.equal(groupCollapsed({ key: 'x', count: 90 }, { x: false }), false);
+  assert.equal(groupCollapsed({ key: 'x', count: 1 }, { x: true }), true);
+});
+
+test('a group is ticked and unticked as a whole, gone rules leave the selection', () => {
+  assert.equal(selectionState(['a', 'b'], []), 'none');
+  assert.equal(selectionState(['a', 'b'], ['a']), 'some');
+  assert.equal(selectionState(['a', 'b'], ['b', 'a', 'c']), 'all');
+  assert.deepEqual(toggleNames(['c', 'a'], ['a', 'b']), ['c', 'a', 'b'], 'some: every one gets ticked');
+  assert.deepEqual(toggleNames(['c', 'a', 'b'], ['a', 'b']), ['c'], 'all: every one gets unticked');
+  assert.deepEqual(pruneRuleSelection(RULES, ['a_kind', 'gone']), ['a_kind']);
+});
+
+test('dropping a selection says what it gives back and what it names', () => {
+  const none = dropSelection(RULES, []);
+  assert.deepEqual([none.count, none.text, none.confirm], [0, 'nothing selected', '']);
+  const two = dropSelection(RULES, ['a_kind', 'b_kind']);
+  assert.equal(two.count, 2);
+  assert.equal(two.saved, 3600);
+  assert.match(two.text, /^2 selected · saves /);
+  assert.match(two.confirm, /these 2 compression rules in one commit/);
+  assert.match(two.confirm, /memory grows by about/);
+  assert.match(two.confirm, /• a_kind/);
+  const many = Array.from({ length: 8 }, (_, i) => ({ name: `r${i}`, stats: stats(1, 2, 1) }));
+  const eight = dropSelection(many, names(many));
+  assert.match(eight.confirm, /… and 3 more/);
+  assert.doesNotMatch(eight.confirm, /r5/);
+  assert.match(dropSelection(RULES, ['a_kind']).confirm, /this compression rule in one commit/);
+});
 
 test('catalog items: one per kind with its count, from the graph info', () => {
   assert.deepEqual(CATALOG_KINDS.map((k) => k.id), ['queries', 'compression']);

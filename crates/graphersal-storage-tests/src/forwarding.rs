@@ -196,6 +196,12 @@ impl GraphStorage for Forwarding {
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
         GraphStorage::remove_definition(&mut self.0, kind, name)
     }
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        GraphStorage::remove_definitions(&mut self.0, definitions)
+    }
     fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
         GraphStorage::recompress(&mut self.0, name)
     }

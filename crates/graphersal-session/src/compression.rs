@@ -1,7 +1,8 @@
 //! Compression rules in the session (`book/src/users_guide/compressed_properties.md`; book page "Compressed
 //! Properties"): the operations behind the playground's Catalog ▸ Compression manager, the dev
 //! server's `/api/compression*` endpoints and its MCP tools `list_compressions`,
-//! `define_compression`, `drop_compression`, `recompress`.
+//! `define_compression`, `drop_compression`, `recompress`; `drop_compressions` (several rules in
+//! one commit) serves the manager and `POST /api/compression/drop-many`.
 //!
 //! Every operation works on the catalog of the graph the session serves (a Store's graph too:
 //! a change is a commit like any other, journaled and recorded in the dev server's change
@@ -535,6 +536,16 @@ impl Session {
             .drop_definition(DefinitionKind::COMPRESSION, name)
     }
 
+    /// Drops the compression rules `names` in ONE commit and one walk (their values are
+    /// decompressed): how many were dropped (a name not stored is skipped).
+    pub fn drop_compressions(&mut self, names: &[String]) -> Result<usize, SessionError> {
+        let definitions: Vec<(DefinitionKind, &str)> = names
+            .iter()
+            .map(|name| (DefinitionKind::COMPRESSION, name.as_str()))
+            .collect();
+        self.graph.drop_definitions(&definitions)
+    }
+
     /// Re-runs the explicit pass of the rule `name` (a new dictionary from the current values,
     /// every value re-encoded); changes no data, commits nothing. Answers the rule's entry.
     pub fn recompress(&mut self, name: &str) -> Result<Value, SessionError> {
@@ -679,6 +690,8 @@ mod tests {
         assert!(s.recompress("nope").is_err());
         assert!(s.drop_compression("cv2").unwrap());
         assert!(!s.drop_compression("cv2").unwrap());
+        let names = ["cv2".to_string(), "none".to_string()];
+        assert_eq!(s.drop_compressions(&names).unwrap(), 0);
     }
 
     #[test]

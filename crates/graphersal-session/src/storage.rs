@@ -205,6 +205,12 @@ pub trait SessionGraph: AnyGraph {
     /// [`crate::queries::remove_definition_in`].
     fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, SessionError>;
 
+    /// [`crate::queries::remove_definitions_in`].
+    fn drop_definitions(
+        &self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, SessionError>;
+
     /// [`crate::queries::move_query_in`].
     fn move_query_into(&self, name: &str, folder: Option<&str>) -> Result<(), SessionError>;
 
@@ -475,6 +481,15 @@ where
     fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, SessionError> {
         writing_with(self, |g| {
             crate::queries::remove_definition_in(g, kind, name)
+        })
+    }
+
+    fn drop_definitions(
+        &self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, SessionError> {
+        writing_with(self, |g| {
+            crate::queries::remove_definitions_in(g, definitions)
         })
     }
 

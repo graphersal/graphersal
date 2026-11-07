@@ -676,6 +676,42 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
+    /// `g.drop_compressions([name, ..])`: removes every rule of the list in ONE unit (one commit)
+    /// and decompresses the values of all their labels in ONE walk (book page "Compressed
+    /// Properties", section "Several rules at once"). A name that is not stored is skipped. Asks
+    /// for `Delete` on each rule before anything changes. Answers the number of rules removed.
+    pub fn drop_compressions(&mut self, names: Dynamic) -> Result<i64, Box<EvalAltResult>> {
+        let operation = "drop_compressions";
+        let actual = type_name_of(&names);
+        let mismatch = |actual: String| {
+            fail(ScriptError::ArgumentMismatch {
+                step_name: operation.to_string(),
+                expected: "a list of rule names [\"a\", \"b\"]".into(),
+                actual,
+            })
+        };
+        let Some(items) = names.try_cast::<rhai::Array>() else {
+            return Err(mismatch(actual));
+        };
+        let mut names: Vec<String> = Vec::with_capacity(items.len());
+        for item in items {
+            let actual = type_name_of(&item);
+            names.push(item.into_string().map_err(|_| mismatch(actual))?);
+        }
+        for name in &names {
+            self.require_compression(operation, Action::Delete, Some(name))?;
+        }
+        let definitions: Vec<(DefinitionKind, &str)> = names
+            .iter()
+            .map(|name| (DefinitionKind::COMPRESSION, name.as_str()))
+            .collect();
+        let removed = self
+            .compression_graph(operation)?
+            .remove_definitions(&definitions)
+            .map_err(script_error)?;
+        Ok(removed as i64)
+    }
+
     /// `g.recompress(name)`: rebuilds the rule's dictionary from the current values and
     /// re-encodes them; changes no logical data (commits nothing). Fails when there is no such
     /// rule. Asks for `Update` on it.

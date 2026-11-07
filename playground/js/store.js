@@ -1400,6 +1400,13 @@ export async function dropCompressionRule(name) {
   return res;
 }
 
+/** Drops several compression rules in one commit (the caller asked first): `{dropped}`. */
+export async function dropCompressionRules(names) {
+  const res = await state.engine.dropCompressions(names);
+  await compressionsChanged();
+  return res;
+}
+
 /**
  * The Compression form's Estimate: what rules for the form's element, label and path would hold
  * over the current data (js/compression.js `draftToEstimateSpec`); changes nothing. Resolves to

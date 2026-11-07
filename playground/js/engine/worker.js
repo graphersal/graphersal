@@ -78,6 +78,7 @@ const JSON_METHODS = {
   listCompressions: () => playground.listCompressions(),
   defineCompression: (spec) => playground.defineCompression(JSON.stringify(spec)),
   dropCompression: (name) => playground.dropCompression(name),
+  dropCompressions: (names) => playground.dropCompressions(JSON.stringify(names || [])),
   recompress: (name) => playground.recompress(name),
   estimateCompression: (spec) => playground.estimateCompression(JSON.stringify(spec)),
   // Property indexes (the catalog's kind `property_index`).
