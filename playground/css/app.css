@@ -1941,6 +1941,7 @@ input.ve-null { color: var(--text-muted); }
 .cj-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); font-size: 13px; }
 .cj-job { display: flex; flex-direction: column; gap: 3px; padding: 8px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
 .cj-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.cj-running { display: inline-flex; align-items: center; gap: 4px; }
 .cj-name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
 .cj-head .catalog-actions { justify-content: flex-end; margin-left: auto; }
 .cj-text { overflow-wrap: anywhere; min-width: 0; }

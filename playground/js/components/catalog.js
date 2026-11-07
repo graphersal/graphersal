@@ -41,7 +41,7 @@ import {
   refreshJobs, defineUserJob, dropUserJob, switchJob, scheduleSystemJob, runJobNow, isServerMode, runStoreTask,
 } from '../store.js';
 import {
-  jobsMenuItem, jobRows, newJobDraft, draftFromJob, jobDraftToSpec, queryChoices, argsSkeleton,
+  jobsMenuItem, jobRowsWithRuns, anyJobRunning, newJobDraft, draftFromJob, jobDraftToSpec, queryChoices, argsSkeleton,
   JOB_ACTIONS, SCHEDULE_PRESETS, scheduleText, formErrors,
 } from '../jobs.js';
 import {
@@ -752,10 +752,12 @@ export const IndexesManager = {
 export const JobsManager = {
   setup(props, { expose }) {
     const dlg = ref(null);
-    const d = reactive({ draft: null, errors: {}, busy: false, now: Date.now() * 1000 });
+    // `started`: the runs this page asked for and still waits for (by job name).
+    const d = reactive({ draft: null, errors: {}, busy: false, now: Date.now() * 1000, started: {} });
     const rows = computed(() => {
       const view = state.jobs;
-      return ((view && view.jobs) || []).map((job, i) => ({ job, row: jobRows({ jobs: [job] }, d.now)[0], i }));
+      const shown = jobRowsWithRuns(view, d.now, d.started);
+      return ((view && view.jobs) || []).map((job, i) => ({ job, row: shown[i], i }));
     });
     const view = computed(() => state.jobs || { jobs: [] });
     const queries = computed(() => queryChoices(state.savedQueries));
@@ -767,15 +769,20 @@ export const JobsManager = {
       await refreshJobs();
       if (dlg.value && !dlg.value.open) dlg.value.showModal();
       if (!timer) {
+        // Every 5 s, every second while a run is under way (its end shows promptly).
+        let tick = 0;
         timer = setInterval(async () => {
           if (!dlg.value || !dlg.value.open) {
             clearInterval(timer);
             timer = null;
             return;
           }
+          tick += 1;
+          if (tick < 5 && !anyJobRunning(state.jobs) && !Object.keys(d.started).length) return;
+          tick = 0;
           d.now = Date.now() * 1000;
           if (!d.draft && !d.busy) await refreshJobs();
-        }, 5000);
+        }, 1000);
       }
     }
     function close() {
@@ -834,9 +841,10 @@ export const JobsManager = {
         d.busy = false;
       }
     }
+    // The dialog stays usable during a run: other jobs can be switched or started meanwhile.
     async function run(job) {
-      if (d.busy) return;
-      d.busy = true;
+      if (d.busy || d.started[job.name]) return;
+      d.started[job.name] = true;
       try {
         const entry = await runJobNow(job.name);
         const error = entry && entry.last && entry.last.error;
@@ -845,7 +853,7 @@ export const JobsManager = {
       } catch (err) {
         toast(`Run failed: ${message(err)}`, 'error', 9000);
       } finally {
-        d.busy = false;
+        delete d.started[job.name];
         d.now = Date.now() * 1000;
       }
     }
@@ -898,8 +906,9 @@ export const JobsManager = {
               <span class="cj-name code">{{ row.name }}</span>
               <span v-if="row.system" class="badge" title="Comes with the store; can be switched and rescheduled, not dropped">system</span>
               <span v-if="!row.scheduled" class="badge" :title="row.reason">not running</span>
+              <span v-if="row.running" class="badge cj-running" role="status" title="A run of this job is under way; requests go on meanwhile"><span class="running-dot" aria-hidden="true"></span>running</span>
               <span class="catalog-actions">
-                <button type="button" class="btn small" :disabled="d.busy || state.running || !row.scheduled" @click="run(job)" title="Run it now, whatever its schedule">Run now</button>
+                <button type="button" class="btn small" :disabled="d.busy || state.running || !row.scheduled || row.running" @click="run(job)" :title="row.running ? 'It is running' : 'Run it now, whatever its schedule'">Run now</button>
                 <button v-if="row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="reschedule(job)">Schedule…</button>
                 <button v-if="!row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="startEdit(job)">Edit…</button>
                 <button v-if="!row.system" type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(job)">Drop</button>
