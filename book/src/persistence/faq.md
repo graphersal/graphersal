@@ -57,8 +57,9 @@ it with a `match`; `StoreFailure::name()` is the stable name, which the Python e
 | `NameTooLong` (`name_too_long`) | a snapshot name over 255 bytes | a shorter name |
 | `SnapshotExists` (`snapshot_exists`) | a named checkpoint at a commit that already has a snapshot under another name | commit something first, or checkpoint without a name |
 | `NoSnapshot` (`no_snapshot`) | an export of a commit without a snapshot, a backup of a store without one | `store list`, `store checkpoint` |
-| `BackupRunning` (`backup_running`) | a prune while a backup copies the files | prune again afterwards |
-| `PruneRunning` (`prune_running`) | a backup while a prune deletes files | back up again afterwards |
+| `BackupRunning` (`backup_running`) | a prune while a backup or a verification reads the files | prune again afterwards |
+| `PruneRunning` (`prune_running`) | a backup while a prune deletes files (the built-in backends wait instead; a store's own `StoreDir` may refuse) | back up again afterwards |
+| `FilesInUse` (`files_in_use`) | a rollback, attic restore or attic remove while a backup or a verification reads the files | run it again afterwards |
 | `NothingAfterTarget` (`nothing_after_target`) | a rollback to the current commit or later | an earlier target |
 | `UnknownAtticEntry` (`unknown_attic_entry`) | no attic entry with that id | `store attic <dir>` lists them |
 | `AtticLineageChanged` (`attic_lineage_changed`) | a later rollback or restore came after the entry's rollback | restore the newer entry first, or fork the entry |

@@ -411,6 +411,9 @@ pub enum StoreFailure {
     BackupRunning,
     /// A backup was asked while a prune deletes the store's files.
     PruneRunning,
+    /// A rollback or an attic change was asked while a backup or a verification reads the store's
+    /// files.
+    FilesInUse,
     /// A rollback target at or after the current commit (or no commit after it in the WAL):
     /// there is nothing to roll back.
     NothingAfterTarget,
@@ -513,6 +516,7 @@ impl StoreFailure {
             StoreFailure::NoSnapshot => "no_snapshot",
             StoreFailure::BackupRunning => "backup_running",
             StoreFailure::PruneRunning => "prune_running",
+            StoreFailure::FilesInUse => "files_in_use",
             StoreFailure::NothingAfterTarget => "nothing_after_target",
             StoreFailure::UnknownAtticEntry => "unknown_attic_entry",
             StoreFailure::AtticLineageChanged => "attic_lineage_changed",
@@ -595,12 +599,18 @@ impl StoreFailure {
                 )],
             ),
             StoreFailure::PruneRunning => help_text(
-                "A prune is deleting files of the store. Back up again when it has finished \
-                 (Store::backup).",
+                "A prune or a rollback is changing files of the store. Back up again when it has \
+                 finished (Store::backup).",
                 &[(
                     "back up again once the prune has finished",
                     "graphersal store backup <dir> <backup_dir>",
                 )],
+            ),
+            StoreFailure::FilesInUse => help_text(
+                "A backup or a verification is reading the store's files, and this operation would \
+                 move or remove some of them. Nothing was changed: run it again when that has \
+                 finished.",
+                &[],
             ),
             StoreFailure::NothingAfterTarget => help_text(
                 "A rollback goes back in time: choose a target before the current commit \
@@ -1574,6 +1584,7 @@ mod tests {
             StoreFailure::NoSnapshot,
             StoreFailure::BackupRunning,
             StoreFailure::PruneRunning,
+            StoreFailure::FilesInUse,
             StoreFailure::NothingAfterTarget,
             StoreFailure::UnknownAtticEntry,
             StoreFailure::AtticLineageChanged,
@@ -1652,6 +1663,7 @@ mod tests {
             StoreFailure::NoSnapshot,
             StoreFailure::BackupRunning,
             StoreFailure::PruneRunning,
+            StoreFailure::FilesInUse,
             StoreFailure::NothingAfterTarget,
             StoreFailure::UnknownAtticEntry,
             StoreFailure::AtticLineageChanged,

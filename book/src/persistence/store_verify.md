@@ -4,7 +4,8 @@
 It also checks every [embedding model](store_models.md) the store keeps (each file's size and
 SHA-256 against the model's manifest, `VerifyReport::models_checked`): a damaged model is a
 problem under `models/<id>/`, but it never makes an open store read-only (it is no graph data);
-remove it and add it again.
+remove it and add it again. On a writable store a verification waits while a rollback or a prune
+changes files, and a rollback, an attic change or a prune is refused while it reads.
 
 ```rust,no_run
 # use graphersal::persist::{Store, StoreOptions};

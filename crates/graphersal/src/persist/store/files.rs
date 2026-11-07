@@ -937,23 +937,30 @@ impl DirLock {
     }
 }
 
-/// The backup pin: shared while a backup copies files (any number of backups, in this or
-/// another process), exclusive while `prune` deletes files.
+/// The backup pin: shared while a backup or a verification reads files (any number of them, in
+/// this or another process), exclusive while `prune` deletes files or a rollback or an attic change
+/// moves them. A reader takes it BEFORE it reads the durable end of the WAL: a rollback in between
+/// would make that position point at files that moved, which reads as damage.
 pub(crate) struct BackupPin {
     _lock: DirLockGuard,
 }
 
 impl BackupPin {
-    /// Pins the store's files for a backup (waits while a prune deletes files).
+    /// Pins the store's files for a backup (waits while a prune or a rollback changes files).
     pub(crate) fn shared(dir: &DirPath) -> Result<Self, PersistError> {
+        Self::shared_for(dir, "back up the store")
+    }
+
+    /// [`Self::shared`] for `operation`, the reader named in a refusal.
+    pub(crate) fn shared_for(dir: &DirPath, operation: &'static str) -> Result<Self, PersistError> {
         match dir.store_dir().lock(LockKind::BackupShared) {
             Ok(Some(lock)) => Ok(Self { _lock: lock }),
             Ok(None) => Err(PersistError::store(
-                "back up the store",
+                operation,
                 StoreFailure::PruneRunning,
-                "a prune is deleting its files; back up again when it has finished",
+                "a prune or a rollback is changing its files; try again when it has finished",
             )),
-            Err(err) => Err(PersistError::io("pinning the store for a backup", err)),
+            Err(err) => Err(PersistError::io("pinning the store's files", err)),
         }
     }
 
@@ -964,7 +971,21 @@ impl BackupPin {
             Ok(None) => Err(PersistError::store(
                 "prune the store",
                 StoreFailure::BackupRunning,
-                "a backup is copying its files; prune again when it has finished",
+                "a backup or a verification is reading its files; prune again when it has finished",
+            )),
+            Err(err) => Err(PersistError::io("opening the store's BACKUP file", err)),
+        }
+    }
+
+    /// The side of a rollback or an attic change (`operation`): fails at once while a backup or a
+    /// verification holds the pin.
+    pub(crate) fn moving(dir: &DirPath, operation: &'static str) -> Result<Self, PersistError> {
+        match dir.store_dir().lock(LockKind::BackupExclusive) {
+            Ok(Some(lock)) => Ok(Self { _lock: lock }),
+            Ok(None) => Err(PersistError::store(
+                operation,
+                StoreFailure::FilesInUse,
+                "a backup or a verification is reading its files; try again when it has finished",
             )),
             Err(err) => Err(PersistError::io("opening the store's BACKUP file", err)),
         }
