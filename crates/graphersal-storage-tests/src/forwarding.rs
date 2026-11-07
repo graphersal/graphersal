@@ -515,6 +515,12 @@ impl graphersal::storage::PersistentStorage for Forwarding {
     ) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::attach_journal(&mut self.0, journal)
     }
+    fn begin_replay(&mut self) -> Result<(), GraphError> {
+        graphersal::storage::PersistentStorage::begin_replay(&mut self.0)
+    }
+    fn finish_replay(&mut self) -> Result<(), GraphError> {
+        graphersal::storage::PersistentStorage::finish_replay(&mut self.0)
+    }
     fn replay(&mut self, changes: &ChangeSet, verify: bool) -> Result<(), String> {
         graphersal::storage::PersistentStorage::replay(&mut self.0, changes, verify)
     }

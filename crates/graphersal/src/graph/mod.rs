@@ -187,6 +187,9 @@ pub struct TraversalGraph {
     /// Above 0 while the rules are off: `apply_change_set` (the replication form carries its
     /// vectors) and the rule pass's own writes.
     pub(crate) rules_off: u32,
+    /// `Some` during a journal replay: the compression rule changes whose pass waits (`(what was
+    /// stored before, name)` each), run in one walk (`TraversalGraph::defer_rule_passes`).
+    pub(crate) deferred_rule_passes: Option<Vec<(Option<Definition>, CompactString)>>,
 }
 
 /// Whether an element is a vertex or an edge.
@@ -231,6 +234,7 @@ impl TraversalGraph {
             labels: labels::Labels::default(),
             vector_rules: None,
             rules_off: 0,
+            deferred_rule_passes: None,
         }
     }
 

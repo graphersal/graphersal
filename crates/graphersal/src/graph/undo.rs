@@ -942,13 +942,7 @@ impl TraversalGraph {
                 old: old.map(Box::new),
             });
         }
-        if !compressions.is_empty() {
-            let changes: Vec<(Option<&Definition>, &str)> = compressions
-                .iter()
-                .map(|(old, name)| (old.as_ref(), name.as_str()))
-                .collect();
-            self.compression_after_changes(&changes);
-        }
+        self.compression_rules_changed(compressions);
         for name in indexes {
             self.catalog_after_change(DefinitionKind::PROPERTY_INDEX, None, &name);
         }
@@ -980,7 +974,7 @@ impl TraversalGraph {
         definitions: &[(DefinitionKind, &str)],
     ) -> usize {
         let mut removed = 0;
-        let mut compressions: Vec<(Definition, CompactString)> = Vec::new();
+        let mut compressions: Vec<(Option<Definition>, CompactString)> = Vec::new();
         for (kind, name) in definitions {
             let Some(old) = self.definitions.remove(*kind, name) else {
                 continue;
@@ -988,7 +982,7 @@ impl TraversalGraph {
             removed += 1;
             let name = CompactString::from(*name);
             if *kind == DefinitionKind::COMPRESSION {
-                compressions.push((old.clone(), name.clone()));
+                compressions.push((Some(old.clone()), name.clone()));
             } else {
                 self.catalog_after_change(*kind, Some(&old), &name);
             }
@@ -998,14 +992,71 @@ impl TraversalGraph {
                 old: Some(Box::new(old)),
             });
         }
-        if !compressions.is_empty() {
-            let changes: Vec<(Option<&Definition>, &str)> = compressions
-                .iter()
-                .map(|(old, name)| (Some(old), name.as_str()))
-                .collect();
-            self.compression_after_changes(&changes);
-        }
+        self.compression_rules_changed(compressions);
         removed
+    }
+
+    /// The explicit pass of the compression rule changes `changes` (`(what was stored before,
+    /// name)` each, the catalog already holds the new state): run now in one walk, or, while a
+    /// replay defers them ([`Self::defer_rule_passes`]), kept for that replay's one walk.
+    fn compression_rules_changed(&mut self, changes: Vec<(Option<Definition>, CompactString)>) {
+        if let Some(deferred) = self.deferred_rule_passes.as_mut() {
+            for (old, name) in changes {
+                // The first old state of a name counts, as in a list naming a rule twice.
+                if !deferred.iter().any(|(_, kept)| *kept == name) {
+                    deferred.push((old, name));
+                }
+            }
+            return;
+        }
+        if changes.is_empty() {
+            return;
+        }
+        let changes: Vec<(Option<&Definition>, &str)> = changes
+            .iter()
+            .map(|(old, name)| (old.as_ref(), name.as_str()))
+            .collect();
+        self.compression_after_changes(&changes);
+    }
+
+    /// From now until [`Self::run_deferred_rule_passes`], the pass of a compression rule change
+    /// waits: a replay of many rule changes walks the data once for all of them, across commits.
+    /// The catalog is current meanwhile; the rows and the rule state stay as they were, consistent
+    /// with each other, and an element write first runs what waits
+    /// ([`Self::before_replayed_mutation`]).
+    #[cfg(feature = "persist")]
+    pub(crate) fn defer_rule_passes(&mut self) {
+        self.deferred_rule_passes.get_or_insert_with(Vec::new);
+    }
+
+    /// Runs the rule passes that wait, in one walk, and ends the deferring.
+    #[cfg(feature = "persist")]
+    pub(crate) fn run_deferred_rule_passes(&mut self) {
+        if let Some(changes) = self.deferred_rule_passes.take() {
+            self.compression_rules_changed(changes);
+        }
+    }
+
+    /// Before a replayed mutation: an element write must meet the rows and the rule state of the
+    /// catalog as it stands, so the rule passes that wait run first (one walk) and the deferring
+    /// goes on. A catalog or schema change leaves them waiting.
+    pub(crate) fn before_replayed_mutation(&mut self, mutation: &crate::graph::Mutation) {
+        use crate::graph::Mutation;
+        if matches!(
+            mutation,
+            Mutation::SetSchema { .. } | Mutation::SetDefinition { .. }
+        ) {
+            return;
+        }
+        if self
+            .deferred_rule_passes
+            .as_ref()
+            .is_some_and(|d| !d.is_empty())
+        {
+            let changes = self.deferred_rule_passes.take().unwrap_or_default();
+            self.compression_rules_changed(changes);
+            self.deferred_rule_passes = Some(Vec::new());
+        }
     }
 
     /// The derived state of a catalog change of `kind` (`old`: what was stored before, the
@@ -1018,7 +1069,11 @@ impl TraversalGraph {
         name: &str,
     ) {
         if kind == DefinitionKind::COMPRESSION {
-            self.compression_after_change(old, name);
+            if self.deferred_rule_passes.is_some() {
+                self.compression_rules_changed(vec![(old.cloned(), CompactString::from(name))]);
+            } else {
+                self.compression_after_change(old, name);
+            }
         } else if kind == DefinitionKind::PROPERTY_INDEX {
             self.property_index_after_change(name);
         }

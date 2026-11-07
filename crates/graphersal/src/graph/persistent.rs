@@ -121,6 +121,21 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
     /// [`GraphError::Unsupported`] when a journal is attached already or a unit is open.
     fn attach_journal(&mut self, journal: JournalSlot) -> Result<(), GraphError>;
 
+    /// A journal replay starts: [`Self::replay`] calls for its commits follow, then
+    /// [`Self::finish_replay`]. A storage may put off derived work until then, as long as every
+    /// read of the replay's own checks answers the replayed state. Default: nothing.
+    /// `TraversalGraph` walks its data once for all the compression rule changes in a row.
+    fn begin_replay(&mut self) -> Result<(), GraphError> {
+        Ok(())
+    }
+
+    /// The journal replay has applied its last commit: the work [`Self::begin_replay`] put off
+    /// is done now. Not called after a failed replay (the storage is dropped or cleared).
+    /// Default: nothing.
+    fn finish_replay(&mut self) -> Result<(), GraphError> {
+        Ok(())
+    }
+
     /// Applies `changes` to a storage nobody sees yet (recovery: snapshot plus journal),
     /// outside units: no hook fires. With `verify`, every mutation's before image is compared
     /// with the current state first (through the read API) and a mismatch fails: the journal
@@ -282,6 +297,16 @@ impl PersistentStorage for TraversalGraph {
             });
         }
         self.undo.hooks.set_journal(journal)
+    }
+
+    fn begin_replay(&mut self) -> Result<(), GraphError> {
+        self.defer_rule_passes();
+        Ok(())
+    }
+
+    fn finish_replay(&mut self) -> Result<(), GraphError> {
+        self.load_outside_units(Self::run_deferred_rule_passes);
+        Ok(())
     }
 
     /// The raw path: with `verify` the before images are checked first

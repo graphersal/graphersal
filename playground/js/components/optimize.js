@@ -348,7 +348,7 @@ export const OptimizePanel = {
           <label class="op-check" title="Lower every threshold: shows candidates on small graphs too"><input type="checkbox" v-model="advice.everything"> Every candidate</label>
         </div>
         <div v-if="advice.checkpointDue" class="op-note" role="status">
-          <span><strong>Write a snapshot now.</strong> The new compression rules are only in the write-ahead log, so every start of this store repeats the re-encoding and takes much longer. A snapshot holds them: the store then starts about as fast as before.</span>
+          <span><strong>Write a snapshot now.</strong> The new compression rules are only in the write-ahead log, so every start of this store re-encodes their labels, with a higher memory peak. A snapshot holds them: each row is then coded as it loads.</span>
           <button type="button" class="btn small primary" :disabled="!!state.storeTask || state.storeBusy || state.running" @click="writeSnapshot">{{ state.storeTask && state.storeTask.id === 'checkpoint' ? 'Writing…' : 'Write a snapshot now' }}</button>
         </div>
         <div v-if="advice.error" class="field-error">{{ advice.error }}</div>

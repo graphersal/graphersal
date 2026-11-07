@@ -183,7 +183,11 @@ impl crate::graph::TraversalGraph {
     /// position and the id sequences raised to the change set's.
     pub(crate) fn replay_in_place(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
         self.load_outside_units(|graph| {
-            apply_mutations(graph, changes, &mut None, &mut Self::stored_copy)
+            for mutation in changes.mutations() {
+                graph.before_replayed_mutation(mutation);
+                apply_mutation_with(graph, mutation, &mut Self::stored_copy)?;
+            }
+            Ok::<(), GraphError>(())
         })?;
         self.raise_replayed_position(changes);
         Ok(())
@@ -274,6 +278,7 @@ impl crate::graph::TraversalGraph {
         let result = self.load_outside_units(|graph| {
             for mutation in changes.mutations() {
                 let subject = || mutation_subject(mutation);
+                graph.before_replayed_mutation(mutation);
                 if let Some(reason) = before_mismatch(&*graph, mutation, true) {
                     return Err(format!("{}: {reason}", subject()));
                 }

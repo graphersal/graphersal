@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use graphersal::catalog::{Codec, CompressionDefinition, DefinitionKind};
+use graphersal::catalog::{Codec, CompressionDefinition, Definition, DefinitionKind};
 use graphersal::persist::{MemDir, ReadOptions, RecoveryTarget, Store, StoreOptions};
 use graphersal::prelude::*;
 use graphersal::storage::ElementKind;
@@ -712,4 +712,97 @@ fn a_coded_key_whose_rule_turns_lz4_is_compressed_in_the_same_pass() {
     assert!(graph.check_compression_invariant().is_ok());
     assert!(graph.is_dedup_coded(ElementKind::Vertex, "i1", "note"));
     assert_same_text(&sorted(exact(&graph)), &plain, "content");
+}
+
+/// What the replay must reproduce of `graph`: every vertex with its properties and which of them
+/// are stored coded (the order of a vertex's edges depends on how the graph was built, so an
+/// export of a live graph and of a loaded one may differ).
+fn stored_state(graph: &TraversalGraph) -> Vec<(String, PropertyMap, Vec<bool>)> {
+    ids(graph)
+        .0
+        .into_iter()
+        .map(|id| {
+            let vertex = GraphStorage::get_vertex_by_id(graph, &id).unwrap().unwrap();
+            let properties = graph.vertex_properties(vertex).unwrap().unwrap().clone();
+            let coded = ITEM_KEYS
+                .iter()
+                .map(|key| graph.is_dedup_coded(ElementKind::Vertex, &id, key))
+                .collect();
+            (id, properties, coded)
+        })
+        .collect()
+}
+
+/// A WAL of rule changes in many commits, mixed with element writes: every open and every
+/// history view is the graph the live commits made (the replay defers the rule passes and walks
+/// once per run of rule changes, a store open also skips the rebuild of what it just filled).
+#[test]
+fn rule_changes_of_many_commits_replay_to_the_state_the_live_commits_made() {
+    let dir = MemDir::new();
+    let store = Store::create(&dir, StoreOptions::new()).unwrap();
+    let graph = Arc::clone(store.graph());
+    add_data(&mut graph.write(), 0, ITEMS, 0, EDGES);
+    store.checkpoint(None).unwrap();
+    let mut states = Vec::new();
+    type Step = Box<dyn Fn(&mut TraversalGraph)>;
+    let define = |name: &'static str, rule: CompressionDefinition| -> Step {
+        Box::new(move |g: &mut TraversalGraph| {
+            g.set_definition(Definition::compression(name, rule.clone()))
+                .unwrap();
+        })
+    };
+    let drop_rule = |name: &'static str| -> Step {
+        Box::new(move |g: &mut TraversalGraph| {
+            g.remove_definition(DefinitionKind::COMPRESSION, name)
+                .unwrap();
+        })
+    };
+    let steps: Vec<Step> = vec![
+        define("r_kind", dedup(ElementKind::Vertex, "item", "kind")),
+        define("r_n", dedup(ElementKind::Vertex, "item", "n")),
+        define("r_text", lz4(ElementKind::Vertex, "item", "text")),
+        // An element write between rule commits meets the rules before it.
+        Box::new(|g: &mut TraversalGraph| {
+            g.traversal_mut()
+                .v(vec!["i1", "i2", "i3"])
+                .property("kind", "written")
+                .property("n", 42i64)
+                .to_list()
+                .unwrap();
+        }),
+        define("r_flag", dedup(ElementKind::Vertex, "item", "flag")),
+        // Stored and removed in a run of rule commits.
+        define("r_gone", dedup(ElementKind::Vertex, "item", "day")),
+        drop_rule("r_gone"),
+        // Removed, then a rule of another codec on the same key.
+        drop_rule("r_n"),
+        define("r_n2", lz4(ElementKind::Vertex, "item", "n")),
+        // Removed and stored again unchanged: the same rule.
+        drop_rule("r_kind"),
+        define("r_kind", dedup(ElementKind::Vertex, "item", "kind")),
+    ];
+    for step in &steps {
+        let mut g = graph.write();
+        step(&mut g);
+        let seq = g.last_commit_seq();
+        states.push((seq, stored_state(&g)));
+    }
+    let (_, last) = states.last().unwrap().clone();
+    store.close().unwrap();
+    let reopened = Store::open(&dir, StoreOptions::new()).unwrap();
+    {
+        let g = reopened.graph().read();
+        g.check_compression_invariant().unwrap();
+        assert_eq!(stored_state(&g), last, "the open");
+    }
+    reopened.close().unwrap();
+    for (seq, state) in &states {
+        let view = Store::open_read_only(&dir, RecoveryTarget::CommitSeq(*seq)).unwrap();
+        view.graph.check_compression_invariant().unwrap();
+        assert_eq!(
+            stored_state(&view.graph),
+            *state,
+            "the view at commit {seq}"
+        );
+    }
 }
