@@ -3,6 +3,7 @@
 // Run: node --test playground/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   EXPLAIN, ACTIONS, commitTarget, markTarget, targetText, targetLabel, fileSafe, baseName,
   defaultForkDir, parseCommit, parseTime, rollbackPlan, atticRows, countsText, changesModel,
@@ -370,4 +371,15 @@ test('the licence text names its source exactly', () => {
   assert.equal(licenceTextOf({ licenseText: 'none', license: 'other' }),
     'none (no standard text for this licence)');
   assert.doesNotMatch(licenceTextOf({ licenseText: 'template', license: 'mit' }), /written by/);
+});
+
+// Issue #25: the components need a browser, so the wiring is read from their source.
+test('the Store menu refreshes when it opens, not on every click of its button', () => {
+  const source = (name) => readFileSync(new URL(`../js/components/${name}.js`, import.meta.url), 'utf8');
+  const menu = source('store-menu');
+  assert.match(menu, /<drop-menu ref="menu"[^\n]*@open="refresh">/);
+  assert.doesNotMatch(menu, /#trigger>[^\n]*@click/);
+  const drop = source('drop-menu');
+  assert.match(drop, /async function show\(\) \{[\s\S]*?emit\('open'\);[\s\S]*?\n    \}/);
+  assert.doesNotMatch(drop.slice(drop.indexOf('function close()'), drop.indexOf('function toggle()')), /emit\(/);
 });

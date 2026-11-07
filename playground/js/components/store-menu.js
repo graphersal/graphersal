@@ -256,8 +256,8 @@ export const StoreMenu = {
     };
   },
   template: `
-  <drop-menu ref="menu" :button-class="'btn hide-narrow' + (state.storeTask ? ' store-busy' : '')" :busy="!!state.storeTask" :title="memory ? 'The store in memory (lost on page reload): position, snapshots, marks, read-only views, forks into databases, rollback, attic' : 'The Store directory of the dev server: position, snapshots, marks, read-only views, forks, rollback, attic'" menu-style="min-width: 380px; max-width: 520px">
-    <template #trigger><span @click="refresh"><span v-if="state.storeTask" class="store-spinner" aria-hidden="true"></span>{{ buttonText }}</span></template>
+  <drop-menu ref="menu" :button-class="'btn hide-narrow' + (state.storeTask ? ' store-busy' : '')" :busy="!!state.storeTask" :title="memory ? 'The store in memory (lost on page reload): position, snapshots, marks, read-only views, forks into databases, rollback, attic' : 'The Store directory of the dev server: position, snapshots, marks, read-only views, forks, rollback, attic'" menu-style="min-width: 380px; max-width: 520px" @open="refresh">
+    <template #trigger><span><span v-if="state.storeTask" class="store-spinner" aria-hidden="true"></span>{{ buttonText }}</span></template>
     <div class="menu-title store-title">
       <span>{{ memory ? 'Store in memory' : 'Store' }} <small v-if="info && !memory" style="font-weight:normal;text-transform:none;letter-spacing:0">{{ info.dir }}</small></span>
       <span class="spacer"></span>
