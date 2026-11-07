@@ -135,7 +135,8 @@ scheduler.sync_user_jobs(found.jobs);
 ```
 
 **In the playground**, **Catalog ▸ Scheduled jobs** lists every job (the system jobs first) with
-its schedule, the next and the last run (with its error), the runs of the last two days and a
+its schedule, the next and the last run (with its error), the runs of the last two days, a
+**running** badge while a run is under way, and a
 switch; a job of yours has **Run now**, **Edit** and **Drop**, a system job **Run now** and
 **Schedule** (empty: its built-in schedule again). **New job** opens the form: the name, what it
 does (a saved query with its arguments as JSON, a checkpoint, a backup directory), the schedule

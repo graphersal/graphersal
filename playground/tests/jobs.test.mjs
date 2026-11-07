@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  jobRows, jobsMenuItem, scheduleText, relativeTime, actionText, newJobDraft, draftFromJob,
+  jobRows, jobRowsWithRuns, anyJobRunning, jobsMenuItem, scheduleText, relativeTime, actionText, newJobDraft, draftFromJob,
   jobDraftToSpec, queryChoices, argsSkeleton, formErrors,
 } from '../js/jobs.js';
 
@@ -42,6 +42,18 @@ test('rows: system jobs, next and last run, failures, the changed schedule', () 
   assert.deepEqual([rows[2].runs, rows[2].failed], [1, 1]);
   assert.deepEqual(rows[2].effects, ['Execute definition query purge', 'Delete data vertex']);
   assert.deepEqual(jobRows(null), []);
+});
+
+test('a run under way: from the engine, or asked for by the page and not answered yet', () => {
+  assert.equal(anyJobRunning(VIEW), false);
+  assert.equal(anyJobRunning(null), false);
+  assert.deepEqual(jobRows(VIEW, NOW).map((r) => r.running), [false, false, false]);
+  const running = { ...VIEW, jobs: VIEW.jobs.map((j) => (j.name === 'purge' ? { ...j, running: true } : j)) };
+  assert.equal(anyJobRunning(running), true);
+  assert.deepEqual(jobRows(running, NOW).map((r) => r.running), [false, false, true]);
+  assert.deepEqual(jobRowsWithRuns(VIEW, NOW, { compact: true }).map((r) => r.running), [false, true, false]);
+  assert.deepEqual(jobRowsWithRuns(running, NOW, {}).map((r) => r.running), [false, false, true]);
+  assert.deepEqual(jobRowsWithRuns(VIEW, NOW, undefined).map((r) => r.running), [false, false, false]);
 });
 
 test('texts: schedules, relative times, actions, the Catalog item', () => {

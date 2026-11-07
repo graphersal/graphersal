@@ -91,6 +91,7 @@ export function jobRow(job, now) {
     schedule: job.schedule,
     scheduleText: scheduleText(job.schedule),
     enabled: !!job.enabled,
+    running: !!job.running,
     next: job.enabled && job.nextAt != null ? relativeTime(job.nextAt, now) : '—',
     last: last ? relativeTime(last.startedAt, now) : 'never',
     lastError: last && last.error ? last.error : null,
@@ -108,6 +109,19 @@ export function jobRow(job, now) {
 /** The rows of every job: the system jobs first, then the jobs of users (the engine's order). */
 export function jobRows(view, now = Date.now() * 1000) {
   return ((view && view.jobs) || []).map((job) => jobRow(job, now));
+}
+
+/**
+ * The rows with the runs the page itself started (`started`: name -> true) marked running at once,
+ * before the engine's next answer says so.
+ */
+export function jobRowsWithRuns(view, now, started) {
+  return jobRows(view, now).map((row) => (started && started[row.name] ? { ...row, running: true } : row));
+}
+
+/** Whether a run is under way: the manager then reloads the list more often. */
+export function anyJobRunning(view) {
+  return ((view && view.jobs) || []).some((job) => job.running);
 }
 
 /** A new form draft. */
