@@ -806,3 +806,102 @@ fn rule_changes_of_many_commits_replay_to_the_state_the_live_commits_made() {
         );
     }
 }
+
+/// Keeps the change set of every commit.
+struct KeepCommits(Arc<std::sync::Mutex<Vec<graphersal::changes::ChangeSet>>>);
+
+impl graphersal::changes::CommitHook for KeepCommits {
+    fn before_commit(
+        &mut self,
+        changes: &graphersal::changes::ChangeSet,
+    ) -> Result<(), graphersal::changes::HookError> {
+        self.0.lock().unwrap().push(changes.clone());
+        Ok(())
+    }
+}
+
+/// Rule changes, batched and one by one, mixed with an element write: a repair, the public
+/// replay, a replay of many change sets and a live apply all reach the graph the commits made,
+/// each with its own way of walking once per run of rule changes.
+#[test]
+fn rule_changes_reach_the_same_state_through_every_way_of_applying_them() {
+    let dir = MemDir::new();
+    let store = Store::create(&dir, StoreOptions::new()).unwrap();
+    let graph = Arc::clone(store.graph());
+    add_data(&mut graph.write(), 0, ITEMS, 0, EDGES);
+    store.checkpoint(None).unwrap();
+    let base = || {
+        let mut graph = TraversalGraph::new();
+        add_data(&mut graph, 0, ITEMS, 0, EDGES);
+        graph
+    };
+
+    let commits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let mut g = graph.write();
+        g.register_commit_hook(Box::new(KeepCommits(Arc::clone(&commits))))
+            .unwrap();
+        g.set_definitions(vec![
+            Definition::compression("r_kind", dedup(ElementKind::Vertex, "item", "kind")),
+            Definition::compression("r_n", dedup(ElementKind::Vertex, "item", "n")),
+            Definition::compression("r_text", lz4(ElementKind::Vertex, "item", "text")),
+        ])
+        .unwrap();
+        g.set_definition(Definition::compression(
+            "r_flag",
+            dedup(ElementKind::Vertex, "item", "flag"),
+        ))
+        .unwrap();
+        g.traversal_mut()
+            .v(vec!["i1", "i2", "i3"])
+            .property("kind", "written")
+            .property("n", 42i64)
+            .to_list()
+            .unwrap();
+        g.remove_definitions(&[
+            (DefinitionKind::COMPRESSION, "r_n"),
+            (DefinitionKind::COMPRESSION, "r_flag"),
+        ])
+        .unwrap();
+        g.set_definition(Definition::compression(
+            "r_n2",
+            lz4(ElementKind::Vertex, "item", "n"),
+        ))
+        .unwrap();
+    }
+    let live = stored_state(&graph.read());
+    let commits = commits.lock().unwrap().clone();
+    assert_eq!(commits.len(), 5);
+
+    let mut replica = base();
+    for changes in &commits {
+        replica = replica.replay(changes).unwrap();
+    }
+    replica.check_compression_invariant().unwrap();
+    assert_eq!(stored_state(&replica), live, "the public replay");
+
+    use graphersal::storage::PersistentStorage;
+    let mut replica = base();
+    replica.begin_replay().unwrap();
+    for changes in &commits {
+        PersistentStorage::replay(&mut replica, changes, true).unwrap();
+    }
+    replica.finish_replay().unwrap();
+    replica.check_compression_invariant().unwrap();
+    assert_eq!(stored_state(&replica), live, "a replay of many change sets");
+
+    let mut replica = base();
+    for changes in &commits {
+        replica.apply_change_set(changes).unwrap();
+    }
+    replica.check_compression_invariant().unwrap();
+    assert_eq!(stored_state(&replica), live, "a live apply");
+
+    store.close().unwrap();
+    let repaired = MemDir::new();
+    Store::repair_dir(&dir, &repaired).unwrap();
+    let reopened = Store::open(&repaired, StoreOptions::new()).unwrap();
+    let g = reopened.graph().read();
+    g.check_compression_invariant().unwrap();
+    assert_eq!(stored_state(&g), live, "a repair");
+}

@@ -3377,6 +3377,209 @@ mod tests {
     }
 
     #[test]
+    fn the_public_replay_walks_once_for_the_rules_of_a_change_set() {
+        let graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let commit = commit_of(
+            start + 1,
+            vec![
+                stored("a_kind", ElementKind::Vertex, "a", "kind"),
+                stored("b_state", ElementKind::Vertex, "b", "state"),
+                stored("rel_w", ElementKind::Edge, "rel", "w"),
+            ],
+        );
+        let before = walks();
+        let graph = graph.replay(&commit).unwrap();
+        assert_eq!(walks(), before + 1);
+        assert!(
+            graph.deferred_rule_passes.is_none(),
+            "nothing waits after it"
+        );
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        assert!(graph.is_dedup_coded(ElementKind::Edge, "e3", "w"));
+    }
+
+    #[test]
+    fn a_failed_public_replay_runs_the_passes_it_kept() {
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let commit = commit_of(
+            start + 1,
+            vec![
+                stored("a_kind", ElementKind::Vertex, "a", "kind"),
+                crate::graph::Mutation::AddLabel {
+                    id: "missing".to_string(),
+                    label: "x".to_string(),
+                },
+            ],
+        );
+        // The element mutation runs the waiting pass before it fails.
+        assert!(graph.replay_in_place(&commit).is_err());
+        assert!(graph.deferred_rule_passes.is_none());
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+    }
+
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_lenient_replay_walks_once_across_commits_and_past_a_failure() {
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let first = commit_of(
+            start + 1,
+            vec![stored("a_kind", ElementKind::Vertex, "a", "kind")],
+        );
+        // Removing a rule that is not stored is an issue, the replay goes on.
+        let second = commit_of(
+            start + 2,
+            vec![
+                crate::graph::Mutation::set_definition(
+                    DefinitionKind::COMPRESSION,
+                    "gone",
+                    Some(Definition::compression(
+                        "gone",
+                        dedup_rule(ElementKind::Vertex, "a", "state"),
+                    )),
+                    None,
+                ),
+                stored("b_state", ElementKind::Vertex, "b", "state"),
+            ],
+        );
+        let before = walks();
+        graph.defer_rule_passes();
+        assert!(graph.replay_lenient(&first, |_| true, true).is_empty());
+        let issues = graph.replay_lenient(&second, |_| true, true);
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert_eq!(walks(), before, "the pass waits for the end of the replay");
+        graph.load_outside_units(TraversalGraph::run_deferred_rule_passes);
+        assert_eq!(walks(), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+    }
+
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+    #[test]
+    fn an_element_write_in_a_lenient_replay_meets_the_rules_before_it() {
+        use crate::graph::{ElementRef, Mutation};
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let set_state = Mutation::SetProperty {
+            element: ElementRef {
+                kind: ElementKind::Vertex,
+                id: "v1".to_string(),
+            },
+            key: "state".to_string(),
+            before: Some(ElementProperty::from("open")),
+            after: ElementProperty::from("closed"),
+        };
+        let commit = commit_of(
+            start + 1,
+            vec![
+                stored("b_state", ElementKind::Vertex, "b", "state"),
+                set_state,
+            ],
+        );
+        let before = walks();
+        assert!(graph.replay_lenient(&commit, |_| true, true).is_empty());
+        assert_eq!(walks(), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+        let v1 = graph.get_vertex_by_id("v1").unwrap().0;
+        assert_eq!(
+            graph.vertex_properties(v1).unwrap().unwrap().get("state"),
+            Some(&ElementProperty::from("closed"))
+        );
+    }
+
+    #[test]
+    fn a_live_change_set_walks_once_per_run_of_rules() {
+        let mut graph = two_label_graph();
+        let start = graph.last_commit_seq();
+        let stored_two = commit_of(
+            start + 1,
+            vec![
+                stored("a_kind", ElementKind::Vertex, "a", "kind"),
+                stored("b_state", ElementKind::Vertex, "b", "state"),
+            ],
+        );
+        let before = walks();
+        graph.apply_change_set(&stored_two).unwrap();
+        assert_eq!(walks(), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+
+        let removed = |name: &str, element, label: &str, key: &str| {
+            crate::graph::Mutation::set_definition(
+                DefinitionKind::COMPRESSION,
+                name,
+                Some(Definition::compression(
+                    name,
+                    dedup_rule(element, label, key),
+                )),
+                None,
+            )
+        };
+        let removed_two = commit_of(
+            graph.last_commit_seq() + 1,
+            vec![
+                removed("a_kind", ElementKind::Vertex, "a", "kind"),
+                removed("b_state", ElementKind::Vertex, "b", "state"),
+            ],
+        );
+        let before = walks();
+        graph.apply_change_set(&removed_two).unwrap();
+        assert_eq!(walks(), before + 1);
+        graph.check_compression_invariant().unwrap();
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        assert!(!graph.is_dedup_coded(ElementKind::Vertex, "v1", "state"));
+    }
+
+    #[test]
+    fn a_live_change_set_removing_a_missing_rule_fails_and_leaves_nothing() {
+        let mut graph = two_label_graph();
+        graph
+            .set_definition(Definition::compression(
+                "a_kind",
+                dedup_rule(ElementKind::Vertex, "a", "kind"),
+            ))
+            .unwrap();
+        let removed = |name: &str| {
+            crate::graph::Mutation::set_definition(
+                DefinitionKind::COMPRESSION,
+                name,
+                Some(Definition::compression(
+                    name,
+                    dedup_rule(ElementKind::Vertex, "a", "kind"),
+                )),
+                None,
+            )
+        };
+        for names in [vec!["a_kind", "missing"], vec!["a_kind", "a_kind"]] {
+            let commit = commit_of(
+                graph.last_commit_seq() + 1,
+                names.iter().map(|name| removed(name)).collect(),
+            );
+            let error = graph.apply_change_set(&commit).unwrap_err().to_string();
+            assert!(
+                error.contains("not found") || error.contains("no "),
+                "{error}"
+            );
+            assert!(
+                graph
+                    .definition(DefinitionKind::COMPRESSION, "a_kind")
+                    .unwrap()
+                    .is_some()
+            );
+            graph.check_compression_invariant().unwrap();
+            assert!(graph.is_dedup_coded(ElementKind::Vertex, "v0", "kind"));
+        }
+    }
+
+    #[test]
     fn dictionaries_that_grew_on_one_label_are_rebuilt_in_one_walk() {
         let mut graph = two_label_graph();
         graph

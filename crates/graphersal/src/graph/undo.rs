@@ -1024,13 +1024,11 @@ impl TraversalGraph {
     /// The catalog is current meanwhile; the rows and the rule state stay as they were, consistent
     /// with each other, and an element write first runs what waits
     /// ([`Self::before_replayed_mutation`]).
-    #[cfg(feature = "persist")]
     pub(crate) fn defer_rule_passes(&mut self) {
         self.deferred_rule_passes.get_or_insert_with(Vec::new);
     }
 
     /// Runs the rule passes that wait, in one walk, and ends the deferring.
-    #[cfg(feature = "persist")]
     pub(crate) fn run_deferred_rule_passes(&mut self) {
         if let Some(changes) = self.deferred_rule_passes.take() {
             self.compression_rules_changed(changes);

@@ -382,6 +382,11 @@ impl TraversalGraph {
     /// assert_eq!(recovered.vertex_count(), 1);
     /// assert_eq!(recovered.last_commit_seq(), live.last_commit_seq());
     /// ```
+    ///
+    /// The compression rule changes in a row of one change set take one walk over the data. The
+    /// returned graph is complete, so each call ends its own walk; to walk once over the rule
+    /// changes of many change sets, use `begin_replay`, `replay` and `finish_replay` of
+    /// `PersistentStorage` (feature `persist`).
     pub fn replay(mut self, changes: &ChangeSet) -> Result<Self, GraphError> {
         self.replay_in_place(changes)?;
         Ok(self)

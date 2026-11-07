@@ -12,6 +12,7 @@ use compact_str::CompactString;
 
 use crate::error::{DefinitionError, GraphError};
 use crate::graph::change::{ChangeSet, ElementRef, Mutation};
+use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::schema::ElementKind;
 use crate::graph::storage::GraphStorage;
 use crate::traversal::memory_budget::UnitBudget;
@@ -31,11 +32,70 @@ pub(crate) fn apply_mutations<S: GraphStorage + ?Sized>(
     budget: &mut Option<UnitBudget>,
     copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
 ) -> Result<(), GraphError> {
-    for mutation in changes.mutations() {
-        apply_mutation_with(storage, mutation, copy)?;
+    let mut rest = changes.mutations();
+    while let Some(mutation) = rest.first() {
+        let batched = apply_rule_run(storage, rest)?;
+        if batched == 0 {
+            apply_mutation_with(storage, mutation, copy)?;
+        }
+        rest = &rest[batched.max(1)..];
         crate::traversal::memory_budget::tick(budget, &*storage)?;
     }
     Ok(())
+}
+
+/// The name and the new state of a compression rule change (`None`: another mutation).
+fn rule_change(mutation: &Mutation) -> Option<(&str, Option<&Definition>)> {
+    match mutation {
+        Mutation::SetDefinition {
+            kind, name, after, ..
+        } if *kind == DefinitionKind::COMPRESSION => Some((name.as_str(), after.as_deref())),
+        _ => None,
+    }
+}
+
+/// Applies the compression rule changes of the same direction that `mutations` starts with, as
+/// one batch call (one walk on a [`TraversalGraph`](crate::graph::TraversalGraph)); answers how
+/// many it applied, `0` when `mutations` starts with something else. A removal of a rule that is
+/// not stored fails as a single one does, and a run of removals ends before a name it holds.
+fn apply_rule_run<S: GraphStorage + ?Sized>(
+    storage: &mut S,
+    mutations: &[Mutation],
+) -> Result<usize, GraphError> {
+    let Some((_, first)) = mutations.first().and_then(rule_change) else {
+        return Ok(0);
+    };
+    if first.is_some() {
+        let definitions: Vec<Definition> = mutations
+            .iter()
+            .map_while(|mutation| rule_change(mutation)?.1.cloned())
+            .collect();
+        let applied = definitions.len();
+        storage.set_definitions(definitions)?;
+        return Ok(applied);
+    }
+    let mut names: Vec<(DefinitionKind, &str)> = Vec::new();
+    for mutation in mutations {
+        let Some((name, None)) = rule_change(mutation) else {
+            break;
+        };
+        if names.iter().any(|(_, kept)| *kept == name) {
+            break;
+        }
+        if storage
+            .definition(DefinitionKind::COMPRESSION, name)?
+            .is_none()
+        {
+            return Err(DefinitionError::NotFound {
+                kind: DefinitionKind::COMPRESSION.to_string(),
+                name: name.to_string(),
+            }
+            .into());
+        }
+        names.push((DefinitionKind::COMPRESSION, name));
+    }
+    storage.remove_definitions(&names)?;
+    Ok(names.len())
 }
 
 /// The map an added element is inserted with on any storage: a clone of the mutation's.
@@ -182,7 +242,7 @@ impl crate::graph::TraversalGraph {
     /// The body of [`Self::replay`] on a graph in place: every mutation outside units, then the
     /// position and the id sequences raised to the change set's.
     pub(crate) fn replay_in_place(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
-        self.load_outside_units(|graph| {
+        self.load_with_rule_passes_deferred(|graph| {
             for mutation in changes.mutations() {
                 graph.before_replayed_mutation(mutation);
                 apply_mutation_with(graph, mutation, &mut Self::stored_copy)?;
@@ -191,6 +251,22 @@ impl crate::graph::TraversalGraph {
         })?;
         self.raise_replayed_position(changes);
         Ok(())
+    }
+
+    /// [`Self::load_outside_units`] with the compression rule passes deferred: the rule changes
+    /// in a row of `load` take one walk. The passes run at the end, also after a failure, so the
+    /// rows and the rule state meet the catalog whatever comes next; when a replay around this
+    /// one defers already ([`Self::defer_rule_passes`]), they keep waiting for its end.
+    fn load_with_rule_passes_deferred<R>(&mut self, load: impl FnOnce(&mut Self) -> R) -> R {
+        self.load_outside_units(|graph| {
+            let inside_a_replay = graph.deferred_rule_passes.is_some();
+            graph.defer_rule_passes();
+            let result = load(graph);
+            if !inside_a_replay {
+                graph.run_deferred_rule_passes();
+            }
+            result
+        })
     }
 
     /// Raises the commit sequence number, the commit time and both auto-id sequences to the
@@ -235,9 +311,10 @@ impl crate::graph::TraversalGraph {
         check: bool,
     ) -> Vec<ReplayIssue> {
         let mut issues = Vec::new();
-        self.load_outside_units(|graph| {
+        self.load_with_rule_passes_deferred(|graph| {
             for mutation in changes.mutations().iter().filter(|m| keep(m)) {
                 let element = mutation_element(mutation);
+                graph.before_replayed_mutation(mutation);
                 if check && let Some(reason) = before_mismatch(&*graph, mutation, false) {
                     issues.push(ReplayIssue {
                         element: element.clone(),
@@ -275,7 +352,7 @@ impl crate::graph::TraversalGraph {
     /// the snapshot it is merged onto). Fails with the element and the reason at the first
     /// mismatch or failure; the graph is then to be dropped.
     pub(crate) fn replay_verified(&mut self, changes: &ChangeSet) -> Result<(), String> {
-        let result = self.load_outside_units(|graph| {
+        let result = self.load_with_rule_passes_deferred(|graph| {
             for mutation in changes.mutations() {
                 let subject = || mutation_subject(mutation);
                 graph.before_replayed_mutation(mutation);

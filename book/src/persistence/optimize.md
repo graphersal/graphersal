@@ -68,7 +68,7 @@ Rules cost almost nothing in the WAL (74 rules: about 2 KiB), so the
 [automatic checkpoint](store_checkpoints.md), which goes by WAL size, does not run because of them.
 Until a snapshot holds them, every open replays the change: it loads the rows as they are in the
 snapshot, then re-encodes the labels of the rules, in one walk for all the rules in a row, even
-over many commits. A snapshot that holds the rules codes each row as it enters the graph, so the
+over many commits (`graphersal store repair` walks the same way). A snapshot that holds the rules codes each row as it enters the graph, so the
 plain rows never fill memory. Measured on a real graph (2.8 million elements, 74 `dedup` rules,
 `--release`):
 
