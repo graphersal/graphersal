@@ -187,6 +187,20 @@ impl Playground {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// [`Self::save_snapshot`] with the store's embedding models (`withModels` true, what
+    /// `saveSnapshot` does) or without them: the choice of "Download current state".
+    #[wasm_bindgen(js_name = saveSnapshotWith)]
+    pub fn save_snapshot_with(&self, with_models: bool) -> Result<Vec<u8>, JsError> {
+        let models = if with_models {
+            graphersal::persist::ModelCopy::Include
+        } else {
+            graphersal::persist::ModelCopy::Exclude
+        };
+        self.session
+            .save_snapshot_with(models)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// `set_schema` ("Load schema"): replaces the graph's schema with JSON text in the schema
     /// format; `mode` (`"none"`, `"open"`, `"closed"`, optional) replaces the schema's own mode
     /// ("Freeze as open/closed": the inferred schema with a mode). Returns the graph info JSON.

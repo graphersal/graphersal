@@ -86,6 +86,12 @@ test('save: a snapshot is one binary .gsnap file that carries its schema', () =>
   assert.deepEqual(file, { name: 'graphersal-graph-20261008-070503.gsnap', type: 'application/octet-stream', bytes });
 });
 
+test('save: a snapshot without the models says so in its file name', () => {
+  const bytes = new Uint8Array([71, 82, 83, 76]);
+  const file = savedGraphFile({ format: 'snapshot', bytes, schema: null, warnings: [], withoutModels: true }, at);
+  assert.equal(file.name, 'graphersal-graph-without-models-20261008-070503.gsnap');
+});
+
 test('restore: a snapshot point is loaded first, a later schema goes on top', () => {
   const bytes = new Uint8Array([1]);
   assert.deepEqual(

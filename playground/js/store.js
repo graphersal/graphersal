@@ -17,7 +17,7 @@ import { createBurst, burstAnnouncement } from './change-burst.js';
 import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
-import { taskStartText, taskEndText, snapshotFileName } from './store-model.js';
+import { taskStartText, taskEndText, snapshotFileName, snapshotModelChoice } from './store-model.js';
 import { VALUE_MAX_CHARS } from './value-view.js';
 import {
   createJournalFollower, DEFAULT_TOAST_MIN_LEVEL, FOLLOW_INTERVAL_SERVER_MS, FOLLOW_INTERVAL_WASM_MS,
@@ -650,15 +650,15 @@ export async function stopRun() {
  * (`.gsnap`): lossless, with the schema, loaded back from the start page in one step.
  * @param {'graphson'|'graphml'|'snapshot'} [format]
  */
-export async function saveGraph(format = 'graphson') {
+export async function saveGraph(format = 'graphson', options = {}) {
   if (!state.engine || !state.graph || state.saving || state.running) return;
   state.saving = true;
   try {
-    const saved = await state.engine.saveGraph(format);
+    const saved = await state.engine.saveGraph(format, options);
     const file = savedGraphFile(saved);
     downloadBlob(new Blob([file.bytes || file.text], { type: file.type }), file.name);
     if (saved.format === 'snapshot') {
-      toast('Saved a snapshot (.gsnap: data, types and schema); load it from the start page.', 'info', 8000);
+      toast(`Saved a snapshot (.gsnap: data, types and schema${saved.withoutModels ? ', without the embedding models' : ''}); load it from the start page.`, 'info', 8000);
       return;
     }
     const name = saved.format === 'graphml' ? 'GraphML' : 'GraphSON';
@@ -673,6 +673,34 @@ export async function saveGraph(format = 'graphson') {
   } finally {
     state.saving = false;
   }
+}
+
+let snapshotChoiceOpener = null;
+
+/** The workspace registers how to ask about the models (components/snapshot-choice-dialog.js). */
+export function registerSnapshotChoice(open) {
+  snapshotChoiceOpener = open;
+}
+
+/**
+ * "Download current state": the state on screen as one `.gsnap`. A store that keeps embedding
+ * models is asked about first (with them or without them), so they are never left out silently.
+ */
+export async function saveCurrentSnapshot() {
+  if (!state.engine || !state.graph || state.saving || state.running) return;
+  let choice = null;
+  if (state.engineInfo && (state.engineInfo.store || state.engineInfo.storeMemory)) {
+    const engine = state.engine;
+    try {
+      choice = snapshotModelChoice(await (engine.storeSummary ? engine.storeSummary() : engine.storeInfo()));
+    } catch (err) {
+      toast(`Download failed: ${err && err.message ? err.message : err}`, 'error', 9000);
+      return;
+    }
+  }
+  if (!choice || !snapshotChoiceOpener) return saveGraph('snapshot');
+  const answer = await snapshotChoiceOpener(choice);
+  if (answer) await saveGraph('snapshot', { withModels: answer === 'with' });
 }
 
 let shareDialogOpener = null;

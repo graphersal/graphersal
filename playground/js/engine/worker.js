@@ -126,6 +126,7 @@ const RAW_METHODS = {
   getSchema: () => playground.getSchema(),
   inferSchema: () => playground.inferSchema(),
   saveSnapshot: () => playground.saveSnapshot(),
+  saveSnapshotWith: (withModels) => playground.saveSnapshotWith(!!withModels),
   storeSnapshot: (commit) => playground.storeSnapshot(commit ?? undefined),
   storeSnapshotWith: (commit, withModels) => playground.storeSnapshotWith(commit ?? undefined, !!withModels),
   // The catalog file's text exactly as the engine writes it.

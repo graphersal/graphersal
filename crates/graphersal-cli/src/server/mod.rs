@@ -1772,7 +1772,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             context.call_fallible(|s| s.statistics_with_process())?,
         )),
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
-            let bytes = context.call_fallible(|s| s.save_snapshot())?;
+            let models = store::model_copy_of(query)?;
+            let bytes = context.call_fallible(move |s| s.save_snapshot_with(models))?;
             Ok(download(bytes, "graph.gsnap"))
         }
         (Method::Get, "queries") => {

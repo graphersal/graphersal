@@ -106,7 +106,10 @@ graphersal store create data2/ --from data.gsnap      # a new Store from a .gsna
 - Python: `graph.save(path)` and `graphersal.Graph.load(path)` ([Python](python.md)).
 - Playground: **Save as snapshot** on the start page, and a `.gsnap` file loads like any graph
   file; the Store menu downloads any stored snapshot as `.gsnap`.
-- Dev server: `GET /api/export?format=gsnap` downloads the current state.
+- Dev server: `GET /api/export?format=gsnap` downloads the current state, with the store's
+  embedding models unless `&models=without`.
+- Rust: `write_snapshot` writes no model blobs, only the catalog's references to them;
+  `store.pack_with_models(packed, writer)` copies such a file with the blobs from the store.
 
 The byte layout is section 8 of the [format specification](format.md#8-the-packed-snapshot): a
 packed file holds exactly the files of a Store's snapshot directory, so the Store imports and

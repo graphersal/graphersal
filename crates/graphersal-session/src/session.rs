@@ -621,12 +621,33 @@ impl Session {
     }
 
     /// "Save graph" as a packed snapshot: the bytes of a `.gsnap` file (data, schema, lineage
-    /// id, commit position), checked by reading them back.
+    /// id, commit position), checked by reading them back, with the embedding models the state
+    /// references when a store keeps them ([`Self::save_snapshot_with`]).
     pub fn save_snapshot(&self) -> Result<Vec<u8>, SessionError> {
+        self.save_snapshot_with(graphersal::persist::ModelCopy::Include)
+    }
+
+    /// [`Self::save_snapshot`] with the active store's embedding models
+    /// ([`ModelCopy::Include`](graphersal::persist::ModelCopy), what `save_snapshot` does; a model
+    /// the store cannot hand on refuses it) or without them (`Exclude`): the choice of "Download
+    /// current state". A session without a store has none to carry.
+    pub fn save_snapshot_with(
+        &self,
+        models: graphersal::persist::ModelCopy,
+    ) -> Result<Vec<u8>, SessionError> {
         let mut bytes = Vec::new();
         self.graph
             .write_snapshot(&mut bytes)
             .map_err(|err| format_diagnostic(&err))?;
+        if models == graphersal::persist::ModelCopy::Include
+            && let Some(store) = self.active_store()
+        {
+            let mut with_models = Vec::new();
+            store
+                .pack_with_models(&mut bytes.as_slice(), &mut with_models)
+                .map_err(|err| format_diagnostic(&err))?;
+            bytes = with_models;
+        }
         graphersal::persist::read_snapshot_info(bytes.as_slice())
             .map_err(|err| format_diagnostic(&err))?;
         Ok(bytes)

@@ -6,7 +6,7 @@
 // sizes are saved in localStorage (best effort).
 
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { state, reveal, cycleTheme, saveGraph, saveSchema, saveToSource, isServerMode, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
+import { state, reveal, cycleTheme, saveGraph, saveCurrentSnapshot, registerSnapshotChoice, saveSchema, saveToSource, isServerMode, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
 import { viewBanner, backupBanner } from '../store-model.js';
 import { mcpBadgeTitle } from '../change-feed.js';
 import { navigate } from '../router.js';
@@ -22,6 +22,7 @@ import { StoreMenu } from './store-menu.js';
 import { CatalogMenu, CatalogDialogs } from './catalog.js';
 import { OptimizePanel } from './optimize.js';
 import { ShareDialog } from './share-dialog.js';
+import { SnapshotChoiceDialog } from './snapshot-choice-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
 import { JournalToasts } from './journal-toasts.js';
 import { McpStatsDialog } from './mcp-stats.js';
@@ -69,7 +70,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -77,6 +78,9 @@ export const Workspace = {
     const mcpStatsDialog = ref(null);
     onMounted(() => registerShareDialog(() => shareDialog.value && shareDialog.value.open()));
     onBeforeUnmount(() => registerShareDialog(null));
+    const snapshotChoice = ref(null);
+    onMounted(() => registerSnapshotChoice((choice) => snapshotChoice.value.ask(choice)));
+    onBeforeUnmount(() => registerSnapshotChoice(null));
     const main = ref(null);
     const left = ref(null);
     const right = ref(null);
@@ -294,7 +298,7 @@ export const Workspace = {
     });
 
     return {
-      formatCount, shareDialog, openShareDialog, openOptimize, mcpStatsDialog,
+      formatCount, shareDialog, snapshotChoice, saveCurrentSnapshot, openShareDialog, openOptimize, mcpStatsDialog,
       openMcpStats: () => mcpStatsDialog.value && mcpStatsDialog.value.open(),
       graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
       state, layout, main, left, right, narrow, leftCount, rightCount, PANELS,
@@ -384,8 +388,8 @@ export const Workspace = {
           <template v-if="state.engine && state.engine.supportsSnapshots">
             <div class="menu-sep"></div>
             <div class="menu-title">Everything in one file</div>
-            <button class="menu-item" :disabled="state.saving || state.running" @click="saveGraph('snapshot')"
-                    title="One packed snapshot (.gsnap): lossless binary with every value type, the schema and the catalog (saved queries, compression rules); load it back with Load from file">Snapshot (.gsnap): data + schema + catalog</button>
+            <button class="menu-item" :disabled="state.saving || state.running" @click="saveCurrentSnapshot"
+                    title="One packed snapshot (.gsnap): lossless binary with every value type, the schema and the catalog (saved queries, compression rules); a store that keeps embedding models asks whether they go with it; load it back with Load from file">Snapshot (.gsnap): data + schema + catalog</button>
           </template>
       </drop-menu>
       <button v-if="serverMode && state.engineInfo.saveable" class="btn hide-narrow" @click="saveToSource" :disabled="!state.graph || state.saving || state.running"
@@ -442,6 +446,7 @@ export const Workspace = {
     <journal-toasts></journal-toasts>
     <optimize-panel></optimize-panel>
     <share-dialog ref="shareDialog"></share-dialog>
+    <snapshot-choice-dialog ref="snapshotChoice"></snapshot-choice-dialog>
     <mcp-stats-dialog ref="mcpStatsDialog"></mcp-stats-dialog>
   </div>
   `,

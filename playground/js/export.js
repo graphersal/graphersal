@@ -20,7 +20,8 @@ export function exportFileName(kind, ext, d = new Date()) {
  */
 export function savedGraphFile(saved, d = new Date()) {
   if (saved.format === 'snapshot') {
-    return { name: exportFileName('graph', 'gsnap', d), type: 'application/octet-stream', bytes: saved.bytes };
+    const kind = saved.withoutModels ? 'graph-without-models' : 'graph';
+    return { name: exportFileName(kind, 'gsnap', d), type: 'application/octet-stream', bytes: saved.bytes };
   }
   return saved.format === 'graphson'
     ? { name: exportFileName('graph', 'json', d), type: 'application/json', text: saved.text }

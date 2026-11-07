@@ -8358,3 +8358,18 @@ mod mcp_usage_statistics {
         assert_eq!(before, after);
     }
 }
+
+/// Issue #23: the current state's download takes the same `models` choice as a stored snapshot's.
+#[test]
+fn the_current_state_download_takes_the_models_choice() {
+    let server = start(&["--graph", "modern"]);
+    for query in ["", "&models=with", "&models=without"] {
+        let answer = get(server.port, &format!("/api/export?format=gsnap{query}"));
+        assert_eq!(answer.status, 200, "{query}");
+        assert!(answer.body.starts_with("GRSLPACK"), "{query}");
+    }
+    assert_eq!(
+        get(server.port, "/api/export?format=gsnap&models=some").status,
+        400
+    );
+}

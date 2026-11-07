@@ -324,7 +324,7 @@ test('the live region announces the start and the end', () => {
 });
 
 // Embedding models kept in the store (format spec 4.5).
-import { modelRows, modelsNote, offersWithoutModels, snapshotFileName, licenceTextOf } from '../js/store-model.js';
+import { modelRows, modelsNote, offersWithoutModels, snapshotFileName, snapshotModelChoice, licenceTextOf } from '../js/store-model.js';
 
 test('the menu shows the default model and the note of a store without one', () => {
   const rows = modelRows({ models: [{ id: 'a', identity: 'model2vec/acme/a@0123456789ab', repo: 'acme/a', default: true }] });
@@ -382,4 +382,34 @@ test('the Store menu refreshes when it opens, not on every click of its button',
   const drop = source('drop-menu');
   assert.match(drop, /async function show\(\) \{[\s\S]*?emit\('open'\);[\s\S]*?\n    \}/);
   assert.doesNotMatch(drop.slice(drop.indexOf('function close()'), drop.indexOf('function toggle()')), /emit\(/);
+});
+
+// Issue #23: "Download current state" never leaves the models out without asking.
+test('the current state download asks only when the store keeps models', () => {
+  assert.equal(snapshotModelChoice(null), null);
+  assert.equal(snapshotModelChoice({ models: [] }), null);
+  // Named by the schema, not kept: not in the file either way, nothing to ask.
+  assert.equal(snapshotModelChoice({ models: [], missingModels: ['acme/x@abc'] }), null);
+  const store = { models: [{ id: 'm', identity: 'acme/tiny@abc', repo: 'acme/tiny', sizeText: '506 MiB' }] };
+  assert.deepEqual(snapshotModelChoice(store), {
+    rows: [{ id: 'm', repo: 'acme/tiny', size: '506 MiB', problem: null }],
+    canInclude: true,
+  });
+});
+
+test('a model the store cannot hand on leaves only the download without models', () => {
+  const choice = snapshotModelChoice({ models: [
+    { id: 'a', repo: 'acme/a', sizeText: '1 MiB' },
+    { id: 'b', repo: 'acme/b', sizeText: '2 MiB', problem: 'its blob is missing' },
+  ] });
+  assert.equal(choice.canInclude, false);
+  assert.equal(choice.rows[1].problem, 'its blob is missing');
+});
+
+test('both snapshot entries ask first: the Store menu and the Save menu', () => {
+  const source = (name) => readFileSync(new URL(`../js/components/${name}.js`, import.meta.url), 'utf8');
+  assert.doesNotMatch(source('store-menu'), /saveGraph\('snapshot'\)/);
+  assert.doesNotMatch(source('workspace'), /saveGraph\('snapshot'\)/);
+  assert.match(source('workspace'), /@click="saveCurrentSnapshot"/);
+  assert.match(source('workspace'), /<snapshot-choice-dialog ref="snapshotChoice">/);
 });

@@ -1810,6 +1810,46 @@ mod tests {
         assert_eq!(s.store_info().unwrap()["models"][0]["state"], "missing");
     }
 
+    /// "Download current state" (issue #23): the state on screen, which has no stored snapshot,
+    /// with its models unless the user leaves them out; the live graph and a read-only view.
+    #[test]
+    fn the_current_state_is_saved_with_its_models_or_without_them_on_request() {
+        let (packed, model) = packed_with_a_model();
+        let mut s = memory_session();
+        s.load_snapshot(&packed, "with-model.gsnap").unwrap();
+        let commit = s.store_info().unwrap()["commitSeq"].as_u64().unwrap();
+        s.execute(r#"g.add_v("later").to_list()"#, &RunOptions::default());
+
+        let with = s.save_snapshot().unwrap();
+        let without = s.save_snapshot_with(ModelCopy::Exclude).unwrap();
+        assert!(without.len() + 4000 < with.len());
+        // Nothing lost beside the models: the commit written after the file's own snapshot.
+        for bytes in [&with, &without] {
+            let info = graphersal::persist::read_snapshot_info(bytes.as_slice()).unwrap();
+            assert_eq!(info.commit_seq, commit + 1);
+        }
+
+        // A read-only view of the earlier state carries them too.
+        s.store_open_view(&json!({ "target": { "commit": commit } }))
+            .unwrap();
+        let view = s.save_snapshot().unwrap();
+        let info = graphersal::persist::read_snapshot_info(view.as_slice()).unwrap();
+        assert_eq!(info.commit_seq, commit);
+        assert!(view.len() > without.len());
+        s.store_close_view().unwrap();
+
+        // The file with models makes a working store again; the one without says its blob is
+        // missing, and then asking for the models is refused naming the blob.
+        s.load_snapshot(&with, "again.gsnap").unwrap();
+        let info = s.store_info().unwrap();
+        assert_eq!(info["models"][0]["identity"], model.identity.as_str());
+        assert_ne!(info["models"][0]["state"], "missing", "{info}");
+        s.load_snapshot(&without, "bare.gsnap").unwrap();
+        assert_eq!(s.store_info().unwrap()["models"][0]["state"], "missing");
+        assert!(s.save_snapshot().is_err());
+        s.save_snapshot_with(ModelCopy::Exclude).unwrap();
+    }
+
     /// A store holding models but no default says so (the CLI's note), and its graph's runs
     /// list the model beside the built-in.
     #[test]

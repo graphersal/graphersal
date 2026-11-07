@@ -680,11 +680,14 @@ export class HttpEngine extends Engine {
     return this.request('GET', 'statistics');
   }
 
-  /** "Save graph" (download): the same `{format, text, schema, warnings}` as the wasm engine. */
-  async saveGraph(format = 'graphson') {
+  /**
+   * "Save graph" (download): the same `{format, text, schema, warnings}` as the wasm engine. A
+   * snapshot carries the store's embedding models unless `options.withModels` is false.
+   */
+  async saveGraph(format = 'graphson', { withModels = true } = {}) {
     if (format === 'snapshot') {
-      const bytes = await this.requestBytes('export?format=gsnap');
-      return { format: 'snapshot', bytes, schema: null, warnings: [] };
+      const bytes = await this.requestBytes(`export?format=gsnap${withModels ? '' : '&models=without'}`);
+      return { format: 'snapshot', bytes, schema: null, warnings: [], withoutModels: !withModels };
     }
     const f = format === 'graphml' ? 'graphml' : 'graphson';
     const saved = await this.request('GET', `export?format=${f}`);
