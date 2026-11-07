@@ -573,3 +573,64 @@ fn an_incremental_snapshot_exports_with_its_models() {
     }
     store.close().unwrap();
 }
+
+/// Issue #23: a state written by `write_snapshot` names the models in its catalog but carries no
+/// blob; `Store::pack_with_models` adds them from the store.
+#[test]
+fn a_written_state_gets_its_models_from_the_store() {
+    let temp = Temp::new("packed-state");
+    let store = Store::create(temp.join("s"), options()).unwrap();
+    let identity = import(&store, 1, "acme/tiny").model.identity;
+    store.set_default_model(Some("acme/tiny")).unwrap();
+    set_schema(&store, &identity);
+    let mut plain = Vec::new();
+    let written = store.graph().read().write_snapshot(&mut plain).unwrap();
+
+    let mut with = Vec::new();
+    let info = store.pack_with_models(plain.as_slice(), &mut with).unwrap();
+    assert_eq!(info.commit_seq, written.commit_seq);
+    assert_eq!(info.graph_id, written.graph_id);
+    assert!(with.len() > plain.len());
+
+    // A store made from it holds the model, as one made from the plain state does not.
+    let from_with = Store::create_from_packed(temp.join("with"), with.as_slice(), options());
+    let models = from_with.unwrap().models().unwrap();
+    assert_eq!(models[0].identity, identity);
+    assert_ne!(models[0].state, ModelState::Missing, "{:?}", models[0]);
+    let from_plain = Store::create_from_packed(temp.join("plain"), plain.as_slice(), options());
+    let Err(err) = from_plain else {
+        panic!("the schema needs a model the plain state does not carry");
+    };
+    assert!(err.to_string().contains("acme/tiny"), "{err}");
+
+    // Without a store too: the file serves the model on its own.
+    let path = temp.join("with.gsnap");
+    std::fs::write(&path, &with).unwrap();
+    let (graph, report) = load(&path);
+    assert_eq!(report.models.len(), 1);
+    assert!(embedder_names(&graph).contains("acme/tiny"));
+
+    // A foreign file is checked, nothing is written for it.
+    let mut out = Vec::new();
+    let mut broken = plain.clone();
+    let last = broken.len() - 1;
+    broken[last] ^= 0xFF;
+    assert!(store.pack_with_models(broken.as_slice(), &mut out).is_err());
+    assert!(store.pack_with_models(&b"nonsense"[..], &mut out).is_err());
+    assert!(out.is_empty());
+}
+
+/// A blob the store cannot hand on refuses the copy with the models, never a file without them.
+#[test]
+fn a_damaged_model_refuses_the_state_with_models() {
+    let temp = Temp::new("packed-state-damaged");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let identity = import(&store, 1, "acme/tiny").model.identity;
+    let mut plain = Vec::new();
+    store.graph().read().write_snapshot(&mut plain).unwrap();
+    crate::model_fixture::flip_byte(&crate::model_fixture::blob_path(&path, &store, &identity));
+    let mut out = Vec::new();
+    assert!(store.pack_with_models(plain.as_slice(), &mut out).is_err());
+    assert!(out.is_empty());
+}

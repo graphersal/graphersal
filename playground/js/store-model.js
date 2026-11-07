@@ -433,6 +433,19 @@ export function offersWithoutModels(store) {
   return !!(store && store.models && store.models.length);
 }
 
+/**
+ * What "Download current state" asks when the store keeps embedding models: `null` when it keeps
+ * none (nothing to ask), else `{rows: [{id, repo, size, problem}], canInclude}`. A model the store
+ * cannot hand on (`problem`) would refuse the download with models, so only the one without is
+ * offered then. A model the schema names but the store does not keep is not in the file either way.
+ */
+export function snapshotModelChoice(store) {
+  const rows = modelRows(store).filter((row) => !row.missing).map((row) => ({
+    id: row.id, repo: row.repo || row.identity, size: row.size, problem: row.problem,
+  }));
+  return rows.length ? { rows, canInclude: rows.every((row) => !row.problem) } : null;
+}
+
 /** The file name of a snapshot download (`graph-N.gsnap`, `graph-N-without-models.gsnap`). */
 export function snapshotFileName(commitSeq, withModels = true) {
   return withModels ? `graph-${commitSeq}.gsnap` : `graph-${commitSeq}-without-models.gsnap`;

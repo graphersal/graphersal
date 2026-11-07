@@ -64,16 +64,7 @@ pub(super) fn route(
                     HttpError::bad_request("commit must be a commit sequence number")
                 })?),
             };
-            // `models=without`: the download without the store's embedding models.
-            let models = match query_value(query, "models").as_deref() {
-                None | Some("with") => graphersal::persist::ModelCopy::Include,
-                Some("without") => graphersal::persist::ModelCopy::Exclude,
-                Some(_) => {
-                    return Err(HttpError::bad_request(
-                        "models must be \"with\" or \"without\"",
-                    ));
-                }
-            };
+            let models = model_copy_of(query)?;
             let (bytes, commit) =
                 session_call(context, move |s| s.store_snapshot_with(commit, models))?;
             Ok(download(bytes, &format!("graph-{commit}.gsnap")))
@@ -455,6 +446,17 @@ fn backup_dir(store_dir: &Path, single_file: bool, body: &Value) -> Result<PathB
 /// Decodes a `%XX`-escaped query value (`+` is a space).
 fn percent_decode_component(text: &str) -> Option<String> {
     super::percent_decode(&text.replace('+', " "))
+}
+
+/// `models=without`: a `.gsnap` download without the store's embedding models.
+pub(super) fn model_copy_of(query: &str) -> Result<graphersal::persist::ModelCopy, HttpError> {
+    match query_value(query, "models").as_deref() {
+        None | Some("with") => Ok(graphersal::persist::ModelCopy::Include),
+        Some("without") => Ok(graphersal::persist::ModelCopy::Exclude),
+        Some(_) => Err(HttpError::bad_request(
+            "models must be \"with\" or \"without\"",
+        )),
+    }
 }
 
 #[cfg(test)]

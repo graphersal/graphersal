@@ -666,13 +666,15 @@ export class WasmEngine extends Engine {
   /**
    * "Save graph": GraphSON (default) or GraphML text and the stored schema as JSON text (or
    * null), or with `format` 'snapshot' the bytes of a packed snapshot (lossless, schema
-   * included). The saved state becomes the restore point of `stop()`.
+   * included, the store's embedding models too unless `options.withModels` is false). The saved
+   * state becomes the restore point of `stop()`.
    * @param {'graphson'|'graphml'|'snapshot'} [format]
+   * @param {{withModels?: boolean}} [options]
    * @returns {Promise<{format: 'graphson'|'graphml'|'snapshot', text?: string, bytes?: Uint8Array, schema: string|null, warnings: string[]}>}
    */
-  async saveGraph(format = 'graphson') {
+  async saveGraph(format = 'graphson', { withModels = true } = {}) {
     if (format === 'snapshot') {
-      const bytes = await this.call('saveSnapshot');
+      const bytes = await (withModels ? this.call('saveSnapshot') : this.call('saveSnapshotWith', false));
       this.schemaJson = null;
       this.catalogJson = null;
       this.restorePoint = {
@@ -683,7 +685,7 @@ export class WasmEngine extends Engine {
         schema: null,
         catalog: null,
       };
-      return { format: 'snapshot', bytes, schema: null, warnings: [] };
+      return { format: 'snapshot', bytes, schema: null, warnings: [], withoutModels: !withModels };
     }
     const saved = await this.call(format === 'graphml' ? 'saveGraphml' : 'saveGraphson');
     this.schemaJson = saved.schema;

@@ -24,7 +24,7 @@ import { StoreDialog } from './store-dialog.js';
 import { StoreCalendar } from './store-calendar.js';
 import { StoreTaskLabel } from './store-task-label.js';
 import {
-  state, toast, saveGraph, openStoreView, backToLiveGraph, restoreAtticEntry, switchDatabase,
+  state, toast, saveCurrentSnapshot, openStoreView, backToLiveGraph, restoreAtticEntry, switchDatabase,
   closeDatabase, downloadStoredSnapshot, runStoreTask,
 } from '../store.js';
 import {
@@ -251,7 +251,7 @@ export const StoreMenu = {
       snapshotUrl: (commit, withModels = true) => (state.engine.snapshotUrl ? state.engine.snapshotUrl(commit, withModels) : null),
       downloadSnapshot: (commit, withModels = true) => downloadStoredSnapshot(commit, withModels),
       models, noDefaultNote, withoutModels, snapshotFileName,
-      saveSnapshot: () => saveGraph('snapshot'),
+      saveSnapshot: saveCurrentSnapshot,
       locked,
     };
   },
@@ -487,7 +487,7 @@ export const StoreMenu = {
         </template>
       </div>
       <button class="menu-item" :disabled="state.saving || state.running" @click="saveSnapshot"
-              title="Download the state shown now (the live graph, or the read-only view) as one packed file (.gsnap)">Download current state (.gsnap)</button>
+              title="Download the state shown now (the live graph, or the read-only view) as one packed file (.gsnap); a store that keeps embedding models asks whether they go with it">Download current state (.gsnap)</button>
     </template>
   </drop-menu>
   <div class="sr-only" role="status" aria-live="polite">{{ state.storeAnnounce }}</div>

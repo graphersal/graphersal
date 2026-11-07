@@ -366,3 +366,13 @@ test('the Store menu loads in two calls: the summary at once, the sizes and the 
   const plain = new HttpEngine(INFO, { base: BASE, fetch: fakeFetch({ 'GET /api/store/summary': [200, { store: null }] }).fetch });
   assert.equal(await plain.storeSummary(), null);
 });
+
+test('the current state downloads with the models unless they are left out', async () => {
+  const gsnap = new Uint8Array([1, 2]);
+  const urls = [];
+  const fetch = async (url) => { urls.push(String(url)); return new Response(gsnap); };
+  const engine = new HttpEngine(INFO, { base: BASE, fetch });
+  assert.equal((await engine.saveGraph('snapshot')).withoutModels, false);
+  assert.equal((await engine.saveGraph('snapshot', { withModels: false })).withoutModels, true);
+  assert.deepEqual(urls, [`${BASE}api/export?format=gsnap`, `${BASE}api/export?format=gsnap&models=without`]);
+});

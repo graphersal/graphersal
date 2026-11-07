@@ -1455,6 +1455,21 @@ impl<S: PersistentStorage + Default> Store<S> {
         self.core.export_packed(commit_seq, writer, models)
     }
 
+    /// Copies the packed snapshot `packed` to `writer` with the embedding models its catalog
+    /// references, read from this store: how a state that has no stored snapshot (the live graph,
+    /// a read-only view, written by `write_snapshot`) gets the models [`Store::export_packed`]
+    /// carries. Every blob is checked first; one the store does not hold or holds damaged refuses
+    /// the copy (hand the snapshot on as it is then). `packed` is checked on the way and held in
+    /// memory meanwhile, its models are not. Waits while a rollback or an attic change moves files;
+    /// while it runs they and a prune are refused.
+    pub fn pack_with_models(
+        &self,
+        packed: impl std::io::Read,
+        writer: impl std::io::Write,
+    ) -> Result<SnapshotInfo, PersistError> {
+        self.core.pack_with_models(packed, writer)
+    }
+
     /// Puts the blobs a packed snapshot carries (format spec 4.6, 8: the model blobs its
     /// catalog references) into this open store, leaving its graph alone: a host that loaded a
     /// `.gsnap` into a store through its graph ([`Store::create_with`]) keeps the file's models
@@ -2824,6 +2839,16 @@ impl StoreCore {
         let _quiet = self.shared.operations.read();
         let _pin = self.pin_files("export the snapshot")?;
         export_packed_from(&self.shared.dir, commit_seq, writer, models)
+    }
+
+    pub fn pack_with_models(
+        &self,
+        packed: impl std::io::Read,
+        writer: impl std::io::Write,
+    ) -> Result<SnapshotInfo, PersistError> {
+        let _quiet = self.shared.operations.read();
+        let _pin = self.pin_files("export the snapshot")?;
+        pack_with_models_from(&self.shared.dir, packed, writer)
     }
 
     pub fn fork(
@@ -5539,6 +5564,26 @@ fn export_packed_from(
         .flush()
         .map_err(|err| PersistError::io("exporting a packed snapshot", err))?;
     read_listing(path)
+}
+
+/// [`StoreCore::pack_with_models`]: the snapshot of `packed` unpacked into a directory in memory
+/// (checking it), then written back with the blobs its manifest names, read from the store `dir`.
+fn pack_with_models_from(
+    dir: &DirPath,
+    packed: impl std::io::Read,
+    mut writer: impl std::io::Write,
+) -> Result<SnapshotInfo, PersistError> {
+    let scratch = DirPath::root(super::MemDir::new().into_store_dir());
+    let (snapshot, info) = snapshot_dir::import_packed(&scratch, packed)?;
+    let mut files = models::packed_files(dir)?.0;
+    files.extend(blobs::packed_files(dir, &snapshot)?);
+    let mut reader = DirSnapshotReader::open_with_models(&snapshot, files)?;
+    std::io::copy(&mut reader, &mut writer)
+        .map_err(|err| PersistError::io("exporting a packed snapshot", err))?;
+    writer
+        .flush()
+        .map_err(|err| PersistError::io("exporting a packed snapshot", err))?;
+    Ok(info)
 }
 
 impl Store {

@@ -38,7 +38,12 @@ top bar works on it exactly as the [dev server's](dev_server.md#on-a-store) does
   them. A `.gsnap` with models loaded on the start page keeps them in its store in memory (the
   browser cannot run them, but its copies and downloads carry them);
 - **Verify the store** checks every checksum, and **Download current state (.gsnap)** saves the
-  state on screen.
+  state on screen. When the store keeps embedding models it first asks whether they go into the
+  file, listing them with their sizes; without them the file is
+  `graphersal-graph-without-models-<stamp>.gsnap`, and a store made from it reports the model's blob
+  as missing until the model is added again. A model the store cannot hand on (its blob is missing
+  or damaged) leaves only the download without models. The browser's **Save ▸ Snapshot (.gsnap)**
+  asks the same.
 
 The menu after a few commits, three marks and three snapshots (the buttons **View**, **Fork…** and
 **Roll back…** are the three actions above):
