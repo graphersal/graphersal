@@ -8033,40 +8033,18 @@ mod read_only_serving {
         assert!(!stderr.contains("short-secret"), "{stderr}");
     }
 
-    #[test]
-    fn sigterm_drains_the_running_queries_then_exits_0() {
-        let mut server = start(&[
-            "--graph",
-            "modern",
-            "--read-only",
-            "--workers",
-            "2",
-            "--drain-timeout",
-            "2",
-            "--max-operations",
-            "0",
-        ]);
-        let port = server.port;
-        // One query finishes within the drain timeout, one would never finish.
-        let short = std::thread::spawn(move || {
-            page_execute(port, "a", "let s = 0; for i in 0..1500000 { s += i; } s")
-        });
-        let endless = std::thread::spawn(move || page_execute(port, "b", ENDLESS));
-        wait_running(port, 2);
-        let started = Instant::now();
+    /// Sends SIGTERM to the server.
+    fn terminate(server: &DevServer) {
         let status = Command::new("kill")
             .args(["-TERM", &server.child.id().to_string()])
             .status()
             .unwrap();
         assert!(status.success());
-        std::thread::sleep(Duration::from_millis(100));
-        // Not ready any more, and no new query is taken.
-        assert_eq!(get(port, "/readyz").status, 503);
-        assert_eq!(page_execute(port, "c", "1 + 1").status, 503);
-        assert_eq!(short.join().unwrap().json()["ok"], true);
-        let endless = endless.join().unwrap().json();
-        assert!(endless.to_string().contains("cancelled"), "{endless}");
-        let deadline = Instant::now() + Duration::from_secs(20);
+    }
+
+    /// Waits for the server's exit, which must be a success.
+    fn assert_exits_0(server: &mut DevServer) {
+        let deadline = Instant::now() + Duration::from_secs(60);
         let exit = loop {
             if let Some(exit) = server.child.try_wait().unwrap() {
                 break exit;
@@ -8075,8 +8053,63 @@ mod read_only_serving {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(exit.success(), "{exit:?}");
+    }
+
+    #[test]
+    fn sigterm_lets_a_running_query_finish_within_the_drain_timeout() {
+        // The drain timeout only has to outlast the query, however slow the machine is: the
+        // server exits as soon as the query has answered.
+        let mut server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--workers",
+            "2",
+            "--drain-timeout",
+            "120",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let short = std::thread::spawn(move || {
+            page_execute(port, "a", "let s = 0; for i in 0..1500000 { s += i; } s")
+        });
+        wait_running(port, 1);
+        terminate(&server);
+        let short = short.join().unwrap().json();
+        assert_eq!(short["ok"], true, "{short}");
+        assert_exits_0(&mut server);
+    }
+
+    #[test]
+    fn sigterm_refuses_new_queries_and_cancels_past_the_drain_timeout_then_exits_0() {
+        let mut server = start(&[
+            "--graph",
+            "modern",
+            "--read-only",
+            "--workers",
+            "2",
+            "--drain-timeout",
+            "3",
+            "--max-operations",
+            "0",
+        ]);
+        let port = server.port;
+        let endless = std::thread::spawn(move || page_execute(port, "b", ENDLESS));
+        wait_running(port, 1);
+        let started = Instant::now();
+        terminate(&server);
+        // Not ready any more (once the signal is handled), and no new query is taken.
+        while get(port, "/readyz").status != 503 {
+            assert!(started.elapsed() < Duration::from_secs(3), "still ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(page_execute(port, "c", "1 + 1").status, 503);
+        let endless = endless.join().unwrap().json();
+        assert!(endless.to_string().contains("cancelled"), "{endless}");
+        assert_exits_0(&mut server);
         assert!(
-            started.elapsed() >= Duration::from_secs(2),
+            started.elapsed() >= Duration::from_secs(3),
             "{:?}",
             started.elapsed()
         );
