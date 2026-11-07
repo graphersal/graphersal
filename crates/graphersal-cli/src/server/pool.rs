@@ -345,6 +345,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// A pool whose workers are all ready: `Session::new` takes 40-650 ms in a debug build under
+    /// load, and a job submitted before that only waits in the queue.
     fn pool(workers: usize, queue: usize, per_client: usize, timeout_ms: u64) -> Arc<Pool> {
         let pool = Arc::new(Pool::new(PoolConfig {
             workers,
@@ -352,90 +354,150 @@ mod tests {
             queue_timeout: Duration::from_millis(timeout_ms),
             max_inflight_per_client: per_client,
         }));
+        let (ready, up) = channel();
         for _ in 0..workers {
             let pool = pool.clone();
+            let ready = ready.clone();
             std::thread::spawn(move || {
                 let mut session = Session::new();
+                let _ = ready.send(());
                 pool.work(&mut session);
             });
+        }
+        for _ in 0..workers {
+            up.recv().unwrap();
         }
         pool
     }
 
-    fn sleeper(ms: u64, ran: &Arc<AtomicUsize>) -> Job {
+    /// Waits until the pool's state satisfies `reached`: the tests follow the pool, not the clock.
+    fn wait_until(pool: &Pool, reached: impl Fn(&State) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !reached(&pool.lock()) {
+            assert!(Instant::now() < deadline, "the pool never got there");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A job that runs until the returned sender is dropped.
+    fn held(ran: &Arc<AtomicUsize>) -> (Job, Sender<()>) {
+        let ran = ran.clone();
+        let (release, released) = channel::<()>();
+        let job: Job = Box::new(move |_| {
+            let _ = released.recv();
+            ran.fetch_add(1, Ordering::SeqCst);
+        });
+        (job, release)
+    }
+
+    fn quick(ran: &Arc<AtomicUsize>) -> Job {
         let ran = ran.clone();
         Box::new(move |_| {
-            std::thread::sleep(Duration::from_millis(ms));
             ran.fetch_add(1, Ordering::SeqCst);
         })
     }
 
+    fn submit(
+        pool: &Arc<Pool>,
+        key: &'static str,
+        job: Job,
+    ) -> std::thread::JoinHandle<Result<(), Refused>> {
+        let pool = pool.clone();
+        std::thread::spawn(move || pool.run(key, job))
+    }
+
     #[test]
     fn jobs_run_in_parallel_on_the_workers() {
-        let pool = pool(4, 16, 4, 5000);
+        let pool = pool(4, 16, 4, 60_000);
         let ran = Arc::new(AtomicUsize::new(0));
-        let started = Instant::now();
-        let threads: Vec<_> = (0..4)
-            .map(|i| {
-                let pool = pool.clone();
-                let job = sleeper(300, &ran);
-                std::thread::spawn(move || pool.run(&format!("c{i}"), job))
-            })
-            .collect();
+        let mut releases = Vec::new();
+        let mut threads = Vec::new();
+        for key in ["c0", "c1", "c2", "c3"] {
+            let (job, release) = held(&ran);
+            releases.push(release);
+            threads.push(submit(&pool, key, job));
+        }
+        // All four run at once, none having ended.
+        wait_until(&pool, |state| state.running.len() == 4);
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        drop(releases);
         for thread in threads {
             assert_eq!(thread.join().unwrap(), Ok(()));
         }
         assert_eq!(ran.load(Ordering::SeqCst), 4);
-        assert!(
-            started.elapsed() < Duration::from_millis(1100),
-            "{:?}",
-            started.elapsed()
-        );
     }
 
     #[test]
-    fn a_full_queue_and_a_busy_client_are_refused() {
-        let pool = pool(1, 1, 2, 300);
+    fn a_full_queue_is_refused() {
+        let pool = pool(1, 1, 2, 60_000);
         let ran = Arc::new(AtomicUsize::new(0));
-        let busy = {
-            let pool = pool.clone();
-            let job = sleeper(800, &ran);
-            std::thread::spawn(move || pool.run("a", job))
-        };
-        std::thread::sleep(Duration::from_millis(100));
-        let queued = {
-            let pool = pool.clone();
-            let job = sleeper(10, &ran);
-            std::thread::spawn(move || pool.run("b", job))
-        };
-        std::thread::sleep(Duration::from_millis(100));
+        let (job, release) = held(&ran);
+        let busy = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        let queued = submit(&pool, "b", quick(&ran));
+        wait_until(&pool, |state| state.queue.len() == 1);
         // The worker runs "a", "b" waits: the queue of one is full.
-        assert_eq!(pool.run("c", sleeper(1, &ran)), Err(Refused::QueueFull));
-        assert_eq!(busy.join().unwrap(), Ok(()));
-        // "b" waited 700 ms > 300 ms for the worker: refused as expired.
-        assert_eq!(queued.join().unwrap(), Err(Refused::Expired));
+        assert_eq!(pool.run("c", quick(&ran)), Err(Refused::QueueFull));
         assert_eq!(pool.status()["refused"]["queueFull"], 1);
+        drop(release);
+        assert_eq!(busy.join().unwrap(), Ok(()));
+        assert_eq!(queued.join().unwrap(), Ok(()));
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_job_that_waited_too_long_is_refused_when_a_worker_reaches_it() {
+        let pool = pool(1, 1, 2, 50);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (job, release) = held(&ran);
+        let busy = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        let queued = submit(&pool, "b", quick(&ran));
+        wait_until(&pool, |state| state.queue.len() == 1);
+        std::thread::sleep(Duration::from_millis(100));
+        drop(release);
+        assert_eq!(busy.join().unwrap(), Ok(()));
+        assert_eq!(queued.join().unwrap(), Err(Refused::Expired));
+        assert_eq!(pool.status()["refused"]["expired"], 1);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_job_that_waited_too_long_gives_its_place_to_a_later_job() {
+        let pool = pool(1, 1, 2, 50);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (job, release) = held(&ran);
+        let busy = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        let expired = submit(&pool, "b", quick(&ran));
+        wait_until(&pool, |state| state.queue.len() == 1);
+        std::thread::sleep(Duration::from_millis(100));
+        // "b" is purged, so "c" finds room instead of a full queue.
+        let later = submit(&pool, "c", quick(&ran));
+        assert_eq!(expired.join().unwrap(), Err(Refused::Expired));
+        drop(release);
+        assert_eq!(busy.join().unwrap(), Ok(()));
+        // "c" itself may expire or run; it was not refused as full.
+        assert_ne!(later.join().unwrap(), Err(Refused::QueueFull));
     }
 
     #[test]
     fn a_client_over_its_limit_waits_then_is_refused() {
-        let pool = pool(2, 8, 1, 200);
+        let pool = pool(2, 8, 1, 1000);
         let ran = Arc::new(AtomicUsize::new(0));
-        let first = {
-            let pool = pool.clone();
-            let job = sleeper(600, &ran);
-            std::thread::spawn(move || pool.run("a", job))
-        };
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(pool.run("a", sleeper(1, &ran)), Err(Refused::ClientBusy));
+        let (job, release) = held(&ran);
+        let first = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
+        assert_eq!(pool.run("a", quick(&ran)), Err(Refused::ClientBusy));
         // Another client is not held up by "a".
-        assert_eq!(pool.run("b", sleeper(1, &ran)), Ok(()));
+        assert_eq!(pool.run("b", quick(&ran)), Ok(()));
+        drop(release);
         assert_eq!(first.join().unwrap(), Ok(()));
     }
 
     #[test]
     fn cancel_reaches_only_the_clients_own_job() {
-        let pool = pool(2, 8, 4, 5000);
+        let pool = pool(2, 8, 4, 60_000);
         let run = |key: &'static str| {
             let pool = pool.clone();
             std::thread::spawn(move || {
@@ -451,34 +513,42 @@ mod tests {
                 answer.recv().unwrap()
             })
         };
+        // Repeats the cancel: one between a job's registration and the start of its run is lost
+        // (`Session::execute` resets the token; issue #29).
+        let cancel_until_done = |key, thread: &std::thread::JoinHandle<String>| {
+            while !thread.is_finished() {
+                pool.cancel_client(key);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
         let a = run("a");
         let b = run("b");
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(pool.cancel_client("a"));
+        wait_until(&pool, |state| state.running.len() == 2);
+        cancel_until_done("a", &a);
         let a = a.join().unwrap();
         assert!(a.contains("ancel"), "{a}");
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(pool.cancel_client("b"));
+        // "b" still runs: the cancels of "a" did not reach it.
+        assert!(!b.is_finished());
+        assert_eq!(pool.status()["running"], 1);
+        cancel_until_done("b", &b);
         let b = b.join().unwrap();
         assert!(b.contains("ancel"), "{b}");
     }
 
     #[test]
     fn drain_lets_running_jobs_finish_and_refuses_new_ones() {
-        let pool = pool(1, 4, 4, 5000);
+        let pool = pool(1, 4, 4, 60_000);
         let ran = Arc::new(AtomicUsize::new(0));
-        let running = {
-            let pool = pool.clone();
-            let job = sleeper(300, &ran);
-            std::thread::spawn(move || pool.run("a", job))
-        };
-        std::thread::sleep(Duration::from_millis(50));
+        let (job, release) = held(&ran);
+        let running = submit(&pool, "a", job);
+        wait_until(&pool, |state| state.running.len() == 1);
         let drained = {
             let pool = pool.clone();
-            std::thread::spawn(move || pool.drain(Duration::from_secs(5)))
+            std::thread::spawn(move || pool.drain(Duration::from_secs(60)))
         };
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(pool.run("b", sleeper(1, &ran)), Err(Refused::Stopping));
+        wait_until(&pool, |state| state.draining);
+        assert_eq!(pool.run("b", quick(&ran)), Err(Refused::Stopping));
+        drop(release);
         assert_eq!(drained.join().unwrap(), 0);
         assert_eq!(running.join().unwrap(), Ok(()));
         assert_eq!(ran.load(Ordering::SeqCst), 1);
