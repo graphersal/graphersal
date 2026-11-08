@@ -45,6 +45,7 @@ pub mod model_definition;
 pub(crate) mod note_text;
 #[cfg(feature = "persist")]
 pub(crate) mod persistent;
+mod postings;
 /// Property indexes: declared, ordered indexes on `(element kind, label, key)`
 /// ([`property_index::PropertyIndexDefinition`]) and their in-memory state.
 pub mod property_index;
