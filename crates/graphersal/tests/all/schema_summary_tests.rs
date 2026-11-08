@@ -250,7 +250,7 @@ fn keys_most_labels_share_are_written_once_with_the_exceptions() {
 #[test]
 fn indexes_are_named_in_the_header() {
     let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
-    crate::script_host::eval_value(
+    let _ = crate::script_host::eval_value(
         graph.clone(),
         r#"g.create_index(#{label: "person", key: "name", transform: "to_lower"})"#,
     )
