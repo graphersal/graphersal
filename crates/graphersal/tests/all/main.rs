@@ -219,6 +219,7 @@ mod schema_gap_tests;
 mod schema_inference_tests;
 mod schema_meta_graph_tests;
 mod schema_required_tests;
+mod schema_summary_tests;
 mod schema_support;
 mod schema_visualization_tests;
 mod scope_local_tests;

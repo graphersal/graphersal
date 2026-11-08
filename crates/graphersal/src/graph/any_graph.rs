@@ -176,6 +176,13 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`Self::capabilities`].
     fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError>;
 
+    /// [`GraphTraversalSource::schema_summary`]: the schema summary, computed under one read
+    /// lock. Fails when cancelled. Unauthorized: the front end asks its authorizer first.
+    fn schema_summary(
+        &self,
+        request: &crate::graph::schema::SchemaSummaryRequest,
+    ) -> TraverserResult<crate::graph::schema::SchemaSummary>;
+
     /// [`GraphTraversalSource::set_schema`]: replaces the stored schema, in the current unit or
     /// as one of its own.
     fn set_schema(&self, schema: GraphSchema) -> TraverserResult<()>;
@@ -483,6 +490,13 @@ where
 
     fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
         self.read_checked()?.get_schema()
+    }
+
+    fn schema_summary(
+        &self,
+        request: &crate::graph::schema::SchemaSummaryRequest,
+    ) -> TraverserResult<crate::graph::schema::SchemaSummary> {
+        GraphTraversalSource::new(&*self.read_checked()?).schema_summary(request)
     }
 
     fn set_schema(&self, schema: GraphSchema) -> TraverserResult<()> {

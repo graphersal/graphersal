@@ -935,15 +935,30 @@ fn tool_definition(listing: &Value) -> ToolDefinition {
 }
 
 /// The graph summary of a conversation's system prompt (after the static prefix): the graph at
-/// the start of the conversation (labels and counts, not the schema).
+/// the start of the conversation (labels and counts), then the schema summary (the get_schema
+/// tool's default answer; left out when it fails).
 fn graph_summary_now(context: &Context) -> Result<String, String> {
-    let (info, statistics) = context
-        .call(|s| (s.info(), s.statistics()))
+    let (info, statistics, schema) = context
+        .call(|s| {
+            (
+                s.info(),
+                s.statistics(),
+                s.schema_summary_text(&Value::Null),
+            )
+        })
         .map_err(|err| err.1)?;
-    Ok(graph_summary(
+    let mut text = graph_summary(
         &info.map_err(|err| err.to_string())?,
         &statistics.map_err(|err| err.to_string())?,
-    ))
+    );
+    if let Ok(schema) = schema {
+        text.push_str(
+            "\n\n## Schema summary (when this chat started; get_schema with labels details \
+             some labels)\n\n",
+        );
+        text.push_str(&schema);
+    }
+    Ok(text)
 }
 
 /// The graph summary of the system prompt.

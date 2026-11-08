@@ -2552,9 +2552,9 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
     assert_eq!(feed["recent"][1]["by"], "tab-1", "{feed}");
 
     // The schema tools.
-    let (error, text) = mcp.call("get_schema", serde_json::json!({}));
+    let (error, text) = mcp.call("get_schema", serde_json::json!({"format": "json"}));
     assert!(!error && text.starts_with("null"), "{text}");
-    let (error, inferred) = mcp.call("infer_schema", serde_json::json!({}));
+    let (error, inferred) = mcp.call("infer_schema", serde_json::json!({"format": "json"}));
     assert!(!error, "{inferred}");
     let inferred: Value = serde_json::from_str(&inferred).unwrap();
     let (error, text) = mcp.call(

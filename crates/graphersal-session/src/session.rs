@@ -702,6 +702,32 @@ impl Session {
         })
     }
 
+    /// The stored schema (`inferred` false; `null` without one) or the inferred schema
+    /// (`inferred` true) as canonical JSON text, keeping only the vertex and edge labels named
+    /// in `labels` (all when empty): one label's declaration of a schema too large to read
+    /// whole.
+    pub fn schema_text_of(
+        &self,
+        inferred: bool,
+        labels: &[String],
+    ) -> Result<String, SessionError> {
+        let schema = if inferred {
+            Some(self.graph.inferred_schema()?)
+        } else {
+            self.graph.get_schema()?
+        };
+        Ok(match schema {
+            None => "null".to_string(),
+            Some(mut schema) => {
+                if !labels.is_empty() {
+                    schema.vertices.retain(|label, _| labels.contains(label));
+                    schema.edges.retain(|label, _| labels.contains(label));
+                }
+                schema.to_json()
+            }
+        })
+    }
+
     /// `patch_schema`: applies a JSON Merge Patch to the stored schema and stores the result
     /// (validated against the data, like `set_schema`); returns the new schema.
     pub fn patch_schema(&mut self, patch: &str) -> Result<Value, SessionError> {
@@ -975,6 +1001,24 @@ impl Session {
             Ok(report) => json!({"ok": true, "report": report}),
             Err(error) => json!({"ok": false, "error": error.to_string()}),
         }
+    }
+
+    /// The schema summary ([`graphersal::schema::SchemaSummary`]): a compact text map of the
+    /// graph (labels with counts, keys with value types and how often they occur, edge
+    /// endpoint label pairs, property indexes, the schema mode, the stored schema's
+    /// declarations laid over it), what an agent reads first instead of the schema JSON.
+    /// `spec` is `{labels?, max_keys?, max_labels?, descriptions?}` or `null`
+    /// ([`crate::views::schema_summary_request`]). Cancellable through [`Self::cancel_token`].
+    /// Read-only.
+    pub fn schema_summary_text(&self, spec: &Value) -> Result<String, SessionError> {
+        let request = crate::views::schema_summary_request(spec)?;
+        self.reset_cancel();
+        let cancel = self.cancel_token();
+        let summary = self
+            .graph
+            .schema_summary(&request.with_cancel(cancel))
+            .map_err(|err| format_diagnostic(&*err))?;
+        Ok(summary.to_string())
     }
 
     /// One element for the inspector, fetched when it is clicked (the drawings carry no

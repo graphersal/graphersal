@@ -332,6 +332,60 @@ pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// `get_schema` / `infer_schema`: the schema summary by default (the same text for both: the
+/// observed graph with the stored schema laid over it), the schema JSON with `format: "json"`
+/// (the stored or the inferred one); `labels` narrows either to some labels.
+fn schema_answer(
+    context: &Ctx<'_>,
+    caller: &ToolCaller,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
+    let labels: Vec<String> = match args.get("labels") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(label)) => vec![label.clone()],
+        Some(Value::Array(labels)) => labels
+            .iter()
+            .map(|label| {
+                label
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("labels holds label names, not {label}"))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(other) => return Err(format!("labels is a list of label names, not {other}")),
+    };
+    match str_arg(args, "format").unwrap_or("summary") {
+        "summary" => {
+            let spec = if labels.is_empty() {
+                Value::Null
+            } else {
+                serde_json::json!({ "labels": labels })
+            };
+            Ok(context.call(move |s| s.schema_summary_text(&spec))??)
+        }
+        "json" => {
+            let inferred = name == "infer_schema";
+            let text = context.call(move |s| s.schema_text_of(inferred, &labels))??;
+            if text == "null" {
+                return Ok(
+                    "null: the graph stores no schema (mode none). infer_schema shows \
+                           what the data has; set_schema stores one."
+                        .to_string(),
+                );
+            }
+            if text.chars().count() > caller.max_chars {
+                return Ok(format!(
+                    "note: the schema JSON is larger than the answer limit; pass labels: \
+                     [\"<label>\", ...] for some labels, or read the summary (no format)\n{text}"
+                ));
+            }
+            Ok(text)
+        }
+        other => Err(format!("format is \"summary\" or \"json\", not {other:?}")),
+    }
+}
+
 /// Runs one tool; `Err` is a tool error (its text is the diagnostic).
 pub(crate) fn run_tool(
     context: &Ctx<'_>,
@@ -342,17 +396,7 @@ pub(crate) fn run_tool(
     match name {
         "query" => query(context, caller, args),
         "gql" => gql(context, caller, args),
-        "get_schema" => {
-            let text = context.call(|s| s.get_schema_text())??;
-            Ok(if text == "null" {
-                "null: the graph stores no schema (mode none). infer_schema shows what the data \
-                 has; set_schema stores one."
-                    .to_string()
-            } else {
-                text
-            })
-        }
-        "infer_schema" => Ok(context.call(|s| s.infer_schema_text())??),
+        "get_schema" | "infer_schema" => schema_answer(context, caller, name, args),
         "validate_schema" => {
             let schema = json_arg(args, "schema", str_arg(args, "mode"))?;
             fallible(context, move |s| s.validate_schema(&schema))

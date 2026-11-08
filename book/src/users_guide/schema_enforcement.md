@@ -461,6 +461,55 @@ change set as the data, rolls back with its unit, and is reported in the result'
 response). Validation is immediate: the existing data is checked when the schema is set, not at
 commit.
 
+## The schema summary
+
+The schema JSON is precise but long, and says nothing about the data's counts: the stored schema
+of a knowledge graph of 124 labels is 204 KB. The **schema summary** is the map a reader (an
+agent behind the [MCP endpoint](../persistence/dev_server.md), a person at the REPL) needs first,
+one line per label:
+
+```text
+graph: 6 vertices, 6 edges; 2 vertex labels, 2 edge labels; no stored schema (mode none)
+notation: label count: key type, ...; "?" = not on every element ...
+
+vertex labels
+person 4: age int, name str
+software 2: lang str, name str
+
+edge labels
+created 4 person->software: weight float
+knows 2 person->person: weight float
+```
+
+- Built from the data: one walk over every element, so element counts, key counts and endpoint
+  pairs are **exact**; only the value types are sampled per label (the first 1000 elements of a
+  label, then fewer per doubling, plus the first element of every distinct key set, so every key
+  has a type). Writes nothing, can be cancelled.
+- A key not on every element of its label is marked `?`, with its share under 10 % (`? 3%`) and
+  its count under 1 % (`? n=12`). Types: `str int float bool uuid date datetime localdatetime
+  time offsettime duration null`, `[T]` a list, `map`, `vector<f32,384>`, `a|b` mixed.
+- An edge label lists its from->to pairs of primary vertex labels (with counts when several); a
+  vertex label lists the other labels its vertices carry (`also labelled: admin 1`).
+- With at least four labels of a kind, the key entries at least 80 % of the labels share are
+  written once (`every vertex label except _IndexRun has: ...`); the lines of the labels named
+  as exceptions keep every key.
+- The **stored schema** is laid over the data: its mode in the header, label descriptions (the first
+  sentence, cut to 80 characters), declared enums (`lang str in(java|rust)`), declared keys and labels without
+  data (`(declared, no data)`), declared connections without data (`person->company 0`).
+- Caps: 30 keys per label (the most frequent; `... N more keys`), 200 labels per kind (the
+  largest; `... N more vertex labels (M vertices)`).
+- **Details** of some labels: every key with its declared description, and for a vertex label
+  the edges going out and coming in (`edges out: created->software 4, knows->person 2`).
+
+| Where | How |
+|---|---|
+| MCP | `get_schema` / `infer_schema` answer it by default (`labels` for details, `format: "json"` for the JSON); resource `graphersal://schema-summary` |
+| REPL | `/schema`, `/schema person knows` |
+| Rust | `g.schema_summary(&SchemaSummaryRequest::new().with_labels(["person"]))?.to_string()` (`graphersal::schema`; `with_max_keys`, `with_max_labels`, `with_type_samples`, `with_descriptions`, `with_cancel`) |
+| AI Chat | its system prompt carries the summary of the graph at the conversation's start |
+
+It needs `Read` on `Schema`, like `infer_schema()`.
+
 ## Applying a schema to existing data
 
 `set_schema` and `patch_schema` validate **all existing data first**, in one pass over the vertices

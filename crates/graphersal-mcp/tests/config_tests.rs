@@ -528,6 +528,67 @@ fn the_gql_reference_is_listed_and_readable() {
 }
 
 #[test]
+fn the_schema_tools_answer_the_summary_and_the_json_on_request() {
+    let host = TestHost::modern();
+    let mcp = Mcp::new(true, None, false);
+    let text = |answer: &Value| {
+        answer["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    for tool in ["get_schema", "infer_schema"] {
+        let summary = call(&mcp, &host, tool, json!({}));
+        let summary = text(&summary);
+        assert!(
+            summary.starts_with("graph: 6 vertices, 6 edges; 2 vertex labels, 2 edge labels"),
+            "{tool}: {summary}"
+        );
+        assert!(
+            summary.contains("\nperson 4: age int, name str\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("\ncreated 4 person->software: weight float"),
+            "{summary}"
+        );
+        let detail = text(&call(&mcp, &host, tool, json!({"labels": ["person"]})));
+        assert!(
+            detail.contains("edges out: created->software 4, knows->person 2"),
+            "{detail}"
+        );
+    }
+    let stored = text(&call(&mcp, &host, "get_schema", json!({"format": "json"})));
+    assert!(
+        stored.starts_with("null: the graph stores no schema"),
+        "{stored}"
+    );
+    let inferred = text(&call(
+        &mcp,
+        &host,
+        "infer_schema",
+        json!({"format": "json", "labels": ["knows"]}),
+    ));
+    let inferred: Value = serde_json::from_str(&inferred).expect("JSON");
+    assert_eq!(inferred["vertices"], json!({}), "{inferred}");
+    assert!(inferred["edges"]["knows"].is_object(), "{inferred}");
+    let wrong = call(&mcp, &host, "get_schema", json!({"format": "yaml"}));
+    assert_eq!(wrong["isError"], true, "{wrong}");
+    // The same text as a resource (readable, listed only when configured).
+    let read = rpc(
+        &mcp,
+        &host,
+        "resources/read",
+        json!({"uri": "graphersal://schema-summary"}),
+    );
+    let resource = read["result"]["contents"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        resource.contains("knows 2 person->person: weight float"),
+        "{read}"
+    );
+}
+
+#[test]
 fn the_default_listing_stays_within_its_budget() {
     // Characters of the instructions and every tools/list entry without a configuration.
     // A failure here means a description grew: shorten it, or raise the budget deliberately

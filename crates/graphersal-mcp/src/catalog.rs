@@ -68,6 +68,17 @@ pub(crate) fn mode_arg() -> Value {
     })
 }
 
+/// The arguments of `get_schema` / `infer_schema`.
+pub(crate) fn schema_read_args() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "format": {"enum": ["summary", "json"]},
+        },
+    })
+}
+
 pub(crate) fn no_args() -> Value {
     json!({"type": "object", "properties": {}})
 }
@@ -246,8 +257,13 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                 "required": ["name"],
             }),
         ),
-        tool("get_schema", "Stored schema", Kind::Read, no_args()),
-        tool("infer_schema", "Inferred schema", Kind::Read, no_args()),
+        tool("get_schema", "Graph schema", Kind::Read, schema_read_args()),
+        tool(
+            "infer_schema",
+            "Inferred schema",
+            Kind::Read,
+            schema_read_args(),
+        ),
         tool(
             "validate_schema",
             "Check a schema",
@@ -505,13 +521,10 @@ pub(crate) fn description(name: &str, read_only: bool) -> &'static str {
         }
         "drop_index" => "Remove a property index (no data changes; queries scan again).",
         "get_schema" => {
-            "The schema stored in the graph (JSON), or null (then the infer_schema tool shows \
-             what the data has)."
+            "A map of the graph (labels, counts, keys, types, edge from->to pairs, indexes); \
+             labels: details. format \"json\": the stored schema."
         }
-        "infer_schema" => {
-            "The schema the data satisfies now (labels, properties, types, edge topology); \
-             stores nothing."
-        }
+        "infer_schema" => "get_schema's map; format \"json\": the schema the data satisfies.",
         "validate_schema" => {
             "Check a proposed schema against the data without applying it: violations, the \
              diff from the stored schema, backward compatibility."

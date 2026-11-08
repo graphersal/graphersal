@@ -17,7 +17,7 @@ pub(crate) struct Resource {
     pub(crate) mime: &'static str,
 }
 
-pub(crate) const RESOURCES: [Resource; 6] = [
+pub(crate) const RESOURCES: [Resource; 7] = [
     Resource {
         uri: "graphersal://schema",
         name: "schema",
@@ -58,6 +58,16 @@ pub(crate) const RESOURCES: [Resource; 6] = [
         mime: "application/json",
     },
     // Listed only when the configuration names it (`resources`), but always readable: the
+    // same text as the get_schema tool's default answer.
+    Resource {
+        uri: "graphersal://schema-summary",
+        name: "schema-summary",
+        title: "Schema summary",
+        description: "A compact map of the graph: labels with counts, keys with types, edge \
+                      label endpoint pairs, indexes, schema mode (the get_schema tool's answer).",
+        mime: "text/plain",
+    },
+    // Listed only when the configuration names it (`resources`), but always readable: the
     // short `gql` description points to it.
     Resource {
         uri: "graphersal://gql-reference",
@@ -79,6 +89,9 @@ pub(crate) fn read_resource(
 ) -> Result<String, String> {
     match uri {
         "graphersal://schema" => Ok(context.call(|s| s.get_schema_text())??),
+        "graphersal://schema-summary" => {
+            Ok(context.call(|s| s.schema_summary_text(&Value::Null))??)
+        }
         "graphersal://gql-reference" => Ok(gql_reference_text()),
         "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,

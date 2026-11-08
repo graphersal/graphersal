@@ -24,6 +24,7 @@ pub mod node;
 pub mod parse;
 /// JSON Merge Patch (RFC 7396) of a schema.
 pub mod patch;
+pub mod summary;
 /// [`ValueType`] and related type tokens.
 pub mod types;
 /// Schema validation on write.
@@ -38,6 +39,7 @@ pub use inference::*;
 pub use meta_schema::*;
 pub use node::*;
 pub use patch::*;
+pub use summary::{SchemaSummary, SchemaSummaryRequest};
 pub use types::*;
 pub(crate) use validation::*;
 pub use visualize::*;
