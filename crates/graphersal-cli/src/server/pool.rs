@@ -519,8 +519,9 @@ mod tests {
                 answer.recv().unwrap()
             })
         };
-        // Repeats the cancel: one between a job's registration and the start of its run is lost
-        // (`Session::execute` resets the token; issue #29).
+        // Cancels until the job ends. One cancel is enough since issue #29 (a cancel before the
+        // query starts is no longer lost; `a_cancel_before_the_query_starts_stops_it`); the
+        // repeats are harmless.
         let cancel_until_done = |key, thread: &std::thread::JoinHandle<String>| {
             while !thread.is_finished() {
                 pool.cancel_client(key);
