@@ -6,8 +6,10 @@
 // Differences to the WebAssembly engine, by design:
 // - the server serves ONE graph, the one it was started with: `listSampleGraphs()` is empty and
 //   `loadGraph()` rejects (the UI hides the graph choice in this mode);
-// - `stop()` cancels the running query on the server (`POST /api/cancel`): it stops at its next
-//   check and rolls back, the graph stays as it was before the query; nothing restarts;
+// - `stop(runId)` cancels the query on the server (`POST /api/cancel`): the run `runId` given to
+//   `execute` (or, without one, every run of this page); it stops at its next check, or at once
+//   when it still waits for the server, and rolls back; nothing restarts and no other page's
+//   or AI Chat's query is touched;
 // - `saveToSource()` writes the graph back to its `--graph` file (`info().saveable`);
 // - on a Store directory (`--graph <dir>`, `info().store`): every commit is persisted, and
 //   `storeInfo()`, `checkpoint(name)`, `mark(name)` and `snapshotUrl(commit)` (a `.gsnap`
@@ -523,9 +525,10 @@ export class HttpEngine extends Engine {
     return this.graph;
   }
 
-  async execute(script, opts = {}) {
+  async execute(script, opts = {}, { runId } = {}) {
     this.stopRequested = false;
-    const res = await this.request('POST', 'execute', JSON.stringify({ script, options: opts }));
+    const body = runId ? { script, options: opts, runId } : { script, options: opts };
+    const res = await this.request('POST', 'execute', JSON.stringify(body));
     if (res && res.graph) this.graph = res.graph;
     if (res) packGraphView(res.subgraph);
     // A query cancelled by Stop comes back as a failed run (rolled back); flag it like the
@@ -715,12 +718,14 @@ export class HttpEngine extends Engine {
   }
 
   /**
-   * Stop: cancels the running query on the server; it rolls back, the graph stays as before it.
+   * Stop: cancels the query `runId` of this page on the server (without one: every run of this
+   * page); it rolls back, the graph stays as before it.
+   * @param {string} [runId]
    * @returns {Promise<{restored: null, cancelled: boolean}>}
    */
-  async stop() {
+  async stop(runId) {
     this.stopRequested = true;
-    const res = await this.request('POST', 'cancel');
+    const res = await this.request('POST', 'cancel', runId ? JSON.stringify({ runId }) : undefined);
     return { restored: null, cancelled: !!(res && res.cancelled) };
   }
 }

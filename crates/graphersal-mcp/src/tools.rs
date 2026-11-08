@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::catalog::{all_tools, offered_tools};
 use crate::config::{Descriptions, McpConfig};
-use crate::host::{ClientRef, Ctx, Host, McpError};
+use crate::host::{ClientRef, Ctx, Host, McpError, RunGuard};
 use crate::protocol::MAX_TEXT_CHARS;
 use crate::stats::McpStats;
 
@@ -24,7 +24,7 @@ pub struct ToolCaller {
     /// The change-feed client of the calls: `mcp`, or `ai` with the conversation id.
     pub(crate) client: ClientRef,
     /// The caller's own cancellation token of the queries it runs (an AI Chat turn's Stop),
-    /// instead of the session's (the UI's Stop, `POST /api/cancel`).
+    /// instead of a new token per query (registered with the host: `Host::run_started`).
     pub(crate) cancel: Option<CancelToken>,
     /// The largest answer text in characters (`--mcp-max-chars`, [`MAX_TEXT_CHARS`]).
     pub(crate) max_chars: usize,
@@ -37,7 +37,7 @@ pub struct ToolCaller {
 
 impl ToolCaller {
     /// A caller whose session jobs run for `client`, offered only the reading tools when
-    /// `read_only`; no saved query as a tool, the host's session-wide cancellation, answers of
+    /// `read_only`; no saved query as a tool, a new cancellation token per query, answers of
     /// at most [`MAX_TEXT_CHARS`] characters.
     pub fn new(client: ClientRef, read_only: bool) -> Self {
         Self {
@@ -76,7 +76,7 @@ impl ToolCaller {
     }
 
     /// Runs the caller's queries under its own cancellation token (an AI Chat turn's Stop)
-    /// instead of the host's session-wide one.
+    /// instead of a new token per query.
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = Some(cancel);
         self
@@ -946,22 +946,17 @@ pub(crate) fn run_script(
     } else {
         playground_authorizer()
     };
-    let answer = match caller.cancel.clone() {
-        // The caller's own token: the session-wide Stop (`POST /api/cancel`) does not reach it.
-        Some(cancel) => context.call(move |s| {
-            let text = s.execute_with_cancel(&script, &options, authorizer, &cancel);
-            (text, s.graph().last_commit_seq())
-        }),
-        None => {
-            context.host.query_started();
-            let answer = context.call(move |s| {
-                let text = s.execute_with_authorizer(&script, &options, authorizer);
-                (text, s.graph().last_commit_seq())
-            });
-            context.host.query_finished();
-            answer
-        }
+    // A token of this run alone (the caller's own: an AI Chat turn's), registered with the host
+    // before the job is queued, so a cancel of it is never lost and reaches no other run.
+    let cancel = caller.cancel.clone().unwrap_or_default();
+    let _run = RunGuard {
+        host: context.host,
+        run: context.host.run_started(context.client, &cancel),
     };
+    let answer = context.call(move |s| {
+        let text = s.execute_with_cancel(&script, &options, authorizer, &cancel);
+        (text, s.graph().last_commit_seq())
+    });
     let (text, commit_seq) = answer?;
     let commit_seq = commit_seq.map_err(|err| err.to_string())?;
     let response: Value =

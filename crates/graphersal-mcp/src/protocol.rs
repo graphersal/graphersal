@@ -370,13 +370,17 @@ impl Mcp {
         );
         let Some(id) = id else {
             // A notification (`notifications/initialized`, `notifications/cancelled`, ...).
+            if method == "notifications/cancelled" {
+                cancel_request(host, session_id.as_deref(), object.get("params"));
+            }
             return empty(202);
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
         let client = match &session_id {
             Some(id) => ClientRef::new(MCP_CLIENT, None).with_key(id),
             None => ClientRef::new(MCP_CLIENT, None),
-        };
+        }
+        .with_request(&id.to_string());
         clear_busy();
         let dispatched = self.dispatch(host, &client, method, &params);
         // The host could not take a job now (queue full, waited too long, too many jobs of this
@@ -535,6 +539,21 @@ fn rpc_answer(status: u16, body: &Value) -> McpResponse {
     McpResponse::new(status, body.to_string().into_bytes())
         .with_header("Content-Type", "application/json")
         .with_header("Cache-Control", "no-store")
+}
+
+/// `notifications/cancelled` `{requestId, reason?}`: cancels the runs of that request of the
+/// same MCP session. JSON-RPC ids are chosen by each client, so without a session id there is
+/// no telling whose request it names: ignored (cancellation is best effort in MCP, as is a
+/// notice for a request that has already ended).
+fn cancel_request(host: &dyn Host, session_id: Option<&str>, params: Option<&Value>) {
+    let (Some(session_id), Some(request)) = (
+        session_id,
+        params.and_then(|params| params.get("requestId")),
+    ) else {
+        return;
+    };
+    let client = ClientRef::new(MCP_CLIENT, None).with_key(session_id);
+    host.cancel_request(&client, &request.to_string());
 }
 
 fn empty(status: u16) -> McpResponse {

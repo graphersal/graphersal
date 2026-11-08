@@ -13,7 +13,7 @@
 //! opened, the process statistics, `graph_info`'s source/store/damage fields, the playground's
 //! examples).
 
-use std::sync::atomic::Ordering;
+use graphersal::exec::CancelToken;
 
 use graphersal_mcp::{ClientRef, Executor, Host, Job, McpError, McpRequest, Refusal};
 use serde_json::{Value, json};
@@ -124,10 +124,20 @@ pub(super) fn current_client() -> ClientRef {
     })
 }
 
+/// The server's client of an endpoint caller.
+fn client_of(client: &ClientRef) -> Client {
+    Client::with_detail(client.name(), client.detail()).with_key(client.key())
+}
+
+/// The key the server cancels a caller's runs by (`mcp:<session id>`, `ai:<conversation>`).
+fn run_key(client: &ClientRef) -> String {
+    client_of(client).pool_key()
+}
+
 impl Executor for Context {
     /// Queues `job` on the session thread for `client` and waits for it ([`Context::call`]).
     fn execute(&self, client: &ClientRef, job: Job) -> Result<(), McpError> {
-        let caller = Client::with_detail(client.name(), client.detail()).with_key(client.key());
+        let caller = client_of(client);
         as_client(caller, || self.call(move |session| job(session))).map_err(
             |HttpError(status, message)| match status {
                 // The pool of the read-only serving mode is busy: the endpoint answers 503.
@@ -166,11 +176,16 @@ impl Host for Context {
         self.ui.read("js/examples.json").map(|(bytes, _)| bytes)
     }
 
-    fn query_started(&self) {
-        self.running.fetch_add(1, Ordering::SeqCst);
+    fn run_started(&self, client: &ClientRef, cancel: &CancelToken) -> u64 {
+        self.runs
+            .start(&run_key(client), client.request(), cancel.clone())
     }
 
-    fn query_finished(&self) {
-        self.running.fetch_sub(1, Ordering::SeqCst);
+    fn run_ended(&self, run: u64) {
+        self.runs.end(run);
+    }
+
+    fn cancel_request(&self, client: &ClientRef, request: &str) -> bool {
+        self.runs.cancel_alias(&run_key(client), request)
     }
 }

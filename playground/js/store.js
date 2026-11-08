@@ -98,6 +98,7 @@ export const state = reactive({
   runCount: 0,
   running: false,
   runningTabId: null, // the tab whose run is in progress (its result goes there even after a switch)
+  runningRunId: null, // the id of that run, which Stop names (`engine.stop(runId)`)
   runningElapsedMs: 0, // live elapsed time of the running query, updated while running is true
   runAllActive: false,
   stopping: false,
@@ -417,6 +418,9 @@ export async function loadGraph(request) {
   }
 }
 
+/** Numbers the runs of this page (`state.runningRunId`). */
+let runSeq = 0;
+
 /**
  * Runs a tab's script (default: the active tab's) through `engine.execute` and records it in the
  * history with the tab's name. A traversal without a terminal returns results and (with the
@@ -457,6 +461,8 @@ export async function run(script, tabId = state.activeId, { selection = null } =
   }
   state.running = true;
   state.runningTabId = tab.id;
+  // The dev server cancels exactly this run on Stop (never another page's or AI Chat's query).
+  state.runningRunId = `run-${++runSeq}`;
   state.runningElapsedMs = 0;
   const startedAt = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   const timer = setInterval(() => {
@@ -476,7 +482,7 @@ export async function run(script, tabId = state.activeId, { selection = null } =
       subgraph_max_elements: graphResultMax,
       // The Graph panel sizes vertices by degree (Display menu, js/graph/size-by.js): only then.
       subgraph_degrees: normalizeSizeBy(storage.get('graph.sizeBy', 'off')) !== 'off',
-    });
+    }, { runId: state.runningRunId });
     const runId = ++state.runCount;
     res.run_id = runId;
     const ex = res.execution;
@@ -530,6 +536,7 @@ export async function run(script, tabId = state.activeId, { selection = null } =
     clearInterval(timer);
     state.running = false;
     state.runningTabId = null;
+    state.runningRunId = null;
     state.runningElapsedMs = 0;
   }
 }
@@ -618,7 +625,7 @@ export async function stopRun() {
   }
   state.stopping = true;
   try {
-    const stopped = await state.engine.stop();
+    const stopped = await state.engine.stop(state.runningRunId);
     if ('cancelled' in stopped) {
       // The dev server cancels the query; it rolls back and the graph stays as it was.
       toast(stopped.cancelled ? 'Stopped: the query was cancelled on the server and rolled back.' : 'Nothing was running on the server.', 'info', 7000);

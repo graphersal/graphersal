@@ -225,11 +225,12 @@ How it works:
 - **Connections**: at most `--max-connections N` requests are handled at once (default 512, a
   thread each); beyond it the server answers `503` at once. The health probes `/healthz` and
   `/readyz` are always answered.
-- **Stop**: the Stop button of a page cancels only that page's running query, never another
-  page's or an agent's.
+- **Stop**: the Stop button of a page cancels only that page's query, never another page's or an
+  agent's, also while the query still waits in the queue.
 - **Graceful stop**: on SIGTERM (`docker stop`, Kubernetes) `/readyz` turns `503`, no new query
-  is taken, the running ones get `--drain-timeout S` seconds (default 20) to finish, then they
-  are cancelled and the process exits with code 0.
+  is taken, the running ones get `--drain-timeout S` seconds (default 20) to finish, then the
+  waiting ones are refused, every query is cancelled (also an AI Chat turn's) and the process
+  exits with code 0. A query that has not stopped 2 s later is named in a warning on stderr.
 - **Safe defaults**: unlike the read-write server (which runs like the playground, without
   limits), every query runs under the SAFE script limits (`--safe-limits`), a 30 s timeout
   (`--timeout 30000`) and a 500 MiB per-query memory limit
@@ -298,10 +299,12 @@ Store](store_models.md)).
   most every 30 seconds instead and a banner says so, with **Refresh now** and **Pause auto
   refresh** (no automatic reloads until **Resume**); 10 seconds after the last change it reloads
   once more and goes back to normal.
-- **Stop** cancels the running query on the server: it stops at its next check (where
+- **Stop** cancels the query this tab started on the server: it stops at its next check (where
   `evaluationTimeout` is checked, plus the script loop), fails with "cancelled", and everything it
-  changed is rolled back. The graph stays as it was before the query; nothing restarts. Stop
-  cancels whatever query runs, also one started from another tab.
+  changed is rolled back; a query that still waits for the server (behind another tab's query)
+  runs nothing. The graph stays as it was before the query; nothing restarts. Stop never cancels
+  another tab's query, an agent's query over MCP or an AI Chat turn's query (the chat has its own
+  Stop).
 - **Save ▾** downloads the graph data (GraphSON or GraphML), the schema (JSON) or a snapshot, one
   file per entry, as in the playground. **Save to file** appears when the server was started with a graph file: it writes
   the graph back to that file in its format (GraphSON, GraphML or a packed snapshot), atomically (a
@@ -438,8 +441,8 @@ snapshot now, optionally named) and **Mark** (name the current position), and th
   - **Roll back here...**: a confirmation explains the effect: everything after commit N moves
     to the **attic** (restorable as long as nothing new is committed or marked), the live graph
     switches to commit N. The option "delete instead of keeping in the attic" (off by default)
-    deletes it for good. The server cancels the running query, rolls the store back in place and
-    serves the result at once; the Graph, Schema and Statistics panels reload and every tab's
+    deletes it for good. The server waits for a running query (it never cancels another
+    client's query: use that tab's Stop), rolls the store back in place and serves the result; the Graph, Schema and Statistics panels reload and every tab's
     result is marked as possibly stale.
 - **Attic**: one entry per rollback (when, commit range, size) with **Show changes** (per
   commit: time, author, counts by kind, examples), **Restore** (undo the rollback; disabled with
@@ -798,9 +801,13 @@ call; the endpoint has no event stream, so it announces `tools.listChanged: fals
 lists the tools again to see a changed catalog. A saved query named like a built-in tool
 (`statistics`, ...) is not listed as a tool of its own; `run_saved_query` reaches it.
 
-The agent's queries share everything with the browser: one query runs at a time, **Stop** in the
-browser also cancels a running agent query (it rolls back), a read-only view opened by either side
-is what both see, and the [limits](#limits) apply.
+The agent's queries share everything with the browser: one query runs at a time, a read-only
+view opened by either side is what both see, and the [limits](#limits) apply. **Stop** in the
+browser cancels only that page's own query, never the agent's. The agent cancels its own request
+with the MCP notification `notifications/cancelled` (`{"requestId": <id of the tools/call>}`, sent
+with its `Mcp-Session-Id`): the query stops and rolls back, also while it still waits for the
+session, and the request answers a "cancelled" tool error. A notification for another session's
+request, for a request that has ended, or sent without a session id is ignored.
 
 ### MCP usage statistics
 
@@ -1105,7 +1112,7 @@ keys); the table below and the linked pages describe every answer.
 | `DELETE /api/ai/conversations/<id>` | drops the conversation (history, pending call, running query) |
 | `GET /api/graph` | `graphInfo()` |
 | `POST /api/execute` `{script, options}` | `execute(script, options)` |
-| `POST /api/cancel` | `stop()`: `{cancelled}` |
+| `POST /api/cancel` | `stop(runId)`: cancels the page's run `runId` (body `{"runId": ".."}`, the id given to `POST /api/execute`), or without a body every run of the page (queries, layout slices); never another client's: `{cancelled}` |
 | `GET /api/schema` | `schema()` (the schema views) |
 | `GET /api/schema/stored`, `GET /api/schema/infer` | `getSchema()`, `inferSchema()` |
 | `POST /api/schema/view` (body: a schema) | `schemaViewOf(schema)`: the schema views of that schema (the editor's draft) with the graph's label counts, `source: "given"`; nothing stored |
@@ -1123,7 +1130,7 @@ keys); the table below and the linked pages describe every answer.
 | `POST /api/element/create` `{kind: "vertex", labels, id?, properties: [[key, typed]], validateOnly?}` or `{kind: "edge", label, from, to, id?, properties, validateOnly?}` | `createElement(request)`: creates the element as ONE commit, validated by the engine (labels, connections, required properties, types); every property is tried, so all bad values come back at once: `{ok: true, created, element, drawn: {kind, id, label, caption, source?, target?}}` or `{ok: false, errors: [{field, message, help?}]}` (`field` a property key, `label`, `id`, `from`/`to` or `general`; always 200). `validateOnly` runs it as a dry run (no commit, no automatic id used up) |
 | `POST /api/element/delete` `{kind, id, validateOnly?}` | `deleteElement(request)`: deletes a vertex with its edges, or an edge, as ONE commit: `{ok: true, deleted, edges}` (`edges`: the edges removed with the vertex; with `validateOnly` they are counted and nothing is deleted) or `{ok: false, errors}`. Creating and deleting are refused, like `element/update`, while the graph is read-only (a past state's view, a backup, maintenance mode) |
 | `POST /api/layout` | `layoutStart(input, options)`: starts the engine's force layout of a drawing (`{vertexCount, edgeSource, edgeTarget, seed?, iterations?, budgetMs?}`) and runs its first slice; answers the job's status `{job, state, iterations, totalIterations, progress, elapsedMs, vertexCount, cached}`, with `positions` (`x, y` per vertex) once `state` is `done` or `cancelled`. A drawing laid out recently comes from the cache at once |
-| `POST /api/layout/step` | `layoutStep(job, budgetMs)`: the next slice (`{job, budgetMs?}`, default 100 ms, at most 500); Stop (`POST /api/cancel`) ends a running slice as `cancelled` |
+| `POST /api/layout/step` | `layoutStep(job, budgetMs)`: the next slice (`{job, budgetMs?}`, default 100 ms, at most 500); Stop (`POST /api/cancel` without a `runId`) ends a running or waiting slice as `cancelled` |
 | `POST /api/layout/cancel` | `layoutCancel(job)`: ends the job, keeping the positions reached so far |
 | `GET /api/completions`, `GET /api/token-values`, `GET /api/memory` | `completions()`, `tokenValues()`, `memoryUsage()` |
 | `GET /api/statistics` | `statistics()`: `{statistics, memory, process, limits: {presets, defaults}}`. `process` is the memory the process holds beside the graph (`GraphStatistics` stays data counts): `memory` is the whole process (`liveHeapBytes`: the bytes the Rust allocator holds, from the CLI's tracking allocator; `rssBytes` and `peakRssBytes`: the resident set size, from `/proc/self/status` `VmRSS`/`VmHWM` on Linux and from `ps -o rss=` on macOS, where the peak is the highest value any report of this server has seen; no RSS on Windows or other platforms; each member is left out when unknown; `source` is `proc`, `ps`, `allocator` or `none`; the WebAssembly playground adds `wasmMemoryBytes`, the linear memory size, `source` `wasm`; beside them the process memory bar: `usedBytes` (the tracked live heap, else the sum of the known segments with `usedTracked` false), `limitBytes` and `usedPercent` (the process ceiling and the share used; absent with `--memory-limit none`), `limitSource` (`configured`, `cgroup`, `physical`, `wasm`, `none`, `unknown`), `segments` (`[{name, bytes}]`: `structure`, `properties`, `compressed`, `indexes`, `models`, then `other` when tracked), `compression {plainBytes, storedBytes}` when values are compressed or deduplicated, `estimateAboveHeap: true` when the graph's estimate exceeds the live heap, or `limitError` when the ceiling cannot be read; see [Seeing how full the process is](../users_guide/resource_limits.md#seeing-how-full-the-process-is)), `models` lists every loaded embedding model that reports its size (`name`, `model`, `dimension`, `bytes`, `default`; an estimate of the weights and the tokenizer), and `aiChat {conversations, historyBytes, historyUncompressedBytes}` (the bytes the stored chat history takes, compressed per finished turn, and the bytes it would take uncompressed) is added when the server runs with `--ai`. The MCP `statistics` tool returns the same |

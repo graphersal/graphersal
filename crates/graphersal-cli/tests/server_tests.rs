@@ -845,6 +845,152 @@ fn cancel_stops_a_running_query_and_rolls_it_back() {
     assert_eq!(execute(port, "g.v().count().next()")["ok"], true);
 }
 
+/// A query of the page `page` (`X-Graphersal-Client`) with its own id `run_id`.
+fn page_run(port: u16, page: &str, script: &str, run_id: Option<&str>) -> Value {
+    let body = match run_id {
+        Some(id) => serde_json::json!({ "script": script, "runId": id }),
+        None => serde_json::json!({ "script": script }),
+    };
+    let client = format!("X-Graphersal-Client: {page}");
+    let answer = request(
+        port,
+        "POST",
+        "/api/execute",
+        Some(&body.to_string()),
+        &[JSON, &client],
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    answer.json()
+}
+
+/// `POST /api/cancel` of the page `page`, for its run `run_id` or all its runs: `cancelled`.
+fn page_stop(port: u16, page: &str, run_id: Option<&str>) -> bool {
+    let body = match run_id {
+        Some(id) => serde_json::json!({ "runId": id }).to_string(),
+        None => String::new(),
+    };
+    let client = format!("X-Graphersal-Client: {page}");
+    let answer = request(port, "POST", "/api/cancel", Some(&body), &[JSON, &client]);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    answer.json()["cancelled"].as_bool().unwrap()
+}
+
+/// Stops until a stop finds the run (its request may not have reached the server yet).
+fn stop_until_found(port: u16, page: &str, run_id: Option<&str>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !page_stop(port, page, run_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never registered"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Issue #30: on the read-write server a Stop reaches only the page's own runs (by `runId`, or
+/// all of them), also while they wait for the session thread behind another page's query, and
+/// never that other query.
+#[test]
+fn a_stop_reaches_only_the_pages_own_runs_also_while_they_wait() {
+    let ui = ui_dir("stop-own-runs");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    let endless = "let n = 0; loop { n += 1; }";
+    // Page a holds the session thread.
+    let a = std::thread::spawn(move || page_run(port, "a", endless, None));
+    std::thread::sleep(Duration::from_millis(300));
+    // Page b queues two runs behind it.
+    let q1 = std::thread::spawn(move || page_run(port, "b", "1 + 1", Some("q1")));
+    let q2 = std::thread::spawn(move || page_run(port, "b", "2 + 2", Some("q2")));
+    stop_until_found(port, "b", Some("q1"));
+    // Unknown ids and other pages find nothing.
+    assert!(!page_stop(port, "b", Some("zz")));
+    assert!(!page_stop(port, "c", Some("q1")));
+    assert!(!page_stop(port, "c", None));
+    // Page a's query was not touched by page b's Stop.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!a.is_finished(), "page a's query still runs");
+    assert!(page_stop(port, "a", None));
+    let a = a.join().unwrap();
+    assert_eq!(a["ok"], false, "{a}");
+    // q1 was cancelled while it waited: it ran nothing; q2 ran.
+    let q1 = q1.join().unwrap();
+    assert_eq!(q1["ok"], false, "{q1}");
+    assert!(q1.to_string().contains("cancelled"), "{q1}");
+    let q2 = q2.join().unwrap();
+    assert_eq!(q2["ok"], true, "{q2}");
+    // Nothing runs any more.
+    assert!(!page_stop(port, "a", None));
+    assert!(!page_stop(port, "b", None));
+    // A malformed runId is refused.
+    let client = "X-Graphersal-Client: b";
+    let refused = request(
+        port,
+        "POST",
+        "/api/cancel",
+        Some(r#"{"runId": 7}"#),
+        &[JSON, client],
+    );
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    let long = serde_json::json!({ "script": "1", "runId": "x".repeat(129) }).to_string();
+    let refused = request(port, "POST", "/api/execute", Some(&long), &[JSON, client]);
+    assert_eq!(refused.status, 400, "{}", refused.body);
+}
+
+/// An MCP client's `notifications/cancelled` cancels its own request of that id, never a
+/// request of the same id of another MCP session.
+#[test]
+fn mcp_notifications_cancelled_cancel_the_clients_own_request() {
+    let ui = ui_dir("mcp-cancelled");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--mcp",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    let one = McpClient::connect(port, &[]);
+    let two = McpClient::connect(port, &[]);
+    let headers = one.headers();
+    let call = std::thread::spawn(move || {
+        mcp_post(
+            port,
+            &headers,
+            r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"query","arguments":{"script":"let n = 0; loop { n += 1; }"}}}"#,
+        )
+    });
+    let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":41,"reason":"test"}}"#;
+    // Another session's notice of the same id does nothing.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(two.send(cancel).status, 202);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !call.is_finished(),
+        "the other session's notice did not cancel it"
+    );
+    // A string id "41" is not the number 41.
+    assert_eq!(
+        one.send(
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"41"}}"#
+        )
+        .status,
+        202
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!call.is_finished(), "a string id is another request");
+    // The client's own notice cancels it.
+    while !call.is_finished() {
+        assert_eq!(one.send(cancel).status, 202);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let answer = call.join().unwrap().json();
+    assert_eq!(answer["id"], 41, "{answer}");
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("cancelled"), "{text}");
+}
+
 #[test]
 fn save_writes_the_graph_back_to_its_file() {
     let ui = ui_dir("save");
@@ -1759,8 +1905,9 @@ fn ok_json(answer: Answer) -> Value {
 }
 
 /// The Store menu's time travel over HTTP: a read-only view at a mark, a commit and a time
-/// (writes refused, back to live), a fork next to the store, a rollback (that cancels the
-/// running query) with the attic: changes, restore, the restore refused after a new commit,
+/// (writes refused, back to live), a fork next to the store, a rollback (that waits for the
+/// running query instead of cancelling it) with the attic: changes, restore, the restore
+/// refused after a new commit,
 /// fork and remove of an entry.
 #[test]
 fn store_views_forks_rollbacks_and_the_attic_over_http() {
@@ -1889,25 +2036,22 @@ fn store_views_forks_rollbacks_and_the_attic_over_http() {
         "{again}"
     );
 
-    // A rollback from inside a view cancels the running query and lands on the live graph.
-    // (Opening a view cancels the running query too: the graph changes under it.)
-    let running = std::thread::spawn(move || execute(port, "let n = 0; loop { n += 1; }"));
-    std::thread::sleep(Duration::from_millis(500));
-    ok_json(post(
-        port,
-        "/api/store/view",
-        r#"{"target": {"commit": 2}}"#,
-    ));
-    assert_eq!(running.join().unwrap()["ok"], false);
-    let running = std::thread::spawn(move || execute(port, "let n = 0; loop { n += 1; }"));
-    std::thread::sleep(Duration::from_millis(500));
-    let rolled = ok_json(post(
-        port,
-        "/api/store/rollback",
-        r#"{"target": {"mark": "m1"}}"#,
-    ));
-    let r = running.join().unwrap();
-    assert_eq!(r["ok"], false, "the running query was cancelled: {r}");
+    // Opening a view, and a rollback from inside it (which lands on the live graph), wait
+    // for a running query instead of cancelling it: stopping a query is its client's Stop.
+    let waits_for_the_query = |path: &'static str, body: &'static str| {
+        let running = std::thread::spawn(move || execute(port, "let n = 0; loop { n += 1; }"));
+        std::thread::sleep(Duration::from_millis(500));
+        let action = std::thread::spawn(move || post(port, path, body));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!action.is_finished(), "{path} waits for the query");
+        assert!(!running.is_finished(), "{path} did not cancel the query");
+        assert_eq!(post(port, "/api/cancel", "").json()["cancelled"], true);
+        let r = running.join().unwrap();
+        assert_eq!(r["ok"], false, "cancelled by its Stop: {r}");
+        ok_json(action.join().unwrap())
+    };
+    waits_for_the_query("/api/store/view", r#"{"target": {"commit": 2}}"#);
+    let rolled = waits_for_the_query("/api/store/rollback", r#"{"target": {"mark": "m1"}}"#);
     assert_eq!(rolled["rollback"]["target"], 1, "{rolled}");
     assert_eq!(rolled["rollback"]["previousCommitSeq"], 3, "{rolled}");
     assert!(
@@ -5303,6 +5447,93 @@ mod ai_chat {
             ],
             "{last}"
         );
+    }
+
+    /// Issue #31: in the read-only serving mode a graceful stop past the drain timeout cancels
+    /// the query of an AI Chat turn too (it runs under its conversation's own token, which the
+    /// run registry holds): the query stops within the grace instead of running on until the
+    /// process exits.
+    #[test]
+    fn a_graceful_stop_cancels_an_ai_chat_query_in_the_read_only_serving_mode() {
+        use std::io::{BufRead, Read};
+        use std::process::{Command, Stdio};
+
+        let mock = MockLlm::start();
+        let ui = ui_dir("ai-drain");
+        let file = ui.parent().unwrap().join("ai.json");
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"provider": "openai", "model": "mock-model", "base_url": "{}/v1",
+                    "api_key": "{KEY}"}}"#,
+                mock.base_url
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(["--graph", "modern", "--read-only", "--workers", "1"])
+            .args(["--drain-timeout", "1", "--timeout", "600000"])
+            .args([
+                "--ui-dir",
+                ui.to_str().unwrap(),
+                "--ai",
+                file.to_str().unwrap(),
+            ])
+            .args(["--server", "--port", "0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port: u16 = line
+            .trim()
+            .trim_end_matches('/')
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("no address on stdout: {line:?}"));
+        // The stderr pipe is drained meanwhile, so the server never blocks on it.
+        let mut stderr = child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        let server = super::DevServer { child, port };
+
+        let id = create(port, "page-a");
+        let run = "RUN g.inject(1).repeat(__.identity()).times(1000000000).count()";
+        assert_eq!(send(port, "page-a", &id, run).status, 200);
+        wait_for(port, "page-a", &id, "tool_call");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while get(port, "/api/info").json()["serving"]["running"] != 1 {
+            assert!(Instant::now() < deadline, "the query never ran");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let status = Command::new("kill")
+            .args(["-TERM", &server.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut server = server;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let exit = loop {
+            if let Some(exit) = server.child.try_wait().unwrap() {
+                break exit;
+            }
+            assert!(Instant::now() < deadline, "the server did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(exit.success(), "{exit:?}");
+        let stderr = stderr.join().unwrap();
+        assert!(
+            stderr.contains("1 running queries were cancelled"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("did not stop"), "{stderr}");
     }
 
     #[test]

@@ -21,8 +21,8 @@ from any static file server, GitHub Pages, or a `play.<domain>` host.
 the rest of the UI is the same code. Both engines run the same Rust session logic
 (`crates/graphersal-session`), so their answers have the same shapes. In dev server mode there is
 no start page and no graph choice (the server serves the graph it was started with), the top bar
-shows a **DEV SERVER · unstable** badge, Stop cancels the running query on the server (it rolls
-back; nothing restarts), and **Save to file** writes the graph back to the server's `--graph` file
+shows a **DEV SERVER · unstable** badge, Stop cancels this page's running query on the server by
+its run id (it rolls back; nothing restarts; another page's or agent's query is not touched), and **Save to file** writes the graph back to the server's `--graph` file
 when it has one. No `pkg/` build is needed in that mode. Every request names the page
 (`X-Graphersal-Client`), and the page polls the server's change feed (`GET api/changes`, every
 2 s while visible, `js/change-feed.js`): a change it did not make (another tab, an AI agent over
