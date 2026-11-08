@@ -112,8 +112,8 @@ g.e().has("weight", P.gt(0.5)).count().next()
 
 A `count()` right after a start step whose one condition an index answers
 [exactly](#kept-exact) is counted from the index without visiting the elements: one equality
-(a folded `has(key, value)`, `has(key, P.eq(..))` or the `each` point `has(key,
-__.unfold().is(..))`) with a string, boolean, uuid or temporal value, no other condition, and
+(a folded `has(key, value)`, `has(key, P.eq(..))`, the `each` point `has(key,
+__.unfold().is(..))` or a `to_lower` point) with a string, boolean, uuid or temporal value, no other condition, and
 either a label-less index under a start without labels or the index of the start's one label.
 `.profile()` shows `[count from index]`:
 
@@ -248,8 +248,11 @@ What is served and what is not:
 - Served: `v()`/`e()` with a folded `has_label(..)` (every label with a `to_lower` index on the
   key), followed in the run of pure filters by `has(key, __.to_lower().is(P))` with `P` a value,
   `P.eq`, `P.within` or a range (`P.gt/gte/lt/lte/between/inside/outside`). `.profile()` shows
-  `[index: vertex person.name to_lower]` on the start step; the `has` step stays in the plan and
-  re-checks every candidate.
+  `[index: vertex person.name to_lower]` on the start step; for a range the `has` step stays in
+  the plan and re-checks every candidate, a point (a value, `P.eq`, `P.within`) is answered
+  [exactly](#kept-exact) in a query that does not write: the `has` step leaves the plan,
+  `v(labels: ["person"]).has("name", __.to_lower().is(P.eq("marko"))) [index: vertex
+  person.name to_lower, exact]`.
 - Not served (a scan, the same result): any other child (`__.is("x")` without `to_lower()`,
   `__.to_upper()`, `__.to_lower(Scope.local)`, more steps after `is(..)`, `P.neq`, text
   predicates), `where(__.values("name").to_lower().is(..))`, a jpath key, a source without
@@ -306,7 +309,7 @@ g.v().has("_owners", "o1").values("name").to_list()           // the whole value
 - **The chain `["each", "to_lower"]`** holds the lowered text of every string element and serves
   `has(key, __.unfold().to_lower().is(P))` (`[index: vertex tags each to_lower, any label]`), like
   `to_lower` only while it skipped nothing (a number in a list makes `to_lower()` fail, and the
-  scan must report it). A `to_lower` transform never serves a `null` constant (`to_lower()` passes
+  scan must report it); a point is then answered [exactly](#kept-exact), like `to_lower`'s. A `to_lower` transform never serves a `null` constant (`to_lower()` passes
   a `null` through, the index holds none).
 - **Not served**: `__.unfold().unfold().is(..)`, `__.to_lower().unfold()..` (the wrong order),
   negations and text predicates, GQL's `x IN n.list` (a `gql:filter` expression: a right operand
@@ -496,16 +499,19 @@ indexing a long compressed field costs the memory compression saved).
 
 Because it is kept exact, the index **answers** some conditions instead of narrowing them: a
 point (`has(key, value)`, `P.eq`, `P.within`) of a string, boolean, uuid or temporal value read
-from an index without a transform, or the same point inside `has(key, __.unfold().is(..))` read
-from an `each` index, finds exactly the elements the condition accepts, each once. In a query
+from an index without a transform, the same point inside `has(key, __.unfold().is(..))` read
+from an `each` index, or inside `has(key, __.to_lower().is(..))` / `has(key,
+__.unfold().to_lower().is(..))` read from a `to_lower` / `["each", "to_lower"]` index while it
+skipped nothing (every value is then a string, `to_lower()` cannot fail, and nothing writes
+during a reading query), finds exactly the elements the condition accepts, each once. In a query
 that does **not write** (no mutating step at any level), the optimizer then drops the re-check
 of that one condition: a folded equality is not checked again on the candidates, a `has` step is
 removed from the plan, and `.profile()` marks the access `exact`. Every query form gains, not
 only `count()`: `.id().to_list()`, `.values(..)`, a traversal from the found elements. Everything
 else is still checked: the other conditions, the labels when a label-less index serves a start
 with labels, ranges, numbers (a slice spans `int64` and `float64`), `null`, a whole-value
-condition read from an `each` index (a superset), the `to_lower` transforms (`to_lower()` can
-fail, user decision), and every condition of a query that writes. The index is trusted on
+condition read from an `each` index (a superset), a `to_lower` index that skipped a value (it is
+not read at all), and every condition of a query that writes. The index is trusted on
 purpose: a wrong entry would show in the result instead of being hidden by a re-check, and the
 randomized differential tests compare every exact shape with the scan. A
 [custom storage](#other-storages) opts in with `StorageCapabilities::exact_property_index_lookups`.

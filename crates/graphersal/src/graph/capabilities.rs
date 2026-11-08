@@ -57,7 +57,8 @@ pub struct StorageCapabilities {
     /// ([`GraphStorage::vertices_by_property_index`] and its siblings) of an index without a
     /// transform return exactly the elements whose value at the key equals it, and of an index
     /// with the transform `each` exactly the elements whose value is it or is an array holding
-    /// it, each element once: never more. The optimizer then drops the re-check of such a
+    /// it, and of an index with `to_lower` (`["each", "to_lower"]`) exactly the elements whose
+    /// string value (string array element) lowers to it, each element once: never more. The optimizer then drops the re-check of such a
     /// condition in a plan that does not write. Without it (the default) every lookup counts as
     /// a superset and every condition is re-checked on each candidate. A read-only view (`&G`)
     /// or a shared `Arc` states it for the storage it reads through, since its lookups are the

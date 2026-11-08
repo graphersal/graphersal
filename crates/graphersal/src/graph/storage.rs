@@ -741,7 +741,9 @@ pub trait GraphStorage: Send + Sync {
     /// section "Case-insensitive search"); `None` when there is no such index (the default).
     /// The same contract as [`Self::vertices_by_property_index`]: a superset, each vertex once;
     /// with [`StorageCapabilities::exact_property_index_lookups`], an `each` lookup of such a
-    /// point returns exactly the vertices whose value is it or an array holding it.
+    /// point returns exactly the vertices whose value is it or an array holding it, a
+    /// `to_lower` (`["each", "to_lower"]`) lookup exactly those whose string value (string
+    /// array element) lowers to it.
     /// A storage serving such an index must report its
     /// [`skipped`](crate::graph::PropertyIndexStats::skipped) count in
     /// [`Self::property_indexes`].
@@ -776,7 +778,7 @@ pub trait GraphStorage: Send + Sync {
     /// index: the caller then counts the candidates of the lookup methods above, re-checking
     /// each. Unlike a lookup, the count must never include an element outside the slice. The
     /// engine asks only for slices whose every element matches the condition (an equality on
-    /// a string, boolean, uuid or temporal value, with no transform or `each`), and only of a
+    /// a string, boolean, uuid or temporal value, with a known transform or none), and only of a
     /// storage claiming [`StorageCapabilities::exact_property_index_lookups`].
     fn count_by_property_index(
         &self,

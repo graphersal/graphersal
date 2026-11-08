@@ -704,7 +704,8 @@ pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S
 /// `exact_property_index_lookups`: for an equality slice of a string, boolean or uuid value,
 /// the lookups of a per-label and a label-less index without a transform return exactly the
 /// vertices whose value at the key equals it, and of an index with the transform `each`
-/// exactly those whose value is it or an array holding it; each vertex once, never more (the
+/// exactly those whose value is it or an array holding it, and of a `to_lower` index exactly
+/// those whose string value lowers to it; each vertex once, never more (the
 /// optimizer drops the re-check of such a condition). The data mixes the look-alikes a
 /// superset could hold: other kinds (`"1"`, `1`, `1.0`), other case, arrays (with the value
 /// twice, nested, beside objects), `null`, a missing key, multi-label and unlabeled vertices.
@@ -770,6 +771,11 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
             "ex_any_each",
             PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
                 .with_transform(Some(each.clone())),
+        ),
+        (
+            "ex_any_lower",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
+                .with_transform(Some(PropertyIndexTransform::ToLower)),
         ),
     ] {
         storage
@@ -851,6 +857,40 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
                 Some(expected(storage, None, true, &wanted)),
                 "{stage}: each lookup of {wanted:?}"
             );
+            // `to_lower`: exactly the string values that lower to it.
+            let lowered = vertex_ids(
+                storage,
+                storage
+                    .vertices_by_transformed_property_index(
+                        None,
+                        "ex",
+                        &PropertyIndexTransform::ToLower,
+                        &range,
+                    )
+                    .unwrap(),
+            );
+            let mut lowers: Vec<String> = Vec::new();
+            for v in storage.vertices().unwrap() {
+                let properties = storage.vertex_properties(v).unwrap();
+                if let (Some(ElementProperty::String(text)), ElementProperty::String(want)) =
+                    (properties.as_ref().and_then(|p| p.get("ex")), &wanted)
+                    && text.to_lowercase() == want.as_str()
+                {
+                    lowers.push(
+                        storage
+                            .vertex_id(v)
+                            .unwrap()
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+            lowers.sort();
+            assert_eq!(
+                lowered,
+                Some(lowers),
+                "{stage}: to_lower lookup of {wanted:?}"
+            );
         }
     };
     check(storage, "built");
@@ -867,7 +907,7 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         .rollback_unit(mark, &RollbackReason::failed(&"contract"))
         .unwrap();
     check(storage, "after the rollback");
-    for name in ["ex_p", "ex_any", "ex_any_each"] {
+    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
         let kind = if name == "ex_p" {
             DefinitionKind::PROPERTY_INDEX
         } else {

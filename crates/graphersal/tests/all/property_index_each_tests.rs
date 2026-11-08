@@ -718,7 +718,7 @@ fn the_each_to_lower_chain_serves_only_while_nothing_is_skipped() {
     check(&graph);
     let query = r#"v().has_label("t").has("tags", __.unfold().to_lower().is("rust"))"#;
     assert!(
-        first_step(&graph, query).ends_with("[index: vertex t.tags each to_lower]"),
+        first_step(&graph, query).ends_with("[index: vertex t.tags each to_lower, exact]"),
         "{:?}",
         profile_steps(&graph, query)
     );

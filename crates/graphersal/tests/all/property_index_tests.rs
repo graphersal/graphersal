@@ -2314,7 +2314,8 @@ mod transforms {
             r#"v().has_label("person").has("name", __.to_lower().is("marko"))"#,
         );
         assert_eq!(
-            steps[0], r#"v(labels: ["person"]) [index: vertex person.name to_lower]"#,
+            steps[0],
+            r#"v(labels: ["person"]).has("name", __.to_lower().is(P.eq("marko"))) [index: vertex person.name to_lower, exact]"#,
             "{steps:?}"
         );
         for served in [
@@ -2399,7 +2400,10 @@ mod transforms {
             &graph,
             r#"v().has_label("person").has("name", __.to_lower().is("marko"))"#,
         );
-        assert!(lowered[0].ends_with("person.name to_lower]"), "{lowered:?}");
+        assert!(
+            lowered[0].ends_with("person.name to_lower, exact]"),
+            "{lowered:?}"
+        );
         // A second index of the same transform is a conflict that names it.
         let err = run(
             &graph,

@@ -446,7 +446,7 @@ fn a_source_without_labels_reads_the_label_less_index_and_profile_says_any_label
     );
     assert_eq!(
         first_step(&graph, r#"v().has("name", __.to_lower().is("josh"))"#),
-        r#"v() [index: vertex name to_lower, any label]"#
+        r#"v().has("name", __.to_lower().is(P.eq("josh"))) [index: vertex name to_lower, any label, exact]"#
     );
     // Edges.
     let _ = ok(

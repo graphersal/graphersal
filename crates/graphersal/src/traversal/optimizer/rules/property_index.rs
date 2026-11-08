@@ -120,9 +120,14 @@ fn exact_value(value: &crate::ElementProperty) -> bool {
 ///   (an element is in the postings of each of its values once, D15; the source deduplicates
 ///   several slices; an object, nested array or vector `unfold()` emits never equals a scalar,
 ///   and the index skips exactly those);
+/// - or `to_lower` serving `has(key, __.to_lower().is(P))`, or `["each", "to_lower"]` serving
+///   `has(key, __.unfold().to_lower().is(P))` (user decision 2026-11-08): the rule reads such
+///   an index only while it skipped no value (`usable`), and nothing writes during a reading
+///   run, so every value at the key is a string (or a list of strings), `to_lower()` cannot
+///   fail, and the lowered keys answer the condition exactly (a `null` constant is never
+///   served: `index_condition`);
 /// - NOT `each` serving a whole-value condition (`superset`: arrays holding the value are
-///   candidates), and not `to_lower` or `["each", "to_lower"]` (user decision 2026-11-08:
-///   a transform that can fail keeps its re-check).
+///   candidates).
 ///
 /// The label side (which index, a label check of a label-less index's candidates) is not part
 /// of it: the source checks labels either way.
@@ -134,8 +139,7 @@ fn exact_shape(
     use std::ops::Bound::Included;
     let transform_ok = match transform {
         None => true,
-        Some(PropertyIndexTransform::Each) => !superset,
-        Some(_) => false,
+        Some(transform) => !superset && transform.is_known(),
     };
     transform_ok
         && !ranges.is_empty()
@@ -447,12 +451,19 @@ mod tests {
         ));
         assert!(exact_shape(Some(&each), false, &[point("x".into())]));
         // A superset, a transform that can fail, numbers, null, ranges, nothing.
-        assert!(!exact_shape(Some(&each), true, &[point("x".into())]));
-        assert!(!exact_shape(
+        assert!(exact_shape(
             Some(&PropertyIndexTransform::ToLower),
             false,
             &[point("x".into())]
         ));
+        let chain = PropertyIndexTransform::from_names(["each", "to_lower"]).unwrap();
+        assert!(exact_shape(Some(&chain), false, &[point("x".into())]));
+        assert!(!exact_shape(
+            Some(&PropertyIndexTransform::Unknown("upper".into())),
+            false,
+            &[point("x".into())]
+        ));
+        assert!(!exact_shape(Some(&each), true, &[point("x".into())]));
         assert!(!exact_shape(None, false, &[point(1.into())]));
         assert!(!exact_shape(
             None,

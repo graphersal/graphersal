@@ -16,15 +16,15 @@ v().has_label("person").has("age", P.gt(30))     →   v(labels: ["person"]) [in
                                                       has("age", P.gt(30))
 e().has_label("knows").has("weight", P.lt(0.5))  →   e(labels: ["knows"]) [index: edge knows.weight]
                                                       has("weight", P.lt(0.5))
-v().has_label("person")                          →   v(labels: ["person"]) [index: vertex person.name to_lower]
-   .has("name", __.to_lower().is("ada"))              has("name", __.to_lower().is(P.eq("ada")))
+v().has_label("person")                          →   v(labels: ["person"]).has("name", __.to_lower().is(P.eq("ada")))
+   .has("name", __.to_lower().is("ada"))                  [index: vertex person.name to_lower, exact]
 v().has("name", "josh")                          →   v().has("name", "josh") [index: vertex name, any label, exact]
 v().has("name", "josh").count()                  →   v().has("name", "josh").count() [index: vertex name, any label, exact] [count from index]
 v().has("_owners", __.unfold().is("o1"))         →   v().has("_owners", __.unfold().is(P.eq("o1"))) [index: vertex _owners each, any label, exact]
 v().has("_owners", __.unfold().is(P.gt("o1")))   →   v() [index: vertex _owners each, any label]
                                                       has("_owners", __.unfold().is(P.gt("o1")))
 v().has_label("doc")                             →   v(labels: ["doc"]) [index: vertex doc.tags each to_lower]
-   .has("tags", __.unfold().to_lower().is("x"))       has("tags", __.unfold().to_lower().is(P.eq("x")))
+   .has("tags", __.unfold().to_lower().is(P.gte("x")))  has("tags", __.unfold().to_lower().is(P.gte("x")))
 ```
 
 It looks at
@@ -72,10 +72,13 @@ exactly, so no re-check could drop a candidate:
 - every slice is a point (an equality, or each operand of `P.within`) of a string, boolean, uuid
   or temporal value: a number slice spans `int64` and `float64` (a superset), and `null` and
   ranges keep their re-check;
-- the index has no transform (a condition on the whole value), or exactly `each` reading
+- the index has no transform (a condition on the whole value), or `each` reading
   `has(key, __.unfold().is(..))` (an element is in the postings of each of its values once; the
-  start step deduplicates several slices); not an `each` index read as a superset, and not
-  `to_lower` or `["each", "to_lower"]` (a transform that can fail keeps its re-check);
+  start step deduplicates several slices), or `to_lower` / `["each", "to_lower"]` reading
+  `has(key, __.to_lower().is(..))` / `has(key, __.unfold().to_lower().is(..))` (read only while
+  the index skipped nothing, so in a reading query `to_lower()` cannot fail and the lowered keys
+  answer the condition; a `null` constant is never served); not an `each` index read as a
+  superset;
 - the query does not write at any level (no mutating step, in a child traversal neither: a write
   could change what the index holds while the plan reads it);
 - the storage claims `StorageCapabilities::exact_property_index_lookups` (the built-in graph, its

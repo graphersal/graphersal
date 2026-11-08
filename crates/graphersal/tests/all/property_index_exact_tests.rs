@@ -169,6 +169,28 @@ fn random_value(rng: &mut Rng) -> String {
     }
 }
 
+/// Case variants of a few texts.
+const TEXTS: [&str; 8] = [
+    r#""ab""#, r#""Ab""#, r#""AB""#, r#""x""#, r#""X""#, r#""Ä""#, r#""ä""#, r#""ab ""#,
+];
+
+/// A random value of `s` (read through `to_lower` indexes): a string. Numbers come only from
+/// the writes in `TEXT_WRITES` (they make `to_lower()` fail and the index skip them: it is then
+/// not read at all, until a later write removes them).
+fn random_text(rng: &mut Rng) -> String {
+    TEXTS[rng.below(TEXTS.len())].to_string()
+}
+
+/// A random value of `ss` (read through an `["each", "to_lower"]` index): a list of texts with
+/// duplicates, or one text.
+fn random_texts(rng: &mut Rng) -> String {
+    if rng.below(4) == 0 {
+        return random_text(rng);
+    }
+    let items: Vec<String> = (0..rng.below(4)).map(|_| random_text(rng)).collect();
+    format!("[{}]", items.join(", "))
+}
+
 /// Vertices labelled `a`, `b`, both or none, with a random `k` (sometimes missing) and a `t`
 /// of two values; edges labelled `r` or `s` with a random `k`.
 fn random_graph(rng: &mut Rng, vertices: usize) -> Arc<Graph> {
@@ -183,6 +205,12 @@ fn random_graph(rng: &mut Rng, vertices: usize) -> Arc<Graph> {
         ));
         if rng.below(6) != 0 {
             script.push_str(&format!(".property(\"k\", {})", random_value(rng)));
+        }
+        if rng.below(5) != 0 {
+            script.push_str(&format!(".property(\"s\", {})", random_text(rng)));
+        }
+        if rng.below(5) != 0 {
+            script.push_str(&format!(".property(\"ss\", {})", random_texts(rng)));
         }
         script.push_str(".iterate();\n");
     }
@@ -212,6 +240,8 @@ fn create_indexes<S: GraphStorage + Default + Send + Sync + 'static>(graph: &Arc
         r#"#{element: "edge", key: "k"}"#,
         r#"#{element: "edge", key: "k", transform: "each"}"#,
         r#"#{element: "edge", label: "r", key: "k"}"#,
+        r#"#{name: "s_lower", key: "s", transform: "to_lower"}"#,
+        r#"#{name: "ss_lower", key: "ss", transform: ["each", "to_lower"]}"#,
     ] {
         let _ = ok(graph, &format!("g.create_index({index})"));
     }
@@ -275,6 +305,67 @@ const QUERIES: [(&str, bool); 27] = [
     (r#"e().has("k", P.between("a", "y"))"#, false),
 ];
 
+/// The lowered points the `to_lower` queries ask for (a constant is compared AS GIVEN).
+const LOWER_POINTS: [&str; 5] = [r#""ab""#, r#""x""#, r#""ä""#, r#""AB""#, r#""ab ""#];
+
+/// Queries through the `to_lower` indexes (`L`, `M`: lowered points), the index each reads, and
+/// whether its condition is a point: exact exactly while that index skipped nothing (else the
+/// index is not read at all, and the scan reports `to_lower()`'s error like the plain scan).
+const LOWER_QUERIES: [(&str, &str, bool); 7] = [
+    (r#"v().has("s", __.to_lower().is(L))"#, "s_lower", true),
+    (
+        r#"v().has("s", __.to_lower().is(P.within([L, M, L])))"#,
+        "s_lower",
+        true,
+    ),
+    (
+        r#"v().has_label("a").has("s", __.to_lower().is(L))"#,
+        "s_lower",
+        true,
+    ),
+    (
+        r#"v().has("s", __.to_lower().is(P.gte(L)))"#,
+        "s_lower",
+        false,
+    ),
+    (
+        r#"v().has("ss", __.unfold().to_lower().is(L))"#,
+        "ss_lower",
+        true,
+    ),
+    (
+        r#"v().has("t", "t1").has("ss", __.unfold().to_lower().is(P.within([L, M])))"#,
+        "ss_lower",
+        true,
+    ),
+    (
+        r#"v().has("ss", __.unfold().to_lower().is(P.lt(L)))"#,
+        "ss_lower",
+        false,
+    ),
+];
+
+/// The `skipped` count of the index `name`.
+fn skipped(graph: &Arc<Graph>, name: &str) -> i64 {
+    ok(
+        graph,
+        &format!(r#"g.indexes().filter(|i| i.name == "{name}")[0].skipped"#),
+    )
+    .as_int()
+    .unwrap()
+}
+
+/// Writes of `s`/`ss` between the queries: a text, a number (skipped), back to texts.
+const TEXT_WRITES: [&str; 7] = [
+    r#"g.v().limit(3).property("s", TEXT).iterate()"#,
+    r#"g.v().has("s", TEXT).limit(1).property("s", 1).iterate()"#,
+    r#"g.v().has("ss", __.unfold().is(TEXT)).limit(1).property("ss", [TEXT, 1]).iterate()"#,
+    r#"g.add_v("a").property("s", TEXT).property("ss", TEXTS).iterate()"#,
+    r#"g.v().has("s", 1).property("s", "ab").iterate()"#,
+    r#"g.v().has("ss", __.unfold().is(1)).property("ss", ["x"]).iterate()"#,
+    r#"g.v().limit(2).property("ss", TEXTS).v().fail("roll back").iterate()"#,
+];
+
 /// Writes between the queries; the last ones fail and roll back.
 const WRITES: [&str; 12] = [
     r#"g.v().has("k", __.unfold().is("x")).limit(2).property("k", VALUE).iterate()"#,
@@ -306,11 +397,56 @@ fn differential(seed: u64, vertices: usize, steps: usize) {
     create_indexes(&graph);
     check(&graph);
     let mut exercised = 0usize;
+    let mut lowered_exact = 0usize;
     for step in 0..=steps {
         if step > 0 {
             let write = WRITES[rng.below(WRITES.len())].replace("VALUE", &random_value(&mut rng));
             let _ = run(&graph, &write);
             check(&graph);
+            let write = TEXT_WRITES[rng.below(TEXT_WRITES.len())]
+                .replace("TEXTS", &random_texts(&mut rng))
+                .replace("TEXT", &random_text(&mut rng));
+            let _ = run(&graph, &write);
+            check(&graph);
+        }
+        for (template, index, point) in LOWER_QUERIES {
+            let l = LOWER_POINTS[rng.below(LOWER_POINTS.len())];
+            let m = LOWER_POINTS[rng.below(LOWER_POINTS.len())];
+            let query = template.replace('L', l).replace('M', m);
+            let served = skipped(&graph, index) == 0;
+            if !served {
+                // The index is not read: the query is the scan, `to_lower()`'s error included.
+                let plan = run(&graph, &format!("g.{query}.profile().to_string()"));
+                assert!(
+                    plan.as_ref()
+                        .map_or(true, |plan| !plan.to_string().contains("[index")),
+                    "{query}: {plan:?}"
+                );
+                let with = run(&graph, &format!("g.{query}.count().next()")).map(|v| v.to_string());
+                let without =
+                    run(&graph, &format!("{SCAN}.{query}.count().next()")).map(|v| v.to_string());
+                assert_eq!(with.is_ok(), without.is_ok(), "{query}");
+                if let (Ok(with), Ok(without)) = (with, without) {
+                    assert_eq!(with, without, "{query}");
+                }
+                continue;
+            }
+            let plan = profile_steps(&graph, &query).join(" | ");
+            assert!(
+                plan.contains("[index"),
+                "seed {seed} step {step}: {query}: {plan}"
+            );
+            lowered_exact += usize::from(point);
+            assert_eq!(
+                plan.contains(", exact]"),
+                point,
+                "seed {seed} step {step}: {query}: {plan}"
+            );
+            let (with, without) = both(&graph, &query);
+            assert_eq!(with, without, "seed {seed} step {step}: {query}");
+            let (with, without) = counts(&graph, &query);
+            assert_eq!(with, without, "seed {seed} step {step}: {query}.count()");
+            exercised += usize::from(with > 0);
         }
         for (template, exact) in QUERIES {
             let x = POINTS[rng.below(POINTS.len())];
@@ -333,6 +469,7 @@ fn differential(seed: u64, vertices: usize, steps: usize) {
         exercised > steps,
         "seed {seed}: the queries found almost nothing"
     );
+    assert!(lowered_exact > 0, "seed {seed}: no exact to_lower read");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -476,17 +613,31 @@ fn the_recheck_stays_where_the_index_does_not_answer_exactly() {
         1,
         "only the scalar"
     );
-    // A `to_lower` transform can fail: it keeps its re-check (user decision).
+    // A `to_lower` index read while it skipped nothing answers a point exactly (nothing
+    // writes during a reading run); a range keeps its `has` step.
     let _ = ok(
         &graph,
         r#"g.create_index(#{key: "name", transform: "to_lower"})"#,
     );
-    let plan = first_step(&graph, r#"v().has("name", __.to_lower().is("m1"))"#);
-    assert!(plan.contains("to_lower, any label]"), "{plan}");
     assert_eq!(
-        profile_steps(&graph, r#"v().has("name", __.to_lower().is("m1"))"#).len(),
+        profile_steps(&graph, r#"v().has("name", __.to_lower().is("m1")).count()"#),
+        [
+            r#"v().has("name", __.to_lower().is(P.eq("m1"))).count() [index: vertex name to_lower, any label, exact] [count from index]"#
+        ]
+    );
+    assert_eq!(
+        profile_steps(&graph, r#"v().has("name", __.to_lower().is(P.gt("m1")))"#).len(),
         2,
         "the has() step stays"
+    );
+    // In a writing plan the point keeps its re-check too.
+    let steps = profile_steps(
+        &graph,
+        r#"v().has("name", __.to_lower().is("m1")).property("seen", 1)"#,
+    );
+    assert!(
+        !steps.iter().any(|step| step.contains("exact")),
+        "{steps:?}"
     );
 }
 
