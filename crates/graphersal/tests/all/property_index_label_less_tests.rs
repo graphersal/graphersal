@@ -151,8 +151,8 @@ fn random_graph(rng: &mut Rng, vertices: usize) -> TraversalGraph {
 #[test]
 fn a_label_less_index_is_created_listed_and_dropped_as_kind_property_index_ext() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    ok(&graph, r#"g.create_index(#{key: "name"})"#);
-    ok(
+    let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
+    let _ = ok(
         &graph,
         r#"g.create_index(#{element: "edge", key: "weight", transform: ()})"#,
     );
@@ -253,12 +253,12 @@ fn the_payload_omits_the_label_and_a_plain_kind_needs_one() {
 #[test]
 fn index_names_are_one_namespace_across_both_kinds() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    ok(
+    let _ = ok(
         &graph,
         r#"g.create_index(#{label: "person", key: "name", name: "names"})"#,
     );
     // The same name, label-less: replaces the per-label index in one unit.
-    ok(&graph, r#"g.create_index(#{key: "name", name: "names"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "name", name: "names"})"#);
     check(&graph);
     {
         let g = graph.read();
@@ -291,7 +291,7 @@ fn index_names_are_one_namespace_across_both_kinds() {
         assert_eq!(g.property_indexes().unwrap()[0].label, None);
     }
     // A per-label and a label-less index on one key coexist under different names.
-    ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
     assert_eq!(graph.read().property_indexes().unwrap().len(), 2);
     check(&graph);
     // Two label-less indexes on one key: a conflict.
@@ -363,8 +363,8 @@ fn random_writes_and_rollbacks_keep_it_exact_and_queries_equal() {
     for seed in [3_u64, 11, 29] {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let graph = Arc::new(Graph::new(random_graph(&mut rng, 80)));
-        ok(&graph, r#"g.create_index(#{key: "k"})"#);
-        ok(&graph, r#"g.create_index(#{element: "edge", key: "o"})"#);
+        let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
+        let _ = ok(&graph, r#"g.create_index(#{element: "edge", key: "o"})"#);
         check(&graph);
         let writes = [
             r#"g.v().has("k", "x").limit(2).property("k", "y").iterate()"#,
@@ -421,7 +421,7 @@ fn a_source_without_labels_reads_the_label_less_index_and_profile_says_any_label
     let graph = Arc::new(GraphSource::tinkerpop_modern());
     // No index yet: a plain scan.
     assert!(!first_step(&graph, r#"v().has("name", "josh")"#).contains("[index"));
-    ok(&graph, r#"g.create_index(#{key: "name"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
     assert_eq!(
         first_step(&graph, r#"v().has("name", "josh")"#),
         r#"v().has("name", "josh") [index: vertex name, any label]"#
@@ -440,7 +440,7 @@ fn a_source_without_labels_reads_the_label_less_index_and_profile_says_any_label
     assert!(with.is_empty());
     assert_eq!(with, without);
     // A transformed label-less index: `to_lower` is named before the marker.
-    ok(
+    let _ = ok(
         &graph,
         r#"g.create_index(#{key: "name", transform: "to_lower"})"#,
     );
@@ -449,7 +449,7 @@ fn a_source_without_labels_reads_the_label_less_index_and_profile_says_any_label
         r#"v() [index: vertex name to_lower, any label]"#
     );
     // Edges.
-    ok(
+    let _ = ok(
         &graph,
         r#"g.create_index(#{element: "edge", key: "weight"})"#,
     );
@@ -491,8 +491,8 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
     // Per-label `a.k`: 100 entries over 1 value (estimate 100); label-less: 1000 over 901
     // (estimate 1): the label-less index wins for `a` and checks the label.
     let graph = skewed();
-    ok(&graph, r#"g.create_index(#{label: "a", key: "k"})"#);
-    ok(&graph, r#"g.create_index(#{key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "a", key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
     let query = r#"v().has_label("a").has("k", "shared")"#;
     assert!(
         first_step(&graph, query).ends_with("[index: vertex k, any label]"),
@@ -506,8 +506,8 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
     // Per-label `c.k`: 900 entries over 900 values (estimate 1); label-less over a skewed
     // whole: 1000 over 901 (estimate 1): a tie keeps the per-label index (no label check).
     let graph = skewed();
-    ok(&graph, r#"g.create_index(#{label: "c", key: "k"})"#);
-    ok(&graph, r#"g.create_index(#{key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "c", key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
     let query = r#"v().has_label("c").has("k", "v7")"#;
     assert!(
         first_step(&graph, query).ends_with(r#"[index: vertex c.k]"#),
@@ -537,11 +537,11 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
         .unwrap();
     }
     let graph = Arc::new(Graph::new(tg));
-    ok(&graph, r#"g.create_index(#{label: "c", key: "k"})"#);
-    ok(&graph, r#"g.create_index(#{key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "c", key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
     // `c.k`: 900 over 9 = 100 per value; label-less: 1000 over 109 = 9 per value: label-less.
     assert!(first_step(&graph, r#"v().has_label("c").has("k", "c1")"#).contains("any label"));
-    ok(&graph, r#"g.create_index(#{label: "b", key: "k"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "b", key: "k"})"#);
     // `b.k`: 100 over 100 = 1 per value; label-less 9: per-label wins.
     assert!(
         first_step(&graph, r#"v().has_label("b").has("k", "b1")"#).ends_with("[index: vertex b.k]")
@@ -554,9 +554,9 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
 #[test]
 fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    ok(&graph, r#"g.create_index(#{key: "name"})"#);
-    ok(&graph, r#"g.create_index(#{key: "age"})"#);
-    ok(&graph, r#"g.create_index(#{label: "person", key: "lang"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "age"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "person", key: "lang"})"#);
     let count =
         |query: &str| {
             (
@@ -599,7 +599,7 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
             .contains("count from index")
     );
     // A per-label index of the source's one label is exact too.
-    ok(
+    let _ = ok(
         &graph,
         r#"g.v().has_label("person").limit(2).property("lang", "en").iterate()"#,
     );
@@ -624,8 +624,8 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
         Ok(2)
     );
     // Edges.
-    ok(&graph, r#"g.e().property("tag", "t").iterate()"#);
-    ok(&graph, r#"g.create_index(#{element: "edge", key: "tag"})"#);
+    let _ = ok(&graph, r#"g.e().property("tag", "t").iterate()"#);
+    let _ = ok(&graph, r#"g.create_index(#{element: "edge", key: "tag"})"#);
     assert!(
         first_step(&graph, r#"e().has("tag", "t").count()"#)
             .contains("[index: edge tag, any label] [count from index]")
@@ -637,7 +637,7 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
 #[test]
 fn gql_node_patterns_without_a_label_use_the_label_less_index() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    ok(&graph, r#"g.create_index(#{key: "name"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
     let gql = |query: &str| format!("gql({query:?})");
     // The root scan of a node without a label.
     let root = gql(r#"MATCH (n {name: "josh"}) RETURN n.age"#);
@@ -695,7 +695,7 @@ fn gql_node_patterns_without_a_label_use_the_label_less_index() {
 #[test]
 fn the_schema_check_looks_at_every_label_that_declares_the_key() {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    ok(
+    let _ = ok(
         &graph,
         r#"g.set_schema(#{mode: "open", vertices: #{
             person: #{schema: #{type: "object", properties: #{name: #{type: "string"}}}},
@@ -706,7 +706,7 @@ fn the_schema_check_looks_at_every_label_that_declares_the_key() {
     let refused = run(&graph, r#"g.create_index(#{key: "name"})"#).unwrap_err();
     assert!(refused.contains("vertex 'doc' key 'name'"), "{refused}");
     // `code` is declared an integer only by `doc`: a plain index is fine, `to_lower` is not.
-    ok(&graph, r#"g.create_index(#{key: "code"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "code"})"#);
     let refused = run(
         &graph,
         r#"g.create_index(#{key: "code", transform: "to_lower"})"#,
@@ -714,7 +714,7 @@ fn the_schema_check_looks_at_every_label_that_declares_the_key() {
     .unwrap_err();
     assert!(refused.contains("'to_lower'"), "{refused}");
     // A key no label declares: fine.
-    ok(&graph, r#"g.create_index(#{key: "age"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{key: "age"})"#);
 }
 
 #[test]
@@ -725,7 +725,7 @@ fn the_advisor_recommends_a_label_less_index_for_scans_without_a_label() {
     graph.attach_workload_stats(Arc::new(WorkloadStats::new(WorkloadLevel::Memory)));
     let graph = Arc::new(graph);
     for _ in 0..3 {
-        ok(
+        let _ = ok(
             &graph,
             r#"g.v().has("name", "josh").values("age").to_list()"#,
         );
@@ -772,7 +772,7 @@ fn the_advisor_recommends_a_label_less_index_for_scans_without_a_label() {
     );
     // A labelled scan of the same key is served by it: no per-label advice either.
     for _ in 0..3 {
-        ok(
+        let _ = ok(
             &graph,
             r#"g.v().has_label("person").has("name", "josh").values("age").to_list()"#,
         );
@@ -785,7 +785,7 @@ fn the_advisor_recommends_a_label_less_index_for_scans_without_a_label() {
             .any(|r| r.id == "create_index:vertex:person:name")
     );
     // A per-label index on the same key: the advisor points out the entries kept twice.
-    ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
+    let _ = ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
     let after = graph.advise(&AdviceRequest::everything()).unwrap();
     let twice = after
         .recommendations
@@ -840,18 +840,18 @@ mod stores {
         let main: Arc<dyn StoreDir> = Arc::new(MemDir::named("pindex-ll-main"));
         let store = Store::create(&main, options()).unwrap();
         let graph = store.graph().clone();
-        ok(
+        let _ = ok(
             &graph,
             r#"g.add_v("p").property("n", 1).iterate();
                g.add_v("q").property("n", 2).iterate();
                g.v().has("n", 1).add_e("r").to(__.V().has("n", 2)).property("_owner", "o1").iterate();
                g.v().has("n", 2).add_e("s").to(__.V().has("n", 1)).property("_owner", "o2").iterate();"#,
         );
-        ok(
+        let _ = ok(
             &graph,
             r#"g.create_index(#{element: "edge", key: "_owner", name: "owner"})"#,
         );
-        ok(
+        let _ = ok(
             &graph,
             r#"g.v().has("n", 1).add_e("t").to(__.V().has("n", 2)).property("_owner", "o1").iterate()"#,
         );
@@ -879,7 +879,7 @@ mod stores {
     #[test]
     fn a_packed_snapshot_keeps_the_kind() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
-        ok(&graph, r#"g.create_index(#{key: "name"})"#);
+        let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
         let mut bytes = Vec::new();
         graphersal::persist::write_snapshot(
             &*graph.read(),

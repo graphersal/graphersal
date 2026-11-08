@@ -122,6 +122,7 @@ impl AdviceRequest {
 #[non_exhaustive]
 pub enum RecommendedAction {
     /// Create a property index on `(element, label, key)`.
+    #[non_exhaustive]
     CreateIndex {
         /// The element kind.
         element: ElementKind,
@@ -135,11 +136,13 @@ pub enum RecommendedAction {
         transform: Option<crate::graph::PropertyIndexTransform>,
     },
     /// Drop the property index `name`.
+    #[non_exhaustive]
     DropIndex {
         /// The index's name.
         name: String,
     },
     /// Define the compression rule `name` on `(element, label, key)` with `candidate`.
+    #[non_exhaustive]
     AddCompression {
         /// The suggested rule name.
         name: String,
@@ -153,6 +156,7 @@ pub enum RecommendedAction {
         candidate: CompressionCandidate,
     },
     /// Drop the compression rule `name`.
+    #[non_exhaustive]
     DropCompression {
         /// The rule's name.
         name: String,
