@@ -1,7 +1,7 @@
 //! The operator's configuration of the endpoint (`--mcp-config FILE`): which tools and
 //! resources are offered, their descriptions, the instructions and the saved-query tools.
-//! Nothing here is a named built-in profile: without a configuration the endpoint offers what
-//! it always offered (every tool of its mode, full descriptions, the built-in instructions).
+//! Nothing here is a named built-in profile: without a configuration the endpoint offers every
+//! tool of its mode with its built-in description and the built-in instructions.
 //!
 //! The host reads the file; [`McpConfig::parse`] checks its JSON (a key starting with `_` is a
 //! comment, every other unknown key an error with a did-you-mean) and reads an instructions
@@ -22,18 +22,6 @@ pub const MIN_ANSWER_CHARS: usize = 1000;
 
 /// The longest `server_name`.
 const MAX_SERVER_NAME_CHARS: usize = 100;
-
-/// How the tool descriptions are written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Descriptions {
-    /// The full descriptions (today's texts; the default).
-    #[default]
-    Full,
-    /// A hand-written sentence or two per built-in tool, with one example where useful; the
-    /// full GQL support list is the resource `graphersal://gql-reference`.
-    Short,
-}
 
 /// What the endpoint answers `initialize` as its instructions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,9 +44,9 @@ pub(crate) struct SavedQueryTools {
     names: Option<Vec<String>>,
     /// Query names never offered as tools.
     exclude: Vec<String>,
-    /// Whether the tools take `offset`/`max_rows`/`max_items`; `None`: yes with full
-    /// descriptions, no with short ones.
-    paging_params: Option<bool>,
+    /// Whether the tools take `offset`/`max_rows`/`max_items` (default no: the defaults apply
+    /// and a call may still pass them).
+    paging_params: bool,
 }
 
 impl SavedQueryTools {
@@ -68,7 +56,7 @@ impl SavedQueryTools {
             folders: None,
             names: None,
             exclude: Vec::new(),
-            paging_params: None,
+            paging_params: false,
         }
     }
 
@@ -104,7 +92,6 @@ impl SavedQueryTools {
 pub struct McpConfig {
     pub(crate) server_name: Option<String>,
     pub(crate) instructions: Instructions,
-    pub(crate) descriptions: Descriptions,
     /// Built-in tools offered (`None`: all of the mode).
     pub(crate) include: Option<Vec<String>>,
     pub(crate) exclude: Vec<String>,
@@ -141,14 +128,15 @@ impl fmt::Display for McpConfigError {
 
 impl std::error::Error for McpConfigError {}
 
-/// The resources listed without a `resources` key (the endpoint's list before configuration
-/// existed; `graphersal://gql-reference` is read on demand from the short `gql` description).
-pub(crate) const DEFAULT_RESOURCES: [&str; 5] = [
+/// The resources listed without a `resources` key (`graphersal://gql-reference` holds the GQL
+/// support list the `gql` description points to).
+pub(crate) const DEFAULT_RESOURCES: [&str; 6] = [
     "schema",
     "statistics",
     "dsl-reference",
     "examples",
     "saved-queries",
+    "gql-reference",
 ];
 
 const TOP_KEYS: [&str; 7] = [
@@ -196,15 +184,24 @@ impl McpConfig {
             config.instructions = parse_instructions(value, read_file)?;
         }
         if let Some(value) = top.get("descriptions") {
-            config.descriptions = match string(value, "descriptions")?.as_str() {
-                "full" => Descriptions::Full,
-                "short" => Descriptions::Short,
+            // The tool descriptions are the short ones only: "short" is accepted so that
+            // existing files keep working, "full" was removed (book: dev server, MCP).
+            match string(value, "descriptions")?.as_str() {
+                "short" => {}
+                "full" => {
+                    return Err(McpConfigError::new(
+                        "\"descriptions\": \"full\" was removed: every tool has one short \
+                         description now, and the long GQL reference is the resource \
+                         graphersal://gql-reference. Remove the key (or write \"short\")",
+                    ));
+                }
                 other => {
                     return Err(McpConfigError::new(format!(
-                        "\"descriptions\" is {other:?}: expected \"full\" or \"short\""
+                        "\"descriptions\" is {other:?}: the only value is \"short\" (the \
+                         default; the key can be left out)"
                     )));
                 }
-            };
+            }
         }
         if let Some(value) = top.get("tools") {
             parse_tools(&mut config, value)?;
@@ -307,11 +304,6 @@ impl McpConfig {
         Ok(self)
     }
 
-    /// The description style.
-    pub fn descriptions(&self) -> Descriptions {
-        self.descriptions
-    }
-
     /// Whether saved queries are tools of their own.
     pub fn has_saved_query_tools(&self) -> bool {
         self.saved_query_tools.is_some()
@@ -352,8 +344,7 @@ impl McpConfig {
     pub(crate) fn saved_query_paging(&self) -> bool {
         self.saved_query_tools
             .as_ref()
-            .and_then(|s| s.paging_params)
-            .unwrap_or(self.descriptions == Descriptions::Full)
+            .is_some_and(|s| s.paging_params)
     }
 }
 
@@ -527,8 +518,8 @@ fn parse_saved_query_tools(value: &Value) -> Result<SavedQueryTools, McpConfigEr
             .transpose()
     };
     let paging_params = match map.get("paging_params") {
-        None => None,
-        Some(Value::Bool(b)) => Some(*b),
+        None => false,
+        Some(Value::Bool(b)) => *b,
         Some(_) => {
             return Err(McpConfigError::new(
                 "\"saved_query_tools.paging_params\" must be true or false",

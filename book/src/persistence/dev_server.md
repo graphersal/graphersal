@@ -579,8 +579,11 @@ The options combine (`--mcp --mcp-read-only --mcp-token ... --mcp-query-tools`),
 ### The MCP configuration file: `--mcp-config`
 
 Every tool, its description and the instructions take room in the agent's context before its
-first call: about 12.5 K tokens for the full read-write endpoint, 10 K read-only, and more with
-every saved query as a tool. `--mcp-config FILE` lets the operator choose what the agent sees:
+first call: about 6.7 K tokens for the read-write endpoint, 4.6 K read-only, and more with
+every saved query as a tool. Each built-in tool's description is a sentence or two with an
+example where it helps; the `gql` description names element ids, anchoring variable-length
+patterns and (on a server that allows writes) the write clauses, and points to the resource
+`graphersal://gql-reference` for the whole supported subset. `--mcp-config FILE` lets the operator choose what the agent sees:
 
 ```bash
 graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-readonly.json
@@ -591,7 +594,6 @@ graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-read
   "_comment": "a key starting with _ is a comment",
   "server_name": "project-kb",
   "instructions": { "mode": "replace", "text": "A read-only knowledge graph of this project. ..." },
-  "descriptions": "short",
   "tools": {
     "include": ["gql", "get_schema", "run_saved_query"],
     "overrides": { "gql": { "description": "Read-only GQL over the project graph. ..." } }
@@ -606,12 +608,12 @@ graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-read
 |---|---|---|
 | `server_name` | The `serverInfo.name` of `initialize` (1 to 100 characters) | `graphersal-dev` |
 | `instructions` | `{"mode": "builtin" \| "append" \| "replace", "text": ".."}` or `{"mode": .., "file": "notes.md"}` (UTF-8, 1 to 20000 characters): `builtin` the built-in text (+ the read-only note), `append` the built-in text with the operator's text under "Notes from the operator of this server about this graph:" (what `--mcp-instructions` does), `replace` the operator's text only | `builtin` |
-| `descriptions` | `full` (the texts of [What the agent gets](#what-the-agent-gets)) or `short`: one or two hand-written sentences per built-in tool, with an example where it helps; the input schemas stay the same. The short `gql` description points to the resource `graphersal://gql-reference`, which holds the full GQL support list | `full` |
+| `descriptions` | Kept so that older files still load: `short`, the only style, changes nothing. `full` (the long descriptions of 0.5.2 and before) was removed: an A/B test of Claude Code with Sonnet on read and write tasks measured the same accuracy, fewer failed calls (above all fewer calls of a tool by its bare name) and about 20 to 27 K fewer input tokens per task with the short texts; a file that still says `full` is refused at start with a message (remove the key) | `short` |
 | `tools.include` | The built-in tools offered (in their usual order); a tool not offered is not callable either | every tool of the mode but `usage_statistics` (offered only when named here) |
 | `tools.exclude` | Built-in tools left out | none |
 | `tools.overrides` | `{"<tool>": {"description": ".."}}`: the operator's description instead of the built-in one (the input schema never changes) | none |
-| `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: false` leaves `offset`/`max_rows`/`max_items` out of their schemas (the defaults apply; a call may still pass them). With `descriptions: short` the paging parameters are left out unless `paging_params` is `true`, and the description is the query's own text without the "Folder: ..; Saved query (read-only); the same as run_saved_query." tail. `run_saved_query` still reaches every saved query | no saved-query tools |
-| `resources` | The resources listed by `resources/list`, by name: `schema`, `statistics`, `dsl-reference`, `examples`, `saved-queries`, `gql-reference`. Every resource stays readable | the first five |
+| `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: true` lists `offset`/`max_rows`/`max_items` in their schemas (by default they are left out: the defaults apply and a call may still pass them). The description is the query's own text (a query that writes adds what it changes). `run_saved_query` still reaches every saved query | no saved-query tools |
+| `resources` | The resources listed by `resources/list`, by name: `schema`, `statistics`, `dsl-reference`, `examples`, `saved-queries`, `gql-reference`. Every resource stays readable | all six |
 | `answer_limit_chars` | The largest tool answer in characters (at least 1000), like `--mcp-max-chars` | 60000 |
 
 The file is checked at start (exit 2 with the reason): JSON, an unknown key is an error with a
@@ -623,14 +625,15 @@ read-only) is an error rather than a silently missing tool. The flags `--mcp-ins
 `--mcp-query-tools` and `--mcp-max-chars` stay as shorthands; the same setting given by a flag
 and in the file is an error (there is no precedence to remember). In an [args file](#arguments-from-a-file)
 the key is `mcp-config`. Nothing in the file is a built-in profile: without it the endpoint offers
-exactly what it always did. Two examples ship in `crates/graphersal-cli/examples/`:
+every tool of its mode with its built-in description. Two examples ship in `crates/graphersal-cli/examples/`:
 `mcp-kb-readonly.json` (a read-only knowledge graph: `gql`, `get_schema`, `run_saved_query`, the
-saved queries of the folder `kb` as tools, short descriptions and instructions) and
-`mcp-short.json` (the data tools with short descriptions, the storage administration tools left
-out, the operator's notes appended).
+saved queries of the folder `kb` as tools, short instructions) and
+`mcp-short.json` (the data tools, the storage administration tools left out, the operator's notes
+appended).
 
-The [AI Chat](#ai-chat) does not read `--mcp-config`: it keeps the full tool set of its mode and
-the built-in instructions.
+The [AI Chat](#ai-chat) does not read `--mcp-config`: it keeps the full tool set of its mode, the
+built-in descriptions and instructions; it cannot read resources, so its prompt carries the DSL
+and GQL references instead.
 
 #### What a configuration costs: `graphersal mcp-cost`
 
@@ -660,7 +663,7 @@ Tools (characters of each tools/list entry, largest first)
   ...
 ```
 
-The same knowledge graph without the file (`--read-only --mcp-query-tools`) costs about 14 K
+The same knowledge graph without the file (`--read-only --mcp-query-tools`) costs about 7 K
 tokens.
 
 ### Schema changes that fill vectors: `confirm_lock`
@@ -724,6 +727,7 @@ The list is the same on every `--graph` source; there are no persistence tools:
 | Tool | What it does |
 |---|---|
 | `query` `{script, profile?, offset?, max_rows?, max_items?}` | Runs a script (Gremlin in Rhai syntax) as one transaction: the results as compact JSON, [paged](#answer-size-and-paging) (100 results after the first `offset`, 100 items of every nested list by default, with a note when something was cut and the next page's offset), whether it changed the graph and the new commit number, the per-step profile with `profile: true`; a failing script is a tool error carrying the diagnostic and its `Help:` line, and changes nothing |
+| `gql` `{query, params?, profile?, offset?, max_rows?, max_items?}` | Runs a GQL query, the text as it is (`$name` values from `params`): one JSON object per row, [paged](#answer-size-and-paging) like `query`; a write (`INSERT`, `SET`, `REMOVE`, `MERGE`, `DELETE`) is one transaction and the answer names the net changes; refused in read-only mode. Its description is short; the resource `graphersal://gql-reference` lists the whole supported subset |
 | `get_schema`, `infer_schema` | The stored schema (or null), the schema the data satisfies |
 | `validate_schema` `{schema, mode?}`, `validate_schema_patch` `{patch}`, `diff_schema` `{schema}` | Check a proposed schema or a JSON Merge Patch against the data, without applying |
 | `set_schema` `{schema, mode?}`, `patch_schema` `{patch}` | Store a schema, patch the stored one (validated against the data) |
@@ -778,23 +782,26 @@ state too. `graph_info` then carries a `note` ("the served state is a read-only 
 ..."), and every tool error carries it as a last line, so a refused write says why. The agent
 cannot close the view; the user does (**Back to the live graph**).
 
-Resources (read with `resources/read`): `graphersal://schema` (the stored schema),
+Resources (read with `resources/read`): `graphersal://gql-reference` (the GQL subset the
+`gql` tool supports, its write semantics and examples, about 13 KB; the `gql` description points
+to it), `graphersal://schema` (the stored schema),
 `graphersal://statistics`, `graphersal://dsl-reference` (every step and function of the language
 with its signatures, both spellings, a one-line description and a runnable example with its result,
 generated from the engine's function docs, about 55 KB),
 `graphersal://examples` (the playground's examples, about 8 KB) and `graphersal://saved-queries`
 (the list of `list_saved_queries`).
 
-**Saved queries first.** The server's instructions and the `query` tool's description tell the
+**Saved queries first.** The server's instructions and the `list_saved_queries` description tell the
 agent to look for a saved query (`list_saved_queries`) before it writes a new query, and to run
 it with `run_saved_query`: the queries a user stored for recurring questions are reused instead of
 rewritten. A query listed with `writes: true` changes data (its `effects` say what), and the
 instructions tell the agent to run one only when the user asked for that change. Both tools are
 offered with `--mcp-read-only` too, which lists only the queries that do not write and refuses a
 call of one that does. With `--mcp-query-tools`, `tools/list` also lists every saved query as a
-tool named like the query, with its description (and folder; a query that writes says so and
+tool named like the query, with its own description (a query that writes says so and
 names its effects), an `inputSchema` built from its parameter schemas (defaults included,
-required parameters in `required`, no other properties) and annotations from its effects
+required parameters in `required`, no other properties; the paging parameters only with
+`saved_query_tools.paging_params: true`) and annotations from its effects
 (`readOnlyHint` false for a query that writes, `destructiveHint` when it updates or deletes);
 calling it is `run_saved_query` with those arguments. `tools/list` reflects the catalog at the time of the
 call; the endpoint has no event stream, so it announces `tools.listChanged: false` and a client
@@ -1043,13 +1050,13 @@ under the line "Notes from the operator of this server about this graph:". It is
 the operator, but it comes after the rules and does not lift them: tool results stay data, never
 instructions. It applies to the AI Chat only; the [MCP](#mcp-an-ai-agent-on-the-same-graph)
 instructions are unchanged (and the `--mcp-instructions` notes are not added; the chat does not
-read `--mcp-config` either: it keeps the full tool set and the built-in instructions). The prompt prefix stays fixed for the conversation, so the provider's
+read `--mcp-config` either: it keeps the full tool set and the built-in instructions, and its prompt carries the GQL reference after the DSL reference). The prompt prefix stays fixed for the conversation, so the provider's
 prompt cache still works.
 
 ### What data leaves the machine
 
 Everything the agent sees goes to the provider: your messages, the system prompt (the MCP
-instructions, the agent's rules, your [custom system prompt](#custom-system-prompt) text if any, the [DSL reference](#what-the-agent-gets) and a short summary of
+instructions, the agent's rules, your [custom system prompt](#custom-system-prompt) text if any, the [DSL and GQL references](#what-the-agent-gets) and a short summary of
 the graph taken at the first question: counts, labels, schema mode, number of saved queries), and **every tool result**:
 query results, schemas, statistics, saved queries. The tab's header says so: "Data you query is
 sent to api.anthropic.com (Anthropic API)"; with `provider: "openai"` it names the

@@ -2614,7 +2614,8 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
             "graphersal://statistics",
             "graphersal://dsl-reference",
             "graphersal://examples",
-            "graphersal://saved-queries"
+            "graphersal://saved-queries",
+            "graphersal://gql-reference"
         ]
     );
     let read = |mcp: &mut McpClient, uri: &str| -> String {
@@ -3273,13 +3274,8 @@ fn mcp_saved_query_tools_and_resource() {
     assert_eq!(own["inputSchema"]["properties"]["age"]["default"], 30);
     assert_eq!(own["inputSchema"]["properties"]["age"]["minimum"], 0);
     assert_eq!(own["annotations"]["readOnlyHint"], true);
-    assert!(
-        own["description"]
-            .as_str()
-            .unwrap()
-            .starts_with("People older than an age. Folder: people."),
-        "{own}"
-    );
+    // The query's own description, no folder tail.
+    assert_eq!(own["description"], "People older than an age.", "{own}");
     let (error, text) = mcp.call("older_than", serde_json::json!({"age": 33}));
     assert!(
         !error && text.contains("peter") && !text.contains("josh"),
@@ -6585,8 +6581,10 @@ fn mcp_saved_query_tools_page() {
         .find(|t| t["name"] == "items")
         .unwrap()
         .clone();
+    // The paging parameters are not listed (saved_query_tools.paging_params lists them), but a
+    // call may pass them.
     assert!(
-        own["inputSchema"]["properties"]["offset"].is_object(),
+        own["inputSchema"]["properties"]["offset"].is_null(),
         "{own}"
     );
     let (error, text) = mcp.call("items", serde_json::json!({"offset": 490, "max_rows": 5}));

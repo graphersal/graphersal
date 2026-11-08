@@ -21,18 +21,20 @@
 //!   the playground's examples).
 //!
 //! The AI Chat calls the same tools in process: [`tool_listings`], [`call_tool`] (with a
-//! [`ToolCaller`] carrying its own cancellation token), [`instructions`] and
-//! [`dsl_reference_text`].
+//! [`ToolCaller`] carrying its own cancellation token), [`instructions`],
+//! [`dsl_reference_text`] and [`gql_reference_text`] (it has no resources, so both references
+//! go into its prompt).
 //!
 //! # Configuration
 //!
 //! The operator chooses what an agent sees with an [`McpConfig`] ([`Mcp::with_config`], the
 //! CLI's `--mcp-config FILE`): the server name, the instructions (built-in, appended to,
-//! replaced), full or short ([`Descriptions`]) tool descriptions, the built-in tools offered
-//! and their descriptions, which saved queries are tools of their own, the resources listed and
-//! the answer limit. There are no built-in profiles; without a configuration the endpoint
-//! offers every tool of its mode with its full description. [`Mcp::prompt_cost`] measures what
-//! the instructions and the tool list cost an agent's context.
+//! replaced), the built-in tools offered and their descriptions, which saved queries are tools
+//! of their own, the resources listed and the answer limit. There are no built-in profiles;
+//! without a configuration the endpoint offers every tool of its mode with its built-in
+//! description: a sentence or two and one example where it helps (the GQL support list is the
+//! resource `graphersal://gql-reference`). [`Mcp::prompt_cost`] measures what the instructions
+//! and the tool list cost an agent's context.
 //!
 //! # Protocol
 //!
@@ -128,13 +130,12 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-pub use config::{
-    Descriptions, MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError,
-};
+pub use config::{MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError};
 pub use host::{ClientRef, Executor, Host, Job, McpError};
 pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
 };
+pub use resources::gql_reference_text;
 pub use sessions::{MAX_CLIENT_NAMES, SessionKey};
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};

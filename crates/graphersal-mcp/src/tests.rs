@@ -96,25 +96,18 @@ fn gql_writes_unless_read_only() {
         "graphersal://examples",
         "\"GQL\"",
     ] {
-        assert!(GQL_DESCRIPTION.contains(named), "{named}");
+        assert!(GQL_REFERENCE.contains(named), "{named}");
     }
     assert!(INSTRUCTIONS.contains("`gql`"));
     assert!(INSTRUCTIONS.contains("CALL folder.name(args) YIELD col"));
 }
 
-/// Stage 3h: run_saved_query names the GQL call of a saved query.
+/// Stage 3h: the GQL call of a saved query is named where every agent reads it (the
+/// instructions) and in the GQL reference (the run_saved_query description stays short).
 #[test]
 fn run_saved_query_names_the_gql_call() {
-    let tool = all_tools()
-        .into_iter()
-        .find(|t| t.name == "run_saved_query")
-        .expect("run_saved_query listed");
-    assert!(
-        tool.description
-            .contains("the gql tool calls it as CALL folder.name(args) YIELD col"),
-        "{}",
-        tool.description
-    );
+    assert!(INSTRUCTIONS.contains("CALL folder.name(args) YIELD col"));
+    assert!(GQL_REFERENCE.contains("CALL folder.name(args) YIELD col"));
 }
 
 /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
@@ -122,7 +115,7 @@ fn run_saved_query_names_the_gql_call() {
 /// and still names what is refused.
 #[test]
 fn gql_description_lists_stage_1b_and_what_is_still_refused() {
-    let (supported, refused) = GQL_DESCRIPTION
+    let (supported, refused) = GQL_REFERENCE
         .split_once("Not yet supported")
         .expect("a not-yet list");
     for named in [
@@ -240,9 +233,9 @@ fn gql_description_lists_stage_1b_and_what_is_still_refused() {
     ] {
         assert!(!refused.contains(gone), "{gone}");
     }
-    assert!(GQL_DESCRIPTION.contains("a failing query changes nothing"));
-    assert!(GQL_DESCRIPTION.contains("run writes only when the user asked"));
-    assert!(GQL_DESCRIPTION.contains("experimental"));
+    assert!(GQL_REFERENCE.contains("a failing query changes nothing"));
+    assert!(GQL_REFERENCE.contains("run writes only when the user asked"));
+    assert!(GQL_REFERENCE.contains("experimental"));
 }
 
 #[test]

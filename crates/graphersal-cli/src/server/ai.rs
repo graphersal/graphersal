@@ -84,8 +84,8 @@ const CALLS_LEFT_NOTE_AT: u32 = 3;
 const AGENT_RULES: &str = "\
 You are the AI Chat of the Graphersal dev server: you answer the user's questions about the \
 graph by calling the tools above (the same tools an MCP client gets; the resources mentioned \
-are not available to you as tools, but the DSL reference is part of this prompt). Learn the \
-data first (graph_info, statistics, get_schema or infer_schema), then query it; prefer a saved \
+are not available to you as tools, but the DSL and GQL references are part of this prompt). \
+Learn the data first (graph_info, statistics, get_schema or infer_schema), then query it; prefer a saved \
 query when one fits. Run a query before you state a fact about the data; do not guess. A saved \
 query listed with writes: true changes data: before you run it (also through g.query in a \
 query, or CALL folder.name(..) in a GQL query), ask the user in the chat, say what it changes (its effects), and run it only after they \
@@ -110,8 +110,8 @@ a GQL write likewise, e.g. `g.gql(\"INSERT (:tag {name: 'new'})\")`, \
 `g.gql(\"MATCH (t:tag {name: 'new'}) SET t.checked = true\")` or, to create it only when it \
 is missing, `g.gql(\"MERGE (t:tag {name: 'new'})\")`. GQL has Cypher's date and time \
 functions (date(), datetime(), duration(), x.year, date.truncate('month', d), \
-duration.between(a, b)): the gql tool's description lists them. A saved query written in GQL \
-is called from a GQL query with its folder, CALL folder.name(args) YIELD col, e.g. \
+duration.between(a, b)): the GQL reference at the end of this prompt lists them. A saved query \
+written in GQL is called from a GQL query with its folder, CALL folder.name(args) YIELD col, e.g. \
 `g.gql(\"CALL people.adults(30) YIELD name RETURN name\")`; run_saved_query runs any saved query.
 
 Write tables as GitHub-flavoured Markdown tables (a header row, a `|---|` separator row). Keep \
@@ -132,7 +132,8 @@ pub(super) struct Ai {
     llm: LlmClient,
     /// The conversations, oldest first.
     conversations: Mutex<Vec<Arc<Conversation>>>,
-    /// The static part of the system prompt (instructions, rules, DSL reference), built once.
+    /// The static part of the system prompt (instructions, rules, DSL and GQL references),
+    /// built once.
     prefix: OnceLock<String>,
 }
 
@@ -390,6 +391,10 @@ impl Ai {
         }
         prefix.push_str("\n\n");
         prefix.push_str(&reference);
+        // The gql tool's description is short and points to the resource
+        // graphersal://gql-reference, which the chat cannot read: the reference goes here.
+        prefix.push_str("\n\n");
+        prefix.push_str(&graphersal_mcp::gql_reference_text());
         Ok(self.prefix.get_or_init(|| prefix).clone())
     }
 }

@@ -9,7 +9,7 @@ use crate::answer::{PAGING_ARGS, Page, compact, fit, page_of, paging_properties,
 use std::sync::Arc;
 
 use crate::catalog::{all_tools, offered_tools};
-use crate::config::{Descriptions, McpConfig};
+use crate::config::McpConfig;
 use crate::host::{ClientRef, Ctx, Host, McpError, RunGuard};
 use crate::protocol::MAX_TEXT_CHARS;
 use crate::stats::McpStats;
@@ -795,7 +795,6 @@ pub(crate) fn query_tool_listings(
     config: &McpConfig,
 ) -> Result<Vec<Value>, String> {
     let list = saved_queries(context, None, None, read_only)?;
-    let short = config.descriptions == Descriptions::Short;
     let paging = config.saved_query_paging();
     Ok(list
         .iter()
@@ -837,11 +836,6 @@ pub(crate) fn query_tool_listings(
             if !description.trim_end().ends_with(['.', '!', '?']) {
                 description.push('.');
             }
-            if let Some(folder) = entry["folder"].as_str()
-                && !short
-            {
-                description.push_str(&format!(" Folder: {folder}."));
-            }
             let writes = entry["writes"].as_bool().unwrap_or(false);
             let effects: Vec<&str> = entry["effects"]
                 .as_array()
@@ -855,8 +849,6 @@ pub(crate) fn query_tool_listings(
                      that change. The same as run_saved_query.",
                     effects.join(", ")
                 ));
-            } else if !short {
-                description.push_str(" Saved query (read-only); the same as run_saved_query.");
             }
             if let Some(error) = entry["error"].as_str() {
                 description.push_str(&format!(" It cannot run: {error}"));

@@ -6,7 +6,6 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use crate::answer::compact;
-use crate::catalog::GQL_DESCRIPTION;
 use crate::host::Ctx;
 use crate::tools::saved_queries;
 
@@ -80,7 +79,7 @@ pub(crate) fn read_resource(
 ) -> Result<String, String> {
     match uri {
         "graphersal://schema" => Ok(context.call(|s| s.get_schema_text())??),
-        "graphersal://gql-reference" => Ok(format!("# GQL reference\n\n{GQL_DESCRIPTION}\n")),
+        "graphersal://gql-reference" => Ok(gql_reference_text()),
         "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,
         )?))),
@@ -435,3 +434,148 @@ pub(crate) fn examples_text(examples: &Value) -> String {
     }
     out
 }
+
+/// The text of the resource `graphersal://gql-reference`.
+pub fn gql_reference_text() -> String {
+    format!("# GQL reference\n\n{GQL_REFERENCE}\n")
+}
+
+/// The GQL reference (the resource `graphersal://gql-reference`, which the `gql` tool's
+/// description points to; [`crate::gql_reference_text`] for an agent without resources): the
+/// supported subset, the write semantics and examples.
+pub(crate) const GQL_REFERENCE: &str = "Run a GQL (ISO graph query language, Cypher-like) query against \
+the shared graph and return its rows as JSON: one JSON object per row, its keys the RETURN \
+columns in the order written (compact JSON, paged like query's: at most max_rows rows, default \
+100, after the first offset ones; a note says what was cut and names the next page's offset). It runs the script g.gql(query, params). A query may write \
+(INSERT, Cypher CREATE; SET; REMOVE; DELETE; MERGE): it is ONE transaction, a failing query changes nothing, and the answer \
+says whether it changed the graph (with the net vertex and edge count changes) and the new \
+commit number; run writes only when the user asked for that change (a read-only server refuses \
+them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is experimental (its \
+subset and answers may still change between versions); the query tool with Gremlin stays the \
+complete interface.
+
+Supported: MATCH with comma-separated patterns of node patterns \
+(v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
+expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
+WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
+pipeline: project, aggregate, DISTINCT, ORDER BY, SKIP, LIMIT, WHERE, then more MATCH clauses); \
+LET x = expr and FILTER expr; FOR x IN list [WITH ORDINALITY i | WITH OFFSET i] (Cypher \
+UNWIND list AS x): one row per item, e.g. FOR id IN $ids MATCH (n) WHERE element_id(n) = id \
+(a NULL list gives no row, a non-list value one row; an equality on element_id or on an \
+indexed property after FOR is a direct lookup, not a scan); a query may start with MATCH, \
+OPTIONAL MATCH, FOR, UNWIND, LET, WITH, FILTER or RETURN (RETURN 1 + 2 AS x runs on one empty \
+row); EXISTS subqueries EXISTS { MATCH <pattern> [WHERE <condition>] } and EXISTS { <pattern> } \
+and Cypher pattern predicates (a pattern where a condition stands, naming only variables bound \
+before it), TRUE or FALSE (never NULL), anywhere an expression stands, each row kept once (a \
+semi-join, unlike a MATCH of the same pattern), e.g. who has no project: MATCH (p:person) WHERE \
+NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name, or MATCH (p:person) \
+WHERE NOT (p)-[:created]->() ...; map projections p {.name, .age, .*, f, total: expr} \
+(Cypher; NULL for a NULL p, while the GQL record {name: p.name} gives {name: NULL}), list \
+comprehensions [x IN list WHERE x > 1 | x * 2] (WHERE and | each optional) and pattern \
+comprehensions [(p)-[:knows]->(f) WHERE f.age > 30 | f.name] (per row the list of the \
+pattern's matches, [] when none, in no defined order), anywhere an expression stands and \
+nested: use them for JSON-shaped answers, one row per entity with its related data inside, e.g. \
+MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]} AS person ORDER BY \
+person.name; list predicates all(x IN list WHERE cond), any, none, single (NULL when a NULL \
+item could decide) and reduce(acc = 0, x IN list | acc + x); COUNT { <pattern> } (the number \
+of matches per row, never NULL) and COLLECT { MATCH ... RETURN x } (the list of its one RETURN \
+column per row); the body of EXISTS { }, COUNT { } and COLLECT { } may be a whole query with \
+WITH, ORDER BY, LIMIT and RETURN; composite queries q1 UNION q2 (duplicate rows removed; UNION \
+ALL keeps them; every operand returns the same column names, in any order; ORDER BY and LIMIT \
+belong to their operand) and q1 NEXT q2 (the RETURN columns of q1 are the rows of q2, e.g. \
+... UNION ... NEXT RETURN name ORDER BY name LIMIT 3); CALL (p) { MATCH ... RETURN ... } runs \
+its body once per incoming row and joins the row with each of the body's rows (a row with none \
+is dropped; OPTIONAL CALL keeps it with NULL columns; Cypher CALL { WITH p ... } imports p \
+too); the body's aggregates, ORDER BY and LIMIT apply per row, so CALL gives top k per group, \
+e.g. each person's heaviest software: MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) \
+RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top ORDER BY who; \
+aggregates count(x), count(*), sum, avg, min, max, collect_list \
+(Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
+optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
+Cypher -[e*1..3]-> (a group variable e is the list of edges); quantified path patterns \
+(a) ((x)-[:knows]->(y) WHERE x.age < y.age){1,3} (b) repeat a whole chain with the same \
+quantifiers (? = 0 or 1): the outer node before the group is its first node, the one after it \
+its last, a variable inside is the list of its nodes or edges, one per iteration (with ? or no \
+quantifier a single value, NULL when ? matched nothing), the body WHERE reads only body \
+variables, every edge at most once per match, e.g. people one or two co-author hops apart \
+(sharing software): MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b) RETURN DISTINCT a.name, \
+b.name; path variables p = (a)-->(b) \
+returned as a path value, path_length(p) (Cypher alias length), nodes(p) and \
+relationships(p) (lists of the path's vertices and edges); CASE, coalesce, nullif; scalar \
+functions: conversions CAST(x AS INTEGER|FLOAT|STRING|BOOLEAN) (strict: bad text fails the query \
+with GQLSTATUS 22018) vs Cypher toInteger, toFloat, toBoolean, toString (bad text gives NULL) \
+and their OrNull forms (NULL for any other kind too); strings upper/toUpper, lower/toLower, \
+substring (0-based), left, right, split, replace, reverse, trim, btrim, ltrim, rtrim, \
+char_length, size, || concatenation; numbers abs, ceil, floor, round(x[, precision[, mode]]), \
+sign, sqrt, exp, ln, log, log10, power, mod; lists head, last, tail, range, size, isEmpty; \
+elements keys, properties, labels, type, element_id, startNode(e) and endNode(e) (the edge's \
+stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; dates and times with \
+Cypher's temporal functions: date('2015-07-21'), localtime('12:31'), localdatetime(..), \
+datetime('2015-07-21T21:40+01:00') (ISO names local_time, local_datetime, zoned_datetime) from \
+ISO 8601 text or a map such as date({year: 2015, week: 30, dayOfWeek: 2}) or datetime({year: \
+1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) (no argument: the time the query \
+started), duration('P1M2DT3H') or duration({days: 14, hours: 16}); components x.year, x.month, \
+x.week, x.dayOfWeek, x.hour, x.epochMillis, dur.days; arithmetic d + duration('P1M'), dur * 2; \
+date.truncate('month', d) (also localtime / localdatetime / datetime.truncate); \
+duration.between(a, b), duration.inDays(a, b); time('10:00+01:00') (ISO zoned_time) a time \
+of day with its offset; the ISO literals DATE '2015-07-21', TIME '10:00+01:00', TIMESTAMP \
+'2015-07-21T21:40', DURATION 'P1D' and the clocks CURRENT_DATE, CURRENT_TIMESTAMP, \
+LOCAL_TIMESTAMP; values hold nanoseconds and a datetime keeps its UTC offset and the zone name \
+it was built with; RETURN (mandatory; expressions \
+with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
+SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text); \
+writes: INSERT (Cypher alias CREATE) of node patterns (n:Label&Other {key: expr}) and directed \
+edge patterns (a)-[:LABEL {key: expr}]->(b) (exactly one edge label; a bound variable stands \
+for an existing node), once per incoming row, e.g. MATCH (p:person {name: 'marko'}) INSERT \
+(p)-[:likes]->(f:fruit {name: 'apple'}) RETURN f.name AS fruit; a NULL property value stores \
+nothing; SET changes the elements of each incoming row, its items left to right: SET n.k = expr \
+(one property), SET n = {k: expr} (replaces every property), SET n += {k: expr} (Cypher: merges \
+the map in), SET n:Label (adds labels to a node; an edge has exactly one label, change it with \
+Gremlin set_label()), e.g. MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin \
+RETURN p.age AS age; REMOVE n.k and REMOVE n:Label remove a property or a label (nothing \
+happens when it is absent); SET n.k = NULL removes the property too, and a NULL target (from \
+OPTIONAL MATCH) is skipped; DETACH DELETE n removes a node with all its edges, e.g. MATCH \
+(p:person {name: 'marko'}) DETACH DELETE p; DELETE x (also written NODETACH DELETE) removes \
+nodes, edges, paths and lists of them, but a node that still has edges fails the query (G1001, \
+nothing removed) unless the same clause deletes those edges, e.g. MATCH (a)-[e:knows]->(b) \
+DELETE e or MATCH (n)-[r]-() DELETE r, n; a NULL target is skipped; after DELETE, reading or \
+returning the deleted element is an error (only count(n), n IS NULL and type(r) still work): \
+read what you need first, e.g. MATCH (p:person {name: 'vadas'}) WITH p, properties(p) AS props \
+DETACH DELETE p RETURN props; MERGE <pattern> (Cypher compatibility form) finds or creates one \
+pattern per row: every match is a row, and when nothing matches the whole pattern is created, \
+reusing the nodes bound before (written alone, as (a)); each row sees what earlier rows created, \
+so it is idempotent and FOR creates a repeated item once, e.g. create-if-missing: MERGE \
+(c:city {name: 'Berlin'}) RETURN c.name AS name (run twice, one city), an edge between matched \
+nodes: MATCH (a:person {name: 'marko'}), (b:person {name: 'peter'}) MERGE (a)-[e:knows]->(b) \
+RETURN e; ON CREATE SET and ON MATCH SET items (SET items, in written order) change what was \
+created or matched, e.g. FOR n IN $names MERGE (p:person {name: n}) ON CREATE SET p.visits = 1 \
+ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name, p.visits AS visits; \
+an edge without a direction -[:T]- matches either direction and is created from left to right; \
+a NULL property value in the pattern fails the query (22004); \
+saved queries as procedures: CALL folder.name(args) YIELD col [AS x], .. [WHERE cond] runs the \
+saved query `name` (written in GQL, see list_saved_queries) of the folder `folder` (CALL name() \
+for the root folder) once per incoming row, its arguments constants or $params in the order its \
+body first reads its parameters (trailing ones left out take their defaults); YIELD names the \
+RETURN columns read after it, e.g. CALL people.adults(30) YIELD name RETURN name ORDER BY name; \
+a call alone is the whole query and returns every column (YIELD * the same); a saved query \
+without RETURN keeps each row once; its writes are part of the query's one transaction; \
+each clause sees every write of the clauses before it; a query may \
+end with its write clause or FINISH (no rows), or RETURN what it wrote. \
+String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
+(trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
+label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
+the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
+a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
+rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS, vendor \
+procedures (CALL db.labels(), apoc.*), a CALL of a saved query written in Rhai (run it with \
+run_saved_query) or with an argument that reads the row, non-deterministic functions (rand, randomUUID, date.realtime()), trigonometry, \
+and the write \
+FOREACH (write FOR x IN list INSERT .. instead); use the query tool with Gremlin for the rest, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
+
+Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
+f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
+OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS who, count(s) AS projects ORDER BY \
+projects DESC, who; FOR name IN $names INSERT (:tag {name: name}) with params {\"names\": \
+[\"a\", \"b\"]}; MATCH (p:person {name: $name}) SET p.age = p.age + 1 RETURN p.age AS age with \
+params {\"name\": \"vadas\"}; more in the group \
+\"GQL\" of the resource graphersal://examples (scripts g.gql(\"...\")).";

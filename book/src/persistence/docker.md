@@ -137,20 +137,19 @@ what it carries. The script writes into `kb-out/`:
 | File | What |
 |---|---|
 | `graph.gstore` | the prepared store |
-| `mcp-config.json` | `--config` ([MCP configuration](dev_server.md#the-mcp-configuration-file---mcp-config)); without it every reading tool with short descriptions |
+| `mcp-config.json` | `--config` ([MCP configuration](dev_server.md#the-mcp-configuration-file---mcp-config)); without it every reading tool |
 | `kb-instructions.md` | `--instructions`, under its own name (`.md` or `.txt`); the config's `instructions.file` names it |
 | `store-format-version` | the store's format version, for the image label |
 | `mcp-cost.out` | what the MCP prompt costs an agent (`graphersal mcp-cost`); it also proves that the configuration loads against the copy |
 
 A configuration for a knowledge base offers GQL, the schema and the saved queries of one folder
-as tools of their own, with short texts (the repository's
+as tools of their own (the repository's
 `crates/graphersal-cli/examples/mcp-kb-readonly.json`):
 
 ```json
 {
   "server_name": "project-kb",
   "instructions": { "mode": "replace", "file": "kb-instructions.md" },
-  "descriptions": "short",
   "tools": { "include": ["gql", "get_schema", "run_saved_query"] },
   "saved_query_tools": { "folders": ["kb"], "paging_params": false },
   "resources": ["schema", "saved-queries", "gql-reference"],
@@ -159,7 +158,7 @@ as tools of their own, with short texts (the repository's
 ```
 
 With 14 saved queries in the folder `kb` this prompt (instructions and tool list) costs an agent
-about 3.3 K tokens, against about 14 K for every tool with full descriptions.
+about 3.3 K tokens, against about 4.6 K for every reading tool without a configuration.
 
 ### 3. Build
 

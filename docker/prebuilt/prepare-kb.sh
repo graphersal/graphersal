@@ -99,8 +99,7 @@ if [ -n "$config" ]; then
 else
     cat >"$out/mcp-config.json" <<'EOF'
 {
-  "_comment": "Written by prepare-kb.sh: every reading tool with short descriptions.",
-  "descriptions": "short"
+  "_comment": "Written by prepare-kb.sh: every reading tool."
 }
 EOF
 fi
