@@ -3,7 +3,7 @@
 
 `create_index` · category: [Property indexes](../../traversal/step_reference.md#property-indexes)
 
-Declares a property index #{key, label, element, name, type, transform}: a v() or e() with that label and a has() on that key then reads the index instead of every element of the label; without label the index is label-less (every element of the kind) and serves a has() with any or no label; type defaults to "memory-ordered", transform "to_lower" indexes lowered strings for has(key, __.to_lower().is(..)), "each" every element of an array value for has(key, __.unfold().is(..)), a chain is an array applied in order (["each", "to_lower"]) (see the book page Property Indexes).
+Declares a property index #{key, label, element, name, type, transform, unique}: a v() or e() with that label and a has() on that key then reads the index instead of every element of the label; without label the index is label-less (every element of the kind) and serves a has() with any or no label; type defaults to "memory-ordered", transform "to_lower" indexes lowered strings for has(key, __.to_lower().is(..)), "each" every element of an array value for has(key, __.unfold().is(..)), a chain is an array applied in order (["each", "to_lower"]); unique: true refuses every write that would repeat a value (null exempt; not with each) (see the book page Property Indexes).
 
 ## Forms
 

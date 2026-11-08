@@ -3,7 +3,7 @@
 
 `indexes` · category: [Property indexes](../../traversal/step_reference.md#property-indexes)
 
-Lists the property indexes as maps: name, element, label (() for a label-less index), key, type, transform (a chain as the array of its names), served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.
+Lists the property indexes as maps: name, element, label (() for a label-less index), key, type, transform (a chain as the array of its names), unique, served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.
 
 ## Forms
 
@@ -14,5 +14,5 @@ indexes()
 ## Example
 
 ```rhai,graph=modern
-{ g.create_index(#{label: "person", key: "age"}); g.indexes().map(|i| i.entries) }   // [4]
+{ g.create_index(#{label: "person", key: "name", unique: true}); g.indexes().map(|i| [i.unique, i.entries]) }   // [[true, 4]]
 ```

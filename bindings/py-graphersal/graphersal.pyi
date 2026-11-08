@@ -549,6 +549,7 @@ class Graph:
         type: str = "memory-ordered",
         *,
         transform: Union[str, list[str], None] = None,
+        unique: bool = False,
         policy: Optional[AccessPolicy] = None,
     ) -> None:
         """Declares (or replaces) a property index: the ``element``s labelled ``label``
@@ -561,11 +562,13 @@ class Graph:
         ``transform="to_lower"`` indexes the lowered text of string values for
         ``has(key, __.to_lower().is(..))``; ``transform="each"`` every element of an array
         value for ``has(key, __.unfold().is(..))``; a chain is a list applied in order,
-        ``transform=["each", "to_lower"]``. An unknown type or transform, a chain in another
+        ``transform=["each", "to_lower"]``. ``unique=True`` makes it a unique constraint (a
+        write repeating a value fails; ``null`` is exempt; refused over data that already
+        repeats a value, and with ``each``). An unknown type or transform, a chain in another
         order, or a key the schema declares as values the index cannot hold, is refused."""
     def indexes(self, *, policy: Optional[AccessPolicy] = None) -> list[dict[str, Any]]:
-        """The property indexes with their type, whether they are served (``reason`` when
-        not) and their current stats."""
+        """The property indexes with their type, transform, ``unique``, whether they are served
+        (``reason`` when not) and their current stats."""
     def drop_index(self, name: str, *, policy: Optional[AccessPolicy] = None) -> bool:
         """Drops the property index; ``False`` when there is none."""
     def embedders(self) -> list[dict[str, Any]]:

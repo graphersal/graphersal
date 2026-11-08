@@ -4112,3 +4112,73 @@ fn creating_and_dropping_a_per_label_each_index_asks_for_the_extended_kind() {
     run(&graph, r#"g.drop_index("person_tags_each")"#, AllowAll).unwrap();
     assert!(graph.read().property_indexes().unwrap().is_empty());
 }
+
+/// A unique index (stage S4 of the property index extensions) is a definition of kind
+/// `property_index_ext` even with a label and without a transform: creating and dropping it
+/// ask for that kind, and making a plain index unique under its name deletes the kind-2 one.
+#[test]
+fn creating_and_dropping_a_per_label_unique_index_asks_for_the_extended_kind() {
+    let graph = modern();
+    assert_denied(
+        run(
+            &graph,
+            r#"g.create_index(#{label: "person", key: "name", unique: true})"#,
+            AccessPolicy::read_only(),
+        ),
+        "create_index",
+        r#"Create Definition(property_index_ext "person_name")"#,
+    );
+    assert!(graph.read().property_indexes().unwrap().is_empty());
+    // Making a plain index unique under its name replaces a kind-2 index: Delete on it too.
+    let _ = run(
+        &graph,
+        r#"g.create_index(#{label: "person", key: "name"})"#,
+        AllowAll,
+    )
+    .unwrap();
+    /// Denies deleting a plain (kind 2) index, allows the rest.
+    struct KeepPlain;
+    impl Authorizer for KeepPlain {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match request.resource {
+                Resource::Definition {
+                    kind: Some(kind), ..
+                } if kind == graphersal::catalog::DefinitionKind::PROPERTY_INDEX
+                    && request.action == Action::Delete =>
+                {
+                    Err(Denied::new("plain indexes stay"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+    assert_denied(
+        run(
+            &graph,
+            r#"g.create_index(#{label: "person", key: "name", unique: true})"#,
+            KeepPlain,
+        ),
+        "create_index",
+        r#"Delete Definition(property_index "person_name")"#,
+    );
+    assert!(!graph.read().property_indexes().unwrap()[0].unique);
+    let _ = run(
+        &graph,
+        r#"g.create_index(#{label: "person", key: "name", unique: true})"#,
+        AllowAll,
+    )
+    .unwrap();
+    assert!(graph.read().property_indexes().unwrap()[0].unique);
+    assert_denied(
+        run(
+            &graph,
+            r#"g.drop_index("person_name")"#,
+            AccessPolicy::read_only(),
+        ),
+        "drop_index",
+        r#"Delete Definition(property_index_ext "person_name")"#,
+    );
+    assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
+    let _ = run(&graph, r#"g.drop_index("person_name")"#, AllowAll).unwrap();
+    assert!(graph.read().property_indexes().unwrap().is_empty());
+}

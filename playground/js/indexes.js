@@ -1,6 +1,6 @@
 // The model of the Catalog's Property indexes manager: what the engine's `listIndexes()`
 // returns (crates/graphersal-session `indexes.rs`: `[{name, element, label, key, type, transform,
-// served, reason, stats: {entries, distinctValues, skipped, bytes} | null}]`) turned into rows to
+// unique, served, reason, stats: {entries, distinctValues, skipped, bytes} | null}]`) turned into rows to
 // show, the form's draft and its spec, the index types and transforms the form offers, and the
 // Catalog dropdown's items
 // with this kind added. Pure functions, no Vue, no DOM (tested under Node:
@@ -183,7 +183,23 @@ export function indexNotServedReason(index) {
   return 'This storage keeps the definition but serves no index: queries scan';
 }
 
-/** A new index's draft (the form); the form's "any label" box adds `anyLabel: true`. */
+/**
+ * Whether a unique index may use the Transform select's value: not with `each` (one key per
+ * list element; the engine refuses it), so the form disables its Unique box then.
+ */
+export function uniqueAllowed(transform) {
+  return !String(transform || '').trim().split(/\s+/u).includes('each');
+}
+
+/** Whether an entry of `listIndexes()` is a unique constraint. */
+export function isUniqueIndex(index) {
+  return !!index && index.unique === true;
+}
+
+/**
+ * A new index's draft (the form); the form's "any label" box adds `anyLabel: true`, its
+ * "unique" box `unique: true`.
+ */
 export function newIndexDraft() {
   return { name: '', element: 'vertex', label: '', key: '' };
 }
@@ -199,8 +215,9 @@ export function newTransformIndexDraft() {
 }
 
 /**
- * The spec `createIndex` takes (`{label, key, element, name?, type?, transform?}`; `type` and
- * `transform` only when the draft has one; `label: null` for a label-less index, the draft's
+ * The spec `createIndex` takes (`{label, key, element, name?, type?, transform?, unique?}`;
+ * `type` and `transform` only when the draft has one, `unique: true` only when the draft's
+ * box is checked (with `each` an error of `unique`); `label: null` for a label-less index, the draft's
  * `anyLabel`), or the field errors the form shows without asking the engine (an empty label
  * or key, a key that looks like a jpath). Whether the type fits the schema's declaration of the
  * key is the engine's check (its error comes back for the field `key`).
@@ -218,6 +235,10 @@ export function indexDraftToSpec(draft) {
   } else if (/^\$[.[]/u.test(key)) {
     errors.push({ field: 'key', message: 'A top-level property name, not a jpath: nested values are not indexed.' });
   }
+  const unique = draft.unique === true;
+  if (unique && !uniqueAllowed(draft.transform)) {
+    errors.push({ field: 'unique', message: 'A unique index cannot use the transform each (one key per list element).' });
+  }
   if (errors.length) return { errors };
   const spec = { element: draft.element === 'edge' ? 'edge' : 'vertex', label: anyLabel ? null : label, key };
   if (name) spec.name = name;
@@ -225,6 +246,7 @@ export function indexDraftToSpec(draft) {
   if (type) spec.type = type;
   const transform = transformSpecOf(typeof draft.transform === 'string' ? draft.transform : '');
   if (transform) spec.transform = transform;
+  if (unique) spec.unique = true;
   return { spec };
 }
 

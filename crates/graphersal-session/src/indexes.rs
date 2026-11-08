@@ -10,17 +10,20 @@
 //! JSON forms:
 //!
 //! - an **entry** (`list_indexes`): `{name, element: "vertex"|"edge", label, key, type,
-//!   transform, served, reason, stats: {entries, distinctValues, skipped, bytes}}`; `label` is
+//!   transform, unique, served, reason, stats: {entries, distinctValues, skipped, bytes}}`;
+//!   `unique` is `true` for a unique constraint; `label` is
 //!   `null` for a label-less index (every element of the kind, unlabeled ones included);
 //!   `transform` is `null` for an index of the values themselves (else `"to_lower"`, `"each"`,
 //!   a chain as the array of its names, `["each", "to_lower"]`, or the unknown name as read); `served` is false and `stats` `null` when the index is not served,
 //!   and `reason` (else `null`) says why: the storage does not serve indexes (it keeps the
 //!   definition in its catalog, no query reads it), or the index's `type`, `transform` or
 //!   `element` is not known to this version (a newer one wrote it,
-//!   [`PropertyIndexDefinition::unserved_reason`]); `skipped` counts elements whose non-null
+//!   [`PropertyIndexDefinition::unserved_reason`]), or a unique index's data holds repeated
+//!   values (`duplicates: ..`, [`UniqueIndexDuplicates::unserved_reason`]); `skipped` counts elements whose non-null
 //!   value the index does not hold (a `to_lower` index is used by queries only while it is 0);
 //!   `bytes` is the storage's estimate of the index's memory;
-//! - a **spec** (`create_index`): `{key, label?, element?, name?, type?, transform?}`; a
+//! - a **spec** (`create_index`): `{key, label?, element?, name?, type?, transform?,
+//!   unique?}`; `unique` (a boolean, default `false`) makes a unique constraint; a
 //!   `label` absent or `null` makes a LABEL-LESS index (an empty string is a `label` error);
 //!   `element` defaults to `"vertex"`, `name` to `<label>_<key>` (`<key>` for a label-less
 //!   index, `<label>_<key>_edge` for an edge index, then `_to_lower`, `_each`,
@@ -29,11 +32,15 @@
 //!   of [`index_transforms`], or a chain as an array of names applied in order,
 //!   `["each", "to_lower"]`, the one chain this version serves);
 //! - **field errors** (a refused create): `[{field, message, help?}]` with `field` one of
-//!   `name`, `element`, `label`, `key`, `type`, `transform` or `general`, the same shape as the
+//!   `name`, `element`, `label`, `key`, `type`, `transform`, `unique` or `general`, the same
+//!   shape as the
 //!   other catalog editors. An unknown `type` is an error of `type`, an unknown `transform` of
 //!   `transform`; a key the graph's schema declares as values the index cannot hold (a vector,
 //!   an array, an object; with `to_lower` anything but a string;
-//!   [`PropertyIndexDefinition::check_create`]) an error of `key`. A storage without property
+//!   [`PropertyIndexDefinition::check_create`]) an error of `key`; `unique` with the transform
+//!   `each`, and a unique index over data that holds a value more than once (the message lists
+//!   up to 10 of them with their counts and example ids, the help the query that lists them
+//!   all), an error of `unique`. A storage without property
 //!   indexes refuses every create with its `Unsupported` diagnostic (field `general`), as
 //!   `recompress` does on a storage without compressed properties.
 
@@ -42,14 +49,24 @@ use graphersal::catalog::{
     Definition, DefinitionKind, PropertyIndexDefinition, PropertyIndexTransform, PropertyIndexType,
 };
 use graphersal::prelude::*;
-use graphersal::storage::{ElementKind, PropertyIndexInfo, PropertyIndexStats};
+use graphersal::storage::{
+    ElementKind, PropertyIndexInfo, PropertyIndexStats, UniqueIndexDuplicates,
+};
 use serde_json::{Value, json};
 
 use crate::Session;
 use crate::queries::FieldError;
 
 /// The keys a spec may have.
-const KEYS: [&str; 6] = ["name", "element", "label", "key", "type", "transform"];
+const KEYS: [&str; 7] = [
+    "name",
+    "element",
+    "label",
+    "key",
+    "type",
+    "transform",
+    "unique",
+];
 
 /// Why a storage that serves no property indexes at all does not serve one.
 const STORAGE_SERVES_NONE: &str =
@@ -121,10 +138,28 @@ fn entry(name: &str, index: &PropertyIndexDefinition, stats: Option<PropertyInde
         "key": index.key(),
         "type": index.index_type().as_str(),
         "transform": index.transform().map(transform_json),
+        "unique": index.is_unique(),
         "served": served,
         "reason": reason,
         "stats": stats,
     })
+}
+
+/// [`entry`] of an index the storage does not serve because its data repeats values under the
+/// unique constraint (`duplicates`): the reason says so, `duplicates: ..`.
+fn entry_checked(
+    name: &str,
+    index: &PropertyIndexDefinition,
+    stats: Option<PropertyIndexStats>,
+    duplicates: Option<UniqueIndexDuplicates>,
+) -> Value {
+    let mut value = entry(name, index, stats);
+    if let Some(report) = duplicates
+        && index.unserved_reason().is_none()
+    {
+        value["reason"] = Value::from(report.unserved_reason());
+    }
+    value
 }
 
 /// The form field a catalog error of a property index belongs to.
@@ -132,11 +167,15 @@ fn field_of(err: &DefinitionError) -> FieldError {
     let mut error = FieldError::of(err);
     match err {
         DefinitionError::InvalidField { field, .. }
-            if matches!(field.as_str(), "label" | "key" | "type" | "transform") =>
+            if matches!(
+                field.as_str(),
+                "label" | "key" | "type" | "transform" | "unique"
+            ) =>
         {
             error.field = field.clone();
         }
         DefinitionError::IndexTypeMismatch { .. } => error.field = "key".to_string(),
+        DefinitionError::UniqueIndexDuplicates { .. } => error.field = "unique".to_string(),
         _ => {}
     }
     error
@@ -202,7 +241,8 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
     let Some(object) = spec.as_object() else {
         return Err(vec![FieldError::new(
             "general",
-            "the index is a JSON object {key, label?, element?, name?, type?, transform?}",
+            "the index is a JSON object {key, label?, element?, name?, type?, transform?, \
+             unique?}",
         )]);
     };
     if let Some(unknown) = object.keys().find(|key| !KEYS.contains(&key.as_str())) {
@@ -246,6 +286,14 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
         }
         _ => text("transform").map(|name| PropertyIndexTransform::from_name(&name)),
     };
+    let unique = match spec.get("unique") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => {
+            errors.push(FieldError::new("unique", "unique must be true or false"));
+            false
+        }
+    };
     if label_given && label.is_none() && !errors.iter().any(|e| e.field == "label") {
         errors.push(FieldError::new(
             "label",
@@ -281,7 +329,8 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
         PropertyIndexType::MemoryOrdered,
         PropertyIndexType::from_name,
     ))
-    .with_transform(transform);
+    .with_transform(transform)
+    .with_unique(unique);
     let name = name.unwrap_or_else(|| index.default_name());
     // The name and the index each on their own, so both wrong fields are reported (the index
     // checked under its default name when the given one is wrong).
@@ -309,13 +358,18 @@ pub fn indexes_in<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
         g.definitions()?
             .filter_map(|definition| {
                 let index = definition.as_property_index()?;
-                Some(entry(
-                    definition.name(),
-                    index,
-                    stats_of(&served, definition.name()),
-                ))
+                let stats = stats_of(&served, definition.name());
+                let duplicates = match stats {
+                    Some(_) => Ok(None),
+                    None => g.unique_index_duplicates(definition.name()),
+                };
+                Some(
+                    duplicates.map(|duplicates| {
+                        entry_checked(definition.name(), index, stats, duplicates)
+                    }),
+                )
             })
-            .collect(),
+            .collect::<Result<Vec<_>, GraphError>>()?,
     ))
 }
 
@@ -328,7 +382,14 @@ pub fn index_in<S: GraphStorage>(g: &S, name: &str) -> Result<Value, GraphError>
             .or(g.definition(DefinitionKind::PROPERTY_INDEX_EXT, name)?)
             .and_then(Definition::as_property_index)
         {
-            Some(index) => entry(name, index, stats_of(&g.property_indexes()?, name)),
+            Some(index) => {
+                let stats = stats_of(&g.property_indexes()?, name);
+                let duplicates = match stats {
+                    Some(_) => None,
+                    None => g.unique_index_duplicates(name)?,
+                };
+                entry_checked(name, index, stats, duplicates)
+            }
             None => Value::Null,
         },
     )
@@ -345,7 +406,8 @@ fn stats_of(served: &[PropertyIndexInfo], name: &str) -> Option<PropertyIndexSta
 /// name must be free; a storage without property indexes refuses it (`Unsupported`, field
 /// `general`); [`PropertyIndexDefinition::check_create`] against `g`'s stored schema refuses
 /// an unknown type (field `type`) or transform (field `transform`) and a key declared as
-/// values the index cannot hold (field `key`).
+/// values the index cannot hold (field `key`); a unique index over data that holds a value
+/// more than once is refused (field `unique`) and leaves nothing.
 pub(crate) fn store_index<S: GraphStorage>(
     g: &mut S,
     definition: Definition,
@@ -373,7 +435,34 @@ pub(crate) fn store_index<S: GraphStorage>(
     {
         return Err(vec![field_of(&err)]);
     }
-    let stored = g.transaction(|unit| unit.set_definition(definition));
+    let unique = definition
+        .as_property_index()
+        .filter(|index| index.is_unique())
+        .map(|index| {
+            (
+                index.element(),
+                index.label().map(str::to_string),
+                index.key().to_string(),
+                index.transform().map(|t| t.as_str().to_string()),
+            )
+        });
+    let stored = g.transaction(|unit| {
+        unit.set_definition(definition)?;
+        if let Some((element, label, key, transform)) = unique
+            && let Some(duplicates) = unit.unique_index_duplicates(&name)?
+        {
+            return Err(DefinitionError::unique_index_duplicates(
+                &name,
+                element,
+                label.as_deref(),
+                &key,
+                transform.as_deref(),
+                duplicates,
+            )
+            .into());
+        }
+        Ok(())
+    });
     match stored {
         Ok(()) => Ok(()),
         Err(GraphError::Definition(err)) => Err(vec![field_of(&err)]),
@@ -447,7 +536,7 @@ mod tests {
         let refused = s.create_index(&json!({"name": "bad name", "label": "a::b", "key": "k"}));
         assert_eq!(refused["errors"][0]["field"], "name", "{refused}");
         assert_eq!(refused["errors"][1]["field"], "label", "{refused}");
-        let refused = s.create_index(&json!({"label": "person", "key": "age", "unique": true}));
+        let refused = s.create_index(&json!({"label": "person", "key": "age", "sparse": true}));
         assert_eq!(refused["errors"][0]["field"], "general", "{refused}");
         assert_eq!(s.create_index(&json!("person"))["ok"], false);
         // The same name again: a name error (drop it first); the same (element, label, key)
@@ -703,5 +792,46 @@ mod tests {
         );
         assert!(out.contains("marko"), "{out}");
         assert_eq!(index_transforms()[1]["name"], "each");
+    }
+
+    #[test]
+    fn a_unique_index_over_json_and_its_refusals() {
+        let mut s = modern();
+        let created = s.create_index(&json!({"label": "person", "key": "name", "unique": true}));
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(created["index"]["unique"], true);
+        assert_eq!(created["index"]["served"], true);
+        let plain = s.create_index(&json!({"label": "software", "key": "lang"}));
+        assert_eq!(plain["index"]["unique"], false, "{plain}");
+        // A non-boolean, each, repeated values: errors of the field `unique`.
+        let wrong = s.create_index(&json!({"label": "person", "key": "age", "unique": "yes"}));
+        assert_eq!(wrong["errors"][0]["field"], "unique", "{wrong}");
+        let each = s.create_index(&json!({"key": "tags", "transform": "each", "unique": true}));
+        assert_eq!(each["errors"][0]["field"], "unique", "{each}");
+        s.execute(
+            r#"g.add_v("software").property("lang", "java").iterate()"#,
+            &crate::RunOptions::default(),
+        );
+        s.drop_index("software_lang").unwrap();
+        let repeated = s.create_index(&json!({"label": "software", "key": "lang", "unique": true}));
+        assert_eq!(repeated["ok"], false, "{repeated}");
+        assert_eq!(repeated["errors"][0]["field"], "unique", "{repeated}");
+        let message = repeated["errors"][0]["message"].as_str().unwrap();
+        assert!(message.contains("\"java\" (3 elements"), "{message}");
+        let help = repeated["errors"][0]["help"].as_str().unwrap();
+        assert!(help.contains("group_count().by(\"lang\")"), "{help}");
+        assert!(
+            s.get_index("software_lang").unwrap().is_null(),
+            "nothing was created"
+        );
+        // A write repeating a value fails.
+        let out = s.execute(
+            r#"g.add_v("person").property("name", "marko").iterate()"#,
+            &crate::RunOptions::default(),
+        );
+        assert!(
+            out.contains("The unique index 'person_name' already holds"),
+            "{out}"
+        );
     }
 }

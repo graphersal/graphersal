@@ -12724,3 +12724,110 @@ fn property_index_each_errors_carry_their_help() {
         assert!(order.contains(part), "{part}\n{order}");
     }
 }
+
+/// Unique property indexes (stage S4 of the property index extensions): a write that repeats a
+/// key, a create over repeated values, `unique` with `each` and the conflict of a second index
+/// on the key carry their help.
+#[test]
+fn unique_index_errors_carry_their_help() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let fail = |script: &str| -> String {
+        eval_value(graph.clone(), script)
+            .expect_err(script)
+            .to_string()
+    };
+    let _ = eval_value(
+        graph.clone(),
+        r#"g.create_index(#{label: "person", key: "name", unique: true})"#,
+    )
+    .unwrap();
+    let violation = fail(r#"g.add_v("person").property("name", "josh").iterate()"#);
+    for part in [
+        "The unique index 'person_name' already holds \"josh\" at 'name' for the vertex '4'",
+        "Help: Nothing was written (a query, an import or an applied change set rolls back as a \
+         whole). The unique index 'person_name' lets one vertex of its scope hold each value of \
+         \"name\" (null and values the index does not hold are exempt; g.indexes() shows its \
+         label).",
+        "g.v(\"4\").value_map()",
+        "g.v(\"4\").property(\"name\", <new value>)",
+        "to swap the values of two elements in one query, move one through an intermediate \
+         value first",
+        "g.drop_index(\"person_name\")",
+    ] {
+        assert!(violation.contains(part), "{part}\n{violation}");
+    }
+    // A label-less edge index names every edge and g.e().
+    let _ = eval_value(
+        graph.clone(),
+        r#"g.create_index(#{element: "edge", key: "weight", unique: true, name: "w"})"#,
+    )
+    .unwrap_err();
+    let _ = eval_value(
+        graph.clone(),
+        r#"g.create_index(#{element: "edge", key: "kind", unique: true, name: "k"});
+           g.v("1").add_e("knows").to(__.v("2")).property("kind", "k1").iterate()"#,
+    )
+    .unwrap();
+    let edge = fail(r#"g.v("2").add_e("knows").to(__.v("1")).property("kind", "k1").iterate()"#);
+    assert!(
+        edge.contains("lets one edge of its scope hold each value of \"kind\""),
+        "{edge}"
+    );
+    assert!(edge.contains("g.e(\""), "{edge}");
+
+    // The create over repeated values: the report and the query that lists them all.
+    let duplicates = fail(r#"g.create_index(#{element: "edge", key: "weight", unique: true})"#);
+    for part in [
+        "Cannot create the unique index 'weight_edge': 2 value(s) of 'weight' are held by more \
+         than one edge: 0.4 (2 elements: 1, 3), 1.0 (2 elements: 2, 4)",
+        "Help: A unique index can only be created over data that holds each value once (null \
+         and values the index does not hold are exempt).",
+        "List every repeated value with its count: g.e().has(\"weight\").group_count()\
+         .by(\"weight\").unfold().where(__.select(Column.values).is(P.gt(1)))",
+        "g.e(\"1\").property(\"weight\", <new value>)",
+        "To index the values without the constraint, leave unique out.",
+    ] {
+        assert!(duplicates.contains(part), "{part}\n{duplicates}");
+    }
+    let lowered = fail(
+        r#"g.add_v("person").property("nick", "Ann").iterate();
+           g.add_v("person").property("nick", "ann").iterate();
+           g.create_index(#{label: "person", key: "nick", unique: true, transform: "to_lower"})"#,
+    );
+    for part in [
+        "\"ann\" (2 elements",
+        "the values are compared as the index keys them, lowered",
+        "g.v().has_label(\"person\").has(\"nick\").group_count().by(__.values(\"nick\")\
+         .to_lower()).unfold().where(__.select(Column.values).is(P.gt(1)))",
+    ] {
+        assert!(lowered.contains(part), "{part}\n{lowered}");
+    }
+
+    // unique with each.
+    let each = fail(r#"g.create_index(#{key: "tags", transform: "each", unique: true})"#);
+    for part in [
+        "Invalid unique of 'tags_each': a unique index cannot use the transform each",
+        "Help: A unique index keeps each value of its key once",
+        "g.create_index(#{label: \"User\", key: \"email\", unique: true})",
+    ] {
+        assert!(each.contains(part), "{part}\n{each}");
+    }
+
+    // A second index on the key: the conflict names how to make the first unique.
+    let _ = eval_value(
+        graph.clone(),
+        r#"g.create_index(#{label: "software", key: "lang"})"#,
+    )
+    .unwrap();
+    let conflict = fail(r#"g.create_index(#{label: "software", key: "lang", name: "l2"})"#);
+    assert!(
+        conflict.contains(
+            "To make it unique (or plain again), declare it again under its own name with \
+             unique: true (or without), which replaces it: g.create_index(#{name: \
+             \"software_lang\", .., unique: true})."
+        ),
+        "{conflict}"
+    );
+}

@@ -26,7 +26,8 @@ use graphersal::storage::{
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ElementKind,
     ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
     JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
-    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UniqueIndexDuplicates,
+    UnitChanges, UnitMark,
 };
 
 /// The fault switches of a [`Failing`] storage: while a switch is on, the methods of its group
@@ -408,6 +409,13 @@ impl GraphStorage for Failing {
         self.faults
             .check(&self.faults.index_lookup, "read a property index")?;
         GraphStorage::count_by_property_index(&self.inner, element, label, key, transform, range)
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<UniqueIndexDuplicates>, GraphError> {
+        GraphStorage::unique_index_duplicates(&self.inner, name)
     }
 
     fn insert_vertex(

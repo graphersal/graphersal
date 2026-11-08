@@ -259,6 +259,25 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`Self::capabilities`].
     fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError>;
 
+    /// [`GraphStorage::unique_index_duplicates`]: why the unique index `name` is not served
+    /// (its data holds repeated values), `None` when it is served or is not unique. Fails like
+    /// [`Self::capabilities`].
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError>;
+
+    /// [`GraphTraversalSource::create_index`] in one unit, unauthorized (the front end asks its
+    /// authorizer first): refused on a storage without property indexes, by
+    /// [`PropertyIndexDefinition::check_create`](crate::graph::PropertyIndexDefinition::check_create),
+    /// and for a unique index over repeated values
+    /// ([`DefinitionError::UniqueIndexDuplicates`](crate::error::DefinitionError::UniqueIndexDuplicates)).
+    fn create_index(
+        &self,
+        name: &str,
+        index: crate::graph::PropertyIndexDefinition,
+    ) -> TraverserResult<()>;
+
     // ---- journal --------------------------------------------------------------------------
 
     /// [`GraphStorage::mark`]: a named mark at the current commit position; without a journal
@@ -546,6 +565,21 @@ where
 
     fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
         self.read_checked()?.property_indexes()
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        self.read_checked()?.unique_index_duplicates(name)
+    }
+
+    fn create_index(
+        &self,
+        name: &str,
+        index: crate::graph::PropertyIndexDefinition,
+    ) -> TraverserResult<()> {
+        GraphTraversalSource::new(&mut *self.write_checked()?).create_index(name, index)
     }
 
     fn mark(&self, name: &str) -> Result<Mark, GraphError> {

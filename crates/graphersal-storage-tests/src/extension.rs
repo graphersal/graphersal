@@ -701,6 +701,164 @@ pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S
     );
 }
 
+/// `property_indexes` with a catalog: a UNIQUE index (kind `property_index_ext`, critical) is
+/// listed with `unique`; every write that would give a second element of its label a key it
+/// holds fails with `GraphError::UniqueViolation` and changes nothing (an insert, a property
+/// write, a label added); keys compare as the index keys them (`to_lower`: case-insensitive);
+/// `null` and values the index does not hold (a number under `to_lower`) are exempt; an
+/// element may write its own key again; a swap through an intermediate value passes; an index
+/// stored over repeated values is neither listed nor enforced, and `unique_index_duplicates`
+/// reports them. Skipped without the capability.
+pub fn unique_property_index_refuses_repeated_keys<S: GraphStorage>(storage: &mut S) {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::ElementKind;
+    let caps = storage.capabilities().unwrap();
+    if !caps.property_indexes || !caps.atomic || !has_catalog(storage) {
+        return;
+    }
+    let a = vertex(
+        storage,
+        Some("uq_a"),
+        &["uq"],
+        props(&[("email", "a@x".into())]),
+    );
+    let b = vertex(
+        storage,
+        Some("uq_b"),
+        &["uq"],
+        props(&[("email", "b@x".into())]),
+    );
+    vertex(
+        storage,
+        Some("uq_n1"),
+        &["uq"],
+        props(&[("email", ElementProperty::Null)]),
+    );
+    let other = vertex(
+        storage,
+        Some("uq_o"),
+        &["uq_other"],
+        props(&[("email", "A@x".into())]),
+    );
+    let index = Definition::property_index(
+        "uq_email",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "uq", "email")
+            .with_transform(Some(PropertyIndexTransform::ToLower))
+            .with_unique(true),
+    );
+    assert_eq!(index.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
+    assert!(index.flags().is_critical());
+    storage
+        .set_definition(index.clone())
+        .expect("a unique index");
+    let listed = storage.property_indexes().unwrap();
+    let info = listed
+        .iter()
+        .find(|info| info.name == "uq_email")
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    assert!(info.unique, "{info:?}");
+    assert_eq!(storage.unique_index_duplicates("uq_email").unwrap(), None);
+    let email = |storage: &S, v: S::VertexId| {
+        storage
+            .vertex_properties(v)
+            .unwrap()
+            .and_then(|map| map.get("email"))
+            .map(|value| value.to_logical())
+    };
+    let violation = |result: Result<(), GraphError>, what: &str| match result {
+        Err(GraphError::UniqueViolation { index, .. }) => assert_eq!(index, "uq_email"),
+        other => panic!("{what}: expected a unique violation, got {other:?}"),
+    };
+    // An insert repeating a key (case-insensitively) fails and adds nothing.
+    violation(
+        storage
+            .insert_vertex(
+                Some("uq_dup".into()),
+                vec!["uq".into()],
+                props(&[("email", "A@X".into())]),
+            )
+            .map(|_| ()),
+        "insert",
+    );
+    assert!(storage.get_vertex_by_id("uq_dup").unwrap().is_none());
+    // A property write repeating a key fails and keeps the old value.
+    violation(
+        storage.set_vertex_property(b, "email".into(), "a@X".into()),
+        "set",
+    );
+    assert_eq!(email(storage, b), Some("b@x".into()));
+    // A label that brings the vertex into the index fails, the labels stay.
+    violation(
+        storage.add_vertex_label(other, "uq".into()).map(|_| ()),
+        "add label",
+    );
+    let labels: Vec<&str> = storage
+        .vertex_labels(other)
+        .unwrap()
+        .iter()
+        .map(|label| label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["uq_other"]);
+    // Exempt: its own key again, null, values a to_lower index does not hold.
+    storage
+        .set_vertex_property(b, "email".into(), "B@x".into())
+        .expect("its own key");
+    for id in ["uq_n2", "uq_5a", "uq_5b"] {
+        let value = if id == "uq_n2" {
+            ElementProperty::Null
+        } else {
+            5.into()
+        };
+        vertex(storage, Some(id), &["uq"], props(&[("email", value)]));
+    }
+    // A swap needs an intermediate value (the check is immediate).
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(a, "email".into(), "tmp@x".into())
+        .unwrap();
+    storage
+        .set_vertex_property(b, "email".into(), "a@x".into())
+        .unwrap();
+    storage
+        .set_vertex_property(a, "email".into(), "b@x".into())
+        .unwrap();
+    storage.commit_unit(mark).unwrap();
+    assert_eq!(email(storage, a), Some("b@x".into()));
+    // Stored over repeated values (no create check): neither listed nor enforced.
+    storage
+        .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
+        .unwrap();
+    storage
+        .set_vertex_property(b, "email".into(), "B@X".into())
+        .unwrap();
+    storage.set_definition(index).unwrap();
+    assert!(
+        storage
+            .property_indexes()
+            .unwrap()
+            .iter()
+            .all(|info| info.name != "uq_email")
+    );
+    let report = storage
+        .unique_index_duplicates("uq_email")
+        .unwrap()
+        .expect("the repeated values");
+    assert_eq!(report.total, 1);
+    assert_eq!(report.values[0].count, 2);
+    assert_eq!(report.values[0].value, "\"b@x\"");
+    vertex(
+        storage,
+        Some("uq_c"),
+        &["uq"],
+        props(&[("email", "b@x".into())]),
+    );
+    assert!(
+        storage
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
+            .unwrap()
+    );
+}
+
 /// `set_definitions` stores a list in order exactly like one `set_definition` per item (a name
 /// given twice: the last one wins); a refused item fails the call with its error, and inside a
 /// unit an atomic storage's rollback keeps nothing of the list. Needs a catalog and `atomic`.

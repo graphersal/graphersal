@@ -532,6 +532,17 @@ fn transformed_key(
     }
 }
 
+/// A value as an index without `each` keys it (the lowered text for `to_lower`), for a
+/// report; the value itself when the transform does not take it.
+fn keyed_value(
+    transform: Option<&PropertyIndexTransform>,
+    value: &ElementProperty,
+) -> ElementProperty {
+    transform
+        .and_then(|transform| transform.apply(value))
+        .unwrap_or_else(|| value.clone())
+}
+
 /// The keys of a stored value under an optional transform, each passed to `key` (an `each`
 /// transform passes one per array element, the same key again for an element held twice: the
 /// postings keep a slot once per key); returns how many values the index does not hold (the
@@ -637,6 +648,10 @@ pub struct PropertyIndexDefinition {
     key: String,
     index_type: PropertyIndexType,
     transform: Option<PropertyIndexTransform>,
+    /// A unique constraint (book page "Property Indexes", section "Unique indexes"): no two
+    /// elements of the index hold an equal key (`null` and values the index does not hold are
+    /// exempt).
+    unique: bool,
     extra: PropertyMap,
     /// The payload map exactly as read, kept for an UNKNOWN type or transform only: written back unchanged
     /// (the key order and every key of a newer version), so the definition survives byte for
@@ -657,6 +672,7 @@ impl PropertyIndexDefinition {
             key: key.into(),
             index_type: PropertyIndexType::MemoryOrdered,
             transform: None,
+            unique: false,
             extra: PropertyMap::default(),
             original: None,
             unknown_element: None,
@@ -688,6 +704,7 @@ impl PropertyIndexDefinition {
             key: key.into(),
             index_type: PropertyIndexType::MemoryOrdered,
             transform: None,
+            unique: false,
             extra: PropertyMap::default(),
             original: None,
             unknown_element: None,
@@ -743,6 +760,54 @@ impl PropertyIndexDefinition {
     /// The transform of the index, `None` when it indexes the values themselves.
     pub fn transform(&self) -> Option<&PropertyIndexTransform> {
         self.transform.as_ref()
+    }
+
+    /// The same index with (`true`) or without a UNIQUE constraint (book page "Property
+    /// Indexes", section "Unique indexes"): no two elements of the index hold an equal key, so
+    /// a write that would give another element a key the index already holds fails with
+    /// [`GraphError::UniqueViolation`] (checked at once, at every write). A per-label index is
+    /// unique within its label, a [label-less](Self::label_less) one over the whole element
+    /// kind, one with `to_lower` case-insensitively. `null` and values the index does not hold
+    /// ([`skipped`](PropertyIndexStats::skipped)) are not part of uniqueness. A unique index is
+    /// stored as [`DefinitionKind::PROPERTY_INDEX_EXT`] (critical); with the transform `each`
+    /// it is refused at create ([`Self::check_create`]) and never served.
+    ///
+    /// ```
+    /// use graphersal::catalog::{Definition, DefinitionKind, PropertyIndexDefinition};
+    /// use graphersal::storage::ElementKind;
+    ///
+    /// let email = PropertyIndexDefinition::new(ElementKind::Vertex, "User", "email")
+    ///     .with_unique(true);
+    /// assert!(email.is_unique() && email.needs_extended_kind());
+    /// let definition = Definition::property_index("user_email", email);
+    /// assert_eq!(definition.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
+    /// ```
+    pub fn with_unique(mut self, unique: bool) -> Self {
+        // An index of an unknown element kind is kept as read.
+        if self.unknown_element.is_none() {
+            self.unique = unique;
+            self.original = None;
+        }
+        self
+    }
+
+    /// Whether the index is a unique constraint ([`Self::with_unique`]).
+    pub fn is_unique(&self) -> bool {
+        self.unique
+    }
+
+    /// Why a unique index of this transform cannot be built (design D9: `each` holds several
+    /// keys per element), `None` when it can.
+    fn unique_error(&self) -> Option<&'static str> {
+        (self.unique
+            && self
+                .transform
+                .as_ref()
+                .is_some_and(PropertyIndexTransform::has_each))
+        .then_some(
+            "a unique index cannot use the transform each (an array gives one key per element; \
+             uniqueness of array elements is not supported)",
+        )
     }
 
     /// Whether the index holds values of type `ty`: its type holds them
@@ -813,11 +878,14 @@ impl PropertyIndexDefinition {
                      Graphersal wrote it); the definition is kept, queries scan"
                 ),
             }),
-            Some(_) | None => None,
+            Some(_) | None => self
+                .unique_error()
+                .map(|reason| format!("{reason}; the definition is kept, queries scan")),
         }
     }
 
-    /// Whether this version builds and serves the index (its type and transform are known).
+    /// Whether this version builds and serves the index (its type and transform are known,
+    /// and a unique one has no `each`).
     pub(crate) fn is_served_type(&self) -> bool {
         self.unknown_element.is_none()
             && self.index_type.is_known()
@@ -825,6 +893,7 @@ impl PropertyIndexDefinition {
                 .transform
                 .as_ref()
                 .is_none_or(PropertyIndexTransform::is_known)
+            && self.unique_error().is_none()
     }
 
     /// Checks that the index can be CREATED (named `name`, for the error) in a graph whose
@@ -906,6 +975,13 @@ impl PropertyIndexDefinition {
                 },
             });
         }
+        if let Some(reason) = self.unique_error() {
+            return Err(DefinitionError::InvalidField {
+                name: name.to_string(),
+                field: "unique".to_string(),
+                reason: reason.to_string(),
+            });
+        }
         let Some(schema) = schema else {
             return Ok(());
         };
@@ -985,12 +1061,13 @@ impl PropertyIndexDefinition {
 
     /// Whether the index uses a feature a reader must know to keep it exact, so it is stored
     /// as [`DefinitionKind::PROPERTY_INDEX_EXT`] with the critical flag (a reader that does not
-    /// know that kind opens the store read-only): today a [label-less](Self::label_less) index
-    /// and an index whose transform [starts with `each`](PropertyIndexTransform::has_each)
-    /// (per label too). A plain per-label index, also with `to_lower`, is
+    /// know that kind opens the store read-only): today a [label-less](Self::label_less) index,
+    /// a [unique](Self::with_unique) one (an older writer would not enforce it) and an index
+    /// whose transform [starts with `each`](PropertyIndexTransform::has_each) (per label too). A plain per-label index, also with `to_lower`, is
     /// [`DefinitionKind::PROPERTY_INDEX`], not critical.
     pub fn needs_extended_kind(&self) -> bool {
         self.label.is_none()
+            || self.unique
             || self
                 .transform
                 .as_ref()
@@ -1063,7 +1140,8 @@ impl PropertyIndexDefinition {
     /// The payload property map (format spec 6.3), in this key order: `element` (`"vertex"` or
     /// `"edge"`), `label` (absent for a label-less index), `key`, `type` (always written),
     /// `transform` (only for an index with a transform: its name, or a chain as the array of
-    /// its names, `["each", "to_lower"]`), then the unknown keys. A definition of an unknown
+    /// its names, `["each", "to_lower"]`), `unique` (`true`, only for a unique index), then the
+    /// unknown keys. A definition of an unknown
     /// type or transform read
     /// from a payload gives that payload back unchanged.
     pub fn to_payload(&self) -> PropertyMap {
@@ -1080,6 +1158,9 @@ impl PropertyIndexDefinition {
         if let Some(transform) = &self.transform {
             map.insert("transform", transform_payload(transform));
         }
+        if self.unique {
+            map.insert("unique", ElementProperty::Boolean(true));
+        }
         for (key, value) in &self.extra {
             map.insert_if_absent(key, || value.clone());
         }
@@ -1088,7 +1169,8 @@ impl PropertyIndexDefinition {
 
     /// Reads a payload map (the inverse of [`Self::to_payload`]). A missing `element` is
     /// `"vertex"`, a missing `label` a label-less index, a missing `type` is
-    /// `"memory-ordered"`, a missing `transform` is none; a known key of the wrong type is an
+    /// `"memory-ordered"`, a missing `transform` is none, a missing `unique` is `false`; a known
+    /// key of the wrong type is an
     /// error; unknown keys are kept. A type or transform this version does not know is
     /// [`PropertyIndexType::Unknown`] / [`PropertyIndexTransform::Unknown`] (never an error),
     /// and the whole map is kept to be written back unchanged. Not validated.
@@ -1155,14 +1237,20 @@ impl PropertyIndexDefinition {
             }
             Some(_) => text("transform")?.map(|name| PropertyIndexTransform::from_name(&name)),
         };
+        let unique = match map.get("unique") {
+            None => false,
+            Some(ElementProperty::Boolean(flag)) => *flag,
+            Some(_) => return Err(malformed("unique", "must be a boolean")),
+        };
         let mut index = match label {
             Some(label) => PropertyIndexDefinition::new(element, label, key),
             None => PropertyIndexDefinition::label_less(element, key),
         }
         .with_type(index_type)
-        .with_transform(transform);
+        .with_transform(transform)
+        .with_unique(unique);
         index.unknown_element = unknown_element;
-        const KNOWN: [&str; 5] = ["element", "label", "key", "type", "transform"];
+        const KNOWN: [&str; 6] = ["element", "label", "key", "type", "transform", "unique"];
         for (key, value) in map {
             if !KNOWN.contains(&key.as_str()) && !skip.contains(&key.as_str()) {
                 index.extra.insert(key.clone(), value.to_logical());
@@ -1206,6 +1294,13 @@ impl PropertyIndexDefinition {
                 field(
                     "label",
                     "a label-less index is stored as kind property_index_ext \
+                     (Definition::property_index picks it)"
+                        .to_string(),
+                )
+            } else if self.unique {
+                field(
+                    "unique",
+                    "a unique index is stored as kind property_index_ext \
                      (Definition::property_index picks it)"
                         .to_string(),
                 )
@@ -1420,6 +1515,13 @@ pub struct PropertyIndexInfo {
     pub index_type: PropertyIndexType,
     /// The transform of the index (`None`: the values themselves).
     pub transform: Option<PropertyIndexTransform>,
+    /// Whether the index is a unique constraint
+    /// ([`PropertyIndexDefinition::with_unique`]) the storage enforces: a storage lists a
+    /// unique index only while it enforces it (an index whose data holds repeated values is
+    /// not served, see [`GraphStorage::unique_index_duplicates`]).
+    ///
+    /// [`GraphStorage::unique_index_duplicates`]: crate::graph::GraphStorage::unique_index_duplicates
+    pub unique: bool,
     /// What it holds right now.
     pub stats: PropertyIndexStats,
 }
@@ -1442,8 +1544,15 @@ impl PropertyIndexInfo {
             key: key.into(),
             index_type: PropertyIndexType::MemoryOrdered,
             transform: None,
+            unique: false,
             stats,
         }
+    }
+
+    /// The same entry with (`true`) or without the unique constraint.
+    pub fn with_unique(mut self, unique: bool) -> Self {
+        self.unique = unique;
+        self
     }
 
     /// The same entry with the type `index_type`.
@@ -1456,6 +1565,105 @@ impl PropertyIndexInfo {
     pub fn with_transform(mut self, transform: Option<PropertyIndexTransform>) -> Self {
         self.transform = transform;
         self
+    }
+}
+
+/// One value a unique property index finds held by several elements (a
+/// [`UniqueIndexDuplicates`] report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DuplicateValue {
+    /// The value as JSON text (`"alice@example.com"`, `42`), transformed as the index keys it
+    /// (the lowered text for `to_lower`).
+    pub value: String,
+    /// How many elements hold it.
+    pub count: u64,
+    /// The ids of up to [`UniqueIndexDuplicates::MAX_EXAMPLES`] of them.
+    pub examples: Vec<String>,
+}
+
+impl DuplicateValue {
+    /// The entry of `value` (rendered as JSON text) held by `count` elements, `examples` some
+    /// of their ids (for a storage outside this crate).
+    pub fn new(value: &ElementProperty, count: u64, examples: Vec<String>) -> Self {
+        DuplicateValue {
+            value: crate::value::physical::to_json_text(&value.to_logical())
+                .unwrap_or_else(|err| err.to_string()),
+            count,
+            examples,
+        }
+    }
+}
+
+impl std::fmt::Display for DuplicateValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({} elements", self.value, self.count)?;
+        if !self.examples.is_empty() {
+            write!(f, ": {}", self.examples.join(", "))?;
+            if (self.examples.len() as u64) < self.count {
+                f.write_str(", ...")?;
+            }
+        }
+        f.write_str(")")
+    }
+}
+
+/// Why a unique property index is not served: values its data holds more than once (book page
+/// "Property Indexes", section "Unique indexes"). A create over such data is refused with
+/// [`DefinitionError::UniqueIndexDuplicates`]; an index stored without that check (a load, a
+/// replay, [`GraphStorage::set_definition`]) is kept but not served nor enforced
+/// ([`GraphStorage::unique_index_duplicates`]).
+///
+/// [`GraphStorage::set_definition`]: crate::graph::GraphStorage::set_definition
+/// [`GraphStorage::unique_index_duplicates`]: crate::graph::GraphStorage::unique_index_duplicates
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct UniqueIndexDuplicates {
+    /// Up to [`Self::MAX_VALUES`] repeated values, in index order.
+    pub values: Vec<DuplicateValue>,
+    /// How many distinct values repeat in all.
+    pub total: u64,
+}
+
+impl UniqueIndexDuplicates {
+    /// The most values a report lists.
+    pub const MAX_VALUES: usize = 10;
+    /// The most example ids a value lists.
+    pub const MAX_EXAMPLES: usize = 3;
+
+    /// A report of `values` (the first ones) out of `total` repeated values (for a storage
+    /// outside this crate).
+    pub fn new(values: Vec<DuplicateValue>, total: u64) -> Self {
+        UniqueIndexDuplicates { values, total }
+    }
+
+    /// The values as one line: `"a" (2 elements: 1, 4), 7 (3 elements: 2, 5, 9)`, with
+    /// `and N more` when the report lists only the first ones.
+    pub fn summary(&self) -> String {
+        let mut text = self
+            .values
+            .iter()
+            .map(DuplicateValue::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = self.total.saturating_sub(self.values.len() as u64);
+        if more > 0 {
+            text.push_str(&format!(" and {more} more"));
+        }
+        text
+    }
+
+    /// The `reason` front ends list next to `served: false` for such an index: it starts with
+    /// `duplicates:`, names the values and the fix (remove the repeats, then drop the index and
+    /// create it again).
+    pub fn unserved_reason(&self) -> String {
+        format!(
+            "duplicates: the data holds {} repeated value(s): {}; the unique index is neither \
+             served nor enforced, queries scan. Give the repeated elements other values, then \
+             drop the index and create it again",
+            self.total,
+            self.summary()
+        )
     }
 }
 
@@ -1760,6 +1968,8 @@ struct IndexState {
     label: Option<CompactString>,
     key: CompactString,
     transform: Option<PropertyIndexTransform>,
+    /// A unique constraint, enforced while the index is installed (built without duplicates).
+    unique: bool,
     entries: BTreeMap<IndexKey, Postings>,
     /// The runs of the postings with two or more slots.
     runs: RunsStore,
@@ -1779,6 +1989,7 @@ impl IndexState {
         label: Option<&str>,
         key: &str,
         transform: Option<PropertyIndexTransform>,
+        unique: bool,
     ) -> IndexState {
         IndexState {
             name: CompactString::from(name),
@@ -1786,6 +1997,7 @@ impl IndexState {
             label: label.map(CompactString::from),
             key: CompactString::from(key),
             transform,
+            unique,
             entries: BTreeMap::new(),
             runs: RunsStore::default(),
             len: 0,
@@ -1898,6 +2110,81 @@ impl IndexState {
         )
     }
 
+    /// The slot of an element other than `me` holding a key equal to `key` (`has()`'s
+    /// equality: an `int64` and a `float64` of the same value are equal, two `int64`s only when
+    /// they are the same number); `None` for a `null` key, which is not part of uniqueness.
+    fn other_holder(&self, key: &IndexKey, me: Option<u32>) -> Option<u32> {
+        let other = |postings: &Postings| self.runs.iter(postings).find(|slot| Some(*slot) != me);
+        match key {
+            IndexKey::Null => None,
+            IndexKey::Number(value, kind, int) => {
+                let lower = IndexKey::Number(*value, 0, i64::MIN);
+                let upper = IndexKey::Number(*value, 1, i64::MAX);
+                self.entries
+                    .range(lower..=upper)
+                    .filter(|(held, _)| match held {
+                        IndexKey::Number(_, held_kind, held_int) => {
+                            held_kind != kind || *kind == 1 || held_int == int
+                        }
+                        _ => false,
+                    })
+                    .find_map(|(_, postings)| other(postings))
+            }
+            _ => self.entries.get(key).and_then(other),
+        }
+    }
+
+    /// The groups of slots holding an equal non-null key (by [`Self::other_holder`]'s
+    /// equality), each with two or more slots, in key order: what keeps a unique index from
+    /// being built.
+    fn duplicate_groups(&self) -> Vec<Vec<u32>> {
+        let mut groups = Vec::new();
+        let mut keys = self.entries.iter().peekable();
+        while let Some((key, postings)) = keys.next() {
+            match key {
+                IndexKey::Null => {}
+                IndexKey::Number(value, _, _) => {
+                    // Every number key of the same float64 value: a float equals each of them,
+                    // two ints only themselves.
+                    let mut members = vec![(key, postings)];
+                    while let Some((IndexKey::Number(next, _, _), _)) = keys.peek()
+                        && next == value
+                    {
+                        if let Some(member) = keys.next() {
+                            members.push(member);
+                        }
+                    }
+                    if members
+                        .iter()
+                        .any(|(key, _)| matches!(key, IndexKey::Number(_, 1, _)))
+                    {
+                        let mut slots: Vec<u32> = members
+                            .iter()
+                            .flat_map(|(_, postings)| self.runs.iter(postings))
+                            .collect();
+                        slots.sort_unstable();
+                        slots.dedup();
+                        if slots.len() >= 2 {
+                            groups.push(slots);
+                        }
+                    } else {
+                        for (_, postings) in members {
+                            if self.runs.len(postings) >= 2 {
+                                groups.push(self.runs.iter(postings).collect());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if self.runs.len(postings) >= 2 {
+                        groups.push(self.runs.iter(postings).collect());
+                    }
+                }
+            }
+        }
+        groups
+    }
+
     /// Whether the index keys array elements (its transform starts with `each`).
     fn has_each(&self) -> bool {
         self.transform
@@ -1929,6 +2216,20 @@ pub(crate) struct PropertyIndexes {
     edge: HashMap<CompactString, Vec<usize>>,
     vertex_any: Vec<usize>,
     edge_any: Vec<usize>,
+    /// How many installed indexes are unique (enforced): `0` makes every write's unique check
+    /// one branch.
+    unique: usize,
+    /// The unique indexes of the catalog that are not installed because their data holds
+    /// repeated values (not served, not enforced), with the report, by name.
+    disabled: Vec<(CompactString, UniqueIndexDuplicates)>,
+}
+
+/// An element other than the one written already holds the key a unique index would get:
+/// the index (its position), the other element's slot and the value written.
+pub(crate) struct UniqueConflict {
+    position: usize,
+    slot: u32,
+    value: ElementProperty,
 }
 
 impl PropertyIndexes {
@@ -1936,6 +2237,56 @@ impl PropertyIndexes {
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.indexes.is_empty()
+    }
+
+    /// Whether an enforced unique index exists.
+    #[inline]
+    pub(crate) fn has_unique(&self) -> bool {
+        self.unique > 0
+    }
+
+    /// The first unique index of an element of kind `element` (its slot `me`, `None` for a new
+    /// element) labelled `labels` whose key another element already holds: with `write`
+    /// `Some((key, value))` the indexes on `key` with `value` as the element's value there
+    /// (the other keys are unchanged), else every unique index of the labels with the values of
+    /// `properties`. A key the index does not hold (`null`, a skipped value) never conflicts.
+    #[inline(never)]
+    pub(crate) fn unique_conflict<'l>(
+        &self,
+        element: ElementKind,
+        me: Option<u32>,
+        labels: impl IntoIterator<Item = &'l str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Option<UniqueConflict> {
+        let (by_label, any) = match element {
+            ElementKind::Vertex => (&self.vertex, &self.vertex_any),
+            ElementKind::Edge => (&self.edge, &self.edge_any),
+        };
+        let check = |position: usize| -> Option<UniqueConflict> {
+            let index = self.indexes.get(position).filter(|index| index.unique)?;
+            let value = match write {
+                Some((key, value)) if key == index.key.as_str() => value,
+                Some(_) => return None,
+                None => properties?.get(index.key.as_str())?,
+            };
+            // A unique index never has `each` (refused at create, never served): one key.
+            let key = transformed_key(index.transform.as_ref(), value)?;
+            let slot = index.other_holder(&key, me)?;
+            Some(UniqueConflict {
+                position,
+                slot,
+                value: value.clone(),
+            })
+        };
+        if let Some(conflict) = any.iter().find_map(|position| check(*position)) {
+            return Some(conflict);
+        }
+        labels
+            .into_iter()
+            .filter_map(|label| by_label.get(label))
+            .flatten()
+            .find_map(|position| check(*position))
     }
 
     fn by_label(&self, element: ElementKind) -> &HashMap<CompactString, Vec<usize>> {
@@ -1960,6 +2311,7 @@ impl PropertyIndexes {
                 None => any.push(position),
             }
         }
+        self.unique = self.indexes.iter().filter(|index| index.unique).count();
     }
 
     /// Takes the entries of one element out (`insert` false) or puts them in (`insert` true):
@@ -2146,6 +2498,7 @@ impl TraversalGraph {
             definition.label(),
             definition.key(),
             definition.transform().cloned(),
+            definition.is_unique(),
         );
         let Some(label) = definition.label() else {
             // Label-less: every element of the kind, unlabeled ones included.
@@ -2204,6 +2557,111 @@ impl TraversalGraph {
         state
     }
 
+    /// Builds one index from the data; a unique one whose data holds repeated values gives the
+    /// report instead (it is then neither served nor enforced).
+    fn build_checked(
+        &self,
+        name: &str,
+        definition: &PropertyIndexDefinition,
+    ) -> Result<IndexState, UniqueIndexDuplicates> {
+        let state = self.build_index(name, definition);
+        if !state.unique {
+            return Ok(state);
+        }
+        let groups = state.duplicate_groups();
+        if groups.is_empty() {
+            return Ok(state);
+        }
+        tracing::warn!(
+            index = name,
+            repeated = groups.len(),
+            "a unique property index is not served: its data holds repeated values"
+        );
+        Err(self.duplicates_report(&state, &groups))
+    }
+
+    /// The report of the duplicate `groups` of `state`: the first values with their counts
+    /// and example ids.
+    fn duplicates_report(&self, state: &IndexState, groups: &[Vec<u32>]) -> UniqueIndexDuplicates {
+        let values = groups
+            .iter()
+            .take(UniqueIndexDuplicates::MAX_VALUES)
+            .map(|slots| {
+                let examples: Vec<String> = slots
+                    .iter()
+                    .take(UniqueIndexDuplicates::MAX_EXAMPLES)
+                    .filter_map(|slot| self.slot_id(state.element, *slot))
+                    .collect();
+                let value = slots
+                    .first()
+                    .and_then(|slot| self.slot_value(state.element, *slot, &state.key))
+                    .map(|value| keyed_value(state.transform.as_ref(), &value))
+                    .unwrap_or(ElementProperty::Null);
+                DuplicateValue::new(&value, slots.len() as u64, examples)
+            })
+            .collect();
+        UniqueIndexDuplicates::new(values, groups.len() as u64)
+    }
+
+    /// The id of the live element of kind `element` at `slot`.
+    fn slot_id(&self, element: ElementKind, slot: u32) -> Option<String> {
+        match element {
+            ElementKind::Vertex => self
+                .graph
+                .node_weight(NodeIndex::from_slot(slot))
+                .map(|vertex| vertex.0.to_string()),
+            ElementKind::Edge => self
+                .graph
+                .edge_weight(EdgeIndex::from_slot(slot))
+                .map(|edge| edge.0.to_string()),
+        }
+    }
+
+    /// The logical value at top-level `key` of the live element of kind `element` at `slot`.
+    fn slot_value(&self, element: ElementKind, slot: u32, key: &str) -> Option<ElementProperty> {
+        match element {
+            ElementKind::Vertex => self
+                .graph
+                .node_weight(NodeIndex::from_slot(slot))
+                .and_then(|vertex| vertex.2.get(key))
+                .map(ElementProperty::to_logical),
+            ElementKind::Edge => self
+                .graph
+                .edge_weight(EdgeIndex::from_slot(slot))
+                .and_then(|edge| edge.2.as_ref()?.get(key))
+                .map(ElementProperty::to_logical),
+        }
+    }
+
+    /// The error of a unique `conflict` ([`PropertyIndexes::unique_conflict`]): names the
+    /// index, the key, the value written and the element holding it.
+    #[cold]
+    pub(crate) fn unique_violation(&self, conflict: UniqueConflict) -> GraphError {
+        let Some(index) = self.property_indexes.indexes.get(conflict.position) else {
+            return GraphError::invalid_element_state("a unique index moved during a write");
+        };
+        GraphError::unique_violation(
+            index.name.as_str(),
+            index.element,
+            index.key.as_str(),
+            &conflict.value,
+            self.slot_id(index.element, conflict.slot)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The report of the unique index `name` when it is not served because its data holds
+    /// repeated values ([`GraphStorage::unique_index_duplicates`]).
+    ///
+    /// [`GraphStorage::unique_index_duplicates`]: crate::graph::GraphStorage::unique_index_duplicates
+    pub(crate) fn property_index_duplicates(&self, name: &str) -> Option<UniqueIndexDuplicates> {
+        self.property_indexes
+            .disabled
+            .iter()
+            .find(|(disabled, _)| disabled == name)
+            .map(|(_, report)| report.clone())
+    }
+
     /// After a catalog change of kind property index: rebuilds the index `name` from the data
     /// (or removes it when the catalog no longer holds it).
     pub(crate) fn property_index_after_change(&mut self, name: &str) {
@@ -2218,7 +2676,20 @@ impl TraversalGraph {
             })
             .and_then(|definition| definition.as_property_index().cloned())
             .filter(PropertyIndexDefinition::is_served_type);
-        let built = definition.map(|definition| self.build_index(name, &definition));
+        // A unique index over repeated values is kept disabled (not installed) with its report.
+        self.property_indexes
+            .disabled
+            .retain(|(disabled, _)| disabled != name);
+        let built = match definition.map(|definition| self.build_checked(name, &definition)) {
+            Some(Ok(state)) => Some(state),
+            Some(Err(report)) => {
+                self.property_indexes
+                    .disabled
+                    .push((CompactString::from(name), report));
+                None
+            }
+            None => None,
+        };
         let indexes = &mut self.property_indexes.indexes;
         match (indexes.iter().position(|index| index.name == name), built) {
             (Some(position), Some(state)) => indexes[position] = state,
@@ -2245,12 +2716,17 @@ impl TraversalGraph {
                     .map(|index| (definition.name().to_string(), index.clone()))
             })
             .collect();
-        let indexes: Vec<IndexState> = definitions
-            .iter()
-            .map(|(name, definition)| self.build_index(name, definition))
-            .collect();
+        let mut indexes = Vec::with_capacity(definitions.len());
+        let mut disabled = Vec::new();
+        for (name, definition) in &definitions {
+            match self.build_checked(name, definition) {
+                Ok(state) => indexes.push(state),
+                Err(report) => disabled.push((CompactString::from(name.as_str()), report)),
+            }
+        }
         self.property_indexes = PropertyIndexes {
             indexes,
+            disabled,
             ..PropertyIndexes::default()
         };
         self.property_indexes.reindex_lookup();
@@ -2268,6 +2744,7 @@ impl TraversalGraph {
                 key: index.key.to_string(),
                 index_type: PropertyIndexType::MemoryOrdered,
                 transform: index.transform.clone(),
+                unique: index.unique,
                 stats: index.stats(),
             })
             .collect()
@@ -2379,6 +2856,14 @@ impl TraversalGraph {
                     .filter(|index| index.is_served_type())
                     .map(|index| (definition.name().to_string(), index.clone()))
             })
+            // A unique index disabled by repeated values is not maintained.
+            .filter(|(name, _)| {
+                !self
+                    .property_indexes
+                    .disabled
+                    .iter()
+                    .any(|(disabled, _)| disabled == name)
+            })
             .collect();
         expected.sort_by(|a, b| a.0.cmp(&b.0));
         let mut actual: Vec<&IndexState> = self.property_indexes.indexes.iter().collect();
@@ -2397,6 +2882,7 @@ impl TraversalGraph {
                 || state.label != fresh.label
                 || state.key != fresh.key
                 || state.transform != fresh.transform
+                || state.unique != fresh.unique
             {
                 return Err(format!("index '{name}': its definition differs"));
             }
@@ -2432,6 +2918,25 @@ impl TraversalGraph {
                 return Err(format!(
                     "index '{name}': {} skipped values counted, {} after a rebuild",
                     state.skipped, fresh.skipped
+                ));
+            }
+            if state.unique && !state.duplicate_groups().is_empty() {
+                return Err(format!(
+                    "index '{name}': unique, but its data holds repeated values"
+                ));
+            }
+        }
+        // Every disabled index is a unique index of the catalog.
+        for (name, _) in &self.property_indexes.disabled {
+            let unique = self.definitions.iter().any(|definition| {
+                definition.name() == name.as_str()
+                    && definition
+                        .as_property_index()
+                        .is_some_and(PropertyIndexDefinition::is_unique)
+            });
+            if !unique {
+                return Err(format!(
+                    "index '{name}' is disabled, but the catalog holds no unique index of that name"
                 ));
             }
         }
