@@ -840,7 +840,7 @@ g.v().has_label(\"person\").values(\"name\")";
 const GQL_SHORT: &str = "Run a GQL query (ISO graph query language; Cypher spellings \
 accepted): the text as it is, strings in single quotes, $name values from params; one JSON \
 object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: \
-element_id(n) = 'x', not id(n). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
+element_id(n) = 'x', not id(n); labels(n), type(r). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
 a property (an unanchored one can exceed the memory limit). Every clause and function: resource \
 graphersal://gql-reference. Example: MATCH (p:person)-[:knows]->(f) WHERE f.age > $min RETURN \
 p.name AS who, f.name AS friend ORDER BY who, params {\"min\": 30}";
@@ -850,7 +850,7 @@ p.name AS who, f.name AS friend ORDER BY who, params {\"min\": 30}";
 const GQL_SHORT_WRITABLE: &str = "Run a GQL query (ISO graph query language; Cypher spellings \
 accepted): the text as it is, strings in single quotes, $name values from params; one JSON \
 object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: \
-element_id(n) = 'x', not id(n). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
+element_id(n) = 'x', not id(n); labels(n), type(r). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
 a property (an unanchored one can exceed the memory limit). Writes, only when the user asked; \
 each call is one transaction (a failure changes nothing; the answer names the net changes): \
 INSERT (Cypher CREATE) (n:L {k: v}), an edge (one label) between matched nodes MATCH (a:L {k: \
