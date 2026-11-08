@@ -357,6 +357,11 @@ g.v("1").property("name", "tmp").v("2").property("name", "marko").v("1").propert
 g.v("1").values("name").next()
 ```
 
+- **A compacted change set may not apply.** `ChangeSet::compact()` keeps only the net effect, so
+  the intermediate value of such a swap is gone: applying the compacted set with
+  `apply_change_set` gives the first element the value the second still holds, and the unit is
+  refused with a unique violation (nothing applied). Apply the uncompacted change set instead; a
+  journal replay and a recovery always use the uncompacted, ordered writes.
 - A unique index is an ordinary index for queries: equality, `P.within` and ranges read it, and a
   point lookup returns at most one element.
 - **Not with `each`**: a unique index cannot use the transform `each` (a list gives one key per

@@ -367,7 +367,9 @@ Rules a consumer can rely on:
   dropped again disappears, an added element absorbs its later changes, a property set back to its
   old value disappears). Schema changes stay barriers, and the result is ordered so that it
   replays. The changes of one catalog definition merge into one (dropped when it ends where it
-  started), listed at the end.
+  started), listed at the end. Under a [unique index](property_indexes.md#unique-indexes) a
+  compacted set that swaps two values cannot be applied (the intermediate value is gone); apply the
+  uncompacted one.
 
 ### Building a change set
 

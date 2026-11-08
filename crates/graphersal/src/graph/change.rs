@@ -857,6 +857,11 @@ impl ChangeSet {
     /// Catalog changes do not interact with data or schema: the changes of one definition
     /// (kind and name) merge into one, with the before of the first and the after of the last
     /// (dropped when they are equal), emitted at the end in order of first appearance.
+    ///
+    /// Under a unique property index the result may not apply: a unit that swapped the values of
+    /// two elements through an intermediate value compacts to the two final writes, and the
+    /// first of them meets the value the other element still holds (`GraphError::UniqueViolation`,
+    /// nothing applied). Apply the uncompacted change set in that case.
     pub fn compact(&self) -> ChangeSet {
         ChangeSet {
             commit_seq: self.commit_seq,
