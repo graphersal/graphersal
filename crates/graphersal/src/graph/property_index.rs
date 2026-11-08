@@ -42,14 +42,22 @@
 //! serves `has(key, __.to_lower().is(P))` (case-insensitive search); the constants of `P` are
 //! compared AS GIVEN with the lowered values. An unknown transform is handled like an unknown
 //! type: kept byte for byte, never built or served, never created.
+//!
+//! LAYOUT: an index keeps each key once with its POSTINGS, the sorted slots of the elements
+//! holding it (`BTreeMap<IndexKey, Postings>`, `graph/postings.rs`): one slot inline in the
+//! 8-byte map value, from the second on a sorted run in the index's `RunsStore`, sorted chunks
+//! past 4096 slots. A slot carries no generation (exact
+//! maintenance: a slot an index names belongs to one live element); a lookup reads the
+//! generation from the slot. Lookups go by key, then by slot.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 
 use compact_str::CompactString;
 
 use crate::error::{DefinitionError, GraphError};
 use crate::graph::definition::{Definition, DefinitionBody, DefinitionFlags, DefinitionKind};
+use crate::graph::postings::{Postings, Removed, RunsStore};
 use crate::graph::schema::{ElementKind, GraphSchema, JsonType, PropertySchema, ValueType};
 use crate::graph::{EdgeHandle, EdgeIndex, NodeIndex, TraversalGraph, VertexHandle};
 use crate::value::number::{N, canonicalize_f64};
@@ -1249,21 +1257,34 @@ fn set_bounds(range: &PropertyIndexRange) -> Option<SetBounds> {
     (!empty).then_some((start, end))
 }
 
+/// The key range of the postings map for set bounds: the slot part of `(key, slot)` bounds is
+/// always 0 or `u64::MAX` (the whole postings of a bound key in or out), so dropping it keeps
+/// the same keys. `None` for a range `BTreeMap::range` would refuse (it panics on a start past
+/// the end, or on equal excluded bounds).
+fn key_bounds((start, end): SetBounds) -> Option<(Bound<IndexKey>, Bound<IndexKey>)> {
+    let key = |bound: Bound<(IndexKey, u64)>| match bound {
+        Bound::Included((key, _)) => Bound::Included(key),
+        Bound::Excluded((key, _)) => Bound::Excluded(key),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    let (start, end) = (key(start), key(end));
+    let refused = match (&start, &end) {
+        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b))
+            if a > b =>
+        {
+            true
+        }
+        (Bound::Excluded(a), Bound::Excluded(b)) => a == b,
+        _ => false,
+    };
+    (!refused).then_some((start, end))
+}
+
 // ---------------------------------------------------------------------------------------------
 // The in-memory state
 // ---------------------------------------------------------------------------------------------
 
-/// A handle packed into one word: slot index in the high half, generation in the low half.
-fn pack(slot: usize, generation: std::num::NonZeroU32) -> u64 {
-    ((slot as u64) << 32) | u64::from(generation.get())
-}
-
-fn unpack(word: u64) -> Option<(usize, std::num::NonZeroU32)> {
-    let generation = std::num::NonZeroU32::new(word as u32)?;
-    Some(((word >> 32) as usize, generation))
-}
-
-/// One active index: its entries, ordered by key then handle.
+/// One active index: each key once with the slots of its elements (by key, then slot).
 #[derive(Debug, Clone)]
 struct IndexState {
     name: CompactString,
@@ -1271,65 +1292,124 @@ struct IndexState {
     label: CompactString,
     key: CompactString,
     transform: Option<PropertyIndexTransform>,
-    entries: BTreeSet<(IndexKey, u64)>,
-    distinct: u64,
+    entries: BTreeMap<IndexKey, Postings>,
+    /// The runs of the postings with two or more slots.
+    runs: RunsStore,
+    /// The number of (key, slot) entries, the sum of the postings' lengths.
+    len: u64,
+    /// The heap bytes of the keys and the postings, kept with every write: the stats are read on
+    /// every execution (by the optimizer), so they never walk the index.
     heap: u64,
     /// Elements whose non-null value at the key the index does not hold.
     skipped: u64,
 }
 
 impl IndexState {
-    /// Puts in (`insert`) or takes out the entry of a stored value of element `handle`: its key,
-    /// or the `skipped` count for a non-null value the index does not hold.
-    fn account(&mut self, insert: bool, value: &ElementProperty, handle: u64) {
+    fn new(
+        name: &str,
+        element: ElementKind,
+        label: &str,
+        key: &str,
+        transform: Option<PropertyIndexTransform>,
+    ) -> IndexState {
+        IndexState {
+            name: CompactString::from(name),
+            element,
+            label: CompactString::from(label),
+            key: CompactString::from(key),
+            transform,
+            entries: BTreeMap::new(),
+            runs: RunsStore::default(),
+            len: 0,
+            heap: 0,
+            skipped: 0,
+        }
+    }
+
+    /// Puts in (`insert`) or takes out the entry of a stored value of the element at `slot`: its
+    /// key, or the `skipped` count for a non-null value the index does not hold.
+    fn account(&mut self, insert: bool, value: &ElementProperty, slot: u32) {
         match transformed_key(self.transform.as_ref(), value) {
-            Some(key) if insert => self.insert(key, handle),
-            Some(key) => self.remove(key, handle),
+            Some(key) if insert => self.insert(key, slot),
+            Some(key) => self.remove(&key, slot),
             None if matches!(value, ElementProperty::Null) => {}
             None if insert => self.skipped += 1,
             None => self.skipped = self.skipped.saturating_sub(1),
         }
     }
 
-    fn insert(&mut self, key: IndexKey, handle: u64) {
-        let heap = key.heap_bytes();
-        let fresh = !self.has_key(&key);
-        if self.entries.insert((key, handle)) {
-            self.heap += heap;
-            if fresh {
-                self.distinct += 1;
+    fn insert(&mut self, key: IndexKey, slot: u32) {
+        match self.entries.entry(key) {
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                self.heap += vacant.key().heap_bytes();
+                vacant.insert(Postings::One(slot));
+                self.len += 1;
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let postings = occupied.get_mut();
+                let before = self.runs.heap_bytes(postings);
+                if self.runs.insert(postings, slot) {
+                    let after = self.runs.heap_bytes(postings);
+                    self.heap = (self.heap + after).saturating_sub(before);
+                    self.len += 1;
+                }
             }
         }
     }
 
-    fn remove(&mut self, key: IndexKey, handle: u64) {
-        let heap = key.heap_bytes();
-        let entry = (key, handle);
-        if self.entries.remove(&entry) {
-            self.heap = self.heap.saturating_sub(heap);
-            if !self.has_key(&entry.0) {
-                self.distinct = self.distinct.saturating_sub(1);
+    fn remove(&mut self, key: &IndexKey, slot: u32) {
+        let Some(postings) = self.entries.get_mut(key) else {
+            return;
+        };
+        let before = self.runs.heap_bytes(postings);
+        match self.runs.remove(postings, slot) {
+            Removed::Absent => return,
+            Removed::Removed => {
+                let after = self.runs.heap_bytes(postings);
+                self.heap = (self.heap + after).saturating_sub(before);
+            }
+            Removed::Emptied => {
+                self.heap = self.heap.saturating_sub(before + key.heap_bytes());
+                self.entries.remove(key);
             }
         }
+        self.len = self.len.saturating_sub(1);
     }
 
-    /// Whether some entry has this key.
-    fn has_key(&self, key: &IndexKey) -> bool {
+    /// Gives back the spare capacity of every postings (after a build) and recounts the heap.
+    fn shrink(&mut self) {
+        self.runs.shrink();
+        self.heap = self.walked_heap();
+    }
+
+    /// Whether both hold the same keys with the same slots (whatever their runs look like).
+    fn same_entries(&self, other: &IndexState) -> bool {
+        self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(&other.entries)
+                .all(|((a, pa), (b, pb))| a == b && self.runs.iter(pa).eq(other.runs.iter(pb)))
+    }
+
+    /// The heap bytes of the keys and the postings, walked from the real containers.
+    fn walked_heap(&self) -> u64 {
         self.entries
-            .range((
-                Bound::Included((key.clone(), 0)),
-                Bound::Included((key.clone(), u64::MAX)),
-            ))
-            .next()
-            .is_some()
+            .iter()
+            .map(|(key, postings)| key.heap_bytes() + self.runs.heap_bytes(postings))
+            .sum()
     }
 
+    /// The stats: per key its map entry (the key, the 8-byte postings and a B-tree share of 8
+    /// bytes), plus the heap of the keys and the runs (the real containers' capacities, kept
+    /// with every write and compared with a walk by `check_property_indexes`) and the table of
+    /// runs.
     fn stats(&self) -> PropertyIndexStats {
-        let entry = std::mem::size_of::<(IndexKey, u64)>() as u64 + 8;
+        let entry = (std::mem::size_of::<IndexKey>() + std::mem::size_of::<Postings>()) as u64 + 8;
         PropertyIndexStats {
-            entries: self.entries.len() as u64,
-            distinct_values: self.distinct,
-            bytes: self.entries.len() as u64 * entry + self.heap,
+            entries: self.len,
+            distinct_values: self.entries.len() as u64,
+            bytes: self.entries.len() as u64 * entry + self.heap + self.runs.table_bytes(),
             skipped: self.skipped,
         }
     }
@@ -1375,7 +1455,7 @@ impl PropertyIndexes {
         &mut self,
         element: ElementKind,
         insert: bool,
-        handle: u64,
+        slot: u32,
         labels: impl Iterator<Item = &'l str>,
         properties: Option<&PropertyMap>,
         only_key: Option<&str>,
@@ -1401,7 +1481,7 @@ impl PropertyIndexes {
                 let Some(value) = properties.get(index.key.as_str()) else {
                     continue;
                 };
-                index.account(insert, value, handle);
+                index.account(insert, value, slot);
             }
         }
     }
@@ -1419,7 +1499,7 @@ impl PropertyIndexes {
         self.element_entries(
             ElementKind::Vertex,
             insert,
-            pack(node.index().index(), node.generation()),
+            node.index().slot(),
             labels.iter().map(CompactString::as_str),
             Some(properties),
             only_key,
@@ -1438,7 +1518,7 @@ impl PropertyIndexes {
         self.element_entries(
             ElementKind::Edge,
             insert,
-            pack(edge.index().index(), edge.generation()),
+            edge.index().slot(),
             label.into_iter(),
             properties,
             only_key,
@@ -1530,17 +1610,13 @@ impl TraversalGraph {
 
     /// Builds the state of one index from the data.
     fn build_index(&self, name: &str, definition: &PropertyIndexDefinition) -> IndexState {
-        let mut state = IndexState {
-            name: CompactString::from(name),
-            element: definition.element(),
-            label: CompactString::from(definition.label()),
-            key: CompactString::from(definition.key()),
-            transform: definition.transform().cloned(),
-            entries: BTreeSet::new(),
-            distinct: 0,
-            heap: 0,
-            skipped: 0,
-        };
+        let mut state = IndexState::new(
+            name,
+            definition.element(),
+            definition.label(),
+            definition.key(),
+            definition.transform().cloned(),
+        );
         match definition.element() {
             ElementKind::Vertex => {
                 if let Some(nodes) = self.index.get_nodes_by_label(definition.label()) {
@@ -1548,11 +1624,7 @@ impl TraversalGraph {
                         if let Some(vertex) = self.vertex_weight(node)
                             && let Some(value) = vertex.2.get(definition.key())
                         {
-                            state.account(
-                                true,
-                                value,
-                                pack(node.index().index(), node.generation()),
-                            );
+                            state.account(true, value, node.index().slot());
                         }
                     }
                 }
@@ -1566,16 +1638,13 @@ impl TraversalGraph {
                                 .as_ref()
                                 .and_then(|properties| properties.get(definition.key()))
                         {
-                            state.account(
-                                true,
-                                value,
-                                pack(edge.index().index(), edge.generation()),
-                            );
+                            state.account(true, value, edge.index().slot());
                         }
                     }
                 }
             }
         }
+        state.shrink();
         state
     }
 
@@ -1643,8 +1712,8 @@ impl TraversalGraph {
             .collect()
     }
 
-    /// The entries of the index on `(element, label, key, transform)` inside `range`, as packed
-    /// handles; `None` when there is no such index.
+    /// The slots in the index on `(element, label, key, transform)` inside `range`, by key then
+    /// slot; `None` when there is no such index.
     fn index_slice<'a>(
         &'a self,
         element: ElementKind,
@@ -1652,14 +1721,14 @@ impl TraversalGraph {
         key: &str,
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
-    ) -> Option<Box<dyn Iterator<Item = (usize, std::num::NonZeroU32)> + 'a>> {
+    ) -> Option<Box<dyn Iterator<Item = u32> + 'a>> {
         let index = self.property_indexes.find(element, label, key, transform)?;
-        Some(match set_bounds(range) {
+        Some(match set_bounds(range).and_then(key_bounds) {
             Some(bounds) => Box::new(
                 index
                     .entries
                     .range(bounds)
-                    .filter_map(|(_, word)| unpack(*word)),
+                    .flat_map(|(_, postings)| index.runs.iter(postings)),
             ),
             None => Box::new(std::iter::empty()),
         })
@@ -1676,8 +1745,11 @@ impl TraversalGraph {
         range: &PropertyIndexRange,
     ) -> Option<Box<dyn Iterator<Item = VertexHandle> + 'a>> {
         let slice = self.index_slice(ElementKind::Vertex, label, key, transform, range)?;
-        Some(Box::new(slice.map(|(slot, generation)| {
-            VertexHandle::new(NodeIndex::new(slot), generation)
+        // The generation is the slot's: exact maintenance names only live elements' slots.
+        Some(Box::new(slice.filter_map(|slot| {
+            let index = NodeIndex::from_slot(slot);
+            let vertex = self.graph.node_weight(index)?;
+            Some(VertexHandle::new(index, vertex.3))
         })))
     }
 
@@ -1690,8 +1762,10 @@ impl TraversalGraph {
         range: &PropertyIndexRange,
     ) -> Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>> {
         let slice = self.index_slice(ElementKind::Edge, label, key, transform, range)?;
-        Some(Box::new(slice.map(|(slot, generation)| {
-            EdgeHandle::new(EdgeIndex::new(slot), generation)
+        Some(Box::new(slice.filter_map(|slot| {
+            let index = EdgeIndex::from_slot(slot);
+            let edge = self.graph.edge_weight(index)?;
+            Some(EdgeHandle::new(index, edge.3.own))
         })))
     }
 
@@ -1729,23 +1803,38 @@ impl TraversalGraph {
             {
                 return Err(format!("index '{name}': its definition differs"));
             }
-            if state.entries != fresh.entries {
+            if !state.same_entries(&fresh) {
                 return Err(format!(
-                    "index '{name}': {} entries maintained, {} after a rebuild (or other values)",
+                    "index '{name}': {} entries over {} keys maintained, {} over {} after a \
+                     rebuild (or other values)",
+                    state.len,
                     state.entries.len(),
+                    fresh.len,
                     fresh.entries.len()
+                ));
+            }
+            if state.heap != state.walked_heap() {
+                return Err(format!(
+                    "index '{name}': {} heap bytes counted, {} held",
+                    state.heap,
+                    state.walked_heap()
+                ));
+            }
+            let counted: u64 = state
+                .entries
+                .values()
+                .map(|postings| state.runs.len(postings) as u64)
+                .sum();
+            if state.len != counted || state.len != fresh.len {
+                return Err(format!(
+                    "index '{name}': {} entries counted, {counted} held, {} after a rebuild",
+                    state.len, fresh.len
                 ));
             }
             if state.skipped != fresh.skipped {
                 return Err(format!(
                     "index '{name}': {} skipped values counted, {} after a rebuild",
                     state.skipped, fresh.skipped
-                ));
-            }
-            if state.distinct != fresh.distinct {
-                return Err(format!(
-                    "index '{name}': {} distinct values counted, {} after a rebuild",
-                    state.distinct, fresh.distinct
                 ));
             }
         }

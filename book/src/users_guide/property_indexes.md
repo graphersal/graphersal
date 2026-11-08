@@ -280,8 +280,12 @@ the data it shows. GraphML and GraphSON files carry no catalog, so no index.
 
 ## Memory
 
-Each indexed element costs one entry: its value (strings longer than 24 bytes on the heap) plus
-about 50 bytes of ordered-set bookkeeping. `g.memory_usage()` reports the indexes as
+An index keeps each distinct value once (strings longer than 24 bytes on the heap), with about
+48 bytes of ordered-map bookkeeping, and the elements holding it as a sorted list of 4-byte
+element slots: a value held by one element keeps it inline, a value held by many costs about 4
+bytes per element after a build and at most about 8 bytes once later writes have grown the list.
+A key with few distinct values (an owner, a status) is therefore cheap; a near-unique key (a
+name, a hash) costs about one map entry per element. `g.memory_usage()` reports the indexes as
 `property_index_bytes` (part of `total_bytes`, so the [memory budget](resource_limits.md) sees
 them), `g.indexes()` per index. Building an index reads every element of its label once.
 

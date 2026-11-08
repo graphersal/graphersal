@@ -65,6 +65,18 @@ impl NodeIndex {
         NodeIndex(index as u32)
     }
 
+    /// The slot at a slot number.
+    #[inline]
+    pub(crate) fn from_slot(slot: u32) -> Self {
+        NodeIndex(slot)
+    }
+
+    /// The slot number as stored (`u32`).
+    #[inline]
+    pub(crate) fn slot(self) -> u32 {
+        self.0
+    }
+
     /// The slot number.
     #[inline]
     pub(crate) fn index(self) -> usize {
@@ -83,6 +95,18 @@ impl EdgeIndex {
     #[inline]
     pub(crate) fn new(index: usize) -> Self {
         EdgeIndex(index as u32)
+    }
+
+    /// The slot at a slot number.
+    #[inline]
+    pub(crate) fn from_slot(slot: u32) -> Self {
+        EdgeIndex(slot)
+    }
+
+    /// The slot number as stored (`u32`).
+    #[inline]
+    pub(crate) fn slot(self) -> u32 {
+        self.0
     }
 
     /// The slot number.
