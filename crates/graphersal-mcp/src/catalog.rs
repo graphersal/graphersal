@@ -805,39 +805,80 @@ pub(crate) fn offered_tools(read_only: bool, config: &McpConfig) -> Vec<Tool> {
             if let Some(text) = config.override_of(t.name) {
                 t.description = text.to_string();
             } else if config.descriptions == Descriptions::Short {
-                t.description = short_description(t.name).to_string();
+                t.description = short_description(t.name, read_only).to_string();
             }
             t
         })
         .collect()
 }
 
+/// The short `query` description of a read-only server.
+const QUERY_SHORT: &str = "Run a Graphersal script: Gremlin in Rhai syntax (double-quoted \
+strings, `__.` for child traversals, tokens such as P.gt(30), Order.desc, T.label); statements \
+end with `;`, the last value is the result, and a traversal before it runs only with a terminal \
+(.to_list(), .next(), .iterate()). Compact JSON, paged (offset, max_rows, max_items). Prefer the \
+gql tool for plain reads; in a script GQL is g.gql(\"MATCH ...\", #{name: value}) and a saved \
+query g.query(\"name\", #{..}). Every step: resource graphersal://dsl-reference. Example: \
+g.v().has_label(\"person\").values(\"name\")";
+
+/// The short `query` description of a server that allows writes: [`QUERY_SHORT`] plus the
+/// write steps and the transaction.
+const QUERY_SHORT_WRITABLE: &str = "Run a Graphersal script: Gremlin in Rhai syntax \
+(double-quoted strings, `__.` for child traversals, tokens such as P.gt(30), Order.desc, \
+T.label); statements end with `;`, the last value is the result, and a traversal before it runs \
+only with a terminal (.to_list(), .next(), .iterate()). Compact JSON, paged (offset, max_rows, \
+max_items). Prefer the gql tool for plain reads and writes; in a script GQL is \
+g.gql(\"MATCH ...\", #{name: value}) and a saved query g.query(\"name\", #{..}). Writes, only \
+when the user asked; the whole script is one transaction (a failure changes nothing): \
+g.add_v(\"person\").property(\"name\", \"ada\"), g.v(\"id1\").add_e(\"knows\").to(\"id2\") \
+(vertex ids), .property(k, v) sets, .properties(k).drop() removes a property, .drop() removes \
+elements (vertices with their edges). Every step: resource graphersal://dsl-reference. Example: \
+g.v().has_label(\"person\").values(\"name\")";
+
+/// The short `gql` description of a read-only server (the full support list is the resource
+/// `graphersal://gql-reference`).
+const GQL_SHORT: &str = "Run a GQL query (ISO graph query language; Cypher spellings \
+accepted): the text as it is, strings in single quotes, $name values from params; one JSON \
+object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: \
+element_id(n) = 'x', not id(n). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
+a property (an unanchored one can exceed the memory limit). Every clause and function: resource \
+graphersal://gql-reference. Example: MATCH (p:person)-[:knows]->(f) WHERE f.age > $min RETURN \
+p.name AS who, f.name AS friend ORDER BY who, params {\"min\": 30}";
+
+/// The short `gql` description of a server that allows writes: [`GQL_SHORT`] plus what a
+/// model must know to write correctly (the clauses, one transaction, DETACH, MERGE).
+const GQL_SHORT_WRITABLE: &str = "Run a GQL query (ISO graph query language; Cypher spellings \
+accepted): the text as it is, strings in single quotes, $name values from params; one JSON \
+object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: \
+element_id(n) = 'x', not id(n). Anchor a variable-length pattern -[:T*1..3]-> on a node found by \
+a property (an unanchored one can exceed the memory limit). Writes, only when the user asked; \
+each call is one transaction (a failure changes nothing; the answer names the net changes): \
+INSERT (Cypher CREATE) (n:L {k: v}), an edge (one label) between matched nodes MATCH (a:L {k: \
+1}), (b:L {k: 2}) INSERT (a)-[:T {k: v}]->(b), once per row (FOR x IN $list INSERT .. for many); \
+SET n.k = v, n += {..} (merge), n = {..} (replace all), n:L (add a label); REMOVE n.k, n:L; MERGE \
+(n:L {k: v}) [ON CREATE SET ..] [ON MATCH SET ..] finds or creates (idempotent; MERGE \
+(a)-[:T]->(b) for an edge between matched nodes); DETACH DELETE n removes a node with its edges \
+(DELETE fails on a node that has edges; DELETE r removes an edge); do not return a deleted \
+element. Every clause and function: resource graphersal://gql-reference. Example: MATCH \
+(p:person)-[:knows]->(f) WHERE f.age > $min RETURN p.name AS who, f.name AS friend ORDER BY \
+who, params {\"min\": 30}";
+
 /// The hand-written short description of every built-in tool (`descriptions: short`): one or
-/// two sentences and one example where it helps. The input schemas stay the same.
-pub(crate) fn short_description(name: &str) -> &'static str {
+/// two sentences and one example where it helps; `query` and `gql` also name the writes when
+/// the server allows them (`read_only` false). The input schemas stay the same.
+pub(crate) fn short_description(name: &str, read_only: bool) -> &'static str {
     match name {
-        "query" => {
-            "Run a Graphersal script (Gremlin in Rhai syntax: `__.` for child traversals, \
-             tokens such as P.gt(30), Order.desc) as one transaction; compact JSON, paged \
-             (offset, max_rows, max_items). Prefer the gql tool for plain reads and writes; \
-             every step: resource graphersal://dsl-reference. Example: \
-             g.v().has_label(\"person\").values(\"name\")"
-        }
-        "gql" => {
-            "Run a GQL query (ISO graph query language; Cypher spellings accepted), the text as \
-             it is, $name values from params: one JSON object per row, paged (offset, max_rows). \
-             A write (INSERT/CREATE, SET, REMOVE, DELETE, MERGE) is one transaction. What is \
-             supported: resource graphersal://gql-reference. Example: MATCH \
-             (p:person)-[:knows]->(f) WHERE f.age > $min RETURN p.name AS who, f.name AS \
-             friend ORDER BY who, params {\"min\": 30}"
-        }
+        "query" if read_only => QUERY_SHORT,
+        "query" => QUERY_SHORT_WRITABLE,
+        "gql" if read_only => GQL_SHORT,
+        "gql" => GQL_SHORT_WRITABLE,
         "list_saved_queries" => {
             "The saved queries stored in the graph (name, folder, description, parameters, \
              language, writes and effects). Check them before writing a new query."
         }
         "run_saved_query" => {
             "Run a saved query by name with named parameters (checked against their schemas; \
-             defaults fill the rest), paged like gql. Run one with writes: true only when the \
+             defaults fill the rest), paged like the gql tool. Run one with writes: true only when the \
              user asked for that change. Example: {\"name\": \"older\", \"params\": \
              {\"min\": 30}}"
         }
@@ -847,8 +888,8 @@ pub(crate) fn short_description(name: &str) -> &'static str {
         }
         "estimate_compression" => {
             "Measure candidate compression rules for one label and property path on the \
-             current data, changing nothing (sizes, ratio, read speed, the best candidate). Run \
-             it before define_compression."
+             current data, changing nothing (sizes, ratio, read speed, the best candidate). Use \
+             it before the define_compression tool."
         }
         "define_compression" => {
             "Store or replace a compression rule: strings of one label at one property path \
@@ -872,8 +913,8 @@ pub(crate) fn short_description(name: &str) -> &'static str {
         }
         "drop_index" => "Remove a property index (no data changes; queries scan again).",
         "get_schema" => {
-            "The schema stored in the graph (JSON), or null (then infer_schema shows what the \
-             data has)."
+            "The schema stored in the graph (JSON), or null (then the infer_schema tool shows \
+             what the data has)."
         }
         "infer_schema" => {
             "The schema the data satisfies now (labels, properties, types, edge topology); \
@@ -893,7 +934,8 @@ pub(crate) fn short_description(name: &str) -> &'static str {
         }
         "set_schema" => {
             "Store a schema, replacing the stored one; in mode open/closed the data is \
-             validated first and nothing changes on a violation. Run validate_schema first."
+             validated first and nothing changes on a violation. Check it with the \
+             validate_schema tool first."
         }
         "patch_schema" => {
             "Apply a JSON Merge Patch to the stored schema, validated like set_schema. Example: \

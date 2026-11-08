@@ -405,7 +405,14 @@ fn short_descriptions_are_short_and_drop_the_saved_query_boilerplate() {
             full["description"].as_str().unwrap(),
             short["description"].as_str().unwrap(),
         );
-        assert!(!s.is_empty() && s.len() < 520, "{}: {s}", full["name"]);
+        // gql and query also carry what writing correctly needs (element ids, the write
+        // clauses and steps, one transaction).
+        let limit = if matches!(full["name"].as_str(), Some("gql" | "query")) {
+            2_000
+        } else {
+            520
+        };
+        assert!(!s.is_empty() && s.len() < limit, "{}: {s}", full["name"]);
         assert!(s.len() <= f.len(), "{}", full["name"]);
         // The input schemas never change.
         assert_eq!(
@@ -456,6 +463,49 @@ fn short_descriptions_are_short_and_drop_the_saved_query_boilerplate() {
             .contains("next page offset"),
         "{answer}"
     );
+}
+
+#[test]
+fn the_short_gql_and_query_texts_name_the_writes_only_where_writes_run() {
+    let host = TestHost::modern();
+    let description = |read_only: bool, name: &str| -> String {
+        Mcp::new(read_only, None, false)
+            .with_config(parse(r#"{"descriptions": "short"}"#).expect("parses"))
+            .tool_listings(&host)
+            .expect("lists")
+            .iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["description"].as_str())
+            .expect("listed")
+            .to_string()
+    };
+    for read_only in [false, true] {
+        let gql = description(read_only, "gql");
+        // What the A/B test found missing: element ids, anchoring variable-length patterns.
+        assert!(
+            gql.contains("element_id(n)") && gql.contains("not id(n)"),
+            "{gql}"
+        );
+        assert!(gql.contains("Anchor a variable-length pattern"), "{gql}");
+        assert!(gql.contains("graphersal://gql-reference"), "{gql}");
+        let query = description(read_only, "query");
+        assert!(query.contains(".iterate()"), "{query}");
+        for (text, writes) in [(&gql, "DETACH DELETE"), (&query, "add_v")] {
+            assert_eq!(text.contains(writes), !read_only, "{text}");
+            assert_eq!(text.contains("one transaction"), !read_only, "{text}");
+        }
+    }
+    let gql = description(false, "gql");
+    for clause in [
+        "INSERT",
+        "SET n.k",
+        "REMOVE",
+        "MERGE",
+        "ON CREATE SET",
+        "FOR x IN $list",
+    ] {
+        assert!(gql.contains(clause), "{clause}: {gql}");
+    }
 }
 
 #[test]
