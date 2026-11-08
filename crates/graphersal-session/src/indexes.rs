@@ -12,8 +12,8 @@
 //! - an **entry** (`list_indexes`): `{name, element: "vertex"|"edge", label, key, type,
 //!   transform, served, reason, stats: {entries, distinctValues, skipped, bytes}}`; `label` is
 //!   `null` for a label-less index (every element of the kind, unlabeled ones included);
-//!   `transform` is `null` for an index of the values themselves (else `"to_lower"`, or the
-//!   unknown name as read); `served` is false and `stats` `null` when the index is not served,
+//!   `transform` is `null` for an index of the values themselves (else `"to_lower"`, `"each"`,
+//!   a chain as the array of its names, `["each", "to_lower"]`, or the unknown name as read); `served` is false and `stats` `null` when the index is not served,
 //!   and `reason` (else `null`) says why: the storage does not serve indexes (it keeps the
 //!   definition in its catalog, no query reads it), or the index's `type`, `transform` or
 //!   `element` is not known to this version (a newer one wrote it,
@@ -23,9 +23,11 @@
 //! - a **spec** (`create_index`): `{key, label?, element?, name?, type?, transform?}`; a
 //!   `label` absent or `null` makes a LABEL-LESS index (an empty string is a `label` error);
 //!   `element` defaults to `"vertex"`, `name` to `<label>_<key>` (`<key>` for a label-less
-//!   index, `<label>_<key>_edge` for an edge index, then `_to_lower` with that transform,
-//!   [`PropertyIndexDefinition::default_name`]), `type` to `"memory-ordered"`
-//!   ([`index_types`] lists the known ones), `transform` to none ([`index_transforms`]);
+//!   index, `<label>_<key>_edge` for an edge index, then `_to_lower`, `_each`,
+//!   `_each_to_lower` with that transform, [`PropertyIndexDefinition::default_name`]), `type`
+//!   to `"memory-ordered"` ([`index_types`] lists the known ones), `transform` to none (a name
+//!   of [`index_transforms`], or a chain as an array of names applied in order,
+//!   `["each", "to_lower"]`, the one chain this version serves);
 //! - **field errors** (a refused create): `[{field, message, help?}]` with `field` one of
 //!   `name`, `element`, `label`, `key`, `type`, `transform` or `general`, the same shape as the
 //!   other catalog editors. An unknown `type` is an error of `type`, an unknown `transform` of
@@ -81,6 +83,21 @@ pub fn index_transforms() -> Value {
     )
 }
 
+/// A transform in JSON: its name (`"to_lower"`, `"each"`), a chain as the array of its names
+/// (`["each", "to_lower"]`).
+pub(crate) fn transform_json(transform: &PropertyIndexTransform) -> Value {
+    match transform {
+        PropertyIndexTransform::Chain(chain) => Value::Array(
+            chain
+                .steps()
+                .iter()
+                .map(|step| Value::from(step.as_str()))
+                .collect(),
+        ),
+        _ => Value::from(transform.as_str()),
+    }
+}
+
 /// The entry of one index (module docs).
 fn entry(name: &str, index: &PropertyIndexDefinition, stats: Option<PropertyIndexStats>) -> Value {
     let served = stats.is_some();
@@ -103,7 +120,7 @@ fn entry(name: &str, index: &PropertyIndexDefinition, stats: Option<PropertyInde
         "label": index.label(),
         "key": index.key(),
         "type": index.index_type().as_str(),
-        "transform": index.transform().map(PropertyIndexTransform::as_str),
+        "transform": index.transform().map(transform_json),
         "served": served,
         "reason": reason,
         "stats": stats,
@@ -211,7 +228,24 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
     let key = text("key").unwrap_or_default();
     let element = text("element");
     let index_type = text("type");
-    let transform = text("transform");
+    // A name, or a chain as an array of names applied in order.
+    let transform = match spec.get("transform") {
+        Some(Value::Array(names)) => {
+            let names: Option<Vec<&str>> = names.iter().map(Value::as_str).collect();
+            match names.and_then(PropertyIndexTransform::from_names) {
+                Some(transform) => Some(transform),
+                None => {
+                    errors.push(FieldError::new(
+                        "transform",
+                        "a chain of transforms is a non-empty array of names, for example \
+                         [\"each\", \"to_lower\"]",
+                    ));
+                    None
+                }
+            }
+        }
+        _ => text("transform").map(|name| PropertyIndexTransform::from_name(&name)),
+    };
     if label_given && label.is_none() && !errors.iter().any(|e| e.field == "label") {
         errors.push(FieldError::new(
             "label",
@@ -247,7 +281,7 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
         PropertyIndexType::MemoryOrdered,
         PropertyIndexType::from_name,
     ))
-    .with_transform(transform.as_deref().map(PropertyIndexTransform::from_name));
+    .with_transform(transform);
     let name = name.unwrap_or_else(|| index.default_name());
     // The name and the index each on their own, so both wrong fields are reported (the index
     // checked under its default name when the given one is wrong).
@@ -625,5 +659,49 @@ mod tests {
         );
         assert_eq!(entry["served"], false);
         assert_eq!(entry["stats"], Value::Null);
+    }
+
+    #[test]
+    fn each_and_the_chain_travel_as_a_name_and_an_array() {
+        let mut s = modern();
+        let _ = s.execute(
+            r#"g.v("1").property("tags", ["Ab", "c"]).iterate()"#,
+            &crate::RunOptions::default(),
+        );
+        let each = s.create_index(&json!({"key": "tags", "transform": "each"}));
+        assert_eq!(each["ok"], true, "{each}");
+        assert_eq!(each["index"]["name"], "tags_each");
+        assert_eq!(each["index"]["transform"], "each");
+        assert_eq!(each["index"]["stats"]["entries"], 2);
+        let chain = s.create_index(
+            &json!({"label": "person", "key": "tags", "transform": ["each", "to_lower"]}),
+        );
+        assert_eq!(chain["ok"], true, "{chain}");
+        assert_eq!(chain["index"]["name"], "person_tags_each_to_lower");
+        assert_eq!(chain["index"]["transform"], json!(["each", "to_lower"]));
+        assert_eq!(s.info().unwrap()["catalog"]["property_index_ext"], 2);
+        for (transform, part) in [
+            (json!(["to_lower", "each"]), "not one this version serves"),
+            (json!([]), "non-empty array"),
+            (json!(["each", 1]), "non-empty array"),
+        ] {
+            let refused = s.create_index(
+                &json!({"label": "person", "key": "tags", "transform": transform, "name": "x"}),
+            );
+            assert_eq!(refused["errors"][0]["field"], "transform", "{refused}");
+            assert!(
+                refused["errors"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(part),
+                "{refused}"
+            );
+        }
+        let out = s.execute(
+            r#"g.v().has("tags", __.unfold().is("c")).values("name").to_list()"#,
+            &crate::RunOptions::default(),
+        );
+        assert!(out.contains("marko"), "{out}");
+        assert_eq!(index_transforms()[1]["name"], "each");
     }
 }

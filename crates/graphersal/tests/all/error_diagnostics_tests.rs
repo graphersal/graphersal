@@ -6890,7 +6890,7 @@ fn property_index_transform_errors_carry_their_help() {
     let unknown = fail(r#"g.create_index(#{label: "person", key: "name", transform: "upper"})"#);
     for part in [
         "Invalid transform of 'person_name_upper': 'upper' is not an index transform this \
-         version knows (known: to_lower)",
+         version knows (known: to_lower, each)",
         "Help: The transform says what an index keys its values by. This version knows \
          \"to_lower\"",
         "g.v().has_label(\"person\").has(\"name\", __.to_lower().is(\"marko\"))",
@@ -12659,5 +12659,68 @@ fn a_label_less_index_name_error_says_how_a_label_less_index_is_named() {
         "a label-less g.create_index(#{key}) calls it <key>",
     ] {
         assert!(err.contains(part), "{part}\n{err}");
+    }
+}
+
+/// The transform `each` (stage S3 of the property index extensions): a plain index on an array
+/// key names it in its help; an `each` index on an object key and an `["each", "to_lower"]`
+/// index on an array of integers explain what they hold, with a runnable alternative.
+#[cfg(feature = "script")]
+#[test]
+fn property_index_each_errors_carry_their_help() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let fail = |script: &str| -> String {
+        eval_value(graph.clone(), script)
+            .expect_err(script)
+            .to_string()
+    };
+    let _ = eval_value(
+        graph.clone(),
+        r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{
+             tags: #{type: "array", items: #{type: "string"}},
+             nums: #{type: "array", items: #{type: "integer"}},
+             meta: #{type: "object"}}}}}})"#,
+    )
+    .unwrap();
+    let plain = fail(r#"g.create_index(#{label: "doc", key: "tags"})"#);
+    for part in [
+        "Help: An index of type 'memory-ordered' holds scalar values only",
+        "An array of scalars is indexed by its elements with the transform \"each\": \
+         g.create_index(#{label: \"doc\", key: \"tags\", transform: \"each\"}), queried with \
+         g.v().has_label(\"doc\").has(\"tags\", __.unfold().is(..)).",
+    ] {
+        assert!(plain.contains(part), "{part}\n{plain}");
+    }
+    let object = fail(r#"g.create_index(#{label: "doc", key: "meta", transform: "each"})"#);
+    for part in [
+        "the schema declares 'meta' as object, and an index of type 'memory-ordered' with the \
+         transform 'each' holds none of its values",
+        "Help: An index with the transform 'each' holds scalar values and the scalar elements \
+         of array values",
+        "g.create_index(#{label: \"doc\", key: \"meta_main\", transform: \"each\"})",
+    ] {
+        assert!(object.contains(part), "{part}\n{object}");
+    }
+    let lowered =
+        fail(r#"g.create_index(#{label: "doc", key: "nums", transform: ["each", "to_lower"]})"#);
+    for part in [
+        "with the transform 'each to_lower' holds none of its values",
+        "Help: An index with the transform chain [\"each\", \"to_lower\"] holds the lowered \
+         text of string values and string array elements only",
+        "g.create_index(#{label: \"doc\", key: \"nums\", transform: \"each\"})",
+    ] {
+        assert!(lowered.contains(part), "{part}\n{lowered}");
+    }
+    let order =
+        fail(r#"g.create_index(#{label: "doc", key: "tags", transform: ["to_lower", "each"]})"#);
+    for part in [
+        "Invalid transform of 'doc_tags_to_lower_each': the chain [\"to_lower\", \"each\"] is \
+         not one this version serves",
+        "\"each\" indexes every element of an array value",
+        "g.v().has(\"tags\", __.unfold().is(\"rust\"))",
+    ] {
+        assert!(order.contains(part), "{part}\n{order}");
     }
 }

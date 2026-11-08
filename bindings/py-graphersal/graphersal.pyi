@@ -548,7 +548,7 @@ class Graph:
         name: Optional[str] = None,
         type: str = "memory-ordered",
         *,
-        transform: Optional[str] = None,
+        transform: Union[str, list[str], None] = None,
         policy: Optional[AccessPolicy] = None,
     ) -> None:
         """Declares (or replaces) a property index: the ``element``s labelled ``label``
@@ -556,11 +556,13 @@ class Graph:
         ``g.v().has(key, ..)`` without a label; ``label`` is ``None`` in ``indexes()``),
         ordered by their top-level property ``key`` (name: ``<label>_<key>`` by default,
         ``<key>`` label-less, with
-        ``_to_lower`` appended for that transform) in an index of ``type``
-        (``"memory-ordered"``, the only type this version knows). ``transform="to_lower"``
-        indexes the lowered text of string values for ``has(key, __.to_lower().is(..))``. An
-        unknown type or transform, or a key the schema declares as values the index cannot
-        hold, is refused."""
+        ``_to_lower``, ``_each`` or ``_each_to_lower`` appended for that transform) in an
+        index of ``type`` (``"memory-ordered"``, the only type this version knows).
+        ``transform="to_lower"`` indexes the lowered text of string values for
+        ``has(key, __.to_lower().is(..))``; ``transform="each"`` every element of an array
+        value for ``has(key, __.unfold().is(..))``; a chain is a list applied in order,
+        ``transform=["each", "to_lower"]``. An unknown type or transform, a chain in another
+        order, or a key the schema declares as values the index cannot hold, is refused."""
     def indexes(self, *, policy: Optional[AccessPolicy] = None) -> list[dict[str, Any]]:
         """The property indexes with their type, whether they are served (``reason`` when
         not) and their current stats."""

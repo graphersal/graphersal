@@ -3743,7 +3743,12 @@ impl DiagnosticError for DefinitionError {
                      indexes the lowered text of string values for case-insensitive search: \
                      g.create_index(#{{label: \"person\", key: \"name\", transform: \
                      \"to_lower\"}}), queried with \
-                     g.v().has_label(\"person\").has(\"name\", __.to_lower().is(\"marko\")).",
+                     g.v().has_label(\"person\").has(\"name\", __.to_lower().is(\"marko\")). \
+                     \"each\" indexes every element of an array value, for \"arrays \
+                     containing x\": g.create_index(#{{key: \"tags\", transform: \"each\"}}), \
+                     queried with g.v().has(\"tags\", __.unfold().is(\"rust\")). A chain is an \
+                     array applied in order, \"each\" first: transform: [\"each\", \"to_lower\"] \
+                     serves has(\"tags\", __.unfold().to_lower().is(\"rust\")).",
                     crate::graph::property_index::PropertyIndexTransform::KNOWN_NAMES
                         .iter()
                         .map(|name| format!("\"{name}\""))
@@ -3816,7 +3821,28 @@ impl DiagnosticError for DefinitionError {
                 transform,
                 ..
             } => {
-                let mut help = if let Some(transform) = transform {
+                let mut help = if transform.as_deref() == Some("each") {
+                    format!(
+                        "An index with the transform 'each' holds scalar values and the scalar \
+                         elements of array values (null, boolean, int64, float64, string, uuid, \
+                         date, localdatetime, datetime, time, duration), never an object, a \
+                         vector or a nested array; '{key}' is declared as {declared}, so it \
+                         would hold nothing. Keep the value you filter on in its own top-level \
+                         property (or array of scalars) and index that, for example \
+                         g.create_index(#{{label: \"{label}\", key: \"{key}_main\", transform: \
+                         \"each\"}})."
+                    )
+                } else if transform.as_deref() == Some("each to_lower") {
+                    format!(
+                        "An index with the transform chain [\"each\", \"to_lower\"] holds the \
+                         lowered text of string values and string array elements only, for \
+                         has(\"{key}\", __.unfold().to_lower().is(..)); '{key}' is declared as \
+                         {declared}, so it would hold nothing. Index the elements themselves \
+                         instead: g.create_index(#{{label: \"{label}\", key: \"{key}\", \
+                         transform: \"each\"}}), queried with \
+                         g.v().has_label(\"{label}\").has(\"{key}\", __.unfold().is(..))."
+                    )
+                } else if let Some(transform) = transform {
                     format!(
                         "An index with the transform '{transform}' holds the lowered text of \
                          string values only, for case-insensitive search with \
@@ -3842,7 +3868,17 @@ impl DiagnosticError for DefinitionError {
                          name, nested fields are not indexed, so keep the value you filter on \
                          in its own top-level property (for example \
                          g.v().has_label(\"{label}\").property(\"{key}_main\", ..)) and index \
-                         that."
+                         that.{}",
+                        if declared.starts_with("array") {
+                            format!(
+                                " An array of scalars is indexed by its elements with the \
+                                 transform \"each\": g.create_index(#{{label: \"{label}\", key: \
+                                 \"{key}\", transform: \"each\"}}), queried with \
+                                 g.v().has_label(\"{label}\").has(\"{key}\", __.unfold().is(..))."
+                            )
+                        } else {
+                            String::new()
+                        }
                     )
                 };
                 help.push_str(
@@ -5715,10 +5751,27 @@ fn literal_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
 fn property_index_advice(query: &str) -> String {
     let label = literal_after(query, "has_label(").or_else(|| literal_after(query, "labels: ["));
     let key = literal_after(query, ".has(");
+    // `has(key, __.unfold()..)` filters on the elements of an array: an `each` index.
+    let transform = key.map_or("", |key| {
+        let unfold = format!(".has(\"{key}\", __.unfold().");
+        if query.contains(&format!("{unfold}to_lower().is(")) {
+            ", transform: [\"each\", \"to_lower\"]"
+        } else if query.contains(&format!("{unfold}is(")) {
+            ", transform: \"each\""
+        } else {
+            ""
+        }
+    });
+    let each = if transform.is_empty() {
+        ""
+    } else {
+        " (the transform each indexes every element of an array value, for \
+         has(key, __.unfold().is(..)))"
+    };
     match (label, key) {
         (Some(label), Some(key)) => format!(
             "A has() on a property reads every \"{label}\" element: declare a property index on \
-             it, for example g.create_index(#{{label: \"{label}\", key: \"{key}\"}}); \
+             it, for example g.create_index(#{{label: \"{label}\", key: \"{key}\"{transform}}}){each}; \
              equality, P.within and ranges on \"{key}\" then read only the matching elements, \
              and .profile() shows [index: ..] on the start step (book page Property Indexes).\n"
         ),
@@ -5730,7 +5783,8 @@ fn property_index_advice(query: &str) -> String {
             };
             format!(
                 "A has() on a property without a label reads every {kind}: declare a label-less \
-                 property index on it, for example g.create_index(#{{{element}key: \"{key}\"}}) \
+                 property index on it, for example \
+                 g.create_index(#{{{element}key: \"{key}\"{transform}}}){each} \
                  (every {kind}, whatever its labels); equality, P.within and ranges on \
                  \"{key}\" then read only the matching elements, and .profile() shows \
                  [index: {kind} {key}, any label] on the start step (book page Property \
@@ -10343,6 +10397,35 @@ mod tests {
             assert!(help.contains("Narrow the start set"), "{help}");
             // Without a property filter there is no index advice.
             assert!(!timeout_help(250, None).contains("create_index"));
+        }
+
+        #[test]
+        fn timeout_help_on_an_unfold_filter_points_to_an_each_index() {
+            let steps = vec![
+                "v().has(\"_owners\", __.unfold().is(P.eq(\"o\")))".to_string(),
+                "count()".to_string(),
+            ];
+            let help = timeout_help(250, Some(steps));
+            assert!(
+                help.contains("g.create_index(#{key: \"_owners\", transform: \"each\"})"),
+                "{help}"
+            );
+            assert!(
+                help.contains("the transform each indexes every element of an array value"),
+                "{help}"
+            );
+            let steps = vec![
+                "v(labels: [\"doc\"]).has(\"tags\", __.unfold().to_lower().is(P.eq(\"x\")))"
+                    .to_string(),
+            ];
+            let help = timeout_help(250, Some(steps));
+            assert!(
+                help.contains(
+                    "g.create_index(#{label: \"doc\", key: \"tags\", transform: [\"each\", \
+                     \"to_lower\"]})"
+                ),
+                "{help}"
+            );
         }
 
         #[test]

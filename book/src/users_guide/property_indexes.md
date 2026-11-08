@@ -17,7 +17,9 @@ g.indexes()                                  // the indexes and what they hold
 ```
 
 Without `label` an index is [label-less](#label-less-indexes): it holds every vertex (or edge)
-and also serves `g.v().has("name", "josh")` without a label.
+and also serves `g.v().has("name", "josh")` without a label. With `transform: "each"` an index
+holds [every element of a list value](#arrays-the-each-transform), so "all nodes of one owner",
+`g.v().has("_owners", __.unfold().is(o))`, reads it.
 
 Indexes are **declared, never automatic**: nothing is indexed until you ask for it, and an index
 costs memory and a little time on every write of its key (below).
@@ -26,7 +28,7 @@ costs memory and a little time on every write of its key (below).
 
 | DSL | Rust (`GraphTraversalSource`) | Python (`Graph`) |
 |---|---|---|
-| `g.create_index(#{key, label?, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))` (label-less: `PropertyIndexDefinition::label_less(kind, key)`), `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` (`label=None`: label-less) |
+| `g.create_index(#{key, label?, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))` (label-less: `PropertyIndexDefinition::label_less(kind, key)`), `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` (`Each`; a chain: `PropertyIndexTransform::from_names(["each", "to_lower"])`) | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` (`label=None`: label-less; `transform="each"`, `transform=["each", "to_lower"]`) |
 | `g.indexes()` | `list_indexes()` | `graph.indexes()` |
 | `g.drop_index(name)` | `drop_index(name)` | `graph.drop_index(name)` |
 
@@ -36,7 +38,8 @@ costs memory and a little time on every write of its key (below).
 - `name` defaults to `<label>_<key>` (`<key>` for a label-less index), then `_edge` for an edge
   index, then `_to_lower` for an
   index with the [transform](#case-insensitive-search) `to_lower` (`person_name_to_lower`,
-  `knows_note_edge_to_lower`), with every character that is not a letter, a digit or `_`
+  `knows_note_edge_to_lower`), `_each` or `_each_to_lower` for the [`each`](#arrays-the-each-transform)
+  transforms (`index__owners_each` for a label-less index on `_owners`), with every character that is not a letter, a digit or `_`
   replaced by `_`, and `index_` in front when it would not start with a letter. It is an
   identifier like a saved query's name. The DSL, the session, the dev server, MCP and Python use
   this default; the playground's form shows it as the name's placeholder and follows the
@@ -44,18 +47,22 @@ costs memory and a little time on every write of its key (below).
 - `type` is the [index type](#index-types), `"memory-ordered"` by default (the only type this
   version knows).
 - `transform` is the [transform](#case-insensitive-search) of the index keys: absent (the
-  default) for the values themselves, `"to_lower"` for case-insensitive search.
+  default) for the values themselves, `"to_lower"` for case-insensitive search, `"each"` for
+  [the elements of a list](#arrays-the-each-transform), or a **chain** written as an array of names
+  applied in order: `["each", "to_lower"]` (the only chain this version serves; `["to_lower",
+  "each"]` is refused).
 - One index per `(element, label, key, type, transform)`: a second one under another name fails
   with a *Conflicting property index* error that names the first. A plain index and a `to_lower`
   index on the same key coexist (their default names differ), and so do a label-less and a
   per-label index on one key. Declaring the same name again replaces the index (also a per-label
   index by a label-less one of the same name, and back: index names are one namespace).
 - `g.indexes()` lists each index (by name) with its `label` (`()` for a label-less index), its
-  `type`, its `transform` (`()` without one), `served`
+  `type`, its `transform` (`()` without one, a chain as the array of its names), `served`
   (whether it is served, with a `reason` when it is not: see
   [unknown types](#an-index-type-from-a-newer-version) and [other storages](#other-storages)) and
-  its current `entries` (indexed elements), `distinct_values`, `skipped` (elements whose non-null
-  value the index does not hold) and `bytes` (an estimate of its memory).
+  its current `entries` (indexed elements; with `each` one per distinct element of a list),
+  `distinct_values`, `skipped` (elements whose non-null value the index does not hold; with
+  `each` list elements it does not hold) and `bytes` (an estimate of its memory).
 
 ```rhai,graph=modern,script
 g.create_index(#{element: "edge", label: "knows", key: "weight"});
@@ -107,8 +114,9 @@ label-less index under a start without labels or the index of the start's one la
 v().has("name", "josh").count() [index: vertex name, any label] [count from index]
 ```
 
-A number (ranged by its `float64` value), `null`, a second condition or a label to check falls
-back to counting the checked candidates of the index read.
+A number (ranged by its `float64` value), `null`, a second condition, a label to check or an
+[`each`](#arrays-the-each-transform) index (it holds lists by their elements, so its slices are not
+exact) falls back to counting the checked candidates of the index read.
 
 ## Index types
 
@@ -123,15 +131,16 @@ Which value types an index holds (Rust: `PropertyIndexType::holds` for the type,
 `PropertyIndexTransform::accepts` for the transform, both combined by
 `PropertyIndexDefinition::holds`, the one place the engine and the front ends take it from):
 
-| Value type | `memory-ordered` | `memory-ordered` with `to_lower` |
-|---|---|---|
-| `null`, `boolean` | yes | no |
-| `int64`, `float64` | yes (ranged by their value as `float64`) | no |
-| `string` (also a [compressed](compressed_properties.md) one, by its text) | yes | yes, by its lowered text |
-| `uuid` | yes | no |
-| `date`, `localdatetime`, `datetime`, `time`, `duration` | yes | no |
-| `array` (a list), `object` (a map) | no | no |
-| `vector` | no ([vectors](vectors.md) are searched with `nearest()` and `similarity()`) | no |
+| Value type | `memory-ordered` | with `to_lower` | with `each` | with `["each", "to_lower"]` |
+|---|---|---|---|---|
+| `null`, `boolean` | yes | no | yes | no |
+| `int64`, `float64` | yes (ranged by their value as `float64`) | no | yes | no |
+| `string` (also a [compressed](compressed_properties.md) one, by its text) | yes | yes, by its lowered text | yes | yes, by its lowered text |
+| `uuid` | yes | no | yes | no |
+| `date`, `localdatetime`, `datetime`, `time`, `duration` | yes | no | yes | no |
+| `array` (a list) | no | no | by its elements (the scalar ones, each once) | by its string elements, lowered |
+| `object` (a map) | no | no | no | no |
+| `vector` | no ([vectors](vectors.md) are searched with `nearest()` and `similarity()`) | no | no | no |
 
 A value the index does not hold is skipped: the element is not in the index, and a condition on
 such a value is answered by a scan, so results never change.
@@ -146,7 +155,9 @@ g.create_index(#{label: "person", key: "age", type: "hash"})   // refused: not a
 When the graph's stored [schema](schema_enforcement.md) declares the key at the top level of the
 index's label (a vertex label for a vertex index, an edge label for an edge index) and **none** of
 the declared types, `null` aside, can be held by the index (for the type a vector, a list, a map,
-or an `anyOf` of only such; with the transform `to_lower` every type but `string`), creating the
+or an `anyOf` of only such; with the transform `to_lower` every type but `string`; with `each` a
+map, a vector, or a list whose `items` declare only such; with `["each", "to_lower"]` anything but
+a string or a list of strings), creating the
 index is refused, with a message that names the label, the
 key, the declared type and the index type:
 
@@ -170,7 +181,9 @@ book page "Vectors"), for example g.v().has_label("doc").nearest("embedding", qu
 With `to_lower` the message says `an index of type 'memory-ordered' with the transform
 'to_lower' holds none of its values`, and the help suggests a plain index or a string property.
 For a list or a map the help suggests indexing a scalar top-level property instead (an index key
-is one top-level name; nested fields are not indexed). A declaration with at least one type the
+is one top-level name; nested fields are not indexed), and for a list the
+[`each`](#arrays-the-each-transform) transform. A list whose `items` declare no type is fine
+for `each`. A declaration with at least one type the
 index holds (`anyOf` of a list and a string, `["string", "null"]`), a key the schema does not
 declare, a label it does not declare, and a graph without a schema are all accepted. The schema's
 mode does not matter (a declaration in mode `none` counts too). The playground's form shows the
@@ -247,6 +260,58 @@ What is served and what is not:
 - An unknown transform (written by a newer version) is kept byte for byte and listed as not served
   ([below](#an-index-type-from-a-newer-version)).
 
+## Arrays: the each transform
+
+A list value is **one** value (Graphersal has no multi-properties): `has("_owners", "o1")`
+compares the whole list, and "the elements whose list holds `o1`" is written with TinkerPop's
+`has(key, traversal)`: `has("_owners", __.unfold().is("o1"))`. An index with the transform
+`each` holds one entry per **element** of a list value, so that query reads it instead of every
+element:
+
+```rhai,graph=modern,script
+g.v("1").property("_owners", ["o1", "o2"]).iterate();
+g.v("2").property("_owners", ["o2"]).iterate();
+g.v("4").property("_owners", "o1").iterate();                  // a scalar: one entry
+g.create_index(#{key: "_owners", transform: "each"});           // named index__owners_each
+
+g.v().has("_owners", __.unfold().is("o1")).values("name").to_list();
+g.v().has_label("person").has("_owners", __.unfold().is(P.within("o1", "o2"))).count().next();
+g.v().has("_owners", "o1").values("name").to_list()           // the whole value: josh only
+```
+
+- **Entries**: one per element of a list, an element held twice once (`["x", "x"]` is one entry);
+  a scalar value gives its one entry, as `unfold()` emits it; an empty list none. A nested list,
+  a map or a vector inside the list is not a key and counts in `skipped` (one per such element),
+  and so does a map or a vector value itself.
+- **Served exactly**: `has(key, __.unfold().is(P))` with `P` a value, `P.eq`, `P.within` or a
+  range, whatever the index skipped: what `unfold()` emits for a skipped value (a nested list, the
+  entries of a map, a vector) never equals or ranges with a scalar constant.
+  `.profile()` shows `[index: vertex _owners each, any label]` (per label
+  `[index: vertex Method._owners each]`); the `has` step stays and re-checks.
+- **Served as a superset**: a condition on the **whole** value, `has(key, value)` and
+  `has(key, P)`, reads an `each` index when no index without a transform covers the key: the lists
+  holding the value are candidates too, and the re-check of the whole value drops them. A plain
+  index on the same key is preferred for those conditions.
+- **The chain `["each", "to_lower"]`** holds the lowered text of every string element and serves
+  `has(key, __.unfold().to_lower().is(P))` (`[index: vertex tags each to_lower, any label]`), like
+  `to_lower` only while it skipped nothing (a number in a list makes `to_lower()` fail, and the
+  scan must report it). A `to_lower` transform never serves a `null` constant (`to_lower()` passes
+  a `null` through, the index holds none).
+- **Not served**: `__.unfold().unfold().is(..)`, `__.to_lower().unfold()..` (the wrong order),
+  negations and text predicates, GQL's `x IN n.list` (a `gql:filter` expression: a right operand
+  that is not a list is an error there, so it scans).
+- A storage lookup returns each element once even when it holds several values of the slice
+  (`["a", "b"]` in `P.between("a", "c")`, or `1` and `1.0`); a fused `count()` is never answered
+  from an `each` index.
+- **Persistence**: an index with `each` is stored as catalog kind `property_index_ext` (6) with
+  the critical flag, also with a label, so a version that does not know it opens the store
+  read-only. The payload keeps a single transform as its name and a chain as the array of its
+  names (`"transform": ["each", "to_lower"]`).
+- **Memory**: about 4 bytes per element entry after a build for a key with few distinct values (an
+  owner).
+- The [advisor](../persistence/optimize.md) recommends `transform: "each"` for a scanned key
+  holding lists.
+
 ## What is served
 
 A `v()`/`e()` start step reads an index when
@@ -267,6 +332,8 @@ A `v()`/`e()` start step reads an index when
 | `has(key, P.outside(a, b))` | two ranges |
 | `P.neq`, `P.without`, text predicates, `P.typeOf`, `and`/`or`/`not` composites | not served (scan) |
 | a value that is a list or a map (`has("tags", ["a"])`) | not served (scan) |
+| `has(key, __.unfold().is(P))` | by an [`each`](#arrays-the-each-transform) index |
+| `has(key, value)`, `has(key, P)` with only an `each` index on the key | by it, as a superset (re-checked) |
 | `v().has("title", "CEO")` without a label | served by a [label-less index](#label-less-indexes) only |
 | a jpath key | not served (scan) |
 
@@ -328,7 +395,8 @@ indexing a long compressed field costs the memory compression saved).
 ## Persistence
 
 An index is a catalog definition (kind `property_index`, or `property_index_ext` with the
-critical flag for a [label-less index](#label-less-indexes), like [saved queries](saved_queries.md)
+critical flag for a [label-less index](#label-less-indexes) and an index with
+[`each`](#arrays-the-each-transform), like [saved queries](saved_queries.md)
 and compression rules), so its **declaration** travels with the graph: the journal (WAL), snapshots,
 backups, forks, rollbacks and the catalog file. Its **entries are never stored**: they are rebuilt
 from the data whenever a graph is loaded, by a store open, a read-only view (also of a past state),
@@ -355,7 +423,9 @@ in its catalog (a catalog file loaded into it, say) and is listed with `served: 
 query reads it. A storage that serves indexes implements `GraphStorage::property_indexes` and the
 lookups `vertices_by_property_index`/`edges_by_property_index`, and for indexes with a transform
 `vertices_by_transformed_property_index`/`edges_by_transformed_property_index` (reporting
-`PropertyIndexStats::skipped`, which the optimizer reads before it uses such an index). The
+`PropertyIndexStats::skipped`, which the optimizer reads before it uses a `to_lower` index; an
+`each` lookup returns each element once, deduplicating an element held under several keys of the
+slice). The
 lookups take the label as `Option<&str>`: `None` reads the label-less index (`PropertyIndexInfo::label`
 is `None` for one). `count_by_property_index` (default `Ok(None)`) answers an exact count from the
 index for [counting from an index](#counting-from-an-index); without it the engine counts the
@@ -366,8 +436,9 @@ lookup's candidates.
 - **Playground** (WebAssembly and over the dev server): **Catalog ▾ ▸ Property indexes** lists the
   indexes with their type, transform, entries, distinct values, elements per value (what an
   equality reads) and memory (an index that is not served says why), creates one from a form
-  (element, label or **any label** for a label-less index, key, type, transform: none or
-  `to_lower` with a hint on the query form, optional name; the default name is shown as you type
+  (element, label or **any label** for a label-less index, key, type, transform: none,
+  `to_lower`, `each` or the chain `each, to_lower`, each with a hint on the query form, optional
+  name; the default name is shown as you type
   and follows the transform; an engine
   refusal shows under its field) and drops one after a confirmation. The **Statistics** tab of the Profile panel
   shows *Property indexes* with their memory when the graph has some. Indexes travel with the
@@ -379,18 +450,19 @@ lookup's candidates.
   block on stderr names the index memory.
 - **MCP**: the tools `list_indexes` (also with `--mcp-read-only`), `create_index` (with an
   optional `label`, omitted for a label-less index, and an optional `type` and `transform`, enums
-  of the known ones) and `drop_index` (not offered read-only, where
+  of the known ones; a chain as the array `["each", "to_lower"]`) and `drop_index` (not offered read-only, where
   `query` refuses `g.create_index` too).
 
 ## Limits
 
-- Not indexed: nested values (jpath keys), lists, maps and vectors as values (see
-  [index types](#index-types)), labels other than the one declared (an index on `person` does not
+- Not indexed: nested values (jpath keys), lists (without [`each`](#arrays-the-each-transform)),
+  maps and vectors as values (see [index types](#index-types)), labels other than the one declared (an index on `person` does not
   serve `v().has("title", ..)` without `has_label`; a [label-less index](#label-less-indexes)
   does).
 - One index type (`memory-ordered`): persisted, hash, vector (approximate nearest neighbour) and
   full-text types are planned and will be additional values of `type`.
-- One transform (`to_lower`); it serves only the exact child `__.to_lower().is(P)`. A `to_lower`
-  index does not serve a plain `has(key, value)`, and `TextP` predicates are not served.
+- Two transforms (`to_lower`, `each`) and one chain (`["each", "to_lower"]`); they serve only the
+  exact children `__.to_lower().is(P)`, `__.unfold().is(P)` and `__.unfold().to_lower().is(P)`. A
+  `to_lower` index does not serve a plain `has(key, value)`, and `TextP` predicates are not served.
 - No unique indexes (constraints) in this version.
 - `order().by(key)` does not read the index.

@@ -581,6 +581,126 @@ pub fn label_less_property_index_serves_every_element<S: GraphStorage>(storage: 
     );
 }
 
+/// `property_indexes` with a catalog: an index with the transform `each` (kind
+/// `property_index_ext`, critical, also per label) holds one entry per array element and a
+/// scalar value as itself; `vertices_by_transformed_property_index` reads it with each vertex
+/// once (D15: an array holding several values of a range, or `1` and `1.0`, is one candidate),
+/// follows writes and rollbacks, and `property_indexes` lists the transform and the skipped
+/// elements (a nested array, an object). `count_by_property_index`, when the storage answers
+/// for a one-value slice, is the exact count. Skipped without the capability.
+pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S) {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::{ElementKind, PropertyIndexRange};
+    use std::ops::Bound;
+    let caps = storage.capabilities().unwrap();
+    if !caps.property_indexes || !caps.atomic || !has_catalog(storage) {
+        return;
+    }
+    let list = |items: &[ElementProperty]| ElementProperty::Array(items.to_vec());
+    let mut object = PropertyMap::default();
+    object.insert("o", "x".into());
+    let a = vertex(
+        storage,
+        Some("each_a"),
+        &["t"],
+        props(&[("tags", list(&["x".into(), "y".into(), "x".into()]))]),
+    );
+    let _b = vertex(
+        storage,
+        Some("each_b"),
+        &["t"],
+        props(&[("tags", "x".into())]),
+    );
+    let _c = vertex(
+        storage,
+        Some("each_c"),
+        &["t"],
+        props(&[(
+            "tags",
+            list(&[
+                list(&["x".into()]),
+                ElementProperty::Object(Box::new(object)),
+                1.into(),
+                1.5.into(),
+            ]),
+        )]),
+    );
+    let _other = vertex(
+        storage,
+        Some("each_u"),
+        &["u"],
+        props(&[("tags", list(&["x".into()]))]),
+    );
+    let each = PropertyIndexTransform::Each;
+    let index = Definition::property_index(
+        "t_tags_each",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "t", "tags")
+            .with_transform(Some(each.clone())),
+    );
+    assert_eq!(index.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
+    assert!(index.flags().is_critical());
+    storage.set_definition(index).expect("an each index");
+    let listed = storage.property_indexes().unwrap();
+    let info = listed
+        .iter()
+        .find(|info| info.name == "t_tags_each")
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    assert_eq!(info.transform, Some(each.clone()));
+    assert_eq!(info.stats.skipped, 2, "the nested array and the object");
+    let found = |storage: &S, range: &PropertyIndexRange| {
+        vertex_ids(
+            storage,
+            storage
+                .vertices_by_transformed_property_index(Some("t"), "tags", &each, range)
+                .unwrap(),
+        )
+    };
+    let x = PropertyIndexRange::equal("x".into());
+    assert_eq!(
+        found(storage, &x),
+        Some(vec!["each_a".to_string(), "each_b".to_string()])
+    );
+    // A range over two values of one array: the vertex once.
+    let a_to_z = PropertyIndexRange::new(Bound::Included("a".into()), Bound::Unbounded);
+    assert_eq!(
+        found(storage, &a_to_z),
+        Some(vec!["each_a".to_string(), "each_b".to_string()])
+    );
+    let numbers = PropertyIndexRange::new(Bound::Included(0.into()), Bound::Included(2.into()));
+    assert_eq!(found(storage, &numbers), Some(vec!["each_c".to_string()]));
+    if let Some(count) = storage
+        .count_by_property_index(ElementKind::Vertex, Some("t"), "tags", Some(&each), &x)
+        .unwrap()
+    {
+        assert_eq!(count, 2);
+    }
+    assert!(
+        storage
+            .vertices_by_property_index(Some("t"), "tags", &x)
+            .unwrap()
+            .is_none(),
+        "an each index is not the plain index of the key"
+    );
+    // A write moves the entries; a rollback restores them.
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(a, "tags".into(), list(&["z".into()]))
+        .unwrap();
+    assert_eq!(found(storage, &x), Some(vec!["each_b".to_string()]));
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_eq!(
+        found(storage, &x),
+        Some(vec!["each_a".to_string(), "each_b".to_string()])
+    );
+    assert!(
+        storage
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "t_tags_each")
+            .unwrap()
+    );
+}
+
 /// `set_definitions` stores a list in order exactly like one `set_definition` per item (a name
 /// given twice: the last one wins); a refused item fails the call with its error, and inside a
 /// unit an atomic storage's rollback keeps nothing of the list. Needs a catalog and `atomic`.

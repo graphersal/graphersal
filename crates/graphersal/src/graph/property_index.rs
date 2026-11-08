@@ -18,7 +18,7 @@
 //!
 //! Keys are the LOGICAL scalar values (`null`, booleans, numbers, strings, uuids, dates and
 //! times; a compressed string by its text). Arrays and objects are not indexed: a condition on one is never served
-//! by an index. The index is ordered: an equality, `P.within` and the ranges `P.gt/gte/lt/lte/
+//! by an index (an index with the transform `each` holds the scalar ELEMENTS of an array, below). The index is ordered: an equality, `P.within` and the ranges `P.gt/gte/lt/lte/
 //! inside/between/outside` read a slice of it. A lookup returns a SUPERSET of the matching
 //! elements (numbers are ranged by their `float64` value, both `int64` and `float64` entries
 //! included); the source re-checks every condition on each candidate, so a result never differs
@@ -40,8 +40,13 @@
 //! lowered text of string values, exactly what the `to_lower()` step computes, through the one
 //! shared function `step_to_lower::lower_text`; every other value is not in the index). It
 //! serves `has(key, __.to_lower().is(P))` (case-insensitive search); the constants of `P` are
-//! compared AS GIVEN with the lowered values. An unknown transform is handled like an unknown
-//! type: kept byte for byte, never built or served, never created.
+//! compared AS GIVEN with the lowered values. It also knows `each` (one key per element of an
+//! array value, a scalar value as itself; it serves `has(key, __.unfold().is(P))`, and a
+//! condition on the whole value as a superset) and the chain `["each", "to_lower"]` (payload: an
+//! array of names). An index with `each` is stored as [`DefinitionKind::PROPERTY_INDEX_EXT`]
+//! (critical), also per label, and its lookups deduplicate an element held under several keys
+//! of a slice. An unknown transform (or a chain in an order this version does not serve) is
+//! handled like an unknown type: kept byte for byte, never built or served, never created.
 //!
 //! LAYOUT: an index keeps each key once with its POSTINGS, the sorted slots of the elements
 //! holding it (`BTreeMap<IndexKey, Postings>`, `graph/postings.rs`): one slot inline in the
@@ -195,14 +200,19 @@ impl std::fmt::Display for PropertyIndexType {
 // ---------------------------------------------------------------------------------------------
 
 /// The transform of a property index (payload key `transform`, absent = none; book page
-/// "Property Indexes", section "Case-insensitive search"): the index keys are the transformed
-/// values, and the index serves a condition that applies the same transform before its
-/// predicate.
+/// "Property Indexes", sections "Case-insensitive search" and "Arrays: the each transform"):
+/// the index keys are the transformed values, and the index serves a condition that applies the
+/// same transform before its predicate.
 ///
-/// This version knows one transform, [`Self::ToLower`], named after the step `to_lower()`. A
+/// This version knows two transforms, [`Self::ToLower`] (named after the step `to_lower()`) and
+/// [`Self::Each`] (named after "each element", the step `unfold()`), and one CHAIN of them,
+/// `each` then `to_lower` ([`Self::chain`], [`Self::Chain`]; the payload stores a single
+/// transform as its name, a chain as the array of its names, `["each", "to_lower"]`). A
 /// transform name this version does not know (a definition written by a newer version) is
-/// [`Self::Unknown`]: the definition is kept and written back unchanged, but the index is never
-/// built or served, and creating one is refused ([`PropertyIndexDefinition::check_create`]).
+/// [`Self::Unknown`], and so is a chain holding one; a chain of known names in an order this
+/// version does not serve (`["to_lower", "each"]`) is not [known](Self::is_known) either: the
+/// definition is kept and written back unchanged, but the index is never built or served, and
+/// creating one is refused ([`PropertyIndexDefinition::check_create`]).
 ///
 /// ```
 /// use graphersal::catalog::PropertyIndexTransform;
@@ -215,6 +225,18 @@ impl std::fmt::Display for PropertyIndexType {
 /// assert!(!lower.accepts(&ValueType::Int64));
 /// let future = PropertyIndexTransform::from_name("unaccent");
 /// assert!(!future.is_known());
+///
+/// let chain = PropertyIndexTransform::from_names(["each", "to_lower"]).unwrap();
+/// assert_eq!(chain.as_str(), "each to_lower");
+/// assert_eq!(chain.names(), vec!["each", "to_lower"]);
+/// assert!(chain.is_known() && chain.has_each());
+/// let wrong = PropertyIndexTransform::from_names(["to_lower", "each"]).unwrap();
+/// assert!(!wrong.is_known());
+/// // A chain of one transform is that transform.
+/// assert_eq!(
+///     PropertyIndexTransform::from_names(["each"]),
+///     Some(PropertyIndexTransform::Each)
+/// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -224,37 +246,198 @@ pub enum PropertyIndexTransform {
     /// Unicode, no locale); a value of any other type is not in the index. Serves
     /// `has(key, __.to_lower().is(P))` with `P` an equality, `P.within` or a range.
     ToLower,
+    /// `"each"`: an ARRAY value gives one key per element (an element held twice gives one
+    /// entry; a nested array, an object or a vector inside it is not a key and counts in
+    /// [`skipped`](PropertyIndexStats::skipped)), any other value its one key, as the step
+    /// `unfold()` emits them. Serves `has(key, __.unfold().is(P))` exactly (arrays are one
+    /// value, design D8: there are no multi-properties), and `has(key, value)` /
+    /// `has(key, P)` as a superset (the source re-checks the whole value), with `P` an
+    /// equality, `P.within` or a range.
+    Each,
+    /// A chain of transforms applied in order (built by [`Self::chain`], never of fewer than two
+    /// transforms, never nested): this version serves `each` then `to_lower`, the lowered text
+    /// of every string element, for `has(key, __.unfold().to_lower().is(P))`.
+    Chain(PropertyIndexTransformChain),
     /// A transform name this version does not know, as read: kept, never served, never created.
     Unknown(String),
+}
+
+/// The transforms of a [`PropertyIndexTransform::Chain`], in the order they apply, with the
+/// chain's name (the names joined by a space, as `.profile()` renders it). Built only by
+/// [`PropertyIndexTransform::chain`], so it always holds two or more transforms, none a chain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PropertyIndexTransformChain {
+    steps: Vec<PropertyIndexTransform>,
+    name: String,
+}
+
+impl PropertyIndexTransformChain {
+    /// The transforms of the chain, in the order they apply.
+    pub fn steps(&self) -> &[PropertyIndexTransform] {
+        &self.steps
+    }
 }
 
 impl PropertyIndexTransform {
     /// The name of [`Self::ToLower`].
     pub const TO_LOWER: &'static str = "to_lower";
 
-    /// The names of every transform this version knows, in the order front ends offer them.
-    pub const KNOWN_NAMES: [&'static str; 1] = [Self::TO_LOWER];
+    /// The name of [`Self::Each`].
+    pub const EACH: &'static str = "each";
+
+    /// The names of every transform this version knows, in the order front ends offer them
+    /// (a chain lists them in the order they apply, `each` first).
+    pub const KNOWN_NAMES: [&'static str; 2] = [Self::TO_LOWER, Self::EACH];
 
     /// The transform of a name: a known one, else [`Self::Unknown`] with the name (never fails).
     pub fn from_name(name: &str) -> PropertyIndexTransform {
         match name {
             Self::TO_LOWER => PropertyIndexTransform::ToLower,
+            Self::EACH => PropertyIndexTransform::Each,
             other => PropertyIndexTransform::Unknown(other.to_string()),
         }
     }
 
-    /// The transform name as stored (`"to_lower"`, or the unknown name as read).
+    /// The transform of a list of names applied in order ([`Self::chain`] of
+    /// [`Self::from_name`]s); `None` for an empty list.
+    pub fn from_names<I, N>(names: I) -> Option<PropertyIndexTransform>
+    where
+        I: IntoIterator<Item = N>,
+        N: AsRef<str>,
+    {
+        Self::chain(names.into_iter().map(|name| Self::from_name(name.as_ref())))
+    }
+
+    /// The chain of `steps` applied in order: one transform is that transform, two or more a
+    /// [`Self::Chain`] (a chain inside is flattened); `None` for none. Any order is built; only
+    /// the orders this version serves are [known](Self::is_known) (`each` first).
+    pub fn chain(
+        steps: impl IntoIterator<Item = PropertyIndexTransform>,
+    ) -> Option<PropertyIndexTransform> {
+        let mut flat = Vec::new();
+        for step in steps {
+            match step {
+                PropertyIndexTransform::Chain(chain) => flat.extend(chain.steps),
+                other => flat.push(other),
+            }
+        }
+        match flat.len() {
+            0 => None,
+            1 => flat.pop(),
+            _ => {
+                let name = flat
+                    .iter()
+                    .map(PropertyIndexTransform::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Some(PropertyIndexTransform::Chain(PropertyIndexTransformChain {
+                    steps: flat,
+                    name,
+                }))
+            }
+        }
+    }
+
+    /// The transform's name: `"to_lower"`, `"each"`, the unknown name as read, or for a chain
+    /// its names joined by a space (`"each to_lower"`, as `.profile()` renders it; the payload
+    /// stores a chain as the array of [`Self::names`]).
     pub fn as_str(&self) -> &str {
         match self {
             PropertyIndexTransform::ToLower => Self::TO_LOWER,
+            PropertyIndexTransform::Each => Self::EACH,
+            PropertyIndexTransform::Chain(chain) => &chain.name,
             PropertyIndexTransform::Unknown(name) => name,
         }
     }
 
-    /// Whether this version knows the transform (and so can build and serve the index).
+    /// The transforms applied in order: the chain's, or this one alone.
+    pub fn steps(&self) -> &[PropertyIndexTransform] {
+        match self {
+            PropertyIndexTransform::Chain(chain) => &chain.steps,
+            PropertyIndexTransform::ToLower
+            | PropertyIndexTransform::Each
+            | PropertyIndexTransform::Unknown(_) => std::slice::from_ref(self),
+        }
+    }
+
+    /// The names of [`Self::steps`], as the payload stores a chain.
+    pub fn names(&self) -> Vec<&str> {
+        self.steps()
+            .iter()
+            .map(PropertyIndexTransform::as_str)
+            .collect()
+    }
+
+    /// Whether the transform starts with [`Self::Each`] (one key per array element).
+    pub fn has_each(&self) -> bool {
+        self.steps().first() == Some(&PropertyIndexTransform::Each)
+    }
+
+    /// Whether a step of the transform can FAIL on a value the index skips (`to_lower()` on a
+    /// non-string): an index of such a transform serves only while it skipped no value.
+    pub(crate) fn can_fail(&self) -> bool {
+        self.steps()
+            .iter()
+            .any(|step| *step != PropertyIndexTransform::Each)
+    }
+
+    /// What is applied to each element after [`Self::Each`] (`None`: nothing), for a transform
+    /// that [has it](Self::has_each).
+    fn after_each(&self) -> Option<&PropertyIndexTransform> {
+        match self {
+            PropertyIndexTransform::Chain(chain) => chain.steps.get(1),
+            PropertyIndexTransform::ToLower
+            | PropertyIndexTransform::Each
+            | PropertyIndexTransform::Unknown(_) => None,
+        }
+    }
+
+    /// Why a chain of known transforms is not one this version serves, `None` when it is (or
+    /// holds an unknown name, reported as such).
+    fn order_error(&self) -> Option<String> {
+        let PropertyIndexTransform::Chain(chain) = self else {
+            return None;
+        };
+        if chain.steps.iter().any(|step| !step.is_single_known()) {
+            return None;
+        }
+        let served = matches!(
+            chain.steps.as_slice(),
+            [
+                PropertyIndexTransform::Each,
+                PropertyIndexTransform::ToLower
+            ]
+        );
+        (!served).then(|| {
+            format!(
+                "the chain [{}] is not one this version serves: \"each\" comes first and \
+                 every transform at most once (known: [\"each\", \"to_lower\"])",
+                chain
+                    .steps
+                    .iter()
+                    .map(|step| format!("\"{step}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+    }
+
+    /// Whether this is one transform this version knows (not a chain).
+    fn is_single_known(&self) -> bool {
+        match self {
+            PropertyIndexTransform::ToLower | PropertyIndexTransform::Each => true,
+            PropertyIndexTransform::Chain(_) | PropertyIndexTransform::Unknown(_) => false,
+        }
+    }
+
+    /// Whether this version knows the transform (and so can build and serve the index): a
+    /// known name, or a chain of known names in an order this version serves.
     pub fn is_known(&self) -> bool {
         match self {
-            PropertyIndexTransform::ToLower => true,
+            PropertyIndexTransform::ToLower | PropertyIndexTransform::Each => true,
+            PropertyIndexTransform::Chain(chain) => {
+                chain.steps.iter().all(Self::is_single_known) && self.order_error().is_none()
+            }
             PropertyIndexTransform::Unknown(_) => false,
         }
     }
@@ -266,32 +449,50 @@ impl PropertyIndexTransform {
                 "Indexes the lowered text of string values (as to_lower() computes it) for \
                  case-insensitive search: query it with has(key, __.to_lower().is(..)).",
             ),
-            PropertyIndexTransform::Unknown(_) => None,
+            PropertyIndexTransform::Each => Some(
+                "Indexes every element of an array value (any other value as itself), for \
+                 \"arrays containing x\": query it with has(key, __.unfold().is(..)).",
+            ),
+            PropertyIndexTransform::Chain(_) if self.is_known() => Some(
+                "Indexes the lowered text of every string element of an array value, for a \
+                 case-insensitive \"arrays containing x\": query it with \
+                 has(key, __.unfold().to_lower().is(..)).",
+            ),
+            PropertyIndexTransform::Chain(_) | PropertyIndexTransform::Unknown(_) => None,
         }
     }
 
     /// Whether the transform takes values of type `ty` (a union when one of its members is):
-    /// [`Self::ToLower`] takes strings only; an unknown transform takes nothing.
+    /// [`Self::ToLower`] takes strings only; [`Self::Each`] takes every type (an array by its
+    /// elements); a chain what its first transform takes; an unknown transform takes nothing.
+    /// [`PropertyIndexDefinition::holds`] checks an array's item types for an `each` index.
     pub fn accepts(&self, ty: &ValueType) -> bool {
         match ty {
             ValueType::Union(members) => members.iter().any(|member| self.accepts(member)),
             _ => match self {
                 PropertyIndexTransform::ToLower => *ty == ValueType::String,
+                PropertyIndexTransform::Each => true,
+                PropertyIndexTransform::Chain(_) => {
+                    self.is_known() && self.steps().first().is_some_and(|step| step.accepts(ty))
+                }
                 PropertyIndexTransform::Unknown(_) => false,
             },
         }
     }
 
     /// The transformed value of a stored value, `None` when the transform does not take it
-    /// (the element is then not in the index).
-    pub(crate) fn apply(&self, value: &ElementProperty) -> Option<ElementProperty> {
+    /// (the element is then not in the index). One value only: an `each` transform's keys come
+    /// from [`value_keys`].
+    fn apply(&self, value: &ElementProperty) -> Option<ElementProperty> {
         match self {
             PropertyIndexTransform::ToLower => value.text().map(|text| {
                 ElementProperty::String(
                     crate::traversal::step::map_steps::step_to_lower::lower_text(&text).into(),
                 )
             }),
-            PropertyIndexTransform::Unknown(_) => None,
+            PropertyIndexTransform::Each
+            | PropertyIndexTransform::Chain(_)
+            | PropertyIndexTransform::Unknown(_) => None,
         }
     }
 }
@@ -302,8 +503,25 @@ impl std::fmt::Display for PropertyIndexTransform {
     }
 }
 
-/// The index key of a stored value under an optional transform; `None` when the index does not
-/// hold the value.
+/// The payload value of a transform: its name, or for a chain the array of its names
+/// (`["each", "to_lower"]`).
+pub(crate) fn transform_payload(transform: &PropertyIndexTransform) -> ElementProperty {
+    match transform {
+        PropertyIndexTransform::Chain(chain) => ElementProperty::Array(
+            chain
+                .steps()
+                .iter()
+                .map(|step| ElementProperty::from(step.as_str()))
+                .collect(),
+        ),
+        PropertyIndexTransform::ToLower
+        | PropertyIndexTransform::Each
+        | PropertyIndexTransform::Unknown(_) => ElementProperty::from(transform.as_str()),
+    }
+}
+
+/// The index key of ONE stored value under an optional transform without `each`; `None` when
+/// the index does not hold the value.
 fn transformed_key(
     transform: Option<&PropertyIndexTransform>,
     value: &ElementProperty,
@@ -311,6 +529,39 @@ fn transformed_key(
     match transform {
         None => IndexKey::of(value),
         Some(transform) => IndexKey::of(&transform.apply(value)?),
+    }
+}
+
+/// The keys of a stored value under an optional transform, each passed to `key` (an `each`
+/// transform passes one per array element, the same key again for an element held twice: the
+/// postings keep a slot once per key); returns how many values the index does not hold (the
+/// [`skipped`](PropertyIndexStats::skipped) count: a non-null value without a key; with `each`
+/// one per such element of an array).
+fn value_keys(
+    transform: Option<&PropertyIndexTransform>,
+    value: &ElementProperty,
+    mut key: impl FnMut(IndexKey),
+) -> u64 {
+    let mut one = |transform: Option<&PropertyIndexTransform>, value: &ElementProperty| match (
+        transformed_key(transform, value),
+        value,
+    ) {
+        (Some(found), _) => {
+            key(found);
+            0
+        }
+        (None, ElementProperty::Null) => 0,
+        (None, _) => 1,
+    };
+    match transform {
+        Some(transform) if transform.has_each() => {
+            let rest = transform.after_each();
+            match value {
+                ElementProperty::Array(items) => items.iter().map(|item| one(rest, item)).sum(),
+                other => one(rest, other),
+            }
+        }
+        other => one(other, value),
     }
 }
 
@@ -333,9 +584,16 @@ fn declared_value_types(node: &PropertySchema) -> Option<Vec<ValueType>> {
                             None => ValueType::Uuid,
                         },
                     },
+                    // An array of the item types its `items` declares (an empty union: no
+                    // declaration), which an `each` index checks.
                     JsonType::Array => match &node.vector {
                         Some(vector) => ValueType::Vector(vector.element),
-                        None => ValueType::Array(Box::new(ValueType::Union(Vec::new()))),
+                        None => ValueType::Array(Box::new(ValueType::Union(
+                            node.items
+                                .as_deref()
+                                .and_then(declared_value_types)
+                                .unwrap_or_default(),
+                        ))),
                     },
                     JsonType::Object => ValueType::Object,
                 })
@@ -504,14 +762,29 @@ impl PropertyIndexDefinition {
     /// assert!(lower.holds(&ValueType::Union(vec![ValueType::Int64, ValueType::String])));
     /// ```
     pub fn holds(&self, ty: &ValueType) -> bool {
+        let transform = self.transform.as_ref();
+        if let Some(transform) = transform.filter(|transform| transform.has_each()) {
+            // `each`: an array by its item types (an array of items of no declared type is
+            // held), any other value as itself; what follows `each` applies to each of them.
+            let rest = transform.after_each();
+            let element = |ty: &ValueType| {
+                self.index_type.holds(ty) && rest.is_none_or(|rest| rest.accepts(ty))
+            };
+            return transform.is_known()
+                && match ty {
+                    ValueType::Union(members) => members.iter().any(|member| self.holds(member)),
+                    ValueType::Array(item) => match item.as_ref() {
+                        ValueType::Union(members) if members.is_empty() => true,
+                        ValueType::Union(members) => members.iter().any(element),
+                        item => element(item),
+                    },
+                    other => element(other),
+                };
+        }
         match ty {
             ValueType::Union(members) => members.iter().any(|member| self.holds(member)),
             _ => {
-                self.index_type.holds(ty)
-                    && self
-                        .transform
-                        .as_ref()
-                        .is_none_or(|transform| transform.accepts(ty))
+                self.index_type.holds(ty) && transform.is_none_or(|transform| transform.accepts(ty))
             }
         }
     }
@@ -533,11 +806,14 @@ impl PropertyIndexDefinition {
             ));
         }
         match &self.transform {
-            Some(PropertyIndexTransform::Unknown(name)) => Some(format!(
-                "index transform '{name}' is not known to this version (a newer Graphersal \
-                 wrote it); the definition is kept, queries scan"
-            )),
-            Some(PropertyIndexTransform::ToLower) | None => None,
+            Some(transform) if !transform.is_known() => Some(match transform.order_error() {
+                Some(reason) => format!("{reason}; the definition is kept, queries scan"),
+                None => format!(
+                    "index transform '{transform}' is not known to this version (a newer \
+                     Graphersal wrote it); the definition is kept, queries scan"
+                ),
+            }),
+            Some(_) | None => None,
         }
     }
 
@@ -610,14 +886,24 @@ impl PropertyIndexDefinition {
                 ),
             });
         }
-        if let Some(PropertyIndexTransform::Unknown(transform)) = &self.transform {
+        if let Some(transform) = &self.transform
+            && !transform.is_known()
+        {
             return Err(DefinitionError::InvalidField {
                 name: name.to_string(),
                 field: "transform".to_string(),
-                reason: format!(
-                    "'{transform}' is not an index transform this version knows (known: {})",
-                    PropertyIndexTransform::KNOWN_NAMES.join(", ")
-                ),
+                reason: match transform.order_error() {
+                    Some(reason) => reason,
+                    None => format!(
+                        "'{}' is not an index transform this version knows (known: {})",
+                        transform
+                            .steps()
+                            .iter()
+                            .find(|step| !step.is_single_known())
+                            .unwrap_or(transform),
+                        PropertyIndexTransform::KNOWN_NAMES.join(", ")
+                    ),
+                },
             });
         }
         let Some(schema) = schema else {
@@ -699,10 +985,16 @@ impl PropertyIndexDefinition {
 
     /// Whether the index uses a feature a reader must know to keep it exact, so it is stored
     /// as [`DefinitionKind::PROPERTY_INDEX_EXT`] with the critical flag (a reader that does not
-    /// know that kind opens the store read-only): today a [label-less](Self::label_less) index.
-    /// A plain per-label index is [`DefinitionKind::PROPERTY_INDEX`], not critical.
+    /// know that kind opens the store read-only): today a [label-less](Self::label_less) index
+    /// and an index whose transform [starts with `each`](PropertyIndexTransform::has_each)
+    /// (per label too). A plain per-label index, also with `to_lower`, is
+    /// [`DefinitionKind::PROPERTY_INDEX`], not critical.
     pub fn needs_extended_kind(&self) -> bool {
         self.label.is_none()
+            || self
+                .transform
+                .as_ref()
+                .is_some_and(PropertyIndexTransform::has_each)
     }
 
     /// The catalog kind [`Definition::property_index`] stores this index as.
@@ -722,7 +1014,8 @@ impl PropertyIndexDefinition {
     /// The name an index gets when none is given (the DSL's `g.create_index` without `name`,
     /// the session, MCP, the playground's form): `<label>_<key>` (`<key>` for a label-less
     /// index; `<label>_<key>_edge` for an edge index), then `_<transform>` for an index with a
-    /// transform (`person_name_to_lower`, `knows_note_edge_to_lower`), every character that is
+    /// transform (`person_name_to_lower`, `knows_note_edge_to_lower`; a chain by its names
+    /// joined by `_`: `index__owners_each`, `person_tags_each_to_lower`), every character that is
     /// not an ASCII letter, digit or `_` replaced by `_`, prefixed with `index_` when it would
     /// not start with a letter (`index__owner_edge` for a label-less edge index on `_owner`).
     ///
@@ -769,7 +1062,9 @@ impl PropertyIndexDefinition {
 
     /// The payload property map (format spec 6.3), in this key order: `element` (`"vertex"` or
     /// `"edge"`), `label` (absent for a label-less index), `key`, `type` (always written),
-    /// `transform` (only for an index with a transform), then the unknown keys. A definition of an unknown type or transform read
+    /// `transform` (only for an index with a transform: its name, or a chain as the array of
+    /// its names, `["each", "to_lower"]`), then the unknown keys. A definition of an unknown
+    /// type or transform read
     /// from a payload gives that payload back unchanged.
     pub fn to_payload(&self) -> PropertyMap {
         if let Some(original) = &self.original {
@@ -783,7 +1078,7 @@ impl PropertyIndexDefinition {
         map.insert("key", self.key.as_str().into());
         map.insert("type", self.index_type.as_str().into());
         if let Some(transform) = &self.transform {
-            map.insert("transform", transform.as_str().into());
+            map.insert("transform", transform_payload(transform));
         }
         for (key, value) in &self.extra {
             map.insert_if_absent(key, || value.clone());
@@ -843,7 +1138,23 @@ impl PropertyIndexDefinition {
             None => PropertyIndexType::MemoryOrdered,
             Some(name) => PropertyIndexType::from_name(&name),
         };
-        let transform = text("transform")?.map(|name| PropertyIndexTransform::from_name(&name));
+        // One name, or a chain as the array of its names.
+        let transform = match map.get("transform") {
+            None => None,
+            Some(ElementProperty::Array(names)) => {
+                let names = names
+                    .iter()
+                    .map(|name| name.text().map(|text| text.into_owned()))
+                    .collect::<Option<Vec<String>>>()
+                    .ok_or_else(|| {
+                        malformed("transform", "every name of a chain must be a string")
+                    })?;
+                Some(PropertyIndexTransform::from_names(&names).ok_or_else(|| {
+                    malformed("transform", "a chain names at least one transform")
+                })?)
+            }
+            Some(_) => text("transform")?.map(|name| PropertyIndexTransform::from_name(&name)),
+        };
         let mut index = match label {
             Some(label) => PropertyIndexDefinition::new(element, label, key),
             None => PropertyIndexDefinition::label_less(element, key),
@@ -891,12 +1202,21 @@ impl PropertyIndexDefinition {
             reason,
         };
         if kind == DefinitionKind::PROPERTY_INDEX && self.needs_extended_kind() {
-            return Err(field(
-                "label",
-                "a label-less index is stored as kind property_index_ext (Definition::property_index \
-                 picks it)"
-                    .to_string(),
-            ));
+            return Err(if self.label.is_none() {
+                field(
+                    "label",
+                    "a label-less index is stored as kind property_index_ext \
+                     (Definition::property_index picks it)"
+                        .to_string(),
+                )
+            } else {
+                field(
+                    "transform",
+                    "an index with the transform each is stored as kind property_index_ext \
+                     (Definition::property_index picks it)"
+                        .to_string(),
+                )
+            });
         }
         if kind == DefinitionKind::PROPERTY_INDEX_EXT && !flags.is_critical() {
             return Err(field(
@@ -1043,14 +1363,17 @@ pub(crate) fn check_conflict(
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PropertyIndexStats {
-    /// Indexed elements (one entry per element with a scalar value at the key).
+    /// Index entries: one per element with a scalar value at the key; with the transform
+    /// `each` one per distinct element of an array value (an element held twice counts once).
     pub entries: u64,
     /// Distinct indexed values.
     pub distinct_values: u64,
     /// An estimate of the index's heap footprint, in bytes.
     pub bytes: u64,
     /// Elements of the index's label whose value at the key is not `null` and not held by the
-    /// index (an array, an object or a vector; with `to_lower` every non-string value). The
+    /// index (an array, an object or a vector; with `to_lower` every non-string value; with
+    /// `each` one per element of an array that is not held: a nested array, an object, a
+    /// vector, with `each to_lower` a non-string; an object or a vector value itself). The
     /// optimizer serves a transformed index only while this is `0`: the transform's step fails
     /// on such a value (`to_lower()` on a number), and a scan must report that error, so a
     /// storage serving an index with a transform must count them.
@@ -1473,13 +1796,22 @@ impl IndexState {
 
     /// Puts in (`insert`) or takes out the entry of a stored value of the element at `slot`: its
     /// key, or the `skipped` count for a non-null value the index does not hold.
+    /// With `each` an array puts in (takes out) one key per element, an element held twice
+    /// once (the postings hold a slot once per key).
     fn account(&mut self, insert: bool, value: &ElementProperty, slot: u32) {
-        match transformed_key(self.transform.as_ref(), value) {
-            Some(key) if insert => self.insert(key, slot),
-            Some(key) => self.remove(&key, slot),
-            None if matches!(value, ElementProperty::Null) => {}
-            None if insert => self.skipped += 1,
-            None => self.skipped = self.skipped.saturating_sub(1),
+        let transform = self.transform.take();
+        let skipped = value_keys(transform.as_ref(), value, |key| {
+            if insert {
+                self.insert(key, slot);
+            } else {
+                self.remove(&key, slot);
+            }
+        });
+        self.transform = transform;
+        if insert {
+            self.skipped += skipped;
+        } else {
+            self.skipped = self.skipped.saturating_sub(skipped);
         }
     }
 
@@ -1545,17 +1877,32 @@ impl IndexState {
             .sum()
     }
 
-    /// The number of (key, slot) entries inside `range` (exact: the sum of the postings'
-    /// lengths of the keys in it).
-    fn count(&self, range: &PropertyIndexRange) -> u64 {
-        match set_bounds(range).and_then(key_bounds) {
-            Some(bounds) => self
-                .entries
-                .range(bounds)
-                .map(|(_, postings)| self.runs.len(postings) as u64)
-                .sum(),
-            None => 0,
+    /// The number of elements inside `range` (exact: the sum of the postings' lengths of the
+    /// keys in it); `None` for an `each` index whose slice holds more than one key (an element
+    /// may be held under several of them).
+    fn count(&self, range: &PropertyIndexRange) -> Option<u64> {
+        let Some(bounds) = set_bounds(range).and_then(key_bounds) else {
+            return Some(0);
+        };
+        let mut keys = self.entries.range(bounds);
+        if self.has_each() {
+            let first = keys.next();
+            if keys.next().is_some() {
+                return None;
+            }
+            return Some(first.map_or(0, |(_, postings)| self.runs.len(postings) as u64));
         }
+        Some(
+            keys.map(|(_, postings)| self.runs.len(postings) as u64)
+                .sum(),
+        )
+    }
+
+    /// Whether the index keys array elements (its transform starts with `each`).
+    fn has_each(&self) -> bool {
+        self.transform
+            .as_ref()
+            .is_some_and(PropertyIndexTransform::has_each)
     }
 
     /// The stats: per key its map entry (the key, the 8-byte postings and a B-tree share of 8
@@ -1937,15 +2284,35 @@ impl TraversalGraph {
         range: &PropertyIndexRange,
     ) -> Option<Box<dyn Iterator<Item = u32> + 'a>> {
         let index = self.property_indexes.find(element, label, key, transform)?;
-        Some(match set_bounds(range).and_then(key_bounds) {
-            Some(bounds) => Box::new(
-                index
+        let Some(bounds) = set_bounds(range).and_then(key_bounds) else {
+            return Some(Box::new(std::iter::empty()));
+        };
+        if index.has_each() {
+            // D15: an element holding several values of the slice is in several postings; a
+            // slice of more than one key is collected and deduplicated (by slot).
+            let mut keys = index.entries.range(bounds.clone());
+            let first = keys.next();
+            if keys.next().is_some() {
+                let mut slots: Vec<u32> = index
                     .entries
                     .range(bounds)
-                    .flat_map(|(_, postings)| index.runs.iter(postings)),
-            ),
-            None => Box::new(std::iter::empty()),
-        })
+                    .flat_map(|(_, postings)| index.runs.iter(postings))
+                    .collect();
+                slots.sort_unstable();
+                slots.dedup();
+                return Some(Box::new(slots.into_iter()));
+            }
+            return Some(match first {
+                Some((_, postings)) => Box::new(index.runs.iter(postings)),
+                None => Box::new(std::iter::empty()),
+            });
+        }
+        Some(Box::new(
+            index
+                .entries
+                .range(bounds)
+                .flat_map(|(_, postings)| index.runs.iter(postings)),
+        ))
     }
 
     /// The vertices labelled `label` (every vertex: `None`) whose `key` (transformed by
@@ -1983,9 +2350,9 @@ impl TraversalGraph {
         })))
     }
 
-    /// The exact number of entries of the index on `(element, label, key, transform)` inside
+    /// The exact number of elements of the index on `(element, label, key, transform)` inside
     /// `range` (from the postings' lengths, no element is visited); `None` without such an
-    /// index.
+    /// index, and for an `each` index whose slice holds more than one key.
     pub(crate) fn property_index_count(
         &self,
         element: ElementKind,
@@ -1994,11 +2361,9 @@ impl TraversalGraph {
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
     ) -> Option<u64> {
-        Some(
-            self.property_indexes
-                .find(element, label, key, transform)?
-                .count(range),
-        )
+        self.property_indexes
+            .find(element, label, key, transform)?
+            .count(range)
     }
 
     /// Compares every maintained index with a fresh rebuild from the data and the catalog:

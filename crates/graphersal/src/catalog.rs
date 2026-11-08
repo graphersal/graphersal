@@ -106,5 +106,5 @@ pub use crate::graph::jobs::{
 pub use crate::graph::model_definition::{BaseModel, MAX_MODEL_NAME_BYTES, ModelDefinition};
 pub use crate::graph::property_index::{
     MAX_INDEX_KEY_BYTES, MAX_INDEX_LABEL_BYTES, PropertyIndexDefinition, PropertyIndexTransform,
-    PropertyIndexType,
+    PropertyIndexTransformChain, PropertyIndexType,
 };

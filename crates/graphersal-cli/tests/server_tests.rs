@@ -5670,7 +5670,7 @@ fn property_index_transforms_over_http_and_mcp() {
         .clone();
     assert_eq!(
         create["inputSchema"]["properties"]["transform"]["enum"],
-        serde_json::json!(["to_lower"]),
+        serde_json::json!(["to_lower", "each", ["each", "to_lower"]]),
         "{create}"
     );
     let (error, text) = mcp.call(
