@@ -20,7 +20,7 @@ How the fused step counts:
 | `v()` / `e()` without ids or labels | the graph's element count, no iteration at all |
 | with labels (`v(labels: ...)`) | the label index; a vertex carrying several of the labels counts once |
 | with ids (`v("1", "2")`) | one lookup per id; ids that do not exist (or, with labels, whose element carries none of them) are not counted |
-| with one folded `has(key, value)` and an exact [index access](property_index.md) | the entries of the index slice (`GraphStorage::count_by_property_index`), no element visited; `.profile()` shows `[count from index]` |
+| with a countable [index access](property_index.md#exact-accesses) (one exact equality, folded or a `has` step it removed, nothing else to check) | the entries of the index slice (`GraphStorage::count_by_property_index`), no element visited; `.profile()` shows `[count from index]` |
 
 The `count()` does not have to be the last step: `v().count().is(6)` fuses as well, and the
 following steps run on the single count value.
@@ -34,8 +34,8 @@ following steps run on the single count value.
 - Any step between the start step and `count()` that was not folded into the start step:
   `v().out().count()`, `v().has("age", P.gt(30)).count()`, `v().as("a").count()`, a second
   `has_label`.
-- A start step with folded `has(key, value)` conditions, unless the
-  [Property Index Rule](property_index.md) marked its index access exact (see the table).
+- A start step with folded `has(key, value)` conditions or an index access, unless the
+  [Property Index Rule](property_index.md) marked its index access countable (see the table).
 - The traversal does not start with `v()`/`e()`.
 - `count(Scope.local)`: it counts the elements of a collection, not the stream.
 - The start step was already fused with a count per label by

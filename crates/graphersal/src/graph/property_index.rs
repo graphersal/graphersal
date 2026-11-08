@@ -576,6 +576,27 @@ fn value_keys(
     }
 }
 
+/// Whether a stored value lies in one of `ranges` as the index of `transform` keys it (with
+/// `each` an array by any of its elements): exactly the elements a lookup of those slices
+/// names. The check of an exact index access's condition when a scan replaces the index
+/// (`IndexAccess::holds`).
+pub(crate) fn value_in_ranges(
+    transform: Option<&PropertyIndexTransform>,
+    value: &ElementProperty,
+    ranges: &[PropertyIndexRange],
+) -> bool {
+    use std::ops::RangeBounds;
+    let bounds: Vec<(Bound<IndexKey>, Bound<IndexKey>)> = ranges
+        .iter()
+        .filter_map(|range| set_bounds(range).and_then(key_bounds))
+        .collect();
+    let mut found = false;
+    value_keys(transform, value, |key| {
+        found = found || bounds.iter().any(|bounds| bounds.contains(&key));
+    });
+    found
+}
+
 /// The value types a schema node declares (through `anyOf`), `None` when it declares no type
 /// restriction (no `type` and no `anyOf`, or an `anyOf` member without one).
 fn declared_value_types(node: &PropertySchema) -> Option<Vec<ValueType>> {

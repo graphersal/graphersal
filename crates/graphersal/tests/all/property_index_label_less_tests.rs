@@ -424,17 +424,17 @@ fn a_source_without_labels_reads_the_label_less_index_and_profile_says_any_label
     let _ = ok(&graph, r#"g.create_index(#{key: "name"})"#);
     assert_eq!(
         first_step(&graph, r#"v().has("name", "josh")"#),
-        r#"v().has("name", "josh") [index: vertex name, any label]"#
+        r#"v().has("name", "josh") [index: vertex name, any label, exact]"#
     );
     // A has(key, P) after the source is served too.
     assert_eq!(
         first_step(&graph, r#"v().has("name", P.within("josh", "lop"))"#),
-        r#"v() [index: vertex name, any label]"#
+        r#"v().has("name", P.within(["josh", "lop"])) [index: vertex name, any label, exact]"#
     );
     // A labelled source without a per-label index reads it and checks the label (D2, D17).
     assert_eq!(
         first_step(&graph, r#"v().has_label("person").has("name", "lop")"#),
-        r#"v(labels: ["person"]).has("name", "lop") [index: vertex name, any label]"#
+        r#"v(labels: ["person"]).has("name", "lop") [index: vertex name, any label, exact]"#
     );
     let (with, without) = both(&graph, r#"v().has_label("person").has("name", "lop")"#);
     assert!(with.is_empty());
@@ -495,7 +495,7 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
     let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
     let query = r#"v().has_label("a").has("k", "shared")"#;
     assert!(
-        first_step(&graph, query).ends_with("[index: vertex k, any label]"),
+        first_step(&graph, query).ends_with("[index: vertex k, any label, exact]"),
         "{}",
         first_step(&graph, query)
     );
@@ -510,7 +510,7 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
     let _ = ok(&graph, r#"g.create_index(#{key: "k"})"#);
     let query = r#"v().has_label("c").has("k", "v7")"#;
     assert!(
-        first_step(&graph, query).ends_with(r#"[index: vertex c.k]"#),
+        first_step(&graph, query).ends_with(r#"[index: vertex c.k, exact]"#),
         "{}",
         first_step(&graph, query)
     );
@@ -544,7 +544,8 @@ fn the_cheaper_of_per_label_and_label_less_wins_both_ways() {
     let _ = ok(&graph, r#"g.create_index(#{label: "b", key: "k"})"#);
     // `b.k`: 100 over 100 = 1 per value; label-less 9: per-label wins.
     assert!(
-        first_step(&graph, r#"v().has_label("b").has("k", "b1")"#).ends_with("[index: vertex b.k]")
+        first_step(&graph, r#"v().has_label("b").has("k", "b1")"#)
+            .ends_with("[index: vertex b.k, exact]")
     );
     let (with, without) = both(&graph, r#"v().has_label("b", "c").has("k", "c1")"#);
     assert_eq!(with.len(), 100);
@@ -574,7 +575,7 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
     // One folded string equality, no label: the postings answer it.
     assert_eq!(
         first_step(&graph, r#"v().has("name", "josh").count()"#),
-        r#"v().has("name", "josh").count() [index: vertex name, any label] [count from index]"#
+        r#"v().has("name", "josh").count() [index: vertex name, any label, exact] [count from index]"#
     );
     assert_eq!(count(r#"v().has("name", "josh")"#), (1, 1));
     assert_eq!(count(r#"v().has("name", "nobody")"#), (0, 0));
@@ -608,7 +609,7 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
             &graph,
             r#"v().has_label("person").has("lang", "en").count()"#
         ),
-        r#"v(labels: ["person"]).has("lang", "en").count() [index: vertex person.lang] [count from index]"#
+        r#"v(labels: ["person"]).has("lang", "en").count() [index: vertex person.lang, exact] [count from index]"#
     );
     assert_eq!(
         count(r#"v().has_label("person").has("lang", "en")"#),
@@ -628,7 +629,7 @@ fn a_fused_count_is_answered_from_the_postings_only_when_exact() {
     let _ = ok(&graph, r#"g.create_index(#{element: "edge", key: "tag"})"#);
     assert!(
         first_step(&graph, r#"e().has("tag", "t").count()"#)
-            .contains("[index: edge tag, any label] [count from index]")
+            .contains("[index: edge tag, any label, exact] [count from index]")
     );
     assert_eq!(count(r#"e().has("tag", "t")"#), (6, 6));
 }
@@ -643,7 +644,7 @@ fn gql_node_patterns_without_a_label_use_the_label_less_index() {
     let root = gql(r#"MATCH (n {name: "josh"}) RETURN n.age"#);
     assert_eq!(
         first_step(&graph, &root),
-        "v() [index: vertex name, any label]"
+        r#"v().has("name", P.eq("josh")) [index: vertex name, any label, exact]"#
     );
     assert_eq!(
         sorted(ok(&graph, &format!("g.{root}.to_list()"))),
@@ -934,7 +935,7 @@ fn the_forwarding_storage_serves_the_same_label_less_index() {
     let profile =
         on_forwarded(r#"g.v().has("name", "josh").count().profile().to_string()"#).unwrap();
     assert!(
-        profile.contains("[index: vertex name, any label] [count from index]"),
+        profile.contains("[index: vertex name, any label, exact] [count from index]"),
         "{profile}"
     );
 }

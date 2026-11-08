@@ -800,6 +800,18 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         .is_err()
     }
 
+    /// Whether any of `steps` or of their child traversals, at any depth, mutates the graph
+    /// ([`Self::mutates`]): a plan that writes.
+    pub(crate) fn any_mutates(steps: &mut [GraphStep<'g, S>]) -> bool {
+        steps.iter_mut().any(|step| {
+            step.mutates()
+                || step
+                    .child_traversals_mut()
+                    .into_iter()
+                    .any(|child| Self::any_mutates(&mut child.steps))
+        })
+    }
+
     /// Whether running this step can be observed other than through its output stream: the step
     /// itself or any child traversal it holds, at any depth, mutates the graph or writes a side
     /// effect ([`Self::own_effects`]). How often and in which order such a step runs is part of
@@ -1414,9 +1426,10 @@ impl PropertyFilter {
 /// `property_index` rule, book page "Property Indexes"): the candidates are the elements of
 /// each source label whose `key` lies in one of `ranges` (a superset), or with `label_less` the
 /// elements of the label-less index on `key` (every element of the kind; the source then keeps
-/// only those carrying one of its labels, if it has any); the source still checks its folded
-/// conditions, and the condition the index serves stays in the plan when it is a `has(key, P)`
-/// step, so the result never differs from the label scan.
+/// only those carrying one of its labels, if it has any). The source checks its folded
+/// conditions on each candidate, and the condition the index serves stays in the plan when it
+/// is a `has(key, P)` step, so the result never differs from the label scan; except the
+/// condition the index answers EXACTLY ([`Self::answered`]), whose re-check the rule dropped.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexAccess {
     /// The top-level property key of the index.
@@ -1428,31 +1441,55 @@ pub(crate) struct IndexAccess {
     /// Whether it reads the label-less index on `key` (design D1/D2) instead of one index per
     /// source label.
     pub(crate) label_less: bool,
-    /// Whether the number of elements the source yields is the number of entries in `ranges`
-    /// (no re-check can drop a candidate: one equality on a string, boolean, uuid or temporal
-    /// value folded into the source, no other folded condition, no transform, and either a
+    /// The condition the index answers exactly and no longer re-checked (`None`: every
+    /// condition is re-checked on each candidate). Set only in a plan that does not write, on a
+    /// storage claiming `StorageCapabilities::exact_property_index_lookups`, for a
+    /// proven-exact shape (the `property_index` rule's `exact_shape`). The candidates then
+    /// satisfy it by construction: `index_vertices`/`index_edges` (`traversal/source.rs`) fall
+    /// back to a scan checking it ([`Self::holds`]) when the storage does not serve the index
+    /// after all.
+    pub(crate) answered: Option<Answered>,
+    /// Whether the number of elements the source yields is the number of entries in the one
+    /// slice of `ranges` (an answered condition, no other folded condition, and either a
     /// label-less index read by a source without labels or the index of the source's one
     /// label): `count_pushdown` may then fuse a `count()` that the storage answers from the
     /// postings ([`GraphStorage::count_by_property_index`]).
     ///
     /// [`GraphStorage::count_by_property_index`]: crate::graph::GraphStorage::count_by_property_index
-    pub(crate) exact: bool,
+    pub(crate) countable: bool,
+}
+
+/// Which condition an exact [`IndexAccess`] answers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Answered {
+    /// The folded `has(key, value)` of the source with the access's key and value: the source
+    /// skips it on the index's candidates (it still shows it).
+    Folded,
+    /// A filter step removed from the plan, as it rendered (`has("tags",
+    /// __.unfold().is("x"))`): the source shows it after its folded conditions.
+    Step(String),
 }
 
 impl IndexAccess {
     /// `[index: vertex person.title, vertex employee.title]`: what `.profile()` shows; an index
     /// with a transform names it (`[index: vertex person.name to_lower]`); a label-less one is
     /// `[index: vertex name, any label]` (design D17), also when a labelled source reads it.
-    /// `count` (a fused `count()` answered from the postings) appends `[count from index]`.
+    /// An answered condition (no re-check) adds `, exact` inside the brackets; `count` (a fused
+    /// `count()` answered from the postings) appends `[count from index]`.
     pub(crate) fn render(&self, element: &str, labels: Option<&[String]>, count: bool) -> String {
         let suffix = match &self.transform {
             Some(transform) => format!(" {transform}"),
             None => String::new(),
         };
         let counted = if count { " [count from index]" } else { "" };
+        let exact = if self.answered.is_some() {
+            ", exact"
+        } else {
+            ""
+        };
         if self.label_less {
             return format!(
-                " [index: {element} {}{suffix}, any label]{counted}",
+                " [index: {element} {}{suffix}, any label{exact}]{counted}",
                 self.key
             );
         }
@@ -1461,7 +1498,47 @@ impl IndexAccess {
             .iter()
             .map(|label| format!("{element} {label}.{}{suffix}", self.key))
             .collect();
-        format!(" [index: {}]{counted}", names.join(", "))
+        format!(" [index: {}{exact}]{counted}", names.join(", "))
+    }
+
+    /// The folded conditions the source checks on the index's candidates: `filters` without
+    /// the one the access answers ([`Answered::Folded`]: the first with its key and value).
+    pub(crate) fn remaining_filters<'f>(
+        &self,
+        filters: &'f [PropertyFilter],
+    ) -> std::borrow::Cow<'f, [PropertyFilter]> {
+        if self.answered != Some(Answered::Folded) {
+            return std::borrow::Cow::Borrowed(filters);
+        }
+        let value = match self.ranges.as_slice() {
+            [range] => match &range.lower {
+                std::ops::Bound::Included(value) => Some(value),
+                std::ops::Bound::Excluded(_) | std::ops::Bound::Unbounded => None,
+            },
+            _ => None,
+        };
+        let Some(position) = filters
+            .iter()
+            .position(|filter| filter.key == self.key && Some(&filter.value) == value)
+        else {
+            return std::borrow::Cow::Borrowed(filters);
+        };
+        let mut remaining = filters.to_vec();
+        remaining.remove(position);
+        std::borrow::Cow::Owned(remaining)
+    }
+
+    /// Whether a stored value (`None`: the element lacks the key) satisfies the answered
+    /// condition: it lies in one of the slices as the index keys it. The check of the scan
+    /// that replaces an index the storage does not serve.
+    pub(crate) fn holds(&self, value: Option<&crate::ElementProperty>) -> bool {
+        value.is_some_and(|value| {
+            crate::graph::property_index::value_in_ranges(
+                self.transform.as_ref(),
+                value,
+                &self.ranges,
+            )
+        })
     }
 }
 

@@ -220,8 +220,8 @@ fn traversal_graph_reports_atomic_change_capture_and_writable() {
     assert_eq!(GraphStorage::capabilities(&&mut owned).unwrap(), caps);
     assert_eq!(
         GraphStorage::capabilities(&&graph).unwrap(),
-        StorageCapabilities::none(),
-        "a read-only view claims nothing"
+        StorageCapabilities::none().with_exact_property_index_lookups(true),
+        "a read-only view claims nothing but the exactness of the index lookups it forwards"
     );
 }
 

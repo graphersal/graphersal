@@ -95,12 +95,17 @@ scan. A parameter works as well as a literal:
 ```
 
 ```text
-v(labels: ["person"]) [index: vertex person.name]               1       0       1
-has("name", P.eq("josh"))                                       1       1       1
-out("created")                                                  1       1       2
-gql:project("s")                                                1       2       2
+v(labels: ["person"]).has("name", P.eq("josh")) [index: vertex person.name, exact]    1       0       1
+out("created")                                                                        1       1       2
+gql:project("s")                                                                      1       2       2
+gql:order("s")                                                                        1       2       2
 Optimizer rules applied: source_filter_pushdown, property_index
 ```
+
+The equality of a string, boolean, uuid or temporal value is answered by the index
+[exactly](../users_guide/property_indexes.md#kept-exact) in a query that does not write: its
+`has` step leaves the plan (`, exact`). A correlated `gql:lookup(..)` reads the same index but
+keeps checking GQL's `=` on each candidate (its value is known only per row).
 
 A [label-less index](../users_guide/property_indexes.md#label-less-indexes)
 (`g.create_index(#{key: "name"})`) serves a node without a label, `MATCH (n {name: $x})`, and a

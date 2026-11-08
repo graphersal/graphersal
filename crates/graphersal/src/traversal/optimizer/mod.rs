@@ -100,12 +100,18 @@ pub(crate) struct TraversalOptimizer<'g, S: GraphStorage + 'g> {
     /// The property indexes the storage serves (read once per run, see
     /// [`Self::for_run`]); empty: no index is used.
     indexes: Vec<crate::graph::PropertyIndexInfo>,
+    /// See [`OptimizerContext::exact_lookups`].
+    exact_lookups: bool,
 }
 
 /// What a rule may know about the run beyond the plan ([`OptimizationRule::apply_in`]).
 pub(crate) struct OptimizerContext<'a> {
     /// The property indexes the storage serves, with their stats.
     pub(crate) indexes: &'a [crate::graph::PropertyIndexInfo],
+    /// Whether the `property_index` rule may drop the re-check of a condition an index answers
+    /// exactly: the storage claims `StorageCapabilities::exact_property_index_lookups` and the
+    /// query (every level) does not write ([`TraversalOptimizer::with_exact_index_lookups`]).
+    pub(crate) exact_lookups: bool,
 }
 
 impl<'g, S: GraphStorage + 'g> Default for TraversalOptimizer<'g, S> {
@@ -115,6 +121,7 @@ impl<'g, S: GraphStorage + 'g> Default for TraversalOptimizer<'g, S> {
             diagnostics: true,
             fired: RefCell::new(Vec::new()),
             indexes: Vec::new(),
+            exact_lookups: false,
         }
     }
 }
@@ -198,6 +205,14 @@ impl<'g, S: GraphStorage + 'g> TraversalOptimizer<'g, S> {
         optimizer
     }
 
+    /// Lets the `property_index` rule drop the re-check of a condition an index answers exactly
+    /// ([`OptimizerContext::exact_lookups`]): `exact` only when the storage claims
+    /// `StorageCapabilities::exact_property_index_lookups` and the query does not write.
+    pub fn with_exact_index_lookups(mut self, exact: bool) -> Self {
+        self.exact_lookups = exact;
+        self
+    }
+
     /// The default-on rules honouring `options`; `property_index` only with `with_indexes`.
     fn pipeline_with(options: &ExecutionOptions, with_indexes: bool) -> Self {
         let registry = Self::registry();
@@ -234,6 +249,7 @@ impl<'g, S: GraphStorage + 'g> TraversalOptimizer<'g, S> {
         }
         let context = OptimizerContext {
             indexes: &self.indexes,
+            exact_lookups: self.exact_lookups,
         };
         for rule in &self.rules {
             if rule.apply_in(&mut plan, &context) {

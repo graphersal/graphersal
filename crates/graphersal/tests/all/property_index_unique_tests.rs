@@ -136,7 +136,10 @@ fn a_unique_index_is_listed_stored_as_the_extended_kind_and_read_like_any_index(
         r#"g.v().has_label("User").has("email", "b@x").profile().to_string()"#,
     )
     .to_string();
-    assert!(profile.contains("[index: vertex User.email]"), "{profile}");
+    assert!(
+        profile.contains("[index: vertex User.email, exact]"),
+        "{profile}"
+    );
     assert_eq!(
         count(&graph, r#"v().has_label("User").has("email", "b@x")"#),
         1
