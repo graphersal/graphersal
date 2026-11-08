@@ -8,8 +8,9 @@ use graphersal::ElementProperty;
 use graphersal::TraversalGraph;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionStats, Definition,
-    DefinitionKind, ExecutionPolicy, GraphError, GraphStatistics, GraphStorage, JsonPath, Mark,
-    MemoryStats, PropertyMap, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+    DefinitionKind, ElementKind, ExecutionPolicy, GraphError, GraphStatistics, GraphStorage,
+    JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
+    PropertyMap, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
 };
 use graphersal_storage_tests::conformance;
 
@@ -288,6 +289,58 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
 
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         self.0.capabilities()
+    }
+
+    // The property indexes it claims through the capabilities are served (forwarded).
+    fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
+        self.0.property_indexes()
+    }
+    fn vertices_by_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>>, GraphError> {
+        self.0.vertices_by_property_index(label, key, range)
+    }
+    fn edges_by_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
+        self.0.edges_by_property_index(label, key, range)
+    }
+    fn vertices_by_transformed_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>>, GraphError> {
+        self.0
+            .vertices_by_transformed_property_index(label, key, transform, range)
+    }
+    fn edges_by_transformed_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
+        self.0
+            .edges_by_transformed_property_index(label, key, transform, range)
+    }
+    fn count_by_property_index(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        self.0
+            .count_by_property_index(element, label, key, transform, range)
     }
 
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {

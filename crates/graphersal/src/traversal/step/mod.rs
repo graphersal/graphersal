@@ -1412,9 +1412,11 @@ impl PropertyFilter {
 
 /// The property index a `v()`/`e()` source reads instead of its label buckets (set by the
 /// `property_index` rule, book page "Property Indexes"): the candidates are the elements of
-/// each source label whose `key` lies in one of `ranges` (a superset); the source still checks
-/// its folded conditions, and the condition the index serves stays in the plan when it is a
-/// `has(key, P)` step, so the result never differs from the label scan.
+/// each source label whose `key` lies in one of `ranges` (a superset), or with `label_less` the
+/// elements of the label-less index on `key` (every element of the kind; the source then keeps
+/// only those carrying one of its labels, if it has any); the source still checks its folded
+/// conditions, and the condition the index serves stays in the plan when it is a `has(key, P)`
+/// step, so the result never differs from the label scan.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexAccess {
     /// The top-level property key of the index.
@@ -1423,21 +1425,43 @@ pub(crate) struct IndexAccess {
     pub(crate) transform: Option<crate::graph::PropertyIndexTransform>,
     /// The slices of the index to read (several for `P.within` and `P.outside`).
     pub(crate) ranges: Vec<crate::graph::PropertyIndexRange>,
+    /// Whether it reads the label-less index on `key` (design D1/D2) instead of one index per
+    /// source label.
+    pub(crate) label_less: bool,
+    /// Whether the number of elements the source yields is the number of entries in `ranges`
+    /// (no re-check can drop a candidate: one equality on a string, boolean, uuid or temporal
+    /// value folded into the source, no other folded condition, no transform, and either a
+    /// label-less index read by a source without labels or the index of the source's one
+    /// label): `count_pushdown` may then fuse a `count()` that the storage answers from the
+    /// postings ([`GraphStorage::count_by_property_index`]).
+    ///
+    /// [`GraphStorage::count_by_property_index`]: crate::graph::GraphStorage::count_by_property_index
+    pub(crate) exact: bool,
 }
 
 impl IndexAccess {
     /// `[index: vertex person.title, vertex employee.title]`: what `.profile()` shows; an index
-    /// with a transform names it (`[index: vertex person.name to_lower]`).
-    pub(crate) fn render(&self, element: &str, labels: &[String]) -> String {
+    /// with a transform names it (`[index: vertex person.name to_lower]`); a label-less one is
+    /// `[index: vertex name, any label]` (design D17), also when a labelled source reads it.
+    /// `count` (a fused `count()` answered from the postings) appends `[count from index]`.
+    pub(crate) fn render(&self, element: &str, labels: Option<&[String]>, count: bool) -> String {
         let suffix = match &self.transform {
             Some(transform) => format!(" {transform}"),
             None => String::new(),
         };
+        let counted = if count { " [count from index]" } else { "" };
+        if self.label_less {
+            return format!(
+                " [index: {element} {}{suffix}, any label]{counted}",
+                self.key
+            );
+        }
         let names: Vec<String> = labels
+            .unwrap_or_default()
             .iter()
             .map(|label| format!("{element} {label}.{}{suffix}", self.key))
             .collect();
-        format!(" [index: {}]", names.join(", "))
+        format!(" [index: {}]{counted}", names.join(", "))
     }
 }
 

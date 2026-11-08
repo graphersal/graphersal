@@ -718,7 +718,8 @@ payload     = property map (3) with inline keys (as in a WAL record)
 | 3 | compression rule |
 | 4 | scheduled job of a user (since 0.3.0) |
 | 5 | embedding model (since 0.5.0, 4.5) |
-| 6..127 | unassigned (assigned only by this format) |
+| 6 | property index of an extended form (since 0.6.0): a label-less index; always critical |
+| 7..127 | unassigned (assigned only by this format) |
 | 128..255 | host kinds: reserved for applications built on the library, never assigned by this format (16 rule 8) |
 
 An **embedding model** (kind 5, not critical: a reader that does not know the kind keeps it and
@@ -842,6 +843,20 @@ damage and needs no new format version (16 rules 1 and 9): the reader keeps the 
 writes its payload back exactly as read (every key, in the order read), builds no entries for it
 and serves no query from it. A store written before this kind was decoded never holds it (kind 2
 was reserved), so no format version changes.
+
+A **property index of an extended form** (kind 6, `property_index_ext`, since 0.6.0) is a
+property index whose meaning a reader must know to keep it exact: today a **label-less** index,
+which orders every element of its element kind (unlabeled ones included) by the value of one
+top-level property. It is ALWAYS written with the critical flag (bit 0 of the flags), so a
+reader that does not know kind 6 opens the store read-only (16 rule 3) instead of writing data
+without maintaining the index; a plain per-label index stays kind 2, not critical. The payload
+keys are those of kind 2; `label` is OPTIONAL (absent: label-less) and the rest is read as for
+kind 2 (an unknown `type`, `transform` or `element` keeps the definition, not served). Index
+names are one namespace across kinds 2 and 6: a writer never stores the same name in both (it
+replaces one by the other in one commit). Two indexes of kinds 2 and 6 with the same `element`,
+`label`, `key`, `type` and `transform` are invalid. Like kind 2, only the declaration is stored.
+A store written before 0.6.0 never holds kind 6 (it was unassigned), so no format version
+changes.
 
 ## 7. Segment files and chunks
 

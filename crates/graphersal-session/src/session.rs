@@ -834,7 +834,7 @@ impl Session {
                 .count(),
             "propertyIndexes": definitions
                 .iter()
-                .filter(|d| d.kind() == DefinitionKind::PROPERTY_INDEX)
+                .filter(|d| d.kind().is_property_index())
                 .count(),
             "catalog": catalog,
             "warnings": self.warnings,

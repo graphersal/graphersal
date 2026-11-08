@@ -3986,3 +3986,87 @@ mod compression_lists {
         }
     }
 }
+
+/// A label-less property index (stage S2 of the property index extensions) is a definition of
+/// kind `property_index_ext`: creating, replacing and dropping it ask for that kind, so a
+/// policy denying definition writes refuses each, and an authorizer that denies only the new
+/// kind refuses the label-less index while per-label indexes stay allowed.
+#[test]
+fn creating_and_dropping_a_label_less_index_asks_for_its_own_kind() {
+    let graph = modern();
+    // A read-only policy refuses the create, with the kind and the default name.
+    assert_denied(
+        run(
+            &graph,
+            r#"g.create_index(#{key: "name"})"#,
+            AccessPolicy::read_only(),
+        ),
+        "create_index",
+        r#"Create Definition(property_index_ext "name")"#,
+    );
+    assert!(graph.read().property_indexes().unwrap().is_empty());
+    // Created by an allowing host; the requests name the kind.
+    let recorder = Arc::new(Recorder::default());
+    run(
+        &graph,
+        r#"g.create_index(#{key: "name"})"#,
+        recorder.clone(),
+    )
+    .unwrap();
+    assert!(
+        recorder
+            .seen()
+            .contains(&r#"Create Definition(property_index_ext "name")"#.to_string()),
+        "{:?}",
+        recorder.seen()
+    );
+    // The drop is refused by a read-only host, allowed by an allowing one.
+    assert_denied(
+        run(&graph, r#"g.drop_index("name")"#, AccessPolicy::read_only()),
+        "drop_index",
+        r#"Delete Definition(property_index_ext "name")"#,
+    );
+    assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
+
+    /// Denies every write of a label-less index, allows the rest.
+    struct NoLabelLess;
+    impl Authorizer for NoLabelLess {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match request.resource {
+                Resource::Definition {
+                    kind: Some(kind), ..
+                } if kind == graphersal::catalog::DefinitionKind::PROPERTY_INDEX_EXT
+                    && request.action != Action::Read =>
+                {
+                    Err(Denied::new("label-less indexes are managed by the host"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+    assert_denied(
+        run(&graph, r#"g.drop_index("name")"#, NoLabelLess),
+        "drop_index",
+        r#"Delete Definition(property_index_ext "name")"#,
+    );
+    // Replacing it by a per-label index of the same name deletes the label-less one: refused.
+    assert_denied(
+        run(
+            &graph,
+            r#"g.create_index(#{label: "person", key: "name", name: "name"})"#,
+            NoLabelLess,
+        ),
+        "create_index",
+        r#"Delete Definition(property_index_ext "name")"#,
+    );
+    // A per-label index under another name is allowed.
+    run(
+        &graph,
+        r#"g.create_index(#{label: "person", key: "age"})"#,
+        NoLabelLess,
+    )
+    .unwrap();
+    assert_eq!(graph.read().property_indexes().unwrap().len(), 2);
+    run(&graph, r#"g.drop_index("name")"#, AllowAll).unwrap();
+    assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
+}

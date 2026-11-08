@@ -1495,8 +1495,10 @@ impl Graph {
     /// transform=None, policy=None)``: declares (or replaces) a property index, like the DSL's
     /// ``g.create_index(#{..})``: the ``element``s labelled ``label``, ordered by their
     /// top-level property ``key``; a ``has()`` on that key after ``has_label(label)`` then reads
-    /// the index. ``name`` defaults to ``<label>_<key>`` (``<label>_<key>_edge`` for edges,
-    /// then ``_to_lower`` with that transform), ``type`` to ``"memory-ordered"`` (the only index
+    /// the index. ``label=None`` declares a LABEL-LESS index (every element of the kind,
+    /// unlabeled ones included), which a ``has()`` without ``has_label`` reads too; ``indexes()``
+    /// lists its ``label`` as ``None``. ``name`` defaults to ``<label>_<key>`` (``<key>``
+    /// label-less, ``<label>_<key>_edge`` for edges, then ``_to_lower`` with that transform), ``type`` to ``"memory-ordered"`` (the only index
     /// type this version knows). ``transform="to_lower"`` indexes the lowered text of string
     /// values for a case-insensitive search, ``has(key, __.to_lower().is("alice"))``. The index
     /// is built at once and rebuilt from the data whenever the graph is loaded. An unknown type
@@ -1507,7 +1509,7 @@ impl Graph {
     fn create_index(
         &self,
         py: Python<'_>,
-        label: &str,
+        label: Option<&str>,
         key: &str,
         element: &str,
         name: Option<&str>,
@@ -1516,13 +1518,15 @@ impl Graph {
         policy: Option<PyRef<'_, AccessPolicy>>,
     ) -> PyResult<()> {
         let params = PyDict::new(py);
-        params.set_item("index_label", label)?;
         params.set_item("index_key", key)?;
         params.set_item("index_element", element)?;
         params.set_item("index_type", r#type)?;
-        let mut spec = String::from(
-            "label: index_label, key: index_key, element: index_element, type: index_type",
-        );
+        let mut spec = String::from("key: index_key, element: index_element, type: index_type");
+        // No label: a label-less index.
+        if let Some(label) = label {
+            params.set_item("index_label", label)?;
+            spec.push_str(", label: index_label");
+        }
         if let Some(name) = name {
             params.set_item("index_name", name)?;
             spec.push_str(", name: index_name");
@@ -1537,7 +1541,7 @@ impl Graph {
     }
 
     /// ``graph.indexes(*, policy=None)``: the property indexes as a ``list`` of ``dict``
-    /// (``name``, ``element``, ``label``, ``key``, ``type``, ``transform`` (``None`` without
+    /// (``name``, ``element``, ``label`` (``None`` for a label-less index), ``key``, ``type``, ``transform`` (``None`` without
     /// one), ``served``, ``reason`` when it is not served, and the current ``entries``,
     /// ``distinct_values``, ``skipped``, ``bytes``).
     #[pyo3(signature = (*, policy=None))]

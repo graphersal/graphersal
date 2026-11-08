@@ -17,6 +17,8 @@ e().has_label("knows").has("weight", P.lt(0.5))  →   e(labels: ["knows"]) [ind
                                                       has("weight", P.lt(0.5))
 v().has_label("person")                          →   v(labels: ["person"]) [index: vertex person.name to_lower]
    .has("name", __.to_lower().is("ada"))              has("name", __.to_lower().is(P.eq("ada")))
+v().has("name", "josh")                          →   v().has("name", "josh") [index: vertex name, any label]
+v().has("name", "josh").count()                  →   v().has("name", "josh").count() [index: vertex name, any label] [count from index]
 ```
 
 It looks at
@@ -35,9 +37,20 @@ It looks at
   other `has(key, traversal)` ends the run of pure filters.
 
 A condition is covered when every label folded into the start step has an index on its key (of
-the condition's transform: none for `has(key, ..)`, `to_lower` for the lowered form). Of the
+the condition's transform: none for `has(key, ..)`, `to_lower` for the lowered form), or when a
+[label-less index](../users_guide/property_indexes.md#label-less-indexes) on the key exists: a
+start step without labels can only read a label-less index; one with labels compares the sum
+of its per-label estimates with the label-less index's estimate, the lower wins (a tie keeps the
+per-label indexes), and with the label-less index it checks each candidate's labels. Of the
 covered conditions the rule picks the most selective by the indexes' statistics (an equality: about
-`entries / distinct_values` elements per label and value; a range: half the entries).
+`entries / distinct_values` elements per index and value; a range: half the entries).
+
+When no re-check can drop a candidate (one folded equality on a string, boolean, uuid or
+temporal value, no other folded condition, no transform, and a label-less index under a start
+without labels or the index of the start's single label) the access is marked exact, and
+[Count Pushdown](count_pushdown.md) may fuse a following `count()` into the start step, which
+the storage then answers from the index (`GraphStorage::count_by_property_index`) without
+visiting the elements: `.profile()` shows `[count from index]`.
 
 ## Why
 
@@ -49,11 +62,12 @@ equals the scan's (only the order of the elements may differ).
 ## When it does not fire
 
 - No index is declared (the rule then costs nothing), or one of the folded labels has none on the
-  key. Only indexes the storage serves count: an index of a
+  key and no label-less index covers it. Only indexes the storage serves count: an index of a
   [type](../users_guide/property_indexes.md#index-types) this version does not know (written by
   a newer version) is kept in the catalog but never read.
-- The start step has no folded label (`v().has("title", "CEO")`), has ids folded
-  (`v("1").has_label(..)`: the ids are cheaper), or a fused `count()`/`group_count()`.
+- The start step has no folded label (`v().has("title", "CEO")`) and no label-less index covers
+  the key, has ids folded (`v("1").has_label(..)`: the ids are cheaper), or a fused
+  `count()`/`group_count()`.
 - The condition is not served: `P.neq`, `P.without`, text predicates, composites, a list or map
   value, a jpath key, `NaN`; a `has(key, traversal)` whose child is not exactly
   `to_lower().is(P)`; the lowered form while its index skipped a non-string value.

@@ -17,7 +17,8 @@ const KEYS: [&str; 6] = ["name", "element", "label", "key", "type", "transform"]
 const STORAGE_SERVES_NONE: &str = "this storage keeps the definition but serves no property \
                                    indexes; queries scan";
 
-/// One index as a map: name, element, label, key, type, transform (`()` without one), served
+/// One index as a map: name, element, label (`()` for a label-less index), key, type,
+/// transform (`()` without one), served
 /// (with `reason` when it is not served) and its current stats (entries, distinct_values,
 /// skipped, bytes; zero when it is not served).
 fn index_entry(
@@ -28,7 +29,13 @@ fn index_entry(
     let mut map = rhai::Map::new();
     map.insert("name".into(), definition.name().to_string().into());
     map.insert("element".into(), index.element_name().to_string().into());
-    map.insert("label".into(), index.label().to_string().into());
+    map.insert(
+        "label".into(),
+        index
+            .label()
+            .map(|label| Dynamic::from(label.to_string()))
+            .unwrap_or(Dynamic::UNIT),
+    );
     map.insert("key".into(), index.key().to_string().into());
     map.insert(
         "type".into(),
@@ -58,21 +65,38 @@ fn index_entry(
 }
 
 impl ScriptGraphTraversalSource {
-    /// Asks the session's authorizer for `action` on the property index `name` (`None`: every
-    /// index).
+    /// Asks the session's authorizer for `action` on the property index `name` of catalog
+    /// `kind` ([`DefinitionKind::PROPERTY_INDEX`] or, for a label-less index,
+    /// [`DefinitionKind::PROPERTY_INDEX_EXT`]; `name` `None`: every index of the kind).
     fn require_index(
         &self,
         operation: &str,
         action: Action<'_>,
+        kind: DefinitionKind,
         name: Option<&str>,
     ) -> Result<(), Box<EvalAltResult>> {
         self.require(
             operation,
-            AccessRequest::new(
-                action,
-                Resource::definition(Some(DefinitionKind::PROPERTY_INDEX), name),
-            ),
+            AccessRequest::new(action, Resource::definition(Some(kind), name)),
         )
+    }
+
+    /// The catalog kind holding the property index `name`, if any (index names are unique
+    /// across both index kinds).
+    fn index_kind(
+        &self,
+        graph: &Arc<dyn AnyGraph>,
+        name: &str,
+    ) -> Result<Option<DefinitionKind>, Box<EvalAltResult>> {
+        for kind in [
+            DefinitionKind::PROPERTY_INDEX,
+            DefinitionKind::PROPERTY_INDEX_EXT,
+        ] {
+            if graph.definition(kind, name).map_err(graph_fail)?.is_some() {
+                return Ok(Some(kind));
+            }
+        }
+        Ok(None)
     }
 
     fn index_graph(&self, operation: &str) -> Result<&Arc<dyn AnyGraph>, Box<EvalAltResult>> {
@@ -84,15 +108,18 @@ impl ScriptGraphTraversalSource {
         })
     }
 
-    /// `g.create_index(#{label, key, element?, name?, type?, transform?})` /
+    /// `g.create_index(#{key, label?, element?, name?, type?, transform?})` /
     /// `g.create_index(..)`: declares (or replaces) a property index: the `element`s
     /// (`"vertex"`, the default, or `"edge"`) labelled `label`, ordered by their top-level
-    /// property `key` (a plain name). `name` defaults to
-    /// [`PropertyIndexDefinition::default_name`] (`<label>_<key>`, `_edge` for edges,
-    /// `_to_lower` with that transform), `type` to `"memory-ordered"` (the only type this
+    /// property `key` (a plain name). Without `label` (omitted or `()`) the index is
+    /// LABEL-LESS: every element of the kind, unlabeled ones included
+    /// ([`PropertyIndexDefinition::label_less`]). `name` defaults to
+    /// [`PropertyIndexDefinition::default_name`] (`<label>_<key>`, `<key>` label-less, `_edge`
+    /// for edges, `_to_lower` with that transform), `type` to `"memory-ordered"` (the only type this
     /// version knows), `transform` to none (`"to_lower"`: the lowered text of string values,
     /// for `has(key, __.to_lower().is(..))`). The index is built in the same
-    /// unit. Asks for `Create` on the index (`Update` when it replaces one); a storage without
+    /// unit. Asks for `Create` on the index (`Update` when it replaces one; of kind
+    /// `property_index_ext` for a label-less index); a storage without
     /// property indexes refuses it, and so does
     /// [`PropertyIndexDefinition::check_create`] (an unknown type, a key the stored schema
     /// declares as values the type cannot hold).
@@ -108,7 +135,7 @@ impl ScriptGraphTraversalSource {
         };
         let Some(mut spec) = spec.try_cast::<rhai::Map>() else {
             return Err(mismatch(
-                "a map #{label, key, element?, name?, type?, transform?}".into(),
+                "a map #{key, label?, element?, name?, type?, transform?}".into(),
                 actual,
             ));
         };
@@ -119,12 +146,8 @@ impl ScriptGraphTraversalSource {
             ));
         }
         let mut take = |key: &str| spec.remove(key).unwrap_or(Dynamic::UNIT);
-        let label = optional_text(operation, "label", take("label"))?.ok_or_else(|| {
-            mismatch(
-                "the key label (the vertex or edge label)".into(),
-                "no label".into(),
-            )
-        })?;
+        // No label: a label-less index (every element of the kind).
+        let label = optional_text(operation, "label", take("label"))?;
         let key = optional_text(operation, "key", take("key"))?.ok_or_else(|| {
             mismatch(
                 "the key key (the top-level property name)".into(),
@@ -147,9 +170,12 @@ impl ScriptGraphTraversalSource {
         };
         let transform = optional_text(operation, "transform", take("transform"))?
             .map(|name| PropertyIndexTransform::from_name(&name));
-        let index = PropertyIndexDefinition::new(element, label, key)
-            .with_type(index_type)
-            .with_transform(transform);
+        let index = match label {
+            Some(label) => PropertyIndexDefinition::new(element, label, key),
+            None => PropertyIndexDefinition::label_less(element, key),
+        }
+        .with_type(index_type)
+        .with_transform(transform);
         let name = match optional_text(operation, "name", take("name"))? {
             Some(name) => name,
             None => index.default_name(),
@@ -159,16 +185,17 @@ impl ScriptGraphTraversalSource {
             .validate()
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
         let graph = self.index_graph(operation)?;
-        let exists = graph
-            .definition(DefinitionKind::PROPERTY_INDEX, &name)
-            .map_err(graph_fail)?
-            .is_some();
-        let action = if exists {
+        let existing = self.index_kind(graph, &name)?;
+        // Replacing an index of the other kind deletes that one.
+        if let Some(kind) = existing.filter(|kind| *kind != definition.kind()) {
+            self.require_index(operation, Action::Delete, kind, Some(&name))?;
+        }
+        let action = if existing == Some(definition.kind()) {
             Action::Update
         } else {
             Action::Create
         };
-        self.require_index(operation, action, Some(&name))?;
+        self.require_index(operation, action, definition.kind(), Some(&name))?;
         if !graph.capabilities().map_err(graph_fail)?.property_indexes {
             return Err(graph_fail(crate::error::GraphError::unsupported(
                 "property indexes",
@@ -187,12 +214,30 @@ impl ScriptGraphTraversalSource {
     /// bytes), by name. Asks for
     /// `Read` on the indexes.
     pub fn indexes(&mut self) -> Result<rhai::Array, Box<EvalAltResult>> {
-        self.require_index("indexes", Action::Read, None)?;
+        self.require_index(
+            "indexes",
+            Action::Read,
+            DefinitionKind::PROPERTY_INDEX,
+            None,
+        )?;
+        self.require_index(
+            "indexes",
+            Action::Read,
+            DefinitionKind::PROPERTY_INDEX_EXT,
+            None,
+        )?;
         let graph = self.index_graph("indexes")?;
         let served = graph.property_indexes().map_err(graph_fail)?;
-        Ok(graph
+        let mut definitions = graph
             .definitions(Some(DefinitionKind::PROPERTY_INDEX))
-            .map_err(graph_fail)?
+            .map_err(graph_fail)?;
+        definitions.extend(
+            graph
+                .definitions(Some(DefinitionKind::PROPERTY_INDEX_EXT))
+                .map_err(graph_fail)?,
+        );
+        definitions.sort_by(|a, b| a.name().cmp(b.name()));
+        Ok(definitions
             .iter()
             .filter_map(|definition| {
                 let stats = served
@@ -205,12 +250,15 @@ impl ScriptGraphTraversalSource {
             .collect())
     }
 
-    /// `g.drop_index(name)`: drops the property index; `false` when there
-    /// is none. Asks for `Delete` on it.
+    /// `g.drop_index(name)`: drops the property index (per-label or label-less); `false` when
+    /// there is none. Asks for `Delete` on it (of the kind holding it; `property_index` when
+    /// there is none).
     pub fn drop_index(&mut self, name: &str) -> Result<bool, Box<EvalAltResult>> {
-        self.require_index("drop_index", Action::Delete, Some(name))?;
-        self.index_graph("drop_index")?
-            .remove_definition(DefinitionKind::PROPERTY_INDEX, name)
-            .map_err(script_error)
+        let graph = Arc::clone(self.index_graph("drop_index")?);
+        let kind = self
+            .index_kind(&graph, name)?
+            .unwrap_or(DefinitionKind::PROPERTY_INDEX);
+        self.require_index("drop_index", Action::Delete, kind, Some(name))?;
+        graph.remove_definition(kind, name).map_err(script_error)
     }
 }

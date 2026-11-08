@@ -137,7 +137,10 @@ Files appear as their stage lands; this table is the target layout.
   per list item, the item itself or the record `{x, i}` with an ordinal; `NULL` no row, a
   non-list one row, E1), `gql:lookup` (FlatMap, `flatmap_steps/step_gql_lookup.rs`: a component that
   is not the root scan started per row at the vertices one equality finds, `element_id(n) = e`
-  by id or `n.k = e` through the property index of every scan label, each checked with GQL `=`,
+  by id or `n.k = e` through the property index of every scan label or the label-less one
+  (`GqlLookup::any_label`, planner `Planner::indexed`/`per_label_indexed`,
+  `PlannerFacts::has_any_label_vertex_index`; scan labels checked by the `has_label` after it),
+  each checked with GQL `=`,
   an unservable value or a storage serving no index scans the scan labels; planned only where an
   id or index serves it, E5; the one internal step that asks a permission: `Read` on vertices,
   like `v()`); stage 3a: `gql:insert_node` / `gql:insert_edge` (SideEffectMut,

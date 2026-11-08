@@ -588,6 +588,7 @@ export const IndexesManager = {
     const suggestions = computed(() => (d.draft ? d.labels[d.draft.element] || [] : []));
     const namePlaceholder = computed(() => {
       const x = d.draft;
+      if (x && x.anyLabel && x.key.trim()) return defaultIndexName(x.element, null, x.key.trim(), x.transform);
       return x && x.label.trim() && x.key.trim()
         ? defaultIndexName(x.element, x.label.trim(), x.key.trim(), x.transform)
         : defaultIndexName('vertex', 'person', 'age', x && x.transform);
@@ -710,10 +711,12 @@ export const IndexesManager = {
           </select>
           <div v-for="m in d.errors.element || []" class="field-error sq-span">{{ m }}</div>
           <label for="ci-label">Label</label>
-          <input id="ci-label" type="text" list="ci-labels" v-model="d.draft.label" :class="{ invalid: d.errors.label }" placeholder="person" autocomplete="off" spellcheck="false">
+          <input id="ci-label" type="text" list="ci-labels" v-model="d.draft.label" :disabled="d.draft.anyLabel" :class="{ invalid: d.errors.label }" placeholder="person" autocomplete="off" spellcheck="false">
           <datalist id="ci-labels"><option v-for="l in suggestions" :key="l" :value="l"></option></datalist>
           <div v-for="m in d.errors.label || []" class="field-error sq-span">{{ m }}</div>
-          <span class="hint">The label need not exist yet; the graph's {{ d.draft.element }} labels are suggested. Queries use the index after has_label() of this label.</span>
+          <span></span>
+          <span><input id="ci-any" type="checkbox" v-model="d.draft.anyLabel"> <label for="ci-any" class="muted">any label: every {{ d.draft.element }}, unlabeled ones included (has() without has_label() reads it)</label></span>
+          <span class="hint">The label need not exist yet; the graph's {{ d.draft.element }} labels are suggested. Queries use the index after has_label() of this label (a label-less index: with any or no label).</span>
           <label for="ci-key">Key</label>
           <input id="ci-key" type="text" v-model="d.draft.key" :class="{ invalid: d.errors.key }" placeholder="age" autocomplete="off" spellcheck="false">
           <div v-for="m in d.errors.key || []" class="field-error sq-span">{{ m }}</div>

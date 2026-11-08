@@ -99,9 +99,10 @@ impl DefinitionRecord {
         } else if kind == DefinitionKind::MODEL {
             crate::graph::model_definition::ModelDefinition::from_payload(&map)
                 .map(|model| Definition::model(self.name.clone(), model))
-        } else if kind == DefinitionKind::PROPERTY_INDEX {
-            PropertyIndexDefinition::from_payload(&map)
-                .map(|index| Definition::property_index(self.name.clone(), index))
+        } else if kind.is_property_index() {
+            // The stored kind is kept (a kind 6 may hold an index a plain kind 2 could too).
+            PropertyIndexDefinition::read_fields_of(kind, &map, &[])
+                .map(|index| Definition::property_index_of(kind, self.name.clone(), index))
         } else {
             QueryDefinition::from_payload(&map)
                 .map(|query| Definition::query(self.name.clone(), query))

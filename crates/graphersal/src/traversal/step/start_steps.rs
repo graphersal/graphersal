@@ -43,10 +43,12 @@ pub(crate) fn render_source(
             crate::value::literal::rhai_literal(&filter.value)
         ));
     }
-    let index = match (index, labels) {
-        (Some(index), Some(labels)) => {
-            index.render(if name == "e" { "edge" } else { "vertex" }, labels)
-        }
+    let index = match index {
+        Some(index) if index.label_less || labels.is_some() => index.render(
+            if name == "e" { "edge" } else { "vertex" },
+            labels.as_deref(),
+            count_only,
+        ),
         _ => String::new(),
     };
     format!("{name}({args}){filters}{suffix}{index}")

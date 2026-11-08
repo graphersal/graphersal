@@ -16,6 +16,9 @@ g.v().has_label("person").has("age", P.between(30, 40)).values("name").to_list()
 g.indexes()                                  // the indexes and what they hold
 ```
 
+Without `label` an index is [label-less](#label-less-indexes): it holds every vertex (or edge)
+and also serves `g.v().has("name", "josh")` without a label.
+
 Indexes are **declared, never automatic**: nothing is indexed until you ask for it, and an index
 costs memory and a little time on every write of its key (below).
 
@@ -23,14 +26,15 @@ costs memory and a little time on every write of its key (below).
 
 | DSL | Rust (`GraphTraversalSource`) | Python (`Graph`) |
 |---|---|---|
-| `g.create_index(#{label, key, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))`, `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` |
+| `g.create_index(#{key, label?, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))` (label-less: `PropertyIndexDefinition::label_less(kind, key)`), `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` (`label=None`: label-less) |
 | `g.indexes()` | `list_indexes()` | `graph.indexes()` |
 | `g.drop_index(name)` | `drop_index(name)` | `graph.drop_index(name)` |
 
 - `element` is `"vertex"` (the default) or `"edge"`; `label` is one vertex or edge label (it need
-  not exist yet); `key` is one **top-level** property name (a plain name, not a jpath: nested
-  values are not indexed).
-- `name` defaults to `<label>_<key>`, then `_edge` for an edge index, then `_to_lower` for an
+  not exist yet), or omitted (`()`) for a [label-less index](#label-less-indexes); `key` is one
+  **top-level** property name (a plain name, not a jpath: nested values are not indexed).
+- `name` defaults to `<label>_<key>` (`<key>` for a label-less index), then `_edge` for an edge
+  index, then `_to_lower` for an
   index with the [transform](#case-insensitive-search) `to_lower` (`person_name_to_lower`,
   `knows_note_edge_to_lower`), with every character that is not a letter, a digit or `_`
   replaced by `_`, and `index_` in front when it would not start with a letter. It is an
@@ -43,9 +47,11 @@ costs memory and a little time on every write of its key (below).
   default) for the values themselves, `"to_lower"` for case-insensitive search.
 - One index per `(element, label, key, type, transform)`: a second one under another name fails
   with a *Conflicting property index* error that names the first. A plain index and a `to_lower`
-  index on the same key coexist (their default names differ). Declaring the same name again
-  replaces the index.
-- `g.indexes()` lists each index with its `type`, its `transform` (`()` without one), `served`
+  index on the same key coexist (their default names differ), and so do a label-less and a
+  per-label index on one key. Declaring the same name again replaces the index (also a per-label
+  index by a label-less one of the same name, and back: index names are one namespace).
+- `g.indexes()` lists each index (by name) with its `label` (`()` for a label-less index), its
+  `type`, its `transform` (`()` without one), `served`
   (whether it is served, with a `reason` when it is not: see
   [unknown types](#an-index-type-from-a-newer-version) and [other storages](#other-storages)) and
   its current `entries` (indexed elements), `distinct_values`, `skipped` (elements whose non-null
@@ -55,6 +61,54 @@ costs memory and a little time on every write of its key (below).
 g.create_index(#{element: "edge", label: "knows", key: "weight"});
 g.e().has_label("knows").has("weight", P.gt(0.6)).count().next()
 ```
+
+## Label-less indexes
+
+An index declared without `label` holds **every** element of its kind, unlabeled ones included
+(a vertex with several labels once):
+
+```rhai,graph=modern,script
+g.create_index(#{key: "name"});                        // named `name`
+g.create_index(#{element: "edge", key: "weight"});     // named `weight_edge`
+
+g.v().has("name", "josh").values("age").to_list();     // no label: reads the index
+g.v().has("name", "josh").count().next();              // counted from the index
+g.e().has("weight", P.gt(0.5)).count().next()
+```
+
+- A `v()`/`e()` **without labels** reads it for the same conditions a per-label index serves
+  ([below](#what-is-served)), and so does a `MATCH (n {name: $x})` node pattern without a label
+  in [GQL](../gql/index.md) (the root scan and a correlated lookup).
+- A source **with labels** reads it when no per-label index covers its labels, or when it is
+  cheaper by the index statistics (an equality reads about `entries / distinct_values` of the
+  label-less index, against the sum over the per-label indexes; a tie keeps the per-label ones);
+  the source then keeps only the candidates carrying one of its labels.
+- `.profile()` names it with `any label`, also under a labelled source:
+  `v(labels: ["person"]).has("name", "josh") [index: vertex name, any label]`, and with a
+  transform `[index: vertex name to_lower, any label]`.
+- It costs the memory of every element of the kind holding the key; a per-label index on the
+  same key keeps its entries a second time (the [advisor](../persistence/optimize.md) points this
+  out).
+- **Persistence**: it is stored as catalog kind `property_index_ext` (6) with the critical flag
+  (plain per-label indexes stay kind `property_index`), so a version that does not know it (0.5.x
+  and older) opens such a store **read-only** instead of writing it without maintaining the index.
+  The [schema check](#checked-against-the-schema-when-created) looks at every label of its
+  element kind that declares the key.
+
+## Counting from an index
+
+A `count()` right after a start step whose one condition an index answers exactly is counted
+from the index without visiting the elements: one folded `has(key, value)` with a string,
+boolean, uuid or temporal value, no other folded condition, no transform, and either a
+label-less index under a start without labels or the index of the start's one label.
+`.profile()` shows `[count from index]`:
+
+```text
+v().has("name", "josh").count() [index: vertex name, any label] [count from index]
+```
+
+A number (ranged by its `float64` value), `null`, a second condition or a label to check falls
+back to counting the checked candidates of the index read.
 
 ## Index types
 
@@ -199,7 +253,8 @@ A `v()`/`e()` start step reads an index when
 
 - it is the **start** of the traversal (or of a child traversal), the optimizer folded a
   `has_label(..)` into it, and **every** folded label has an index on the key: the index of
-  `has_label("person")`, or of `has_label("person", "employee")` when both labels have one;
+  `has_label("person")`, or of `has_label("person", "employee")` when both labels have one; or
+  a [label-less index](#label-less-indexes) covers the key (with or without folded labels);
 - and a `has()` on the indexed key follows directly (only `has()`, `has_label()`, `has_id()`,
   `has_key()`, `has_not()` in between):
 
@@ -212,7 +267,8 @@ A `v()`/`e()` start step reads an index when
 | `has(key, P.outside(a, b))` | two ranges |
 | `P.neq`, `P.without`, text predicates, `P.typeOf`, `and`/`or`/`not` composites | not served (scan) |
 | a value that is a list or a map (`has("tags", ["a"])`) | not served (scan) |
-| `v().has("title", "CEO")` without a label, a jpath key | not served (scan) |
+| `v().has("title", "CEO")` without a label | served by a [label-less index](#label-less-indexes) only |
+| a jpath key | not served (scan) |
 
 With several served conditions the optimizer picks the **most selective** index from the index
 statistics (an equality reads about `entries / distinct_values` elements of each label, a range
@@ -271,7 +327,8 @@ indexing a long compressed field costs the memory compression saved).
 
 ## Persistence
 
-An index is a catalog definition (kind `property_index`, like [saved queries](saved_queries.md)
+An index is a catalog definition (kind `property_index`, or `property_index_ext` with the
+critical flag for a [label-less index](#label-less-indexes), like [saved queries](saved_queries.md)
 and compression rules), so its **declaration** travels with the graph: the journal (WAL), snapshots,
 backups, forks, rollbacks and the catalog file. Its **entries are never stored**: they are rebuilt
 from the data whenever a graph is loaded, by a store open, a read-only view (also of a past state),
@@ -298,31 +355,39 @@ in its catalog (a catalog file loaded into it, say) and is listed with `served: 
 query reads it. A storage that serves indexes implements `GraphStorage::property_indexes` and the
 lookups `vertices_by_property_index`/`edges_by_property_index`, and for indexes with a transform
 `vertices_by_transformed_property_index`/`edges_by_transformed_property_index` (reporting
-`PropertyIndexStats::skipped`, which the optimizer reads before it uses such an index).
+`PropertyIndexStats::skipped`, which the optimizer reads before it uses such an index). The
+lookups take the label as `Option<&str>`: `None` reads the label-less index (`PropertyIndexInfo::label`
+is `None` for one). `count_by_property_index` (default `Ok(None)`) answers an exact count from the
+index for [counting from an index](#counting-from-an-index); without it the engine counts the
+lookup's candidates.
 
 ## In the playground, the dev server and MCP
 
 - **Playground** (WebAssembly and over the dev server): **Catalog ▾ ▸ Property indexes** lists the
   indexes with their type, transform, entries, distinct values, elements per value (what an
   equality reads) and memory (an index that is not served says why), creates one from a form
-  (element, label, key, type, transform: none or `to_lower` with a hint on the query form,
-  optional name; the default name is shown as you type and follows the transform; an engine
+  (element, label or **any label** for a label-less index, key, type, transform: none or
+  `to_lower` with a hint on the query form, optional name; the default name is shown as you type
+  and follows the transform; an engine
   refusal shows under its field) and drops one after a confirmation. The **Statistics** tab of the Profile panel
   shows *Property indexes* with their memory when the graph has some. Indexes travel with the
   catalog file (**Catalog ▾ ▸ Save catalog**).
-- **Dev server**: `GET /api/indexes`, `POST /api/indexes/create` `{label, key, element?, name?, type?, transform?}`,
+- **Dev server**: `GET /api/indexes`, `POST /api/indexes/create` `{key, label?, element?, name?, type?, transform?}`
+  (`label` absent or `null`: label-less; listed with `label: null`),
   `POST /api/indexes/drop` `{name}` (see [the dev server](../persistence/dev_server.md)); a
   create or drop is a commit recorded in the change feed, so open browsers reload. The start
   block on stderr names the index memory.
 - **MCP**: the tools `list_indexes` (also with `--mcp-read-only`), `create_index` (with an
-  optional `type` and `transform`, enums of the known ones) and `drop_index` (not offered read-only, where
+  optional `label`, omitted for a label-less index, and an optional `type` and `transform`, enums
+  of the known ones) and `drop_index` (not offered read-only, where
   `query` refuses `g.create_index` too).
 
 ## Limits
 
 - Not indexed: nested values (jpath keys), lists, maps and vectors as values (see
   [index types](#index-types)), labels other than the one declared (an index on `person` does not
-  serve `v().has("title", ..)` without `has_label`).
+  serve `v().has("title", ..)` without `has_label`; a [label-less index](#label-less-indexes)
+  does).
 - One index type (`memory-ordered`): persisted, hash, vector (approximate nearest neighbour) and
   full-text types are planned and will be additional values of `type`.
 - One transform (`to_lower`); it serves only the exact child `__.to_lower().is(P)`. A `to_lower`

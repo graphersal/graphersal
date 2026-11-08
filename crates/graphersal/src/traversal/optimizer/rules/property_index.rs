@@ -19,9 +19,9 @@ const PURE_FILTERS: [&str; 7] = [
 ];
 
 /// Optimizer rule that lets a `v()`/`e()` source read a property index (book page "Property
-/// Indexes") instead of its label buckets. It runs after `source_filter_pushdown`, on a source
-/// with folded labels (every one of them must have an index on the key) and no ids, and looks
-/// at two kinds of conditions on a literal property name:
+/// Indexes") instead of its label buckets or of every element. It runs after
+/// `source_filter_pushdown`, on a source with no ids, and looks at two kinds of conditions on a
+/// literal property name:
 ///
 /// - the `has(key, value)` conditions folded into the source (scalar values only), and
 /// - the `has(key, P)` steps in the run of pure filters right after it (`eq`, `within`, the
@@ -34,12 +34,22 @@ const PURE_FILTERS: [&str; 7] = [
 ///   `to_lower()` of the child fails on a non-string value, and a scan must report it. Any
 ///   other `has(key, traversal)` ends the run of pure filters.
 ///
+/// Which indexes can serve a condition on `key` (design D1/D2):
+///
+/// - a source WITHOUT labels: only the label-less index on `key` (every element of the kind);
+/// - a source with folded labels: the per-label indexes on `key` (every label must have one;
+///   their estimates are summed), or the label-less index on `key`, whose candidates the source
+///   then checks for its labels. The lower estimate wins (a tie: the per-label indexes, which
+///   need no label check).
+///
 /// Among the conditions an index covers it picks the most selective by the indexes' stats
-/// (equality: entries / distinct values per label and value; a range: half the entries) and
+/// (equality: entries / distinct values per index and value; a range: half the entries) and
 /// records it on the source ([`IndexAccess`]). Nothing else changes: the source still checks its
 /// folded conditions on each candidate and the `has(key, P)` step stays in the plan, so the
-/// result equals the scan's (only the order of the elements may differ). Without indexes the
-/// rule does nothing. `g.with("optimizer.disabled", ["property_index"])` turns it off.
+/// result equals the scan's (only the order of the elements may differ). When no re-check can
+/// drop a candidate the access is marked `exact`, so `count_pushdown` can fuse a following
+/// `count()` answered from the index (design section 8). Without indexes the rule does nothing.
+/// `g.with("optimizer.disabled", ["property_index"])` turns it off.
 #[derive(Default)]
 pub(crate) struct PropertyIndexRule;
 
@@ -64,6 +74,25 @@ fn estimate(info: &PropertyIndexInfo, ranges: &[PropertyIndexRange]) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+/// Whether an index slice of this equality holds exactly the elements `has(key, value)` finds
+/// (a number is ranged by its `float64` value, a superset; `null` is left to the scan).
+fn exact_value(value: &crate::ElementProperty) -> bool {
+    use crate::ElementProperty as P;
+    match value {
+        P::String(_) | P::Compressed(_) | P::Deduped(_) | P::Boolean(_) | P::Uuid(_) => true,
+        P::Temporal(_) => true,
+        P::Null
+        | P::Number(_)
+        | P::Vector(_)
+        | P::Blob(_)
+        | P::Object(_)
+        | P::Array(_)
+        | P::Vertex(_)
+        | P::Edge(_)
+        | P::Map(_) => false,
+    }
+}
+
 impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
     fn name(&self) -> &'static str {
         "property_index"
@@ -78,25 +107,25 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
         if plan.is_empty() {
             return false;
         }
-        let (element, labels, has_access) = match &plan[0] {
+        // `labels`: `None` = a source without labels (the label-less indexes only).
+        let (element, labels, has_access, servable) = match &plan[0] {
             GraphStep::Init(name, init) if *name == "v" || *name == "e" => {
                 let element = if *name == "v" {
                     ElementKind::Vertex
                 } else {
                     ElementKind::Edge
                 };
-                let labels = match init.labels() {
-                    Some(labels)
-                        if !labels.is_empty()
-                            && init.ids().is_none()
-                            && !init.is_count_only()
-                            && !init.is_group_count_by_label() =>
-                    {
-                        Some(labels.to_vec())
-                    }
-                    _ => None,
-                };
-                (element, labels, init.index_access().is_some())
+                let servable = init.ids().is_none()
+                    && !init.is_count_only()
+                    && !init.is_group_count_by_label()
+                    // An empty label list matches nothing: no index read.
+                    && init.labels().is_none_or(|labels| !labels.is_empty());
+                (
+                    element,
+                    init.labels().map(<[String]>::to_vec),
+                    init.index_access().is_some(),
+                    servable,
+                )
             }
             _ => return false,
         };
@@ -107,46 +136,82 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
             }
             false
         };
-        let Some(labels) = labels else {
-            return clear(plan);
-        };
-        if context.indexes.is_empty() {
+        if !servable || context.indexes.is_empty() {
             return clear(plan);
         }
-        // The cost of serving `key` with `ranges`: `None` unless every label has an index on it.
         // A transformed index serves only while it skipped no value (see the rule's doc).
+        let usable = |info: &PropertyIndexInfo,
+                      label: Option<&str>,
+                      key: &str,
+                      transform: Option<&PropertyIndexTransform>| {
+            info.element == element
+                && info.label.as_deref() == label
+                && info.key == key
+                && info.transform.as_ref() == transform
+                && (transform.is_none() || info.stats.skipped == 0)
+        };
+        // The cheapest way to serve `key` with `ranges`: `(cost, label_less)`, `None` when no
+        // index serves it.
         let cost = |key: &str,
                     transform: Option<&PropertyIndexTransform>,
                     ranges: &[PropertyIndexRange]|
-         -> Option<u64> {
-            labels.iter().try_fold(0u64, |total, label| {
-                let info = context.indexes.iter().find(|info| {
-                    info.element == element
-                        && info.label == *label
-                        && info.key == key
-                        && info.transform.as_ref() == transform
-                        && (transform.is_none() || info.stats.skipped == 0)
-                })?;
-                Some(total.saturating_add(estimate(info, ranges)))
-            })
-        };
-        let mut best: Option<(u64, IndexAccess)> = None;
-        let mut consider = |key: &str,
-                            transform: Option<PropertyIndexTransform>,
-                            ranges: Vec<PropertyIndexRange>| {
-            if let Some(cost) = cost(key, transform.as_ref(), &ranges)
-                && best.as_ref().is_none_or(|(best, _)| cost < *best)
-            {
-                best = Some((
-                    cost,
-                    IndexAccess {
-                        key: key.to_string(),
-                        transform,
-                        ranges,
-                    },
-                ));
+         -> Option<(u64, bool)> {
+            let label_less = context
+                .indexes
+                .iter()
+                .find(|info| usable(info, None, key, transform))
+                .map(|info| estimate(info, ranges));
+            let per_label = labels.as_ref().and_then(|labels| {
+                labels.iter().try_fold(0u64, |total, label| {
+                    let info = context
+                        .indexes
+                        .iter()
+                        .find(|info| usable(info, Some(label), key, transform))?;
+                    Some(total.saturating_add(estimate(info, ranges)))
+                })
+            });
+            match (per_label, label_less) {
+                (Some(per_label), Some(any)) if any < per_label => Some((any, true)),
+                (Some(per_label), _) => Some((per_label, false)),
+                (None, Some(any)) => Some((any, true)),
+                (None, None) => None,
             }
         };
+        let filters = match &plan[0] {
+            GraphStep::Init(_, init) => init.property_filters().len(),
+            _ => 0,
+        };
+        let single_label = labels.as_ref().is_some_and(|labels| labels.len() == 1);
+        let mut best: Option<(u64, IndexAccess)> = None;
+        let mut consider =
+            |key: &str,
+             transform: Option<PropertyIndexTransform>,
+             ranges: Vec<PropertyIndexRange>,
+             folded_value: Option<&crate::ElementProperty>| {
+                if let Some((cost, label_less)) = cost(key, transform.as_ref(), &ranges)
+                    && best.as_ref().is_none_or(|(best, _)| cost < *best)
+                {
+                    // Count from the postings: one folded equality, nothing else to re-check.
+                    let exact = folded_value.is_some_and(exact_value)
+                        && filters == 1
+                        && transform.is_none()
+                        && if label_less {
+                            labels.is_none()
+                        } else {
+                            single_label
+                        };
+                    best = Some((
+                        cost,
+                        IndexAccess {
+                            key: key.to_string(),
+                            transform,
+                            ranges,
+                            label_less,
+                            exact,
+                        },
+                    ));
+                }
+            };
         if let GraphStep::Init(_, init) = &plan[0] {
             for filter in init.property_filters() {
                 if crate::graph::property_index::is_indexable(&filter.value) {
@@ -154,6 +219,7 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                         &filter.key,
                         None,
                         vec![PropertyIndexRange::equal(filter.value.clone())],
+                        Some(&filter.value),
                     );
                 }
             }
@@ -166,7 +232,7 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                         || (*name == "has_traversal" && filter.index_condition().is_some()) =>
                 {
                     if let Some(condition) = filter.index_condition() {
-                        consider(condition.key, condition.transform, condition.ranges);
+                        consider(condition.key, condition.transform, condition.ranges, None);
                     }
                 }
                 _ => break,

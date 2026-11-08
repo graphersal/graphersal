@@ -37,7 +37,7 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:order("<keys>")` | `ORDER BY` with GQL's `NULL` placement and type order; stable |
 | `gql:not_self_loop()` | keeps a self-loop from matching twice in an either-direction edge |
 | `gql:for("x IN <list>")` | `FOR` / `UNWIND`: one row per item of the list (`unfold()` with GQL's `NULL` rule); with an ordinal the row is the record of item and position |
-| `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`) |
+| `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`, or `[index: vertex key, any label]` for a label-less one) |
 | `gql:value("<expression>")` | the last step of a pattern comprehension's child: the value of its `\|` part for one match, which the host step collects into the list |
 | `gql:insert_node(["label", ...], "{props}")` | `INSERT` of one node: creates it per row, with all its properties in one storage call, and makes it the current element ([Writes](#writes)) |
 | `gql:insert_edge("label", "from", "to", "{props}")` | `INSERT` of one edge between the nodes of the row named `from` and `to` (`(#n)` for an unnamed node of the pattern) |
@@ -101,6 +101,12 @@ out("created")                                                  1       1       
 gql:project("s")                                                1       2       2
 Optimizer rules applied: source_filter_pushdown, property_index
 ```
+
+A [label-less index](../users_guide/property_indexes.md#label-less-indexes)
+(`g.create_index(#{key: "name"})`) serves a node without a label, `MATCH (n {name: $x})`, and a
+node whose labels have no index of their own on the key (the labels are checked after it), both
+as the root scan and as a correlated lookup: `.profile()` shows
+`[index: vertex name, any label]` on `v()` or on `gql:lookup(..)`.
 
 The planner reads only what every storage offers (`statistics()` and the index catalog), so a
 host's [own storage](../for_developers/custom_storage.md) gets the same plans.

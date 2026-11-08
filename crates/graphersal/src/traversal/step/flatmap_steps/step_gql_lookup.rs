@@ -16,7 +16,7 @@ use crate::*;
 pub(crate) enum GqlLookupKey {
     /// `element_id(n) = e`: the vertex whose id is `e` (`GraphStorage::get_vertex_by_id`).
     Id,
-    /// `n.key = e`: the property index on `key` of every scan label
+    /// `n.key = e`: the property index on `key` of every scan label, or the label-less one
     /// (`GraphStorage::vertices_by_property_index`).
     Property(CompactString),
 }
@@ -28,9 +28,11 @@ pub(crate) enum GqlLookupKey {
 /// - `NULL`: no vertex (`x = NULL` is never TRUE);
 /// - [`GqlLookupKey::Id`] and a string: the vertex with that id, if any;
 /// - [`GqlLookupKey::Property`] and a string, a number (not `NaN`), a boolean or a uuid: the
-///   vertices of the property index slice `[e, e]` of every scan label (a superset: numbers are
-///   one slice across `int64` and `float64`, so `1` finds `1.0`), each kept only when GQL `=`
-///   holds (the same equality as `gql:filter`, Q5);
+///   vertices of the property index slice `[e, e]` of every scan label, or of the label-less
+///   index on the key when the planner chose it (`any_label`: no per-label index for every
+///   scan label, or no scan label; design D1/D2) (a superset: numbers are one slice across
+///   `int64` and `float64`, so `1` finds `1.0`), each kept only when GQL `=` holds (the same
+///   equality as `gql:filter`, Q5);
 /// - any other value, or a storage that serves no index for a scan label: every vertex of the
 ///   scan labels (every vertex without scan labels), each kept only when GQL `=` holds: exactly
 ///   the rows of the scan + filter it replaces, only slower.
@@ -59,6 +61,8 @@ pub(crate) struct StepGqlLookup<S: GraphStorage> {
     labels: Arc<[String]>,
     /// Whether an index served the lookup when it was planned (display only).
     indexed: bool,
+    /// Whether it reads the label-less index on the key.
+    any_label: bool,
     /// The step labels the value reads (sorted).
     path_labels: Arc<[CompactString]>,
     /// The labels it reads in every occurrence (group variables, sorted).
@@ -76,6 +80,7 @@ impl<S: GraphStorage> Clone for StepGqlLookup<S> {
             key: self.key.clone(),
             labels: Arc::clone(&self.labels),
             indexed: self.indexed,
+            any_label: self.any_label,
             path_labels: Arc::clone(&self.path_labels),
             history: Arc::clone(&self.history),
         }
@@ -93,6 +98,10 @@ impl<S: GraphStorage> fmt::Display for StepGqlLookup<S> {
         )?;
         match &self.key {
             GqlLookupKey::Id => f.write_str(" [id]"),
+            GqlLookupKey::Property(key) if self.indexed && self.any_label => {
+                // Design D17: the label-less index, whatever the scan labels.
+                write!(f, " [index: vertex {key}, any label]")
+            }
             GqlLookupKey::Property(key) => {
                 f.write_str(if self.indexed {
                     " [index: "
@@ -125,6 +134,8 @@ pub(crate) struct GqlLookup<S: GraphStorage> {
     pub(crate) labels: Vec<String>,
     /// Whether an index served the lookup when it was planned (display only).
     pub(crate) indexed: bool,
+    /// Whether it reads the label-less index on the key (planned).
+    pub(crate) any_label: bool,
 }
 
 impl<S: GraphStorage> StepGqlLookup<S> {
@@ -140,6 +151,7 @@ impl<S: GraphStorage> StepGqlLookup<S> {
             key: lookup.key,
             labels: lookup.labels.into(),
             indexed: lookup.indexed,
+            any_label: lookup.any_label,
             path_labels,
             history,
         }
@@ -180,10 +192,11 @@ impl<S: GraphStorage> StepGqlLookup<S> {
         Ok(equals(&found.unwrap_or(Value::Null), value) == Truth::True)
     }
 
-    /// The vertices of the property index slice `[value, value]` of every scan label, each
-    /// once (a superset); `None` when the value is not an index key the lookup serves, there
-    /// is no scan label, or the storage serves no index for one of the labels; the storage's
-    /// error when it cannot read the index.
+    /// The vertices of the property index slice `[value, value]` of every scan label (of the
+    /// label-less index with `any_label`), each once (a superset); `None` when the value is not
+    /// an index key the lookup serves, there is no scan label (and no label-less index), or the
+    /// storage serves no index for one of the labels; the storage's error when it cannot read
+    /// the index.
     fn by_index(
         &self,
         storage: &S,
@@ -200,15 +213,24 @@ impl<S: GraphStorage> StepGqlLookup<S> {
             ElementProperty::Number(number) => !number.as_f64().is_some_and(f64::is_nan),
             _ => false,
         };
-        if !servable || self.labels.is_empty() {
+        if !servable {
             return Ok(None);
         }
         let range = PropertyIndexRange::equal(scalar.clone());
+        if self.any_label {
+            // The scan labels are checked by the `has_label()` after the lookup.
+            return Ok(storage
+                .vertices_by_property_index(None, key, &range)?
+                .map(Iterator::collect));
+        }
+        if self.labels.is_empty() {
+            return Ok(None);
+        }
         let mut found = Vec::new();
         let dedup = self.labels.len() > 1;
         let mut seen = std::collections::HashSet::new();
         for label in self.labels.iter() {
-            let Some(served) = storage.vertices_by_property_index(label, key, &range)? else {
+            let Some(served) = storage.vertices_by_property_index(Some(label), key, &range)? else {
                 return Ok(None);
             };
             for v in served {

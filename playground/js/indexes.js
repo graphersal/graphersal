@@ -9,9 +9,13 @@
 import { formatBytes } from './statistics.js';
 import { catalogItems } from './compression.js';
 
-/** The catalog kind of an index (the engine's `DefinitionKind::PROPERTY_INDEX` name). */
+/**
+ * The catalog kind of an index (the engine's `DefinitionKind::PROPERTY_INDEX` name); a
+ * label-less index is kept under `extKind` (`DefinitionKind::PROPERTY_INDEX_EXT`).
+ */
 export const INDEX_KIND = Object.freeze({
   kind: 'property_index',
+  extKind: 'property_index_ext',
   id: 'indexes',
   title: 'Property indexes',
   hint: 'Indexes that let v()/e() with has_label() and has() read only the matching elements',
@@ -27,7 +31,11 @@ export const INDEX_KIND = Object.freeze({
 export function catalogMenuItems(info) {
   const counts = (info && info.catalog) || {};
   let count = counts[INDEX_KIND.kind];
-  if (count === undefined) count = info && info.propertyIndexes;
+  if (count !== undefined || counts[INDEX_KIND.extKind] !== undefined) {
+    count = (Number(count) || 0) + (Number(counts[INDEX_KIND.extKind]) || 0);
+  } else {
+    count = info && info.propertyIndexes;
+  }
   return [
     ...catalogItems(info),
     { id: INDEX_KIND.id, title: INDEX_KIND.title, hint: INDEX_KIND.hint, count: Number(count) || 0 },
@@ -36,13 +44,14 @@ export function catalogMenuItems(info) {
 
 /**
  * The name the engine gives an index without one (`PropertyIndexDefinition::default_name`):
- * `<label>_<key>` (`<label>_<key>_edge` for an edge index), then `_<transform>` for an index with
+ * `<label>_<key>` (`<key>` for a label-less index, `label` null or empty; `<label>_<key>_edge`
+ * for an edge index), then `_<transform>` for an index with
  * a transform (`person_name_to_lower`), every character that is not an ASCII letter, digit or `_`
  * replaced by `_`, prefixed with `index_` when it would not start with a letter. The form shows
  * it as the name's placeholder, so it follows the Transform select while no name is typed.
  */
 export function defaultIndexName(element, label, key, transform) {
-  let name = `${label}_${key}`.replace(/[^A-Za-z0-9_]/gu, '_');
+  let name = (label ? `${label}_${key}` : `${key}`).replace(/[^A-Za-z0-9_]/gu, '_');
   if (element === 'edge') name += '_edge';
   const t = typeof transform === 'string' ? transform.trim() : '';
   if (t) name += `_${t.replace(/[^A-Za-z0-9_]/gu, '_')}`;
@@ -59,7 +68,8 @@ export function indexRow(index) {
   const served = index.served !== false && !!s;
   return {
     name: index.name,
-    target: `${index.element || 'vertex'} ${index.label}`,
+    // A label-less index (`label: null`) covers every element of its kind.
+    target: `${index.element || 'vertex'} ${index.label == null ? 'any label' : index.label}`,
     key: index.key,
     served,
     entries: served ? s.entries : '—',
@@ -147,7 +157,7 @@ export function indexNotServedReason(index) {
   return 'This storage keeps the definition but serves no index: queries scan';
 }
 
-/** A new index's draft (the form). */
+/** A new index's draft (the form); the form's "any label" box adds `anyLabel: true`. */
 export function newIndexDraft() {
   return { name: '', element: 'vertex', label: '', key: '' };
 }
@@ -164,24 +174,26 @@ export function newTransformIndexDraft() {
 
 /**
  * The spec `createIndex` takes (`{label, key, element, name?, type?, transform?}`; `type` and
- * `transform` only when the draft has one), or the field errors the form shows without asking the engine (an empty label
+ * `transform` only when the draft has one; `label: null` for a label-less index, the draft's
+ * `anyLabel`), or the field errors the form shows without asking the engine (an empty label
  * or key, a key that looks like a jpath). Whether the type fits the schema's declaration of the
  * key is the engine's check (its error comes back for the field `key`).
  * @returns {{spec: object} | {errors: Array<{field:string, message:string}>}}
  */
 export function indexDraftToSpec(draft) {
   const errors = [];
-  const label = String(draft.label || '').trim();
+  const anyLabel = draft.anyLabel === true;
+  const label = anyLabel ? '' : String(draft.label || '').trim();
   const key = String(draft.key || '').trim();
   const name = String(draft.name || '').trim();
-  if (!label) errors.push({ field: 'label', message: 'Name the vertex or edge label the index covers, for example person.' });
+  if (!label && !anyLabel) errors.push({ field: 'label', message: 'Name the vertex or edge label the index covers, for example person.' });
   if (!key) {
     errors.push({ field: 'key', message: 'Name the top-level property the index orders by, for example age.' });
   } else if (/^\$[.[]/u.test(key)) {
     errors.push({ field: 'key', message: 'A top-level property name, not a jpath: nested values are not indexed.' });
   }
   if (errors.length) return { errors };
-  const spec = { element: draft.element === 'edge' ? 'edge' : 'vertex', label, key };
+  const spec = { element: draft.element === 'edge' ? 'edge' : 'vertex', label: anyLabel ? null : label, key };
   if (name) spec.name = name;
   const type = typeof draft.type === 'string' ? draft.type.trim() : '';
   if (type) spec.type = type;

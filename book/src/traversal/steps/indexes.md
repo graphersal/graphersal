@@ -3,7 +3,7 @@
 
 `indexes` · category: [Property indexes](../../traversal/step_reference.md#property-indexes)
 
-Lists the property indexes as maps: name, element, label, key, type, transform, served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.
+Lists the property indexes as maps: name, element, label (() for a label-less index), key, type, transform, served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.
 
 ## Forms
 

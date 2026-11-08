@@ -149,7 +149,11 @@ fn index(info: &PropertyIndexInfo) -> ElementProperty {
     let mut map = PropertyMap::default();
     map.insert("name", text(&info.name));
     map.insert("element", text(info.element.as_str()));
-    map.insert("label", text(&info.label));
+    // A label-less index has `label: null`.
+    map.insert(
+        "label",
+        info.label.as_deref().map_or(ElementProperty::Null, text),
+    );
     map.insert("key", text(&info.key));
     map.insert("entries", int(info.stats.entries));
     map.insert("distinct_values", int(info.stats.distinct_values));

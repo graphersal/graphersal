@@ -757,7 +757,8 @@ fn fold<S: GraphStorage>(
             .iter()
             .filter(|index| {
                 index.element == acc.element
-                    && Some(index.label.as_str()) == label_text
+                    // A label-less index covers the key of every label.
+                    && index.label.as_deref().is_none_or(|label| Some(label) == label_text)
                     && index.key == key
             })
             .map(|index| index.name.clone())
