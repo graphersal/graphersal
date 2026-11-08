@@ -4007,7 +4007,7 @@ fn creating_and_dropping_a_label_less_index_asks_for_its_own_kind() {
     assert!(graph.read().property_indexes().unwrap().is_empty());
     // Created by an allowing host; the requests name the kind.
     let recorder = Arc::new(Recorder::default());
-    run(
+    let _ = run(
         &graph,
         r#"g.create_index(#{key: "name"})"#,
         recorder.clone(),
@@ -4060,14 +4060,14 @@ fn creating_and_dropping_a_label_less_index_asks_for_its_own_kind() {
         r#"Delete Definition(property_index_ext "name")"#,
     );
     // A per-label index under another name is allowed.
-    run(
+    let _ = run(
         &graph,
         r#"g.create_index(#{label: "person", key: "age"})"#,
         NoLabelLess,
     )
     .unwrap();
     assert_eq!(graph.read().property_indexes().unwrap().len(), 2);
-    run(&graph, r#"g.drop_index("name")"#, AllowAll).unwrap();
+    let _ = run(&graph, r#"g.drop_index("name")"#, AllowAll).unwrap();
     assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
 }
 
@@ -4077,7 +4077,7 @@ fn creating_and_dropping_a_label_less_index_asks_for_its_own_kind() {
 #[test]
 fn creating_and_dropping_a_per_label_each_index_asks_for_the_extended_kind() {
     let graph = modern();
-    run(
+    let _ = run(
         &graph,
         r#"g.v("1").property("tags", ["x"]).iterate()"#,
         AllowAll,
@@ -4093,7 +4093,7 @@ fn creating_and_dropping_a_per_label_each_index_asks_for_the_extended_kind() {
         r#"Create Definition(property_index_ext "person_tags_each")"#,
     );
     assert!(graph.read().property_indexes().unwrap().is_empty());
-    run(
+    let _ = run(
         &graph,
         r#"g.create_index(#{label: "person", key: "tags", transform: "each"})"#,
         AllowAll,
@@ -4109,7 +4109,7 @@ fn creating_and_dropping_a_per_label_each_index_asks_for_the_extended_kind() {
         r#"Delete Definition(property_index_ext "person_tags_each")"#,
     );
     assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
-    run(&graph, r#"g.drop_index("person_tags_each")"#, AllowAll).unwrap();
+    let _ = run(&graph, r#"g.drop_index("person_tags_each")"#, AllowAll).unwrap();
     assert!(graph.read().property_indexes().unwrap().is_empty());
 }
 

@@ -183,7 +183,7 @@ impl Session {
                 }
                 answer
             }
-            RecommendedAction::DropIndex { name } => match self.drop_index(name) {
+            RecommendedAction::DropIndex { name, .. } => match self.drop_index(name) {
                 Ok(dropped) => json!({"dropped": dropped}),
                 Err(error) => return json!({"ok": false, "error": error.to_string()}),
             },
@@ -193,6 +193,7 @@ impl Session {
                 label,
                 key,
                 candidate,
+                ..
             } => {
                 let answer = self.define_compression(&json!({
                     "name": name,
@@ -208,7 +209,7 @@ impl Session {
                 }
                 answer
             }
-            RecommendedAction::DropCompression { name } => match self.drop_compression(name) {
+            RecommendedAction::DropCompression { name, .. } => match self.drop_compression(name) {
                 Ok(dropped) => json!({"dropped": dropped}),
                 Err(error) => return json!({"ok": false, "error": error.to_string()}),
             },
