@@ -536,7 +536,7 @@ mod tests {
         let refused = s.create_index(&json!({"name": "bad name", "label": "a::b", "key": "k"}));
         assert_eq!(refused["errors"][0]["field"], "name", "{refused}");
         assert_eq!(refused["errors"][1]["field"], "label", "{refused}");
-        let refused = s.create_index(&json!({"label": "person", "key": "age", "unique": true}));
+        let refused = s.create_index(&json!({"label": "person", "key": "age", "sparse": true}));
         assert_eq!(refused["errors"][0]["field"], "general", "{refused}");
         assert_eq!(s.create_index(&json!("person"))["ok"], false);
         // The same name again: a name error (drop it first); the same (element, label, key)
