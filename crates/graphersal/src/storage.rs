@@ -208,8 +208,8 @@ pub use crate::graph::memory_report::{
     StructureMemory, ValueTypeCount, VectorMemory, register_memory_source,
 };
 pub use crate::graph::property_index::{
-    PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats, PropertyIndexTransform,
-    PropertyIndexTransformChain,
+    DuplicateValue, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
+    PropertyIndexTransform, PropertyIndexTransformChain, UniqueIndexDuplicates,
 };
 pub use crate::graph::schema::defaults::CreateContext;
 pub use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema, SchemaInferer};

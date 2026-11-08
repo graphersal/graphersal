@@ -1492,7 +1492,7 @@ impl Graph {
     }
 
     /// ``graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", *,
-    /// transform=None, policy=None)``: declares (or replaces) a property index, like the DSL's
+    /// transform=None, unique=False, policy=None)``: declares (or replaces) a property index, like the DSL's
     /// ``g.create_index(#{..})``: the ``element``s labelled ``label``, ordered by their
     /// top-level property ``key``; a ``has()`` on that key after ``has_label(label)`` then reads
     /// the index. ``label=None`` declares a LABEL-LESS index (every element of the kind,
@@ -1505,10 +1505,14 @@ impl Graph {
     /// ``transform="each"`` every element of an array value, for ``has(key,
     /// __.unfold().is("x"))``; a chain is a list of names applied in order,
     /// ``transform=["each", "to_lower"]``. The index is built at once and rebuilt from the data
-    /// whenever the graph is loaded. An unknown type or transform, a chain in another order, or
-    /// a key the graph's schema declares as values the index cannot hold (a vector, an object,
-    /// an array without ``each``; with ``to_lower`` any non-string), is refused.
-    #[pyo3(signature = (label, key, element="vertex", name=None, r#type="memory-ordered", *, transform=None, policy=None))]
+    /// whenever the graph is loaded. ``unique=True`` makes it a unique constraint: a write that
+    /// would give another element a value the index holds fails (``null`` is exempt; with
+    /// ``to_lower`` case-insensitively); it is refused over data that already repeats a value
+    /// (the error lists them) and with ``each``. An unknown type or transform, a chain in
+    /// another order, or a key the graph's schema declares as values the index cannot hold (a
+    /// vector, an object, an array without ``each``; with ``to_lower`` any non-string), is
+    /// refused.
+    #[pyo3(signature = (label, key, element="vertex", name=None, r#type="memory-ordered", *, transform=None, unique=false, policy=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_index(
         &self,
@@ -1519,6 +1523,7 @@ impl Graph {
         name: Option<&str>,
         r#type: &str,
         transform: Option<IndexTransformArg>,
+        unique: bool,
         policy: Option<PyRef<'_, AccessPolicy>>,
     ) -> PyResult<()> {
         let params = PyDict::new(py);
@@ -1552,6 +1557,9 @@ impl Graph {
             }
             None => {}
         }
+        if unique {
+            spec.push_str(", unique: true");
+        }
         let script = format!("g.create_index(#{{{spec}}})");
         self.run(py, &script, Some(&params), false, policy.as_deref())?;
         Ok(())
@@ -1559,7 +1567,7 @@ impl Graph {
 
     /// ``graph.indexes(*, policy=None)``: the property indexes as a ``list`` of ``dict``
     /// (``name``, ``element``, ``label`` (``None`` for a label-less index), ``key``, ``type``, ``transform`` (``None`` without
-    /// one, a chain as the list of its names), ``served``, ``reason`` when it is not served, and the current ``entries``,
+    /// one, a chain as the list of its names), ``unique``, ``served``, ``reason`` when it is not served, and the current ``entries``,
     /// ``distinct_values``, ``skipped``, ``bytes``).
     #[pyo3(signature = (*, policy=None))]
     fn indexes(

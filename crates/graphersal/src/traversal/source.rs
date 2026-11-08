@@ -2014,6 +2014,13 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// against the stored schema: an unknown index type, or a key the schema declares as values
     /// the type cannot hold (a vector, an array, an object), is refused.
     ///
+    /// A [unique](crate::graph::PropertyIndexDefinition::with_unique) index is refused with
+    /// [`DefinitionError::UniqueIndexDuplicates`](crate::error::DefinitionError::UniqueIndexDuplicates)
+    /// when the data holds one of its keys more than once (nothing is created; the error lists
+    /// up to 10 repeated values with their counts and example ids); once created, a write that
+    /// would repeat a key fails with
+    /// [`GraphError::UniqueViolation`](crate::error::GraphError::UniqueViolation).
+    ///
     /// ```
     /// use graphersal::prelude::*;
     /// use graphersal::{catalog::PropertyIndexDefinition, storage::ElementKind};
@@ -2058,7 +2065,37 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         index
             .check_create(name, self.storage.get_schema()?.as_ref())
             .map_err(crate::error::GraphError::from)?;
-        self.set_definition(Definition::property_index(name, index))
+        let unique = index.is_unique().then(|| {
+            (
+                index.element(),
+                index.label().map(str::to_string),
+                index.key().to_string(),
+                index
+                    .transform()
+                    .map(|transform| transform.as_str().to_string()),
+            )
+        });
+        let definition = Definition::property_index(name, index);
+        self.atomically(|this| {
+            this.storage.set_definition(definition)?;
+            // A unique index over repeated values is refused: the unit rolls it back.
+            if let Some((element, label, key, transform)) = unique
+                && let Some(duplicates) = this.storage.unique_index_duplicates(name)?
+            {
+                return Err(crate::error::GraphError::from(
+                    crate::error::DefinitionError::unique_index_duplicates(
+                        name,
+                        element,
+                        label.as_deref(),
+                        &key,
+                        transform.as_deref(),
+                        duplicates,
+                    ),
+                )
+                .into());
+            }
+            Ok(())
+        })
     }
 
     /// Drops the property index `name` (per-label or label-less); `false` when there is none.

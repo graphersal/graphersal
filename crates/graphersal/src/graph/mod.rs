@@ -92,7 +92,7 @@ pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, Stru
 pub use persistent::PersistentStorage;
 pub use property_index::{
     PropertyIndexDefinition, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
-    PropertyIndexTransform,
+    PropertyIndexTransform, UniqueIndexDuplicates,
 };
 pub(crate) use topology::{EdgeIndex, NodeIndex};
 // Only the script layer names it through the crate glob.

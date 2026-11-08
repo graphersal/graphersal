@@ -10,7 +10,7 @@ use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionStats, Definition,
     DefinitionKind, ElementKind, ExecutionPolicy, GraphError, GraphStatistics, GraphStorage,
     JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
-    PropertyMap, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+    PropertyMap, RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
 };
 use graphersal_storage_tests::conformance;
 
@@ -341,6 +341,13 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
     ) -> Result<Option<u64>, GraphError> {
         self.0
             .count_by_property_index(element, label, key, transform, range)
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<UniqueIndexDuplicates>, GraphError> {
+        self.0.unique_index_duplicates(name)
     }
 
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {

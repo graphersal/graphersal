@@ -22,7 +22,7 @@ use graphersal::storage::{
     ElementKind, ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics,
     GraphStorage, JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange,
     PropertyIndexTransform, PropertyMap, PropertySchema, RollbackReason, StorageCapabilities,
-    UnitChanges, UnitMark, VertexHandle,
+    UniqueIndexDuplicates, UnitChanges, UnitMark, VertexHandle,
 };
 
 /// The vertex handle of [`Forwarding`]: a newtype around the wrapped graph's [`VertexHandle`],
@@ -279,6 +279,13 @@ impl GraphStorage for Forwarding {
         range: &PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
         GraphStorage::count_by_property_index(&self.0, element, label, key, transform, range)
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<UniqueIndexDuplicates>, GraphError> {
+        GraphStorage::unique_index_duplicates(&self.0, name)
     }
 
     fn insert_vertex(

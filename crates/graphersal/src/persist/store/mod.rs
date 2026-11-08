@@ -5176,6 +5176,45 @@ impl Shared {
         );
     }
 
+    /// Writes `index.unique_duplicates` for every unique property index the open left
+    /// unserved because its data holds repeated values (the open never fails for it).
+    fn journal_unique_duplicates(&self) {
+        let problems = match self.graph.read().unique_index_problems() {
+            Ok(problems) => problems,
+            Err(err) => {
+                tracing::warn!("listing the unique indexes after the open failed: {err}");
+                return;
+            }
+        };
+        for (name, index, report) in problems {
+            let query = crate::error::unique_duplicates_query(
+                index.element(),
+                index.label(),
+                index.key(),
+                index.transform().map(|t| t.as_str()),
+            );
+            self.system_journal.emit(
+                &catalogue::INDEX_UNIQUE_DUPLICATES,
+                Event::new(format!(
+                    "the unique index '{name}' is not served: {} value(s) of '{}' repeat",
+                    report.total,
+                    index.key()
+                ))
+                .field("name", name.as_str())
+                .field("key", index.key())
+                .count("repeated", report.total)
+                .field("values", report.summary())
+                .field(
+                    "recommendation",
+                    format!(
+                        "list the repeats with {query}, give them other values, then \
+                         g.drop_index(\"{name}\") and create the index again"
+                    ),
+                ),
+            );
+        }
+    }
+
     /// Writes `store.opened` (and `store.recovered` when the open repaired traces of a crash or
     /// of an interrupted operation).
     fn journal_opened(&self, report: &OpenReport, started: web_time::Instant, read_only: bool) {
@@ -5213,6 +5252,7 @@ impl Shared {
                     .field("wal_cut", report.refused_cut.is_some()),
             );
         }
+        self.journal_unique_duplicates();
         let load_ms = started.elapsed().as_millis() as u64;
         self.system_journal.emit(
             &catalogue::STORE_OPENED,

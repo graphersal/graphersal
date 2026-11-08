@@ -737,6 +737,27 @@ pub(crate) static VECTOR_FILL_FAILED: EventKind = event(
     Collapse::Never,
 );
 
+pub(crate) static INDEX_UNIQUE_DUPLICATES: EventKind = event(
+    "index.unique_duplicates",
+    "index",
+    Level::Warn,
+    "A unique property index is not served after the open: its data holds repeated values (a \
+     store written without the constraint, or an index stored without the create check). \
+     Queries scan it and writes are not checked against it until it is dropped and created \
+     again after the repeats are removed.",
+    &[
+        f("name", "the index"),
+        f("key", "its property key"),
+        f("repeated", "how many values repeat"),
+        f(
+            "values",
+            "the first repeated values with their counts and example ids",
+        ),
+        f("recommendation", "how to fix it"),
+    ],
+    Collapse::By(&["name"]),
+);
+
 /// Every declared event kind, in catalogue order.
 pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &REPEATED,
@@ -782,6 +803,7 @@ pub(crate) static EVENT_KINDS: &[&EventKind] = &[
     &VECTOR_FILL_STARTED,
     &VECTOR_FILL_DONE,
     &VECTOR_FILL_FAILED,
+    &INDEX_UNIQUE_DUPLICATES,
 ];
 
 /// The declared kind with `code`.

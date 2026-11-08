@@ -11,7 +11,15 @@ use crate::graph::{
 };
 
 /// The keys `create_index` accepts.
-const KEYS: [&str; 6] = ["name", "element", "label", "key", "type", "transform"];
+const KEYS: [&str; 7] = [
+    "name",
+    "element",
+    "label",
+    "key",
+    "type",
+    "transform",
+    "unique",
+];
 
 /// Why a storage that does not serve property indexes at all serves none.
 const STORAGE_SERVES_NONE: &str = "this storage keeps the definition but serves no property \
@@ -76,12 +84,14 @@ fn transform_of(
 }
 
 /// One index as a map: name, element, label (`()` for a label-less index), key, type,
-/// transform (`()` without one; a chain as the array of its names), served
-/// (with `reason` when it is not served) and its current stats (entries, distinct_values,
-/// skipped, bytes; zero when it is not served).
+/// transform (`()` without one; a chain as the array of its names), unique, served
+/// (with `reason` when it is not served: a unique index over repeated values says
+/// `duplicates: ..`) and its current stats (entries, distinct_values, skipped, bytes; zero
+/// when it is not served).
 fn index_entry(
     definition: &Definition,
     stats: Option<crate::graph::PropertyIndexStats>,
+    duplicates: Option<crate::graph::UniqueIndexDuplicates>,
 ) -> Option<rhai::Map> {
     let index = definition.as_property_index()?;
     let mut map = rhai::Map::new();
@@ -106,10 +116,12 @@ fn index_entry(
             .map(transform_value)
             .unwrap_or(Dynamic::UNIT),
     );
+    map.insert("unique".into(), Dynamic::from_bool(index.is_unique()));
     map.insert("served".into(), Dynamic::from_bool(stats.is_some()));
     if stats.is_none() {
         let reason = index
             .unserved_reason()
+            .or_else(|| duplicates.map(|report| report.unserved_reason()))
             .unwrap_or_else(|| STORAGE_SERVES_NONE.to_string());
         map.insert("reason".into(), reason.into());
     }
@@ -166,7 +178,7 @@ impl ScriptGraphTraversalSource {
         })
     }
 
-    /// `g.create_index(#{key, label?, element?, name?, type?, transform?})` /
+    /// `g.create_index(#{key, label?, element?, name?, type?, transform?, unique?})` /
     /// `g.create_index(..)`: declares (or replaces) a property index: the `element`s
     /// (`"vertex"`, the default, or `"edge"`) labelled `label`, ordered by their top-level
     /// property `key` (a plain name). Without `label` (omitted or `()`) the index is
@@ -178,8 +190,10 @@ impl ScriptGraphTraversalSource {
     /// (`"to_lower"`: the lowered text of string values, for `has(key, __.to_lower().is(..))`;
     /// `"each"`: every element of an array value, for `has(key, __.unfold().is(..))`; the
     /// chain `["each", "to_lower"]` for `has(key, __.unfold().to_lower().is(..))`). The index is
-    /// built in the same unit. Asks for `Create` on the index (`Update` when it replaces one;
-    /// of kind `property_index_ext` for a label-less index or one with `each`); a storage without
+    /// built in the same unit. `unique: true` makes it a unique constraint (a write that
+    /// would repeat a key fails; refused over data that already repeats one, and with
+    /// `each`). Asks for `Create` on the index (`Update` when it replaces one; of kind
+    /// `property_index_ext` for a label-less index, a unique one or one with `each`); a storage without
     /// property indexes refuses it, and so does
     /// [`PropertyIndexDefinition::check_create`] (an unknown type, a key the stored schema
     /// declares as values the type cannot hold).
@@ -195,7 +209,7 @@ impl ScriptGraphTraversalSource {
         };
         let Some(mut spec) = spec.try_cast::<rhai::Map>() else {
             return Err(mismatch(
-                "a map #{key, label?, element?, name?, type?, transform?}".into(),
+                "a map #{key, label?, element?, name?, type?, transform?, unique?}".into(),
                 actual,
             ));
         };
@@ -229,12 +243,22 @@ impl ScriptGraphTraversalSource {
             Some(name) => PropertyIndexType::from_name(&name),
         };
         let transform = transform_of(operation, take("transform"))?;
+        let unique = take("unique");
+        let unique = if unique.is_unit() {
+            false
+        } else {
+            let actual = type_name_of(&unique);
+            unique
+                .as_bool()
+                .map_err(|_| mismatch("unique as a boolean (true, false) or ()".into(), actual))?
+        };
         let index = match label {
             Some(label) => PropertyIndexDefinition::new(element, label, key),
             None => PropertyIndexDefinition::label_less(element, key),
         }
         .with_type(index_type)
-        .with_transform(transform);
+        .with_transform(transform)
+        .with_unique(unique);
         let name = match optional_text(operation, "name", take("name"))? {
             Some(name) => name,
             None => index.default_name(),
@@ -263,13 +287,12 @@ impl ScriptGraphTraversalSource {
         index
             .check_create(&name, graph.get_schema().map_err(graph_fail)?.as_ref())
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
-        graph
-            .set_definitions(vec![definition])
-            .map_err(script_error)
+        // One unit: a unique index over repeated values is refused and leaves nothing.
+        graph.create_index(&name, index).map_err(script_error)
     }
 
     /// `g.indexes()`: every property index as a map (name, element, label, key, type,
-    /// transform, served, `reason` when it is not served, entries, distinct_values, skipped,
+    /// transform, unique, served, `reason` when it is not served, entries, distinct_values, skipped,
     /// bytes), by name. Asks for
     /// `Read` on the indexes.
     pub fn indexes(&mut self) -> Result<rhai::Array, Box<EvalAltResult>> {
@@ -296,17 +319,23 @@ impl ScriptGraphTraversalSource {
                 .map_err(graph_fail)?,
         );
         definitions.sort_by(|a, b| a.name().cmp(b.name()));
-        Ok(definitions
-            .iter()
-            .filter_map(|definition| {
-                let stats = served
-                    .iter()
-                    .find(|info| info.name == definition.name())
-                    .map(|info| info.stats);
-                index_entry(definition, stats)
-            })
-            .map(Dynamic::from_map)
-            .collect())
+        let mut entries = rhai::Array::with_capacity(definitions.len());
+        for definition in &definitions {
+            let stats = served
+                .iter()
+                .find(|info| info.name == definition.name())
+                .map(|info| info.stats);
+            let duplicates = match stats {
+                Some(_) => None,
+                None => graph
+                    .unique_index_duplicates(definition.name())
+                    .map_err(graph_fail)?,
+            };
+            if let Some(entry) = index_entry(definition, stats, duplicates) {
+                entries.push(Dynamic::from_map(entry));
+            }
+        }
+        Ok(entries)
     }
 
     /// `g.drop_index(name)`: drops the property index (per-label or label-less); `false` when

@@ -58,6 +58,7 @@ import { paramArgs } from '../gql-tab.js';
 import {
   catalogMenuItems, indexRow, indexTotals, newTransformIndexDraft, indexDraftToSpec, defaultIndexName,
   INDEX_TYPES, INDEX_TRANSFORMS, indexTypeOf, indexTransformOf, indexNotServedReason,
+  uniqueAllowed, isUniqueIndex,
 } from '../indexes.js';
 import { formatBytes } from '../statistics.js';
 import { DropMenu } from './drop-menu.js';
@@ -574,7 +575,7 @@ export const IndexesManager = {
     });
     const rows = computed(() => (state.indexes || []).map((index) => ({
       index, row: indexRow(index), type: indexTypeOf(index), transform: indexTransformOf(index),
-      reason: indexNotServedReason(index),
+      reason: indexNotServedReason(index), unique: isUniqueIndex(index),
     })));
     const transformHint = computed(() => {
       const t = d.draft && INDEX_TRANSFORMS.find((x) => x.name === (d.draft.transform || ''));
@@ -658,7 +659,7 @@ export const IndexesManager = {
     expose({ open, close });
     return {
       state, dlg, d, rows, sum, suggestions, namePlaceholder, typeHint, transformHint,
-      indexTypes: INDEX_TYPES, indexTransforms: INDEX_TRANSFORMS, formatBytes, close,
+      indexTypes: INDEX_TYPES, indexTransforms: INDEX_TRANSFORMS, formatBytes, close, uniqueAllowed,
       startNew, cancelForm, save, drop,
     };
   },
@@ -680,8 +681,8 @@ export const IndexesManager = {
               <th class="num">Entries</th><th class="num">Distinct values</th><th class="num">Per value</th><th class="num">Memory</th><th></th>
             </tr></thead>
             <tbody>
-              <tr v-for="{ index, row, type, transform, reason } in rows" :key="index.name">
-                <td class="code">{{ row.name }} <span v-if="!row.served" class="badge" :title="reason">not served</span></td>
+              <tr v-for="{ index, row, type, transform, reason, unique } in rows" :key="index.name">
+                <td class="code">{{ row.name }} <span v-if="unique" class="badge" title="A unique constraint: each value at most once (null exempt)">unique</span> <span v-if="!row.served" class="badge" :title="reason">not served</span></td>
                 <td>{{ row.target }}</td><td class="code">{{ row.key }}</td>
                 <td class="code">{{ type }}<div v-if="!row.served && reason" class="muted" style="font-size: 12px">{{ reason }}</div></td>
                 <td class="code">{{ transform || '—' }}</td>
@@ -733,6 +734,10 @@ export const IndexesManager = {
           </select>
           <div v-for="m in d.errors.transform || []" class="field-error sq-span">{{ m }}</div>
           <span class="hint">{{ transformHint }}</span>
+          <span></span>
+          <span><input id="ci-unique" type="checkbox" v-model="d.draft.unique" :disabled="!uniqueAllowed(d.draft.transform)"> <label for="ci-unique" class="muted">unique: each value at most once (null exempt; with to_lower case-insensitive)</label></span>
+          <div v-for="m in d.errors.unique || []" class="field-error sq-span">{{ m }}</div>
+          <span class="hint">A write that would repeat a value fails and its query rolls back; creating it over data that already repeats a value is refused (the message lists them). Not with the transform each.</span>
           <label for="ci-name">Name</label>
           <input id="ci-name" type="text" v-model="d.draft.name" :class="{ invalid: d.errors.name }" :placeholder="namePlaceholder" autocomplete="off" spellcheck="false">
           <div v-for="m in d.errors.name || []" class="field-error sq-span">{{ m }}</div>

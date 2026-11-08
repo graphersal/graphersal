@@ -183,6 +183,7 @@ mod property_index_each_tests;
 mod property_index_label_less_tests;
 mod property_index_postings_tests;
 mod property_index_tests;
+mod property_index_unique_tests;
 mod property_order_tests;
 mod property_shape_tests;
 mod query_memory_tests;

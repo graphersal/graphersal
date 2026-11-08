@@ -57,7 +57,10 @@ start step without labels can only read a label-less index; one with labels comp
 of its per-label estimates with the label-less index's estimate, the lower wins (a tie keeps the
 per-label indexes), and with the label-less index it checks each candidate's labels. Of the
 covered conditions the rule picks the most selective by the indexes' statistics (an equality: about
-`entries / distinct_values` elements per index and value; a range: half the entries).
+`entries / distinct_values` elements per index and value; a range: half the entries). A
+[unique index](../users_guide/property_indexes.md#unique-indexes) is read like any other index
+(its statistics give an equality about one element; one that is not served, its data holding
+repeated values, is never read).
 
 When no re-check can drop a candidate (one folded equality on a string, boolean, uuid or
 temporal value, no other folded condition, no transform (so never with `each`), and a label-less index under a start

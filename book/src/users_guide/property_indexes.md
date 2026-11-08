@@ -19,7 +19,8 @@ g.indexes()                                  // the indexes and what they hold
 Without `label` an index is [label-less](#label-less-indexes): it holds every vertex (or edge)
 and also serves `g.v().has("name", "josh")` without a label. With `transform: "each"` an index
 holds [every element of a list value](#arrays-the-each-transform), so "all nodes of one owner",
-`g.v().has("_owners", __.unfold().is(o))`, reads it.
+`g.v().has("_owners", __.unfold().is(o))`, reads it. With `unique: true` an index is a
+[unique constraint](#unique-indexes): a write that would repeat one of its values fails.
 
 Indexes are **declared, never automatic**: nothing is indexed until you ask for it, and an index
 costs memory and a little time on every write of its key (below).
@@ -28,7 +29,7 @@ costs memory and a little time on every write of its key (below).
 
 | DSL | Rust (`GraphTraversalSource`) | Python (`Graph`) |
 |---|---|---|
-| `g.create_index(#{key, label?, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))` (label-less: `PropertyIndexDefinition::label_less(kind, key)`), `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` (`Each`; a chain: `PropertyIndexTransform::from_names(["each", "to_lower"])`) | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` (`label=None`: label-less; `transform="each"`, `transform=["each", "to_lower"]`) |
+| `g.create_index(#{key, label?, element?, name?, type?, transform?, unique?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))` (label-less: `PropertyIndexDefinition::label_less(kind, key)`), `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` (`Each`; a chain: `PropertyIndexTransform::from_names(["each", "to_lower"])`), `.with_unique(true)` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None, unique=False)` (`label=None`: label-less; `transform="each"`, `transform=["each", "to_lower"]`) |
 | `g.indexes()` | `list_indexes()` | `graph.indexes()` |
 | `g.drop_index(name)` | `drop_index(name)` | `graph.drop_index(name)` |
 
@@ -51,15 +52,20 @@ costs memory and a little time on every write of its key (below).
   [the elements of a list](#arrays-the-each-transform), or a **chain** written as an array of names
   applied in order: `["each", "to_lower"]` (the only chain this version serves; `["to_lower",
   "each"]` is refused).
+- `unique` (`false` by default) makes the index a [unique constraint](#unique-indexes); it does
+  not change the default name.
 - One index per `(element, label, key, type, transform)`: a second one under another name fails
   with a *Conflicting property index* error that names the first. A plain index and a `to_lower`
   index on the same key coexist (their default names differ), and so do a label-less and a
   per-label index on one key. Declaring the same name again replaces the index (also a per-label
-  index by a label-less one of the same name, and back: index names are one namespace).
+  index by a label-less one of the same name, and back: index names are one namespace). `unique`
+  is not part of that identity: to make an index unique, declare it again under its name with
+  `unique: true`.
 - `g.indexes()` lists each index (by name) with its `label` (`()` for a label-less index), its
-  `type`, its `transform` (`()` without one, a chain as the array of its names), `served`
+  `type`, its `transform` (`()` without one, a chain as the array of its names), `unique`, `served`
   (whether it is served, with a `reason` when it is not: see
-  [unknown types](#an-index-type-from-a-newer-version) and [other storages](#other-storages)) and
+  [unknown types](#an-index-type-from-a-newer-version), [repeated values under a unique
+  index](#stored-over-repeated-values) and [other storages](#other-storages)) and
   its current `entries` (indexed elements; with `each` one per distinct element of a list),
   `distinct_values`, `skipped` (elements whose non-null value the index does not hold; with
   `each` list elements it does not hold) and `bytes` (an estimate of its memory).
@@ -312,6 +318,80 @@ g.v().has("_owners", "o1").values("name").to_list()           // the whole value
 - The [advisor](../persistence/optimize.md) recommends `transform: "each"` for a scanned key
   holding lists.
 
+## Unique indexes
+
+With `unique: true` an index is a **constraint**: no two elements of the index hold an equal
+value of its key. A write that would give an element a value the index already holds for
+another element fails, and the query (or import, or applied change set) rolls back as a whole:
+
+```rhai
+g.create_index(#{label: "person", key: "name", unique: true});
+g.v("2").property("name", "marko").iterate()      // vertex 1 holds "marko" already
+```
+
+```text
+Error: The unique index 'person_name' already holds "marko" at 'name' for the vertex '1'
+```
+
+- **Scope**: a per-label index is unique within its label (`person` and `software` may share a
+  name); a [label-less](#label-less-indexes) one over the whole element kind (every vertex, or
+  every edge); with `transform: "to_lower"` the comparison is **case-insensitive** (logins,
+  e-mail addresses: `"Ann"` and `"ann"` collide).
+- **Equality** is `has()`'s: an `int64` and a `float64` of the same value collide (`1` and
+  `1.0`), two `int64`s only when they are the same number, a `datetime` by its instant.
+- **`null` is not part of uniqueness**: any number of elements may hold `null` (or lack the key).
+- **Values the index does not hold** are exempt as well: a list, a map or a vector under a plain
+  unique index, a non-string under `to_lower`. They count in `skipped`, as for any index.
+- **Every write path is checked**: `add_v()`/`add_e()` with their properties, `property()` on an
+  existing element (also a one-segment `jpath`), `merge_v()`/`merge_e()` when they create or
+  change, GQL `INSERT`, `SET` and `MERGE`, `add_label()` and GQL `SET n:Label` when they bring a
+  vertex into a per-label unique index, GraphSON and GraphML imports, `apply_change_set`. Nothing
+  of the failing unit stays.
+- **The check is immediate**, at each write, never deferred to the commit. Swapping the values
+  of two elements in one query therefore needs an intermediate value:
+
+```rhai,graph=modern,script
+g.create_index(#{label: "person", key: "name", unique: true});
+// Vertex 2 can take "marko" only after vertex 1 has let it go: through "tmp".
+g.v("1").property("name", "tmp").v("2").property("name", "marko").v("1").property("name", "vadas").iterate();
+g.v("1").values("name").next()
+```
+
+- A unique index is an ordinary index for queries: equality, `P.within` and ranges read it, and a
+  point lookup returns at most one element.
+- **Not with `each`**: a unique index cannot use the transform `each` (a list gives one key per
+  element); the create is refused.
+- **Persistence**: a unique index is stored as catalog kind `property_index_ext` (6) with the
+  critical flag, also with a label (a version that does not know it opens the store read-only,
+  so it never writes past the constraint). The payload has `"unique": true` (absent when false).
+  A journal replay and a recovery apply only writes that were checked when they were committed.
+
+### Created over repeated values
+
+Creating a unique index over data that already holds a value twice is refused, and nothing is
+created. The error names up to 10 repeated values, each with its count and up to 3 example ids,
+and its help gives the query that lists all of them:
+
+```text
+Error: Cannot create the unique index 'User_email': 2 value(s) of 'email' are held by more than one vertex labelled 'User': "a@x" (2 elements: 1, 7), "b@x" (3 elements: 2, 8, 9)
+Help: ... List every repeated value with its count: g.v().has_label("User").has("email").group_count().by("email").unfold().where(__.select(Column.values).is(P.gt(1))). ...
+```
+
+With `to_lower` the query groups by the lowered value
+(`.group_count().by(__.values("email").to_lower())`). Give the repeated elements other values
+(or drop the extra ones), then create the index again.
+
+### Stored over repeated values
+
+Storing a definition never checks the data (`set_definition`, a catalog file, a journal replay,
+a store load). A unique index whose data holds repeated values (a store written past the
+constraint, an index stored without the create check) is kept, but **neither served nor
+enforced**: `g.indexes()` lists it with `served: false` and a `reason` that starts with
+`duplicates:` and names the values, the open of a store writes the system journal event
+`index.unique_duplicates` (see [System Journal](../persistence/system_journal.md)), and the open
+never fails for it. The fix: remove the repeats, then drop the index and create it again
+(`GraphStorage::unique_index_duplicates` returns the report to a host).
+
 ## What is served
 
 A `v()`/`e()` start step reads an index when
@@ -395,8 +475,8 @@ indexing a long compressed field costs the memory compression saved).
 ## Persistence
 
 An index is a catalog definition (kind `property_index`, or `property_index_ext` with the
-critical flag for a [label-less index](#label-less-indexes) and an index with
-[`each`](#arrays-the-each-transform), like [saved queries](saved_queries.md)
+critical flag for a [label-less index](#label-less-indexes), a [unique index](#unique-indexes)
+and an index with [`each`](#arrays-the-each-transform), like [saved queries](saved_queries.md)
 and compression rules), so its **declaration** travels with the graph: the journal (WAL), snapshots,
 backups, forks, rollbacks and the catalog file. Its **entries are never stored**: they are rebuilt
 from the data whenever a graph is loaded, by a store open, a read-only view (also of a past state),
@@ -429,7 +509,12 @@ slice). The
 lookups take the label as `Option<&str>`: `None` reads the label-less index (`PropertyIndexInfo::label`
 is `None` for one). `count_by_property_index` (default `Ok(None)`) answers an exact count from the
 index for [counting from an index](#counting-from-an-index); without it the engine counts the
-lookup's candidates.
+lookup's candidates. A storage that serves a [unique index](#unique-indexes) lists it with
+`PropertyIndexInfo::unique`, refuses every write that would repeat a key with
+`GraphError::UniqueViolation` (constructor `GraphError::unique_violation`) without changing
+anything, and reports an index stored over repeated values through
+`GraphStorage::unique_index_duplicates` instead of serving it (the trait's rustdoc has the
+contract).
 
 ## In the playground, the dev server and MCP
 
@@ -437,20 +522,22 @@ lookup's candidates.
   indexes with their type, transform, entries, distinct values, elements per value (what an
   equality reads) and memory (an index that is not served says why), creates one from a form
   (element, label or **any label** for a label-less index, key, type, transform: none,
-  `to_lower`, `each` or the chain `each, to_lower`, each with a hint on the query form, optional
-  name; the default name is shown as you type
+  `to_lower`, `each` or the chain `each, to_lower`, each with a hint on the query form, a
+  **unique** box (disabled with `each`; a unique index carries a *unique* badge in the list),
+  optional name; the default name is shown as you type
   and follows the transform; an engine
   refusal shows under its field) and drops one after a confirmation. The **Statistics** tab of the Profile panel
   shows *Property indexes* with their memory when the graph has some. Indexes travel with the
   catalog file (**Catalog ▾ ▸ Save catalog**).
-- **Dev server**: `GET /api/indexes`, `POST /api/indexes/create` `{key, label?, element?, name?, type?, transform?}`
+- **Dev server**: `GET /api/indexes`, `POST /api/indexes/create` `{key, label?, element?, name?, type?, transform?, unique?}`
   (`label` absent or `null`: label-less; listed with `label: null`),
   `POST /api/indexes/drop` `{name}` (see [the dev server](../persistence/dev_server.md)); a
   create or drop is a commit recorded in the change feed, so open browsers reload. The start
   block on stderr names the index memory.
 - **MCP**: the tools `list_indexes` (also with `--mcp-read-only`), `create_index` (with an
-  optional `label`, omitted for a label-less index, and an optional `type` and `transform`, enums
-  of the known ones; a chain as the array `["each", "to_lower"]`) and `drop_index` (not offered read-only, where
+  optional `label`, omitted for a label-less index, an optional `type` and `transform`, enums
+  of the known ones; a chain as the array `["each", "to_lower"]`, and an optional boolean
+  `unique`) and `drop_index` (not offered read-only, where
   `query` refuses `g.create_index` too).
 
 ## Limits
@@ -464,5 +551,6 @@ lookup's candidates.
 - Two transforms (`to_lower`, `each`) and one chain (`["each", "to_lower"]`); they serve only the
   exact children `__.to_lower().is(P)`, `__.unfold().is(P)` and `__.unfold().to_lower().is(P)`. A
   `to_lower` index does not serve a plain `has(key, value)`, and `TextP` predicates are not served.
-- No unique indexes (constraints) in this version.
+- A unique index checks each write at once (no deferred, commit-time check) and cannot use
+  `each`; composite (multi-key) unique constraints are not available.
 - `order().by(key)` does not read the index.

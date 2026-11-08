@@ -627,9 +627,21 @@ impl Uses {
 /// The value types a property index cannot hold.
 const NOT_INDEXABLE: [&str; 3] = ["vector", "array", "object"];
 
-/// About the bytes of one index entry (the value, the element and the tree's share), for the
-/// cost of an index not yet built.
-const INDEX_ENTRY_BYTES: u64 = 48;
+/// About the bytes of one distinct value of an index not yet built (the key, its 8-byte
+/// postings and the tree's share; `graph/postings.rs`).
+const INDEX_VALUE_BYTES: u64 = 48;
+
+/// About the bytes of each further element of a value (a `u32` slot in the value's postings).
+const INDEX_POSTING_BYTES: u64 = 4;
+
+/// The estimated memory of an index over `entries` elements holding `distinct` values (the
+/// postings layout: each value once, then 4 bytes per further element).
+fn index_cost_bytes(entries: u64, distinct: u64) -> u64 {
+    let distinct = distinct.clamp(entries.min(1), entries);
+    distinct
+        .saturating_mul(INDEX_VALUE_BYTES)
+        .saturating_add((entries - distinct).saturating_mul(INDEX_POSTING_BYTES))
+}
 
 /// A byte count for a sentence: `512 B`, `12.3 KiB`, `4.0 MiB`, `1.2 GiB`.
 pub(crate) fn bytes_text(bytes: u64) -> String {
@@ -922,7 +934,17 @@ pub fn compute(
             }
             let transform = arrays.then_some(PropertyIndexTransform::Each);
             let row_elements: u64 = rows.iter().map(|row| row.elements).sum();
-            let cost_bytes = row_elements.saturating_mul(INDEX_ENTRY_BYTES);
+            // Distinct values: the string estimate of each row (a label-less index sums the
+            // labels' estimates, an upper bound); a key without one counts every element as
+            // its own value (the near-unique worst case).
+            let distinct: u64 = rows
+                .iter()
+                .map(|row| match row.strings {
+                    Some(strings) if strings.values == row.elements => strings.distinct_estimate,
+                    _ => row.elements,
+                })
+                .sum();
+            let cost_bytes = index_cost_bytes(row_elements, distinct);
             let confidence = if uses.scan_runs >= 100 {
                 Confidence::High
             } else {
@@ -1528,5 +1550,22 @@ impl Advice {
     /// [`Self::to_property`] as JSON text.
     pub fn to_json(&self) -> String {
         crate::value::physical::to_json_text(&self.to_property()).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_index_cost_follows_the_postings_layout() {
+        // A near-unique key: one map entry per element.
+        assert_eq!(index_cost_bytes(1000, 1000), 48_000);
+        // A low-cardinality key: each value once, 4 bytes per further element.
+        assert_eq!(index_cost_bytes(1000, 10), 10 * 48 + 990 * 4);
+        // An estimate above the elements (HLL error) is clamped; no elements cost nothing.
+        assert_eq!(index_cost_bytes(10, 12), 480);
+        assert_eq!(index_cost_bytes(0, 0), 0);
+        assert_eq!(index_cost_bytes(5, 0), 48 + 4 * 4);
     }
 }

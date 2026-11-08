@@ -1966,6 +1966,30 @@ pub enum GraphError {
         cause: Box<crate::value::EmbedError>,
     },
 
+    /// A write would give an element a key that a UNIQUE property index already holds for
+    /// another element (book page "Property Indexes", section "Unique indexes"): nothing was
+    /// written, and a unit the write belongs to (a query, an import, an applied change set)
+    /// is rolled back. The check is immediate, at each write: swapping the values of two
+    /// elements in one unit needs an intermediate value. `null` and values the index does not
+    /// hold are never part of uniqueness. Built with [`GraphError::unique_violation`].
+    #[error(
+        "The unique index '{index}' already holds {value} at '{key}' for the {} '{existing}'",
+        element.as_str()
+    )]
+    #[non_exhaustive]
+    UniqueViolation {
+        /// The name of the unique index.
+        index: String,
+        /// The element kind the index covers.
+        element: crate::graph::schema::ElementKind,
+        /// The top-level property key.
+        key: String,
+        /// The value written, as JSON text (`"alice@example.com"`).
+        value: String,
+        /// The id of the element that holds an equal key already.
+        existing: String,
+    },
+
     /// A schema declares a vector rule whose model is neither `hash-ngram/1` nor a model of the
     /// store's catalog: nothing was applied.
     #[error(
@@ -2185,6 +2209,26 @@ impl GraphError {
         }
     }
 
+    /// [`GraphError::UniqueViolation`]: writing `value` at `key` would repeat a key of the
+    /// unique index `index` (on `element`s) that the element `existing` (its id) holds
+    /// already. The value is rendered as JSON text.
+    pub fn unique_violation(
+        index: impl Into<String>,
+        element: crate::graph::schema::ElementKind,
+        key: impl Into<String>,
+        value: &crate::value::ElementProperty,
+        existing: impl Into<String>,
+    ) -> Self {
+        GraphError::UniqueViolation {
+            index: index.into(),
+            element,
+            key: key.into(),
+            value: crate::value::physical::to_json_text(&value.to_logical())
+                .unwrap_or_else(|err| err.to_string()),
+            existing: existing.into(),
+        }
+    }
+
     /// [`GraphError::ElementRemoved`] for a vertex.
     pub(crate) fn vertex_removed() -> Self {
         GraphError::ElementRemoved {
@@ -2198,6 +2242,38 @@ impl GraphError {
             kind: GraphNodeType::Edge,
         }
     }
+}
+
+/// The source step of an element kind (`v`, `e`).
+fn source_step(element: crate::graph::schema::ElementKind) -> &'static str {
+    match element {
+        crate::graph::schema::ElementKind::Vertex => "v",
+        crate::graph::schema::ElementKind::Edge => "e",
+    }
+}
+
+/// The help of [`GraphError::UniqueViolation`].
+fn unique_violation_help(
+    index: &str,
+    element: crate::graph::schema::ElementKind,
+    key: &str,
+    value: &str,
+    existing: &str,
+) -> String {
+    let source = source_step(element);
+    let element = element.as_str();
+    format!(
+        "Nothing was written (a query, an import or an applied change set rolls back as a \
+         whole). The unique index '{index}' lets one {element} of its scope hold each value of \
+         \"{key}\" (null and values the index does not hold are exempt; g.indexes() shows its \
+         label). See who holds it: \
+         g.{source}(\"{existing}\").value_map(). Write another value, or change that element first, \
+         for example g.{source}(\"{existing}\").property(\"{key}\", <new value>). The check is \
+         immediate, at each write: to swap the values of two elements in one query, move one \
+         through an intermediate value first (set it to a temporary value, write the other, \
+         then write the first). To allow repeated values, drop the index and create it without \
+         unique: g.drop_index(\"{index}\"). The value written was {value}."
+    )
 }
 
 /// The own help of a hook's veto that brings one: a [`HookRefusal`](crate::graph::HookRefusal),
@@ -2518,6 +2594,13 @@ impl DiagnosticError for GraphError {
                 )
                 .finish(),
             ),
+            GraphError::UniqueViolation {
+                index,
+                element,
+                key,
+                value,
+                existing,
+            } => Some(unique_violation_help(index, *element, key, value, existing)),
             GraphError::VectorRuleModelMissing { model, .. } => Some(if model.contains("?normalize=") {
                 format!(
                     "A vector rule embeds with hash-ngram/1 or a model of the store, named by \
@@ -3640,6 +3723,33 @@ pub enum DefinitionError {
         /// The index transform (`to_lower`), `None` without one.
         transform: Option<Box<str>>,
     },
+    /// A unique property index cannot be created because its data holds values more than once
+    /// (book page "Property Indexes", section "Unique indexes"): nothing was created.
+    /// `duplicates` lists up to 10 repeated values, each with its count and up to 3 example
+    /// ids.
+    #[error(
+        "Cannot create the unique index '{name}': {} value(s) of '{key}' are held by more than \
+         one {}{}: {}",
+        duplicates.total,
+        element.as_str(),
+        label.as_deref().map(|label| format!(" labelled '{label}'")).unwrap_or_default(),
+        duplicates.summary()
+    )]
+    #[non_exhaustive]
+    UniqueIndexDuplicates {
+        /// The name of the index.
+        name: String,
+        /// The element kind the index covers.
+        element: crate::graph::schema::ElementKind,
+        /// The label it covers; `None` for a label-less index.
+        label: Option<String>,
+        /// The top-level property key.
+        key: String,
+        /// The index transform (`to_lower`), `None` without one.
+        transform: Option<String>,
+        /// The repeated values (boxed: the error stays small).
+        duplicates: Box<crate::graph::property_index::UniqueIndexDuplicates>,
+    },
     /// The JSON (or value) form of a definition or a catalog is malformed.
     #[error("Malformed definition: {reason}")]
     #[non_exhaustive]
@@ -3647,6 +3757,30 @@ pub enum DefinitionError {
         /// What is wrong, with the place (`/definitions/2/params`).
         reason: String,
     },
+}
+
+impl DefinitionError {
+    /// [`DefinitionError::UniqueIndexDuplicates`]: the unique index `name` (on `element`s
+    /// labelled `label`, `None`: label-less; on `key`, with `transform`) cannot be created over
+    /// the repeated values `duplicates` (for a front end outside this crate that creates
+    /// indexes through [`GraphStorage::unique_index_duplicates`]).
+    pub fn unique_index_duplicates(
+        name: &str,
+        element: crate::graph::schema::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&str>,
+        duplicates: crate::graph::property_index::UniqueIndexDuplicates,
+    ) -> Self {
+        DefinitionError::UniqueIndexDuplicates {
+            name: name.to_string(),
+            element,
+            label: label.map(str::to_string),
+            key: key.to_string(),
+            transform: transform.map(str::to_string),
+            duplicates: Box::new(duplicates),
+        }
+    }
 }
 
 /// ` with the transform 'to_lower'` for a mismatch of an index with a transform, else empty.
@@ -3768,6 +3902,14 @@ impl DiagnosticError for DefinitionError {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+                "unique" => "A unique index keeps each value of its key once, so it keys \
+                             every element by one value: it cannot use the transform \"each\" \
+                             (one key per array element). Create it on a scalar key, for \
+                             example g.create_index(#{label: \"User\", key: \"email\", unique: \
+                             true}), or with transform: \"to_lower\" for case-insensitive \
+                             uniqueness; an \"each\" index without unique serves \"arrays \
+                             containing x\"."
+                    .to_string(),
                 "dialect" => format!(
                     "The dialect names the language of the source; this version writes \"{}\" \
                      and \"{}\" (Rhai) and \"{}\" and \"{}\" (GQL).",
@@ -3805,7 +3947,9 @@ impl DiagnosticError for DefinitionError {
                 format!(
                     "One index per element kind, label and key, and '{existing}' already is it: \
                      queries use it as it is (see g.indexes()). To rename it, drop it first with \
-                     g.drop_index(\"{existing}\")."
+                     g.drop_index(\"{existing}\"). To make it unique (or plain again), declare \
+                     it again under its own name with unique: true (or without), which replaces \
+                     it: g.create_index(#{{name: \"{existing}\", .., unique: true}})."
                 )
             }
             DefinitionError::Conflict { existing, .. } => format!(
@@ -3888,6 +4032,20 @@ impl DiagnosticError for DefinitionError {
                 );
                 help
             }
+            DefinitionError::UniqueIndexDuplicates {
+                element,
+                label,
+                key,
+                transform,
+                duplicates,
+                ..
+            } => unique_duplicates_help(
+                *element,
+                label.as_deref(),
+                key,
+                transform.as_deref(),
+                duplicates,
+            ),
             DefinitionError::Malformed { .. } => {
                 "A definition in JSON is an object with \"kind\" (\"query\") and \"name\", plus \
                  for a query \"source\", \"params\" and optionally \"folder\", \
@@ -3895,11 +4053,64 @@ impl DiagnosticError for DefinitionError {
                  (\"kind\": \"compression\") has \"label\", \"path\" and optionally \"element\", \
                  \"codec\", \"min_bytes\" and \"dictionary\"; a property index \
                  (\"kind\": \"property_index\") has \"label\", \"key\" and optionally \
-                 \"element\", \"type\" and \"transform\"; a catalog is {\"definitions\": [..]}."
+                 \"element\", \"type\", \"transform\" and \"unique\" (a boolean); a catalog is \
+                 {\"definitions\": [..]}."
                     .to_string()
             }
         })
     }
+}
+
+/// The query that lists the values a unique index on `key` finds repeated: elements of the
+/// index (with the key), grouped by the value as the index keys it, groups of more than one.
+pub(crate) fn unique_duplicates_query(
+    element: crate::graph::schema::ElementKind,
+    label: Option<&str>,
+    key: &str,
+    transform: Option<&str>,
+) -> String {
+    let mut query = format!("g.{}()", source_step(element));
+    if let Some(label) = label {
+        query.push_str(&format!(".has_label(\"{label}\")"));
+    }
+    query.push_str(&format!(".has(\"{key}\")"));
+    match transform {
+        Some(transform) => query.push_str(&format!(
+            ".group_count().by(__.values(\"{key}\").{transform}())"
+        )),
+        None => query.push_str(&format!(".group_count().by(\"{key}\")")),
+    }
+    query.push_str(".unfold().where(__.select(Column.values).is(P.gt(1)))");
+    query
+}
+
+/// The help of [`DefinitionError::UniqueIndexDuplicates`].
+fn unique_duplicates_help(
+    element: crate::graph::schema::ElementKind,
+    label: Option<&str>,
+    key: &str,
+    transform: Option<&str>,
+    duplicates: &crate::graph::property_index::UniqueIndexDuplicates,
+) -> String {
+    let source = source_step(element);
+    let example = duplicates
+        .values
+        .first()
+        .and_then(|value| value.examples.first())
+        .map_or_else(|| "<id>".to_string(), |id| format!("\"{id}\""));
+    format!(
+        "A unique index can only be created over data that holds each value once (null and \
+         values the index does not hold are exempt{}). List every repeated value with its \
+         count: {}. Give the repeated elements other values (or drop the extra ones), for \
+         example g.{source}({example}).property(\"{key}\", <new value>), then create the index \
+         again. To index the values without the constraint, leave unique out.",
+        if transform.is_some() {
+            "; the values are compared as the index keys them, lowered"
+        } else {
+            ""
+        },
+        unique_duplicates_query(element, label, key, transform)
+    )
 }
 
 /// True for a schema error's property name that is a nested canonical path (`$.a.b[1].c`) rather

@@ -255,6 +255,17 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// wrapper forwards what it can actually guarantee (a shared `Arc` or the read-only `&G` view of
 /// any storage claims nothing).
 ///
+/// ## Property indexes
+///
+/// [`StorageCapabilities::property_indexes`] is the switch: a storage that claims it serves the
+/// indexes of its catalog through [`Self::property_indexes`] and the lookups below it. When it
+/// serves a UNIQUE index ([`PropertyIndexInfo::unique`](crate::graph::PropertyIndexInfo::unique))
+/// it enforces it at every write, before anything changes, with
+/// [`GraphError::UniqueViolation`]; an index it stored over repeated values is neither served
+/// nor enforced and is reported by [`Self::unique_index_duplicates`] (the contract is there).
+/// A storage without the capability keeps index definitions in its catalog and enforces
+/// nothing.
+///
 /// ## Change capture and hooks
 ///
 /// With hooks registered, an atomic storage builds a [`ChangeSet`] at the outermost commit of
@@ -764,6 +775,41 @@ pub trait GraphStorage: Send + Sync {
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
         let _ = (element, label, key, transform, range);
+        Ok(None)
+    }
+
+    /// The repeated values that keep the UNIQUE property index `name` from being served
+    /// (book page "Property Indexes", section "Unique indexes"); `Ok(None)` when the index is
+    /// served, is not unique, does not exist, or the storage serves no property indexes (the
+    /// default).
+    ///
+    /// The contract of a storage that serves a unique index
+    /// ([`PropertyIndexDefinition::is_unique`](crate::graph::PropertyIndexDefinition::is_unique),
+    /// listed with [`PropertyIndexInfo::unique`](crate::graph::PropertyIndexInfo::unique) in
+    /// [`Self::property_indexes`]):
+    ///
+    /// - every write that would give an element of the index a key another element of the
+    ///   index already holds ([`Self::insert_vertex`], [`Self::insert_edge`], the property
+    ///   writes, [`Self::add_vertex_label`], [`Self::set_edge_label`], ...) fails with
+    ///   [`GraphError::UniqueViolation`] (built with [`GraphError::unique_violation`]) and
+    ///   changes nothing; the check is immediate, at each write, never deferred to the commit;
+    /// - keys compare as `has()` does (with the index's transform: `to_lower` compares the
+    ///   lowered text); `null` and values the index does not hold are never part of
+    ///   uniqueness;
+    /// - an index stored over data that holds a key more than once (a load, a replay, a
+    ///   [`Self::set_definition`]: stores never check the data) is neither served nor
+    ///   enforced, and this method returns the report (up to
+    ///   [`UniqueIndexDuplicates::MAX_VALUES`](crate::graph::UniqueIndexDuplicates::MAX_VALUES)
+    ///   values with their counts and up to
+    ///   [`UniqueIndexDuplicates::MAX_EXAMPLES`](crate::graph::UniqueIndexDuplicates::MAX_EXAMPLES)
+    ///   example ids each); the front ends that create an index refuse such data with
+    ///   [`DefinitionError::UniqueIndexDuplicates`](crate::error::DefinitionError::UniqueIndexDuplicates)
+    ///   through it.
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        let _ = name;
         Ok(None)
     }
 
@@ -1694,6 +1740,63 @@ impl UnitMark {
 }
 
 impl TraversalGraph {
+    /// The unique check of an in-place path write (schema off) of `value` at `path` (top-level
+    /// key `name`) of vertex `node`: the resulting top-level value is computed only when a
+    /// unique index exists.
+    fn unique_check_vertex_path(
+        &self,
+        node: VertexHandle,
+        path: &crate::value::JsonPath,
+        name: &str,
+        value: &ElementProperty,
+    ) -> Result<(), GraphError> {
+        if !self.property_indexes.has_unique() {
+            return Ok(());
+        }
+        let Some(vertex) = self.vertex_weight(node) else {
+            return Ok(());
+        };
+        let (key, resulting) = write_path(vertex.2.get(name), path, value.clone())?;
+        match self.property_indexes.unique_conflict(
+            crate::graph::schema::ElementKind::Vertex,
+            Some(node.index().slot()),
+            self.labels.set(vertex.1).iter().map(CompactString::as_str),
+            None,
+            Some((&key, &resulting)),
+        ) {
+            Some(conflict) => Err(self.unique_violation(conflict)),
+            None => Ok(()),
+        }
+    }
+
+    /// The edge counterpart of [`Self::unique_check_vertex_path`].
+    fn unique_check_edge_path(
+        &self,
+        edge: EdgeHandle,
+        path: &crate::value::JsonPath,
+        name: &str,
+        value: &ElementProperty,
+    ) -> Result<(), GraphError> {
+        if !self.property_indexes.has_unique() {
+            return Ok(());
+        }
+        let Some(edge_ref) = self.edge_weight(edge) else {
+            return Ok(());
+        };
+        let existing = edge_ref.2.as_ref().and_then(|map| map.get(name));
+        let (key, resulting) = write_path(existing, path, value.clone())?;
+        match self.property_indexes.unique_conflict(
+            crate::graph::schema::ElementKind::Edge,
+            Some(edge.index().slot()),
+            self.labels.name_str(edge_ref.1),
+            None,
+            Some((&key, &resulting)),
+        ) {
+            Some(conflict) => Err(self.unique_violation(conflict)),
+            None => Ok(()),
+        }
+    }
+
     /// [`GraphStorage::set_vertex_property`] in a graph with coding rules (out of line: a
     /// graph without them never takes it).
     #[inline(never)]
@@ -1728,6 +1831,20 @@ impl TraversalGraph {
                     &key,
                     &mut value,
                 );
+                if self.property_indexes.has_unique()
+                    && let Some(conflict) = self.property_indexes.unique_conflict(
+                        crate::graph::schema::ElementKind::Vertex,
+                        Some(node.index().slot()),
+                        self.labels
+                            .set(node_ref.1)
+                            .iter()
+                            .map(CompactString::as_str),
+                        None,
+                        Some((&key, &value)),
+                    )
+                {
+                    return Err(self.unique_violation(conflict));
+                }
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 // The property indexes on `key`: the old entry out, the new one in.
                 let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
@@ -1827,6 +1944,17 @@ impl TraversalGraph {
                     &key,
                     &mut value,
                 );
+                if self.property_indexes.has_unique()
+                    && let Some(conflict) = self.property_indexes.unique_conflict(
+                        crate::graph::schema::ElementKind::Edge,
+                        Some(edge.index().slot()),
+                        self.labels.name_str(edge_ref.1),
+                        None,
+                        Some((&key, &value)),
+                    )
+                {
+                    return Err(self.unique_violation(conflict));
+                }
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 let map_was_none = edge_ref.2.is_none();
                 // The property indexes on `key`: the old entry out, the new one in.
@@ -2196,6 +2324,18 @@ impl GraphStorage for TraversalGraph {
         }
         // Compression rules (D7): strings at rule paths are stored compressed.
         self.compression_prepare_vertex(&labels, &mut properties);
+        // Unique property indexes: no other vertex may hold one of its keys.
+        if self.property_indexes.has_unique()
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Vertex,
+                None,
+                labels.iter().map(CompactString::as_str),
+                Some(&properties),
+                None,
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
 
         let sequence = self.node_sequence;
         let id = match id {
@@ -2280,6 +2420,18 @@ impl GraphStorage for TraversalGraph {
                     &vertex.2,
                 )?;
                 self.check_incident_topology(node.index(), &new_labels)?;
+                // Unique property indexes of the new label: no other vertex may hold its key.
+                if self.property_indexes.has_unique()
+                    && let Some(conflict) = self.property_indexes.unique_conflict(
+                        crate::graph::schema::ElementKind::Vertex,
+                        Some(node.index().slot()),
+                        std::iter::once(label.as_str()),
+                        Some(&vertex.2),
+                        None,
+                    )
+                {
+                    return Err(self.unique_violation(conflict));
+                }
                 let recording = self.undo.is_recording();
                 self.pindex_vertex(node, false, None);
                 // Borrows only the `graph` field, so the statistics can be updated alongside.
@@ -2403,6 +2555,17 @@ impl GraphStorage for TraversalGraph {
                 )?;
             }
         }
+        if self.property_indexes.has_unique()
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Edge,
+                Some(edge.index().slot()),
+                Some(label.as_str()),
+                weight.2.as_ref(),
+                None,
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
         let recording = self.undo.is_recording();
         self.pindex_edge(edge, false, None);
         let Some(weight) = self.graph.edge_weight_mut(index) else {
@@ -2469,6 +2632,17 @@ impl GraphStorage for TraversalGraph {
             )?;
         }
         self.compression_prepare_edge(label.as_deref(), &mut properties);
+        if self.property_indexes.has_unique()
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Edge,
+                None,
+                label.as_deref(),
+                Some(&properties),
+                None,
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
 
         let edge_id = match id {
             Some(edge_id_str) => {
@@ -2529,6 +2703,20 @@ impl GraphStorage for TraversalGraph {
                     &key,
                     &mut value,
                 );
+                if self.property_indexes.has_unique()
+                    && let Some(conflict) = self.property_indexes.unique_conflict(
+                        crate::graph::schema::ElementKind::Vertex,
+                        Some(node.index().slot()),
+                        self.labels
+                            .set(node_ref.1)
+                            .iter()
+                            .map(CompactString::as_str),
+                        None,
+                        Some((&key, &value)),
+                    )
+                {
+                    return Err(self.unique_violation(conflict));
+                }
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 // The property indexes on `key`: the old entry out, the new one in.
                 let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
@@ -2598,6 +2786,17 @@ impl GraphStorage for TraversalGraph {
                     &key,
                     &mut value,
                 );
+                if self.property_indexes.has_unique()
+                    && let Some(conflict) = self.property_indexes.unique_conflict(
+                        crate::graph::schema::ElementKind::Edge,
+                        Some(edge.index().slot()),
+                        self.labels.name_str(edge_ref.1),
+                        None,
+                        Some((&key, &value)),
+                    )
+                {
+                    return Err(self.unique_violation(conflict));
+                }
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 let map_was_none = edge_ref.2.is_none();
                 // The property indexes on `key`: the old entry out, the new one in.
@@ -2655,6 +2854,7 @@ impl GraphStorage for TraversalGraph {
             self.schema.read().mode,
             crate::graph::schema::SchemaMode::None
         ) {
+            self.unique_check_vertex_path(node, path, name, &value)?;
             self.record_vertex_property(node, name);
             self.pindex_vertex(node, false, Some(name));
             let written = self
@@ -2690,6 +2890,18 @@ impl GraphStorage for TraversalGraph {
             )?;
             (key, resulting)
         };
+        if self.property_indexes.has_unique()
+            && let Some(vertex) = self.vertex_weight(node)
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Vertex,
+                Some(node.index().slot()),
+                self.labels.set(vertex.1).iter().map(CompactString::as_str),
+                None,
+                Some((&key, &resulting)),
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
         self.record_vertex_property(node, &key);
         self.pindex_vertex(node, false, Some(&key));
         self.with_vertex_map(node, |shapes, map| {
@@ -2714,6 +2926,7 @@ impl GraphStorage for TraversalGraph {
             self.schema.read().mode,
             crate::graph::schema::SchemaMode::None
         ) {
+            self.unique_check_edge_path(edge, path, name, &value)?;
             self.record_edge_property(edge, name);
             self.pindex_edge(edge, false, Some(name));
             let written = self
@@ -2756,6 +2969,18 @@ impl GraphStorage for TraversalGraph {
             )?;
             (key, resulting)
         };
+        if self.property_indexes.has_unique()
+            && let Some(edge_ref) = self.edge_weight(edge)
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Edge,
+                Some(edge.index().slot()),
+                self.labels.name_str(edge_ref.1),
+                None,
+                Some((&key, &resulting)),
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
         self.record_edge_property(edge, &key);
         self.pindex_edge(edge, false, Some(&key));
         self.with_edge_map(edge, |shapes, map| {
@@ -3149,6 +3374,13 @@ impl GraphStorage for TraversalGraph {
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
         Ok(self.property_index_count(element, label, key, transform, range))
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        Ok(self.property_index_duplicates(name))
     }
 
     #[inline]
@@ -3683,6 +3915,13 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).count_by_property_index(element, label, key, transform, range)
     }
 
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        (**self).unique_index_duplicates(name)
+    }
+
     #[inline]
     fn declared_property_schema(
         &self,
@@ -4129,6 +4368,13 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
         (**self).count_by_property_index(element, label, key, transform, range)
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        (**self).unique_index_duplicates(name)
     }
 
     #[inline]
@@ -4639,6 +4885,13 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
         (**self).count_by_property_index(element, label, key, transform, range)
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        (**self).unique_index_duplicates(name)
     }
 
     #[inline]
@@ -5304,6 +5557,13 @@ impl GraphStorage for Arc<TraversalGraph> {
         Ok(self
             .as_ref()
             .property_index_count(element, label, key, transform, range))
+    }
+
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::graph::UniqueIndexDuplicates>, GraphError> {
+        Ok(self.as_ref().property_index_duplicates(name))
     }
 
     #[inline]

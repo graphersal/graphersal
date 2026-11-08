@@ -847,18 +847,23 @@ was reserved), so no format version changes.
 A **property index of an extended form** (kind 6, `property_index_ext`, since 0.6.0) is a
 property index whose meaning a reader must know to keep it exact: today a **label-less** index,
 which orders every element of its element kind (unlabeled ones included) by the value of one
-top-level property, and an index whose transform starts with **`each`** (one entry per element
-of a list value; also with a label). It is ALWAYS written with the critical flag (bit 0 of the flags), so a
+top-level property, an index whose transform starts with **`each`** (one entry per element
+of a list value; also with a label), and a **unique** index (also with a label: a reader that
+does not know it would write past the constraint). It is ALWAYS written with the critical flag (bit 0 of the flags), so a
 reader that does not know kind 6 opens the store read-only (16 rule 3) instead of writing data
 without maintaining the index; a plain per-label index stays kind 2, not critical. The payload
 keys are those of kind 2; `label` is OPTIONAL (absent: label-less), `transform` is a string (one
 transform: `to_lower`, `each`) or an array of strings (a chain applied in order; this version
-serves `["each", "to_lower"]`, any other order or name keeps the definition, not served), and
-the rest is read as for kind 2 (an unknown `type`, `transform` or `element` keeps the definition,
+serves `["each", "to_lower"]`, any other order or name keeps the definition, not served),
+`unique` is a boolean (absent: `false`; a writer writes it only when `true`; a non-boolean is a
+malformed payload; with `each` the definition is kept, not served), and the rest is read as for
+kind 2 (an unknown `type`, `transform` or `element` keeps the definition,
 not served). Index
 names are one namespace across kinds 2 and 6: a writer never stores the same name in both (it
 replaces one by the other in one commit). Two indexes of kinds 2 and 6 with the same `element`,
-`label`, `key`, `type` and `transform` are invalid. Like kind 2, only the declaration is stored.
+`label`, `key`, `type` and `transform` are invalid (`unique` is not part of that identity). Like
+kind 2, only the declaration is stored: a reader rebuilds a unique index from the data, and data
+that holds a key twice keeps the definition but neither serves nor enforces it (never damage).
 A store written before 0.6.0 never holds kind 6 (it was unassigned), so no format version
 changes.
 

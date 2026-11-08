@@ -76,6 +76,19 @@ pub(crate) trait LiveRead {
     /// Why the state must not be written by this version: a critical definition of a kind it
     /// does not know (format spec 16 rule 3).
     fn critical_definition(&self) -> Result<Option<String>, GraphError>;
+    /// The unique property indexes of the catalog that are not served because their data
+    /// holds repeated values, each with its definition and the report
+    /// ([`GraphStorage::unique_index_duplicates`]).
+    fn unique_index_problems(
+        &self,
+    ) -> Result<
+        Vec<(
+            String,
+            crate::graph::PropertyIndexDefinition,
+            crate::graph::UniqueIndexDuplicates,
+        )>,
+        GraphError,
+    >;
     /// Writes the graph as a snapshot directory into `tmp` (the streaming encoder).
     fn write_snapshot_live(&self, tmp: &DirPath, write: &WriteOptions) -> Result<(), PersistError>;
     /// A backup of the graph in memory (format spec 12.11, [`super::from_memory`]).
@@ -199,6 +212,28 @@ where
         Ok(crate::persist::definitions::critical_unknown(
             self.0.definitions()?,
         ))
+    }
+
+    fn unique_index_problems(
+        &self,
+    ) -> Result<
+        Vec<(
+            String,
+            crate::graph::PropertyIndexDefinition,
+            crate::graph::UniqueIndexDuplicates,
+        )>,
+        GraphError,
+    > {
+        let mut problems = Vec::new();
+        for definition in self.0.definitions()? {
+            let Some(index) = definition.as_property_index().filter(|i| i.is_unique()) else {
+                continue;
+            };
+            if let Some(report) = self.0.unique_index_duplicates(definition.name())? {
+                problems.push((definition.name().to_string(), index.clone(), report));
+            }
+        }
+        Ok(problems)
     }
 
     fn write_snapshot_live(&self, tmp: &DirPath, write: &WriteOptions) -> Result<(), PersistError> {
