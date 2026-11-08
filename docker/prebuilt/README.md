@@ -49,7 +49,6 @@ Write the MCP configuration. The keys are documented in the book, "Dev Server an
 {
   "server_name": "my-kb",
   "instructions": { "mode": "replace", "file": "kb-instructions.md" },
-  "descriptions": "short",
   "tools": { "include": ["gql", "get_schema", "run_saved_query"] },
   "saved_query_tools": { "folders": ["kb"], "paging_params": false },
   "resources": ["schema", "saved-queries", "gql-reference"],

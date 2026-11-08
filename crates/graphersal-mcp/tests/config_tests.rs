@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 
 use graphersal_mcp::{
-    ClientRef, Descriptions, Executor, Host, Job, Mcp, McpConfig, McpError, McpRequest, PromptCost,
+    ClientRef, Executor, Host, Job, Mcp, McpConfig, McpError, McpRequest, PromptCost,
 };
 use graphersal_session::Session;
 use serde_json::{Value, json};
@@ -160,7 +160,7 @@ fn unknown_keys_and_names_are_errors_with_a_hint() {
     let err = parse(r#"{"resources": ["schemas"]}"#).unwrap_err();
     assert!(err.contains("did you mean \"schema\""), "{err}");
     let err = parse(r#"{"descriptions": "tiny"}"#).unwrap_err();
-    assert!(err.contains("\"full\" or \"short\""), "{err}");
+    assert!(err.contains("the only value is \"short\""), "{err}");
     let err = parse(r#"{"answer_limit_chars": 10}"#).unwrap_err();
     assert!(err.contains("at least 1000"), "{err}");
     let err = parse(r#"{"saved_query_tools": {"paging_param": false}}"#).unwrap_err();
@@ -302,15 +302,9 @@ fn a_configured_endpoint_lists_and_runs_only_its_tools() {
     );
     assert_eq!(listed[2]["description"], "The schema.");
     let older = &listed[3];
-    // Full descriptions: the folder tail and the paging parameters stay.
-    assert!(
-        older["description"]
-            .as_str()
-            .unwrap()
-            .contains("Folder: kb."),
-        "{older}"
-    );
-    assert!(older["inputSchema"]["properties"].get("max_rows").is_some());
+    // The query's own description, without a folder tail; no paging parameters listed.
+    assert_eq!(older["description"], "People older than min.", "{older}");
+    assert!(older["inputSchema"]["properties"].get("max_rows").is_none());
 
     let answer = call(&mcp, &host, "older", json!({"min": 30}));
     assert_eq!(answer["isError"], false, "{answer}");
@@ -388,52 +382,45 @@ fn saved_query_selection_by_folder_and_name() {
 }
 
 #[test]
-fn short_descriptions_are_short_and_drop_the_saved_query_boilerplate() {
+fn descriptions_are_short_and_saved_query_tools_carry_their_own_text() {
     let host = TestHost::with_queries();
-    let full = Mcp::new(false, None, true)
+    let listed = Mcp::new(false, None, false)
+        .with_config(parse(r#"{"saved_query_tools": {}}"#).expect("parses"))
         .tool_listings(&host)
         .expect("lists");
-    let short = Mcp::new(false, None, false)
-        .with_config(
-            parse(r#"{"descriptions": "short", "saved_query_tools": {}}"#).expect("parses"),
-        )
-        .tool_listings(&host)
-        .expect("lists");
-    assert_eq!(names(&full), names(&short));
-    for (full, short) in full.iter().zip(&short).take(27) {
-        let (f, s) = (
-            full["description"].as_str().unwrap(),
-            short["description"].as_str().unwrap(),
-        );
-        assert!(!s.is_empty() && s.len() < 520, "{}: {s}", full["name"]);
-        assert!(s.len() <= f.len(), "{}", full["name"]);
-        // The input schemas never change.
-        assert_eq!(
-            full["inputSchema"], short["inputSchema"],
-            "{}",
-            full["name"]
+    for tool in listed.iter().take(27) {
+        let text = tool["description"].as_str().unwrap();
+        // gql and query also carry what writing correctly needs (element ids, the write
+        // clauses and steps, one transaction).
+        let limit = if matches!(tool["name"].as_str(), Some("gql" | "query")) {
+            2_000
+        } else {
+            520
+        };
+        assert!(
+            !text.is_empty() && text.len() < limit,
+            "{}: {text}",
+            tool["name"]
         );
     }
-    let gql = short.iter().find(|t| t["name"] == "gql").unwrap();
+    let gql = listed.iter().find(|t| t["name"] == "gql").unwrap();
     assert!(
         gql["description"]
             .as_str()
             .unwrap()
             .contains("graphersal://gql-reference")
     );
-    let older = short.iter().find(|t| t["name"] == "older").unwrap();
+    let older = listed.iter().find(|t| t["name"] == "older").unwrap();
     assert_eq!(older["description"], "People older than min.");
     assert_eq!(
         older["inputSchema"]["properties"],
         json!({"min": {"type": "integer", "default": 30}})
     );
-    // paging_params: true keeps the paging in short mode; false drops it in full mode.
+    // The paging parameters are listed only with paging_params: true.
     for (config, paging) in [
-        (
-            r#"{"descriptions": "short", "saved_query_tools": {"paging_params": true}}"#,
-            true,
-        ),
+        (r#"{"saved_query_tools": {"paging_params": true}}"#, true),
         (r#"{"saved_query_tools": {"paging_params": false}}"#, false),
+        (r#"{"saved_query_tools": {}}"#, false),
     ] {
         let listed = Mcp::new(false, None, false)
             .with_config(parse(config).expect("parses"))
@@ -446,8 +433,8 @@ fn short_descriptions_are_short_and_drop_the_saved_query_boilerplate() {
         );
     }
     // Paging arguments still work without being listed.
-    let mcp = Mcp::new(false, None, false)
-        .with_config(parse(r#"{"descriptions": "short", "saved_query_tools": {}}"#).unwrap());
+    let mcp =
+        Mcp::new(false, None, false).with_config(parse(r#"{"saved_query_tools": {}}"#).unwrap());
     let answer = call(&mcp, &host, "older", json!({"min": 0, "max_rows": 1}));
     assert!(
         answer["content"][0]["text"]
@@ -459,11 +446,74 @@ fn short_descriptions_are_short_and_drop_the_saved_query_boilerplate() {
 }
 
 #[test]
-fn the_gql_reference_is_readable_and_listed_only_when_configured() {
+fn descriptions_short_is_accepted_and_full_was_removed() {
+    // "short" (the only style) is a no-op, so existing files keep working.
+    assert_eq!(
+        parse(r#"{"descriptions": "short"}"#).expect("parses"),
+        McpConfig::default()
+    );
+    let err = parse(r#"{"descriptions": "full"}"#).unwrap_err();
+    assert!(
+        err.contains("\"full\" was removed") && err.contains("graphersal://gql-reference"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_gql_and_query_texts_name_the_writes_only_where_writes_run() {
+    let host = TestHost::modern();
+    let description = |read_only: bool, name: &str| -> String {
+        Mcp::new(read_only, None, false)
+            .tool_listings(&host)
+            .expect("lists")
+            .iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["description"].as_str())
+            .expect("listed")
+            .to_string()
+    };
+    for read_only in [false, true] {
+        let gql = description(read_only, "gql");
+        // What the A/B test found missing: element ids, anchoring variable-length patterns.
+        assert!(
+            gql.contains("element_id(n)") && gql.contains("not id(n)"),
+            "{gql}"
+        );
+        assert!(gql.contains("Anchor a variable-length pattern"), "{gql}");
+        assert!(gql.contains("graphersal://gql-reference"), "{gql}");
+        let query = description(read_only, "query");
+        assert!(query.contains(".iterate()"), "{query}");
+        for (text, writes) in [(&gql, "DETACH DELETE"), (&query, "add_v")] {
+            assert_eq!(text.contains(writes), !read_only, "{text}");
+            assert_eq!(text.contains("one transaction"), !read_only, "{text}");
+        }
+    }
+    let gql = description(false, "gql");
+    for clause in [
+        "INSERT",
+        "SET n.k",
+        "REMOVE",
+        "MERGE",
+        "ON CREATE SET",
+        "FOR x IN $list",
+    ] {
+        assert!(gql.contains(clause), "{clause}: {gql}");
+    }
+}
+
+#[test]
+fn the_gql_reference_is_listed_and_readable() {
     let host = TestHost::modern();
     let mcp = Mcp::new(false, None, false);
     let listed = rpc(&mcp, &host, "resources/list", json!({}));
-    assert_eq!(listed["result"]["resources"].as_array().unwrap().len(), 5);
+    let uris: Vec<&str> = listed["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert_eq!(uris.len(), 6);
+    assert!(uris.contains(&"graphersal://gql-reference"), "{uris:?}");
     let read = rpc(
         &mcp,
         &host,
@@ -484,7 +534,7 @@ fn the_default_listing_stays_within_its_budget() {
     // (it is what every agent pays in context before its first call).
     let host = TestHost::modern();
     for (read_only, instructions, tools, tool_count) in
-        [(false, 3_471, 47_000, 27), (true, 3_577, 37_000, 19)]
+        [(false, 3_471, 24_000, 27), (true, 3_577, 15_500, 19)]
     {
         let cost = Mcp::new(read_only, None, false)
             .prompt_cost(&host)
@@ -509,7 +559,6 @@ fn the_knowledge_graph_example_stays_within_its_budget() {
     config
         .check(true)
         .expect("the example fits a read-only server");
-    assert_eq!(config.descriptions(), Descriptions::Short);
     let mcp = Mcp::new(true, None, false).with_config(config);
     let cost = mcp.prompt_cost(&host).expect("measures");
     let listed: Vec<&str> = cost.tools.iter().map(|(name, _)| name.as_str()).collect();

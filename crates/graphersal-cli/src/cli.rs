@@ -438,10 +438,10 @@ OPTIONS:
         --mcp-config <FILE>
                            With --mcp: the operator's configuration of the endpoint, JSON:
                            {"server_name": "..", "instructions": {"mode": "builtin" | "append"
-                           | "replace", "text": ".." | "file": ".."}, "descriptions": "full" |
-                           "short", "tools": {"include": [..], "exclude": [..], "overrides":
-                           {"<tool>": {"description": ".."}}}, "saved_query_tools": {"folders":
-                           [..], "names": [..], "exclude": [..], "paging_params": false},
+                           | "replace", "text": ".." | "file": ".."}, "tools": {"include":
+                           [..], "exclude": [..], "overrides": {"<tool>": {"description":
+                           ".."}}}, "saved_query_tools": {"folders": [..], "names": [..],
+                           "exclude": [..], "paging_params": false},
                            "resources": [..], "answer_limit_chars": 30000}. Checked at start:
                            an unknown key or tool is an error (exit 2), a key starting with "_"
                            is a comment, relative paths resolve against the file, a writing
@@ -2540,7 +2540,6 @@ mod tests {
         let kb = kb.to_str().unwrap();
         let cli = Cli::parse(["--server", "--read-only", "--mcp", "--mcp-config", kb]).unwrap();
         let config = cli.mcp_config.expect("read");
-        assert_eq!(config.descriptions(), graphersal_mcp::Descriptions::Short);
         assert_eq!(config.answer_limit_chars(), Some(30000));
         // A relative instructions file resolves against the configuration's directory.
         let short = examples.join("mcp-short.json");
