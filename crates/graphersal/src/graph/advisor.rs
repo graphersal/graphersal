@@ -8,7 +8,7 @@
 //!
 //! | Kind | When | Effect |
 //! |---|---|---|
-//! | `create_index` | a `(element, label, key)` filtered by a full scan at least `min_filter_runs` times in two days, on a label of at least `min_index_elements` elements, no index serving it (a label-less index on the key serves every label), values an index holds; a scan whose flow names no single label (no label, or several) is advised a LABEL-LESS index (`label: None`, id `create_index:<element>:*:<key>`; the elements of the kind count) | the scans become index lookups; costs index memory (estimated) |
+//! | `create_index` | a `(element, label, key)` filtered by a full scan at least `min_filter_runs` times in two days, on a label of at least `min_index_elements` elements, no index serving it (a label-less index on the key serves every label), values an index holds (a key holding arrays is advised `transform: each`, one entry per element, and only an `each` index serves it); a scan whose flow names no single label (no label, or several) is advised a LABEL-LESS index (`label: None`, id `create_index:<element>:*:<key>`; the elements of the kind count) | the scans become index lookups; costs index memory (estimated) |
 //! | `drop_index` | an index no query used for its key in the window observed, after at least `min_observed_days` days of statistics; or (confidence low) a per-label index whose key a label-less index of the same element kind and transform covers too (the entries are kept twice) | frees the index's memory (measured) |
 //! | `add_compression` | lz4: a top-level string property of at least `min_compression_bytes` without a rule, not indexed, read fewer than `hot_reads` times in two days, whose best lz4 candidate saves at least `min_saving_bytes` and `min_saving_percent`; dedup: a top-level property of any value type without a rule (indexed or not, hot or not) whose values repeat (at most one in `dedup_distinct_ratio` distinct) and whose dedup saves at least `min_dedup_saving_bytes` and more than lz4 would | frees memory (measured on the data by `estimate_compression`); lz4 reads decompress, dedup writes look the value up |
 //! | `drop_compression` | a compressed key read at least `hot_reads` times in two days | reads stop decompressing; memory grows back (measured) |
@@ -37,7 +37,7 @@ use crate::graph::compression_estimate::{
     CompressionCandidate, CompressionEstimate, CompressionEstimateRequest,
 };
 use crate::graph::memory_report::{MemoryReport, PropertyMemory};
-use crate::graph::property_index::PropertyIndexInfo;
+use crate::graph::property_index::{PropertyIndexInfo, PropertyIndexTransform};
 use crate::graph::workload::{AccessKind, AdviceMark, SeriesKind, WorkloadLevel, WorkloadReport};
 use crate::value::{ElementProperty, PropertyMap};
 
@@ -130,6 +130,9 @@ pub enum RecommendedAction {
         label: Option<String>,
         /// The top-level key.
         key: String,
+        /// The index transform: `Some(each)` for a key holding arrays (its scans filter on
+        /// their elements, `has(key, __.unfold().is(..))`), `None` otherwise.
+        transform: Option<crate::graph::PropertyIndexTransform>,
     },
     /// Drop the property index `name`.
     DropIndex {
@@ -175,6 +178,7 @@ impl RecommendedAction {
                 element,
                 label,
                 key,
+                transform,
             } => {
                 let mut fields = Vec::new();
                 if *element == ElementKind::Edge {
@@ -184,6 +188,17 @@ impl RecommendedAction {
                     fields.push(format!("label: {}", text(label)));
                 }
                 fields.push(format!("key: {}", text(key)));
+                if let Some(transform) = transform {
+                    let names: Vec<String> = transform
+                        .names()
+                        .into_iter()
+                        .map(|name| text(name))
+                        .collect();
+                    fields.push(match names.as_slice() {
+                        [one] => format!("transform: {one}"),
+                        many => format!("transform: [{}]", many.join(", ")),
+                    });
+                }
                 format!("g.create_index(#{{{}}})", fields.join(", "))
             }
             RecommendedAction::DropIndex { name } => format!("g.drop_index({})", text(name)),
@@ -237,6 +252,7 @@ impl RecommendedAction {
                 element,
                 label,
                 key,
+                transform,
             } => {
                 let index = match label {
                     Some(label) => crate::graph::PropertyIndexDefinition::new(
@@ -247,7 +263,8 @@ impl RecommendedAction {
                     None => {
                         crate::graph::PropertyIndexDefinition::label_less(*element, key.as_str())
                     }
-                };
+                }
+                .with_transform(transform.clone());
                 CatalogChange::Set(Definition::property_index(index.default_name(), index))
             }
             RecommendedAction::DropIndex { name } => {
@@ -840,15 +857,6 @@ pub fn compute(
             if uses.scan_runs < request.min_filter_runs {
                 continue;
             }
-            // A label-less index serves a labelled source too (D2).
-            let indexed = memory.indexes.iter().any(|index| {
-                index.element == element
-                    && index.key == key
-                    && (index.label.is_none() || index.label.as_deref() == label.as_deref())
-            });
-            if indexed {
-                continue;
-            }
             let rows: Vec<&PropertyMemory> = memory
                 .properties
                 .iter()
@@ -858,6 +866,26 @@ pub fn compute(
                     })
                 })
                 .collect();
+            // A key holding arrays is filtered on its elements (`has(key, __.unfold().is(..))`,
+            // or a whole-value has() an `each` index serves as a superset): an `each` index.
+            let arrays = rows
+                .iter()
+                .any(|row| row.value_types.iter().any(|t| t.name == "array"));
+            // A label-less index serves a labelled source too (D2); a key holding arrays only
+            // an `each` one.
+            let indexed = memory.indexes.iter().any(|index| {
+                index.element == element
+                    && index.key == key
+                    && (index.label.is_none() || index.label.as_deref() == label.as_deref())
+                    && (!arrays
+                        || index
+                            .transform
+                            .as_ref()
+                            .is_some_and(|transform| *transform == PropertyIndexTransform::Each))
+            });
+            if indexed {
+                continue;
+            }
             let label_elements: u64 = match &label {
                 Some(label) => memory
                     .labels
@@ -881,13 +909,18 @@ pub fn compute(
                 // The key holds no values: nothing to index.
                 continue;
             }
-            if rows.iter().any(|row| {
-                row.value_types
-                    .iter()
-                    .any(|t| NOT_INDEXABLE.contains(&t.name.as_str()))
-            }) {
+            // Without arrays a vector or an object value is never indexed; with arrays an
+            // `each` index holds their scalar elements (objects and vectors are skipped).
+            if !arrays
+                && rows.iter().any(|row| {
+                    row.value_types
+                        .iter()
+                        .any(|t| NOT_INDEXABLE.contains(&t.name.as_str()))
+                })
+            {
                 continue;
             }
+            let transform = arrays.then_some(PropertyIndexTransform::Each);
             let row_elements: u64 = rows.iter().map(|row| row.elements).sum();
             let cost_bytes = row_elements.saturating_mul(INDEX_ENTRY_BYTES);
             let confidence = if uses.scan_runs >= 100 {
@@ -928,6 +961,7 @@ pub fn compute(
                         element,
                         label: label.as_ref().map(CompactString::to_string),
                         key: key.to_string(),
+                        transform,
                     },
                     element,
                     label: label.as_ref().map(CompactString::to_string),
@@ -1346,6 +1380,7 @@ impl Advice {
                         element,
                         label,
                         key,
+                        transform,
                     } => {
                         action.insert("element", text(element.as_str()));
                         action.insert(
@@ -1353,6 +1388,12 @@ impl Advice {
                             label.as_deref().map_or(ElementProperty::Null, text),
                         );
                         action.insert("key", text(key));
+                        if let Some(transform) = transform {
+                            action.insert(
+                                "transform",
+                                crate::graph::property_index::transform_payload(transform),
+                            );
+                        }
                     }
                     RecommendedAction::DropIndex { name }
                     | RecommendedAction::DropCompression { name } => {

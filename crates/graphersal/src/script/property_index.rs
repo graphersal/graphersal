@@ -17,8 +17,66 @@ const KEYS: [&str; 6] = ["name", "element", "label", "key", "type", "transform"]
 const STORAGE_SERVES_NONE: &str = "this storage keeps the definition but serves no property \
                                    indexes; queries scan";
 
+/// A transform as the DSL shows it: its name (`"to_lower"`, `"each"`), a chain as the array of
+/// its names (`["each", "to_lower"]`).
+fn transform_value(transform: &PropertyIndexTransform) -> Dynamic {
+    match transform {
+        PropertyIndexTransform::Chain(chain) => Dynamic::from_array(
+            chain
+                .steps()
+                .iter()
+                .map(|step| Dynamic::from(step.as_str().to_string()))
+                .collect(),
+        ),
+        PropertyIndexTransform::ToLower
+        | PropertyIndexTransform::Each
+        | PropertyIndexTransform::Unknown(_) => Dynamic::from(transform.as_str().to_string()),
+    }
+}
+
+/// The `transform` of `create_index`: `()` (none), a name, or a chain as an array of names
+/// applied in order (`["each", "to_lower"]`).
+fn transform_of(
+    operation: &str,
+    value: Dynamic,
+) -> Result<Option<PropertyIndexTransform>, Box<EvalAltResult>> {
+    let mismatch = |actual: String| {
+        fail(ScriptError::ArgumentMismatch {
+            step_name: operation.to_string(),
+            expected: "transform as a name (\"to_lower\", \"each\"), an array of names applied \
+                       in order ([\"each\", \"to_lower\"]) or () for none"
+                .to_string(),
+            actual,
+        })
+    };
+    if value.is_array() {
+        let actual = type_name_of(&value);
+        let Some(items) = value.try_cast::<rhai::Array>() else {
+            return Err(mismatch(actual));
+        };
+        let mut names = Vec::with_capacity(items.len());
+        for item in items {
+            if !item.is_string() {
+                return Err(mismatch(format!(
+                    "an array holding {}",
+                    type_name_of(&item)
+                )));
+            }
+            names.push(item.to_string());
+        }
+        return PropertyIndexTransform::from_names(&names)
+            .map(Some)
+            .ok_or_else(|| mismatch("an empty array".to_string()));
+    }
+    if value.is_unit() || value.is_string() {
+        return Ok(optional_text(operation, "transform", value)?
+            .map(|name| PropertyIndexTransform::from_name(&name)));
+    }
+    Err(mismatch(type_name_of(&value)))
+}
+
 /// One index as a map: name, element, label (`()` for a label-less index), key, type,
-/// transform (`()` without one), served
+/// transform (`()` without one; a chain as the array of its names), served
 /// (with `reason` when it is not served) and its current stats (entries, distinct_values,
 /// skipped, bytes; zero when it is not served).
 fn index_entry(
@@ -45,7 +103,7 @@ fn index_entry(
         "transform".into(),
         index
             .transform()
-            .map(|transform| Dynamic::from(transform.as_str().to_string()))
+            .map(transform_value)
             .unwrap_or(Dynamic::UNIT),
     );
     map.insert("served".into(), Dynamic::from_bool(stats.is_some()));
@@ -115,11 +173,13 @@ impl ScriptGraphTraversalSource {
     /// LABEL-LESS: every element of the kind, unlabeled ones included
     /// ([`PropertyIndexDefinition::label_less`]). `name` defaults to
     /// [`PropertyIndexDefinition::default_name`] (`<label>_<key>`, `<key>` label-less, `_edge`
-    /// for edges, `_to_lower` with that transform), `type` to `"memory-ordered"` (the only type this
-    /// version knows), `transform` to none (`"to_lower"`: the lowered text of string values,
-    /// for `has(key, __.to_lower().is(..))`). The index is built in the same
-    /// unit. Asks for `Create` on the index (`Update` when it replaces one; of kind
-    /// `property_index_ext` for a label-less index); a storage without
+    /// for edges, `_to_lower` with that transform, `_each`, `_each_to_lower`), `type` to
+    /// `"memory-ordered"` (the only type this version knows), `transform` to none
+    /// (`"to_lower"`: the lowered text of string values, for `has(key, __.to_lower().is(..))`;
+    /// `"each"`: every element of an array value, for `has(key, __.unfold().is(..))`; the
+    /// chain `["each", "to_lower"]` for `has(key, __.unfold().to_lower().is(..))`). The index is
+    /// built in the same unit. Asks for `Create` on the index (`Update` when it replaces one;
+    /// of kind `property_index_ext` for a label-less index or one with `each`); a storage without
     /// property indexes refuses it, and so does
     /// [`PropertyIndexDefinition::check_create`] (an unknown type, a key the stored schema
     /// declares as values the type cannot hold).
@@ -168,8 +228,7 @@ impl ScriptGraphTraversalSource {
             None => PropertyIndexType::MemoryOrdered,
             Some(name) => PropertyIndexType::from_name(&name),
         };
-        let transform = optional_text(operation, "transform", take("transform"))?
-            .map(|name| PropertyIndexTransform::from_name(&name));
+        let transform = transform_of(operation, take("transform"))?;
         let index = match label {
             Some(label) => PropertyIndexDefinition::new(element, label, key),
             None => PropertyIndexDefinition::label_less(element, key),

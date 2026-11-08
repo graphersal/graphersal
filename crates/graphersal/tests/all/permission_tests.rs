@@ -4070,3 +4070,45 @@ fn creating_and_dropping_a_label_less_index_asks_for_its_own_kind() {
     run(&graph, r#"g.drop_index("name")"#, AllowAll).unwrap();
     assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
 }
+
+/// An index with the transform `each` (stage S3 of the property index extensions) is a
+/// definition of kind `property_index_ext` even with a label: creating and dropping it ask for
+/// that kind, so a read-only policy refuses both, with the kind and the default name.
+#[test]
+fn creating_and_dropping_a_per_label_each_index_asks_for_the_extended_kind() {
+    let graph = modern();
+    run(
+        &graph,
+        r#"g.v("1").property("tags", ["x"]).iterate()"#,
+        AllowAll,
+    )
+    .unwrap();
+    assert_denied(
+        run(
+            &graph,
+            r#"g.create_index(#{label: "person", key: "tags", transform: "each"})"#,
+            AccessPolicy::read_only(),
+        ),
+        "create_index",
+        r#"Create Definition(property_index_ext "person_tags_each")"#,
+    );
+    assert!(graph.read().property_indexes().unwrap().is_empty());
+    run(
+        &graph,
+        r#"g.create_index(#{label: "person", key: "tags", transform: "each"})"#,
+        AllowAll,
+    )
+    .unwrap();
+    assert_denied(
+        run(
+            &graph,
+            r#"g.drop_index("person_tags_each")"#,
+            AccessPolicy::read_only(),
+        ),
+        "drop_index",
+        r#"Delete Definition(property_index_ext "person_tags_each")"#,
+    );
+    assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
+    run(&graph, r#"g.drop_index("person_tags_each")"#, AllowAll).unwrap();
+    assert!(graph.read().property_indexes().unwrap().is_empty());
+}

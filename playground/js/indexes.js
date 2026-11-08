@@ -46,7 +46,7 @@ export function catalogMenuItems(info) {
  * The name the engine gives an index without one (`PropertyIndexDefinition::default_name`):
  * `<label>_<key>` (`<key>` for a label-less index, `label` null or empty; `<label>_<key>_edge`
  * for an edge index), then `_<transform>` for an index with
- * a transform (`person_name_to_lower`), every character that is not an ASCII letter, digit or `_`
+ * a transform (`person_name_to_lower`; a chain by its names, `tags_each_to_lower`), every character that is not an ASCII letter, digit or `_`
  * replaced by `_`, prefixed with `index_` when it would not start with a letter. The form shows
  * it as the name's placeholder, so it follows the Transform select while no name is typed.
  */
@@ -128,10 +128,36 @@ export const INDEX_TRANSFORMS = Object.freeze([
       + 'constant in lower case (it is compared as given); P.within and ranges are served too. '
       + 'Other values are not indexed; while the key holds a non-string value queries scan.',
   }),
+  Object.freeze({
+    name: 'each',
+    label: 'each',
+    description: 'Indexes every element of a list value (any other value as itself), for "lists '
+      + 'containing x": queries are written has(key, __.unfold().is(..)); a has(key, x) on the whole '
+      + 'value reads it too and is re-checked. Nested lists, maps and vectors inside a list are '
+      + 'not indexed.',
+  }),
+  Object.freeze({
+    name: 'each to_lower',
+    label: 'each, to_lower',
+    description: 'A chain: the lowered text of every string element of a list value, for a '
+      + 'case-insensitive "lists containing x" written has(key, __.unfold().to_lower().is(..)). '
+      + 'While the key holds a non-string element queries scan.',
+  }),
 ]);
 
-/** The transform of an entry of `listIndexes()`, '' for none. */
+/**
+ * The `transform` a spec sends for the Transform select's value: a chain (names separated by a
+ * space, as the engine names it) as the array of its names, one name as itself.
+ */
+export function transformSpecOf(value) {
+  const names = String(value || '').trim().split(/\s+/u).filter(Boolean);
+  if (names.length === 0) return undefined;
+  return names.length === 1 ? names[0] : names;
+}
+
+/** The transform of an entry of `listIndexes()`, '' for none (a chain by its names, space-separated). */
 export function indexTransformOf(index) {
+  if (index && Array.isArray(index.transform)) return index.transform.join(' ');
   return (index && typeof index.transform === 'string' && index.transform) || '';
 }
 
@@ -197,7 +223,7 @@ export function indexDraftToSpec(draft) {
   if (name) spec.name = name;
   const type = typeof draft.type === 'string' ? draft.type.trim() : '';
   if (type) spec.type = type;
-  const transform = typeof draft.transform === 'string' ? draft.transform.trim() : '';
+  const transform = transformSpecOf(typeof draft.transform === 'string' ? draft.transform : '');
   if (transform) spec.transform = transform;
   return { spec };
 }

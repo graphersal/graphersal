@@ -170,10 +170,14 @@ impl Session {
                 element: kind_of,
                 label,
                 key,
+                transform,
+                ..
             } => {
-                let answer = self.create_index(
-                    &json!({"element": element(kind_of), "label": label, "key": key}),
-                );
+                let mut spec = json!({"element": element(kind_of), "label": label, "key": key});
+                if let Some(transform) = transform {
+                    spec["transform"] = crate::indexes::transform_json(transform);
+                }
+                let answer = self.create_index(&spec);
                 if answer["ok"] != true {
                     return refused(&answer);
                 }

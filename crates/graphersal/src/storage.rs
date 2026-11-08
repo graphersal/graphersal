@@ -209,6 +209,7 @@ pub use crate::graph::memory_report::{
 };
 pub use crate::graph::property_index::{
     PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats, PropertyIndexTransform,
+    PropertyIndexTransformChain,
 };
 pub use crate::graph::schema::defaults::CreateContext;
 pub use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema, SchemaInferer};

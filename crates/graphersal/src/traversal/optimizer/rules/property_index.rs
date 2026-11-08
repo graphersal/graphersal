@@ -31,8 +31,15 @@ const PURE_FILTERS: [&str; 7] = [
 ///   with exactly that child, `P` as above), served by an index with the transform `to_lower`
 ///   on the key, read with `P`'s constants as given (the child compares the lowered value with
 ///   them). Only while that index skipped no value (`PropertyIndexStats::skipped` 0): the
-///   `to_lower()` of the child fails on a non-string value, and a scan must report it. Any
-///   other `has(key, traversal)` ends the run of pure filters.
+///   `to_lower()` of the child fails on a non-string value, and a scan must report it.
+/// - the `has(key, __.unfold().is(P))` steps in that run ("arrays containing", design section
+///   4), served by an index with the transform `each` (whatever it skipped: a nested array, an
+///   object or a vector that `unfold()` emits never equals nor ranges with a scalar), and
+///   `has(key, __.unfold().to_lower().is(P))` by `["each", "to_lower"]` while it skipped
+///   nothing. Any other `has(key, traversal)` ends the run of pure filters.
+/// - a condition on the whole value (a folded `has(key, value)`, `has(key, P)`) with no index
+///   of no transform on the key: an `each` index serves it as a SUPERSET (an array holding the
+///   value is a candidate; the source's re-check of the whole value drops it), never `exact`.
 ///
 /// Which indexes can serve a condition on `key` (design D1/D2):
 ///
@@ -148,7 +155,8 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                 && info.label.as_deref() == label
                 && info.key == key
                 && info.transform.as_ref() == transform
-                && (transform.is_none() || info.stats.skipped == 0)
+                && (transform.is_none_or(|transform| !transform.can_fail())
+                    || info.stats.skipped == 0)
         };
         // The cheapest way to serve `key` with `ranges`: `(cost, label_less)`, `None` when no
         // index serves it.
@@ -188,7 +196,18 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
              transform: Option<PropertyIndexTransform>,
              ranges: Vec<PropertyIndexRange>,
              folded_value: Option<&crate::ElementProperty>| {
-                if let Some((cost, label_less)) = cost(key, transform.as_ref(), &ranges)
+                // A condition on the whole value is served exactly by an index without a
+                // transform, else by an `each` index as a superset (its candidates' arrays fail
+                // the re-check of the whole value).
+                let (transform, found) = match cost(key, transform.as_ref(), &ranges) {
+                    None if transform.is_none() => {
+                        let each = Some(PropertyIndexTransform::Each);
+                        let found = cost(key, each.as_ref(), &ranges);
+                        (each, found)
+                    }
+                    found => (transform, found),
+                };
+                if let Some((cost, label_less)) = found
                     && best.as_ref().is_none_or(|(best, _)| cost < *best)
                 {
                     // Count from the postings: one folded equality, nothing else to re-check.

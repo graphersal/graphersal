@@ -175,27 +175,52 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasTraversal<'g, S
             visit(Some(key), crate::graph::workload::AccessKind::FilterScan);
         }
     }
-    /// `has(key, __.to_lower().is(P))` on a literal name, `P` an equality, `P.within` or a
-    /// range: the condition a `to_lower` index serves (the constants of `P` as given, compared
-    /// with the lowered values). Any other child is not served.
+    /// `has(key, __.to_lower().is(P))`, `has(key, __.unfold().is(P))` and
+    /// `has(key, __.unfold().to_lower().is(P))` on a literal name, `P` an equality, `P.within`
+    /// or a range: the condition an index of the transform `to_lower`, `each` or
+    /// `["each", "to_lower"]` serves (the constants of `P` as given, compared with the
+    /// transformed values). Any other child is not served, nor a `to_lower()` condition whose
+    /// `P` names `null` (`to_lower()` passes a `null` through, a `to_lower` index holds no
+    /// `null`).
     fn index_condition(&self) -> Option<crate::traversal::step::IndexCondition<'_>> {
         let HasTarget::Property(key) = &self.target else {
             return None;
         };
         let key = key.as_name()?;
-        let [values, transform, predicate] = self.traversal.steps.as_slice() else {
-            return None;
-        };
-        let (
+        let [
             GraphStep::FlatMap("values", _),
-            GraphStep::Map(_, transform),
+            middle @ ..,
             GraphStep::Filter("is", predicate),
-        ) = (values, transform, predicate)
+        ] = self.traversal.steps.as_slice()
         else {
             return None;
         };
-        let transform = transform.index_transform()?;
+        let mut steps = Vec::with_capacity(middle.len());
+        for step in middle {
+            steps.push(match step {
+                GraphStep::FlatMap("unfold", _) => crate::graph::PropertyIndexTransform::Each,
+                GraphStep::Map(_, map) => map.index_transform()?,
+                _ => return None,
+            });
+        }
+        let transform = crate::graph::PropertyIndexTransform::chain(steps)?;
+        if !transform.is_known() {
+            return None;
+        }
         let ranges = predicate.value_index_ranges()?;
+        if transform.can_fail()
+            && ranges.iter().any(|range| {
+                [&range.lower, &range.upper].into_iter().any(|bound| {
+                    matches!(
+                        bound,
+                        std::ops::Bound::Included(crate::ElementProperty::Null)
+                            | std::ops::Bound::Excluded(crate::ElementProperty::Null)
+                    )
+                })
+            })
+        {
+            return None;
+        }
         Some(crate::traversal::step::IndexCondition {
             key,
             transform: Some(transform),

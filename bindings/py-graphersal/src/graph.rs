@@ -1498,12 +1498,16 @@ impl Graph {
     /// the index. ``label=None`` declares a LABEL-LESS index (every element of the kind,
     /// unlabeled ones included), which a ``has()`` without ``has_label`` reads too; ``indexes()``
     /// lists its ``label`` as ``None``. ``name`` defaults to ``<label>_<key>`` (``<key>``
-    /// label-less, ``<label>_<key>_edge`` for edges, then ``_to_lower`` with that transform), ``type`` to ``"memory-ordered"`` (the only index
+    /// label-less, ``<label>_<key>_edge`` for edges, then ``_to_lower``, ``_each`` or
+    /// ``_each_to_lower`` with that transform), ``type`` to ``"memory-ordered"`` (the only index
     /// type this version knows). ``transform="to_lower"`` indexes the lowered text of string
-    /// values for a case-insensitive search, ``has(key, __.to_lower().is("alice"))``. The index
-    /// is built at once and rebuilt from the data whenever the graph is loaded. An unknown type
-    /// or transform, or a key the graph's schema declares as values the index cannot hold (a
-    /// vector, an array, an object; with ``to_lower`` any non-string), is refused.
+    /// values for a case-insensitive search, ``has(key, __.to_lower().is("alice"))``;
+    /// ``transform="each"`` every element of an array value, for ``has(key,
+    /// __.unfold().is("x"))``; a chain is a list of names applied in order,
+    /// ``transform=["each", "to_lower"]``. The index is built at once and rebuilt from the data
+    /// whenever the graph is loaded. An unknown type or transform, a chain in another order, or
+    /// a key the graph's schema declares as values the index cannot hold (a vector, an object,
+    /// an array without ``each``; with ``to_lower`` any non-string), is refused.
     #[pyo3(signature = (label, key, element="vertex", name=None, r#type="memory-ordered", *, transform=None, policy=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_index(
@@ -1514,7 +1518,7 @@ impl Graph {
         element: &str,
         name: Option<&str>,
         r#type: &str,
-        transform: Option<&str>,
+        transform: Option<IndexTransformArg>,
         policy: Option<PyRef<'_, AccessPolicy>>,
     ) -> PyResult<()> {
         let params = PyDict::new(py);
@@ -1531,9 +1535,22 @@ impl Graph {
             params.set_item("index_name", name)?;
             spec.push_str(", name: index_name");
         }
-        if let Some(transform) = transform {
-            params.set_item("index_transform", transform)?;
-            spec.push_str(", transform: index_transform");
+        match transform {
+            Some(IndexTransformArg::One(name)) => {
+                params.set_item("index_transform", name)?;
+                spec.push_str(", transform: index_transform");
+            }
+            Some(IndexTransformArg::Chain(names)) => {
+                // Parameters are scalars: one per name, gathered into an array literal.
+                let mut items = Vec::with_capacity(names.len());
+                for (position, name) in names.iter().enumerate() {
+                    let param = format!("index_transform_{position}");
+                    params.set_item(param.as_str(), name)?;
+                    items.push(param);
+                }
+                spec.push_str(&format!(", transform: [{}]", items.join(", ")));
+            }
+            None => {}
         }
         let script = format!("g.create_index(#{{{spec}}})");
         self.run(py, &script, Some(&params), false, policy.as_deref())?;
@@ -1542,7 +1559,7 @@ impl Graph {
 
     /// ``graph.indexes(*, policy=None)``: the property indexes as a ``list`` of ``dict``
     /// (``name``, ``element``, ``label`` (``None`` for a label-less index), ``key``, ``type``, ``transform`` (``None`` without
-    /// one), ``served``, ``reason`` when it is not served, and the current ``entries``,
+    /// one, a chain as the list of its names), ``served``, ``reason`` when it is not served, and the current ``entries``,
     /// ``distinct_values``, ``skipped``, ``bytes``).
     #[pyo3(signature = (*, policy=None))]
     fn indexes(
@@ -1867,4 +1884,12 @@ fn warn_graphson_skips(py: Python<'_>, path: &str, report: &ImportReport) -> PyR
         )?;
     }
     Ok(())
+}
+
+/// The ``transform`` of ``Graph.create_index``: one name (``"to_lower"``, ``"each"``) or a chain
+/// as a list of names applied in order (``["each", "to_lower"]``).
+#[derive(FromPyObject)]
+enum IndexTransformArg {
+    One(String),
+    Chain(Vec<String>),
 }

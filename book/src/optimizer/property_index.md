@@ -19,6 +19,10 @@ v().has_label("person")                          →   v(labels: ["person"]) [in
    .has("name", __.to_lower().is("ada"))              has("name", __.to_lower().is(P.eq("ada")))
 v().has("name", "josh")                          →   v().has("name", "josh") [index: vertex name, any label]
 v().has("name", "josh").count()                  →   v().has("name", "josh").count() [index: vertex name, any label] [count from index]
+v().has("_owners", __.unfold().is("o1"))         →   v() [index: vertex _owners each, any label]
+                                                      has("_owners", __.unfold().is(P.eq("o1")))
+v().has_label("doc")                             →   v(labels: ["doc"]) [index: vertex doc.tags each to_lower]
+   .has("tags", __.unfold().to_lower().is("x"))       has("tags", __.unfold().to_lower().is(P.eq("x")))
 ```
 
 It looks at
@@ -33,8 +37,18 @@ It looks at
   [transform](../users_guide/property_indexes.md#case-insensitive-search) `to_lower` on the key
   covers. Its slices are `P`'s constants as given (the child compares the lowered value with
   them); it is covered only while that index has skipped no value (`skipped` 0), because the
-  child's `to_lower()` fails on a non-string value and the scan must report that error. Any
-  other `has(key, traversal)` ends the run of pure filters.
+  child's `to_lower()` fails on a non-string value and the scan must report that error. A
+  `null` constant is not covered (`to_lower()` passes a `null` through, the index holds none).
+- the `has(key, __.unfold().is(P))` steps in that run, covered by an index with the transform
+  [`each`](../users_guide/property_indexes.md#arrays-the-each-transform) (one entry per list
+  element) whatever it skipped (a nested list, a map's entries or a vector that `unfold()`
+  emits never equals or ranges with a scalar), and `has(key, __.unfold().to_lower().is(P))` by
+  `["each", "to_lower"]` while it skipped nothing. Any other `has(key, traversal)` ends the run
+  of pure filters.
+
+A condition on the whole value (a folded `has(key, value)`, a `has(key, P)`) with no index of no
+transform on the key is covered by an `each` index as a SUPERSET: lists holding the value are
+candidates and the re-check of the whole value drops them; such an access is never exact.
 
 A condition is covered when every label folded into the start step has an index on its key (of
 the condition's transform: none for `has(key, ..)`, `to_lower` for the lowered form), or when a
@@ -46,7 +60,7 @@ covered conditions the rule picks the most selective by the indexes' statistics 
 `entries / distinct_values` elements per index and value; a range: half the entries).
 
 When no re-check can drop a candidate (one folded equality on a string, boolean, uuid or
-temporal value, no other folded condition, no transform, and a label-less index under a start
+temporal value, no other folded condition, no transform (so never with `each`), and a label-less index under a start
 without labels or the index of the start's single label) the access is marked exact, and
 [Count Pushdown](count_pushdown.md) may fuse a following `count()` into the start step, which
 the storage then answers from the index (`GraphStorage::count_by_property_index`) without
@@ -70,7 +84,8 @@ equals the scan's (only the order of the elements may differ).
   `count()`/`group_count()`.
 - The condition is not served: `P.neq`, `P.without`, text predicates, composites, a list or map
   value, a jpath key, `NaN`; a `has(key, traversal)` whose child is not exactly
-  `to_lower().is(P)`; the lowered form while its index skipped a non-string value.
+  `to_lower().is(P)`, `unfold().is(P)` or `unfold().to_lower().is(P)`; a lowered form while its
+  index skipped a non-string value.
 
 `g.with("optimizer.disabled", ["property_index"])` turns it off for one query, for example to
 compare the plan with the label scan.

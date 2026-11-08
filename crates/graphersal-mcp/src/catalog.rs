@@ -459,8 +459,8 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             "The property indexes of the graph: the vertices or edges of one label (label null: \
              of every label) ordered by one top-level property, so that v()/e() with \
              has_label(label) and has(key, ..) (equality, P.within, ranges) read only the \
-             matching elements. Each has name, element, label, key, type (memory-ordered), transform (null, or to_lower: the \
-             lowered text of string values), served (false: the definition is kept but no \
+             matching elements. Each has name, element, label, key, type (memory-ordered), transform (null, to_lower, each \
+             or [\"each\",\"to_lower\"]), served (false: the definition is kept but no \
              query reads it; reason says why, such as a storage without indexes or a type or \
              transform this version does not know) and its current stats (entries, \
              distinctValues, skipped, bytes; a to_lower index is read only while skipped, the \
@@ -479,14 +479,14 @@ pub(crate) fn all_tools() -> Vec<Tool> {
              results are the same as without the index, only their order may differ. It costs \
              memory (see bytes in list_indexes) and a little time on every write of the key. One \
              index per element, label, key, type and transform; `name` defaults to \
-             <label>_<key> (<key> without a label, <label>_<key>_edge for edges, then _to_lower \
-             with that transform), `type` to memory-ordered (an ordered index in \
+             <label>_<key> (<key> without a label, <label>_<key>_edge for edges, then \
+             _<transform>), `type` to memory-ordered (an ordered index in \
              memory holding scalar values: null, booleans, numbers, strings, uuids, dates and \
              times). `transform` \"to_lower\" indexes the lowered text of string values for a \
              case-insensitive search written has(key, __.to_lower().is(\"alice\")) (also \
-             P.within and ranges; the constants compared as given). A key the schema declares \
-             as a vector, an array or an object is refused (search vectors with \
-             nearest()/similarity()), with to_lower any non-string key.",
+             P.within and ranges; the constants compared as given); \"each\" the elements of a \
+             list, for has(key, __.unfold().is(\"x\")). A key the schema declares as a vector, \
+             an object, a list (without each) is refused, with to_lower any non-string key.",
             json!({
                 "type": "object",
                 "properties": {
@@ -500,9 +500,8 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                         "description": "The index type; default memory-ordered (an ordered index kept in memory, rebuilt from the data on open; serves =, P.within and ranges).",
                     },
                     "transform": {
-                        "type": "string",
-                        "enum": graphersal::catalog::PropertyIndexTransform::KNOWN_NAMES,
-                        "description": "Optional: to_lower indexes the lowered text of string values, for has(key, __.to_lower().is(..)) (case-insensitive search). Default: none (the values themselves).",
+                        "enum": transform_choices(),
+                        "description": "Optional: to_lower for has(key, __.to_lower().is(..)); each (list elements) for has(key, __.unfold().is(..)); [\"each\", \"to_lower\"] for has(key, __.unfold().to_lower().is(..)). Default: none.",
                     },
                 },
                 "required": ["key"],
@@ -938,4 +937,15 @@ pub(crate) fn short_description(name: &str) -> &'static str {
         }
         _ => "",
     }
+}
+
+/// The `transform` values `create_index` takes: every transform name this version knows, then
+/// the chain it serves as the array of its names (`["each", "to_lower"]`).
+fn transform_choices() -> Value {
+    let mut choices: Vec<Value> = graphersal::catalog::PropertyIndexTransform::KNOWN_NAMES
+        .iter()
+        .map(|name| Value::from(*name))
+        .collect();
+    choices.push(json!(["each", "to_lower"]));
+    Value::Array(choices)
 }
