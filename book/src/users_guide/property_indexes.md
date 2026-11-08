@@ -110,19 +110,21 @@ g.e().has("weight", P.gt(0.5)).count().next()
 
 ## Counting from an index
 
-A `count()` right after a start step whose one condition an index answers exactly is counted
-from the index without visiting the elements: one folded `has(key, value)` with a string,
-boolean, uuid or temporal value, no other folded condition, no transform, and either a
-label-less index under a start without labels or the index of the start's one label.
+A `count()` right after a start step whose one condition an index answers
+[exactly](#kept-exact) is counted from the index without visiting the elements: one equality
+(a folded `has(key, value)`, `has(key, P.eq(..))`, the `each` point `has(key,
+__.unfold().is(..))` or a `to_lower` point) with a string, boolean, uuid or temporal value, no other condition, and
+either a label-less index under a start without labels or the index of the start's one label.
 `.profile()` shows `[count from index]`:
 
 ```text
-v().has("name", "josh").count() [index: vertex name, any label] [count from index]
+v().has("name", "josh").count() [index: vertex name, any label, exact] [count from index]
+v().has("_owners", __.unfold().is(P.eq("o1"))).count() [index: vertex _owners each, any label, exact] [count from index]
 ```
 
-A number (ranged by its `float64` value), `null`, a second condition, a label to check or an
-[`each`](#arrays-the-each-transform) index (it holds lists by their elements, so its slices are not
-exact) falls back to counting the checked candidates of the index read.
+A number (ranged by its `float64` value), `null`, a range, `P.within`, a second condition, a
+label to check or a whole-value condition read from an [`each`](#arrays-the-each-transform)
+index (a superset) falls back to counting the candidates of the index read.
 
 ## Index types
 
@@ -246,8 +248,11 @@ What is served and what is not:
 - Served: `v()`/`e()` with a folded `has_label(..)` (every label with a `to_lower` index on the
   key), followed in the run of pure filters by `has(key, __.to_lower().is(P))` with `P` a value,
   `P.eq`, `P.within` or a range (`P.gt/gte/lt/lte/between/inside/outside`). `.profile()` shows
-  `[index: vertex person.name to_lower]` on the start step; the `has` step stays in the plan and
-  re-checks every candidate.
+  `[index: vertex person.name to_lower]` on the start step; for a range the `has` step stays in
+  the plan and re-checks every candidate, a point (a value, `P.eq`, `P.within`) is answered
+  [exactly](#kept-exact) in a query that does not write: the `has` step leaves the plan,
+  `v(labels: ["person"]).has("name", __.to_lower().is(P.eq("marko"))) [index: vertex
+  person.name to_lower, exact]`.
 - Not served (a scan, the same result): any other child (`__.is("x")` without `to_lower()`,
   `__.to_upper()`, `__.to_lower(Scope.local)`, more steps after `is(..)`, `P.neq`, text
   predicates), `where(__.values("name").to_lower().is(..))`, a jpath key, a source without
@@ -291,9 +296,12 @@ g.v().has("_owners", "o1").values("name").to_list()           // the whole value
   and so does a map or a vector value itself.
 - **Served exactly**: `has(key, __.unfold().is(P))` with `P` a value, `P.eq`, `P.within` or a
   range, whatever the index skipped: what `unfold()` emits for a skipped value (a nested list, the
-  entries of a map, a vector) never equals or ranges with a scalar constant.
-  `.profile()` shows `[index: vertex _owners each, any label]` (per label
-  `[index: vertex Method._owners each]`); the `has` step stays and re-checks.
+  entries of a map, a vector) never equals or ranges with a scalar constant. For a point of a
+  string, boolean, uuid or temporal value (`P.within` of such values too) the `has` step leaves
+  the plan and the start shows it: `v().has("_owners", __.unfold().is(P.eq("o1"))) [index:
+  vertex _owners each, any label, exact]` (per label `[index: vertex Method._owners each,
+  exact]`; see [Kept exact](#kept-exact)); a range, a number or `null` keeps the `has` step,
+  which re-checks.
 - **Served as a superset**: a condition on the **whole** value, `has(key, value)` and
   `has(key, P)`, reads an `each` index when no index without a transform covers the key: the lists
   holding the value are candidates too, and the re-check of the whole value drops them. A plain
@@ -301,14 +309,14 @@ g.v().has("_owners", "o1").values("name").to_list()           // the whole value
 - **The chain `["each", "to_lower"]`** holds the lowered text of every string element and serves
   `has(key, __.unfold().to_lower().is(P))` (`[index: vertex tags each to_lower, any label]`), like
   `to_lower` only while it skipped nothing (a number in a list makes `to_lower()` fail, and the
-  scan must report it). A `to_lower` transform never serves a `null` constant (`to_lower()` passes
+  scan must report it); a point is then answered [exactly](#kept-exact), like `to_lower`'s. A `to_lower` transform never serves a `null` constant (`to_lower()` passes
   a `null` through, the index holds none).
 - **Not served**: `__.unfold().unfold().is(..)`, `__.to_lower().unfold()..` (the wrong order),
   negations and text predicates, GQL's `x IN n.list` (a `gql:filter` expression: a right operand
   that is not a list is an error there, so it scans).
 - A storage lookup returns each element once even when it holds several values of the slice
-  (`["a", "b"]` in `P.between("a", "c")`, or `1` and `1.0`); a fused `count()` is never answered
-  from an `each` index.
+  (`["a", "b"]` in `P.between("a", "c")`, or `1` and `1.0`); a fused `count()` is answered from an
+  `each` index only for one exact point ([above](#counting-from-an-index)).
 - **Persistence**: an index with `each` is stored as catalog kind `property_index_ext` (6) with
   the critical flag, also with a label, so a version that does not know it opens the store
   read-only. The payload keeps a single transform as its name and a chain as the array of its
@@ -418,6 +426,7 @@ A `v()`/`e()` start step reads an index when
 | `P.neq`, `P.without`, text predicates, `P.typeOf`, `and`/`or`/`not` composites | not served (scan) |
 | a value that is a list or a map (`has("tags", ["a"])`) | not served (scan) |
 | `has(key, __.unfold().is(P))` | by an [`each`](#arrays-the-each-transform) index |
+| a point (`value`, `P.eq`, `P.within`) of a string, boolean, uuid or temporal value, without a transform or by `each` | exactly: no re-check ([Kept exact](#kept-exact)) |
 | `has(key, value)`, `has(key, P)` with only an `each` index on the key | by it, as a superset (re-checked) |
 | `v().has("title", "CEO")` without a label | served by a [label-less index](#label-less-indexes) only |
 | a jpath key | not served (scan) |
@@ -428,7 +437,8 @@ about half the entries).
 
 **Results are the same as without the index**, always: the index returns a superset of the
 matching elements (numbers are ranged by their value as `float64`, so `29` and `29.0` are both
-read), and the start step and the `has()` step still check every condition on each candidate. The
+read), and the start step and the `has()` step still check every condition on each candidate,
+except the one condition the index answers [exactly](#kept-exact), which no longer needs it. The
 comparison is exactly that of `has()`: `has("age", 29)` matches an `int64` 29 only,
 `has("age", P.eq(29.0))` and the ranges compare numbers across `int64` and `float64`, a string never
 equals a uuid, `null` equals only `null`. Dates and times are index keys with the same rules
@@ -462,9 +472,19 @@ values("name")                                                  1       2       
 Optimizer rules applied: source_filter_pushdown, property_index
 ```
 
-An equality folded into the start step shows as
-`v(labels: ["person"]).has("title", "CEO") [index: vertex person.title]`. To compare with the scan,
-turn the rule off for one query: `g.with("optimizer.disabled", ["property_index"])` (see
+The range keeps its `has` step, which re-checks every candidate. A condition the index answers
+[exactly](#kept-exact) adds `, exact` inside the brackets: an equality folded into the start step
+shows as `v(labels: ["person"]).has("title", "CEO") [index: vertex person.title, exact]` (the
+start step does not check it again), and a `has` step it answers leaves the plan and is shown on
+the start step:
+
+```text
+v().has("_owners", __.unfold().is(P.eq("o1"))) [index: vertex _owners each, any label, exact]
+out()
+```
+
+To compare with the scan, turn the rule off for one query:
+`g.with("optimizer.disabled", ["property_index"])` (see
 [Property Index Rule](../optimizer/property_index.md)).
 
 ## Kept exact
@@ -476,6 +496,25 @@ them), changing an edge label. A rolled-back unit restores the index with the da
 `apply_change_set` and a store's recovery rebuild it exactly. A string kept
 [compressed](compressed_properties.md) is indexed by its text (the index holds the plain text, so
 indexing a long compressed field costs the memory compression saved).
+
+Because it is kept exact, the index **answers** some conditions instead of narrowing them: a
+point (`has(key, value)`, `P.eq`, `P.within`) of a string, boolean, uuid or temporal value read
+from an index without a transform, the same point inside `has(key, __.unfold().is(..))` read
+from an `each` index, or inside `has(key, __.to_lower().is(..))` / `has(key,
+__.unfold().to_lower().is(..))` read from a `to_lower` / `["each", "to_lower"]` index while it
+skipped nothing (every value is then a string, `to_lower()` cannot fail, and nothing writes
+during a reading query), finds exactly the elements the condition accepts, each once. In a query
+that does **not write** (no mutating step at any level), the optimizer then drops the re-check
+of that one condition: a folded equality is not checked again on the candidates, a `has` step is
+removed from the plan, and `.profile()` marks the access `exact`. Every query form gains, not
+only `count()`: `.id().to_list()`, `.values(..)`, a traversal from the found elements. Everything
+else is still checked: the other conditions, the labels when a label-less index serves a start
+with labels, ranges, numbers (a slice spans `int64` and `float64`), `null`, a whole-value
+condition read from an `each` index (a superset), a `to_lower` index that skipped a value (it is
+not read at all), and every condition of a query that writes. The index is trusted on
+purpose: a wrong entry would show in the result instead of being hidden by a re-check, and the
+randomized differential tests compare every exact shape with the scan. A
+[custom storage](#other-storages) opts in with `StorageCapabilities::exact_property_index_lookups`.
 
 ## Persistence
 
@@ -514,7 +553,13 @@ slice). The
 lookups take the label as `Option<&str>`: `None` reads the label-less index (`PropertyIndexInfo::label`
 is `None` for one). `count_by_property_index` (default `Ok(None)`) answers an exact count from the
 index for [counting from an index](#counting-from-an-index); without it the engine counts the
-lookup's candidates. A storage that serves a [unique index](#unique-indexes) lists it with
+lookup's candidates. A storage whose lookups return exactly the matching elements for a point
+of a string, boolean, uuid or temporal value (an `each` lookup: the elements whose value is it or
+a list holding it), never more, claims `StorageCapabilities::exact_property_index_lookups`; the
+engine then drops the re-check of such conditions ([Kept exact](#kept-exact)); without it every
+lookup is treated as a superset (the conformance item
+`exact_property_index_lookups_return_exactly` checks a storage that claims it). A storage that
+serves a [unique index](#unique-indexes) lists it with
 `PropertyIndexInfo::unique`, refuses every write that would repeat a key with
 `GraphError::UniqueViolation` (constructor `GraphError::unique_violation`) without changing
 anything, and reports an index stored over repeated values through

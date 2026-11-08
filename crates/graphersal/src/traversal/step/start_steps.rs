@@ -43,6 +43,13 @@ pub(crate) fn render_source(
             crate::value::literal::rhai_literal(&filter.value)
         ));
     }
+    // A filter step the index answers exactly left the plan: the source shows it.
+    if let Some(crate::traversal::step::Answered::Step(step)) =
+        index.and_then(|index| index.answered.as_ref())
+    {
+        filters.push('.');
+        filters.push_str(step);
+    }
     let index = match index {
         Some(index) if index.label_less || labels.is_some() => index.render(
             if name == "e" { "edge" } else { "vertex" },

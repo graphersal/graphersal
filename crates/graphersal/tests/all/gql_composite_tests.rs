@@ -591,7 +591,10 @@ fn a_string_equality_is_a_value_and_index_served_in_every_operand() {
     let text = profile(&graph, query);
     let indexed = steps(&text)
         .iter()
-        .filter(|s| *s == "\\> v(labels: [\"person\"]) [index: vertex person.name]")
+        .filter(|s| {
+            s.starts_with("\\> v(labels: [\"person\"]).has(\"name\", P.eq(")
+                && s.ends_with("[index: vertex person.name, exact]")
+        })
         .count();
     assert_eq!(indexed, 2, "{text}");
     assert_eq!(multiset(&graph, query, "n"), ints(&[29, 32]));

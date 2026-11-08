@@ -3,7 +3,7 @@ use crate::graph::{GraphStorage, PropertyIndexInfo, PropertyIndexRange, Property
 use crate::traversal::optimizer::OptimizerContext;
 use crate::traversal::optimizer::plan::Plan;
 use crate::traversal::optimizer::rule::OptimizationRule;
-use crate::traversal::step::{GraphStep, IndexAccess};
+use crate::traversal::step::{Answered, GraphStep, IndexAccess};
 
 /// The filter steps a `has(key, P)` served by an index may follow directly after the source:
 /// pure filters on the element itself (no child traversal, no side effect), so reading fewer
@@ -51,11 +51,19 @@ const PURE_FILTERS: [&str; 7] = [
 ///
 /// Among the conditions an index covers it picks the most selective by the indexes' stats
 /// (equality: entries / distinct values per index and value; a range: half the entries) and
-/// records it on the source ([`IndexAccess`]). Nothing else changes: the source still checks its
-/// folded conditions on each candidate and the `has(key, P)` step stays in the plan, so the
-/// result equals the scan's (only the order of the elements may differ). When no re-check can
-/// drop a candidate the access is marked `exact`, so `count_pushdown` can fuse a following
-/// `count()` answered from the index (design section 8). Without indexes the rule does nothing.
+/// records it on the source ([`IndexAccess`]). The source still checks its folded conditions on
+/// each candidate and the `has(key, P)` steps stay in the plan, so the result equals the scan's
+/// (only the order of the elements may differ), with ONE exception (user decision 2026-11-08,
+/// book page "Property Indexes", section "Kept exact"): when the picked condition is answered
+/// exactly by the index ([`exact_shape`]) in a plan that does not write, on a storage claiming
+/// `StorageCapabilities::exact_property_index_lookups` (`OptimizerContext::exact_lookups`), its
+/// re-check is dropped: a folded `has(key, value)` is skipped on the candidates
+/// ([`Answered::Folded`]), a filter step is removed from the plan ([`Answered::Step`]); every
+/// other condition, the source's label check of a label-less index's candidates included, is
+/// still checked. The index is then trusted: a wrong entry shows in the result instead of
+/// being hidden by a re-check. When nothing but that condition is left and the slice needs no
+/// label check, the access is `countable`, so `count_pushdown` can fuse a following `count()`
+/// answered from the postings (design section 8). Without indexes the rule does nothing.
 /// `g.with("optimizer.disabled", ["property_index"])` turns it off.
 #[derive(Default)]
 pub(crate) struct PropertyIndexRule;
@@ -98,6 +106,58 @@ fn exact_value(value: &crate::ElementProperty) -> bool {
         | P::Edge(_)
         | P::Map(_) => false,
     }
+}
+
+/// THE definition of a proven-exact index access (book page "Property Indexes", section "Kept
+/// exact"): whether the elements of the slices `ranges` of an index of `transform` are exactly
+/// the elements the condition served by it accepts, each once, so no re-check can drop one.
+///
+/// - every slice is a point (`[v, v]`: an equality, or one operand of `P.within`) of a string,
+///   boolean, uuid or temporal value ([`exact_value`]): a number slice spans `int64` and
+///   `float64` (a superset), `null` and ranges are left to the re-check;
+/// - the index has no transform (the condition is on the whole value: a folded `has(key,
+///   value)`, `has(key, P.eq/within)`), or exactly `each` serving `has(key, __.unfold().is(P))`
+///   (an element is in the postings of each of its values once, D15; the source deduplicates
+///   several slices; an object, nested array or vector `unfold()` emits never equals a scalar,
+///   and the index skips exactly those);
+/// - or `to_lower` serving `has(key, __.to_lower().is(P))`, or `["each", "to_lower"]` serving
+///   `has(key, __.unfold().to_lower().is(P))` (user decision 2026-11-08): the rule reads such
+///   an index only while it skipped no value (`usable`), and nothing writes during a reading
+///   run, so every value at the key is a string (or a list of strings), `to_lower()` cannot
+///   fail, and the lowered keys answer the condition exactly (a `null` constant is never
+///   served: `index_condition`);
+/// - NOT `each` serving a whole-value condition (`superset`: arrays holding the value are
+///   candidates).
+///
+/// The label side (which index, a label check of a label-less index's candidates) is not part
+/// of it: the source checks labels either way.
+fn exact_shape(
+    transform: Option<&PropertyIndexTransform>,
+    superset: bool,
+    ranges: &[PropertyIndexRange],
+) -> bool {
+    use std::ops::Bound::Included;
+    let transform_ok = match transform {
+        None => true,
+        Some(transform) => !superset && transform.is_known(),
+    };
+    transform_ok
+        && !ranges.is_empty()
+        && ranges
+            .iter()
+            .all(|range| match (&range.lower, &range.upper) {
+                (Included(a), Included(b)) => a == b && exact_value(a),
+                _ => false,
+            })
+}
+
+/// Where the condition an access serves comes from.
+#[derive(Clone, Copy, PartialEq)]
+enum Origin {
+    /// The folded `has(key, value)` of the source.
+    Folded,
+    /// The filter step at this plan position.
+    Step(usize),
 }
 
 impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
@@ -146,6 +206,15 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
         if !servable || context.indexes.is_empty() {
             return clear(plan);
         }
+        // A source whose answered condition left the plan keeps its access: the condition is
+        // only on the access now (a plan is optimized once; this keeps a second pass sound).
+        if let GraphStep::Init(_, init) = &plan[0]
+            && init
+                .index_access()
+                .is_some_and(|access| matches!(access.answered, Some(Answered::Step(_))))
+        {
+            return false;
+        }
         // A transformed index serves only while it skipped no value (see the rule's doc).
         let usable = |info: &PropertyIndexInfo,
                       label: Option<&str>,
@@ -190,47 +259,52 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
             _ => 0,
         };
         let single_label = labels.as_ref().is_some_and(|labels| labels.len() == 1);
-        let mut best: Option<(u64, IndexAccess)> = None;
-        let mut consider =
-            |key: &str,
-             transform: Option<PropertyIndexTransform>,
-             ranges: Vec<PropertyIndexRange>,
-             folded_value: Option<&crate::ElementProperty>| {
-                // A condition on the whole value is served exactly by an index without a
-                // transform, else by an `each` index as a superset (its candidates' arrays fail
-                // the re-check of the whole value).
-                let (transform, found) = match cost(key, transform.as_ref(), &ranges) {
-                    None if transform.is_none() => {
-                        let each = Some(PropertyIndexTransform::Each);
-                        let found = cost(key, each.as_ref(), &ranges);
-                        (each, found)
-                    }
-                    found => (transform, found),
-                };
-                if let Some((cost, label_less)) = found
-                    && best.as_ref().is_none_or(|(best, _)| cost < *best)
-                {
-                    // Count from the postings: one folded equality, nothing else to re-check.
-                    let exact = folded_value.is_some_and(exact_value)
-                        && filters == 1
-                        && transform.is_none()
-                        && if label_less {
-                            labels.is_none()
-                        } else {
-                            single_label
-                        };
-                    best = Some((
-                        cost,
-                        IndexAccess {
-                            key: key.to_string(),
-                            transform,
-                            ranges,
-                            label_less,
-                            exact,
-                        },
-                    ));
+        let mut best: Option<(u64, IndexAccess, Option<Origin>)> = None;
+        let mut consider = |key: &str,
+                            transform: Option<PropertyIndexTransform>,
+                            ranges: Vec<PropertyIndexRange>,
+                            origin: Origin| {
+            // A condition on the whole value is served exactly by an index without a
+            // transform, else by an `each` index as a superset (its candidates' arrays fail
+            // the re-check of the whole value).
+            let (transform, found, superset) = match cost(key, transform.as_ref(), &ranges) {
+                None if transform.is_none() => {
+                    let each = Some(PropertyIndexTransform::Each);
+                    let found = cost(key, each.as_ref(), &ranges);
+                    (each, found, true)
                 }
+                found => (transform, found, false),
             };
+            if let Some((cost, label_less)) = found
+                && best.as_ref().is_none_or(|(best, _, _)| cost < *best)
+            {
+                let answered = (context.exact_lookups
+                    && exact_shape(transform.as_ref(), superset, &ranges))
+                .then_some(origin);
+                // Count from the postings: one slice, nothing else to check (no other
+                // folded condition, no label check).
+                let countable = answered.is_some()
+                    && ranges.len() == 1
+                    && filters == usize::from(origin == Origin::Folded)
+                    && if label_less {
+                        labels.is_none()
+                    } else {
+                        single_label
+                    };
+                best = Some((
+                    cost,
+                    IndexAccess {
+                        key: key.to_string(),
+                        transform,
+                        ranges,
+                        label_less,
+                        answered: None,
+                        countable,
+                    },
+                    answered,
+                ));
+            }
+        };
         if let GraphStep::Init(_, init) = &plan[0] {
             for filter in init.property_filters() {
                 if crate::graph::property_index::is_indexable(&filter.value) {
@@ -238,7 +312,7 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                         &filter.key,
                         None,
                         vec![PropertyIndexRange::equal(filter.value.clone())],
-                        Some(&filter.value),
+                        Origin::Folded,
                     );
                 }
             }
@@ -251,14 +325,29 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                         || (*name == "has_traversal" && filter.index_condition().is_some()) =>
                 {
                     if let Some(condition) = filter.index_condition() {
-                        consider(condition.key, condition.transform, condition.ranges, None);
+                        consider(
+                            condition.key,
+                            condition.transform,
+                            condition.ranges,
+                            Origin::Step(index),
+                        );
                     }
                 }
                 _ => break,
             }
         }
         match best {
-            Some((_, access)) => {
+            Some((_, mut access, answered)) => {
+                access.answered = match answered {
+                    None => None,
+                    Some(Origin::Folded) => Some(Answered::Folded),
+                    Some(Origin::Step(index)) => {
+                        // The step's work moves into the source: it answers it exactly.
+                        let rendered = plan[index].get_name();
+                        plan.absorb(index, 0);
+                        Some(Answered::Step(rendered))
+                    }
+                };
                 if let GraphStep::Init(_, init) = plan.step_mut(0) {
                     init.set_index_access(Some(access))
                 } else {
@@ -267,5 +356,134 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
             }
             None => clear(plan),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{PropertyIndexDefinition, TraversalGraph};
+    use crate::traversal::optimizer::rules::filter_pushdown::SourceFilterPushdownRule;
+
+    /// The plan of `steps` after `source_filter_pushdown` and this rule, with or without
+    /// `exact_lookups`: the rendered step names.
+    fn planned(
+        graph: &TraversalGraph,
+        steps: Vec<GraphStep<'_, &TraversalGraph>>,
+        exact_lookups: bool,
+    ) -> Vec<String> {
+        let indexes = graph.property_index_infos();
+        let mut plan = Plan::from_steps(steps, true);
+        SourceFilterPushdownRule::new().apply(&mut plan);
+        let context = OptimizerContext {
+            indexes: &indexes,
+            exact_lookups,
+        };
+        assert!(PropertyIndexRule::new().apply_in(&mut plan, &context));
+        plan.into_steps().iter().map(GraphStep::get_name).collect()
+    }
+
+    #[test]
+    fn the_recheck_is_dropped_only_with_exact_lookups() {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        graph
+            .traversal_mut()
+            .create_index(
+                "name_any",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "name"),
+            )
+            .unwrap();
+        graph
+            .traversal_mut()
+            .create_index(
+                "tags_each",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "tags")
+                    .with_transform(Some(PropertyIndexTransform::Each)),
+            )
+            .unwrap();
+        let folded = |graph: &TraversalGraph, exact| {
+            planned(
+                graph,
+                graph.traversal().v(None).has("name", "josh").take_steps(),
+                exact,
+            )
+        };
+        // A storage without the capability (or a plan that writes): every re-check stays.
+        assert_eq!(
+            folded(&graph, false),
+            [r#"v().has("name", "josh") [index: vertex name, any label]"#]
+        );
+        assert_eq!(
+            folded(&graph, true),
+            [r#"v().has("name", "josh") [index: vertex name, any label, exact]"#]
+        );
+        let each = |graph: &TraversalGraph, exact| {
+            planned(
+                graph,
+                graph
+                    .traversal()
+                    .v(None)
+                    .has_traversal("tags", crate::__::unfold().is("x"))
+                    .take_steps(),
+                exact,
+            )
+        };
+        assert_eq!(each(&graph, false).len(), 2, "the has() step stays");
+        assert_eq!(
+            each(&graph, true),
+            [
+                r#"v().has("tags", __.unfold().is(P.eq("x"))) [index: vertex tags each, any label, exact]"#
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_shapes_are_points_of_exact_values() {
+        use crate::ElementProperty as V;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let point = |value: V| PropertyIndexRange::equal(value);
+        let each = PropertyIndexTransform::Each;
+        assert!(exact_shape(None, false, &[point("x".into())]));
+        assert!(exact_shape(
+            None,
+            false,
+            &[point("x".into()), point(true.into()), point(V::Uuid(7))]
+        ));
+        assert!(exact_shape(Some(&each), false, &[point("x".into())]));
+        // A superset, a transform that can fail, numbers, null, ranges, nothing.
+        assert!(exact_shape(
+            Some(&PropertyIndexTransform::ToLower),
+            false,
+            &[point("x".into())]
+        ));
+        let chain = PropertyIndexTransform::from_names(["each", "to_lower"]).unwrap();
+        assert!(exact_shape(Some(&chain), false, &[point("x".into())]));
+        assert!(!exact_shape(
+            Some(&PropertyIndexTransform::Unknown("upper".into())),
+            false,
+            &[point("x".into())]
+        ));
+        assert!(!exact_shape(Some(&each), true, &[point("x".into())]));
+        assert!(!exact_shape(None, false, &[point(1.into())]));
+        assert!(!exact_shape(
+            None,
+            false,
+            &[point("x".into()), point(1.into())]
+        ));
+        assert!(!exact_shape(None, false, &[point(V::Null)]));
+        assert!(!exact_shape(
+            None,
+            false,
+            &[PropertyIndexRange::new(Included("a".into()), Unbounded)]
+        ));
+        assert!(!exact_shape(
+            None,
+            false,
+            &[PropertyIndexRange::new(
+                Included("a".into()),
+                Excluded("a".into())
+            )]
+        ));
+        assert!(!exact_shape(None, false, &[]));
     }
 }

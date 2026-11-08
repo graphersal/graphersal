@@ -264,7 +264,12 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// [`GraphError::UniqueViolation`]; an index it stored over repeated values is neither served
 /// nor enforced and is reported by [`Self::unique_index_duplicates`] (the contract is there).
 /// A storage without the capability keeps index definitions in its catalog and enforces
-/// nothing.
+/// nothing. The lookups may return a superset (the engine re-checks every condition on each
+/// candidate), unless the storage also claims
+/// [`StorageCapabilities::exact_property_index_lookups`]: then a lookup of a point of a string,
+/// boolean, uuid or temporal value returns exactly the matching elements, and the engine drops
+/// the re-check of such a condition in a plan that does not write (book page "Property Indexes",
+/// section "Kept exact"; the conformance item `exact_property_index_lookups_return_exactly`).
 ///
 /// ## Change capture and hooks
 ///
@@ -702,7 +707,11 @@ pub trait GraphStorage: Send + Sync {
     /// The vertices labelled `label` whose top-level property `key` lies in `range`, read from
     /// the property index on `(vertex, label, key)`; `Ok(None)` when there is no such index
     /// (the default). The result may hold MORE vertices than the range does (the caller
-    /// re-checks every condition), never fewer, each vertex once; the order is unspecified.
+    /// re-checks every condition), never fewer, each vertex once; the order is unspecified. A
+    /// storage claiming [`StorageCapabilities::exact_property_index_lookups`] returns EXACTLY
+    /// the vertices whose value equals the point for an equality slice
+    /// ([`PropertyIndexRange::equal`](crate::graph::PropertyIndexRange::equal)) of a string,
+    /// boolean, uuid or temporal value: the caller then does not re-check that condition.
     /// `Err` when the index cannot be read now (a backend error): the step that asked fails
     /// with it, it never falls back to a scan.
     fn vertices_by_property_index<'a>(
@@ -730,7 +739,11 @@ pub trait GraphStorage: Send + Sync {
     /// `transform` (`to_lower`: the lowered text of a string value), lies in `range`, read from
     /// the property index on `(vertex, label, key, transform)` (book page "Property Indexes",
     /// section "Case-insensitive search"); `None` when there is no such index (the default).
-    /// The same contract as [`Self::vertices_by_property_index`]: a superset, each vertex once.
+    /// The same contract as [`Self::vertices_by_property_index`]: a superset, each vertex once;
+    /// with [`StorageCapabilities::exact_property_index_lookups`], an `each` lookup of such a
+    /// point returns exactly the vertices whose value is it or an array holding it, a
+    /// `to_lower` (`["each", "to_lower"]`) lookup exactly those whose string value (string
+    /// array element) lowers to it.
     /// A storage serving such an index must report its
     /// [`skipped`](crate::graph::PropertyIndexStats::skipped) count in
     /// [`Self::property_indexes`].
@@ -765,7 +778,8 @@ pub trait GraphStorage: Send + Sync {
     /// index: the caller then counts the candidates of the lookup methods above, re-checking
     /// each. Unlike a lookup, the count must never include an element outside the slice. The
     /// engine asks only for slices whose every element matches the condition (an equality on
-    /// a string, boolean, uuid or temporal value with no transform).
+    /// a string, boolean, uuid or temporal value, with a known transform or none), and only of a
+    /// storage claiming [`StorageCapabilities::exact_property_index_lookups`].
     fn count_by_property_index(
         &self,
         element: crate::graph::ElementKind,
@@ -3575,7 +3589,8 @@ const TRAVERSAL_GRAPH_CAPABILITIES: StorageCapabilities = StorageCapabilities::n
     .with_change_capture(true)
     .with_isolation(IsolationLevel::None)
     .with_writable(true)
-    .with_property_indexes(true);
+    .with_property_indexes(true)
+    .with_exact_property_index_lookups(true);
 
 /// The error every write through a read-only `&G` view returns.
 #[inline]
@@ -3956,10 +3971,15 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).execution_policy()
     }
 
-    /// A read-only view: claims nothing (no writes, so nothing to make atomic or capture).
+    /// A read-only view: claims nothing (no writes, so nothing to make atomic or capture),
+    /// except the exactness of the index lookups it forwards to the viewed storage.
     #[inline]
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
-        Ok(StorageCapabilities::none())
+        Ok(
+            StorageCapabilities::none().with_exact_property_index_lookups(
+                (**self).capabilities()?.exact_property_index_lookups,
+            ),
+        )
     }
 
     /// A read-only view writes no journal record.
@@ -5678,13 +5698,18 @@ impl GraphStorage for Arc<TraversalGraph> {
     }
 
     /// The capabilities of [`TraversalGraph`] while this `Arc` is the only owner; a shared
-    /// `Arc` cannot mutate at all and claims nothing.
+    /// `Arc` cannot mutate at all and claims nothing but the exactness of the index lookups it
+    /// reads from the graph.
     #[inline]
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         if Arc::strong_count(self) == 1 && Arc::weak_count(self) == 0 {
             self.as_ref().capabilities()
         } else {
-            Ok(StorageCapabilities::none())
+            Ok(
+                StorageCapabilities::none().with_exact_property_index_lookups(
+                    self.as_ref().capabilities()?.exact_property_index_lookups,
+                ),
+            )
         }
     }
 
@@ -6150,17 +6175,13 @@ mod tests {
         let caps = GraphStorage::capabilities(&graph).unwrap();
         assert!(caps.atomic && caps.change_capture && caps.writable && !caps.immutable);
         assert!(caps.is_consistent());
-        assert_eq!(
-            GraphStorage::capabilities(&&graph).unwrap(),
-            StorageCapabilities::none()
-        );
+        // A view and a shared `Arc` claim nothing but the exactness of the lookups they forward.
+        let lookups_only = StorageCapabilities::none().with_exact_property_index_lookups(true);
+        assert_eq!(GraphStorage::capabilities(&&graph).unwrap(), lookups_only);
         let shared = Arc::new(TraversalGraph::new());
         assert_eq!(GraphStorage::capabilities(&shared).unwrap(), caps);
         let second = shared.clone();
-        assert_eq!(
-            GraphStorage::capabilities(&shared).unwrap(),
-            StorageCapabilities::none()
-        );
+        assert_eq!(GraphStorage::capabilities(&shared).unwrap(), lookups_only);
         drop(second);
     }
 

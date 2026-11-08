@@ -51,6 +51,22 @@ pub struct StorageCapabilities {
     /// `GraphError::Unsupported`. A read-only view (`&G`) claims nothing but still serves the
     /// indexes of the storage it views.
     pub property_indexes: bool,
+    /// The property index lookups answer an exact condition EXACTLY (book page "Property
+    /// Indexes", section "Kept exact"): for an equality slice ([`PropertyIndexRange::equal`])
+    /// of a string, boolean, uuid or temporal value, the lookups
+    /// ([`GraphStorage::vertices_by_property_index`] and its siblings) of an index without a
+    /// transform return exactly the elements whose value at the key equals it, and of an index
+    /// with the transform `each` exactly the elements whose value is it or is an array holding
+    /// it, and of an index with `to_lower` (`["each", "to_lower"]`) exactly the elements whose
+    /// string value (string array element) lowers to it, each element once: never more. The optimizer then drops the re-check of such a
+    /// condition in a plan that does not write. Without it (the default) every lookup counts as
+    /// a superset and every condition is re-checked on each candidate. A read-only view (`&G`)
+    /// or a shared `Arc` states it for the storage it reads through, since its lookups are the
+    /// storage's.
+    ///
+    /// [`PropertyIndexRange::equal`]: crate::graph::PropertyIndexRange::equal
+    /// [`GraphStorage::vertices_by_property_index`]: crate::graph::GraphStorage::vertices_by_property_index
+    pub exact_property_index_lookups: bool,
 }
 
 impl StorageCapabilities {
@@ -65,6 +81,7 @@ impl StorageCapabilities {
             writable: false,
             immutable: false,
             property_indexes: false,
+            exact_property_index_lookups: false,
         }
     }
 
@@ -107,6 +124,15 @@ impl StorageCapabilities {
     /// Sets [`Self::property_indexes`].
     pub const fn with_property_indexes(mut self, property_indexes: bool) -> Self {
         self.property_indexes = property_indexes;
+        self
+    }
+
+    /// Sets [`Self::exact_property_index_lookups`].
+    pub const fn with_exact_property_index_lookups(
+        mut self,
+        exact_property_index_lookups: bool,
+    ) -> Self {
+        self.exact_property_index_lookups = exact_property_index_lookups;
         self
     }
 

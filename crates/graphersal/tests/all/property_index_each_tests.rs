@@ -612,9 +612,15 @@ fn the_owner_query_reads_the_each_index_and_profile_names_it() {
         r#"v().has("_owners", __.unfold().is(P.within(["o1", "o3"])))"#,
         r#"v().has("_owners", __.unfold().is(P.gte("o2")))"#,
     ] {
+        // A range keeps its re-check; the points are answered exactly.
+        let expected = if query.contains("P.gte") {
+            ": vertex _owners each, any label]"
+        } else {
+            ": vertex _owners each, any label, exact]"
+        };
         assert_eq!(
             first_step(&graph, query).split(" [index").nth(1),
-            Some(": vertex _owners each, any label]"),
+            Some(expected),
             "{query}"
         );
         let (with, without) = both(&graph, query);
@@ -639,7 +645,7 @@ fn the_owner_query_reads_the_each_index_and_profile_names_it() {
             &graph,
             r#"v().has_label("Method").has("_owners", __.unfold().is("o2"))"#
         )
-        .ends_with("[index: vertex Method._owners each]"),
+        .ends_with("[index: vertex Method._owners each, exact]"),
     );
     // Not served: another child, a negation, the wrong transform order in the query.
     for query in [
@@ -687,11 +693,11 @@ fn a_whole_value_condition_reads_an_each_index_as_a_superset_and_prefers_an_exac
     exec(&graph, r#"g.create_index(#{key: "_owners"})"#);
     assert!(
         first_step(&graph, r#"v().has("_owners", "o1")"#)
-            .ends_with("[index: vertex _owners, any label]"),
+            .ends_with("[index: vertex _owners, any label, exact]"),
     );
     assert!(
         first_step(&graph, r#"v().has("_owners", __.unfold().is("o1"))"#)
-            .ends_with("[index: vertex _owners each, any label]"),
+            .ends_with("[index: vertex _owners each, any label, exact]"),
     );
 }
 
@@ -712,7 +718,7 @@ fn the_each_to_lower_chain_serves_only_while_nothing_is_skipped() {
     check(&graph);
     let query = r#"v().has_label("t").has("tags", __.unfold().to_lower().is("rust"))"#;
     assert!(
-        first_step(&graph, query).ends_with("[index: vertex t.tags each to_lower]"),
+        first_step(&graph, query).ends_with("[index: vertex t.tags each to_lower, exact]"),
         "{:?}",
         profile_steps(&graph, query)
     );
@@ -823,9 +829,13 @@ fn random_data_queries_equal_the_scan_and_writes_keep_it_exact() {
             assert_eq!(with, without, "seed {seed}, after {write}: {query}.count()");
         }
         // The owner shape and the whole-value shape are served on this data.
-        assert!(first_step(&graph, QUERIES[0]).contains("[index: vertex tags each, any label]"));
+        assert!(
+            first_step(&graph, QUERIES[0]).contains("[index: vertex tags each, any label, exact]")
+        );
         assert!(first_step(&graph, QUERIES[8]).contains("each, any label]"));
-        assert!(first_step(&graph, QUERIES[14]).contains("[index: edge tags each, any label]"));
+        assert!(
+            first_step(&graph, QUERIES[14]).contains("[index: edge tags each, any label, exact]")
+        );
     }
 }
 
@@ -973,7 +983,7 @@ fn the_forwarding_storage_serves_the_same_each_index() {
     let profile =
         on(r#"g.v().has("_owners", __.unfold().is("o1")).profile().to_string()"#).unwrap();
     assert!(
-        profile.contains("[index: vertex _owners each, any label]"),
+        profile.contains("[index: vertex _owners each, any label, exact]"),
         "{profile}"
     );
 }

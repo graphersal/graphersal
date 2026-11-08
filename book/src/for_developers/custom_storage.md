@@ -189,7 +189,10 @@ graphersal_storage_tests::conformance!(my_storage, base = MyStorage::default() =
 ```
 
 Each contract item becomes its own test; the capability-conditional items (rollback, savepoints,
-hooks, change sets, dry runs) run for what `capabilities()` claims. See
+hooks, change sets, dry runs, property indexes and their exact lookups) run for what
+`capabilities()` claims. Claim `exact_property_index_lookups` only when a lookup of a point of a
+string, boolean, uuid or temporal value returns exactly the matching elements: the engine then
+stops re-checking such conditions ([Kept exact](../users_guide/property_indexes.md#kept-exact)). See
 [Storage Conformance](storage_conformance.md).
 
 ### The `Forwarding` pattern

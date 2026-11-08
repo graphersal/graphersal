@@ -417,7 +417,7 @@ fn index_vertices<S: GraphStorage>(
         let dedup = access.ranges.len() > 1;
         for range in &access.ranges {
             let Some(found) = lookup(None, range)? else {
-                return Ok(None);
+                return scan_answered_vertices(storage, labels, access);
             };
             for node in found {
                 if dedup && !seen.insert(node) {
@@ -435,13 +435,13 @@ fn index_vertices<S: GraphStorage>(
         return Ok(Some(out));
     }
     let Some(labels) = labels else {
-        return Ok(None);
+        return scan_answered_vertices(storage, None, access);
     };
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
             let Some(found) = lookup(Some(label.as_str()), range)? else {
-                return Ok(None);
+                return scan_answered_vertices(storage, Some(labels), access);
             };
             for node in found {
                 if !dedup || seen.insert(node) {
@@ -497,7 +497,7 @@ fn index_edges<S: GraphStorage>(
         let dedup = access.ranges.len() > 1;
         for range in &access.ranges {
             let Some(found) = lookup(None, range)? else {
-                return Ok(None);
+                return scan_answered_edges(storage, labels, access);
             };
             for edge in found {
                 if dedup && !seen.insert(edge) {
@@ -516,13 +516,13 @@ fn index_edges<S: GraphStorage>(
         return Ok(Some(out));
     }
     let Some(labels) = labels else {
-        return Ok(None);
+        return scan_answered_edges(storage, None, access);
     };
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
             let Some(found) = lookup(Some(label.as_str()), range)? else {
-                return Ok(None);
+                return scan_answered_edges(storage, Some(labels), access);
             };
             for edge in found {
                 if !dedup || seen.insert(edge) {
@@ -534,8 +534,94 @@ fn index_edges<S: GraphStorage>(
     Ok(Some(out))
 }
 
-/// The count of a `count()` fused into a source whose index access is exact (the
-/// `property_index` rule's `IndexAccess::exact`): the entries of the access's slices, counted
+/// What [`index_vertices`] returns when the storage does not serve the index an access names:
+/// `None` (the source scans and checks every condition), or for an access that answers a
+/// condition exactly ([`IndexAccess::answered`], no longer checked anywhere else) the vertices
+/// of `labels` (every vertex: `None`), each once, that satisfy it ([`IndexAccess::holds`]).
+///
+/// [`IndexAccess::answered`]: crate::traversal::step::IndexAccess::answered
+/// [`IndexAccess::holds`]: crate::traversal::step::IndexAccess::holds
+fn scan_answered_vertices<S: GraphStorage>(
+    storage: &S,
+    labels: Option<&[String]>,
+    access: &crate::traversal::step::IndexAccess,
+) -> Result<Option<Vec<S::VertexId>>, crate::error::GraphError> {
+    if access.answered.is_none() {
+        return Ok(None);
+    }
+    let holds = |node: S::VertexId| -> Result<bool, crate::error::GraphError> {
+        Ok(access.holds(
+            storage
+                .vertex_properties(node)?
+                .and_then(|properties| properties.get(access.key.as_str())),
+        ))
+    };
+    let mut out = Vec::new();
+    match labels {
+        None => {
+            for node in storage.vertices()? {
+                if holds(node)? {
+                    out.push(node);
+                }
+            }
+        }
+        Some(labels) => {
+            let mut seen: std::collections::HashSet<S::VertexId> = std::collections::HashSet::new();
+            for label in labels {
+                for node in storage.vertices_by_label(label)? {
+                    if seen.insert(node) && holds(node)? {
+                        out.push(node);
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The edge counterpart of [`scan_answered_vertices`].
+fn scan_answered_edges<S: GraphStorage>(
+    storage: &S,
+    labels: Option<&[String]>,
+    access: &crate::traversal::step::IndexAccess,
+) -> Result<Option<Vec<S::EdgeId>>, crate::error::GraphError> {
+    if access.answered.is_none() {
+        return Ok(None);
+    }
+    let holds = |edge: S::EdgeId| -> Result<bool, crate::error::GraphError> {
+        Ok(access.holds(
+            storage
+                .edge_properties(edge)?
+                .and_then(|properties| properties.get(access.key.as_str())),
+        ))
+    };
+    let mut out = Vec::new();
+    match labels {
+        None => {
+            for edge in storage.edges()? {
+                if holds(edge)? {
+                    out.push(edge);
+                }
+            }
+        }
+        Some(labels) => {
+            let mut distinct: Vec<&String> = labels.iter().collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            for label in distinct {
+                for edge in storage.edges_by_label(label)? {
+                    if holds(edge)? {
+                        out.push(edge);
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The count of a `count()` fused into a source whose index access is countable (the
+/// `property_index` rule's `IndexAccess::countable`): the entries of the access's slice, counted
 /// by the storage from its postings ([`GraphStorage::count_by_property_index`]); `None` when the
 /// storage cannot count them (the caller counts the checked candidates instead).
 fn index_count<S: GraphStorage>(
@@ -566,10 +652,10 @@ fn index_count<S: GraphStorage>(
     Ok(Some(usize::try_from(total).unwrap_or(usize::MAX)))
 }
 
-/// The vertices of a source without ids that satisfy its folded `filters`: the index access's
-/// candidates when it has one the storage serves, else its labels' vertices (every vertex
-/// without labels), each once. The count of a fused `count()` the storage cannot answer from
-/// an index.
+/// The vertices of a source without ids that satisfy its folded `filters` (and the condition
+/// its index access answers, if any): the index access's candidates when it has one the
+/// storage serves, else its labels' vertices (every vertex without labels), each once. The
+/// count of a fused `count()` the storage cannot answer from an index.
 fn count_filtered_vertices<S: GraphStorage>(
     storage: &S,
     labels: Option<&[String]>,
@@ -582,9 +668,11 @@ fn count_filtered_vertices<S: GraphStorage>(
     if let Some(access) = access
         && let Some(candidates) = index_vertices(storage, labels, access)?
     {
+        // The candidates satisfy the condition the access answers (if any).
+        let remaining = access.remaining_filters(filters);
         let mut count = 0;
         for node in candidates {
-            if matches(node)? {
+            if crate::traversal::step::PropertyFilter::all_vertex(&remaining, storage, node)? {
                 count += 1;
             }
         }
@@ -625,9 +713,10 @@ fn count_filtered_edges<S: GraphStorage>(
     if let Some(access) = access
         && let Some(candidates) = index_edges(storage, labels, access)?
     {
+        let remaining = access.remaining_filters(filters);
         let mut count = 0;
         for edge in candidates {
-            if matches(edge)? {
+            if crate::traversal::step::PropertyFilter::all_edge(&remaining, storage, edge)? {
                 count += 1;
             }
         }
@@ -3277,11 +3366,17 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         // `optimizer.enabled` options (D3 of the rule-visibility spec) when building the pipeline.
         // With the property indexes the storage serves (none: one empty `Vec`, no allocation, and
         // the `property_index` rule is left out of the pipeline).
-        let optimizer = crate::traversal::optimizer::TraversalOptimizer::for_run(
-            &context.options,
-            context.storage.property_indexes()?,
-        )
-        .with_diagnostics(context.strategy.contains(TraversalStrategy::Diagnostics));
+        let indexes = context.storage.property_indexes()?;
+        // The re-check of a condition an index answers exactly is dropped only on a storage
+        // whose lookups are exact, in a query that does not write at any level (a write could
+        // change what the index holds while the plan reads it).
+        let exact_lookups = !indexes.is_empty()
+            && context.storage.capabilities()?.exact_property_index_lookups
+            && !GraphStep::any_mutates(steps);
+        let optimizer =
+            crate::traversal::optimizer::TraversalOptimizer::for_run(&context.options, indexes)
+                .with_exact_index_lookups(exact_lookups)
+                .with_diagnostics(context.strategy.contains(TraversalStrategy::Diagnostics));
         let level = optimizer.apply(steps);
         // Fired-rule names, top-level and nested (the same `&self` optimizes every nested level
         // via `step.optimize_nested`), for the profile's `optimizer_rules_applied`. Collected
@@ -3553,10 +3648,11 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = 1;
                 } else if count_only {
-                    let count = if !property_filters.is_empty() {
-                        // A `count()` fused into a source with an exact index access (the
-                        // only way a source with folded conditions is count-only): the
-                        // index's postings answer it (book page "Property Indexes").
+                    let count = if !property_filters.is_empty() || step.index_access().is_some() {
+                        // A `count()` fused into a source with a countable index access (the
+                        // only way a source with folded conditions or an index access is
+                        // count-only): the index's postings answer it (book page "Property
+                        // Indexes").
                         let access = step.index_access();
                         let counted = match access {
                             Some(access) => index_count(
@@ -3690,16 +3786,20 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 } {
                     // A property index serves a condition (book page "Property
                     // Indexes"): its candidates (a superset) are checked like the
-                    // label scan's elements.
+                    // label scan's elements, except for the condition it answers exactly.
+                    let remaining = match step.index_access() {
+                        Some(access) => access.remaining_filters(property_filters),
+                        None => std::borrow::Cow::Borrowed(property_filters),
+                    };
                     for node_index in candidates {
                         tick_deadline(&mut context.deadline).with_step_frame(
                             || step.get_name(),
                             step_at,
                             || plan_frame(steps, level, logical_step_idx),
                         )?;
-                        if !(property_filters.is_empty()
+                        if !(remaining.is_empty()
                             || located!(crate::traversal::step::PropertyFilter::all_vertex(
-                                property_filters,
+                                &remaining,
                                 &*context.storage,
                                 node_index,
                             ))?)
@@ -3865,7 +3965,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = 1;
                 } else if count_only {
-                    let count = if !property_filters.is_empty() {
+                    let count = if !property_filters.is_empty() || step.index_access().is_some() {
                         // See the vertex case.
                         let access = step.index_access();
                         let counted = match access {
@@ -3989,15 +4089,19 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     None => None,
                 } {
                     // A property index serves a condition (see the vertex case).
+                    let remaining = match step.index_access() {
+                        Some(access) => access.remaining_filters(property_filters),
+                        None => std::borrow::Cow::Borrowed(property_filters),
+                    };
                     for edge_index in candidates {
                         tick_deadline(&mut context.deadline).with_step_frame(
                             || step.get_name(),
                             step_at,
                             || plan_frame(steps, level, logical_step_idx),
                         )?;
-                        if !(property_filters.is_empty()
+                        if !(remaining.is_empty()
                             || located!(crate::traversal::step::PropertyFilter::all_edge(
-                                property_filters,
+                                &remaining,
                                 &*context.storage,
                                 edge_index,
                             ))?)

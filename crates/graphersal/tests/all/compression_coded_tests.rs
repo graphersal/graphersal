@@ -682,7 +682,10 @@ fn a_property_index_on_a_coded_key_serves_and_follows_writes() {
     )
     .unwrap()
     .to_string();
-    assert!(profile.contains("[index: vertex item.kind]"), "{profile}");
+    assert!(
+        profile.contains("[index: vertex item.kind, exact]"),
+        "{profile}"
+    );
     invariant(&graph.read());
 }
 

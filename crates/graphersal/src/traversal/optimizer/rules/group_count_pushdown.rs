@@ -32,12 +32,14 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for GroupCountPushdownRul
         // Check if the first step is an Init step ("v" or "e") that is not count_only or already group_count
         let is_valid_init = match &steps[0] {
             GraphStep::Init(name, init_step) => {
-                // A source with folded `has(key, value)` conditions is not counted per label from
-                // the statistics: those count every element of the label.
+                // A source with folded `has(key, value)` conditions or an index access (whose
+                // answered condition may have left the plan) is not counted per label from the
+                // statistics: those count every element of the label.
                 (*name == "v" || *name == "e")
                     && !init_step.is_count_only()
                     && !init_step.is_group_count_by_label()
                     && init_step.property_filters().is_empty()
+                    && init_step.index_access().is_none()
             }
             _ => false,
         };

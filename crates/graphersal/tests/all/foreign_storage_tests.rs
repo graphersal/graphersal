@@ -327,7 +327,7 @@ const GQL_CURATED: &[&str] = &[
     r#"g.gql("MATCH (p:person) WHERE p.age >= $min RETURN p ORDER BY p.age LIMIT $n", #{min: 29, n: 2}).select("p").out("created").values("name").toList()"#,
     r#"g.gql("MATCH (p {name: $name})-[:knows]->(f) RETURN f.name AS f", #{name: "marko"}).select("f").fold().next()"#,
     // A property index read by the planner: the same rows, and the plan reads the index on both.
-    r#"g.create_index(#{label: "person", key: "name"}); let q = "MATCH (p:person {name: $n})-[:created]->(s) RETURN s.name AS s"; [g.gql(q, #{n: "josh"}).toList(), g.gql(q, #{n: "josh"}).profile().to_string().contains("[index: vertex person.name]")]"#,
+    r#"g.create_index(#{label: "person", key: "name"}); let q = "MATCH (p:person {name: $n})-[:created]->(s) RETURN s.name AS s"; [g.gql(q, #{n: "josh"}).toList(), g.gql(q, #{n: "josh"}).profile().to_string().contains("[index: vertex person.name, exact]")]"#,
     // Errors: before the run (syntax, refused construct) and during it (division by zero).
     r#"g.gql("MATCH (p:person) RETRUN p").toList()"#,
     r#"g.gql("MATCH (p) CALL (p) { RETURN 1 AS x } IN TRANSACTIONS RETURN p").toList()"#,

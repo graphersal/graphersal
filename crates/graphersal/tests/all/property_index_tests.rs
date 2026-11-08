@@ -700,7 +700,7 @@ fn the_profile_shows_the_access_path_and_the_rule_can_be_turned_off() {
         .unwrap();
     assert_eq!(
         metrics.metrics()[0].name(),
-        r#"v(labels: ["person"]).has("title", "CEO") [index: vertex person.title]"#
+        r#"v(labels: ["person"]).has("title", "CEO") [index: vertex person.title, exact]"#
     );
     let profile = metrics.to_string();
     assert!(
@@ -750,7 +750,7 @@ fn the_most_selective_index_is_picked() {
         r#"v().has_label("person").has("team", "all").has("name", "josh")"#,
     );
     assert!(
-        steps[0].ends_with("[index: vertex person.name]"),
+        steps[0].ends_with("[index: vertex person.name, exact]"),
         "{steps:?}"
     );
 }
@@ -866,7 +866,10 @@ fn a_string_eq_predicate_in_a_child_traversal_is_served() {
         .try_cast::<graphersal::profile::TraversalMetrics>()
         .expect("metrics")
         .to_string();
-    assert!(profile.contains("[index: vertex person.name]"), "{profile}");
+    assert!(
+        profile.contains("[index: vertex person.name, exact]"),
+        "{profile}"
+    );
     let with = run(&graph, &format!("g.{query}.to_list()"))
         .unwrap()
         .to_string();
@@ -890,9 +893,11 @@ fn a_string_eq_predicate_in_a_child_traversal_is_served() {
     assert_eq!(
         profile
             .lines()
-            .filter(|line| line
-                .trim_start()
-                .starts_with(r#"\> v(labels: ["person"]) [index: vertex person.name]"#))
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with(r#"\> v(labels: ["person"]).has("name", P.eq("#)
+                    && line.contains("[index: vertex person.name, exact]")
+            })
             .count(),
         2,
         "{profile}"
@@ -2309,7 +2314,8 @@ mod transforms {
             r#"v().has_label("person").has("name", __.to_lower().is("marko"))"#,
         );
         assert_eq!(
-            steps[0], r#"v(labels: ["person"]) [index: vertex person.name to_lower]"#,
+            steps[0],
+            r#"v(labels: ["person"]).has("name", __.to_lower().is(P.eq("marko"))) [index: vertex person.name to_lower, exact]"#,
             "{steps:?}"
         );
         for served in [
@@ -2387,14 +2393,17 @@ mod transforms {
         // Each index serves its own form.
         let plain = profile_steps(&graph, r#"v().has_label("person").has("name", "marko")"#);
         assert!(
-            plain[0].ends_with("[index: vertex person.name]"),
+            plain[0].ends_with("[index: vertex person.name, exact]"),
             "{plain:?}"
         );
         let lowered = profile_steps(
             &graph,
             r#"v().has_label("person").has("name", __.to_lower().is("marko"))"#,
         );
-        assert!(lowered[0].ends_with("person.name to_lower]"), "{lowered:?}");
+        assert!(
+            lowered[0].ends_with("person.name to_lower, exact]"),
+            "{lowered:?}"
+        );
         // A second index of the same transform is a conflict that names it.
         let err = run(
             &graph,

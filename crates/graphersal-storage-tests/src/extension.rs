@@ -701,6 +701,222 @@ pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S
     );
 }
 
+/// `exact_property_index_lookups`: for an equality slice of a string, boolean or uuid value,
+/// the lookups of a per-label and a label-less index without a transform return exactly the
+/// vertices whose value at the key equals it, and of an index with the transform `each`
+/// exactly those whose value is it or an array holding it, and of a `to_lower` index exactly
+/// those whose string value lowers to it; each vertex once, never more (the
+/// optimizer drops the re-check of such a condition). The data mixes the look-alikes a
+/// superset could hold: other kinds (`"1"`, `1`, `1.0`), other case, arrays (with the value
+/// twice, nested, beside objects), `null`, a missing key, multi-label and unlabeled vertices.
+/// Checked after writes and a rollback too. Skipped without the capability.
+pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mut S) {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::{ElementKind, PropertyIndexRange};
+    let caps = storage.capabilities().unwrap();
+    if !caps.exact_property_index_lookups
+        || !caps.property_indexes
+        || !caps.atomic
+        || !has_catalog(storage)
+    {
+        return;
+    }
+    let list = |items: &[ElementProperty]| ElementProperty::Array(items.to_vec());
+    let mut object = PropertyMap::default();
+    object.insert("x", "x".into());
+    let uuid = ElementProperty::Uuid(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let values: Vec<(&[&str], Option<ElementProperty>)> = vec![
+        (&["p"], Some("x".into())),
+        (&["p", "q"], Some("x".into())),
+        (&[], Some("x".into())),
+        (&["q"], Some("x".into())),
+        (&["p"], Some("X".into())),
+        (&["p"], Some("1".into())),
+        (&["p"], Some(1.into())),
+        (&["p"], Some(1.0.into())),
+        (&["p"], Some(true.into())),
+        (&["p"], Some("true".into())),
+        (&["p"], Some(uuid.clone())),
+        (&["p"], Some(list(&["x".into(), "x".into(), "y".into()]))),
+        (&["q"], Some(list(&[list(&["x".into()]), true.into()]))),
+        (
+            &["p"],
+            Some(list(&[ElementProperty::Object(Box::new(object.clone()))])),
+        ),
+        (&["p"], Some(ElementProperty::Object(Box::new(object)))),
+        (&["p"], Some(list(&[uuid.clone(), "1".into()]))),
+        (&["p"], Some(ElementProperty::Null)),
+        (&["p"], None),
+    ];
+    let mut handles = Vec::new();
+    for (n, (labels, value)) in values.into_iter().enumerate() {
+        let id = format!("ex_{n:02}");
+        let properties = match value {
+            Some(value) => props(&[("ex", value)]),
+            None => PropertyMap::default(),
+        };
+        handles.push(vertex(storage, Some(&id), labels, properties));
+    }
+    let each = PropertyIndexTransform::Each;
+    for (name, definition) in [
+        (
+            "ex_p",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "p", "ex"),
+        ),
+        (
+            "ex_any",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex"),
+        ),
+        (
+            "ex_any_each",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
+                .with_transform(Some(each.clone())),
+        ),
+        (
+            "ex_any_lower",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
+                .with_transform(Some(PropertyIndexTransform::ToLower)),
+        ),
+    ] {
+        storage
+            .set_definition(Definition::property_index(name, definition))
+            .expect("an index");
+    }
+    // Exactly what the conditions accept, from a scan.
+    let expected = |storage: &S, label: Option<&str>, by_each: bool, wanted: &ElementProperty| {
+        let mut ids: Vec<String> = Vec::new();
+        for v in storage.vertices().unwrap() {
+            if let Some(label) = label
+                && !storage
+                    .vertex_labels(v)
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.as_str() == label)
+            {
+                continue;
+            }
+            let properties = storage.vertex_properties(v).unwrap();
+            let Some(value) = properties.as_ref().and_then(|p| p.get("ex")) else {
+                continue;
+            };
+            let holds = value == wanted
+                || (by_each
+                    && matches!(value, ElementProperty::Array(items) if items.contains(wanted)));
+            if holds {
+                ids.push(
+                    storage
+                        .vertex_id(v)
+                        .unwrap()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
+        }
+        ids.sort();
+        ids
+    };
+    let check = |storage: &S, stage: &str| {
+        for wanted in [
+            ElementProperty::from("x"),
+            ElementProperty::from("1"),
+            ElementProperty::from(true),
+            uuid.clone(),
+            ElementProperty::from("absent"),
+        ] {
+            let range = PropertyIndexRange::equal(wanted.clone());
+            let plain = vertex_ids(
+                storage,
+                storage
+                    .vertices_by_property_index(Some("p"), "ex", &range)
+                    .unwrap(),
+            );
+            assert_eq!(
+                plain,
+                Some(expected(storage, Some("p"), false, &wanted)),
+                "{stage}: per-label lookup of {wanted:?}"
+            );
+            let any = vertex_ids(
+                storage,
+                storage
+                    .vertices_by_property_index(None, "ex", &range)
+                    .unwrap(),
+            );
+            assert_eq!(
+                any,
+                Some(expected(storage, None, false, &wanted)),
+                "{stage}: label-less lookup of {wanted:?}"
+            );
+            let by_each = vertex_ids(
+                storage,
+                storage
+                    .vertices_by_transformed_property_index(None, "ex", &each, &range)
+                    .unwrap(),
+            );
+            assert_eq!(
+                by_each,
+                Some(expected(storage, None, true, &wanted)),
+                "{stage}: each lookup of {wanted:?}"
+            );
+            // `to_lower`: exactly the string values that lower to it.
+            let lowered = vertex_ids(
+                storage,
+                storage
+                    .vertices_by_transformed_property_index(
+                        None,
+                        "ex",
+                        &PropertyIndexTransform::ToLower,
+                        &range,
+                    )
+                    .unwrap(),
+            );
+            let mut lowers: Vec<String> = Vec::new();
+            for v in storage.vertices().unwrap() {
+                let properties = storage.vertex_properties(v).unwrap();
+                if let (Some(ElementProperty::String(text)), ElementProperty::String(want)) =
+                    (properties.as_ref().and_then(|p| p.get("ex")), &wanted)
+                    && text.to_lowercase() == want.as_str()
+                {
+                    lowers.push(
+                        storage
+                            .vertex_id(v)
+                            .unwrap()
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+            lowers.sort();
+            assert_eq!(
+                lowered,
+                Some(lowers),
+                "{stage}: to_lower lookup of {wanted:?}"
+            );
+        }
+    };
+    check(storage, "built");
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(handles[0], "ex".into(), list(&["x".into(), "z".into()]))
+        .unwrap();
+    storage
+        .set_vertex_property(handles[6], "ex".into(), "x".into())
+        .unwrap();
+    storage.drop_vertex(handles[2]).unwrap();
+    check(storage, "after writes");
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    check(storage, "after the rollback");
+    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
+        let kind = if name == "ex_p" {
+            DefinitionKind::PROPERTY_INDEX
+        } else {
+            DefinitionKind::PROPERTY_INDEX_EXT
+        };
+        assert!(storage.remove_definition(kind, name).unwrap(), "{name}");
+    }
+}
+
 /// `property_indexes` with a catalog: a UNIQUE index (kind `property_index_ext`, critical) is
 /// listed with `unique`; every write that would give a second element of its label a key it
 /// holds fails with `GraphError::UniqueViolation` and changes nothing (an insert, a property

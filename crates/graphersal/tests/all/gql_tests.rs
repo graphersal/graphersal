@@ -594,7 +594,10 @@ fn a_property_index_serves_an_inline_property() {
         .profile()
         .unwrap()
         .to_string();
-    assert!(metrics.contains("[index: vertex person.name]"), "{metrics}");
+    assert!(
+        metrics.contains("[index: vertex person.name, exact]"),
+        "{metrics}"
+    );
     assert!(metrics.contains("property_index"), "{metrics}");
     let result = rows_with(&graph, query, vec![("n", "marko".into())]).unwrap();
     assert_eq!(texts(&result, "age"), ["29"]);
@@ -1223,7 +1226,10 @@ fn the_start_node_is_the_most_selective_one() {
         &graph,
         "MATCH (s:software)<-[:created]-(p:person {name: 'josh'}) RETURN s.name AS s",
     );
-    assert!(text.contains("[index: vertex person.name]"), "{text}");
+    assert!(
+        text.contains("[index: vertex person.name, exact]"),
+        "{text}"
+    );
     assert!(has_step(&text, r#"out("created")"#), "{text}");
     let result = rows(
         &graph,

@@ -5,24 +5,26 @@ Rule name: `property_index` (on by default, sixth in the pipeline, right after
 
 ## What it rewrites
 
-Nothing in the plan's shape: it records on a `v()`/`e()` start step which
-[property index](../users_guide/property_indexes.md) the step reads instead of its label buckets.
-`.profile()` shows the choice on the start step:
+It records on a `v()`/`e()` start step which
+[property index](../users_guide/property_indexes.md) the step reads instead of its label buckets,
+and, for a condition the index answers [exactly](#exact-accesses), drops that condition's
+re-check. `.profile()` shows the choice on the start step:
 
 ```rhai
-v().has_label("person").has("title", "CEO")      →   v(labels: ["person"]).has("title", "CEO") [index: vertex person.title]
+v().has_label("person").has("title", "CEO")      →   v(labels: ["person"]).has("title", "CEO") [index: vertex person.title, exact]
 v().has_label("person").has("age", P.gt(30))     →   v(labels: ["person"]) [index: vertex person.age]
                                                       has("age", P.gt(30))
 e().has_label("knows").has("weight", P.lt(0.5))  →   e(labels: ["knows"]) [index: edge knows.weight]
                                                       has("weight", P.lt(0.5))
-v().has_label("person")                          →   v(labels: ["person"]) [index: vertex person.name to_lower]
-   .has("name", __.to_lower().is("ada"))              has("name", __.to_lower().is(P.eq("ada")))
-v().has("name", "josh")                          →   v().has("name", "josh") [index: vertex name, any label]
-v().has("name", "josh").count()                  →   v().has("name", "josh").count() [index: vertex name, any label] [count from index]
-v().has("_owners", __.unfold().is("o1"))         →   v() [index: vertex _owners each, any label]
-                                                      has("_owners", __.unfold().is(P.eq("o1")))
+v().has_label("person")                          →   v(labels: ["person"]).has("name", __.to_lower().is(P.eq("ada")))
+   .has("name", __.to_lower().is("ada"))                  [index: vertex person.name to_lower, exact]
+v().has("name", "josh")                          →   v().has("name", "josh") [index: vertex name, any label, exact]
+v().has("name", "josh").count()                  →   v().has("name", "josh").count() [index: vertex name, any label, exact] [count from index]
+v().has("_owners", __.unfold().is("o1"))         →   v().has("_owners", __.unfold().is(P.eq("o1"))) [index: vertex _owners each, any label, exact]
+v().has("_owners", __.unfold().is(P.gt("o1")))   →   v() [index: vertex _owners each, any label]
+                                                      has("_owners", __.unfold().is(P.gt("o1")))
 v().has_label("doc")                             →   v(labels: ["doc"]) [index: vertex doc.tags each to_lower]
-   .has("tags", __.unfold().to_lower().is("x"))       has("tags", __.unfold().to_lower().is(P.eq("x")))
+   .has("tags", __.unfold().to_lower().is(P.gte("x")))  has("tags", __.unfold().to_lower().is(P.gte("x")))
 ```
 
 It looks at
@@ -62,19 +64,48 @@ covered conditions the rule picks the most selective by the indexes' statistics 
 (its statistics give an equality about one element; one that is not served, its data holding
 repeated values, is never read).
 
-When no re-check can drop a candidate (one folded equality on a string, boolean, uuid or
-temporal value, no other folded condition, no transform (so never with `each`), and a label-less index under a start
-without labels or the index of the start's single label) the access is marked exact, and
-[Count Pushdown](count_pushdown.md) may fuse a following `count()` into the start step, which
-the storage then answers from the index (`GraphStorage::count_by_property_index`) without
-visiting the elements: `.profile()` shows `[count from index]`.
+## Exact accesses
+
+An access is **exact** (user decision 2026-11-08) when the index answers the condition it reads
+exactly, so no re-check could drop a candidate:
+
+- every slice is a point (an equality, or each operand of `P.within`) of a string, boolean, uuid
+  or temporal value: a number slice spans `int64` and `float64` (a superset), and `null` and
+  ranges keep their re-check;
+- the index has no transform (a condition on the whole value), or `each` reading
+  `has(key, __.unfold().is(..))` (an element is in the postings of each of its values once; the
+  start step deduplicates several slices), or `to_lower` / `["each", "to_lower"]` reading
+  `has(key, __.to_lower().is(..))` / `has(key, __.unfold().to_lower().is(..))` (read only while
+  the index skipped nothing, so in a reading query `to_lower()` cannot fail and the lowered keys
+  answer the condition; a `null` constant is never served); not an `each` index read as a
+  superset;
+- the query does not write at any level (no mutating step, in a child traversal neither: a write
+  could change what the index holds while the plan reads it);
+- the storage claims `StorageCapabilities::exact_property_index_lookups` (the built-in graph, its
+  read-only views and the wrappers that forward it do; a custom storage's lookups otherwise
+  count as supersets).
+
+Then the re-check of that one condition is dropped: a folded `has(key, value)` is no longer
+checked on the candidates (the start step still shows it), a `has` step leaves the plan and the
+start step shows it after its folded conditions, and the index marker reads `, exact`. Every other
+condition is still checked, and so are the labels of a label-less index's candidates under a
+start with labels. When nothing else is left (one slice, no other folded condition, and a
+label-less index under a start without labels or the index of the start's single label) the
+access is also countable, and [Count Pushdown](count_pushdown.md) may fuse a following `count()`
+into the start step, which the storage then answers from the index
+(`GraphStorage::count_by_property_index`) without visiting the elements: `.profile()` shows
+`[count from index]`. Should the storage not serve the index after all, the start step scans and
+checks the answered condition itself, as the index keys it.
 
 ## Why
 
 The start step then reads only the elements whose value lies in the slices of the index, instead
-of every element of its labels. The conditions are not removed: the start step still checks its
-folded conditions on each candidate and the `has(key, P)` step stays in the plan, so the result
-equals the scan's (only the order of the elements may differ).
+of every element of its labels. The conditions it does not answer exactly are not removed: the
+start step still checks its other folded conditions on each candidate and their `has(key, P)`
+steps stay in the plan, so the result equals the scan's (only the order of the elements may
+differ). An exact condition is not checked twice: the index is maintained exactly on every write
+and rollback, it is trusted, and a wrong entry would show in the result instead of being hidden
+by a re-check (the randomized differential tests compare every exact shape with the scan).
 
 ## When it does not fire
 

@@ -250,7 +250,9 @@ impl GraphStorage for NoCompression {
     }
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         // No property indexes either: `property_indexes` and the lookups keep the defaults.
-        Ok(GraphStorage::capabilities(&self.0)?.with_property_indexes(false))
+        Ok(GraphStorage::capabilities(&self.0)?
+            .with_property_indexes(false)
+            .with_exact_property_index_lookups(false))
     }
     fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
         GraphStorage::register_commit_hook(&mut self.0, hook)
