@@ -7,7 +7,7 @@
 //! click) wait at most that long, and `POST /api/cancel` (Stop) ends a running slice as
 //! `cancelled`.
 
-use std::sync::atomic::Ordering;
+use graphersal::exec::CancelToken;
 
 use graphersal_session::Session;
 use graphersal_session::layout::LayoutRequest;
@@ -47,7 +47,7 @@ fn with_positions(session: &mut Session, status: Value) -> Result<Value, String>
 }
 
 /// One slice as a session job.
-type SliceJob = Box<dyn FnOnce(&mut Session) -> Result<Value, String> + Send>;
+type SliceJob = Box<dyn FnOnce(&mut Session, &CancelToken) -> Result<Value, String> + Send>;
 
 pub(super) fn route(
     context: &Context,
@@ -63,12 +63,12 @@ pub(super) fn route(
     }
     let body = json_body(request)?;
     let budget_ms = budget(&body);
-    // A slice counts as running: Stop (`POST /api/cancel`) ends it.
+    // A slice is a run of the page with a token of its own: the page's Stop (`POST
+    // /api/cancel` without a `runId`) ends it, also while it waits for the session.
     let slice = |job: SliceJob| {
-        context.running.fetch_add(1, Ordering::SeqCst);
-        let answer = context.call_fallible(job);
-        context.running.fetch_sub(1, Ordering::SeqCst);
-        answer
+        let cancel = CancelToken::new();
+        let _run = context.register_run(None, cancel.clone());
+        context.call_fallible(move |s| job(s, &cancel))
     };
     match endpoint {
         "layout" => {
@@ -78,15 +78,15 @@ pub(super) fn route(
                      \"seed\"?, \"iterations\"?, \"budgetMs\"?}}: {err}"
                 ))
             })?;
-            value(slice(Box::new(move |s| {
-                let status = s.layout_start(request, budget_ms)?;
+            value(slice(Box::new(move |s, cancel| {
+                let status = s.layout_start_with_cancel(request, budget_ms, cancel)?;
                 with_positions(s, status)
             }))?)
         }
         "layout/step" => {
             let job = job_of(&body)?;
-            value(slice(Box::new(move |s| {
-                let status = s.layout_step(job, budget_ms)?;
+            value(slice(Box::new(move |s, cancel| {
+                let status = s.layout_step_with_cancel(job, budget_ms, cancel)?;
                 with_positions(s, status)
             }))?)
         }

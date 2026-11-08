@@ -420,11 +420,13 @@ export class Engine {
    * (`to_list()`, `next()`, `profile()`, `to_table()`, `execute(...)`, ...) are honoured. Never
    * rejects for a failing query: the failure is `execution.error`. Rejects only for engine faults
    * and when the run is stopped (`StoppedError`).
+   * `runId` names the run for `stop(runId)` (the dev server cancels exactly that run).
    * @param {string} script
    * @param {ExecuteOptions} [opts]
+   * @param {{runId?: string}} [run]
    * @returns {Promise<ExecuteResponse>}
    */
-  async execute(script, opts) { throw notImplemented('execute'); }
+  async execute(script, opts, run) { throw notImplemented('execute'); }
 
   /** @returns {Promise<SchemaView>} */
   async schema() { throw notImplemented('schema'); }
@@ -837,10 +839,12 @@ export class Engine {
   async aiDelete(id) { throw notImplemented('aiDelete'); }
 
   /**
-   * Stops a running query by restarting the engine; the graph is restored from the last loaded
-   * or saved state. @returns {Promise<{restored:string|null}>}
+   * Stops a running query: the WebAssembly engine restarts and restores the graph from the last
+   * loaded or saved state (`{restored}`); the dev server cancels the run `runId` of `execute`
+   * (`{restored: null, cancelled}`). @param {string} [runId]
+   * @returns {Promise<{restored:string|null, cancelled?:boolean}>}
    */
-  async stop() { throw notImplemented('stop'); }
+  async stop(runId) { throw notImplemented('stop'); }
 }
 
 /** Why the AI Chat is not available in the WebAssembly playground (decision 6 of the AI Chat). */

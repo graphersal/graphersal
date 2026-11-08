@@ -204,9 +204,6 @@ pub struct Session {
     /// The token the running script checks in its progress callback: [`Self::cancel`], or the
     /// caller's token of [`Self::execute_with_cancel`].
     run_cancel: Arc<Mutex<CancelToken>>,
-    /// The host resets [`Self::cancel`], not this session's operations
-    /// ([`Self::set_cancel_reset_by_host`]).
-    cancel_reset_by_host: bool,
     /// The stores the session serves ([`crate::store`]): `None` without a store.
     pub(crate) stores: Option<crate::store::Stores>,
     /// Every loaded graph becomes a store in memory ([`Self::set_memory_stores`]).
@@ -461,7 +458,6 @@ impl Session {
             warnings,
             cancel,
             run_cancel,
-            cancel_reset_by_host: false,
             stores: None,
             memory_stores: false,
             layouts,
@@ -526,29 +522,17 @@ impl Session {
     /// The token that cancels the running [`Self::execute`] from another thread: the query
     /// stops at its next check with a "cancelled" error and its unit rolls back (the response
     /// is `ok: false`). `execute` resets the token when it starts, so a cancel reaches only the
-    /// run in progress. A host that registers the token before it starts the run says so with
-    /// [`Self::set_cancel_reset_by_host`], or a cancel in between is lost.
+    /// run in progress; a cancel that arrives before the run starts is lost. A host that
+    /// accepts a cancel while the work still waits for the session (the dev server, whose
+    /// requests queue for its session threads) gives every run a token of its own instead:
+    /// [`Self::execute_with_cancel`], [`Self::layout_step_with_cancel`].
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
     }
 
-    /// With `true`, the session's operations no longer reset [`Self::cancel_token`] when they
-    /// start: the host resets it itself, before it makes the token reachable for the next piece
-    /// of work (the dev server's reader pool, which registers a worker's token for a job before
-    /// the job runs). A cancel from then on stops the work, also one that arrives before the
-    /// query starts, and everything else the same job runs on this session.
-    ///
-    /// A token left cancelled stops every later operation until the host resets it.
-    pub fn set_cancel_reset_by_host(&mut self, by_host: bool) {
-        self.cancel_reset_by_host = by_host;
-    }
-
-    /// Clears a cancel of an earlier operation when one starts, unless the host does
-    /// ([`Self::set_cancel_reset_by_host`]).
+    /// Clears a cancel of an earlier operation when one starts.
     pub(crate) fn reset_cancel(&self) {
-        if !self.cancel_reset_by_host {
-            self.cancel.reset();
-        }
+        self.cancel.reset();
     }
 
     /// The sample graphs this engine can build.
@@ -1087,9 +1071,22 @@ impl Session {
         request: crate::layout::LayoutRequest,
         budget_ms: f64,
     ) -> Result<Value, SessionError> {
+        self.reset_cancel();
+        let cancel = self.cancel.clone();
+        self.layout_start_with_cancel(request, budget_ms, &cancel)
+    }
+
+    /// [`Self::layout_start`] whose first slice is stopped by the caller's own `cancel` token
+    /// ([`Self::layout_step_with_cancel`]).
+    pub fn layout_start_with_cancel(
+        &mut self,
+        request: crate::layout::LayoutRequest,
+        budget_ms: f64,
+        cancel: &CancelToken,
+    ) -> Result<Value, SessionError> {
         let options = request.options();
         let job = self.layouts().start(request.input, options)?;
-        self.layout_step(job, budget_ms)
+        self.layout_step_with_cancel(job, budget_ms, cancel)
     }
 
     /// The layout jobs, locked (only the session's memory source reads them besides).
@@ -1116,8 +1113,21 @@ impl Session {
     /// [`Self::execute`], a slice resets the token when it starts.
     pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, SessionError> {
         self.reset_cancel();
+        let cancel = self.cancel.clone();
+        self.layout_step_with_cancel(job, budget_ms, &cancel)
+    }
+
+    /// [`Self::layout_step`] stopped by the caller's own `cancel` token instead of the
+    /// session's: a host that queues slices for several clients cancels exactly the slice it
+    /// accepted, also before it starts. The token is NOT reset here.
+    pub fn layout_step_with_cancel(
+        &mut self,
+        job: u64,
+        budget_ms: f64,
+        cancel: &CancelToken,
+    ) -> Result<Value, SessionError> {
         let budget = crate::layout::slice_budget(budget_ms);
-        self.layouts().step(job, budget, &self.cancel)
+        self.layouts().step(job, budget, cancel)
     }
 
     /// Cancels layout `job`; it keeps the positions reached so far ([`Self::layout_positions`]).
@@ -1195,7 +1205,7 @@ impl Session {
     /// the session's ([`Self::cancel_token`]): a host that runs queries for several clients
     /// (the dev server's AI Chat conversations) cancels exactly the run it started, never
     /// another client's. The token is NOT reset here: a token cancelled before the run starts
-    /// stops it at its first check.
+    /// runs nothing and answers the "cancelled" failure.
     pub fn execute_with_cancel(
         &mut self,
         script: &str,
@@ -1203,6 +1213,12 @@ impl Session {
         authorizer: Arc<dyn Authorizer>,
         cancel: &CancelToken,
     ) -> String {
+        // A short script may end before its first check: one cancelled while it waited for the
+        // session must not run at all.
+        if cancel.is_cancelled() {
+            let out = Outcome::failed("unknown", &error_of_diagnostic(CANCELLED_DIAGNOSTIC));
+            return self.response_of_refused_run(out, web_time::Instant::now());
+        }
         // The slot holds a plain token: a poisoned lock is used as it is (module docs of the
         // progress check above), so a run is always stoppable through its own token.
         let previous = std::mem::replace(
@@ -3489,31 +3505,52 @@ mod tests {
         assert_eq!(run(&mut session, "g.v().count().next()")["ok"], true);
     }
 
-    /// With the host resetting the token, a cancel that arrives before an operation starts stops
-    /// it, and stays until the host resets it.
+    /// A layout slice with the caller's own token: the session's token does not reach it, its
+    /// own token (cancelled before the slice starts) ends the job as `cancelled`.
     #[test]
-    fn a_token_the_host_resets_keeps_a_cancel_from_before_the_run() {
+    fn a_layout_slice_with_its_own_token_is_cancelled_by_that_token_only() {
         let mut session = modern();
-        let run = |session: &mut Session| -> Value {
-            serde_json::from_str(&session.execute("g.v().count().next()", &RunOptions::default()))
-                .unwrap()
-        };
-        let token = session.cancel_token();
+        let n = 400u32;
+        let request = json!({
+            "vertexCount": n,
+            "edgeSource": (0..n).collect::<Vec<_>>(),
+            "edgeTarget": (0..n).map(|i| (i + 1) % n).collect::<Vec<_>>(),
+            "iterations": 1_000_000,
+        });
+        let request: crate::layout::LayoutRequest = serde_json::from_value(request).unwrap();
+        let own = CancelToken::new();
+        session.cancel_token().cancel();
+        let status = session
+            .layout_start_with_cancel(request, 0.0, &own)
+            .unwrap();
+        assert_eq!(status["state"], "running", "{status}");
+        let job = status["job"].as_u64().unwrap();
+        own.cancel();
+        let status = session.layout_step_with_cancel(job, 0.0, &own).unwrap();
+        assert_eq!(status["state"], "cancelled", "{status}");
+    }
 
-        // The default: the operation resets the token.
-        token.cancel();
-        assert_eq!(run(&mut session)["ok"], true);
-
-        session.set_cancel_reset_by_host(true);
-        token.cancel();
-        let r = run(&mut session);
+    /// A run whose own token was cancelled before it started (a Stop while it waited for the
+    /// session) runs nothing, not even a script too short to reach a check, and changes nothing.
+    #[test]
+    fn a_run_cancelled_before_it_starts_runs_nothing() {
+        let mut session = modern();
+        let own = CancelToken::new();
+        own.cancel();
+        let r: Value = serde_json::from_str(&session.execute_with_cancel(
+            r#"g.addV("ghost").next(); 1"#,
+            &RunOptions::default(),
+            playground_authorizer(),
+            &own,
+        ))
+        .unwrap();
         assert_eq!(r["ok"], false, "{r}");
-        assert!(r.to_string().contains("ancel"), "{r}");
-        let r = run(&mut session);
-        assert_eq!(r["ok"], false, "still cancelled: {r}");
-
-        token.reset();
-        assert_eq!(run(&mut session)["ok"], true);
+        let diagnostic = r["execution"]["error"]["diagnostic"].as_str().unwrap();
+        assert!(diagnostic.contains("cancelled"), "{diagnostic}");
+        assert_eq!(session.info().unwrap()["vertexCount"], 6);
+        // The token stays cancelled (the host's), the session's own runs are not affected.
+        assert!(own.is_cancelled());
+        assert_eq!(run(&mut session, "g.v().count().next()")["ok"], true);
     }
 
     /// `execute_with_cancel` is stopped by the caller's token only: the session's token does

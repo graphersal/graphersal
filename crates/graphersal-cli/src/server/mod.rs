@@ -11,8 +11,11 @@
 //! Threads: one session thread (64 MiB stack, like the CLI's script thread) owns the
 //! [`Session`] and runs the jobs one after the other; every HTTP request gets a thread of its
 //! own that sends a job and waits for its answer. `POST /api/cancel`, `GET /api/info` and the
-//! health probes `GET /healthz` / `/readyz` ([`health`]) never wait for the session thread, so Stop works while a query runs: it cancels the session's
-//! [`CancelToken`], the query stops at its next check and its unit rolls back.
+//! health probes `GET /healthz` / `/readyz` ([`health`]) never wait for the session thread, so Stop works while a query runs. Every run a client may
+//! cancel (a query, a layout slice, an MCP query, an AI Chat tool call) has a [`CancelToken`] of
+//! its own, registered before its job is queued ([`runs`]): Stop cancels the page's run
+//! `runId` or all its runs, never another client's; a run cancelled while it waits stops when
+//! it starts, a running one at its next check, and its unit rolls back.
 //!
 //! Scheduled jobs do not run on the session thread: it only hands their runs out and takes the
 //! results back, the work happens on [`job_workers`] threads.
@@ -56,7 +59,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use graphersal::persist::Store;
 use graphersal::{GraphSource, exec::CancelToken};
 use graphersal_session::store::{backup_value, damage_value, found_damage_value};
-use graphersal_session::{RunOptions, Session, SessionPresets, views};
+use graphersal_session::{RunOptions, Session, SessionPresets, playground_authorizer, views};
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -70,6 +73,7 @@ mod job_workers;
 mod layout;
 mod mcp;
 mod pool;
+mod runs;
 mod start_stats;
 
 pub use cost::run as mcp_cost;
@@ -125,10 +129,8 @@ enum Runner {
 /// What every request handler shares.
 struct Context {
     runner: Runner,
-    /// The session-wide token of the session thread (`POST /api/cancel` of the read-write
-    /// server); the pool cancels per client instead.
-    cancel: CancelToken,
-    running: AtomicUsize,
+    /// The runs a client may cancel, each with a token of its own ([`runs`]).
+    runs: Arc<runs::Runs>,
     /// The playground UI: a directory over the embedded copy.
     ui: ui::Ui,
     /// The `--graph` file, when the graph came from one ("Save to file" writes it back).
@@ -206,7 +208,7 @@ impl Client {
         self
     }
 
-    /// The key the pool counts and cancels this client's jobs by: `mcp` (+ its MCP session
+    /// The key the pool counts and the run registry cancels this client's jobs by: `mcp` (+ its MCP session
     /// id), `ai` + the conversation id, or `page` + a browser page's `X-Graphersal-Client`.
     fn pool_key(&self) -> String {
         match (self.name.as_str(), &self.key, &self.detail) {
@@ -540,15 +542,23 @@ pub fn run(cli: &Cli) -> i32 {
         }
     };
     let load_time = load_started.elapsed();
-    // Ctrl+C / SIGTERM: the running query is cancelled and the store closed cleanly; in the
+    // Ctrl+C / SIGTERM: the running queries are cancelled and the store closed cleanly; in the
     // read-only serving mode the running queries get the drain timeout first.
     if let Some(store) = &store {
         stop.set_store(store.clone());
     }
+    let runs = Arc::new(runs::Runs::default());
     match &pool {
-        None => stop.set_cancel(cancel.clone()),
+        None => {
+            stop.set_cancel(cancel.clone());
+            let runs = runs.clone();
+            stop.set_on_stop(Arc::new(move || {
+                runs.cancel_all();
+            }));
+        }
         Some(pool) => {
             let pool = pool.clone();
+            let runs = runs.clone();
             let answering = serving.clone();
             let timeout = std::time::Duration::from_secs(
                 cli.drain_timeout_s
@@ -559,9 +569,19 @@ pub fn run(cli: &Cli) -> i32 {
                     "Stopping: no new queries; the running ones get {} s to finish.",
                     timeout.as_secs()
                 );
-                let cancelled = pool.drain(timeout);
-                if cancelled > 0 {
-                    errln!("{cancelled} running queries were cancelled after the drain timeout.");
+                let drained = pool.drain(timeout, || runs.cancel_all());
+                if drained.cancelled > 0 {
+                    errln!(
+                        "{} running queries were cancelled after the drain timeout.",
+                        drained.cancelled
+                    );
+                }
+                if drained.still_running > 0 {
+                    errln!(
+                        "warning: {} queries did not stop within 2 s of the cancel; exiting \
+                         under them.",
+                        drained.still_running
+                    );
                 }
                 // The answers of the jobs that ended are still being written: give the request
                 // threads a moment (new requests are answered 503 at once meanwhile).
@@ -783,8 +803,7 @@ pub fn run(cli: &Cli) -> i32 {
     };
     let context = Arc::new(Context {
         runner,
-        cancel,
-        running: AtomicUsize::new(0),
+        runs,
         ui,
         source,
         schema_source,
@@ -1238,6 +1257,13 @@ fn load_graph(
 }
 
 impl Context {
+    /// Registers a run of this request's client stopped by `cancel` (the client's own id of
+    /// it: `alias`) until the answer is dropped; register it BEFORE its job is queued.
+    fn register_run(&self, alias: Option<&str>, cancel: CancelToken) -> runs::Registered<'_> {
+        let key = CLIENT.with(|c| c.borrow().pool_key());
+        self.runs.register(&key, alias, cancel)
+    }
+
     /// Runs `job` on the session thread and waits for its answer. A job that changes the
     /// served graph's commit position (or swaps the graph) is recorded in the change feed with
     /// the client of this request.
@@ -1483,10 +1509,14 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "info") => Ok(json_response(200, &info(context))),
         (Method::Get, "changes") => Ok(json_response(200, &changes(context))),
         (Method::Get, "mcp/stats") => mcp::stats(context),
-        // The read-only serving mode: Stop of a page cancels that page's running queries only.
-        (Method::Post, "cancel") if context.pool().is_some() => {
+        // Stop of a page: its run `runId`, or all its runs; never another client's.
+        (Method::Post, "cancel") => {
+            let run_id = cancel_run_id(request)?;
             let key = CLIENT.with(|c| c.borrow().pool_key());
-            let cancelled = context.pool().is_some_and(|pool| pool.cancel_client(&key));
+            let cancelled = match run_id {
+                Some(id) => context.runs.cancel_alias(&key, &id),
+                None => context.runs.cancel_client(&key),
+            };
             Ok(json_response(200, &json!({ "cancelled": cancelled })))
         }
         // Scheduled jobs belong to a Store, which the read-only serving mode does not open.
@@ -1494,13 +1524,6 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             Method::Post,
             "jobs/define" | "jobs/drop" | "jobs/enable" | "jobs/schedule" | "jobs/run",
         ) if context.pool().is_some() => Err(HttpError(409, NOT_SERVING.to_string())),
-        (Method::Post, "cancel") => {
-            let running = context.running.load(Ordering::SeqCst) > 0;
-            if running {
-                context.cancel.cancel();
-            }
-            Ok(json_response(200, &json!({ "cancelled": running })))
-        }
         (Method::Get, "graph") => value(context.call_fallible(|s| s.info())?),
         (Method::Post, "execute") => {
             let body = json_body(request)?;
@@ -1516,9 +1539,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
                 Some(options) => serde_json::from_value(options.clone())
                     .map_err(|err| HttpError::bad_request(format!("invalid options: {err}")))?,
             };
-            context.running.fetch_add(1, Ordering::SeqCst);
-            let answer = context.call(move |s| s.execute(&script, &options));
-            context.running.fetch_sub(1, Ordering::SeqCst);
+            let run_id = run_id_of(&body)?;
+            let cancel = CancelToken::new();
+            let _run = context.register_run(run_id.as_deref(), cancel.clone());
+            let answer = context.call(move |s| {
+                s.execute_with_cancel(&script, &options, playground_authorizer(), &cancel)
+            });
             Ok(text_response(200, answer?))
         }
         (Method::Get, "schema") => value(context.call_fallible(|s| s.graph().schema_view())?),
@@ -2428,6 +2454,46 @@ fn json_body(request: &mut Request) -> Result<Value, HttpError> {
         return Err(HttpError::bad_request("the body must be a JSON object"));
     }
     Ok(body)
+}
+
+/// The client's own id of a run (`runId` of `POST /api/execute` and `/api/cancel`): a string
+/// of 1 to [`runs::MAX_ALIAS_CHARS`] characters, or absent.
+fn run_id_of(body: &Value) -> Result<Option<String>, HttpError> {
+    match body.get("runId") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id))
+            if !id.is_empty() && id.chars().count() <= runs::MAX_ALIAS_CHARS =>
+        {
+            Ok(Some(id.clone()))
+        }
+        Some(_) => Err(HttpError::bad_request(format!(
+            "runId must be a string of 1 to {} characters",
+            runs::MAX_ALIAS_CHARS
+        ))),
+    }
+}
+
+/// The `runId` of a `POST /api/cancel`: its body is optional (a Stop without one cancels all
+/// the client's runs), and read only when sent as JSON.
+fn cancel_run_id(request: &mut Request) -> Result<Option<String>, HttpError> {
+    let json_type = header(request, "Content-Type").is_some_and(|t| {
+        t.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("application/json")
+    });
+    if !json_type {
+        return Ok(None);
+    }
+    let text = text_body(request)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|err| HttpError::bad_request(format!("malformed JSON body: {err}")))?;
+    if !body.is_object() {
+        return Err(HttpError::bad_request("the body must be a JSON object"));
+    }
+    run_id_of(&body)
 }
 
 fn query_value(query: &str, key: &str) -> Option<String> {

@@ -131,9 +131,27 @@
         "tags": [
           "Server"
         ],
-        "summary": "Stop the running query",
-        "description": "Cancels the session's running query (it is rolled back): `{cancelled}`. Does not stop an AI Chat turn.",
+        "summary": "Stop the page's runs",
+        "description": "Cancels the run `runId` of this page (`X-Graphersal-Client`), or without one every run of this page (queries and force-layout slices): a run still waiting for the session runs nothing, a running one stops at its next check; both are rolled back. Never cancels another page's, an MCP client's or an AI Chat turn's run. `{cancelled}`: whether such a run was found. The body is optional.",
         "operationId": "postApiCancel",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "The page's own id of the run, as given to `POST /api/execute`."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "JSON answer.",
@@ -187,6 +205,12 @@
                   "options": {
                     "type": "object",
                     "description": "RunOptions: display limits (`maxRows`, `maxItems`, `noLimit`, `offset`), `profile`, `profileTypes`, subgraph limits, ..."
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "The page's own id of this run: `POST /api/cancel` with it cancels exactly this run."
                   }
                 },
                 "required": [

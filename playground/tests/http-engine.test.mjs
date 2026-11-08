@@ -82,13 +82,23 @@ test('stop cancels on the server and flags the cancelled run as stopped', async 
     return fetch(url, init);
   };
   const engine = new HttpEngine(INFO, { base: BASE, fetch: slowFetch });
-  const running = engine.execute('loop {}', {});
-  const stopped = await engine.stop();
+  const running = engine.execute('loop {}', {}, { runId: 'run-7' });
+  const stopped = await engine.stop('run-7');
   assert.deepEqual(stopped, { restored: null, cancelled: true });
   release();
   const res = await running;
   assert.equal(res.stopped, true);
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ['POST /api/cancel', 'POST /api/execute']);
+  // Both name the run: the server cancels exactly it.
+  assert.deepEqual(JSON.parse(calls[0].init.body), { runId: 'run-7' });
+  assert.deepEqual(JSON.parse(calls[1].init.body), { script: 'loop {}', options: {}, runId: 'run-7' });
+});
+
+test('stop without a run id cancels every run of the page (no body)', async () => {
+  const { fetch, calls } = fakeFetch({ 'POST /api/cancel': [200, { cancelled: false }] });
+  const engine = new HttpEngine(INFO, { base: BASE, fetch });
+  assert.deepEqual(await engine.stop(), { restored: null, cancelled: false });
+  assert.equal(calls[0].init.body, '');
 });
 
 test('the schema methods, views and saving map to their endpoints', async () => {

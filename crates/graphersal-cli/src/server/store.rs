@@ -13,7 +13,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use graphersal::persist::{SINGLE_FILE_EXTENSION, Store, store_dir_at};
 use graphersal_session::store::{target_label, target_of};
@@ -72,15 +71,13 @@ pub(super) fn route(
         (Method::Post, "store/view") => {
             own_store(context)?;
             let body = json_body(request)?;
-            // The graph changes under the session: a running query is cancelled.
-            stop_running_query(context);
+            // Queued behind the running jobs of every client: none of them is cancelled.
             let answer = session_call(context, move |s| s.store_open_view(&body))?;
             set_view(context, Some(answer["view"].clone()));
             value(answer)
         }
         (Method::Post, "store/live") => {
             own_store(context)?;
-            stop_running_query(context);
             let answer = session_call(context, |s| s.store_close_view())?;
             set_view(context, None);
             value(answer)
@@ -101,7 +98,6 @@ pub(super) fn route(
         (Method::Post, "store/rollback") => {
             own_store(context)?;
             let body = json_body(request)?;
-            stop_running_query(context);
             let answer = session_call(context, move |s| s.store_rollback(&body));
             set_view(context, None);
             value(answer?)
@@ -120,7 +116,6 @@ pub(super) fn route(
         (Method::Post, "store/attic/restore") => {
             own_store(context)?;
             let id = body_id(request)?;
-            stop_running_query(context);
             let answer = session_call(context, move |s| s.store_attic_restore(&id));
             set_view(context, None);
             value(answer?)
@@ -295,14 +290,6 @@ pub(super) fn current_view(context: &Context) -> Value {
 pub(super) fn set_view(context: &Context, view: Option<Value>) {
     if let Ok(mut current) = context.view.lock() {
         *current = view.filter(|v| !v.is_null());
-    }
-}
-
-/// Cancels the query that runs now (it stops at its next check and rolls back), so an action
-/// queued behind it on the session thread does not wait for it.
-pub(super) fn stop_running_query(context: &Context) {
-    if context.running.load(Ordering::SeqCst) > 0 {
-        context.cancel.cancel();
     }
 }
 

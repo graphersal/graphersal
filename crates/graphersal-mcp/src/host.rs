@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::sync::mpsc::channel;
 
+use graphersal::exec::CancelToken;
 use graphersal_session::Session;
 use serde_json::Value;
 
@@ -21,6 +22,9 @@ pub struct ClientRef {
     /// Which client of that name: the MCP session id of an endpoint call (none without one).
     /// A host that shares its workers fairly counts the running and queued jobs per key.
     key: Option<String>,
+    /// The JSON-RPC id of the request the jobs answer (its JSON text), which the client's
+    /// `notifications/cancelled` names ([`Host::cancel_request`]).
+    request: Option<String>,
 }
 
 impl ClientRef {
@@ -30,7 +34,19 @@ impl ClientRef {
             name: name.to_string(),
             detail: detail.map(str::to_string),
             key: None,
+            request: None,
         }
+    }
+
+    /// The same client answering the JSON-RPC request `id` (its JSON text: `7`, `"a"`).
+    pub fn with_request(mut self, id: &str) -> Self {
+        self.request = Some(id.to_string());
+        self
+    }
+
+    /// The JSON-RPC id (its JSON text) of the request the jobs answer, if any.
+    pub fn request(&self) -> Option<&str> {
+        self.request.as_deref()
     }
 
     /// The same client, told apart from others of its name by `key` (the endpoint sets the MCP
@@ -87,12 +103,41 @@ pub trait Host: Executor {
     /// when the host has none.
     fn examples_json(&self) -> Option<Vec<u8>>;
 
-    /// A query without a caller's own cancellation token starts: it runs under the host's
-    /// session-wide token (the host may report it as running, e.g. for its Stop button).
-    fn query_started(&self) {}
+    /// A query of `client` is about to be queued: it runs under `cancel`, a token of this run
+    /// alone (the caller's own, an AI Chat turn's, or a new one). The host keeps it until
+    /// [`Host::run_ended`] with the returned id, so it can cancel the run, also while the run
+    /// still waits for a session: by the client's request id ([`Host::cancel_request`]), by
+    /// the client, or all at a graceful stop.
+    fn run_started(&self, client: &ClientRef, cancel: &CancelToken) -> u64 {
+        let _ = (client, cancel);
+        0
+    }
 
-    /// The query of the last [`Host::query_started`] ended.
-    fn query_finished(&self) {}
+    /// The run of [`Host::run_started`] that returned `run` ended.
+    fn run_ended(&self, run: u64) {
+        let _ = run;
+    }
+
+    /// The client's `notifications/cancelled` for its request `request` (the JSON text of the
+    /// id): cancels the runs of that request of this client (`client` carries the MCP session
+    /// id); whether one was running. Never another client's run.
+    fn cancel_request(&self, client: &ClientRef, request: &str) -> bool {
+        let _ = (client, request);
+        false
+    }
+}
+
+/// Ends a run of [`Host::run_started`] when dropped (also when the job panics or the host
+/// refuses it).
+pub(crate) struct RunGuard<'a> {
+    pub(crate) host: &'a dyn Host,
+    pub(crate) run: u64,
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        self.host.run_ended(self.run);
+    }
 }
 
 /// A failure of the host or of an operation of the endpoint.

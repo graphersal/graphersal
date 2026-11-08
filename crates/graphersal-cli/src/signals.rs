@@ -27,6 +27,8 @@ pub struct Stop {
     cancel: Mutex<Option<CancelToken>>,
     /// The graceful stop of the read-only serving mode ([`Stop::set_drain`]).
     drain: Mutex<Option<Drain>>,
+    /// Runs beside the cancel of [`Stop::set_cancel`] ([`Stop::set_on_stop`]).
+    on_stop: Mutex<Option<Drain>>,
     signals: AtomicUsize,
 }
 
@@ -46,6 +48,16 @@ impl Stop {
     pub fn set_cancel(&self, cancel: CancelToken) {
         if let Ok(mut slot) = self.cancel.lock() {
             *slot = Some(cancel);
+        }
+    }
+
+    /// What a signal runs beside cancelling the token of [`Stop::set_cancel`], before the
+    /// store closes (the read-write dev server cancels its clients' runs, each with a token of
+    /// its own).
+    #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
+    pub fn set_on_stop(&self, on_stop: Drain) {
+        if let Ok(mut slot) = self.on_stop.lock() {
+            *slot = Some(on_stop);
         }
     }
 
@@ -102,6 +114,9 @@ impl Stop {
         }
         if let Some(cancel) = self.cancel.lock().ok().and_then(|slot| slot.clone()) {
             cancel.cancel();
+        }
+        if let Some(on_stop) = self.on_stop.lock().ok().and_then(|slot| slot.clone()) {
+            on_stop();
         }
         let Some(store) = self.store.lock().ok().and_then(|slot| slot.clone()) else {
             if !without_store.is_empty() {

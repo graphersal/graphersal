@@ -30,8 +30,9 @@
 //! Stop (`POST .../stop`) ends only that conversation's turn: the pending provider call is
 //! abandoned (a synchronous call cannot be interrupted; its answer is dropped when it comes),
 //! and the query the turn runs is cancelled through the turn's own [`CancelToken`]
-//! ([`graphersal_session::Session::execute_with_cancel`]), never the session-wide one, so
-//! another conversation's or tab's query keeps running.
+//! ([`graphersal_session::Session::execute_with_cancel`]), so another conversation's or tab's
+//! query keeps running. The run registry holds that token too ([`super::runs`]): a graceful stop
+//! cancels the turn's query like every other run (issue #31).
 //!
 //! Endpoints (the `Host`/`Origin` checks of every endpoint apply; without `--ai` they are `404`):
 //! - `POST /api/ai/conversations` -> `{id}` (needs `X-Graphersal-Client`);
