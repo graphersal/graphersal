@@ -3270,6 +3270,7 @@ impl<'q> Lowering<'q> {
                 key,
                 labels,
                 indexed: lookup.indexed,
+                any_label: lookup.any_label,
             },
             site,
         })

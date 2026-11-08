@@ -8,8 +8,8 @@
 //!
 //! | Kind | When | Effect |
 //! |---|---|---|
-//! | `create_index` | a `(element, label, key)` filtered by a full scan at least `min_filter_runs` times in two days, on a label of at least `min_index_elements` elements, no index serving it, values an index holds | the scans become index lookups; costs index memory (estimated) |
-//! | `drop_index` | an index no query used for its key in the window observed, after at least `min_observed_days` days of statistics | frees the index's memory (measured) |
+//! | `create_index` | a `(element, label, key)` filtered by a full scan at least `min_filter_runs` times in two days, on a label of at least `min_index_elements` elements, no index serving it (a label-less index on the key serves every label), values an index holds; a scan whose flow names no single label (no label, or several) is advised a LABEL-LESS index (`label: None`, id `create_index:<element>:*:<key>`; the elements of the kind count) | the scans become index lookups; costs index memory (estimated) |
+//! | `drop_index` | an index no query used for its key in the window observed, after at least `min_observed_days` days of statistics; or (confidence low) a per-label index whose key a label-less index of the same element kind and transform covers too (the entries are kept twice) | frees the index's memory (measured) |
 //! | `add_compression` | lz4: a top-level string property of at least `min_compression_bytes` without a rule, not indexed, read fewer than `hot_reads` times in two days, whose best lz4 candidate saves at least `min_saving_bytes` and `min_saving_percent`; dedup: a top-level property of any value type without a rule (indexed or not, hot or not) whose values repeat (at most one in `dedup_distinct_ratio` distinct) and whose dedup saves at least `min_dedup_saving_bytes` and more than lz4 would | frees memory (measured on the data by `estimate_compression`); lz4 reads decompress, dedup writes look the value up |
 //! | `drop_compression` | a compressed key read at least `hot_reads` times in two days | reads stop decompressing; memory grows back (measured) |
 //!
@@ -37,6 +37,7 @@ use crate::graph::compression_estimate::{
     CompressionCandidate, CompressionEstimate, CompressionEstimateRequest,
 };
 use crate::graph::memory_report::{MemoryReport, PropertyMemory};
+use crate::graph::property_index::PropertyIndexInfo;
 use crate::graph::workload::{AccessKind, AdviceMark, SeriesKind, WorkloadLevel, WorkloadReport};
 use crate::value::{ElementProperty, PropertyMap};
 
@@ -124,8 +125,9 @@ pub enum RecommendedAction {
     CreateIndex {
         /// The element kind.
         element: ElementKind,
-        /// The label.
-        label: String,
+        /// The label; `None`: a label-less index (every element of the kind), recommended for
+        /// scans whose flow names no single label.
+        label: Option<String>,
         /// The top-level key.
         key: String,
     },
@@ -173,20 +175,17 @@ impl RecommendedAction {
                 element,
                 label,
                 key,
-            } => match element {
-                ElementKind::Vertex => {
-                    format!(
-                        "g.create_index(#{{label: {}, key: {}}})",
-                        text(label),
-                        text(key)
-                    )
+            } => {
+                let mut fields = Vec::new();
+                if *element == ElementKind::Edge {
+                    fields.push("element: \"edge\"".to_string());
                 }
-                ElementKind::Edge => format!(
-                    "g.create_index(#{{element: \"edge\", label: {}, key: {}}})",
-                    text(label),
-                    text(key)
-                ),
-            },
+                if let Some(label) = label {
+                    fields.push(format!("label: {}", text(label)));
+                }
+                fields.push(format!("key: {}", text(key)));
+                format!("g.create_index(#{{{}}})", fields.join(", "))
+            }
             RecommendedAction::DropIndex { name } => format!("g.drop_index({})", text(name)),
             RecommendedAction::AddCompression {
                 name,
@@ -239,11 +238,16 @@ impl RecommendedAction {
                 label,
                 key,
             } => {
-                let index = crate::graph::PropertyIndexDefinition::new(
-                    *element,
-                    label.as_str(),
-                    key.as_str(),
-                );
+                let index = match label {
+                    Some(label) => crate::graph::PropertyIndexDefinition::new(
+                        *element,
+                        label.as_str(),
+                        key.as_str(),
+                    ),
+                    None => {
+                        crate::graph::PropertyIndexDefinition::label_less(*element, key.as_str())
+                    }
+                };
                 CatalogChange::Set(Definition::property_index(index.default_name(), index))
             }
             RecommendedAction::DropIndex { name } => {
@@ -354,8 +358,8 @@ pub struct Recommendation {
     pub action: RecommendedAction,
     /// The element kind of the target.
     pub element: ElementKind,
-    /// The label of the target.
-    pub label: String,
+    /// The label of the target; `None` for a label-less index (every element of the kind).
+    pub label: Option<String>,
     /// The key of the target.
     pub key: String,
     /// One line: what to do.
@@ -545,7 +549,14 @@ struct Uses {
 }
 
 impl Uses {
-    fn of(workload: Option<&WorkloadReport>, element: ElementKind, label: &str, key: &str) -> Uses {
+    /// `label` `None`: the uses of a label-less target, the scans whose flow names no single
+    /// label (an index lookup with any label counts as a use of it).
+    fn of(
+        workload: Option<&WorkloadReport>,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+    ) -> Uses {
         let mut uses = Uses::default();
         let Some(workload) = workload else {
             return uses;
@@ -554,14 +565,22 @@ impl Uses {
             let SeriesKind::Property(property) = &series.key.kind else {
                 continue;
             };
-            let same_label = property.label.as_deref().is_none_or(|l| l == label);
+            let same_label = match label {
+                Some(label) => property.label.as_deref().is_none_or(|l| l == label),
+                None => true,
+            };
             let same_element = property.element.is_none_or(|e| e == element);
             if property.key != key || !same_label || !same_element {
                 continue;
             }
             // A use that names the label is this property's for sure; one without a label
-            // might be any label's, so it counts only for "is it read" (never for an index).
-            let exact = property.label.is_some() && property.element.is_some();
+            // might be any label's, so it counts only for "is it read" (never for a per-label
+            // index). For a label-less target exactly the uses without a label are its scans.
+            let exact = property.element.is_some()
+                && match label {
+                    Some(_) => property.label.is_some(),
+                    None => property.label.is_none(),
+                };
             let two_days = &series.last_two_days;
             match property.access {
                 AccessKind::FilterScan if exact => {
@@ -641,6 +660,14 @@ fn key_of(path: &crate::value::JsonPath) -> Option<String> {
     match path.segments() {
         [crate::value::JsonPathSegment::Key(key)] => Some(key.to_string()),
         _ => None,
+    }
+}
+
+/// `person.age`, or `age (any label)` for a label-less index.
+fn target_text(index: &PropertyIndexInfo) -> String {
+    match &index.label {
+        Some(label) => format!("{label}.{}", index.key),
+        None => format!("{} (any label)", index.key),
     }
 }
 
@@ -733,7 +760,7 @@ fn compression_recommendation(
             candidate: best.candidate,
         },
         element,
-        label: label.to_string(),
+        label: Some(label.to_string()),
         key: key.to_string(),
         title,
         evidence,
@@ -788,16 +815,18 @@ pub fn compute(
     let mut drop_index_advice: Vec<(u64, Recommendation)> = Vec::new();
     let mut drop_compression_advice: Vec<(u64, Recommendation)> = Vec::new();
 
-    // create_index: full scans of a labelled filter.
+    // create_index: full scans of a filter, per label, or label-less when the flow names no
+    // single label (design D1).
     if workload.is_some() {
-        let mut seen: Vec<(ElementKind, CompactString, CompactString)> = Vec::new();
+        let mut seen: Vec<(ElementKind, Option<CompactString>, CompactString)> = Vec::new();
         for series in workload.map_or(&[][..], |w| &w.series[..]) {
             let SeriesKind::Property(property) = &series.key.kind else {
                 continue;
             };
-            let (Some(element), Some(label)) = (property.element, property.label.clone()) else {
+            let Some(element) = property.element else {
                 continue;
             };
+            let label = property.label.clone();
             if property.access != AccessKind::FilterScan || property.key == "*" {
                 continue;
             }
@@ -807,40 +836,60 @@ pub fn compute(
             }
             seen.push(target);
             let key = property.key.as_str();
-            let uses = Uses::of(workload, element, &label, key);
+            let uses = Uses::of(workload, element, label.as_deref(), key);
             if uses.scan_runs < request.min_filter_runs {
                 continue;
             }
-            let indexed = memory
-                .indexes
-                .iter()
-                .any(|index| index.element == element && index.label == label && index.key == key);
+            // A label-less index serves a labelled source too (D2).
+            let indexed = memory.indexes.iter().any(|index| {
+                index.element == element
+                    && index.key == key
+                    && (index.label.is_none() || index.label.as_deref() == label.as_deref())
+            });
             if indexed {
                 continue;
             }
-            let row = memory.properties.iter().find(|row| {
-                top_level(row).is_some_and(|(e, l, k)| e == element && l == label && k == key)
-            });
-            let label_elements = memory
-                .labels
+            let rows: Vec<&PropertyMemory> = memory
+                .properties
                 .iter()
-                .find(|l| l.element == element && l.label.as_deref() == Some(label.as_str()))
-                .map_or_else(|| row.map_or(0, |row| row.label_elements), |l| l.elements);
+                .filter(|row| {
+                    top_level(row).is_some_and(|(e, l, k)| {
+                        e == element && k == key && label.as_deref().is_none_or(|label| l == label)
+                    })
+                })
+                .collect();
+            let label_elements: u64 = match &label {
+                Some(label) => memory
+                    .labels
+                    .iter()
+                    .find(|l| l.element == element && l.label.as_deref() == Some(label.as_str()))
+                    .map_or_else(
+                        || rows.first().map_or(0, |row| row.label_elements),
+                        |l| l.elements,
+                    ),
+                None => memory
+                    .labels
+                    .iter()
+                    .filter(|l| l.element == element)
+                    .map(|l| l.elements)
+                    .sum(),
+            };
             if label_elements < request.min_index_elements {
                 continue;
             }
-            let Some(row) = row else {
+            if rows.is_empty() {
                 // The key holds no values: nothing to index.
                 continue;
-            };
-            if row
-                .value_types
-                .iter()
-                .any(|t| NOT_INDEXABLE.contains(&t.name.as_str()))
-            {
+            }
+            if rows.iter().any(|row| {
+                row.value_types
+                    .iter()
+                    .any(|t| NOT_INDEXABLE.contains(&t.name.as_str()))
+            }) {
                 continue;
             }
-            let cost_bytes = row.elements.saturating_mul(INDEX_ENTRY_BYTES);
+            let row_elements: u64 = rows.iter().map(|row| row.elements).sum();
+            let cost_bytes = row_elements.saturating_mul(INDEX_ENTRY_BYTES);
             let confidence = if uses.scan_runs >= 100 {
                 Confidence::High
             } else {
@@ -853,28 +902,46 @@ pub fn compute(
             } else {
                 (uses.scan_runs.saturating_mul(label_elements), "about ")
             };
+            let (id_label, title, scope) = match &label {
+                Some(label) => (
+                    label.to_string(),
+                    format!("Create an index on {label}.{key}"),
+                    format!("{label_elements} {label} elements"),
+                ),
+                None => (
+                    "*".to_string(),
+                    format!(
+                        "Create a label-less index on {key} (every {})",
+                        element.as_str()
+                    ),
+                    format!(
+                        "{label_elements} {} elements (no single label)",
+                        element.as_str()
+                    ),
+                ),
+            };
             index_advice.push((
                 scanned,
                 Recommendation {
-                    id: format!("create_index:{}:{label}:{key}", element_name(element)),
+                    id: format!("create_index:{}:{id_label}:{key}", element_name(element)),
                     action: RecommendedAction::CreateIndex {
                         element,
-                        label: label.to_string(),
+                        label: label.as_ref().map(CompactString::to_string),
                         key: key.to_string(),
                     },
                     element,
-                    label: label.to_string(),
+                    label: label.as_ref().map(CompactString::to_string),
                     key: key.to_string(),
-                    title: format!("Create an index on {label}.{key}"),
+                    title,
                     evidence: format!(
-                        "filtered {} times in two days by a full scan of {} {} elements \
-                         ({about}{} elements read in all)",
-                        uses.scan_runs, label_elements, label, scanned
+                        "filtered {} times in two days by a full scan of {scope} ({about}{} \
+                         elements read in all)",
+                        uses.scan_runs, scanned
                     ),
                     cost: format!(
                         "about {} of memory for {} entries; every write of {key} updates the index",
                         bytes_text(cost_bytes),
-                        row.elements
+                        row_elements
                     ),
                     memory_bytes: -(cost_bytes.min(i64::MAX as u64) as i64),
                     measured: false,
@@ -889,7 +956,7 @@ pub fn compute(
     // drop_index: no indexed lookup in the window observed.
     if workload.is_some() && observed_days >= request.min_observed_days {
         for index in &memory.indexes {
-            let uses = Uses::of(workload, index.element, &index.label, &index.key);
+            let uses = Uses::of(workload, index.element, index.label.as_deref(), &index.key);
             if uses.index_runs_90 > 0 {
                 continue;
             }
@@ -913,8 +980,8 @@ pub fn compute(
                     title: format!("Drop the unused index {}", index.name),
                     evidence: format!("no query used it in {observed_days} days of statistics"),
                     cost: format!(
-                        "filters on {}.{} scan again; it can be created again at any time",
-                        index.label, index.key
+                        "filters on {} scan again; it can be created again at any time",
+                        target_text(index)
                     ),
                     memory_bytes: index.stats.bytes.min(i64::MAX as u64) as i64,
                     measured: true,
@@ -926,6 +993,62 @@ pub fn compute(
         }
     }
 
+    // drop_index: a per-label index whose key a label-less index of the same element kind and
+    // transform covers too (design section 8: the entries are kept twice). The label-less one
+    // serves that label's queries as well (D2), so dropping the per-label one frees its memory;
+    // it may still be the faster read for its label, so the confidence is low.
+    for index in &memory.indexes {
+        let Some(label) = &index.label else {
+            continue;
+        };
+        let Some(any) = memory.indexes.iter().find(|other| {
+            other.label.is_none()
+                && other.element == index.element
+                && other.key == index.key
+                && other.transform == index.transform
+        }) else {
+            continue;
+        };
+        let id = format!("drop_index:{}", index.name);
+        if drop_index_advice.iter().any(|(_, r)| r.id == id) {
+            continue;
+        }
+        drop_index_advice.push((
+            index.stats.bytes,
+            Recommendation {
+                id,
+                action: RecommendedAction::DropIndex {
+                    name: index.name.clone(),
+                },
+                element: index.element,
+                label: index.label.clone(),
+                key: index.key.clone(),
+                title: format!(
+                    "Drop the index {}: the label-less index {} covers it",
+                    index.name, any.name
+                ),
+                evidence: format!(
+                    "the label-less index {} on {} holds every {}, {label} ones included, so the \
+                     entries of {label}.{} are kept twice",
+                    any.name,
+                    index.key,
+                    index.element.as_str(),
+                    index.key
+                ),
+                cost: format!(
+                    "filters on {label}.{} read the label-less index and check the label of each \
+                     candidate; it can be created again at any time",
+                    index.key
+                ),
+                memory_bytes: index.stats.bytes.min(i64::MAX as u64) as i64,
+                measured: true,
+                impact: Impact::of_memory(index.stats.bytes, graph_bytes),
+                confidence: Confidence::Low,
+                reversible: true,
+            },
+        ));
+    }
+
     // drop_compression: a compressed key that became hot.
     for rule in &memory.compression_rules {
         let Some(label) = rule.target.label.as_deref() else {
@@ -934,7 +1057,7 @@ pub fn compute(
         let Some(key) = key_of(&rule.target.path) else {
             continue;
         };
-        let uses = Uses::of(workload, rule.target.element, label, &key);
+        let uses = Uses::of(workload, rule.target.element, Some(label), &key);
         if workload.is_none() || uses.reads < request.hot_reads {
             continue;
         }
@@ -950,7 +1073,7 @@ pub fn compute(
                     name: rule.name.clone(),
                 },
                 element: rule.target.element,
-                label: label.to_string(),
+                label: Some(label.to_string()),
                 key: key.clone(),
                 title: format!("Stop compressing {label}.{key} (rule {})", rule.name),
                 evidence: format!(
@@ -992,7 +1115,7 @@ pub fn compute(
     let mut estimates = 0;
     let mut measured_keys: Vec<(ElementKind, String, String)> = Vec::new();
     for (element, label, key, _) in candidates {
-        let uses = Uses::of(workload, element, label, &key);
+        let uses = Uses::of(workload, element, Some(label), &key);
         // A hot key keeps lz4 away (every read would decompress); dedup reads stay plain.
         let hot = workload.is_some() && uses.reads >= request.hot_reads;
         let Ok(estimate_request) = CompressionEstimateRequest::new(element, label, key.as_str())
@@ -1111,7 +1234,7 @@ pub fn compute(
         let Some(best) = measured.candidates.iter().find(|c| dedup_ok(c)) else {
             continue;
         };
-        let uses = Uses::of(workload, element, label, &key);
+        let uses = Uses::of(workload, element, Some(label), &key);
         compression_advice.push((
             u64::try_from(best.saved_bytes).unwrap_or(0),
             compression_recommendation(
@@ -1161,13 +1284,14 @@ pub fn compute(
             }
             let index_lookups = (record.kind == "create_index")
                 .then(|| {
-                    // create_index:<element>:<label>:<key>
+                    // create_index:<element>:<label>:<key> (`*`: a label-less index)
                     let mut parts = id.splitn(4, ':').skip(1);
                     let element = match parts.next()? {
                         "edge" => ElementKind::Edge,
                         _ => ElementKind::Vertex,
                     };
                     let (label, key) = (parts.next()?, parts.next()?);
+                    let label = (label != "*").then_some(label);
                     Some(Uses::of(workload, element, label, key).index_runs_90)
                 })
                 .flatten();
@@ -1224,7 +1348,10 @@ impl Advice {
                         key,
                     } => {
                         action.insert("element", text(element.as_str()));
-                        action.insert("label", text(label));
+                        action.insert(
+                            "label",
+                            label.as_deref().map_or(ElementProperty::Null, text),
+                        );
                         action.insert("key", text(key));
                     }
                     RecommendedAction::DropIndex { name }
@@ -1251,7 +1378,10 @@ impl Advice {
                 map.insert("id", text(&r.id));
                 map.insert("kind", text(r.action.kind()));
                 map.insert("element", text(r.element.as_str()));
-                map.insert("label", text(&r.label));
+                map.insert(
+                    "label",
+                    r.label.as_deref().map_or(ElementProperty::Null, text),
+                );
                 map.insert("key", text(&r.key));
                 map.insert("title", text(&r.title));
                 map.insert("evidence", text(&r.evidence));

@@ -28,14 +28,17 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for CountPushdownRule {
         }
 
         // Check if the first step is an Init step ("v" or "e") that is not group_count. A source
-        // with folded `has(key, value)` conditions is not counted from storage or an index: its
-        // filtered scan feeds the `count()` (which the executor collapses without materializing
-        // more than the matches).
+        // with folded `has(key, value)` conditions is not counted from storage: its filtered
+        // scan feeds the `count()` (which the executor collapses without materializing more
+        // than the matches), unless the `property_index` rule marked its index access exact
+        // (no re-check can drop a candidate): the count is then the number of entries in the
+        // index slice, answered from the postings (book page "Property Indexes").
         let is_init = matches!(
             &steps[0],
             GraphStep::Init(name, init) if (*name == "v" || *name == "e")
                 && !init.is_group_count_by_label()
-                && init.property_filters().is_empty()
+                && (init.property_filters().is_empty()
+                    || init.index_access().is_some_and(|access| access.exact))
         );
         if !is_init {
             return false;

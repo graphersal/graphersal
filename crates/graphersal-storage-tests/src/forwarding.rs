@@ -19,10 +19,10 @@ use graphersal::TraversalGraph;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, EdgeHandle,
-    ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
-    JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
-    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
-    VertexHandle,
+    ElementKind, ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics,
+    GraphStorage, JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange,
+    PropertyIndexTransform, PropertyMap, PropertySchema, RollbackReason, StorageCapabilities,
+    UnitChanges, UnitMark, VertexHandle,
 };
 
 /// The vertex handle of [`Forwarding`]: a newtype around the wrapped graph's [`VertexHandle`],
@@ -219,7 +219,7 @@ impl GraphStorage for Forwarding {
     }
     fn vertices_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
@@ -231,7 +231,7 @@ impl GraphStorage for Forwarding {
     }
     fn edges_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
@@ -242,7 +242,7 @@ impl GraphStorage for Forwarding {
     }
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
@@ -257,7 +257,7 @@ impl GraphStorage for Forwarding {
     }
     fn edges_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
@@ -269,6 +269,16 @@ impl GraphStorage for Forwarding {
             return Ok(None);
         };
         Ok(Some(Box::new(found.map(ForwardEdgeId))))
+    }
+    fn count_by_property_index(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        GraphStorage::count_by_property_index(&self.0, element, label, key, transform, range)
     }
 
     fn insert_vertex(

@@ -399,30 +399,48 @@ fn find_fault<'g, S: GraphStorage + 'g>(
 /// when no step matches.
 /// The one label `labels` names (repeated names count once), or `None` for none or several.
 /// The candidates of a `v()` source that reads a property index ([`IndexAccess`]): the vertices
-/// of every label in every range of the access, each once. `None` when the storage serves no
-/// index for one of the labels (the source scans its labels instead).
+/// of every label (`labels`, the source's folded labels) in every range of the access, each
+/// once; for a label-less access the vertices of the label-less index, kept only when they carry
+/// one of `labels` (if any). `None` when the storage serves no index the access names (the
+/// source scans instead).
 ///
 /// [`IndexAccess`]: crate::traversal::step::IndexAccess
 fn index_vertices<S: GraphStorage>(
     storage: &S,
-    labels: &[String],
+    labels: Option<&[String]>,
     access: &crate::traversal::step::IndexAccess,
 ) -> Result<Option<Vec<S::VertexId>>, crate::error::GraphError> {
-    let dedup = labels.len() > 1 || access.ranges.len() > 1;
+    let lookup = |label, range| vertex_lookup(storage, label, access, range);
     let mut seen: std::collections::HashSet<S::VertexId> = std::collections::HashSet::new();
     let mut out = Vec::new();
+    if access.label_less {
+        let dedup = access.ranges.len() > 1;
+        for range in &access.ranges {
+            let Some(found) = lookup(None, range)? else {
+                return Ok(None);
+            };
+            for node in found {
+                if dedup && !seen.insert(node) {
+                    continue;
+                }
+                // D2: the label-less index holds every vertex; the source's labels are checked.
+                if let Some(labels) = labels
+                    && !crate::graph::storage::vertex_has_any_label(storage, node, labels)?
+                {
+                    continue;
+                }
+                out.push(node);
+            }
+        }
+        return Ok(Some(out));
+    }
+    let Some(labels) = labels else {
+        return Ok(None);
+    };
+    let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
-            let found = match &access.transform {
-                None => storage.vertices_by_property_index(label, &access.key, range)?,
-                Some(transform) => storage.vertices_by_transformed_property_index(
-                    label,
-                    &access.key,
-                    transform,
-                    range,
-                )?,
-            };
-            let Some(found) = found else {
+            let Some(found) = lookup(Some(label.as_str()), range)? else {
                 return Ok(None);
             };
             for node in found {
@@ -435,27 +453,75 @@ fn index_vertices<S: GraphStorage>(
     Ok(Some(out))
 }
 
-/// The edge counterpart of [`index_vertices`].
+/// One slice of the index an access reads, from the vertex lookups of `storage`.
+type Found<'a, T> = Result<Option<Box<dyn Iterator<Item = T> + 'a>>, crate::error::GraphError>;
+
+fn vertex_lookup<'a, S: GraphStorage>(
+    storage: &'a S,
+    label: Option<&'a str>,
+    access: &'a crate::traversal::step::IndexAccess,
+    range: &crate::graph::PropertyIndexRange,
+) -> Found<'a, S::VertexId> {
+    match &access.transform {
+        None => storage.vertices_by_property_index(label, &access.key, range),
+        Some(transform) => {
+            storage.vertices_by_transformed_property_index(label, &access.key, transform, range)
+        }
+    }
+}
+
+fn edge_lookup<'a, S: GraphStorage>(
+    storage: &'a S,
+    label: Option<&'a str>,
+    access: &'a crate::traversal::step::IndexAccess,
+    range: &crate::graph::PropertyIndexRange,
+) -> Found<'a, S::EdgeId> {
+    match &access.transform {
+        None => storage.edges_by_property_index(label, &access.key, range),
+        Some(transform) => {
+            storage.edges_by_transformed_property_index(label, &access.key, transform, range)
+        }
+    }
+}
+
+/// The edge counterpart of [`index_vertices`] (an edge has one label).
 fn index_edges<S: GraphStorage>(
     storage: &S,
-    labels: &[String],
+    labels: Option<&[String]>,
     access: &crate::traversal::step::IndexAccess,
 ) -> Result<Option<Vec<S::EdgeId>>, crate::error::GraphError> {
-    let dedup = labels.len() > 1 || access.ranges.len() > 1;
+    let lookup = |label, range| edge_lookup(storage, label, access, range);
     let mut seen: std::collections::HashSet<S::EdgeId> = std::collections::HashSet::new();
     let mut out = Vec::new();
+    if access.label_less {
+        let dedup = access.ranges.len() > 1;
+        for range in &access.ranges {
+            let Some(found) = lookup(None, range)? else {
+                return Ok(None);
+            };
+            for edge in found {
+                if dedup && !seen.insert(edge) {
+                    continue;
+                }
+                if let Some(labels) = labels
+                    && !storage
+                        .edge_label(edge)?
+                        .is_some_and(|label| labels.iter().any(|wanted| wanted == label))
+                {
+                    continue;
+                }
+                out.push(edge);
+            }
+        }
+        return Ok(Some(out));
+    }
+    let Some(labels) = labels else {
+        return Ok(None);
+    };
+    let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
-            let found = match &access.transform {
-                None => storage.edges_by_property_index(label, &access.key, range)?,
-                Some(transform) => storage.edges_by_transformed_property_index(
-                    label,
-                    &access.key,
-                    transform,
-                    range,
-                )?,
-            };
-            let Some(found) = found else {
+            let Some(found) = lookup(Some(label.as_str()), range)? else {
                 return Ok(None);
             };
             for edge in found {
@@ -466,6 +532,130 @@ fn index_edges<S: GraphStorage>(
         }
     }
     Ok(Some(out))
+}
+
+/// The count of a `count()` fused into a source whose index access is exact (the
+/// `property_index` rule's `IndexAccess::exact`): the entries of the access's slices, counted
+/// by the storage from its postings ([`GraphStorage::count_by_property_index`]); `None` when the
+/// storage cannot count them (the caller counts the checked candidates instead).
+fn index_count<S: GraphStorage>(
+    storage: &S,
+    element: crate::graph::ElementKind,
+    labels: Option<&[String]>,
+    access: &crate::traversal::step::IndexAccess,
+) -> Result<Option<usize>, crate::error::GraphError> {
+    let label = match (access.label_less, labels) {
+        (true, _) => None,
+        (false, Some([label])) => Some(label.as_str()),
+        (false, _) => return Ok(None),
+    };
+    let mut total = 0u64;
+    for range in &access.ranges {
+        let Some(count) = storage.count_by_property_index(
+            element,
+            label,
+            &access.key,
+            access.transform.as_ref(),
+            range,
+        )?
+        else {
+            return Ok(None);
+        };
+        total = total.saturating_add(count);
+    }
+    Ok(Some(usize::try_from(total).unwrap_or(usize::MAX)))
+}
+
+/// The vertices of a source without ids that satisfy its folded `filters`: the index access's
+/// candidates when it has one the storage serves, else its labels' vertices (every vertex
+/// without labels), each once. The count of a fused `count()` the storage cannot answer from
+/// an index.
+fn count_filtered_vertices<S: GraphStorage>(
+    storage: &S,
+    labels: Option<&[String]>,
+    access: Option<&crate::traversal::step::IndexAccess>,
+    filters: &[crate::traversal::step::PropertyFilter],
+) -> Result<usize, crate::error::GraphError> {
+    let matches = |node: S::VertexId| {
+        crate::traversal::step::PropertyFilter::all_vertex(filters, storage, node)
+    };
+    if let Some(access) = access
+        && let Some(candidates) = index_vertices(storage, labels, access)?
+    {
+        let mut count = 0;
+        for node in candidates {
+            if matches(node)? {
+                count += 1;
+            }
+        }
+        return Ok(count);
+    }
+    let mut count = 0;
+    match labels {
+        None => {
+            for node in storage.vertices()? {
+                if matches(node)? {
+                    count += 1;
+                }
+            }
+        }
+        Some(labels) => {
+            let mut seen: std::collections::HashSet<S::VertexId> = std::collections::HashSet::new();
+            for label in labels {
+                for node in storage.vertices_by_label(label)? {
+                    if seen.insert(node) && matches(node)? {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// The edge counterpart of [`count_filtered_vertices`].
+fn count_filtered_edges<S: GraphStorage>(
+    storage: &S,
+    labels: Option<&[String]>,
+    access: Option<&crate::traversal::step::IndexAccess>,
+    filters: &[crate::traversal::step::PropertyFilter],
+) -> Result<usize, crate::error::GraphError> {
+    let matches =
+        |edge: S::EdgeId| crate::traversal::step::PropertyFilter::all_edge(filters, storage, edge);
+    if let Some(access) = access
+        && let Some(candidates) = index_edges(storage, labels, access)?
+    {
+        let mut count = 0;
+        for edge in candidates {
+            if matches(edge)? {
+                count += 1;
+            }
+        }
+        return Ok(count);
+    }
+    let mut count = 0;
+    match labels {
+        None => {
+            for edge in storage.edges()? {
+                if matches(edge)? {
+                    count += 1;
+                }
+            }
+        }
+        Some(labels) => {
+            let mut distinct: Vec<&String> = labels.iter().collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            for label in distinct {
+                for edge in storage.edges_by_label(label)? {
+                    if matches(edge)? {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn single_label(labels: &[String]) -> Option<&str> {
@@ -1805,9 +1995,16 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// The index is built in the same unit, kept exact on every write, rollback and replay, and
     /// rebuilt from the data when a graph is loaded (its entries are never stored).
     ///
+    /// A label-less index ([`PropertyIndexDefinition::label_less`](crate::graph::PropertyIndexDefinition::label_less))
+    /// holds every element of its kind: a `v()`/`e()` without labels then reads it too
+    /// (`g.v().has("name", x)`), and so does a labelled source without a per-label index on
+    /// the key when it is cheaper.
+    ///
     /// A [`set_definition`](Self::set_definition) of a [`Definition::property_index`] (a
-    /// catalog entry of kind [`DefinitionKind::PROPERTY_INDEX`]); a second index on the same
-    /// `(element, label, key, type)` fails with
+    /// catalog entry of kind [`DefinitionKind::PROPERTY_INDEX`], or
+    /// [`DefinitionKind::PROPERTY_INDEX_EXT`] for a label-less index; names are unique across
+    /// both, so an index of the other kind with the same name is replaced and asked `Delete`
+    /// for); a second index on the same `(element, label, key, type, transform)` fails with
     /// [`DefinitionError::Conflict`](crate::error::DefinitionError::Conflict). A storage
     /// without [`property_indexes`](crate::graph::StorageCapabilities::property_indexes)
     /// refuses it with [`GraphError::Unsupported`](crate::error::GraphError::Unsupported).
@@ -1842,31 +2039,49 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         if !self.storage.capabilities()?.property_indexes {
             return Err(crate::error::GraphError::unsupported("property indexes").into());
         }
-        let action = if self
-            .storage
-            .definition(DefinitionKind::PROPERTY_INDEX, name)?
-            .is_some()
-        {
+        let kind = index.definition_kind();
+        let existing = self.index_kind(name)?;
+        if let Some(other) = existing.filter(|other| *other != kind) {
+            self.authorize_definition(
+                "create_index",
+                crate::graph::Action::Delete,
+                Some(other),
+                Some(name),
+            )?;
+        }
+        let action = if existing == Some(kind) {
             crate::graph::Action::Update
         } else {
             crate::graph::Action::Create
         };
-        self.authorize_definition(
-            "create_index",
-            action,
-            Some(DefinitionKind::PROPERTY_INDEX),
-            Some(name),
-        )?;
+        self.authorize_definition("create_index", action, Some(kind), Some(name))?;
         index
             .check_create(name, self.storage.get_schema()?.as_ref())
             .map_err(crate::error::GraphError::from)?;
         self.set_definition(Definition::property_index(name, index))
     }
 
-    /// Drops the property index `name`; `false` when there is none. Asks an attached
-    /// authorizer for `Delete` on it.
+    /// Drops the property index `name` (per-label or label-less); `false` when there is none.
+    /// Asks an attached authorizer for `Delete` on it.
     pub fn drop_index(&mut self, name: &str) -> TraverserResult<bool> {
-        self.remove_definition(DefinitionKind::PROPERTY_INDEX, name)
+        let kind = self
+            .index_kind(name)?
+            .unwrap_or(DefinitionKind::PROPERTY_INDEX);
+        self.remove_definition(kind, name)
+    }
+
+    /// The catalog kind holding the property index `name`, if any (names are unique across
+    /// [`DefinitionKind::PROPERTY_INDEX`] and [`DefinitionKind::PROPERTY_INDEX_EXT`]).
+    fn index_kind(&self, name: &str) -> TraverserResult<Option<DefinitionKind>> {
+        for kind in [
+            DefinitionKind::PROPERTY_INDEX,
+            DefinitionKind::PROPERTY_INDEX_EXT,
+        ] {
+            if self.storage.definition(kind, name)?.is_some() {
+                return Ok(Some(kind));
+            }
+        }
+        Ok(None)
     }
 
     /// The property indexes of the catalog, by name, each with what it holds right now
@@ -1874,17 +2089,26 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     pub fn list_indexes(
         &self,
     ) -> TraverserResult<Vec<(Definition, Option<crate::graph::PropertyIndexStats>)>> {
-        self.authorize_definition(
-            "list_indexes",
-            crate::graph::Action::Read,
-            Some(DefinitionKind::PROPERTY_INDEX),
-            None,
-        )?;
+        for kind in [
+            DefinitionKind::PROPERTY_INDEX,
+            DefinitionKind::PROPERTY_INDEX_EXT,
+        ] {
+            self.authorize_definition(
+                "list_indexes",
+                crate::graph::Action::Read,
+                Some(kind),
+                None,
+            )?;
+        }
         let served = self.storage.property_indexes()?;
-        Ok(self
+        let mut definitions: Vec<&Definition> = self
             .storage
             .definitions()?
-            .filter(|definition| definition.kind() == DefinitionKind::PROPERTY_INDEX)
+            .filter(|definition| definition.kind().is_property_index())
+            .collect();
+        definitions.sort_by(|a, b| a.name().cmp(b.name()));
+        Ok(definitions
+            .into_iter()
             .map(|definition| {
                 let stats = served
                     .iter()
@@ -3178,7 +3402,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         let init_labels = step.labels();
         let init_ids = step.ids();
         // Folded `has(key, value)` conditions: checked while scanning, before a
-        // traverser exists (never together with a fused count, see the rules).
+        // traverser exists (together with a fused count only when an exact index access
+        // answers it, see the rules).
         let property_filters = step.property_filters();
         let count_only = step.is_count_only();
         let group_count_by_label = step.is_group_count_by_label();
@@ -3291,7 +3516,39 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = 1;
                 } else if count_only {
-                    let count = if let Some(ids) = init_ids {
+                    let count = if !property_filters.is_empty() {
+                        // A `count()` fused into a source with an exact index access (the
+                        // only way a source with folded conditions is count-only): the
+                        // index's postings answer it (book page "Property Indexes").
+                        let access = step.index_access();
+                        let counted = match access {
+                            Some(access) => index_count(
+                                &*context.storage,
+                                crate::graph::ElementKind::Vertex,
+                                init_labels,
+                                access,
+                            ),
+                            None => Ok(None),
+                        };
+                        match counted.with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )? {
+                            Some(count) => count,
+                            None => count_filtered_vertices(
+                                &*context.storage,
+                                init_labels,
+                                access,
+                                property_filters,
+                            )
+                            .with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?,
+                        }
+                    } else if let Some(ids) = init_ids {
                         let mut cnt = 0;
                         for id_value in ids {
                             if let Some(node_index) =
@@ -3385,15 +3642,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         }
                     }
                     count_out = source.len();
-                } else if let Some(candidates) = match (init_labels, step.index_access()) {
-                    (Some(labels), Some(access)) => {
-                        index_vertices(&*context.storage, labels, access).with_step_frame(
+                } else if let Some(candidates) = match step.index_access() {
+                    Some(access) => index_vertices(&*context.storage, init_labels, access)
+                        .with_step_frame(
                             || step.get_name(),
                             step_at,
                             || plan_frame(steps, level, logical_step_idx),
-                        )?
-                    }
-                    _ => None,
+                        )?,
+                    None => None,
                 } {
                     // A property index serves a condition (book page "Property
                     // Indexes"): its candidates (a superset) are checked like the
@@ -3572,7 +3828,37 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = 1;
                 } else if count_only {
-                    let count = if let Some(ids) = init_ids {
+                    let count = if !property_filters.is_empty() {
+                        // See the vertex case.
+                        let access = step.index_access();
+                        let counted = match access {
+                            Some(access) => index_count(
+                                &*context.storage,
+                                crate::graph::ElementKind::Edge,
+                                init_labels,
+                                access,
+                            ),
+                            None => Ok(None),
+                        };
+                        match counted.with_step_frame(
+                            || step.get_name(),
+                            step_at,
+                            || plan_frame(steps, level, logical_step_idx),
+                        )? {
+                            Some(count) => count,
+                            None => count_filtered_edges(
+                                &*context.storage,
+                                init_labels,
+                                access,
+                                property_filters,
+                            )
+                            .with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?,
+                        }
+                    } else if let Some(ids) = init_ids {
                         let mut cnt = 0;
                         for id_value in ids {
                             if let Some(edge_index) =
@@ -3656,14 +3942,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         }
                     }
                     count_out = source.len();
-                } else if let Some(candidates) = match (init_labels, step.index_access()) {
-                    (Some(labels), Some(access)) => index_edges(&*context.storage, labels, access)
+                } else if let Some(candidates) = match step.index_access() {
+                    Some(access) => index_edges(&*context.storage, init_labels, access)
                         .with_step_frame(
                             || step.get_name(),
                             step_at,
                             || plan_frame(steps, level, logical_step_idx),
                         )?,
-                    _ => None,
+                    None => None,
                 } {
                     // A property index serves a condition (see the vertex case).
                     for edge_index in candidates {

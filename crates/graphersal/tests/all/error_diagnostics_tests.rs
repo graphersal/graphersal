@@ -12641,3 +12641,23 @@ fn an_unavailable_database_model_names_the_restore_commands() {
     assert!(!report.contains("with_embedders"), "{report}");
     store.close().unwrap();
 }
+
+#[cfg(feature = "script")]
+#[test]
+fn a_label_less_index_name_error_says_how_a_label_less_index_is_named() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let err = eval_value(
+        graph.clone(),
+        r#"g.create_index(#{key: "name", name: "bad name"})"#,
+    )
+    .expect_err("an invalid name")
+    .to_string();
+    for part in [
+        "Help: A property index's name is an identifier",
+        "a label-less g.create_index(#{key}) calls it <key>",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+}

@@ -456,10 +456,10 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             "list_indexes",
             "Property indexes",
             Kind::Read,
-            "The property indexes of the graph: the vertices or edges of one label ordered by \
-             one top-level property, so that v()/e() with has_label(label) and has(key, ..) \
-             (equality, P.within, ranges) read only the matching elements. Each has name, \
-             element, label, key, type (memory-ordered), transform (null, or to_lower: the \
+            "The property indexes of the graph: the vertices or edges of one label (label null: \
+             of every label) ordered by one top-level property, so that v()/e() with \
+             has_label(label) and has(key, ..) (equality, P.within, ranges) read only the \
+             matching elements. Each has name, element, label, key, type (memory-ordered), transform (null, or to_lower: the \
              lowered text of string values), served (false: the definition is kept but no \
              query reads it; reason says why, such as a storage without indexes or a type or \
              transform this version does not know) and its current stats (entries, \
@@ -472,14 +472,15 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             "Create a property index",
             Kind::Write,
             "Declares a property index on the `element`s labelled `label`, ordered by their \
-             top-level property `key`, and builds it from the data. Queries that start with \
-             g.v().has_label(label) (g.e() for edges) and filter has(key, value), \
-             has(key, P.within(..)) or a range (P.gt/gte/lt/lte/between/inside/outside) then \
-             read only the matching elements; results are the same as without the index, only \
-             their order may differ. It costs memory (see bytes in list_indexes) and a little \
-             time on every write of the key. One index per element, label, key, type and \
-             transform; `name` defaults to <label>_<key> (<label>_<key>_edge for edges, then \
-             _to_lower with that transform), `type` to memory-ordered (an ordered index in \
+             top-level property `key`, and builds it from the data. Without `label`: every \
+             vertex (edge), also read by has(key, ..) without has_label. Queries that start with g.v().has_label(label) (g.e() for edges) and \
+             filter has(key, value), has(key, P.within(..)) or a range \
+             (P.gt/gte/lt/lte/between/inside/outside) then read only the matching elements; \
+             results are the same as without the index, only their order may differ. It costs \
+             memory (see bytes in list_indexes) and a little time on every write of the key. One \
+             index per element, label, key, type and transform; `name` defaults to \
+             <label>_<key> (<key> without a label, <label>_<key>_edge for edges, then _to_lower \
+             with that transform), `type` to memory-ordered (an ordered index in \
              memory holding scalar values: null, booleans, numbers, strings, uuids, dates and \
              times). `transform` \"to_lower\" indexes the lowered text of string values for a \
              case-insensitive search written has(key, __.to_lower().is(\"alice\")) (also \
@@ -489,10 +490,10 @@ pub(crate) fn all_tools() -> Vec<Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "label": {"type": "string", "description": "The vertex or edge label."},
+                    "label": {"type": "string", "description": "The vertex or edge label; omit for every label."},
                     "key": {"type": "string", "description": "The top-level property name (not a jpath)."},
                     "element": {"type": "string", "enum": ["vertex", "edge"], "description": "Default vertex."},
-                    "name": {"type": "string", "description": "The index's name (an identifier); default <label>_<key>."},
+                    "name": {"type": "string", "description": "The index's name (an identifier); default <label>_<key> (<key> label-less)."},
                     "type": {
                         "type": "string",
                         "enum": graphersal::catalog::PropertyIndexType::KNOWN_NAMES,
@@ -504,7 +505,7 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                         "description": "Optional: to_lower indexes the lowered text of string values, for has(key, __.to_lower().is(..)) (case-insensitive search). Default: none (the values themselves).",
                     },
                 },
-                "required": ["label", "key"],
+                "required": ["key"],
             }),
         ),
         tool(

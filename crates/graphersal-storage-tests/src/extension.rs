@@ -6,6 +6,7 @@
 //! instead (a hook registration is refused). The macros generate them for every storage, so a
 //! storage that starts claiming a capability is tested for it automatically.
 
+use graphersal::prelude::PropertyMap;
 use graphersal::schema::{GraphSchema, SchemaMode};
 use graphersal::{ElementProperty, error::GraphError};
 use graphersal::{
@@ -450,6 +451,134 @@ fn has_catalog<S: GraphStorage>(storage: &mut S) -> bool {
         .rollback_unit(mark, &RollbackReason::failed(&"contract probe"))
         .unwrap();
     supported
+}
+
+/// The ids of the vertices a lookup answered (`None`: not served), sorted.
+fn vertex_ids<S: GraphStorage>(
+    storage: &S,
+    found: Option<Box<dyn Iterator<Item = S::VertexId> + '_>>,
+) -> Option<Vec<String>> {
+    let mut ids: Vec<String> = found?
+        .map(|v| {
+            storage
+                .vertex_id(v)
+                .unwrap()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    ids.sort();
+    Some(ids)
+}
+
+/// `property_indexes` with a catalog: a LABEL-LESS index (`PropertyIndexDefinition::label_less`,
+/// kind `property_index_ext`, critical) holds every vertex of the kind, unlabeled ones
+/// included, and follows writes and rollbacks; `vertices_by_property_index(None, ..)` reads it
+/// (a superset, each vertex once), a per-label lookup of the same key is not answered by it, and
+/// `count_by_property_index`, when the storage answers, is the exact count. `property_indexes`
+/// lists it with `label: None`. A label-less edge index the same for edges. Skipped without the
+/// capability.
+pub fn label_less_property_index_serves_every_element<S: GraphStorage>(storage: &mut S) {
+    use graphersal::catalog::PropertyIndexDefinition;
+    use graphersal::storage::{ElementKind, PropertyIndexRange};
+    let caps = storage.capabilities().unwrap();
+    if !caps.property_indexes || !caps.atomic || !has_catalog(storage) {
+        return;
+    }
+    let a = vertex(storage, Some("ll_a"), &["a"], props(&[("k", "x".into())]));
+    let _b = vertex(storage, Some("ll_b"), &["b"], props(&[("k", "y".into())]));
+    let _bare = vertex(storage, Some("ll_bare"), &[], props(&[("k", "x".into())]));
+    let _none = vertex(storage, Some("ll_none"), &["a"], PropertyMap::default());
+    let e = edge(
+        storage,
+        Some("ll_e"),
+        Some("r"),
+        a,
+        a,
+        props(&[("o", "x".into())]),
+    );
+    let index = Definition::property_index(
+        "k_any",
+        PropertyIndexDefinition::label_less(ElementKind::Vertex, "k"),
+    );
+    assert_eq!(index.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
+    assert!(index.flags().is_critical());
+    storage.set_definition(index).expect("a label-less index");
+    storage
+        .set_definition(Definition::property_index(
+            "o_any",
+            PropertyIndexDefinition::label_less(ElementKind::Edge, "o"),
+        ))
+        .expect("a label-less edge index");
+    let x = PropertyIndexRange::equal("x".into());
+    let listed = storage.property_indexes().unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|info| info.name == "k_any" && info.label.is_none() && info.key == "k"),
+        "{listed:?}"
+    );
+    let found = |storage: &S| {
+        vertex_ids(
+            storage,
+            storage.vertices_by_property_index(None, "k", &x).unwrap(),
+        )
+    };
+    let mut expected = vec!["ll_a".to_string(), "ll_bare".to_string()];
+    assert_eq!(
+        found(storage),
+        Some(expected.clone()),
+        "unlabeled ones included"
+    );
+    assert!(
+        storage
+            .vertices_by_property_index(Some("a"), "k", &x)
+            .unwrap()
+            .is_none(),
+        "no per-label index on a.k"
+    );
+    if let Some(count) = storage
+        .count_by_property_index(ElementKind::Vertex, None, "k", None, &x)
+        .unwrap()
+    {
+        assert_eq!(count, 2);
+    }
+    let edges: Option<Vec<S::EdgeId>> = storage
+        .edges_by_property_index(None, "o", &x)
+        .unwrap()
+        .map(Iterator::collect);
+    assert_eq!(edges, Some(vec![e]));
+    // A write moves the entry; a rollback restores it.
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(a, "k".into(), "y".into())
+        .unwrap();
+    assert_eq!(found(storage), Some(vec!["ll_bare".to_string()]));
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_eq!(found(storage), Some(expected.clone()));
+    let late = vertex(
+        storage,
+        Some("ll_late"),
+        &["c", "d"],
+        props(&[("k", "x".into())]),
+    );
+    expected.push("ll_late".to_string());
+    assert_eq!(found(storage), Some(expected), "a multi-label vertex once");
+    storage.drop_vertex(late).unwrap();
+    assert!(
+        storage
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "k_any")
+            .unwrap()
+    );
+    assert!(
+        storage
+            .vertices_by_property_index(None, "k", &x)
+            .unwrap()
+            .is_none(),
+        "a dropped index serves nothing"
+    );
 }
 
 /// `set_definitions` stores a list in order exactly like one `set_definition` per item (a name

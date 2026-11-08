@@ -222,6 +222,12 @@ pub(crate) trait PlannerFacts {
     fn vertex_count(&self) -> Option<u64>;
     /// Whether a property index on `(vertex, label, key)` (no transform) serves lookups.
     fn has_vertex_index(&self, label: &str, key: &str) -> bool;
+    /// Whether a label-less property index on `(vertex, key)` (no transform) serves lookups
+    /// (design D1/D2: any vertex, whatever its labels). Default: none.
+    fn has_any_label_vertex_index(&self, key: &str) -> bool {
+        let _ = key;
+        false
+    }
 }
 
 /// No facts at all: every count unknown, no index.
@@ -246,8 +252,10 @@ impl PlannerFacts for NoFacts {
 #[derive(Debug, Clone)]
 pub(crate) struct StorageFacts<'s> {
     statistics: Option<&'s GraphStatistics>,
-    /// `(label, key)` of every untransformed vertex property index, sorted.
+    /// `(label, key)` of every untransformed per-label vertex property index, sorted.
     indexes: Vec<(String, String)>,
+    /// The key of every untransformed label-less vertex property index, sorted.
+    any_label: Vec<String>,
 }
 
 impl<'s> StorageFacts<'s> {
@@ -256,17 +264,25 @@ impl<'s> StorageFacts<'s> {
     pub(crate) fn from_storage<S: GraphStorage + ?Sized>(
         storage: &'s S,
     ) -> Result<Self, crate::error::GraphError> {
-        let mut indexes: Vec<(String, String)> = storage
-            .property_indexes()?
-            .into_iter()
-            .filter(|info| info.element == ElementKind::Vertex && info.transform.is_none())
-            .map(|info| (info.label, info.key))
-            .collect();
+        let mut indexes: Vec<(String, String)> = Vec::new();
+        let mut any_label: Vec<String> = Vec::new();
+        for info in storage.property_indexes()? {
+            if info.element != ElementKind::Vertex || info.transform.is_some() {
+                continue;
+            }
+            match info.label {
+                Some(label) => indexes.push((label, info.key)),
+                None => any_label.push(info.key),
+            }
+        }
         indexes.sort_unstable();
         indexes.dedup();
+        any_label.sort_unstable();
+        any_label.dedup();
         Ok(StorageFacts {
             statistics: storage.statistics()?,
             indexes,
+            any_label,
         })
     }
 }
@@ -283,6 +299,11 @@ impl PlannerFacts for StorageFacts<'_> {
     fn has_vertex_index(&self, label: &str, key: &str) -> bool {
         self.indexes
             .binary_search_by(|(l, k)| (l.as_str(), k.as_str()).cmp(&(label, key)))
+            .is_ok()
+    }
+    fn has_any_label_vertex_index(&self, key: &str) -> bool {
+        self.any_label
+            .binary_search_by(|k| k.as_str().cmp(key))
             .is_ok()
     }
 }
@@ -845,12 +866,7 @@ impl<'q> Planner<'q> {
                 };
                 let indexed = match &by {
                     LookupBy::Id => true,
-                    LookupBy::Index(key) => labels.as_ref().is_some_and(|labels| {
-                        !labels.is_empty()
-                            && labels
-                                .iter()
-                                .all(|label| self.facts.has_vertex_index(label, key))
-                    }),
+                    LookupBy::Index(key) => self.indexed(labels.as_deref(), key),
                 };
                 if !indexed && !self.scan_lookups {
                     continue;
@@ -867,6 +883,12 @@ impl<'q> Planner<'q> {
         }
         let ((_, _, conjunct), node, by, value, indexed) = best?;
         let scan_labels = bound.binding(node).and_then(|b| scan_labels(&b.labels));
+        // The label-less index serves it when the scan labels have no per-label index each.
+        let any_label = indexed
+            && match &by {
+                LookupBy::Id => false,
+                LookupBy::Index(key) => !self.per_label_indexed(scan_labels.as_deref(), key),
+            };
         let mut filters = self.filters_of(node, scan_labels.as_deref());
         filters.pushed.retain(|&c| c != conjunct);
         filters.residual.retain(|&c| c != conjunct);
@@ -879,6 +901,7 @@ impl<'q> Planner<'q> {
             conjunct,
             by,
             indexed,
+            any_label,
             value: value.clone(),
         })
     }
@@ -999,21 +1022,13 @@ impl<'q> Planner<'q> {
             .filter(|p| p.op.is_equality())
             .map(|p| p.key.as_str())
             .collect();
+        let indexed = equality_keys
+            .iter()
+            .any(|key| self.indexed(labels.as_deref(), key));
         let level = match &labels {
-            Some(labels) => {
-                let indexed = equality_keys.iter().any(|key| {
-                    labels
-                        .iter()
-                        .all(|label| self.facts.has_vertex_index(label, key))
-                });
-                if indexed {
-                    0
-                } else if !equality_keys.is_empty() {
-                    1
-                } else {
-                    2
-                }
-            }
+            _ if indexed => 0,
+            Some(_) if !equality_keys.is_empty() => 1,
+            Some(_) => 2,
             None => 3,
         };
         (level, self.estimate(id).unwrap_or(u64::MAX), id)
@@ -1052,13 +1067,25 @@ impl<'q> Planner<'q> {
             return ElementFilters::default();
         };
         element_filters(&binding.predicates, &self.pushdown, &self.uses, |key| {
-            scan.is_some_and(|labels| {
-                !labels.is_empty()
-                    && labels
-                        .iter()
-                        .all(|label| self.facts.has_vertex_index(label, key))
-            })
+            self.indexed(scan, key)
         })
+    }
+
+    /// Whether every one of `labels` (at least one) has a per-label index on `key`.
+    fn per_label_indexed(&self, labels: Option<&[String]>, key: &str) -> bool {
+        labels.is_some_and(|labels| {
+            !labels.is_empty()
+                && labels
+                    .iter()
+                    .all(|label| self.facts.has_vertex_index(label, key))
+        })
+    }
+
+    /// Whether an index serves an equality on `key` of a node with scan labels `labels`
+    /// (`None`: none): a per-label index for every scan label, or the label-less index on
+    /// `key` (design D1/D2; the scan labels are checked after it).
+    fn indexed(&self, labels: Option<&[String]>, key: &str) -> bool {
+        self.per_label_indexed(labels, key) || self.facts.has_any_label_vertex_index(key)
     }
 
     fn bind(&mut self, id: BindingId) {

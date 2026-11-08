@@ -367,7 +367,7 @@ fn looked_up(
     range: &PropertyIndexRange,
 ) -> Vec<String> {
     let mut ids: Vec<String> = graph
-        .vertices_by_property_index(label, key, range)
+        .vertices_by_property_index(Some(label), key, range)
         .unwrap()
         .expect("an index")
         .filter_map(|v| graph.vertex_id(v).unwrap().map(str::to_string))
@@ -486,7 +486,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
     let since = PropertyIndexRange::equal(2020.into());
     let edges = |graph: &TraversalGraph| {
         graph
-            .edges_by_property_index("r", "since", &since)
+            .edges_by_property_index(Some("r"), "since", &since)
             .unwrap()
             .unwrap()
             .count()
@@ -550,7 +550,7 @@ fn every_mutation_kind_and_its_rollback_keep_the_index_exact() {
     check(&graph);
     assert!(
         graph
-            .vertices_by_property_index("p", "title", &ceo)
+            .vertices_by_property_index(Some("p"), "title", &ceo)
             .unwrap()
             .is_none()
     );
@@ -1075,7 +1075,11 @@ mod stores {
         assert_eq!(infos.len(), 1, "{infos:?}");
         assert_eq!(infos[0].stats.entries, entries);
         let found = graph
-            .vertices_by_property_index("person", "age", &PropertyIndexRange::equal(29.into()))
+            .vertices_by_property_index(
+                Some("person"),
+                "age",
+                &PropertyIndexRange::equal(29.into()),
+            )
             .unwrap()
             .unwrap()
             .count();
@@ -1809,7 +1813,11 @@ mod index_types {
         assert!(
             graph
                 .read()
-                .vertices_by_property_index("person", "age", &PropertyIndexRange::equal(29.into()))
+                .vertices_by_property_index(
+                    Some("person"),
+                    "age",
+                    &PropertyIndexRange::equal(29.into())
+                )
                 .unwrap()
                 .is_none()
         );

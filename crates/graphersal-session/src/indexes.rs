@@ -10,7 +10,8 @@
 //! JSON forms:
 //!
 //! - an **entry** (`list_indexes`): `{name, element: "vertex"|"edge", label, key, type,
-//!   transform, served, reason, stats: {entries, distinctValues, skipped, bytes}}`;
+//!   transform, served, reason, stats: {entries, distinctValues, skipped, bytes}}`; `label` is
+//!   `null` for a label-less index (every element of the kind, unlabeled ones included);
 //!   `transform` is `null` for an index of the values themselves (else `"to_lower"`, or the
 //!   unknown name as read); `served` is false and `stats` `null` when the index is not served,
 //!   and `reason` (else `null`) says why: the storage does not serve indexes (it keeps the
@@ -19,9 +20,10 @@
 //!   [`PropertyIndexDefinition::unserved_reason`]); `skipped` counts elements whose non-null
 //!   value the index does not hold (a `to_lower` index is used by queries only while it is 0);
 //!   `bytes` is the storage's estimate of the index's memory;
-//! - a **spec** (`create_index`): `{label, key, element?, name?, type?, transform?}`;
-//!   `element` defaults to `"vertex"`, `name` to `<label>_<key>` (`<label>_<key>_edge` for an
-//!   edge index, then `_to_lower` with that transform,
+//! - a **spec** (`create_index`): `{key, label?, element?, name?, type?, transform?}`; a
+//!   `label` absent or `null` makes a LABEL-LESS index (an empty string is a `label` error);
+//!   `element` defaults to `"vertex"`, `name` to `<label>_<key>` (`<key>` for a label-less
+//!   index, `<label>_<key>_edge` for an edge index, then `_to_lower` with that transform,
 //!   [`PropertyIndexDefinition::default_name`]), `type` to `"memory-ordered"`
 //!   ([`index_types`] lists the known ones), `transform` to none ([`index_transforms`]);
 //! - **field errors** (a refused create): `[{field, message, help?}]` with `field` one of
@@ -136,9 +138,11 @@ impl Session {
         Ok(self.graph.index(name)?)
     }
 
-    /// How many property indexes the graph holds. Fails like [`Self::list_indexes`].
+    /// How many property indexes the graph holds (per-label and label-less). Fails like
+    /// [`Self::list_indexes`].
     pub fn index_count(&self) -> Result<usize, SessionError> {
-        Ok(self.graph.count_kind(DefinitionKind::PROPERTY_INDEX)?)
+        Ok(self.graph.count_kind(DefinitionKind::PROPERTY_INDEX)?
+            + self.graph.count_kind(DefinitionKind::PROPERTY_INDEX_EXT)?)
     }
 
     /// Creates a property index from a spec (module docs) in ONE commit, which also builds it.
@@ -163,10 +167,16 @@ impl Session {
             .map_err(|err| vec![FieldError::new("general", err.to_string())])
     }
 
-    /// Drops the property index `name`: `true`, or `false` when there was none.
+    /// Drops the property index `name` (per-label or label-less): `true`, or `false` when
+    /// there was none.
     pub fn drop_index(&mut self, name: &str) -> Result<bool, SessionError> {
-        self.graph
-            .drop_definition(DefinitionKind::PROPERTY_INDEX, name)
+        // Index names are unique across both index kinds.
+        Ok(self
+            .graph
+            .drop_definition(DefinitionKind::PROPERTY_INDEX, name)?
+            || self
+                .graph
+                .drop_definition(DefinitionKind::PROPERTY_INDEX_EXT, name)?)
     }
 }
 
@@ -175,7 +185,7 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
     let Some(object) = spec.as_object() else {
         return Err(vec![FieldError::new(
             "general",
-            "the index is a JSON object {label, key, element?, name?, type?, transform?}",
+            "the index is a JSON object {key, label?, element?, name?, type?, transform?}",
         )]);
     };
     if let Some(unknown) = object.keys().find(|key| !KEYS.contains(&key.as_str())) {
@@ -195,15 +205,18 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
         }
     };
     let name = text("name");
-    let label = text("label").unwrap_or_default();
+    // Absent or null: a label-less index; an empty string is a mistake.
+    let label_given = !matches!(spec.get("label"), None | Some(Value::Null));
+    let label = text("label");
     let key = text("key").unwrap_or_default();
     let element = text("element");
     let index_type = text("type");
     let transform = text("transform");
-    if label.is_empty() {
+    if label_given && label.is_none() && !errors.iter().any(|e| e.field == "label") {
         errors.push(FieldError::new(
             "label",
-            "name the vertex or edge label the index covers, for example person",
+            "name the vertex or edge label the index covers, for example person, or omit \
+             label (null) for an index of every element of the kind",
         ));
     }
     if key.is_empty() {
@@ -226,12 +239,15 @@ pub(crate) fn index_definition(spec: &Value) -> Result<Definition, Vec<FieldErro
     if !errors.is_empty() {
         return Err(errors);
     }
-    let index = PropertyIndexDefinition::new(element, label, key)
-        .with_type(index_type.as_deref().map_or(
-            PropertyIndexType::MemoryOrdered,
-            PropertyIndexType::from_name,
-        ))
-        .with_transform(transform.as_deref().map(PropertyIndexTransform::from_name));
+    let index = match label {
+        Some(label) => PropertyIndexDefinition::new(element, label, key),
+        None => PropertyIndexDefinition::label_less(element, key),
+    }
+    .with_type(index_type.as_deref().map_or(
+        PropertyIndexType::MemoryOrdered,
+        PropertyIndexType::from_name,
+    ))
+    .with_transform(transform.as_deref().map(PropertyIndexTransform::from_name));
     let name = name.unwrap_or_else(|| index.default_name());
     // The name and the index each on their own, so both wrong fields are reported (the index
     // checked under its default name when the given one is wrong).
@@ -275,6 +291,7 @@ pub fn index_in<S: GraphStorage>(g: &S, name: &str) -> Result<Value, GraphError>
     Ok(
         match g
             .definition(DefinitionKind::PROPERTY_INDEX, name)?
+            .or(g.definition(DefinitionKind::PROPERTY_INDEX_EXT, name)?)
             .and_then(Definition::as_property_index)
         {
             Some(index) => entry(name, index, stats_of(&g.property_indexes()?, name)),
@@ -304,10 +321,14 @@ pub(crate) fn store_index<S: GraphStorage>(
         return Err(general(GraphError::unsupported("property indexes")));
     }
     let name = definition.name().to_string();
-    if g.definition(DefinitionKind::PROPERTY_INDEX, &name)
+    let taken = g
+        .definition(DefinitionKind::PROPERTY_INDEX, &name)
         .map_err(general)?
         .is_some()
-    {
+        || g.definition(DefinitionKind::PROPERTY_INDEX_EXT, &name)
+            .map_err(general)?
+            .is_some();
+    if taken {
         return Err(vec![FieldError::new(
             "name",
             format!("a property index named '{name}' exists already; choose another name"),
@@ -553,6 +574,35 @@ mod tests {
                 .contains("serves no property indexes"),
             "{entry}"
         );
+    }
+
+    #[test]
+    fn a_label_less_index_has_label_null_and_shares_the_names() {
+        let mut s = modern();
+        let created = s.create_index(&json!({"key": "name"}));
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(created["index"]["name"], "name");
+        assert_eq!(created["index"]["label"], Value::Null);
+        assert_eq!(created["index"]["stats"]["entries"], 6);
+        let edge = s.create_index(&json!({"element": "edge", "key": "weight", "label": null}));
+        assert_eq!(edge["index"]["name"], "weight_edge", "{edge}");
+        assert_eq!(s.index_count().unwrap(), 2);
+        assert_eq!(s.info().unwrap()["propertyIndexes"], 2);
+        assert_eq!(s.info().unwrap()["catalog"]["property_index_ext"], 2);
+        // The name is taken across both kinds; an empty label is a mistake, not label-less.
+        let taken = s.create_index(&json!({"label": "person", "key": "age", "name": "name"}));
+        assert_eq!(taken["errors"][0]["field"], "name", "{taken}");
+        let empty = s.create_index(&json!({"label": " ", "key": "age"}));
+        assert_eq!(empty["errors"][0]["field"], "label", "{empty}");
+        let out = s.execute(
+            r#"g.v().has("name", "josh").values("age").to_list()"#,
+            &crate::RunOptions::default(),
+        );
+        assert!(out.contains("32"), "{out}");
+        assert!(s.drop_index("name").unwrap());
+        assert!(!s.drop_index("name").unwrap());
+        assert_eq!(s.get_index("name").unwrap(), Value::Null);
+        assert_eq!(s.index_count().unwrap(), 1);
     }
 
     #[test]

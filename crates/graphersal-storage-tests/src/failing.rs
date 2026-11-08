@@ -23,10 +23,10 @@ use graphersal::ElementProperty;
 use graphersal::TraversalGraph;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
-    CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ExecutionPolicy,
-    GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage, JsonPath, Mark,
-    MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap,
-    PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+    CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ElementKind,
+    ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
+    JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
+    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
 };
 
 /// The fault switches of a [`Failing`] storage: while a switch is on, the methods of its group
@@ -347,7 +347,7 @@ impl GraphStorage for Failing {
 
     fn vertices_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
@@ -358,7 +358,7 @@ impl GraphStorage for Failing {
 
     fn edges_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
@@ -369,7 +369,7 @@ impl GraphStorage for Failing {
 
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
@@ -387,7 +387,7 @@ impl GraphStorage for Failing {
 
     fn edges_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
@@ -395,6 +395,19 @@ impl GraphStorage for Failing {
         self.faults
             .check(&self.faults.index_lookup, "read a property index")?;
         GraphStorage::edges_by_transformed_property_index(&self.inner, label, key, transform, range)
+    }
+
+    fn count_by_property_index(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        self.faults
+            .check(&self.faults.index_lookup, "read a property index")?;
+        GraphStorage::count_by_property_index(&self.inner, element, label, key, transform, range)
     }
 
     fn insert_vertex(

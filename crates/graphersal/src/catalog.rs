@@ -38,7 +38,7 @@
 //! | Kinds | Owner |
 //! |---|---|
 //! | `0` | invalid |
-//! | `1..=127` | the library: `1` saved query, `2` property index, `3` compression rule, `4` job, `5` model, the rest unassigned |
+//! | `1..=127` | the library: `1` saved query, `2` property index, `3` compression rule, `4` job, `5` model, `6` property index of an extended form (label-less; critical), the rest unassigned |
 //! | `128..=255` | hosts ([`DefinitionKind::HOST_FIRST`]..=[`DefinitionKind::HOST_LAST`]): never assigned by the library |
 //!
 //! A host (a server built on the library, say) adds its own catalog entities under a host kind

@@ -312,7 +312,7 @@ fn ruled_graph() -> TraversalGraph {
 
 fn ages(graph: &TraversalGraph, age: i64) -> Vec<String> {
     let mut ids: Vec<String> = graph
-        .vertices_by_property_index("p", "age", &PropertyIndexRange::equal(int(age)))
+        .vertices_by_property_index(Some("p"), "age", &PropertyIndexRange::equal(int(age)))
         .unwrap()
         .expect("an index")
         .filter_map(|v| graph.vertex_id(v).unwrap().map(str::to_string))

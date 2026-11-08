@@ -585,6 +585,9 @@ pub(crate) struct Lookup {
     /// Whether an index (or the id) serves it now; `false`: the lookup scans the scan labels
     /// and compares the stored value directly (planned for a `MERGE` match child only).
     pub(crate) indexed: bool,
+    /// Whether the label-less index on the key serves it (no per-label index for every scan
+    /// label, or no scan label at all; design D1/D2); the scan labels are checked after it.
+    pub(crate) any_label: bool,
     /// The other side of the equality: reads only bindings bound before the component and
     /// parameters, evaluated once per incoming row.
     pub(crate) value: Expr,
@@ -595,7 +598,7 @@ pub(crate) struct Lookup {
 pub(crate) enum LookupBy {
     /// `element_id(n) = e`: the vertex with that id.
     Id,
-    /// `n.key = e`: the property index on `key` of every scan label.
+    /// `n.key = e`: the property index on `key` of every scan label, or the label-less one.
     Index(String),
 }
 

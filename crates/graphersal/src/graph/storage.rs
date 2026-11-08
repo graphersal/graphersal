@@ -696,7 +696,7 @@ pub trait GraphStorage: Send + Sync {
     /// with it, it never falls back to a scan.
     fn vertices_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'a>>, GraphError> {
@@ -707,7 +707,7 @@ pub trait GraphStorage: Send + Sync {
     /// The edge counterpart of [`Self::vertices_by_property_index`].
     fn edges_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
@@ -725,7 +725,7 @@ pub trait GraphStorage: Send + Sync {
     /// [`Self::property_indexes`].
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -737,12 +737,33 @@ pub trait GraphStorage: Send + Sync {
     /// The edge counterpart of [`Self::vertices_by_transformed_property_index`].
     fn edges_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'a>>, GraphError> {
         let _ = (label, key, transform, range);
+        Ok(None)
+    }
+
+    /// The EXACT number of elements of kind `element` whose top-level property `key`
+    /// (transformed by `transform`, if any) lies in `range`, read from the property index on
+    /// `(element, label, key, transform)` (`label` `None`: the label-less index) without
+    /// visiting the elements (book page "Property Indexes", section "Counting from an index");
+    /// `Ok(None)` when the storage cannot count that slice exactly (the default) or has no such
+    /// index: the caller then counts the candidates of the lookup methods above, re-checking
+    /// each. Unlike a lookup, the count must never include an element outside the slice. The
+    /// engine asks only for slices whose every element matches the condition (an equality on
+    /// a string, boolean, uuid or temporal value with no transform).
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        let _ = (element, label, key, transform, range);
         Ok(None)
     }
 
@@ -3083,7 +3104,7 @@ impl GraphStorage for TraversalGraph {
 
     fn vertices_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
@@ -3092,7 +3113,7 @@ impl GraphStorage for TraversalGraph {
 
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -3102,7 +3123,7 @@ impl GraphStorage for TraversalGraph {
 
     fn edges_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -3112,11 +3133,22 @@ impl GraphStorage for TraversalGraph {
 
     fn edges_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
         Ok(self.property_index_edges(label, key, None, range))
+    }
+
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        Ok(self.property_index_count(element, label, key, transform, range))
     }
 
     #[inline]
@@ -3600,7 +3632,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     #[inline]
     fn vertices_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
@@ -3610,7 +3642,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     #[inline]
     fn edges_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
@@ -3620,7 +3652,7 @@ impl<G: GraphStorage> GraphStorage for &G {
     #[inline]
     fn vertices_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -3631,12 +3663,24 @@ impl<G: GraphStorage> GraphStorage for &G {
     #[inline]
     fn edges_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
+    }
+
+    #[inline]
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        (**self).count_by_property_index(element, label, key, transform, range)
     }
 
     #[inline]
@@ -4036,7 +4080,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn vertices_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
@@ -4046,7 +4090,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn edges_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
@@ -4056,7 +4100,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn vertices_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -4067,12 +4111,24 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn edges_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
+    }
+
+    #[inline]
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        (**self).count_by_property_index(element, label, key, transform, range)
     }
 
     #[inline]
@@ -4534,7 +4590,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn vertices_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::VertexId> + 'b>>, GraphError> {
@@ -4544,7 +4600,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn edges_by_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
@@ -4554,7 +4610,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn vertices_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -4565,12 +4621,24 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn edges_by_transformed_property_index<'b>(
         &'b self,
-        label: &'b str,
+        label: Option<&'b str>,
         key: &'b str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = Self::EdgeId> + 'b>>, GraphError> {
         (**self).edges_by_transformed_property_index(label, key, transform, range)
+    }
+
+    #[inline]
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        (**self).count_by_property_index(element, label, key, transform, range)
     }
 
     #[inline]
@@ -5179,7 +5247,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn vertices_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = VertexHandle> + 'a>>, GraphError> {
@@ -5191,7 +5259,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn edges_by_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         range: &crate::graph::PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = EdgeHandle> + 'a>>, GraphError> {
@@ -5201,7 +5269,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn vertices_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -5214,7 +5282,7 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn edges_by_transformed_property_index<'a>(
         &'a self,
-        label: &'a str,
+        label: Option<&'a str>,
         key: &'a str,
         transform: &crate::graph::PropertyIndexTransform,
         range: &crate::graph::PropertyIndexRange,
@@ -5222,6 +5290,20 @@ impl GraphStorage for Arc<TraversalGraph> {
         Ok(self
             .as_ref()
             .property_index_edges(label, key, Some(transform), range))
+    }
+
+    #[inline]
+    fn count_by_property_index(
+        &self,
+        element: crate::graph::ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&crate::graph::PropertyIndexTransform>,
+        range: &crate::graph::PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        Ok(self
+            .as_ref()
+            .property_index_count(element, label, key, transform, range))
     }
 
     #[inline]

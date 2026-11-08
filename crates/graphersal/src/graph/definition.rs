@@ -240,6 +240,14 @@ impl DefinitionKind {
     /// Kind `5`: an embedding model
     /// ([`ModelDefinition`](crate::graph::model_definition::ModelDefinition)).
     pub const MODEL: DefinitionKind = DefinitionKind(5);
+    /// Kind `6`: a property index of a feature a reader must know to keep it exact
+    /// ([`PropertyIndexDefinition`](crate::graph::property_index::PropertyIndexDefinition)
+    /// with [`needs_extended_kind`](crate::graph::property_index::PropertyIndexDefinition::needs_extended_kind):
+    /// today a label-less index), always written with the critical flag, so a version that
+    /// does not know the kind (0.5.x) opens the store read-only instead of writing it without
+    /// maintaining the index. Plain per-label indexes stay [`Self::PROPERTY_INDEX`]; both kinds
+    /// share one namespace of index names ([`Self::is_property_index`]).
+    pub const PROPERTY_INDEX_EXT: DefinitionKind = DefinitionKind(6);
     /// The first kind reserved for hosts (`128`): kinds `128..=255` are never assigned by this
     /// library (see the [module docs](crate::catalog#kind-ranges)).
     pub const HOST_FIRST: DefinitionKind = DefinitionKind(128);
@@ -282,14 +290,30 @@ impl DefinitionKind {
     }
 
     /// Whether this version decodes the payload of this kind ([`Self::QUERY`],
-    /// [`Self::PROPERTY_INDEX`], [`Self::COMPRESSION`], [`Self::JOB`] and [`Self::MODEL`]);
-    /// every other kind is kept opaque.
+    /// [`Self::PROPERTY_INDEX`], [`Self::COMPRESSION`], [`Self::JOB`], [`Self::MODEL`] and
+    /// [`Self::PROPERTY_INDEX_EXT`]); every other kind is kept opaque.
     pub const fn is_known(self) -> bool {
         self.0 == Self::QUERY.0
             || self.0 == Self::PROPERTY_INDEX.0
             || self.0 == Self::COMPRESSION.0
             || self.0 == Self::JOB.0
             || self.0 == Self::MODEL.0
+            || self.0 == Self::PROPERTY_INDEX_EXT.0
+    }
+
+    /// Whether this kind holds property indexes: [`Self::PROPERTY_INDEX`] or
+    /// [`Self::PROPERTY_INDEX_EXT`]. Index names are unique across both kinds: storing an
+    /// index under a name replaces the index of that name, whichever kind holds it.
+    ///
+    /// ```
+    /// use graphersal::catalog::DefinitionKind;
+    ///
+    /// assert!(DefinitionKind::PROPERTY_INDEX.is_property_index());
+    /// assert!(DefinitionKind::PROPERTY_INDEX_EXT.is_property_index());
+    /// assert!(!DefinitionKind::QUERY.is_property_index());
+    /// ```
+    pub const fn is_property_index(self) -> bool {
+        self.0 == Self::PROPERTY_INDEX.0 || self.0 == Self::PROPERTY_INDEX_EXT.0
     }
 
     /// The name of an assigned kind (`"query"`, `"property_index"`), `None` for an unassigned
@@ -301,6 +325,7 @@ impl DefinitionKind {
             3 => Some("compression"),
             4 => Some("job"),
             5 => Some("model"),
+            6 => Some("property_index_ext"),
             _ => None,
         }
     }
@@ -313,6 +338,7 @@ impl DefinitionKind {
             "compression" => Some(Self::COMPRESSION),
             "job" => Some(Self::JOB),
             "model" => Some(Self::MODEL),
+            "property_index_ext" => Some(Self::PROPERTY_INDEX_EXT),
             _ => None,
         }
     }
@@ -566,7 +592,7 @@ impl Definition {
                         reason,
                     });
                 }
-                index.validate(&self.name)
+                index.validate(self.kind, self.flags, &self.name)
             }
             DefinitionBody::Job(job) => {
                 if let Some(reason) = identifier_problem(&self.name, MAX_QUERY_NAME_BYTES) {
@@ -721,6 +747,10 @@ impl Definition {
             None => return Err(malformed("", "'name' is missing")),
         };
         let flags = match map.get("flags") {
+            // A label-less index (kind 6) is always critical.
+            None if kind == DefinitionKind::PROPERTY_INDEX_EXT => {
+                DefinitionFlags::NONE.with_critical(true)
+            }
             None => DefinitionFlags::NONE,
             Some(value) => value
                 .as_i64()
@@ -752,8 +782,9 @@ impl Definition {
                 body: DefinitionBody::Compression(rule),
             });
         }
-        if kind == DefinitionKind::PROPERTY_INDEX {
-            let index = crate::graph::property_index::PropertyIndexDefinition::read_fields(
+        if kind.is_property_index() {
+            let index = crate::graph::property_index::PropertyIndexDefinition::read_fields_of(
+                kind,
                 map,
                 &["kind", "name", "flags"],
             )?;

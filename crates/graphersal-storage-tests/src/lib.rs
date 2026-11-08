@@ -120,6 +120,7 @@ macro_rules! conformance {
             change_set_builder_round_trip
             applied_change_set_raises_the_id_sequences
             rollback_restores_definitions
+            label_less_property_index_serves_every_element
             a_definition_list_is_stored_like_single_calls
             definition_changes_are_captured
             edge_label_change_rolls_back_and_is_captured
@@ -179,6 +180,7 @@ macro_rules! conformance_core {
             change_set_builder_round_trip
             applied_change_set_raises_the_id_sequences
             rollback_restores_definitions
+            label_less_property_index_serves_every_element
             a_definition_list_is_stored_like_single_calls
             definition_changes_are_captured
             edge_label_change_rolls_back_and_is_captured

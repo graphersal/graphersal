@@ -324,8 +324,8 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Counts the traversers (bulk included); with Scope.local counts the elements of each incoming collection.",
         "g.v().has_label(\"person\").count().next()" => "4";
     "traversal" "create_index":
-        "Declares a property index #{label, key, element, name, type, transform}: a v() or e() with that label and a has() on that key then reads the index instead of every element of the label; type defaults to \"memory-ordered\", transform \"to_lower\" indexes lowered strings for has(key, __.to_lower().is(..)) (see the book page Property Indexes).",
-        "{ g.create_index(#{label: \"person\", key: \"age\"}); g.v().has_label(\"person\").has(\"age\", P.gt(30)).values(\"name\").to_list() }" => "[\"josh\", \"peter\"]";
+        "Declares a property index #{key, label, element, name, type, transform}: a v() or e() with that label and a has() on that key then reads the index instead of every element of the label; without label the index is label-less (every element of the kind) and serves a has() with any or no label; type defaults to \"memory-ordered\", transform \"to_lower\" indexes lowered strings for has(key, __.to_lower().is(..)) (see the book page Property Indexes).",
+        "{ g.create_index(#{key: \"name\"}); g.v().has(\"name\", \"josh\").values(\"age\").to_list() }" => "[32]";
     "traversal" "cyclic_path":
         "Keeps only traversers whose path visits some element twice.",
         "g.v(1).out().in().cyclic_path().count().next()" => "3";
@@ -493,7 +493,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Pairs every element of the incoming list with its position ([value, index]).",
         "g.inject([\"a\", \"b\"]).index().next()" => "[[\"a\", 0], [\"b\", 1]]";
     "traversal" "indexes":
-        "Lists the property indexes as maps: name, element, label, key, type, transform, served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.",
+        "Lists the property indexes as maps: name, element, label (() for a label-less index), key, type, transform, served (with a reason when it is not) and the current entries, distinct_values, skipped and bytes.",
         "{ g.create_index(#{label: \"person\", key: \"age\"}); g.indexes().map(|i| i.entries) }" => "[4]";
     "traversal" "infer_schema":
         "Infers a schema map from the data: on g from the whole graph, after steps from the elements the traversal yields.",

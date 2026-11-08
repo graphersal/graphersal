@@ -829,6 +829,12 @@ impl<S: GraphStorage> Graph<S> {
                 .map_err(GraphError::from)?
             {
                 CatalogChange::Set(definition) => definitions.push(definition),
+                // An index name may be held by either index kind (a removal of a name not
+                // stored is skipped).
+                CatalogChange::Remove(kind, name) if kind.is_property_index() => {
+                    removals.push((DefinitionKind::PROPERTY_INDEX, name.clone()));
+                    removals.push((DefinitionKind::PROPERTY_INDEX_EXT, name));
+                }
                 CatalogChange::Remove(kind, name) => removals.push((kind, name)),
             }
         }
@@ -836,7 +842,19 @@ impl<S: GraphStorage> Graph<S> {
             let mut guard = self.write_checked()?;
             let schema = guard.get_schema()?;
             for definition in &definitions {
-                if let Some(existing) = guard.definition(definition.kind(), definition.name())? {
+                // Index names are unique across both index kinds.
+                let mut existing = guard.definition(definition.kind(), definition.name())?;
+                if existing.is_none() && definition.kind().is_property_index() {
+                    for kind in [
+                        DefinitionKind::PROPERTY_INDEX,
+                        DefinitionKind::PROPERTY_INDEX_EXT,
+                    ] {
+                        if existing.is_none() {
+                            existing = guard.definition(kind, definition.name())?;
+                        }
+                    }
+                }
+                if let Some(existing) = existing {
                     let what = if definition.kind() == DefinitionKind::COMPRESSION {
                         "compression rule"
                     } else {

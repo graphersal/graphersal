@@ -3661,13 +3661,18 @@ impl DiagnosticError for DefinitionError {
     fn help(&self) -> Option<String> {
         use crate::graph::definition as d;
         Some(match self {
-            DefinitionError::InvalidName { kind, .. } if kind == "property_index" => format!(
-                "A property index's name is an identifier of 1 to {} bytes (ASCII letters, \
-                 digits and '_', starting with a letter or '_'), for example \"person_title\". \
-                 It names the index for g.drop_index; g.create_index(#{{label, key}}) without a \
-                 name calls it <label>_<key>.",
-                d::MAX_QUERY_NAME_BYTES
-            ),
+            DefinitionError::InvalidName { kind, .. }
+                if kind == "property_index" || kind == "property_index_ext" =>
+            {
+                format!(
+                    "A property index's name is an identifier of 1 to {} bytes (ASCII letters, \
+                     digits and '_', starting with a letter or '_'), for example \
+                     \"person_title\". It names the index for g.drop_index; \
+                     g.create_index(#{{label, key}}) without a name calls it <label>_<key>, a \
+                     label-less g.create_index(#{{key}}) calls it <key>.",
+                    d::MAX_QUERY_NAME_BYTES
+                )
+            }
             DefinitionError::InvalidName { kind, .. } if kind == "compression" => format!(
                 "A compression rule's name is an identifier of 1 to {} bytes (ASCII letters, \
                  digits and '_', starting with a letter or '_'), for example \"customer_cv\". \
@@ -5705,7 +5710,8 @@ fn literal_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
 }
 
 /// Advice to declare a property index when the failing query filters a labelled start on a
-/// property (`v().has_label("person").has("title", ..)`), or `""`.
+/// property (`v().has_label("person").has("title", ..)`), or a start without a label
+/// (`v().has("title", ..)`: a label-less index), or `""`.
 fn property_index_advice(query: &str) -> String {
     let label = literal_after(query, "has_label(").or_else(|| literal_after(query, "labels: ["));
     let key = literal_after(query, ".has(");
@@ -5716,6 +5722,21 @@ fn property_index_advice(query: &str) -> String {
              equality, P.within and ranges on \"{key}\" then read only the matching elements, \
              and .profile() shows [index: ..] on the start step (book page Property Indexes).\n"
         ),
+        (None, Some(key)) if query.starts_with("v(") || query.starts_with("e(") => {
+            let (element, kind) = if query.starts_with("e(") {
+                ("element: \"edge\", ", "edge")
+            } else {
+                ("", "vertex")
+            };
+            format!(
+                "A has() on a property without a label reads every {kind}: declare a label-less \
+                 property index on it, for example g.create_index(#{{{element}key: \"{key}\"}}) \
+                 (every {kind}, whatever its labels); equality, P.within and ranges on \
+                 \"{key}\" then read only the matching elements, and .profile() shows \
+                 [index: {kind} {key}, any label] on the start step (book page Property \
+                 Indexes).\n"
+            )
+        }
         _ => String::new(),
     }
 }
@@ -10322,6 +10343,33 @@ mod tests {
             assert!(help.contains("Narrow the start set"), "{help}");
             // Without a property filter there is no index advice.
             assert!(!timeout_help(250, None).contains("create_index"));
+        }
+
+        #[test]
+        fn timeout_help_on_a_filter_without_a_label_points_to_a_label_less_index() {
+            let steps = vec![
+                "v().has(\"name\", \"josh\")".to_string(),
+                "out()".to_string(),
+                "count()".to_string(),
+            ];
+            let help = timeout_help(250, Some(steps));
+            assert!(
+                help.contains(
+                    "declare a label-less property index on it, for example \
+                     g.create_index(#{key: \"name\"})"
+                ),
+                "{help}"
+            );
+            assert!(help.contains("[index: vertex name, any label]"), "{help}");
+            let edges = vec![
+                "e().has(\"_owner\", \"o\")".to_string(),
+                "count()".to_string(),
+            ];
+            let help = timeout_help(250, Some(edges));
+            assert!(
+                help.contains("g.create_index(#{element: \"edge\", key: \"_owner\"})"),
+                "{help}"
+            );
         }
 
         #[test]

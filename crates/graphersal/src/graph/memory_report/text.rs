@@ -188,11 +188,13 @@ impl fmt::Display for MemoryReport {
             for index in &self.indexes {
                 writeln!(
                     f,
-                    "  {:<24} {} {}.{}  {:>10}  {:>10}",
+                    "  {:<24} {} {}  {:>10}  {:>10}",
                     index.name,
                     index.element.as_str(),
-                    index.label,
-                    index.key,
+                    match &index.label {
+                        Some(label) => format!("{label}.{}", index.key),
+                        None => format!("{} (any label)", index.key),
+                    },
                     index.stats.entries,
                     human(index.stats.bytes)
                 )?;

@@ -542,7 +542,7 @@ class Graph:
         over the current values (candidates, best, current rule, warnings); changes nothing."""
     def create_index(
         self,
-        label: str,
+        label: Optional[str],
         key: str,
         element: str = "vertex",
         name: Optional[str] = None,
@@ -551,8 +551,11 @@ class Graph:
         transform: Optional[str] = None,
         policy: Optional[AccessPolicy] = None,
     ) -> None:
-        """Declares (or replaces) a property index: the ``element``s labelled ``label``,
-        ordered by their top-level property ``key`` (name: ``<label>_<key>`` by default, with
+        """Declares (or replaces) a property index: the ``element``s labelled ``label``
+        (``None``: a label-less index of every element of the kind, which also serves
+        ``g.v().has(key, ..)`` without a label; ``label`` is ``None`` in ``indexes()``),
+        ordered by their top-level property ``key`` (name: ``<label>_<key>`` by default,
+        ``<key>`` label-less, with
         ``_to_lower`` appended for that transform) in an index of ``type``
         (``"memory-ordered"``, the only type this version knows). ``transform="to_lower"``
         indexes the lowered text of string values for ``has(key, __.to_lower().is(..))``. An

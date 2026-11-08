@@ -904,6 +904,26 @@ impl TraversalGraph {
         let mut indexes: Vec<CompactString> = Vec::new();
         for definition in definitions {
             definition.validate()?;
+            // Index names are unique across both index kinds: an index stored under a name
+            // replaces the index of that name held by the other kind (recorded, in this unit).
+            if definition.kind().is_property_index() {
+                let sibling = if definition.kind() == DefinitionKind::PROPERTY_INDEX {
+                    DefinitionKind::PROPERTY_INDEX_EXT
+                } else {
+                    DefinitionKind::PROPERTY_INDEX
+                };
+                if let Some(old) = self.definitions.remove(sibling, definition.name()) {
+                    let name = CompactString::from(definition.name());
+                    self.undo.record(UndoEntry::Definition {
+                        kind: sibling,
+                        name: name.clone(),
+                        old: Some(Box::new(old)),
+                    });
+                    if !indexes.contains(&name) {
+                        indexes.push(name);
+                    }
+                }
+            }
             crate::graph::compression::check_conflict(self, &definition)?;
             crate::graph::property_index::check_conflict(self, &definition)?;
             crate::graph::model_definition::check_conflict(self, &definition)?;
@@ -929,7 +949,7 @@ impl TraversalGraph {
                 if !compressions.iter().any(|(_, n)| *n == name) {
                     compressions.push((old.clone(), name.clone()));
                 }
-            } else if kind == DefinitionKind::PROPERTY_INDEX {
+            } else if kind.is_property_index() {
                 if !indexes.contains(&name) {
                     indexes.push(name.clone());
                 }
@@ -1072,7 +1092,7 @@ impl TraversalGraph {
             } else {
                 self.compression_after_change(old, name);
             }
-        } else if kind == DefinitionKind::PROPERTY_INDEX {
+        } else if kind.is_property_index() {
             self.property_index_after_change(name);
         }
     }

@@ -70,7 +70,7 @@ fn stats(graph: &TraversalGraph, name: &str) -> PropertyIndexStats {
 /// The vertices labelled `p` with `k == value`, from the index, in the index's order.
 fn lookup(graph: &TraversalGraph, value: &str) -> Vec<VertexHandle> {
     graph
-        .vertices_by_property_index("p", "k", &PropertyIndexRange::equal(value.into()))
+        .vertices_by_property_index(Some("p"), "k", &PropertyIndexRange::equal(value.into()))
         .unwrap()
         .expect("an index")
         .collect()
@@ -305,7 +305,7 @@ fn a_lookup_goes_by_value_then_slot_and_follows_slot_reuse() {
         std::ops::Bound::Included("c".into()),
     );
     let got: Vec<VertexHandle> = graph
-        .vertices_by_property_index("p", "k", &range)
+        .vertices_by_property_index(Some("p"), "k", &range)
         .unwrap()
         .unwrap()
         .collect();
