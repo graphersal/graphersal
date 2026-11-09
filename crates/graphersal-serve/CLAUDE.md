@@ -13,7 +13,7 @@ Agent guidance for the hosting core of the dev server: ONE graph, no HTTP librar
 - `runs.rs`: the run registry (one `CancelToken` per run, registered before the job is queued; cancel by alias, by client, all). Moved unchanged from the CLI with its tests.
 - `job_workers.rs`: one worker thread per job group for the scheduled jobs (issue #26).
 - `host_check.rs`: `Exposure`, `HostRules` (borrowed rules: loopback exact names + port; network any port, IP/localhost/dotless/`--host` name; allowed names on any port, `http(s)` origins) and `HostCheck` (owned, with port and URL; the 403 texts). Where to listen stays the host's (CLI `bind.rs`).
-- `ui.rs`: `Ui` (a UI directory over the embedded copy; traversal refused); embedded table from `build.rs` (feature `ui-assets`; `ui/` is a symlink to `../../playground`, entries `index.html`, `css/`, `js/`, `assets/`, `reset/` = `include`); its test (with the feature) fails when the embedded set differs from `playground/`.
+- `ui.rs`: `Ui` (a UI directory over the embedded copy; traversal refused); embedded table from `build.rs` (feature `ui-assets`; reads `../../playground` in a checkout, else `ui/`: a git-ignored copy that `prepare-package.sh` makes before `cargo package`/`publish`; entries `index.html`, `css/`, `js/`, `assets/`, `reset/` = `include` = the script's list; no symlinks in the repository, user decision 2026-11-09); its test (with the feature) fails when the embedded set differs from `playground/`.
 - `mcp.rs`: `POST /mcp`, `/api/mcp/stats`, `impl Executor/Host for Context`, `current_client` (feature `mcp`; without it the endpoint answers 404 and `Mcp` is an empty enum).
 
 ## Rules

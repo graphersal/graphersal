@@ -18,3 +18,6 @@ bindings/py-graphersal/**/__pycache__
 
 # session working notes (plans, reports): local only, never published
 /ai/
+
+# graphersal-serve: the playground copy prepare-package.sh makes for `cargo package`
+/crates/graphersal-serve/ui/

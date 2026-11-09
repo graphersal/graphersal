@@ -11,8 +11,8 @@ description = "Internal hosting core of Graphersal's servers (one graph: session
 readme = "README.md"
 keywords = ["graph", "gremlin", "tinkerpop"]
 categories = ["database"]
-# `ui` is a symbolic link to `../../playground`; `cargo package` follows it, so the packaged crate
-# holds a real copy of the UI files `build.rs` embeds (the same entries as its `ENTRIES`).
+# `ui/` is a git-ignored copy of the playground entries `build.rs` embeds (its `ENTRIES`), made by
+# `prepare-package.sh` before `cargo package`/`publish`; a checkout embeds `../../playground`.
 include = ["/src/**", "/build.rs", "/openapi.json", "/ui/index.html", "/ui/css/**", "/ui/js/**", "/ui/assets/**", "/ui/reset/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
 
 [features]
