@@ -885,3 +885,179 @@ fn a_setup_failure_keeps_the_hosts_error_as_its_source() {
     .expect_err("the setup fails");
     assert_eq!(err.to_string(), "Error: cannot load");
 }
+
+thread_local! {
+    /// Dropped when its thread ends: tells a test that the session thread is gone.
+    static ENDED: std::cell::RefCell<Option<Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A session thread on the `modern` sample whose end the returned receiver sees (its channel
+/// closes), behind a queue that counts the jobs ([`OwnQueue`]).
+fn counted_session() -> (Arc<OwnQueue>, std::sync::mpsc::Receiver<()>) {
+    let (ended, session_ended) = channel::<()>();
+    let (jobs, ()) = spawn_session(
+        SessionPresets::new(),
+        move |session| {
+            ENDED.with(|slot| *slot.borrow_mut() = Some(ended));
+            session
+                .load_sample("modern")
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        },
+        None,
+    )
+    .expect("the session thread starts");
+    let queue = Arc::new(OwnQueue {
+        jobs: Mutex::new(jobs),
+        submitted: AtomicUsize::new(0),
+    });
+    (queue, session_ended)
+}
+
+/// Waits until `done` holds (at most 10 s).
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_stopped_job_ticker_lets_the_context_and_the_session_go() {
+    let (queue, session_ended) = counted_session();
+    let context = Context::builder(Runner::Queue(queue.clone()), check()).build();
+    let ticker = crate::context::start_ticker(&context, Duration::from_millis(5))
+        .expect("the ticker starts");
+    wait_for("two ticks", || queue.submitted.load(Ordering::SeqCst) >= 2);
+    ticker.stop().expect("the ticker stops");
+    let ticks = queue.submitted.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        queue.submitted.load(Ordering::SeqCst),
+        ticks,
+        "no tick after stop"
+    );
+    // The ticker holds nothing: the host's context is the last one, and with it the job queue
+    // goes, so the session thread ends.
+    let weak = Arc::downgrade(&context);
+    drop(context);
+    assert!(
+        weak.upgrade().is_none(),
+        "the stopped ticker keeps no context"
+    );
+    drop(queue);
+    session_ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect_err("the session thread ends");
+}
+
+#[test]
+fn a_dropped_job_ticker_ticks_until_the_context_is_gone() {
+    let (queue, session_ended) = counted_session();
+    let context = Context::builder(Runner::Queue(queue.clone()), check()).build();
+    let ticker = crate::context::start_ticker(&context, Duration::from_millis(5))
+        .expect("the ticker starts");
+    drop(ticker);
+    // The handle is gone, the ticker is not (the CLI's dev server keeps no handle).
+    let ticks = queue.submitted.load(Ordering::SeqCst);
+    wait_for("ticks after the handle is dropped", || {
+        queue.submitted.load(Ordering::SeqCst) >= ticks + 2
+    });
+    // It holds the context only during a tick: it ends once the host dropped its context.
+    let weak = Arc::downgrade(&context);
+    drop(context);
+    wait_for("the context to go", || weak.upgrade().is_none());
+    drop(queue);
+    session_ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect_err("the session thread ends");
+}
+
+#[test]
+fn background_runs_count_the_job_runs_until_their_result_is_back() {
+    let (jobs, ()) = spawn_session(
+        SessionPresets::new(),
+        |session| -> Result<(), String> {
+            // A store in memory: the scheduled jobs belong to a store.
+            session.set_memory_stores(true);
+            let query = session.define_query(&json!({
+                "name": "slow",
+                "body": "fn slow() { let n = 0; for i in 0..100000000 { n += g.v().count().next(); } n }",
+            }));
+            assert_eq!(query["ok"], true, "{query}");
+            let job = session.define_job(&json!({
+                "name": "slow_job", "schedule": "0 3 1 1 *", "action": "query",
+                "query": "slow", "timeout_ms": 300,
+            }));
+            assert_eq!(job["ok"], true, "{job}");
+            Ok(())
+        },
+        None,
+    )
+    .expect("the session thread starts");
+    let context = Context::builder(Runner::Session(jobs), check()).build();
+    assert_eq!(context.background_runs().expect("counted"), 0);
+    let (before, run) = context
+        .call_fallible(|s| {
+            let before = crate::context::position(s).ok();
+            s.start_job_now("slow_job").map(|run| (before, run))
+        })
+        .expect("the job starts");
+    let (done, finished) = channel();
+    crate::job_workers::start(&context, before, run, Some(done));
+    // Running on its worker (its timeout ends it): counted, the session answers meanwhile.
+    assert_eq!(context.background_runs().expect("counted"), 1);
+    assert_eq!(context.call(|_| 1).expect("the session answers"), 1);
+    finished
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the run finishes");
+    // Its result is back in the session before the caller is told.
+    assert_eq!(context.background_runs().expect("counted"), 0);
+    let entry = context
+        .call_fallible(|s| s.job_entry("slow_job"))
+        .expect("the job's entry");
+    assert_eq!(entry["running"], false, "{entry}");
+    // The worker holds its context weakly: dropping the host's context lets it go.
+    let weak = Arc::downgrade(&context);
+    drop(context);
+    assert!(weak.upgrade().is_none(), "the job worker keeps no context");
+}
+
+#[test]
+fn the_runtime_errors_of_call_answer_the_http_status_of_before() {
+    // A refusing host queue: `Busy`, a 503 with the queue's text.
+    let full = Context::builder(Runner::Queue(Arc::new(Quiet)), check()).build();
+    let err = full.call(|_| ()).expect_err("refused");
+    let crate::ServeError::Busy(busy) = &err else {
+        panic!("expected Busy, got {err:?}");
+    };
+    let refusal = busy.message().to_string();
+    assert_eq!(err.to_string(), refusal);
+    assert_eq!(HttpError::from(err), HttpError::new(503, refusal));
+    // A session method's diagnostic: `Failed`, a 422.
+    let context = Context::builder(session_on("modern"), check()).build();
+    let err = context
+        .call_fallible(|_| Err::<(), _>("no such thing"))
+        .expect_err("the method fails");
+    assert!(matches!(err, crate::ServeError::Failed(_)), "{err:?}");
+    assert_eq!(HttpError::from(err), HttpError::new(422, "no such thing"));
+    // A session that is not running: `Session`, a 500 with the text of before.
+    let (jobs, queue) = channel::<Job>();
+    drop(queue);
+    let gone = Context::builder(Runner::Session(jobs), check()).build();
+    let err = gone.call(|_| ()).expect_err("no session");
+    assert!(matches!(err, crate::ServeError::Session(_)), "{err:?}");
+    assert_eq!(
+        HttpError::from(err),
+        HttpError::new(500, "the session is not running")
+    );
+    // A job that panics answers nothing: `Session`, a 500.
+    let err = context
+        .call(|_| -> () { panic!("a bug in a job") })
+        .expect_err("the job panicked");
+    assert_eq!(
+        HttpError::from(err),
+        HttpError::new(500, "the request failed inside the session")
+    );
+}

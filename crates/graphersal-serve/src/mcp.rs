@@ -52,7 +52,7 @@ mod enabled {
 
     use super::off;
     use crate::api::current_view;
-    use crate::context::{BusyReason, CLIENT, Client, Context, as_client};
+    use crate::context::{BusyReason, CLIENT, Client, Context, ServeError, as_client};
     use crate::http::{HttpError, Request, Response};
     use crate::runs::{RunDetails, RunKind};
 
@@ -147,13 +147,17 @@ mod enabled {
         /// Queues `job` on the session thread for `client` and waits for it ([`Context::call`]).
         fn execute(&self, client: &ClientRef, job: Job) -> Result<(), McpError> {
             let caller = client_of(client);
-            as_client(caller, || self.call(move |session| job(session))).map_err(
-                |HttpError(status, message)| match status {
-                    // The host's job queue is busy: the endpoint answers 503.
-                    503 => McpError::Busy(message),
-                    _ => McpError::Unavailable(message),
-                },
-            )
+            as_client(caller, || self.call(move |session| job(session))).map_err(|err| match err {
+                // The host's job queue is busy: the endpoint answers 503.
+                ServeError::Busy(busy) => McpError::Busy(busy.message().to_string()),
+                ServeError::Setup(_)
+                | ServeError::Thread(_)
+                | ServeError::Ui(_)
+                | ServeError::Lifecycle(_)
+                | ServeError::Session(_)
+                | ServeError::NoMcp(_)
+                | ServeError::Failed(_) => McpError::Unavailable(err.to_string()),
+            })
         }
     }
 

@@ -71,23 +71,32 @@ pub enum ServeError {
     Ui(String),
     /// A lifecycle step out of order ([`crate::Server::ready`] twice).
     Lifecycle(String),
-    /// A session job of the runtime failed (the session thread is gone, the queue refused the
-    /// job, or the session refused the work: [`start_job_ticker`]'s time zone).
+    /// A session job of the runtime could not run or answer (the session thread is gone, the
+    /// job panicked), or the session refused the work ([`start_job_ticker`]'s time zone). An
+    /// HTTP answer is a `500`.
     Session(String),
     /// The context has no MCP endpoint ([`Context::mcp_connection`] without
     /// [`ContextBuilder::mcp`] or [`ContextBuilder::shared_mcp`]).
     NoMcp(String),
+    /// The host's [`JobQueue`] refused the job ([`Context::call`]). An HTTP answer is a `503`
+    /// with `Retry-After: 1`.
+    Busy(Busy),
+    /// The session method of [`Context::call_fallible`] failed with this diagnostic. An HTTP
+    /// answer is a `422`.
+    Failed(String),
 }
 
 impl fmt::Display for ServeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Setup(source) => fmt::Display::fmt(source, f),
+            Self::Busy(busy) => f.write_str(busy.message()),
             Self::Thread(message)
             | Self::Ui(message)
             | Self::Lifecycle(message)
             | Self::Session(message)
-            | Self::NoMcp(message) => f.write_str(message),
+            | Self::NoMcp(message)
+            | Self::Failed(message) => f.write_str(message),
         }
     }
 }
@@ -100,8 +109,29 @@ impl std::error::Error for ServeError {
             | Self::Ui(_)
             | Self::Lifecycle(_)
             | Self::Session(_)
-            | Self::NoMcp(_) => None,
+            | Self::NoMcp(_)
+            | Self::Busy(_)
+            | Self::Failed(_) => None,
         }
+    }
+}
+
+/// The HTTP answer of a runtime failure (the playground API's answers of [`Context::call`] and
+/// [`Context::call_fallible`]): [`ServeError::Busy`] is a `503` (with `Retry-After: 1`),
+/// [`ServeError::Failed`] a `422`, every other failure a `500`; the message is the error's text.
+impl From<ServeError> for HttpError {
+    fn from(err: ServeError) -> Self {
+        let status = match &err {
+            ServeError::Busy(_) => 503,
+            ServeError::Failed(_) => 422,
+            ServeError::Setup(_)
+            | ServeError::Thread(_)
+            | ServeError::Ui(_)
+            | ServeError::Lifecycle(_)
+            | ServeError::Session(_)
+            | ServeError::NoMcp(_) => 500,
+        };
+        HttpError(status, err.to_string())
     }
 }
 
@@ -764,10 +794,14 @@ impl Context {
     /// Runs `job` on the session thread and waits for its answer. A job that changes the
     /// served graph's commit position (or swaps the graph) is recorded in the change feed with
     /// the client of this request.
+    ///
+    /// `Err`: [`ServeError::Busy`] when the host's [`JobQueue`] refused the job,
+    /// [`ServeError::Session`] when the session is not running or the job did not answer (it
+    /// panicked). An HTTP host answers it through `From<ServeError> for HttpError` (`?`).
     pub fn call<T: Send + 'static>(
         &self,
         job: impl FnOnce(&mut Session) -> T + Send + 'static,
-    ) -> Result<T, HttpError> {
+    ) -> Result<T, ServeError> {
         let (reply, answer) = channel();
         let feed = self.feed.clone();
         let client = CLIENT.with(|c| c.borrow().clone());
@@ -804,7 +838,9 @@ impl Context {
                     Err(_) => false,
                 };
                 if !sent {
-                    return Err(HttpError(500, "the session is not running".to_string()));
+                    return Err(ServeError::Session(
+                        "the session is not running".to_string(),
+                    ));
                 }
             }
             Jobs::Queue(queue) => {
@@ -815,13 +851,13 @@ impl Context {
                     {
                         mcp::record_refusal(mcp, refused.reason());
                     }
-                    HttpError(503, refused.message)
+                    ServeError::Busy(refused)
                 })?;
             }
         }
         answer
             .recv()
-            .map_err(|_| HttpError(500, "the request failed inside the session".to_string()))
+            .map_err(|_| ServeError::Session("the request failed inside the session".to_string()))
     }
 
     /// The host's job queue, if this is the read-only serving mode.
@@ -832,13 +868,25 @@ impl Context {
         }
     }
 
-    /// A session method that fails with a diagnostic: the failure is a 422 answer.
+    /// A session method that fails with a diagnostic ([`Context::call`]): the failure is
+    /// [`ServeError::Failed`] with the diagnostic's text, an HTTP `422` answer.
     pub fn call_fallible<T: Send + 'static, E: std::fmt::Display + Send + 'static>(
         &self,
         job: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
-    ) -> Result<T, HttpError> {
+    ) -> Result<T, ServeError> {
         self.call(job)?
-            .map_err(|message| HttpError(422, message.to_string()))
+            .map_err(|message| ServeError::Failed(message.to_string()))
+    }
+
+    /// How many scheduled-job runs this context handed to its job workers are running or
+    /// waiting for their worker (the runs of [`start_job_ticker`] and of `POST /api/jobs/run`),
+    /// until each one's result is back in the session. Part of the **activity** extension point
+    /// beside [`crate::Server::idle_for`] (which counts requests only): a host's idle logic
+    /// that must not stop during background work waits for `0`, and a host that closes the
+    /// Store stops the ticker ([`JobTicker::stop`]) first, then waits for `0`. `Result` for
+    /// shared state (root rule 15; it does not fail today).
+    pub fn background_runs(&self) -> Result<usize, ServeError> {
+        Ok(self.job_workers.active())
     }
 
     /// The session's statistics with the host's part of the process added
@@ -853,21 +901,57 @@ impl Context {
 /// How often the server ticks the scheduled jobs of the active store.
 const JOB_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The handle of the ticker [`start_job_ticker`] started.
+///
+/// The ticker's thread holds its [`Context`] weakly: it ends by itself at its next tick once the
+/// host dropped the last [`Context`] (or the session is gone), so it never keeps the session's
+/// job queue, the session thread or the Store alive. [`JobTicker::stop`] stops it at once and
+/// waits for its thread (at most the tick it is in, a short session job). Dropping the handle
+/// lets the ticker run on, like a dropped [`std::thread::JoinHandle`] (the CLI's dev server
+/// ticks until the process ends without keeping it).
+///
+/// The job worker threads also hold their context weakly. A host that closes the Store stops
+/// the ticker first, waits until [`Context::background_runs`] is `0` (a run still on a worker
+/// when its context is gone finishes without giving its result back), then drops its contexts
+/// (the session's job queue closes and the session thread ends) or shuts the Store down.
+#[derive(Debug)]
+pub struct JobTicker {
+    /// Told to stop (one message); dropped with the handle, which lets the ticker run on.
+    stop: Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl JobTicker {
+    /// Stops the ticker and waits for its thread (at most the tick it is in). `Err`
+    /// ([`ServeError::Thread`]) when the thread ended by a panic (a bug).
+    pub fn stop(self) -> Result<(), ServeError> {
+        // An `Err`: the thread ended already (its context is gone).
+        let _ = self.stop.send(());
+        self.thread
+            .join()
+            .map_err(|_| ServeError::Thread("the scheduled-jobs thread panicked".to_string()))
+    }
+}
+
 /// Ticks the session's scheduled jobs (book page "Scheduled Jobs") from a thread of its own,
-/// in the time zone `zone` (the machine's; `None`: the session's default). Each tick is a short
-/// session job like a browser call that only decides what is due; the work happens on
-/// job worker threads (one per job group). `Err` when the session does not take the time
-/// zone ([`ServeError::Session`]: an unknown zone, or the session job could not run; then no
-/// ticker starts) or when the thread cannot start.
-pub fn start_job_ticker(context: &Arc<Context>, zone: Option<String>) -> Result<(), ServeError> {
+/// in the time zone `zone` (the machine's; `None`: the session's default), until the returned
+/// [`JobTicker`] is stopped or the context is gone (the last [`Context`] dropped, or the session
+/// thread ended). Each tick is a short session job like a browser call
+/// that only decides what is due; the work happens on job worker threads (one per job group).
+/// `Err` when the session does not take the time zone ([`ServeError::Session`]: an unknown
+/// zone, or the session job could not run; then no ticker starts) or when the thread cannot
+/// start.
+pub fn start_job_ticker(
+    context: &Arc<Context>,
+    zone: Option<String>,
+) -> Result<JobTicker, ServeError> {
     if let Some(zone) = zone {
         let named = zone.clone();
         context
             .call(move |session| session.set_time_zone(&zone))
             .map_err(|err| {
                 ServeError::Session(format!(
-                    "cannot set the time zone '{named}' of the scheduled jobs: {}",
-                    err.message()
+                    "cannot set the time zone '{named}' of the scheduled jobs: {err}"
                 ))
             })?
             .map_err(|err| {
@@ -876,12 +960,36 @@ pub fn start_job_ticker(context: &Arc<Context>, zone: Option<String>) -> Result<
                 ))
             })?;
     }
-    let context = context.clone();
-    std::thread::Builder::new()
+    start_ticker(context, JOB_TICK)
+}
+
+/// The ticker of [`start_job_ticker`], ticking every `tick` (tests tick faster).
+pub(crate) fn start_ticker(
+    context: &Arc<Context>,
+    tick: std::time::Duration,
+) -> Result<JobTicker, ServeError> {
+    let context = Arc::downgrade(context);
+    let (stop, stopped) = channel::<()>();
+    let thread = std::thread::Builder::new()
         .name("graphersal-jobs".to_string())
         .spawn(move || {
+            let mut stopped = Some(stopped);
             loop {
-                std::thread::sleep(JOB_TICK);
+                match stopped.as_ref().map(|stopped| stopped.recv_timeout(tick)) {
+                    // Stopped by `JobTicker::stop`.
+                    Some(Ok(())) => break,
+                    Some(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) => {}
+                    // The handle is gone: tick on, until the context is gone.
+                    Some(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) => {
+                        stopped = None;
+                        std::thread::sleep(tick);
+                    }
+                    None => std::thread::sleep(tick),
+                }
+                // Held for this tick only.
+                let Some(context) = context.upgrade() else {
+                    break;
+                };
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_micros() as i64);
@@ -904,6 +1012,6 @@ pub fn start_job_ticker(context: &Arc<Context>, zone: Option<String>) -> Result<
                 }
             }
         })
-        .map(|_| ())
-        .map_err(|err| ServeError::Thread(err.to_string()))
+        .map_err(|err| ServeError::Thread(err.to_string()))?;
+    Ok(JobTicker { stop, thread })
 }
