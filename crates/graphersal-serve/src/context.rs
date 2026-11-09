@@ -450,8 +450,13 @@ pub struct Context {
     pub(crate) feed: Arc<Mutex<Feed>>,
     /// The threads that do the work of the scheduled jobs ([`job_workers`]).
     pub(crate) job_workers: job_workers::JobWorkers,
-    /// The MCP endpoint (`--mcp`), or `None`.
-    pub(crate) mcp: Option<mcp::Mcp>,
+    /// The MCP endpoint (`--mcp`), or `None`; possibly shared with the contexts of other
+    /// graphs of the process (one endpoint: its statistics, sessions and token).
+    pub(crate) mcp: Option<Arc<mcp::Mcp>>,
+    /// The MCP profile of this context's requests and connections; `None`: the endpoint's
+    /// default.
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_profile: Option<graphersal_mcp::Profile>,
     /// What the host adds.
     pub(crate) hooks: Arc<dyn Hooks>,
 }
@@ -468,7 +473,9 @@ pub struct ContextBuilder {
     read_only: bool,
     store: Option<Arc<Store>>,
     commit_seq: u64,
-    mcp: Option<mcp::Mcp>,
+    mcp: Option<Arc<mcp::Mcp>>,
+    #[cfg(feature = "mcp")]
+    mcp_profile: Option<graphersal_mcp::Profile>,
     hooks: Option<Arc<dyn Hooks>>,
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
@@ -527,7 +534,28 @@ impl ContextBuilder {
     /// The MCP endpoint (`POST /mcp`).
     #[cfg(feature = "mcp")]
     pub fn mcp(mut self, mcp: Option<graphersal_mcp::Mcp>) -> Self {
-        self.mcp = mcp;
+        self.mcp = mcp.map(Arc::new);
+        self
+    }
+
+    /// The MCP endpoint (`POST /mcp`), shared with the contexts of the host's other graphs: one
+    /// endpoint for the process (its statistics, MCP sessions, token and default profile),
+    /// whose requests the graph resolver sends to this context, so this context's session runs
+    /// their jobs ([`Context`] is the endpoint's `Host`).
+    #[cfg(feature = "mcp")]
+    pub fn shared_mcp(mut self, mcp: Arc<graphersal_mcp::Mcp>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    /// The MCP profile of this context's requests and connections (what an agent may do here:
+    /// configuration, read-only flag, answer limit, access policy), chosen by the host;
+    /// default: the endpoint's own ([`graphersal_mcp::Mcp::profile`]). Two contexts over the
+    /// same session ([`Runner`]) with different profiles serve one graph to two kinds of
+    /// clients, the resolver choosing which a request gets.
+    #[cfg(feature = "mcp")]
+    pub fn mcp_profile(mut self, profile: graphersal_mcp::Profile) -> Self {
+        self.mcp_profile = Some(profile);
         self
     }
 
@@ -577,6 +605,8 @@ impl ContextBuilder {
             })),
             job_workers: job_workers::JobWorkers::default(),
             mcp: self.mcp,
+            #[cfg(feature = "mcp")]
+            mcp_profile: self.mcp_profile,
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
         })
     }
@@ -598,6 +628,8 @@ impl Context {
             store: None,
             commit_seq: 0,
             mcp: None,
+            #[cfg(feature = "mcp")]
+            mcp_profile: None,
             hooks: None,
             filter: None,
             memory_tracked: false,
@@ -607,7 +639,32 @@ impl Context {
     /// The MCP endpoint, if the server has one.
     #[cfg(feature = "mcp")]
     pub fn mcp(&self) -> Option<&graphersal_mcp::Mcp> {
-        self.mcp.as_ref()
+        self.mcp.as_deref()
+    }
+
+    /// The MCP profile of this context's requests and connections: its own
+    /// ([`ContextBuilder::mcp_profile`]), else the endpoint's default; `None` without an
+    /// endpoint.
+    #[cfg(feature = "mcp")]
+    pub fn mcp_profile(&self) -> Option<&graphersal_mcp::Profile> {
+        let mcp = self.mcp.as_deref()?;
+        Some(self.mcp_profile.as_ref().unwrap_or_else(|| mcp.profile()))
+    }
+
+    /// A new MCP connection (one MCP session over a stream: `graphersal_mcp::serve_lines`)
+    /// whose jobs run on this context's session, under this context's profile; `None`
+    /// without an endpoint. The host picks the context (its graph and profile) from its own
+    /// handshake, as the graph resolver does for a request.
+    #[cfg(feature = "mcp")]
+    pub fn mcp_connection(self: &Arc<Self>) -> Option<graphersal_mcp::Connection> {
+        let mcp = self.mcp.clone()?;
+        let profile = self.mcp_profile.clone();
+        let host: Arc<dyn graphersal_mcp::Host> = self.clone();
+        let connection = graphersal_mcp::Connection::new(mcp, host);
+        Some(match profile {
+            Some(profile) => connection.with_profile(profile),
+            None => connection,
+        })
     }
 
     /// The Store the session serves, if any.

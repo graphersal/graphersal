@@ -660,3 +660,183 @@ fn a_run_observer_sees_the_mcp_tool_runs_with_their_text() {
     assert_eq!(info.alias(), Some("7"));
     assert_eq!(recorder.ended().len(), 1);
 }
+
+/// `POST /mcp` of `body` on `server` (with `headers`): the JSON answer of a `200`.
+#[cfg(feature = "mcp")]
+fn mcp_post(server: &Server, body: Value, headers: &[(&str, &str)]) -> Value {
+    let text = body.to_string();
+    let mut request = post("/mcp", text.as_bytes()).with_header("Accept", "application/json");
+    for (name, value) in headers {
+        request = request.with_header(name, value);
+    }
+    let answer = server.handle(request);
+    assert_eq!(
+        answer.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(answer.body())
+    );
+    body_json(&answer)
+}
+
+/// A `tools/call` of `name` with `arguments` as the JSON-RPC body.
+#[cfg(feature = "mcp")]
+fn tool_call(name: &str, arguments: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+           "params": {"name": name, "arguments": arguments}})
+}
+
+/// The text of a tool answer.
+#[cfg(feature = "mcp")]
+fn tool_text(answer: &Value) -> String {
+    answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn one_mcp_endpoint_serves_two_graphs_behind_the_resolver() {
+    let mcp = Arc::new(graphersal_mcp::Mcp::new(false, None, false));
+    let server = Server::new();
+    server
+        .ready_with(Arc::new(TwoGraphs {
+            a: Context::builder(session_on("modern"), check())
+                .shared_mcp(mcp.clone())
+                .build(),
+            b: Context::builder(session_on("empty"), check())
+                .shared_mcp(mcp.clone())
+                .build(),
+        }))
+        .expect("ready once");
+    let count = |graph: &str| -> String {
+        let answer = mcp_post(
+            &server,
+            tool_call("gql", json!({"query": "MATCH (n) RETURN count(n) AS c"})),
+            &[("X-Graph", graph)],
+        );
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        tool_text(&answer)
+    };
+    let (a, b) = (count("a"), count("b"));
+    assert!(a.contains("\"c\":6"), "{a}");
+    assert!(b.contains("\"c\":0"), "{b}");
+    // The endpoint's statistics count the calls of both graphs.
+    let stats = mcp.stats().to_json().expect("statistics");
+    let gql = stats["tools"]
+        .as_array()
+        .and_then(|tools| tools.iter().find(|tool| tool["name"] == "gql"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(gql["calls"], 2, "{stats}");
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn two_contexts_over_one_session_serve_two_mcp_profiles() {
+    use graphersal::auth::AccessPolicy;
+    use graphersal_mcp::Profile;
+
+    let (jobs, ()) = spawn_session(
+        SessionPresets::new(),
+        |session| {
+            session
+                .load_sample("modern")
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        },
+        None,
+    )
+    .expect("the session thread starts");
+    let mcp = Arc::new(graphersal_mcp::Mcp::new(false, None, false));
+    // `X-Graph: b` is the "use" side (reads only, by its access policy), no header "develop".
+    let server = Server::new();
+    server
+        .ready_with(Arc::new(TwoGraphs {
+            a: Context::builder(Runner::Session(jobs.clone()), check())
+                .shared_mcp(mcp.clone())
+                .build(),
+            b: Context::builder(Runner::Session(jobs), check())
+                .shared_mcp(mcp.clone())
+                .mcp_profile(Profile::new(true).with_access_policy(AccessPolicy::read_only()))
+                .build(),
+        }))
+        .expect("ready once");
+    let write = tool_call("query", json!({"script": "g.add_v(\"thing\").iterate()"}));
+    let refused = mcp_post(&server, write.clone(), &[("X-Graph", "b")]);
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        tool_text(&refused).contains("Permission denied"),
+        "{refused}"
+    );
+    let allowed = mcp_post(&server, write, &[]);
+    assert_eq!(allowed["result"]["isError"], false, "{allowed}");
+    // Both see the one graph (the write of the develop side).
+    let count = tool_call(
+        "gql",
+        json!({"query": "MATCH (n:thing) RETURN count(n) AS c"}),
+    );
+    assert!(tool_text(&mcp_post(&server, count, &[("X-Graph", "b")])).contains("\"c\":1"));
+    // What each side reports of itself follows its profile.
+    let info = mcp_post(
+        &server,
+        tool_call("graph_info", json!({})),
+        &[("X-Graph", "b")],
+    );
+    assert!(tool_text(&info).contains("\"mcpReadOnly\":true"), "{info}");
+    let info = mcp_post(&server, tool_call("graph_info", json!({})), &[]);
+    assert!(tool_text(&info).contains("\"mcpReadOnly\":false"), "{info}");
+    let api =
+        |graph: &str| body_json(&server.handle(get("/api/info").with_header("X-Graph", graph)));
+    assert_eq!(api("b")["mcp"]["readOnly"], true);
+    assert_eq!(api("a")["mcp"]["readOnly"], false);
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn an_mcp_connection_of_a_context_runs_there_with_its_identity() {
+    let recorder = Arc::new(Recorder::default());
+    let context = Context::builder(session_on("modern"), check())
+        .runs(Arc::new(Runs::with_observer(recorder.clone())))
+        .mcp(Some(graphersal_mcp::Mcp::new(false, None, false)))
+        .build();
+    let connection = context
+        .mcp_connection()
+        .expect("the context has an endpoint")
+        .with_identity("carol");
+    let lines = connection
+        .handle(&tool_call("query", json!({"script": "g.v().count().next()"})).to_string());
+    let answer: Value = serde_json::from_str(&lines[0]).expect("JSON");
+    assert!(tool_text(&answer).contains("\n6"), "{answer}");
+    let started = recorder.started();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].0.kind(), RunKind::Tool);
+    assert_eq!(started[0].0.identity(), Some("carol"));
+    assert_eq!(started[0].0.client(), format!("mcp:{}", connection.key()));
+    // Without an endpoint there is no connection.
+    let plain = Context::builder(session_on("empty"), check()).build();
+    assert!(plain.mcp_connection().is_none());
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn the_identity_of_the_request_filter_reaches_the_mcp_runs() {
+    let recorder = Arc::new(Recorder::default());
+    let context = Context::builder(session_on("modern"), check())
+        .filter(Arc::new(TokenFilter))
+        .runs(Arc::new(Runs::with_observer(recorder.clone())))
+        .mcp(Some(graphersal_mcp::Mcp::new(false, None, false)))
+        .build();
+    let server = Server::new();
+    server.ready(context).expect("ready once");
+    let answer = mcp_post(
+        &server,
+        tool_call("query", json!({"script": "1"})),
+        &[("X-Token", "secret")],
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let started = recorder.started();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].0.identity(), Some("alice"));
+}

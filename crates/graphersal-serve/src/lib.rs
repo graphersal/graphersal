@@ -31,10 +31,21 @@
 //! | Activity / lifecycle hooks: ready, stopping, last activity | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] |
 //! | Executor policy: how jobs reach the session | one session thread, unbounded queue | [`Runner`], [`JobQueue`] |
 //!
+//! With the feature `mcp`, one `graphersal_mcp::Mcp` endpoint can serve several graphs: each
+//! context gets the same endpoint ([`ContextBuilder::shared_mcp`]; its statistics, MCP sessions
+//! and token stay the process's) and, if the host wants, a profile of its own
+//! ([`ContextBuilder::mcp_profile`]: configuration, read-only flag, answer limit, access
+//! policy). The graph resolver picks the context of an `/mcp` request, and so the session its
+//! jobs run on and its profile; a host that serves MCP over a stream picks the context from its
+//! own handshake and calls [`Context::mcp_connection`]. The identity a request filter attached
+//! travels with the MCP request to its session jobs and to the run observer's [`RunInfo`].
+//!
 //! Today's host is the dev server of `graphersal-cli` (`graphersal --server`), which keeps the
 //! `tiny_http` accept loop, the argument parsing, the signals, the reader pool of the read-only
 //! serving mode (plugged in as a [`JobQueue`]) and the AI Chat (its endpoints plugged in through
-//! [`Hooks::route`]). It is published only because `graphersal-cli` depends on it.
+//! [`Hooks::route`]). It is published because `graphersal-cli` depends on it, and for hosts of
+//! Graphersal's own servers; its API changes in any release (a patch release included): a crate
+//! that depends on it pins the exact version (`graphersal-serve = "=0.x.y"`) during 0.x.
 
 #![warn(missing_docs)]
 

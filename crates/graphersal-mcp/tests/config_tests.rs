@@ -627,12 +627,13 @@ fn the_knowledge_graph_example_stays_within_its_budget() {
         listed,
         ["gql", "run_saved_query", "get_schema", "deep", "older"]
     );
-    // The built-in part (instructions, gql, run_saved_query, get_schema): about 900 tokens;
-    // each saved-query tool adds its own description and parameters.
+    // The built-in part (instructions, gql, run_saved_query, get_schema with its summary option
+    // `descriptions`): about 900 tokens; each saved-query tool adds its own description and
+    // parameters.
     let builtin: usize =
         cost.instructions_chars + cost.tools.iter().take(3).map(|(_, c)| c).sum::<usize>();
     assert!(
-        builtin <= 3_700,
+        builtin <= 3_750,
         "the example's built-in part takes {builtin} chars"
     );
     assert!(PromptCost::tokens(cost.total_chars()) <= 1_200, "{cost:?}");
