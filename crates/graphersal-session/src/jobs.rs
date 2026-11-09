@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn a_store_operation_waits_for_a_users_job_but_not_for_a_system_job() {
         let (mut session, run) = session_with_a_run_out();
-        let refused = session.store_checkpoint("").err().expect("refused");
+        let refused = session.store_checkpoint("").expect_err("refused");
         assert_eq!(refused.status, 409);
         assert!(refused.message.contains("'cp'"), "{}", refused.message);
         session.finish_job_run(run.run());
