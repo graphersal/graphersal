@@ -54,6 +54,7 @@ mod enabled {
     use crate::api::current_view;
     use crate::context::{BusyReason, CLIENT, Client, Context, as_client};
     use crate::http::{HttpError, Request, Response};
+    use crate::runs::{RunDetails, RunKind};
 
     pub(crate) fn endpoint_status(mcp: &Mcp) -> Value {
         mcp.status()
@@ -165,8 +166,27 @@ mod enabled {
         }
 
         fn run_started(&self, client: &ClientRef, cancel: &CancelToken) -> u64 {
-            self.runs
-                .start(&run_key(client), client.request(), cancel.clone())
+            self.run_started_with_text(client, cancel, "")
+        }
+
+        fn run_started_with_text(
+            &self,
+            client: &ClientRef,
+            cancel: &CancelToken,
+            text: &str,
+        ) -> u64 {
+            // Called on the thread of the request (or the agent's turn): its identity, if any.
+            let identity = CLIENT.with(|c| c.borrow().identity.clone());
+            self.runs.start_with(
+                &run_key(client),
+                client.request(),
+                cancel.clone(),
+                RunDetails {
+                    kind: Some(RunKind::Tool),
+                    text: (!text.is_empty()).then(|| text.to_string()),
+                    identity,
+                },
+            )
         }
 
         fn run_ended(&self, run: u64) {

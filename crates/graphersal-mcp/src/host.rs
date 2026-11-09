@@ -113,6 +113,14 @@ pub trait Host: Executor {
         0
     }
 
+    /// [`Host::run_started`] with the query `text` of the run (the script it evaluates), for a
+    /// host that shows its runs (graphersal-serve's run observer). Default: `run_started`,
+    /// the text unused. The endpoint calls this one.
+    fn run_started_with_text(&self, client: &ClientRef, cancel: &CancelToken, text: &str) -> u64 {
+        let _ = text;
+        self.run_started(client, cancel)
+    }
+
     /// The run of [`Host::run_started`] that returned `run` ended.
     fn run_ended(&self, run: u64) {
         let _ = run;

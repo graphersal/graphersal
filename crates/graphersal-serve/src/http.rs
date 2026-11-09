@@ -81,6 +81,7 @@ pub struct Request<'a> {
     headers: Vec<(String, String)>,
     body_length: Option<usize>,
     body: Box<dyn Read + 'a>,
+    identity: Option<String>,
 }
 
 impl<'a> Request<'a> {
@@ -93,6 +94,7 @@ impl<'a> Request<'a> {
             headers: Vec::new(),
             body_length: None,
             body: Box::new(body),
+            identity: None,
         }
     }
 
@@ -134,6 +136,19 @@ impl<'a> Request<'a> {
     /// The declared body length, if any.
     pub fn body_length(&self) -> Option<usize> {
         self.body_length
+    }
+
+    /// Attaches `identity` to the request: who sent it, as a request filter decided
+    /// ([`crate::RequestFilter`]; an opaque text of the host, e.g. a user or token name). The
+    /// extra routes read it here, a run observer from [`crate::RunInfo::identity`]. The core
+    /// itself never reads it.
+    pub fn set_identity(&mut self, identity: impl Into<String>) {
+        self.identity = Some(identity.into());
+    }
+
+    /// The identity a request filter attached ([`Self::set_identity`]), if any.
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
     }
 
     /// The body.

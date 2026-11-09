@@ -12,6 +12,7 @@ use graphersal::exec::CancelToken;
 use super::value;
 use crate::context::Context;
 use crate::http::{HttpError, Method, Request, Response};
+use crate::runs::RunKind;
 use graphersal_session::Session;
 use graphersal_session::layout::LayoutRequest;
 use serde_json::{Value, json};
@@ -67,7 +68,7 @@ pub(super) fn route(
     // /api/cancel` without a `runId`) ends it, also while it waits for the session.
     let slice = |job: SliceJob| {
         let cancel = CancelToken::new();
-        let _run = context.register_run(None, cancel.clone());
+        let _run = context.register_run(None, cancel.clone(), RunKind::Layout, None);
         context.call_fallible(move |s| job(s, &cancel))
     };
     match endpoint {

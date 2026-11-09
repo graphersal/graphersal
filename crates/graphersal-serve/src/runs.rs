@@ -15,15 +15,147 @@
 //! - all at once ([`Runs::cancel_all`]): the graceful stop (SIGTERM).
 //!
 //! Stopping another client's runs is an administrative act and not part of this module's
-//! client API.
+//! client API. **Extension point "run observer + cancel handle"** ([`RunObserver`], default:
+//! none): a host that wants to see every run (an administrative list, idle tracking, live
+//! progress) gives the registry an observer ([`Runs::with_observer`]); it is told of every run's
+//! start ([`RunInfo`]: client, kind, the head of the query text, identity, start time) with a
+//! [`RunHandle`] that cancels that run, and of its end with its duration. This crate only calls
+//! the observer: it offers no endpoint that lists or stops runs.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime};
 
 use graphersal::exec::CancelToken;
 
 /// The longest client id of a run (`runId`) the server accepts.
 pub(crate) const MAX_ALIAS_CHARS: usize = 128;
+
+/// How many characters of a run's query text a [`RunObserver`] is shown ([`RunInfo::text`]).
+pub const RUN_TEXT_HEAD_CHARS: usize = 200;
+
+/// What a run does.
+///
+/// `#[non_exhaustive]`: further kinds of runs may be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunKind {
+    /// A query of the HTTP API (`POST /api/execute`).
+    Query,
+    /// A slice of a force layout (`POST /api/layout`, `/api/layout/step`).
+    Layout,
+    /// A query of a tool call of the MCP endpoint or of a host's agent (the AI Chat): the
+    /// client name tells which.
+    Tool,
+    /// A run registered through [`Runs::start`] / [`Runs::register`] without a kind.
+    Other,
+}
+
+/// One run as a [`RunObserver`] sees it.
+#[derive(Debug, Clone)]
+pub struct RunInfo {
+    id: u64,
+    client: String,
+    alias: Option<String>,
+    kind: RunKind,
+    text: Option<String>,
+    identity: Option<String>,
+    started_at: SystemTime,
+}
+
+impl RunInfo {
+    /// The registry's id of the run (unique within the registry).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The client's key: `page:<X-Graphersal-Client>`, `mcp:<MCP session id>` (or `mcp`),
+    /// `ai:<conversation>`.
+    pub fn client(&self) -> &str {
+        &self.client
+    }
+
+    /// The client's own id of the run (a page's `runId`, an MCP request id), if it sent one.
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    /// What the run does.
+    pub fn kind(&self) -> RunKind {
+        self.kind
+    }
+
+    /// The first [`RUN_TEXT_HEAD_CHARS`] characters of the query text, when the run has one.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// The identity a request filter attached to the request that started the run
+    /// ([`crate::Request::set_identity`]), if any.
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
+    }
+
+    /// When the run was registered (before its job was queued).
+    pub fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+}
+
+/// Cancels one run: the handle a [`RunObserver`] gets with each run's start. A cancel of a
+/// waiting run stops it when it starts; of a running one at its next check (its unit rolls
+/// back). Cancelling an ended run does nothing.
+#[derive(Clone)]
+pub struct RunHandle {
+    token: CancelToken,
+}
+
+impl RunHandle {
+    /// Cancels the run.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    /// Whether the run was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+impl fmt::Debug for RunHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunHandle")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+/// **Extension point "run observer + cancel handle"**: told of every run's start and end.
+/// Default: none (a registry without an observer calls nothing).
+///
+/// Both methods are called on the thread that registers or ends the run (a request thread, an
+/// agent's turn thread), outside the registry's lock; they must return quickly. Every method
+/// has a default that does nothing.
+pub trait RunObserver: Send + Sync {
+    /// A run was registered (before its job is queued); `handle` cancels it.
+    fn run_started(&self, run: &RunInfo, handle: RunHandle) {
+        let _ = (run, handle);
+    }
+
+    /// The run ended (answered, refused, failed or cancelled) after `duration`.
+    fn run_ended(&self, run: &RunInfo, duration: Duration) {
+        let _ = (run, duration);
+    }
+}
+
+/// What a run registration says about the run, beyond its client and token.
+#[derive(Default)]
+pub(crate) struct RunDetails {
+    pub(crate) kind: Option<RunKind>,
+    pub(crate) text: Option<String>,
+    pub(crate) identity: Option<String>,
+}
 
 /// One registered run.
 struct Run {
@@ -32,6 +164,8 @@ struct Run {
     /// The client's own id of the run, if it sent one.
     alias: Option<String>,
     token: CancelToken,
+    /// What the observer was told, and when the run started (only with an observer).
+    observed: Option<(RunInfo, Instant)>,
 }
 
 #[derive(Default)]
@@ -40,10 +174,11 @@ struct State {
     runs: HashMap<u64, Run>,
 }
 
-/// The registry of cancellable runs (one per server).
+/// The registry of cancellable runs (one per server), optionally with a [`RunObserver`].
 #[derive(Default)]
 pub struct Runs {
     state: Mutex<State>,
+    observer: Option<Arc<dyn RunObserver>>,
 }
 
 /// Removes its run from the registry when dropped (also when the job panics or is refused).
@@ -59,6 +194,14 @@ impl Drop for Registered<'_> {
 }
 
 impl Runs {
+    /// A registry that tells `observer` of every run's start and end.
+    pub fn with_observer(observer: Arc<dyn RunObserver>) -> Self {
+        Self {
+            state: Mutex::default(),
+            observer: Some(observer),
+        }
+    }
+
     /// The state, also after a panic of a holder (every change is one map operation).
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state
@@ -67,19 +210,52 @@ impl Runs {
     }
 
     /// Registers a run of `client` stopped by `token`, with the client's own id `alias`;
-    /// returns its id for [`Self::end`].
+    /// returns its id for [`Self::end`]. An observer sees it as [`RunKind::Other`].
     pub fn start(&self, client: &str, alias: Option<&str>, token: CancelToken) -> u64 {
+        self.start_with(client, alias, token, RunDetails::default())
+    }
+
+    /// [`Self::start`] with what the run does (for the observer).
+    pub(crate) fn start_with(
+        &self,
+        client: &str,
+        alias: Option<&str>,
+        token: CancelToken,
+        details: RunDetails,
+    ) -> u64 {
         let mut state = self.lock();
         state.next += 1;
         let id = state.next;
+        let observed = self.observer.as_ref().map(|_| {
+            (
+                RunInfo {
+                    id,
+                    client: client.to_string(),
+                    alias: alias.map(str::to_string),
+                    kind: details.kind.unwrap_or(RunKind::Other),
+                    text: details
+                        .text
+                        .map(|text| text.chars().take(RUN_TEXT_HEAD_CHARS).collect()),
+                    identity: details.identity,
+                    started_at: SystemTime::now(),
+                },
+                Instant::now(),
+            )
+        });
+        let told = observed.as_ref().map(|(info, _)| info.clone());
         state.runs.insert(
             id,
             Run {
                 client: client.to_string(),
                 alias: alias.map(str::to_string),
-                token,
+                token: token.clone(),
+                observed,
             },
         );
+        drop(state);
+        if let (Some(observer), Some(info)) = (&self.observer, told) {
+            observer.run_started(&info, RunHandle { token });
+        }
         id
     }
 
@@ -96,9 +272,33 @@ impl Runs {
         }
     }
 
+    /// [`Self::register`] with what the run does (for the observer).
+    pub(crate) fn register_with(
+        &self,
+        client: &str,
+        alias: Option<&str>,
+        token: CancelToken,
+        details: RunDetails,
+    ) -> Registered<'_> {
+        Registered {
+            runs: self,
+            id: self.start_with(client, alias, token, details),
+        }
+    }
+
     /// The run `id` ended.
     pub fn end(&self, id: u64) {
-        self.lock().runs.remove(&id);
+        let ended = self.lock().runs.remove(&id);
+        if let (
+            Some(observer),
+            Some(Run {
+                observed: Some((info, started)),
+                ..
+            }),
+        ) = (&self.observer, ended)
+        {
+            observer.run_ended(&info, started.elapsed());
+        }
     }
 
     /// Cancels the runs of `client`; whether there was one.

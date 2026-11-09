@@ -20,6 +20,8 @@
 
 use std::net::IpAddr;
 
+use crate::http::{HttpError, Request};
+
 /// Whether the server is reachable from other machines.
 ///
 /// Closed by definition (not `#[non_exhaustive]`): a bind address is either a loopback address
@@ -168,6 +170,26 @@ impl HostCheck {
     /// ([`HostRules::is_own_origin`] on this port).
     pub fn is_own_origin(&self, origin: &str, host: &str) -> bool {
         self.rules().is_own_origin(origin, host, self.port)
+    }
+
+    /// The checks of one request: `Ok` when its `Host` names this server and its `Origin`, if
+    /// any, is allowed; else the `403` that refuses it (DNS rebinding, a cross-site page). The
+    /// default request filter of a context ([`crate::RequestFilter`]); a host's own filter that
+    /// keeps the checks calls this first.
+    pub fn check(&self, request: &Request<'_>) -> Result<(), HttpError> {
+        let host = match request.header("Host") {
+            Some(host) if self.is_own_host(host) => host,
+            _ => return Err(HttpError(403, self.unknown_host_message())),
+        };
+        if let Some(origin) = request.header("Origin")
+            && !self.is_own_origin(origin, host)
+        {
+            return Err(HttpError(
+                403,
+                format!("cross-origin request from {origin} refused"),
+            ));
+        }
+        Ok(())
     }
 
     /// The message of the `403` to a request whose `Host` is not this server.

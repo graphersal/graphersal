@@ -7,6 +7,22 @@
 //! that sends a job and waits for its answer ([`Context::call`]). A host may queue the jobs
 //! elsewhere instead ([`Runner::Queue`], the CLI's reader pool of the read-only serving mode).
 //!
+//! Extension points of this module (each with the core default a host gets without it):
+//! - **executor policy** ([`Runner`], [`JobQueue`]; default: one session thread, unbounded
+//!   queue): how the jobs reach a session. The CLI's reader pool of `--server --read-only` is a
+//!   [`JobQueue`] (bounded queue, per-client fairness, 503 when busy, its first worker takes
+//!   over the session thread: [`spawn_session`]'s `takeover`);
+//! - **request filter** ([`RequestFilter`]; default: the context's [`HostCheck`]): sees each
+//!   request before routing, refuses it or attaches an identity;
+//! - **extra routes** ([`Hooks::route`]; default: `404 unknown endpoint`): the `/api/`
+//!   endpoints the core does not know (the CLI's AI Chat), plus the host's fields of
+//!   `GET /api/info` and the statistics ([`Hooks`]);
+//! - **run observer + cancel handle**: [`crate::RunObserver`] on the run registry
+//!   ([`crate::Runs::with_observer`], [`ContextBuilder::runs`]).
+//!
+//! The graph resolver and the lifecycle (probes, loading, stopping, activity) are one level up,
+//! in [`crate::Server`].
+//!
 //! Change feed: every job that changes the commit position of the served graph (or swaps the
 //! graph: a view, a rollback) is recorded with the client that sent it (`X-Graphersal-Client`
 //! of a browser tab, `mcp` for the MCP endpoint, `ai` for the AI Chat); `GET /api/changes`
@@ -51,14 +67,17 @@ pub enum ServeError {
     Thread(String),
     /// The UI directory is not usable (the diagnostic, shown as it is).
     Ui(String),
+    /// A lifecycle step out of order ([`crate::Server::ready`] twice).
+    Lifecycle(String),
 }
 
 impl fmt::Display for ServeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Setup(message) | Self::Thread(message) | Self::Ui(message) => {
-                f.write_str(message)
-            }
+            Self::Setup(message)
+            | Self::Thread(message)
+            | Self::Ui(message)
+            | Self::Lifecycle(message) => f.write_str(message),
         }
     }
 }
@@ -108,9 +127,17 @@ impl Busy {
     }
 }
 
-/// A queue that runs the session jobs instead of the one session thread (the CLI's reader pool
-/// of the read-only serving mode, `--server --read-only`). A server with one is in the
-/// read-only serving mode: no scheduled jobs, `GET /api/info` adds `serving`.
+/// **Extension point "executor policy"**: a queue of the host that runs the session jobs
+/// instead of the one session thread (default: [`Runner::Session`], one session thread with an
+/// unbounded queue). The CLI's reader pool of the read-only serving mode (`--server
+/// --read-only`: N workers with a session each over the same graph, a bounded queue, a limit
+/// per client) is one.
+///
+/// A context on a host queue offers no scheduled jobs (they need the one session that owns the
+/// Store: `POST /api/jobs/*` answers `409` [`JobQueue::scheduled_jobs_refusal`]) and adds
+/// `serving` ([`JobQueue::status`]) to `GET /api/info`. A refusal ([`Busy`]) is a `503` with
+/// `Retry-After: 1`. To let the queue's first worker use the session thread the graph was
+/// loaded on, pass its loop as [`spawn_session`]'s `takeover`.
 pub trait JobQueue: Send + Sync {
     /// Queues `job` for the client `key` (`page:<tab>`, `mcp:<session>`, `ai:<conversation>`);
     /// `Err` when refused. The job's answer comes through the job itself.
@@ -118,9 +145,21 @@ pub trait JobQueue: Send + Sync {
 
     /// The `serving` value of `GET /api/info`: the queue's settings and load.
     fn status(&self) -> Value;
+
+    /// The message of the `409` to `POST /api/jobs/define|drop|enable|schedule|run` on this
+    /// queue. Default: [`SCHEDULED_JOBS_REFUSAL`].
+    fn scheduled_jobs_refusal(&self) -> String {
+        SCHEDULED_JOBS_REFUSAL.to_string()
+    }
 }
 
-/// Where the session jobs run.
+/// The default answer of a host queue to a scheduled-jobs write
+/// ([`JobQueue::scheduled_jobs_refusal`]).
+pub const SCHEDULED_JOBS_REFUSAL: &str = "not available on this server: scheduled jobs need the \
+    one session thread that owns the Store, and this server runs its jobs on a queue of its host";
+
+/// Where the session jobs run: the **executor policy** of a [`Context`] (default:
+/// [`Runner::Session`]).
 ///
 /// `#[non_exhaustive]`: further ways of running jobs may be added.
 #[non_exhaustive]
@@ -132,8 +171,13 @@ pub enum Runner {
     Queue(Arc<dyn JobQueue>),
 }
 
-/// What the host adds to the core API (S1a seam; the CLI's AI Chat and the embedding models it
-/// lists). Every method has a default that adds nothing.
+/// **Extension point "extra routes"** and the host's additions to the core's answers (the CLI's
+/// AI Chat and the embedding models it lists). Default: nothing added, an unknown `/api/`
+/// endpoint answers `404 unknown endpoint /api/<endpoint>`. Every method has a default that
+/// adds nothing.
+///
+/// Only `/api/` endpoints the core does not answer reach [`Hooks::route`] (after the request
+/// filter, with the request's client set); a path outside `/api/` is a static file of the UI.
 pub trait Hooks: Send + Sync {
     /// Adds the host's fields to `GET /api/info` (the core's fields are set already).
     fn add_info(&self, context: &Context, info: &mut Value) {
@@ -166,6 +210,27 @@ struct NoHooks;
 
 impl Hooks for NoHooks {}
 
+/// **Extension point "request filter"**: sees each request of the API before routing (after
+/// the lifecycle answers of [`crate::Server`]: probes, loading, stopping), refuses it or
+/// attaches an identity ([`Request::set_identity`]; the extra routes read it from the request,
+/// a [`crate::RunObserver`] from [`crate::RunInfo::identity`]). Default: the context's
+/// [`HostCheck`] (the loopback/`Host`/`Origin` checks).
+///
+/// A filter REPLACES the default: one that should keep the checks calls
+/// [`HostCheck::check`] first (a host that answers requests relayed from another process, whose
+/// `Host` is that process's, checks them there instead).
+pub trait RequestFilter: Send + Sync {
+    /// `Ok` to serve `request`, or the answer that refuses it (`{"error": message}` with the
+    /// error's status).
+    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError>;
+}
+
+impl RequestFilter for HostCheck {
+    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
+        self.check(request)
+    }
+}
+
 /// How many recent changes the feed keeps (a poller that missed more reloads anyway).
 const FEED_RECENT: usize = 32;
 
@@ -194,6 +259,8 @@ pub(crate) struct Client {
     pub(crate) detail: Option<String>,
     /// Which client of the name, for the pool's fairness and cancellation: an MCP session id.
     key: Option<String>,
+    /// The identity the request filter attached to the request ([`Request::identity`]).
+    pub(crate) identity: Option<String>,
 }
 
 impl Client {
@@ -203,6 +270,7 @@ impl Client {
             name: name.to_string(),
             detail: detail.map(str::to_string),
             key: None,
+            identity: None,
         }
     }
 
@@ -365,8 +433,10 @@ pub struct Context {
     pub(crate) source: Option<PathBuf>,
     /// The `--schema` file the graph was loaded with, when one was given.
     pub(crate) schema_source: Option<PathBuf>,
-    /// Which `Host`/`Origin` headers the server answers.
-    pub(crate) check: HostCheck,
+    /// The request filter (default: the `Host`/`Origin` checks of the builder's [`HostCheck`]).
+    pub(crate) filter: Arc<dyn RequestFilter>,
+    /// Whether the host process counts its allocations (`GET /api/info` `memoryTracked`).
+    pub(crate) memory_tracked: bool,
     /// The session presets, as `GET /api/info` reports them.
     pub(crate) presets: Value,
     /// `--read-only` (or a Store opened read-only): the graph refuses every write and
@@ -402,10 +472,13 @@ pub struct ContextBuilder {
     commit_seq: u64,
     mcp: Option<mcp::Mcp>,
     hooks: Option<Arc<dyn Hooks>>,
+    filter: Option<Arc<dyn RequestFilter>>,
+    memory_tracked: bool,
 }
 
 impl ContextBuilder {
-    /// The run registry (shared with the host's graceful stop); default: a new one.
+    /// The run registry (shared with the host's graceful stop); default: a new one without an
+    /// observer. A host that observes the runs passes [`Runs::with_observer`].
     pub fn runs(mut self, runs: Arc<Runs>) -> Self {
         self.runs = Some(runs);
         self
@@ -460,9 +533,25 @@ impl ContextBuilder {
         self
     }
 
-    /// What the host adds ([`Hooks`]); default: nothing.
+    /// What the host adds ([`Hooks`]: extra routes, `/api/info` and statistics fields);
+    /// default: nothing.
     pub fn hooks(mut self, hooks: Arc<dyn Hooks>) -> Self {
         self.hooks = Some(hooks);
+        self
+    }
+
+    /// The request filter ([`RequestFilter`]); default: the [`HostCheck`] of
+    /// [`Context::builder`]. It replaces the default checks.
+    pub fn filter(mut self, filter: Arc<dyn RequestFilter>) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Whether the host process counts its allocations (it installs
+    /// `graphersal::alloc_tracking`'s allocator), as `GET /api/info` `memoryTracked` tells the
+    /// UI; default: `false`.
+    pub fn memory_tracked(mut self, tracked: bool) -> Self {
+        self.memory_tracked = tracked;
         self
     }
 
@@ -477,7 +566,8 @@ impl ContextBuilder {
             ui: self.ui,
             source: self.source,
             schema_source: self.schema_source,
-            check: self.check,
+            filter: self.filter.unwrap_or_else(|| Arc::new(self.check)),
+            memory_tracked: self.memory_tracked,
             presets: self.presets,
             read_only: self.read_only,
             store: self.store,
@@ -494,7 +584,8 @@ impl ContextBuilder {
 }
 
 impl Context {
-    /// A builder of the context whose jobs go to `runner` and whose requests pass `check`.
+    /// A builder of the context whose jobs go to `runner` (the executor policy) and whose
+    /// requests pass `check` (the default request filter).
     pub fn builder(runner: Runner, check: HostCheck) -> ContextBuilder {
         ContextBuilder {
             runner,
@@ -509,6 +600,8 @@ impl Context {
             commit_seq: 0,
             mcp: None,
             hooks: None,
+            filter: None,
+            memory_tracked: false,
         }
     }
 
@@ -552,14 +645,29 @@ impl Context {
     }
 
     /// Registers a run of this request's client stopped by `cancel` (the client's own id of
-    /// it: `alias`) until the answer is dropped; register it BEFORE its job is queued.
+    /// it: `alias`; what it does: `kind` and its query `text`, for the run observer) until the
+    /// answer is dropped; register it BEFORE its job is queued.
     pub(crate) fn register_run(
         &self,
         alias: Option<&str>,
         cancel: CancelToken,
+        kind: runs::RunKind,
+        text: Option<&str>,
     ) -> runs::Registered<'_> {
-        let key = CLIENT.with(|c| c.borrow().pool_key());
-        self.runs.register(&key, alias, cancel)
+        let (key, identity) = CLIENT.with(|c| {
+            let client = c.borrow();
+            (client.pool_key(), client.identity.clone())
+        });
+        self.runs.register_with(
+            &key,
+            alias,
+            cancel,
+            runs::RunDetails {
+                kind: Some(kind),
+                text: text.map(str::to_string),
+                identity,
+            },
+        )
     }
 
     /// Runs `job` on the session thread and waits for its answer. A job that changes the
