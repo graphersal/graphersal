@@ -31,7 +31,7 @@
 //! abandoned (a synchronous call cannot be interrupted; its answer is dropped when it comes),
 //! and the query the turn runs is cancelled through the turn's own [`CancelToken`]
 //! ([`graphersal_session::Session::execute_with_cancel`]), so another conversation's or tab's
-//! query keeps running. The run registry holds that token too ([`super::runs`]): a graceful stop
+//! query keeps running. The run registry holds that token too ([`graphersal_serve::Runs`]): a graceful stop
 //! cancels the turn's query like every other run (issue #31).
 //!
 //! Endpoints (the `Host`/`Origin` checks of every endpoint apply; without `--ai` they are `404`):
@@ -52,8 +52,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use graphersal::exec::CancelToken;
+use graphersal_serve::{Method, Request};
 use serde_json::{Value, json};
-use tiny_http::{Method, Request};
 
 use crate::ai::client::{
     AssistantTurn, Client as LlmClient, Conversation as LlmConversation, Message, StopReason,
@@ -348,19 +348,18 @@ impl Ai {
         let found = self
             .conversations
             .lock()
-            .map_err(|_| HttpError(500, "the AI Chat state is poisoned".into()))?
+            .map_err(|_| HttpError::new(500, "the AI Chat state is poisoned"))?
             .iter()
             .find(|c| c.id == id)
             .cloned();
         match found {
-            None => Err(HttpError(
+            None => Err(HttpError::new(
                 404,
                 format!("unknown AI Chat conversation {id:?} (deleted, or the server restarted)"),
             )),
-            Some(conversation) if conversation.owner != client => Err(HttpError(
+            Some(conversation) if conversation.owner != client => Err(HttpError::new(
                 403,
-                "this AI Chat conversation belongs to another page: start a new conversation"
-                    .into(),
+                "this AI Chat conversation belongs to another page: start a new conversation",
             )),
             Some(conversation) => Ok(conversation),
         }
@@ -401,10 +400,7 @@ impl Ai {
 
 /// `{provider, model, readOnly, sendsDataTo}` for `GET /api/info` (never the key), or null
 /// without `--ai`. `sendsDataTo` is the provider's host, null for a provider on this machine.
-pub(super) fn status(context: &Context) -> Value {
-    let Some(ai) = &context.ai else {
-        return Value::Null;
-    };
+pub(super) fn status(ai: &Ai) -> Value {
     let config = ai.config();
     json!({
         "provider": config.provider.name(),
@@ -432,8 +428,7 @@ fn budget_rule(max_calls: u32) -> String {
 /// (`None` without `--ai`): the number of conversations kept, the bytes their stored history
 /// takes (compressed per finished turn: the messages sent to the provider, the events shown to
 /// the page and each conversation's graph summary) and the bytes it would take uncompressed.
-pub(super) fn process_memory(context: &Context) -> Option<Value> {
-    let ai = context.ai.as_ref()?;
+pub(super) fn process_memory(ai: &Ai) -> Option<Value> {
     let list = ai.conversations.lock().ok()?.clone();
     let (stored, raw) = list
         .iter()
@@ -449,21 +444,22 @@ pub(super) fn process_memory(context: &Context) -> Option<Value> {
 /// Routes `/api/ai/conversations*` (`endpoint` without the `/api/` prefix).
 pub(super) fn route(
     context: &Arc<Context>,
+    ai: Option<&Arc<Ai>>,
     request: &mut Request,
     method: &Method,
     endpoint: &str,
     query: &str,
     client: &str,
 ) -> Result<Answer, HttpError> {
-    let Some(ai) = &context.ai else {
-        return Err(HttpError(
+    let Some(ai) = ai else {
+        return Err(HttpError::new(
             404,
-            "the AI Chat is off: start the server with --ai FILE".into(),
+            "the AI Chat is off: start the server with --ai FILE",
         ));
     };
     let rest = endpoint
         .strip_prefix("ai/conversations")
-        .ok_or_else(|| HttpError(404, format!("unknown endpoint /api/{endpoint}")))?;
+        .ok_or_else(|| HttpError::new(404, format!("unknown endpoint /api/{endpoint}")))?;
     let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
     match (method, parts.as_slice()) {
         (Method::Post, []) => {
@@ -480,13 +476,13 @@ pub(super) fn route(
                 .filter(|t| !t.is_empty())
                 .ok_or_else(|| HttpError::bad_request("expected {\"text\": \"<message>\"}"))?;
             if text.chars().count() > MAX_MESSAGE_CHARS {
-                return Err(HttpError(
+                return Err(HttpError::new(
                     413,
                     format!("the message is longer than {MAX_MESSAGE_CHARS} characters"),
                 ));
             }
             let conversation = ai.conversation(id, client)?;
-            send(context, conversation, text.to_string())
+            send(context, ai, conversation, text.to_string())
         }
         (Method::Get, [id, "events"]) => {
             let conversation = ai.conversation(id, client)?;
@@ -495,7 +491,7 @@ pub(super) fn route(
             let events = state
                 .log
                 .events_after(after)
-                .map_err(|err| HttpError(500, err))?;
+                .map_err(|err| HttpError::new(500, err))?;
             value(json!({
                 "events": events,
                 "running": state.turn.is_some(),
@@ -515,11 +511,14 @@ pub(super) fn route(
             close(&conversation);
             value(json!({ "deleted": true }))
         }
-        (_, [] | [_] | [_, "messages" | "events" | "stop"]) => Err(HttpError(
+        (_, [] | [_] | [_, "messages" | "events" | "stop"]) => Err(HttpError::new(
             405,
             format!("method {method} is not allowed on /api/{endpoint}"),
         )),
-        _ => Err(HttpError(404, format!("unknown endpoint /api/{endpoint}"))),
+        _ => Err(HttpError::new(
+            404,
+            format!("unknown endpoint /api/{endpoint}"),
+        )),
     }
 }
 
@@ -527,7 +526,7 @@ fn lock(conversation: &Conversation) -> Result<std::sync::MutexGuard<'_, State>,
     conversation
         .state
         .lock()
-        .map_err(|_| HttpError(500, "the AI Chat state is poisoned".into()))
+        .map_err(|_| HttpError::new(500, "the AI Chat state is poisoned"))
 }
 
 /// Closes a dropped conversation: its turn stopped (query cancelled, provider call abandoned).
@@ -554,7 +553,7 @@ fn create(ai: &Ai, client: &str) -> Result<Answer, HttpError> {
         let mut list = ai
             .conversations
             .lock()
-            .map_err(|_| HttpError(500, "the AI Chat state is poisoned".into()))?;
+            .map_err(|_| HttpError::new(500, "the AI Chat state is poisoned"))?;
         let dropped = (list.len() >= MAX_CONVERSATIONS).then(|| list.remove(0));
         list.push(conversation.clone());
         dropped
@@ -568,18 +567,19 @@ fn create(ai: &Ai, client: &str) -> Result<Answer, HttpError> {
 /// `POST .../messages`: starts a turn on a thread of its own.
 fn send(
     context: &Arc<Context>,
+    ai: &Arc<Ai>,
     conversation: Arc<Conversation>,
     text: String,
 ) -> Result<Answer, HttpError> {
     let (turn, cancel) = {
         let mut state = lock(&conversation)?;
         if state.closed {
-            return Err(HttpError(404, "the conversation was deleted".into()));
+            return Err(HttpError::new(404, "the conversation was deleted"));
         }
         if state.turn.is_some() {
-            return Err(HttpError(
+            return Err(HttpError::new(
                 409,
-                "a turn of this conversation is running: wait for it or stop it".into(),
+                "a turn of this conversation is running: wait for it or stop it",
             ));
         }
         state.next_turn += 1;
@@ -595,10 +595,19 @@ fn send(
         (turn, cancel)
     };
     let thread_context = context.clone();
+    let thread_ai = ai.clone();
     let thread_conversation = conversation.clone();
     let spawned = std::thread::Builder::new()
         .name("graphersal-ai".to_string())
-        .spawn(move || run_turn(&thread_context, &thread_conversation, turn, cancel));
+        .spawn(move || {
+            run_turn(
+                &thread_context,
+                &thread_ai,
+                &thread_conversation,
+                turn,
+                cancel,
+            )
+        });
     if let Err(err) = spawned {
         let mut state = lock(&conversation)?;
         state.push(
@@ -616,10 +625,13 @@ fn send(
 /// At the limit the calls beyond it are answered "not run" and the provider is called once more
 /// with `answer_only`: the model answers from the results it has. Only when it asks for tools
 /// all the same does the turn end with the limit error.
-fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: CancelToken) {
-    let Some(ai) = &context.ai else {
-        return;
-    };
+fn run_turn(
+    context: &Context,
+    ai: &Ai,
+    conversation: &Conversation,
+    turn: u64,
+    cancel: CancelToken,
+) {
     let config = ai.config();
     let max_calls = config.max_tool_calls_per_turn;
     let caller = ToolCaller::new(
@@ -946,7 +958,7 @@ fn graph_summary_now(context: &Context) -> Result<String, String> {
                 s.schema_summary_text(&Value::Null),
             )
         })
-        .map_err(|err| err.1)?;
+        .map_err(|err| err.message().to_string())?;
     let mut text = graph_summary(
         &info.map_err(|err| err.to_string())?,
         &statistics.map_err(|err| err.to_string())?,

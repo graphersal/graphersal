@@ -7,23 +7,10 @@
 //! works without flags. `--host ADDR` binds the address given (an IP address or a host name,
 //! resolved once; `localhost` is the loopback default).
 //!
-//! Header checks (DNS rebinding and cross-site requests):
-//! - Loopback ([`Exposure::Loopback`]): `Host` must name this server exactly
-//!   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, or the `--host` name with the
-//!   port), and an `Origin` must be one of them, as before `--host` existed.
-//! - Network ([`Exposure::Network`], a non-loopback bind): the port of `Host` is not checked
-//!   (a container's port mapping changes it), and its name must be an IP address, `localhost`
-//!   or a `*.localhost` name, a single-label name without a dot (a machine name, a Compose
-//!   service name), or the `--host` name itself. A fully qualified name other than `--host` is
-//!   refused: that is what a DNS rebinding attack sends. An `Origin` must be the request's own
-//!   origin (`http://` + its `Host`): a page of another site is refused even when it names an
-//!   IP address.
-//! - `--allowed-host NAME` (repeatable) and `GRAPHERSAL_ALLOWED_HOSTS` (comma-separated) admit
-//!   further names in both exposures, on any port: a `Host` naming one of them is served, and an
-//!   `Origin` of `http://` or `https://` one of them is accepted whatever the `Host` (a reverse
-//!   proxy that ends TLS for `https://kb.example.com` may forward `Host: kb.example.com` or a
-//!   name of its own). They are the public names of a deployment behind a proxy; the operator
-//!   vouches for them, so the DNS-rebinding guard does not apply to them.
+//! Header checks (DNS rebinding and cross-site requests) are `graphersal_serve::HostCheck`'s
+//! (rules in its module docs): this module records the decision they check ([`Exposure`], the
+//! `--host` name, the allowed names of `--allowed-host` and `GRAPHERSAL_ALLOWED_HOSTS`) and
+//! hands it over ([`BindPlan::host_check`]).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
@@ -64,14 +51,10 @@ fn default_host(in_container: bool) -> IpAddr {
     }
 }
 
-/// Whether the server is reachable from other machines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Exposure {
-    /// A loopback address: only this machine reaches it.
-    Loopback,
-    /// Any other address: reachable from the network, without authentication.
-    Network,
-}
+pub(super) use graphersal_serve::Exposure;
+use graphersal_serve::HostCheck;
+#[cfg(test)]
+use graphersal_serve::HostRules;
 
 /// Why the server binds the address it binds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,13 +214,17 @@ impl BindPlan {
         &self.allowed
     }
 
-    /// Whether the name part of `host` (`name`, `name:port`, `[v6]:port`) is an allowed name.
-    fn is_allowed_name(&self, host: &str) -> bool {
-        if self.allowed.is_empty() {
-            return false;
-        }
-        let name = host_name(host).trim_end_matches('.').to_ascii_lowercase();
-        !name.is_empty() && self.allowed.contains(&name)
+    /// The header rules of this plan (`graphersal_serve::HostRules`).
+    #[cfg(test)]
+    fn rules(&self) -> HostRules<'_> {
+        HostRules::new(self.exposure, self.name.as_deref(), &self.allowed)
+    }
+
+    /// The header checks of the server listening on `port` by this plan.
+    pub(super) fn host_check(&self, port: u16) -> HostCheck {
+        HostCheck::new(self.exposure, port, &self.url(port))
+            .with_name(self.name.clone())
+            .with_allowed_hosts(self.allowed.clone())
     }
 
     /// Whether the bind address is a wildcard (`0.0.0.0`, `::`): every interface.
@@ -285,74 +272,17 @@ impl BindPlan {
     }
 
     /// Whether a request naming `host` (a `Host` header, or the host part of an `Origin`) is
-    /// served by this server on `port` (module docs).
+    /// served by this server on `port` (`graphersal_serve::HostRules::is_own_host`).
+    #[cfg(test)]
     pub(super) fn is_own_host(&self, host: &str, port: u16) -> bool {
-        if self.is_allowed_name(host) {
-            return true;
-        }
-        match self.exposure {
-            Exposure::Loopback => {
-                let port = port.to_string();
-                ["127.0.0.1", "localhost", "[::1]"]
-                    .into_iter()
-                    .chain(self.name.as_deref())
-                    .any(|name| host.eq_ignore_ascii_case(&format!("{name}:{port}")))
-            }
-            Exposure::Network => {
-                let name = host_name(host).to_ascii_lowercase();
-                if name.is_empty() {
-                    return false;
-                }
-                let bare = name
-                    .strip_prefix('[')
-                    .and_then(|n| n.strip_suffix(']'))
-                    .unwrap_or(&name);
-                bare.parse::<IpAddr>().is_ok()
-                    || name == "localhost"
-                    || name.ends_with(".localhost")
-                    || !name.contains('.')
-                    || self.name.as_deref() == Some(name.as_str())
-            }
-        }
+        self.rules().is_own_host(host, port)
     }
 
-    /// Whether an `Origin` header is allowed for a request whose `Host` is `host`.
+    /// Whether an `Origin` header is allowed for a request whose `Host` is `host`
+    /// (`graphersal_serve::HostRules::is_own_origin`).
+    #[cfg(test)]
     pub(super) fn is_own_origin(&self, origin: &str, host: &str, port: u16) -> bool {
-        // An allowed name: http or https (TLS ended at a reverse proxy), any port, any Host.
-        let allowed_origin = origin
-            .strip_prefix("https://")
-            .or_else(|| origin.strip_prefix("http://"))
-            .map(|h| h.trim_end_matches('/'))
-            .is_some_and(|h| !h.contains('/') && self.is_allowed_name(h));
-        if allowed_origin {
-            return true;
-        }
-        let Some(origin_host) = origin
-            .strip_prefix("http://")
-            .map(|h| h.trim_end_matches('/'))
-        else {
-            return false;
-        };
-        match self.exposure {
-            Exposure::Loopback => self.is_own_host(origin_host, port),
-            // Same origin only: the page was served by this server under this very name.
-            Exposure::Network => origin_host.eq_ignore_ascii_case(host),
-        }
-    }
-}
-
-/// The name part of a `Host` value (`name`, `name:port`, `[v6]`, `[v6]:port`), brackets kept.
-fn host_name(host: &str) -> &str {
-    if host.starts_with('[') {
-        return match host.find(']') {
-            Some(end) => &host[..=end],
-            None => "",
-        };
-    }
-    match host.rsplit_once(':') {
-        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
-        Some(_) => "",
-        None => host,
+        self.rules().is_own_origin(origin, host, port)
     }
 }
 

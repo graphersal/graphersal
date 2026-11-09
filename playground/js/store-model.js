@@ -5,7 +5,7 @@
 // Pure functions, no Vue, no DOM (tested under Node: tests/store-model.test.mjs).
 //
 // A target is the JSON the server takes: `{commit: N}`, `{mark: "name"}` or `{time: "RFC 3339"}`
-// (crates/graphersal-cli/src/server/store.rs). Every commit can be a target, not only the
+// (crates/graphersal-serve/src/api/store.rs). Every commit can be a target, not only the
 // snapshots and marks; a snapshot only makes loading that state fast.
 
 /** The one-line explanations shown in the menu. */

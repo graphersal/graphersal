@@ -15,7 +15,10 @@ mod health;
 mod log;
 mod repl;
 mod sections;
+// `src/server/mod.rs` and `src/server/store.rs` are symbolic links to graphersal-serve's router
+// (read by the OpenAPI check of `tests/server_tests.rs`), so the module is loaded by its path.
 #[cfg(feature = "dev-server")]
+#[path = "server/dev_server.rs"]
 mod server;
 mod signals;
 mod store_cmd;

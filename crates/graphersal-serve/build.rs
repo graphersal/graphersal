@@ -1,4 +1,4 @@
-//! Embeds the playground UI into the binary (feature `dev-server`).
+//! Embeds the playground UI into the crate (feature `ui-assets`).
 //!
 //! The UI is read from `ui/` next to this file: in the repository it is a symbolic link to
 //! `../../playground`, in a packaged crate (`cargo package` follows the link) a real copy. When
@@ -18,7 +18,7 @@ fn main() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let target = out.join("ui_files.rs");
     println!("cargo::rerun-if-changed=build.rs");
-    if std::env::var_os("CARGO_FEATURE_DEV_SERVER").is_none() {
+    if std::env::var_os("CARGO_FEATURE_UI_ASSETS").is_none() {
         std::fs::write(&target, "pub static UI_FILES: &[(&str, &[u8])] = &[];\n")
             .expect("ui_files.rs is writable");
         return;

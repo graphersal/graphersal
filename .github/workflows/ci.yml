@@ -144,6 +144,9 @@ jobs:
       # The MCP endpoint without HTTP (unit tests and tests/handle_tests.rs).
       - name: graphersal-mcp
         run: cargo test --package graphersal-mcp
+      # The hosting core of the dev server: the HTTP boundary without an HTTP library.
+      - name: graphersal-serve
+        run: cargo test --package graphersal-serve --all-features
       - name: graphersal-storage-tests
         run: cargo test --package graphersal-storage-tests --features persist
       # The playground engine's session logic, natively (the wasm32 run is in `playground`).

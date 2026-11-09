@@ -1,0 +1,32 @@
+[package]
+name = "graphersal-serve"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal hosting core of Graphersal's servers (one graph: session thread, job queue, run registry, the playground HTTP API as an HTTP-library-free boundary, the embedded playground UI); used by the dev server of graphersal-cli; no stability guarantees"
+readme = "README.md"
+keywords = ["graph", "gremlin", "tinkerpop"]
+categories = ["database"]
+# `ui` is a symbolic link to `../../playground`; `cargo package` follows it, so the packaged crate
+# holds a real copy of the UI files `build.rs` embeds (the same entries as its `ENTRIES`).
+include = ["/src/**", "/build.rs", "/openapi.json", "/ui/index.html", "/ui/css/**", "/ui/js/**", "/ui/assets/**", "/ui/reset/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
+
+[features]
+# The playground UI embedded at build time (`build.rs`); without it only a UI directory serves.
+ui-assets = []
+# The glue implementing `graphersal-mcp`'s `Host`/`Executor` over the runtime and `POST /mcp`.
+mcp = ["dep:graphersal-mcp"]
+
+[dependencies]
+graphersal = { workspace = true, features = ["io", "persist"] }
+# The session every endpoint calls (one method per endpoint).
+graphersal-session = { workspace = true }
+serde_json = { workspace = true }
+# Warnings of the runtime (a panicked job, a job thread that cannot start); the host installs the
+# subscriber (already in the tree through graphersal).
+tracing = { workspace = true }
+graphersal-mcp = { workspace = true, optional = true }

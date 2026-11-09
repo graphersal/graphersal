@@ -11,9 +11,9 @@ description = "Command line REPL and one-shot query runner for the Graphersal gr
 readme = "README.md"
 keywords = ["graph", "gremlin", "tinkerpop", "repl", "cli"]
 categories = ["command-line-utilities", "database"]
-# `ui` is a symbolic link to `../../playground`; `cargo package` follows it, so the packaged crate
-# holds a real copy of the UI files `build.rs` embeds (the same entries as its `ENTRIES`).
-include = ["/src/**", "/build.rs", "/openapi.json", "/ui/index.html", "/ui/css/**", "/ui/js/**", "/ui/assets/**", "/ui/reset/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
+# The playground UI and the OpenAPI description are graphersal-serve's (`openapi.json` here is a
+# symbolic link to it, read by `tests/server_tests.rs`).
+include = ["/src/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
 
 # `cargo binstall graphersal-cli`: the prebuilt archives of the GitHub Release
 # (.github/workflows/binaries.yml names them `graphersal-v<version>-<platform>`, each holding a
@@ -45,10 +45,11 @@ path = "src/main.rs"
 
 [features]
 default = ["dev-server", "ai", "model2vec"]
-# `graphersal --server`: the playground UI over HTTP on 127.0.0.1 (DEV mode, unstable).
-# `--mcp` adds the MCP endpoint `/mcp` (the crate `graphersal-mcp`, adapted to `tiny_http` in
-# `src/server/mcp.rs`).
-dev-server = ["dep:tiny_http", "dep:graphersal-mcp"]
+# `graphersal --server`: the playground UI over HTTP on 127.0.0.1 (DEV mode, unstable). The
+# hosting core (session thread, HTTP API, embedded UI, the MCP endpoint's host) is the crate
+# `graphersal-serve`; this crate adapts it to `tiny_http`. `--mcp` adds the MCP endpoint `/mcp`
+# (the crate `graphersal-mcp`).
+dev-server = ["dep:tiny_http", "dep:graphersal-mcp", "dep:graphersal-serve"]
 # `--ai FILE`: the AI Chat of the dev server, an LLM agent working on the served graph
 # (EXPERIMENTAL). `ureq` calls the provider (OpenAI-compatible Chat Completions or Anthropic
 # Messages) over HTTPS; `lz4_flex` (already in the tree through graphersal's `persist`)
@@ -76,6 +77,8 @@ graphersal-session = { workspace = true }
 tiny_http = { workspace = true, optional = true }
 # The MCP endpoint of the dev server (`--mcp`) and the tools of its AI Chat.
 graphersal-mcp = { workspace = true, optional = true }
+# The dev server's hosting core with the embedded playground UI and the MCP endpoint's host.
+graphersal-serve = { workspace = true, optional = true, features = ["ui-assets", "mcp"] }
 # Always built: `--args-file` reads JSON (already in the tree through graphersal).
 serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
