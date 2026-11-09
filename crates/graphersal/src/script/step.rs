@@ -336,8 +336,8 @@ pub(super) enum Step {
     /// `as_local([zone])`.
     AsLocal(Option<CompactString>),
     As(Vec<CompactString>),
-    From(Vec<CompactString>),
-    To(Vec<CompactString>),
+    From(Vec<crate::value::EndpointArg>),
+    To(Vec<crate::value::EndpointArg>),
     AddE(Option<CompactString>),
     /// `add_e(traversal)`: the label is the traversal's first result.
     AddETraversal(ScriptGraphTraversalSource),

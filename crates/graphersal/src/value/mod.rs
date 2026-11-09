@@ -2729,6 +2729,133 @@ impl From<&ElementProperty> for ArgStrings {
     }
 }
 
+/// One item of a `from()`/`to()` argument list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EndpointArg {
+    /// A step label, a side-effect key or a vertex id (`add_e()` tries them in this order); for
+    /// `path()` a step label.
+    Name(String),
+    /// A vertex given as a value (TinkerPop's `from(Vertex)`/`to(Vertex)`): the vertex of this
+    /// id, never read as a step label or side-effect key.
+    Vertex(CompactString),
+    /// A value that can never be an endpoint (an edge); `add_e()` fails with this type name.
+    NotAVertex(&'static str),
+}
+
+impl EndpointArg {
+    /// One list item: a vertex (or an edge endpoint) is a vertex, an edge is refused, anything
+    /// else names a label, key or id by its text (as a list item of [`ArgStrings`]).
+    fn of_item(value: &ElementProperty) -> Self {
+        match value {
+            ElementProperty::Vertex(vertex) => EndpointArg::Vertex(CompactString::new(vertex.id())),
+            ElementProperty::Edge(_) => EndpointArg::NotAVertex("edge"),
+            other => EndpointArg::Name(arg_text(other)),
+        }
+    }
+}
+
+/// The argument of `from()`/`to()`: absent, or a list of names (step labels, side-effect keys,
+/// vertex ids) and vertices.
+///
+/// Every value an [`ArgStrings`] is made from converts the same way (a string is one name, a
+/// list several). An [`ElementProperty::Vertex`], a [`VertexValue`] or a [`VertexRef`] (an
+/// edge's endpoint) is a vertex: `add_e()` connects that vertex, found by its id, and never reads
+/// the id as a step label or side-effect key (TinkerPop's `from(Vertex)`/`to(Vertex)`). An
+/// [`ElementProperty::Edge`] is no endpoint: `add_e()` fails on it instead of reading its id as a
+/// vertex id.
+#[derive(Debug, Clone)]
+pub struct EndpointArgs(pub(crate) Option<Vec<EndpointArg>>);
+
+impl From<ArgStrings> for EndpointArgs {
+    fn from(value: ArgStrings) -> Self {
+        EndpointArgs(match value {
+            ArgStrings::None => None,
+            ArgStrings::String(name) => Some(vec![EndpointArg::Name(name)]),
+            ArgStrings::List(names) => Some(names.into_iter().map(EndpointArg::Name).collect()),
+        })
+    }
+}
+
+/// Implements `From<$ty> for EndpointArgs` through the [`ArgStrings`] conversion.
+macro_rules! endpoint_args_via_arg_strings {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl From<$ty> for EndpointArgs {
+                fn from(value: $ty) -> Self {
+                    ArgStrings::from(value).into()
+                }
+            }
+        )*
+    };
+}
+
+endpoint_args_via_arg_strings!(
+    String,
+    &str,
+    Vec<&str>,
+    Vec<String>,
+    &Vec<String>,
+    CompactString,
+    &CompactString,
+    Vec<CompactString>,
+    &Vec<CompactString>,
+    Option<()>,
+);
+
+impl From<&ElementProperty> for EndpointArgs {
+    fn from(value: &ElementProperty) -> Self {
+        match value {
+            ElementProperty::Vertex(_) | ElementProperty::Edge(_) => {
+                EndpointArgs(Some(vec![EndpointArg::of_item(value)]))
+            }
+            ElementProperty::Array(items) => {
+                EndpointArgs(Some(items.iter().map(EndpointArg::of_item).collect()))
+            }
+            other => ArgStrings::from(other).into(),
+        }
+    }
+}
+
+impl From<ElementProperty> for EndpointArgs {
+    fn from(value: ElementProperty) -> Self {
+        EndpointArgs::from(&value)
+    }
+}
+
+impl From<Vec<ElementProperty>> for EndpointArgs {
+    fn from(value: Vec<ElementProperty>) -> Self {
+        EndpointArgs(Some(value.iter().map(EndpointArg::of_item).collect()))
+    }
+}
+
+impl From<&VertexValue> for EndpointArgs {
+    fn from(value: &VertexValue) -> Self {
+        EndpointArgs(Some(vec![EndpointArg::Vertex(CompactString::new(
+            value.id(),
+        ))]))
+    }
+}
+
+impl From<VertexValue> for EndpointArgs {
+    fn from(value: VertexValue) -> Self {
+        EndpointArgs::from(&value)
+    }
+}
+
+impl From<&VertexRef> for EndpointArgs {
+    fn from(value: &VertexRef) -> Self {
+        EndpointArgs(Some(vec![EndpointArg::Vertex(CompactString::new(
+            value.id(),
+        ))]))
+    }
+}
+
+impl From<VertexRef> for EndpointArgs {
+    fn from(value: VertexRef) -> Self {
+        EndpointArgs::from(&value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

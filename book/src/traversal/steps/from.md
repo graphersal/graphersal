@@ -3,7 +3,7 @@
 
 `from` · category: [Modulators and options](../../traversal/step_reference.md#modulators-and-options)
 
-Sets the out vertex of the edge add_e() creates: a vertex id, a path label or a child traversal; for path() it starts the window at a label.
+Sets the out vertex of the edge add_e() creates: a vertex, a vertex id, a path label or a child traversal; for path() it starts the window at a label.
 
 ## Forms
 

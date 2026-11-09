@@ -70,6 +70,22 @@ def test_elements_pass_back_as_parameters(graph):
     assert graph.query('g.V(e.out_v).values("name").toList()', params={"e": e}) == ["marko"]
 
 
+def test_vertices_pass_as_add_e_endpoints(graph):
+    # TinkerPop's from(Vertex) / to(Vertex): a Vertex parameter is that vertex, by its id.
+    a = graph.query('g.V("1").next()')
+    b = graph.query('g.V("2").next()')
+    e = graph.query('g.addE("likes").from(a).to(b).next()', params={"a": a, "b": b})
+    assert (e.out_v.id, e.in_v.id) == ("1", "2")
+    e = graph.query('g.V("3").addE("likes").to(b).next()', params={"b": b})
+    assert (e.out_v.id, e.in_v.id) == ("3", "2")
+    # An edge's endpoint is a vertex too.
+    e = graph.query('g.addE("back").from(e.in_v).to(e.out_v).next()', params={"e": e})
+    assert (e.out_v.id, e.in_v.id) == ("2", "3")
+    # An edge is not an endpoint.
+    with pytest.raises(graphersal.GraphersalError):
+        graph.query('g.V("1").addE("x").to(e).next()', params={"e": e})
+
+
 def test_lists_and_paths_hold_elements(graph):
     path = graph.query('g.V("1").outE("knows").inV().has("name", "vadas").path().next()')
     assert [type(item).__name__ for item in path] == ["Vertex", "Edge", "Vertex"]

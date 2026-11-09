@@ -386,6 +386,35 @@ pub(super) fn name_arg(
     Ok(dynamic_to_compact_string(arg))
 }
 
+/// One `from()`/`to()` argument: a vertex value (or an edge's endpoint) is that vertex, an edge
+/// is refused when `add_e()` runs, anything else a name ([`name_arg`]).
+pub(super) fn endpoint_arg(
+    step: &str,
+    arg: Dynamic,
+) -> Result<crate::value::EndpointArg, Box<rhai::EvalAltResult>> {
+    if (arg.is::<ScriptVertex>() || arg.is::<ScriptVertexRef>())
+        && let Some(id) = element_id_of(&arg)
+    {
+        return Ok(crate::value::EndpointArg::Vertex(id));
+    }
+    if arg.is::<ScriptEdge>() {
+        return Ok(crate::value::EndpointArg::NotAVertex("edge"));
+    }
+    Ok(crate::value::EndpointArg::Name(
+        name_arg(step, arg)?.into_string(),
+    ))
+}
+
+/// [`endpoint_arg`] for every item of `arg`.
+pub(super) fn endpoint_args(
+    step: &str,
+    arg: Vec<Dynamic>,
+) -> Result<Vec<crate::value::EndpointArg>, Box<rhai::EvalAltResult>> {
+    arg.into_iter()
+        .map(|item| endpoint_arg(step, item))
+        .collect()
+}
+
 /// [`name_arg`] for every item of `arg`.
 pub(super) fn vec_dynamic_to_compact_string(
     step: &str,

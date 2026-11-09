@@ -346,13 +346,13 @@ impl ScriptGraphTraversalSource {
         if arg.is::<ScriptGraphTraversalSource>() {
             return Ok(self.add_step(Step::FromTraversal(try_dynamic_to_gts(arg)?)));
         }
-        Ok(self.add_step(Step::From(vec![name_arg("from", arg)?])))
+        Ok(self.add_step(Step::From(vec![endpoint_arg("from", arg)?])))
     }
 
     /// Sets the out vertex of the edge add_e() creates: a vertex id, a path label or a child
     /// traversal; for path() it starts the window at a label. Rhai binding of `from()`.
     pub fn from_step(&mut self, arg: Vec<Dynamic>) -> Result<Self, Box<rhai::EvalAltResult>> {
-        Ok(self.add_step(Step::From(vec_dynamic_to_compact_string("from", arg)?)))
+        Ok(self.add_step(Step::From(endpoint_args("from", arg)?)))
     }
 
     /// `to(Direction)`: `out()`/`in()`/`both()` without a label filter; see
@@ -427,20 +427,20 @@ impl ScriptGraphTraversalSource {
         self.add_step(step)
     }
 
-    /// Sets the in vertex of the edge add_e() creates (vertex id, path label or child traversal);
+    /// Sets the in vertex of the edge add_e() creates (vertex, vertex id, path label or child traversal);
     /// with a Direction it moves like out()/in()/both(). Rhai binding of `to()`, the overload with
     /// one argument.
     pub fn to_single(&mut self, arg: Dynamic) -> Result<Self, Box<rhai::EvalAltResult>> {
         if arg.is::<ScriptGraphTraversalSource>() {
             return Ok(self.add_step(Step::ToTraversal(try_dynamic_to_gts(arg)?)));
         }
-        Ok(self.add_step(Step::To(vec![name_arg("to", arg)?])))
+        Ok(self.add_step(Step::To(vec![endpoint_arg("to", arg)?])))
     }
 
-    /// Sets the in vertex of the edge add_e() creates (vertex id, path label or child traversal);
+    /// Sets the in vertex of the edge add_e() creates (vertex, vertex id, path label or child traversal);
     /// with a Direction it moves like out()/in()/both(). Rhai binding of `to()`.
     pub fn to(&mut self, arg: Vec<Dynamic>) -> Result<Self, Box<rhai::EvalAltResult>> {
-        Ok(self.add_step(Step::To(vec_dynamic_to_compact_string("to", arg)?)))
+        Ok(self.add_step(Step::To(endpoint_args("to", arg)?)))
     }
 
     /// Selects path labels, map keys or side effects (one label: the value, several: a map; an

@@ -189,6 +189,22 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         }
     }
 
+    /// Hands a `from()`/`to()` argument list holding a vertex value (or a refused value such as
+    /// an edge) to this step; see [`ArgsModulation`]. Only mutating steps (`add_e()`) take one;
+    /// a list of names only goes to [`Self::push_modulator_args`].
+    pub(crate) fn push_modulator_endpoints(
+        &mut self,
+        args: Vec<crate::value::EndpointArg>,
+        modulator_name: &str,
+    ) -> ArgsModulation {
+        match self {
+            GraphStep::SideEffectMut(_, step) => {
+                step.push_modulator_endpoints(args, modulator_name)
+            }
+            _ => ArgsModulation::Unsupported,
+        }
+    }
+
     /// Hands a `from(__...)`/`to(__...)` child traversal to this step; see [`ArgsModulation`].
     /// Only mutating steps (`add_e()`) take one.
     pub(crate) fn push_modulator_traversal(
@@ -1001,7 +1017,9 @@ pub(crate) trait GraphStepCount<'g, S: GraphStorage + 'g>:
 pub(crate) trait GraphStepModulator<'g, S: GraphStorage + 'g>:
     Send + Sync + fmt::Display
 {
-    fn get_args(&mut self) -> Option<Vec<String>> {
+    /// The argument list of a `from()`/`to()` modulator, taken once; `None` for every other
+    /// modulator.
+    fn get_args(&mut self) -> Option<Vec<crate::value::EndpointArg>> {
         None
     }
     fn get_by(&mut self) -> Option<By<'g, S>> {
@@ -1107,6 +1125,15 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     /// `to()` (TinkerPop's `FromToModulating`: `add_e()` today), so a step can never swallow
     /// one silently.
     fn push_modulator_args(&mut self, _args: Vec<String>, _modulator_name: &str) -> ArgsModulation {
+        ArgsModulation::Unsupported
+    }
+    /// Attaches a `from()`/`to()` argument list holding a vertex value (TinkerPop's
+    /// `from(Vertex)`). The default rejects it; only `add_e()` takes one.
+    fn push_modulator_endpoints(
+        &mut self,
+        _args: Vec<crate::value::EndpointArg>,
+        _modulator_name: &str,
+    ) -> ArgsModulation {
         ArgsModulation::Unsupported
     }
     /// Attaches a `from(__...)`/`to(__...)` child traversal. The default rejects it; only

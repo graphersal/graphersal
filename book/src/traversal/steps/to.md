@@ -3,7 +3,7 @@
 
 `to` · category: [Modulators and options](../../traversal/step_reference.md#modulators-and-options)
 
-Sets the in vertex of the edge add_e() creates (vertex id, path label or child traversal); with a Direction it moves like out()/in()/both().
+Sets the in vertex of the edge add_e() creates (vertex, vertex id, path label or child traversal); with a Direction it moves like out()/in()/both().
 
 ## Forms
 
