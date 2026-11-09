@@ -806,7 +806,7 @@ pub(crate) fn read_weights(
     // The `safetensors` validation: sorted by offsets, contiguous from 0, sizes from shapes.
     let mut tensors: Vec<(String, &safetensors::tensor::TensorInfo)> =
         metadata.tensors().into_iter().collect();
-    tensors.sort_by(|a, b| a.1.data_offsets.cmp(&b.1.data_offsets));
+    tensors.sort_by_key(|tensor| tensor.1.data_offsets);
     let mut end = 0usize;
     for (name, info) in &tensors {
         let (start, stop) = info.data_offsets;

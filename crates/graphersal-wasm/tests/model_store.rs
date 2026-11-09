@@ -104,7 +104,9 @@ fn a_store_needing_a_model_opens_read_only_without_text_queries() {
     let Some(reason) = store.read_only_reason().unwrap() else {
         // A build with the Model2Vec loader (natively only, `graphersal/model2vec` unified on):
         // the model the schema needs is loaded at the open and serves the text query.
-        assert!(!cfg!(target_arch = "wasm32"), "wasm32 has no loader");
+        if cfg!(target_arch = "wasm32") {
+            panic!("wasm32 has no loader");
+        }
         assert_eq!(models[0].state, ModelState::Loaded);
         assert_eq!(embedded.unwrap().len(), 1);
         return;
