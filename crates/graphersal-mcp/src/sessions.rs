@@ -161,6 +161,16 @@ impl Sessions {
         }
     }
 
+    /// Remembers the client `client` (`{name, version}`) of a stream connection for the
+    /// statistics, without a session id (a stream is its own session); its digest.
+    pub(crate) fn remember_client(&self, client: &Value) -> u64 {
+        let digest = client_digest(client);
+        if let Ok(mut clients) = self.clients().write() {
+            clients.remember(digest, client.clone());
+        }
+        digest
+    }
+
     /// Whether `id` names a session of this endpoint (in the table, or signed by its key).
     pub(crate) fn knows(&self, id: &str) -> bool {
         match self {

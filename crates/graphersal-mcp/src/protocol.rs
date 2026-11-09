@@ -2,13 +2,16 @@
 //! answers), `initialize`, `ping`, `tools/*`, `resources/*`, `prompts/list`, and the server
 //! instructions.
 
-use std::sync::{Arc, Mutex};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use crate::catalog::is_built_in;
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
+use crate::connection::Stream;
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::resources::{RESOURCES, read_resource};
 use crate::sessions::{SessionKey, Sessions};
@@ -29,14 +32,14 @@ const SERVER_NAME: &str = "graphersal-dev";
 const SERVER_TITLE: &str = "Graphersal dev server";
 
 /// JSON-RPC error codes.
-const PARSE_ERROR: i64 = -32700;
-const INVALID_REQUEST: i64 = -32600;
+pub(crate) const PARSE_ERROR: i64 = -32700;
+pub(crate) const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
-const INTERNAL_ERROR: i64 = -32603;
+pub(crate) const INTERNAL_ERROR: i64 = -32603;
 
 /// The client name of the endpoint's session jobs (the host's change feed records it).
-const MCP_CLIENT: &str = "mcp";
+pub(crate) const MCP_CLIENT: &str = "mcp";
 
 /// The MCP endpoint: its options and its MCP sessions. One per server; [`Mcp::handle`] answers
 /// every request to it.
@@ -53,6 +56,9 @@ pub struct Mcp {
     stats: Arc<McpStats>,
     /// The `clientInfo` of the last `initialize` (the playground's top bar names it).
     client: Mutex<Option<Value>>,
+    /// The open stream connections ([`crate::Connection`]), which hear the server's pushes.
+    /// Weak: a dropped connection leaves by itself.
+    streams: Mutex<Vec<Weak<Stream>>>,
 }
 
 impl Mcp {
@@ -72,6 +78,7 @@ impl Mcp {
             stats: Arc::new(McpStats::new(sessions.clients())),
             sessions,
             client: Mutex::new(None),
+            streams: Mutex::new(Vec::new()),
         }
     }
 
@@ -326,107 +333,135 @@ impl Mcp {
                 return rpc_error(status, Value::Null, INVALID_REQUEST, &message);
             }
         };
-        let message: Value = match serde_json::from_str(&body) {
-            Ok(message) => message,
-            Err(err) => {
-                return rpc_error(
-                    400,
-                    Value::Null,
-                    PARSE_ERROR,
-                    &format!("malformed JSON: {err}"),
-                );
-            }
+        let peer = Peer {
+            host,
+            key: session_id.as_deref(),
+            client_digest: session_id
+                .as_deref()
+                .and_then(|id| self.sessions.client_of(id)),
+            stream: None,
         };
+        let outcome = match parse_message(&body) {
+            Ok(message) => self.message(&peer, &message),
+            Err(outcome) => outcome,
+        };
+        match outcome {
+            Outcome::Accepted => empty(202),
+            Outcome::Answer { body, session } => {
+                let answer = rpc_answer(200, &body);
+                match session {
+                    Some(session) => answer.with_header("Mcp-Session-Id", &session),
+                    None => answer,
+                }
+            }
+            // The host could not take a job now (queue full, waited too long, too many jobs of
+            // this client, stopping): the whole request is `503`, so the client retries it.
+            Outcome::Busy { id, message } => {
+                rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1")
+            }
+            Outcome::Invalid { id, code, message } => rpc_error(400, id, code, &message),
+        }
+    }
+
+    /// One parsed JSON-RPC message of `peer`, whatever carried it (an HTTP `POST` or a line of
+    /// a stream connection): a request is dispatched, a notification or a response accepted.
+    pub(crate) fn message(&self, peer: &Peer<'_>, message: &Value) -> Outcome {
         let Some(object) = message.as_object() else {
-            return rpc_error(
-                400,
-                Value::Null,
-                INVALID_REQUEST,
-                "expected one JSON-RPC message object (batches are not supported)",
-            );
+            return Outcome::Invalid {
+                id: Value::Null,
+                code: INVALID_REQUEST,
+                message: "expected one JSON-RPC message object (batches are not supported)".into(),
+            };
         };
         let id = object.get("id").cloned();
         let Some(method) = object.get("method").and_then(Value::as_str) else {
             // A response to a server request (this server sends none): accepted.
             return if object.contains_key("result") || object.contains_key("error") {
-                empty(202)
+                Outcome::Accepted
             } else {
-                rpc_error(
-                    400,
-                    id.unwrap_or(Value::Null),
-                    INVALID_REQUEST,
-                    "a JSON-RPC message needs \"method\"",
-                )
+                Outcome::Invalid {
+                    id: id.unwrap_or(Value::Null),
+                    code: INVALID_REQUEST,
+                    message: "a JSON-RPC message needs \"method\"".into(),
+                }
             };
         };
-        let client_digest = session_id
-            .as_deref()
-            .and_then(|id| self.sessions.client_of(id));
         self.stats.record_request(
             id.is_some().then_some(method),
-            session_id.as_deref(),
-            client_digest,
+            peer.key,
+            peer.client_digest,
             method == "tools/call" && id.is_some(),
         );
         let Some(id) = id else {
             // A notification (`notifications/initialized`, `notifications/cancelled`, ...).
             if method == "notifications/cancelled" {
-                cancel_request(host, session_id.as_deref(), object.get("params"));
+                cancel_request(peer.host, peer.key, object.get("params"));
             }
-            return empty(202);
+            return Outcome::Accepted;
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
-        let client = match &session_id {
-            Some(id) => ClientRef::new(MCP_CLIENT, None).with_key(id),
+        let client = match peer.key {
+            Some(key) => ClientRef::new(MCP_CLIENT, None).with_key(key),
             None => ClientRef::new(MCP_CLIENT, None),
         }
         .with_request(&id.to_string());
         clear_busy();
-        let dispatched = self.dispatch(host, &client, method, &params);
-        // The host could not take a job now (queue full, waited too long, too many jobs of this
-        // client, stopping): the whole request is `503`, so the client retries it.
+        let dispatched = self.dispatch(peer, &client, method, &params);
         if let Some(message) = take_busy() {
             self.stats.record_busy();
-            return rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1");
+            return Outcome::Busy { id, message };
         }
         match dispatched {
-            Ok((result, new_session)) => {
-                let answer =
-                    rpc_answer(200, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
-                match new_session {
-                    Some(session) => {
-                        self.stats.record_initialize(&session);
-                        answer.with_header("Mcp-Session-Id", &session)
-                    }
-                    None => answer,
-                }
-            }
-            Err((code, message)) => rpc_error(200, id, code, &message),
+            Ok((result, session)) => Outcome::Answer {
+                body: json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                session,
+            },
+            Err((code, message)) => Outcome::Answer {
+                body: error_body(id, code, &message),
+                session: None,
+            },
         }
     }
 
     fn dispatch(
         &self,
-        host: &dyn Host,
+        peer: &Peer<'_>,
         client: &ClientRef,
         method: &str,
         params: &Value,
     ) -> RpcResult {
+        let host = peer.host;
         let plain = |value: Value| Ok((value, None));
         let caller = self.caller_for(client.clone());
         match method {
-            "initialize" => self.initialize(params),
+            "initialize" => self.initialize(peer, params),
             "ping" => plain(json!({})),
             "tools/list" => {
                 let listed = tool_listings(host, &caller)
                     .map_err(|err: McpError| (-32603, err.to_string()))?;
-                plain(json!({ "tools": listed }))
+                let listed = json!({ "tools": listed });
+                // What the client saw: a later change of it is pushed (stream only).
+                if let Some(stream) = peer.stream {
+                    stream.listed(fingerprint(&listed["tools"]));
+                }
+                plain(listed)
             }
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 let started = Instant::now();
-                let called = call_tool(host, &caller, name, &args);
+                // A stream client that asked for progress (`_meta.progressToken`) hears that the
+                // call still runs; over HTTP nothing is pushed.
+                let token = params
+                    .get("_meta")
+                    .and_then(|meta| meta.get("progressToken"))
+                    .filter(|token| token.is_string() || token.is_number());
+                let called = match (peer.stream, token) {
+                    (Some(stream), Some(token)) => {
+                        stream.with_progress(token, || call_tool(host, &caller, name, &args))
+                    }
+                    _ => call_tool(host, &caller, name, &args),
+                };
                 let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                 // A built-in tool by its name; a saved query's own tool ran when the call was
                 // not refused; any other name is an unknown tool.
@@ -446,6 +481,9 @@ impl Mcp {
                 };
                 self.stats
                     .record_tool(tool, saved_query, elapsed_us, is_error, chars);
+                // The call may have changed the saved queries the stream clients listed.
+                // Best effort: a failed listing leaves the clients' lists as they were.
+                let _ = self.check_listings(peer.stream);
                 match called {
                     Ok(outcome) => plain(tool_result(outcome.text, outcome.is_error)),
                     Err(CallRefused::Internal(message)) => Err((INTERNAL_ERROR, message)),
@@ -486,9 +524,11 @@ impl Mcp {
     }
 
     /// `initialize`: negotiates the protocol version (the client's when this server speaks it,
-    /// else the newest), assigns a session id and remembers the client's name for the
-    /// [`Mcp::status`].
-    fn initialize(&self, params: &Value) -> RpcResult {
+    /// else the newest), remembers the client's name for the [`Mcp::status`] and, over HTTP,
+    /// assigns a session id. A stream connection keeps the negotiated state itself and is told
+    /// that the tool list may change (`tools.listChanged`) when it can: saved queries are tools
+    /// of their own, and a stream carries the notification.
+    fn initialize(&self, peer: &Peer<'_>, params: &Value) -> RpcResult {
         let requested = params
             .get("protocolVersion")
             .and_then(Value::as_str)
@@ -503,16 +543,30 @@ impl Mcp {
             "name": client.get("name").and_then(Value::as_str).unwrap_or("unknown client"),
             "version": client.get("version").and_then(Value::as_str).unwrap_or(""),
         });
-        let session = self.sessions.create(&client);
+        let session = match peer.stream {
+            None => {
+                let session = self.sessions.create(&client);
+                self.stats.record_initialize(&session);
+                Some(session)
+            }
+            Some(stream) => {
+                let digest = self.sessions.remember_client(&client);
+                self.stats.record_initialize(stream.key());
+                let capabilities = params.get("capabilities").cloned().unwrap_or(json!({}));
+                stream.initialized(version, client.clone(), capabilities, digest);
+                None
+            }
+        };
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }
         let instructions = self.instructions_text();
+        let list_changed = peer.stream.is_some() && self.lists_change();
         Ok((
             json!({
                 "protocolVersion": version,
                 "capabilities": {
-                    "tools": { "listChanged": false },
+                    "tools": { "listChanged": list_changed },
                     "resources": { "listChanged": false },
                 },
                 "serverInfo": {
@@ -522,17 +576,156 @@ impl Mcp {
                 },
                 "instructions": instructions,
             }),
-            Some(session),
+            session,
         ))
     }
+
+    /// Whether the tool list can change while a client is connected: saved queries are tools
+    /// of their own (the rest of the list is fixed by the configuration).
+    pub(crate) fn lists_change(&self) -> bool {
+        self.config.has_saved_query_tools()
+    }
+
+    /// Registers a stream connection for the server's pushes.
+    pub(crate) fn add_stream(&self, stream: Weak<Stream>) {
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.retain(|known| known.strong_count() > 0);
+            streams.push(stream);
+        }
+    }
+
+    /// Tells the stream connections that listed the tools when their list changed (after a
+    /// tool call of any client, or [`Mcp::check_tools_changed`]): `notifications/tools/list_changed`
+    /// to each whose listing is no longer what it saw. `origin` (the stream that made the call)
+    /// gets the notification after its answer instead. Nothing
+    /// to do without stream connections or saved-query tools; over HTTP nothing is pushed.
+    pub(crate) fn check_listings(&self, origin: Option<&Stream>) -> Result<(), McpError> {
+        if !self.lists_change() {
+            return Ok(());
+        }
+        let streams: Vec<Arc<Stream>> = match self.streams.lock() {
+            Ok(streams) => streams.iter().filter_map(Weak::upgrade).collect(),
+            Err(_) => return Err(McpError::Failed("the stream registry is poisoned".into())),
+        };
+        let mut failure = Ok(());
+        // One listing per host (connections over the same host see the same catalog).
+        let mut seen: Vec<(*const (), Option<u64>)> = Vec::new();
+        for stream in streams.iter().filter(|stream| stream.has_listed()) {
+            let host = stream.host();
+            let address = Arc::as_ptr(host) as *const ();
+            let now = match seen.iter().find(|(known, _)| *known == address) {
+                Some((_, now)) => *now,
+                None => {
+                    let client = ClientRef::new(MCP_CLIENT, None).with_key(stream.key());
+                    let now = match tool_listings(host.as_ref(), &self.caller_for(client)) {
+                        Ok(listed) => Some(fingerprint(&Value::Array(listed))),
+                        Err(err) => {
+                            if failure.is_ok() {
+                                failure = Err(err);
+                            }
+                            None
+                        }
+                    };
+                    seen.push((address, now));
+                    now
+                }
+            };
+            if let Some(now) = now
+                && stream.list_changed(now)
+            {
+                if origin.is_some_and(|origin| std::ptr::eq(origin, stream.as_ref())) {
+                    stream.mark_list_changed();
+                } else {
+                    stream.push(list_changed_notice());
+                }
+            }
+        }
+        failure
+    }
+
+    /// Tells the stream connections that listed the tools when the list changed: a host calls
+    /// this after it changed the saved queries itself (its own UI, an import), since the
+    /// endpoint checks only after the tool calls it serves. A job per host runs when saved
+    /// queries are tools of their own and a stream client has listed the tools; otherwise it
+    /// does nothing. HTTP clients are never notified (no stream). `Err` when a host could not
+    /// list the tools (the other connections are checked all the same).
+    pub fn check_tools_changed(&self) -> Result<(), McpError> {
+        self.check_listings(None)
+    }
+}
+
+/// Who sent a message: the host its jobs run on and how the endpoint tells its clients apart.
+pub(crate) struct Peer<'a> {
+    pub(crate) host: &'a dyn Host,
+    /// The MCP session id (HTTP) or the connection's key (stream), if any.
+    pub(crate) key: Option<&'a str>,
+    /// The client digest of the session, for the statistics.
+    pub(crate) client_digest: Option<u64>,
+    /// The stream connection the message came on (none over HTTP).
+    pub(crate) stream: Option<&'a Stream>,
+}
+
+/// What a message comes to, before a transport frames it.
+pub(crate) enum Outcome {
+    /// A notification or a response: nothing to answer (HTTP `202`).
+    Accepted,
+    /// The JSON-RPC answer (a result or an error) and, for an HTTP `initialize`, the new
+    /// session id.
+    Answer {
+        body: Value,
+        session: Option<String>,
+    },
+    /// The host could not take a job (HTTP `503` + `Retry-After`).
+    Busy { id: Value, message: String },
+    /// Not a JSON-RPC message this endpoint takes (HTTP `400`).
+    Invalid {
+        id: Value,
+        code: i64,
+        message: String,
+    },
+}
+
+impl Outcome {
+    /// The JSON-RPC message of the outcome, if it has one (a stream writes it as one line).
+    pub(crate) fn into_message(self) -> Option<Value> {
+        match self {
+            Self::Accepted => None,
+            Self::Answer { body, .. } => Some(body),
+            Self::Busy { id, message } => Some(error_body(id, INTERNAL_ERROR, &message)),
+            Self::Invalid { id, code, message } => Some(error_body(id, code, &message)),
+        }
+    }
+}
+
+/// Parses one message's text: `Err` is the parse error's outcome.
+pub(crate) fn parse_message(text: &str) -> Result<Value, Outcome> {
+    serde_json::from_str(text).map_err(|err| Outcome::Invalid {
+        id: Value::Null,
+        code: PARSE_ERROR,
+        message: format!("malformed JSON: {err}"),
+    })
+}
+
+/// The JSON-RPC error message.
+pub(crate) fn error_body(id: Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// `notifications/tools/list_changed`.
+pub(crate) fn list_changed_notice() -> Value {
+    json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+}
+
+/// A digest of a tool listing (what a client saw), to tell a changed one.
+fn fingerprint(listed: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    listed.to_string().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A JSON-RPC error answer with an HTTP status (`id` null when the request had none).
 fn rpc_error(status: u16, id: Value, code: i64, message: &str) -> McpResponse {
-    rpc_answer(
-        status,
-        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
-    )
+    rpc_answer(status, &error_body(id, code, message))
 }
 
 fn rpc_answer(status: u16, body: &Value) -> McpResponse {
