@@ -201,6 +201,13 @@ step. What 0.6.0 writes can stop an older version from using a store:
   the engine enforces, an answer limit) is chosen by the host for each connection; the session's
   writing tools follow the policy too. A host per connection, and an identity carried to the
   session jobs (`ClientRef::identity`).
+- **Bound saved-query parameters.** `Profile::with_bound_params` lets a host fix saved-query
+  parameters per connection or HTTP request (for example the project it serves): a bound
+  parameter disappears from the saved-query tools' input schemas, and every call of a saved query
+  that declares it runs with the bound value, whatever the client sent.
+- **Two new `--mcp-config` keys.** `saved_query_tools.write_note` (`"default"`, `"none"` or your
+  own text with `{effects}`) sets the note at the end of a writing saved query's tool description;
+  `server_title` sets `serverInfo.title` in `initialize` (until now always "Graphersal dev server").
 - **Read-only serving has a reader pool**: stateless MCP session ids, per-client limits, parallel
   readers ([Read-only serving mode](../persistence/dev_server.md#read-only-serving-mode)).
 - **MCP usage statistics in memory**: `/api/mcp/stats`, a playground dialog and the opt-in tool
