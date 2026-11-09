@@ -222,15 +222,12 @@ fn a_run_observer_sees_every_run_and_cancels_one() {
     assert_eq!(recorder.ended().len(), 2);
 }
 
-/// A filter that keeps the `Host`/`Origin` checks, needs `X-Token: secret` and attaches the
-/// identity `alice`.
-struct TokenFilter {
-    check: HostCheck,
-}
+/// A filter that needs `X-Token: secret` and attaches the identity `alice` (the `Host`/`Origin`
+/// checks run before it anyway).
+struct TokenFilter;
 
 impl RequestFilter for TokenFilter {
     fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
-        self.check.check(request)?;
         if request.header("X-Token") != Some("secret") {
             return Err(HttpError::new(401, "a token is needed"));
         }
@@ -264,7 +261,7 @@ impl Hooks for WhoAmI {
 fn a_request_filter_refuses_requests_and_attaches_an_identity() {
     let recorder = Arc::new(Recorder::default());
     let context = Context::builder(session_on("modern"), check())
-        .filter(Arc::new(TokenFilter { check: check() }))
+        .filter(Arc::new(TokenFilter))
         .hooks(Arc::new(WhoAmI))
         .runs(Arc::new(Runs::with_observer(recorder.clone())))
         .build();
@@ -273,7 +270,7 @@ fn a_request_filter_refuses_requests_and_attaches_an_identity() {
     let refused = server.handle(get("/api/info"));
     assert_eq!(refused.status(), 401);
     assert_eq!(body_json(&refused)["error"], "a token is needed");
-    // The filter kept the default checks: a foreign Host is still a 403.
+    // The checks run before the filter: a foreign Host is a 403 even with the token.
     let foreign = server.handle(
         Request::new(Method::Get, "/api/info", Cursor::new(&b""[..]))
             .with_header("Host", "evil.example:8080")
@@ -302,6 +299,48 @@ fn a_request_filter_refuses_requests_and_attaches_an_identity() {
     assert_eq!(started[0].0.identity(), Some("alice"));
     // The probes come before the filter.
     assert_eq!(server.handle(get("/healthz")).status(), 200);
+}
+
+/// A filter that would accept every request.
+struct AcceptAll;
+
+impl RequestFilter for AcceptAll {
+    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
+        request.set_identity("anyone");
+        Ok(())
+    }
+}
+
+#[test]
+fn the_host_checks_run_even_with_a_filter_that_accepts_everything() {
+    let server = Server::new();
+    server
+        .ready(
+            Context::builder(session_on("modern"), check())
+                .filter(Arc::new(AcceptAll))
+                .build(),
+        )
+        .expect("ready once");
+    let foreign = server.handle(
+        Request::new(Method::Get, "/api/info", Cursor::new(&b""[..]))
+            .with_header("Host", "evil.example:8080"),
+    );
+    assert_eq!(foreign.status(), 403);
+    assert!(
+        body_json(&foreign)["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown Host"),
+    );
+    let no_host = server.handle(Request::new(
+        Method::Get,
+        "/api/info",
+        Cursor::new(&b""[..]),
+    ));
+    assert_eq!(no_host.status(), 403);
+    let cross_site = server.handle(get("/api/info").with_header("Origin", "http://evil.example"));
+    assert_eq!(cross_site.status(), 403);
+    assert_eq!(server.handle(get("/api/info")).status(), 200);
 }
 
 /// Answers `GET /api/hello`; every other unknown endpoint stays the core's 404.

@@ -26,7 +26,7 @@
 //! |---|---|---|
 //! | Graph resolver: which hosted graph serves a request / an MCP connection | one graph | [`GraphResolver`], [`Server::ready_with`] ([`OneGraph`], [`Server::ready`]) |
 //! | Run observer + cancel handle: every run's start and end, with a handle that cancels it | none | [`RunObserver`], [`Runs::with_observer`] |
-//! | Request filter: sees each request before routing, refuses it or attaches an identity | the loopback/`Host`/`Origin` checks | [`RequestFilter`], [`ContextBuilder::filter`] ([`HostCheck`]) |
+//! | Request filter: sees each request before routing, refuses it or attaches an identity | none beyond the loopback/`Host`/`Origin` checks, which always run first | [`RequestFilter`], [`ContextBuilder::filter`] ([`HostCheck`]) |
 //! | Extra routes: the `/api/` endpoints the core does not know | `404` | [`Hooks::route`], [`ContextBuilder::hooks`] |
 //! | Activity / lifecycle hooks: ready, stopping, last activity | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] |
 //! | Executor policy: how jobs reach the session | one session thread, unbounded queue | [`Runner`], [`JobQueue`] |

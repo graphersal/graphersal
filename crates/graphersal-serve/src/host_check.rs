@@ -173,9 +173,8 @@ impl HostCheck {
     }
 
     /// The checks of one request: `Ok` when its `Host` names this server and its `Origin`, if
-    /// any, is allowed; else the `403` that refuses it (DNS rebinding, a cross-site page). The
-    /// default request filter of a context ([`crate::RequestFilter`]); a host's own filter that
-    /// keeps the checks calls this first.
+    /// any, is allowed; else the `403` that refuses it (DNS rebinding, a cross-site page). A
+    /// context runs it on every request before the host's [`crate::RequestFilter`].
     pub fn check(&self, request: &Request<'_>) -> Result<(), HttpError> {
         let host = match request.header("Host") {
             Some(host) if self.is_own_host(host) => host,

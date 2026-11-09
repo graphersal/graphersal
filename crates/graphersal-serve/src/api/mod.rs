@@ -60,8 +60,8 @@ fn client_id(request: &Request) -> String {
         .unwrap_or_default()
 }
 
-/// Answers one request of the API with the context that serves it: the request filter
-/// ([`crate::RequestFilter`], default the `Host`/`Origin` checks), then the endpoint (`/mcp`,
+/// Answers one request of the API with the context that serves it: the `Host`/`Origin` checks
+/// (always), the host's request filter ([`crate::RequestFilter`], if any), then the endpoint (`/mcp`,
 /// `/openapi.json`, `/api/...`, the host's extra routes, else a static file of the UI). A
 /// failure is answered as `{"error": message}`; a `503` (the host's job queue is busy) carries
 /// `Retry-After: 1`. A host with a lifecycle (probes, loading, stopping) or several graphs calls
@@ -76,11 +76,18 @@ pub fn handle(context: &Arc<Context>, mut request: Request) -> Response {
         client_id(&request)
     };
     CLIENT.with(|c| *c.borrow_mut() = Client::with_detail(&client, None));
-    let answer = context.filter.filter(&mut request).and_then(|()| {
-        let identity = request.identity().map(str::to_string);
-        CLIENT.with(|c| c.borrow_mut().identity = identity);
-        route(context, &mut request)
-    });
+    let answer = context
+        .check
+        .check(&request)
+        .and_then(|()| match &context.filter {
+            Some(filter) => filter.filter(&mut request),
+            None => Ok(()),
+        })
+        .and_then(|()| {
+            let identity = request.identity().map(str::to_string);
+            CLIENT.with(|c| c.borrow_mut().identity = identity);
+            route(context, &mut request)
+        });
     answer.unwrap_or_else(error_response)
 }
 
@@ -95,8 +102,8 @@ pub(crate) fn error_response(error: HttpError) -> Response {
     }
 }
 
-/// Routes a request the filter accepted (DNS rebinding and cross-site requests are the default
-/// filter's: [`crate::HostCheck::check`]).
+/// Routes a request the checks ([`crate::HostCheck::check`]: DNS rebinding, cross-site
+/// requests) and the host's filter accepted.
 fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, HttpError> {
     let url = request.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));

@@ -49,8 +49,8 @@ pub enum Lifecycle {
 /// **Extension point "graph resolver"**: which hosted graph (its [`Context`]) serves a request.
 /// Default: one graph ([`OneGraph`], what [`Server::ready`] installs).
 ///
-/// Called for every request but the probes, after the lifecycle checks and before the request
-/// filter (which is the resolved context's). An MCP request names its connection by its
+/// Called for every request but the probes, after the lifecycle checks and before the
+/// `Host`/`Origin` checks and the request filter (both the resolved context's). An MCP request names its connection by its
 /// `Mcp-Session-Id` header.
 pub trait GraphResolver: Send + Sync {
     /// The context that serves `request`, or the answer that refuses it (`{"error": message}`

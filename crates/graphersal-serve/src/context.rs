@@ -12,8 +12,9 @@
 //!   queue): how the jobs reach a session. The CLI's reader pool of `--server --read-only` is a
 //!   [`JobQueue`] (bounded queue, per-client fairness, 503 when busy, its first worker takes
 //!   over the session thread: [`spawn_session`]'s `takeover`);
-//! - **request filter** ([`RequestFilter`]; default: the context's [`HostCheck`]): sees each
-//!   request before routing, refuses it or attaches an identity;
+//! - **request filter** ([`RequestFilter`]; default: none beyond the context's [`HostCheck`],
+//!   which always runs first): sees each request the checks accepted before routing, refuses it
+//!   or attaches an identity;
 //! - **extra routes** ([`Hooks::route`]; default: `404 unknown endpoint`): the `/api/`
 //!   endpoints the core does not know (the CLI's AI Chat), plus the host's fields of
 //!   `GET /api/info` and the statistics ([`Hooks`]);
@@ -213,22 +214,17 @@ impl Hooks for NoHooks {}
 /// **Extension point "request filter"**: sees each request of the API before routing (after
 /// the lifecycle answers of [`crate::Server`]: probes, loading, stopping), refuses it or
 /// attaches an identity ([`Request::set_identity`]; the extra routes read it from the request,
-/// a [`crate::RunObserver`] from [`crate::RunInfo::identity`]). Default: the context's
-/// [`HostCheck`] (the loopback/`Host`/`Origin` checks).
+/// a [`crate::RunObserver`] from [`crate::RunInfo::identity`]). Default: none, only the
+/// context's [`HostCheck`] (the loopback/`Host`/`Origin` checks).
 ///
-/// A filter REPLACES the default: one that should keep the checks calls
-/// [`HostCheck::check`] first (a host that answers requests relayed from another process, whose
-/// `Host` is that process's, checks them there instead).
+/// The checks ALWAYS run first and a filter cannot replace or skip them (user decision
+/// 2026-11-09): it only sees the requests they accepted. A host that relays requests from
+/// another process forwards the original `Host` (and `Origin`) header, or builds the context's
+/// [`HostCheck`] with the rules of the address the browser uses.
 pub trait RequestFilter: Send + Sync {
     /// `Ok` to serve `request`, or the answer that refuses it (`{"error": message}` with the
     /// error's status).
     fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError>;
-}
-
-impl RequestFilter for HostCheck {
-    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
-        self.check(request)
-    }
 }
 
 /// How many recent changes the feed keeps (a poller that missed more reloads anyway).
@@ -433,8 +429,10 @@ pub struct Context {
     pub(crate) source: Option<PathBuf>,
     /// The `--schema` file the graph was loaded with, when one was given.
     pub(crate) schema_source: Option<PathBuf>,
-    /// The request filter (default: the `Host`/`Origin` checks of the builder's [`HostCheck`]).
-    pub(crate) filter: Arc<dyn RequestFilter>,
+    /// The `Host`/`Origin` checks every request passes first.
+    pub(crate) check: HostCheck,
+    /// The host's request filter, run after the checks; `None`: none.
+    pub(crate) filter: Option<Arc<dyn RequestFilter>>,
     /// Whether the host process counts its allocations (`GET /api/info` `memoryTracked`).
     pub(crate) memory_tracked: bool,
     /// The session presets, as `GET /api/info` reports them.
@@ -540,8 +538,8 @@ impl ContextBuilder {
         self
     }
 
-    /// The request filter ([`RequestFilter`]); default: the [`HostCheck`] of
-    /// [`Context::builder`]. It replaces the default checks.
+    /// The host's request filter ([`RequestFilter`]), run after the [`HostCheck`] of
+    /// [`Context::builder`] (which always runs); default: none.
     pub fn filter(mut self, filter: Arc<dyn RequestFilter>) -> Self {
         self.filter = Some(filter);
         self
@@ -566,7 +564,8 @@ impl ContextBuilder {
             ui: self.ui,
             source: self.source,
             schema_source: self.schema_source,
-            filter: self.filter.unwrap_or_else(|| Arc::new(self.check)),
+            check: self.check,
+            filter: self.filter,
             memory_tracked: self.memory_tracked,
             presets: self.presets,
             read_only: self.read_only,
@@ -585,7 +584,7 @@ impl ContextBuilder {
 
 impl Context {
     /// A builder of the context whose jobs go to `runner` (the executor policy) and whose
-    /// requests pass `check` (the default request filter).
+    /// requests pass `check` (always, before any request filter).
     pub fn builder(runner: Runner, check: HostCheck) -> ContextBuilder {
         ContextBuilder {
             runner,
