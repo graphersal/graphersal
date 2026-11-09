@@ -591,7 +591,7 @@ pub struct StringMemory {
     /// Their plain (logical) length, in bytes.
     pub plain_bytes: u64,
     /// The estimated number of distinct texts (HyperLogLog, 256 registers: about 6.5 %
-    /// standard error).
+    /// standard error; exact up to 32 distinct texts).
     pub distinct_estimate: u64,
     /// `false` when the estimate comes from a sample: distinct counts do not extrapolate.
     pub distinct_reliable: bool,
