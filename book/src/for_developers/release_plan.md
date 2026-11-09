@@ -20,15 +20,15 @@ Python package and the web playground are released with the same number:
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
 
-## Stability in 0.5.x
+## Stability in 0.6.x
 
-The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.4.x as well); a
-minor release (0.4 to 0.5) may break them, and its release notes list every break with the upgrade step
-([Release Notes 0.5.0](../release_notes/release_notes_0.5.0.md)).
+The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.5.x as well); a
+minor release (0.5 to 0.6) may break them, and its release notes list every break with the upgrade step
+([Release Notes 0.6.0](../release_notes/release_notes_0.6.0.md)).
 
-- Stable within 0.5.x (additive changes only): the public API of `graphersal` outside the items marked
+- Stable within 0.6.x (additive changes only): the public API of `graphersal` outside the items marked
   EXPERIMENTAL, the DSL and the schema format.
-- EXPERIMENTAL (may change in any 0.5.x release): the `GraphStorage` trait and its associated types,
+- EXPERIMENTAL (may change in any 0.6.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
 - Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
@@ -67,7 +67,8 @@ Before a version is tagged:
 - a benchmark run on a quiet machine shows no unexplained regression against the previous release;
 - a dry run of the CLI binaries (`gh workflow run "CLI binaries" --ref <release branch>`, see Publishing) is
   green on all four platforms;
-- `cargo publish --dry-run` succeeds for every published crate, `graphersal` first, then the crates that depend on it;
+- `cargo publish --dry-run` succeeds for every published crate, `graphersal` first, then the crates that depend on it
+  (`graphersal-serve` after `crates/graphersal-serve/prepare-package.sh`, see Publishing);
 - the version's release notes (`book/src/release_notes/`, for 0.2.0
   [Release Notes 0.2.0](../release_notes/release_notes_0.2.0.md)) describe what changed; they are the project's
   record of changes (there is no separate `CHANGELOG.md`) and the text of the GitHub Release.
