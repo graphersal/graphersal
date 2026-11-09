@@ -10,7 +10,9 @@ It depends on no HTTP library: the host converts the requests of its own server 
 calls `handle` and writes the `Response` back. Today's host is `graphersal --server` (the dev
 server of `graphersal-cli`, over `tiny_http`).
 
-It is published only because `graphersal-cli` depends on it. Its API changes with the servers in
-any release; use the `graphersal` crate instead.
+It is published because `graphersal-cli` depends on it, and for hosts of Graphersal's own servers.
+Its API changes with the servers in any release (a patch release included): a crate that depends on
+it pins the exact version (`graphersal-serve = "=0.x.y"`) during 0.x. Applications that query graphs
+use the `graphersal` crate instead.
 
 License: Apache-2.0 (see `LICENSE-APACHE` and `NOTICE`).

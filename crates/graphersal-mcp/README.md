@@ -12,7 +12,9 @@ through its own `Executor`.
 Today's host is `graphersal --server --mcp` (the dev server of `graphersal-cli`), whose AI Chat
 uses the same tools.
 
-It is published only because `graphersal-cli` depends on it. Its API changes with the servers in
-any release; use the `graphersal` crate instead.
+It is published because `graphersal-cli` depends on it, and for hosts of Graphersal's own servers.
+Its API changes with the servers in any release (a patch release included): a crate that depends on
+it pins the exact version (`graphersal-mcp = "=0.x.y"`) during 0.x. Applications that query graphs
+use the `graphersal` crate instead.
 
 License: Apache-2.0 (see `LICENSE-APACHE` and `NOTICE`).

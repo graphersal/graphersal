@@ -75,6 +75,8 @@ pub(crate) fn schema_read_args() -> Value {
         "properties": {
             "labels": {"type": "array", "items": {"type": "string"}},
             "format": {"enum": ["summary", "json"]},
+            // The summary with the schema's descriptions (default false: issue #34).
+            "descriptions": {"type": "boolean"},
         },
     })
 }

@@ -12,8 +12,8 @@ Python package and the web playground are released with the same number:
 |---|---|---|
 | `graphersal` | crates.io | the library: engine, Rhai DSL, I/O, persistence (feature flags) |
 | `graphersal-session` | crates.io | the playground session logic, published because the CLI depends on it; internal, no stability guarantees |
-| `graphersal-mcp` | crates.io | the MCP endpoint of the servers (protocol, tools, resources, operator configuration), published because the CLI depends on it; internal, no stability guarantees |
-| `graphersal-serve` | crates.io | the hosting core of the dev server (session thread, run registry, the playground HTTP API without an HTTP library, the embedded playground UI), published because the CLI depends on it; internal, no stability guarantees |
+| `graphersal-mcp` | crates.io | the MCP endpoint of the servers (protocol, connections, tools, resources, operator configuration, profiles), published because the CLI depends on it; internal, EXPERIMENTAL, no stability guarantees (a dependent pins the exact version during 0.x) |
+| `graphersal-serve` | crates.io | the hosting core of the dev server (session thread, run registry, the playground HTTP API without an HTTP library, the embedded playground UI, extension points), published because the CLI depends on it; internal, EXPERIMENTAL, no stability guarantees (a dependent pins the exact version during 0.x) |
 | `graphersal-cli` | crates.io | the `graphersal` binary: REPL, one-shot runner, `graphersal store`, the dev server |
 | `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for four platforms, with `SHA256SUMS` and build provenance attestations |
 | `graphersal-storage-tests` | crates.io | the `GraphStorage` conformance suite, EXPERIMENTAL like the trait (pin the exact version) |
@@ -30,9 +30,12 @@ minor release (0.4 to 0.5) may break them, and its release notes list every brea
   EXPERIMENTAL, the DSL and the schema format.
 - EXPERIMENTAL (may change in any 0.5.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
-- Internal: `graphersal-session`, `graphersal-mcp`, `graphersal-serve`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
+- Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
   says otherwise), the experimental AI Chat.
+- Internal and EXPERIMENTAL, no stability guarantees, changed in any release (a patch release
+  included): `graphersal-mcp` and `graphersal-serve`, the building blocks of Graphersal's own servers;
+  a crate that depends on them pins their exact versions during 0.x.
 - The storage format has its own version numbers ([Format Versions and Upgrade](../persistence/store_versions.md)):
   a patch release never changes a format version, and every release reads the formats of every
   release before it (an older store is upgraded with `graphersal store upgrade`, no older build needed).

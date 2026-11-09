@@ -503,7 +503,7 @@ knows 2 person->person: weight float
 
 | Where | How |
 |---|---|
-| MCP | `get_schema` / `infer_schema` answer it by default (`labels` for details, `format: "json"` for the JSON); resource `graphersal://schema-summary` |
+| MCP | `get_schema` / `infer_schema` answer it by default, without the descriptions (`descriptions: true` adds them, `labels` for details, `format: "json"` for the JSON); resource `graphersal://schema-summary` (with the descriptions) |
 | REPL | `/schema`, `/schema person knows` |
 | Rust | `g.schema_summary(&SchemaSummaryRequest::new().with_labels(["person"]))?.to_string()` (`graphersal::schema`; `with_max_keys`, `with_max_labels`, `with_type_samples`, `with_descriptions`, `with_cancel`) |
 | AI Chat | its system prompt carries the summary of the graph at the conversation's start |

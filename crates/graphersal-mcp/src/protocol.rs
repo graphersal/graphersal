@@ -13,6 +13,7 @@ use crate::catalog::is_built_in;
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
 use crate::connection::Stream;
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
+use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
 use crate::sessions::{SessionKey, Sessions};
 use crate::stats::{McpStats, Refusal};
@@ -44,11 +45,13 @@ pub(crate) const MCP_CLIENT: &str = "mcp";
 /// The MCP endpoint: its options and its MCP sessions. One per server; [`Mcp::handle`] answers
 /// every request to it.
 pub struct Mcp {
-    read_only: bool,
     token: Option<String>,
-    /// The operator's configuration (tools, descriptions, instructions, saved-query tools,
-    /// resources, answer limit), with the shorthand flags folded in.
-    config: Arc<McpConfig>,
+    /// The default profile: the operator's configuration (tools, descriptions, instructions,
+    /// saved-query tools, resources, answer limit, with the shorthand flags folded in), the
+    /// read-only flag and the access policy. A connection or a request may get another from
+    /// the host ([`Connection::with_profile`](crate::Connection::with_profile),
+    /// [`Mcp::handle_with_profile`]).
+    profile: Profile,
     /// The MCP sessions: a bounded table (the default) or stateless signed ids
     /// ([`Mcp::with_session_key`]).
     sessions: Sessions,
@@ -72,9 +75,8 @@ impl Mcp {
         }
         let sessions = Sessions::table();
         Self {
-            read_only,
             token,
-            config: Arc::new(config),
+            profile: Profile::new(read_only).with_config(config),
             stats: Arc::new(McpStats::new(sessions.clients())),
             sessions,
             client: Mutex::new(None),
@@ -111,15 +113,30 @@ impl Mcp {
     /// by [`McpConfig::with_flags`]). It replaces the whole configuration, including what
     /// `query_tools`, [`Mcp::with_operator_notes`] and [`Mcp::with_max_chars`] set before.
     pub fn with_config(mut self, config: McpConfig) -> Self {
-        self.config = Arc::new(config);
+        self.profile.config = Arc::new(config);
         self
+    }
+
+    /// Serves `profile` by default: to every HTTP request ([`Mcp::handle`]) and every
+    /// connection built afterwards ([`crate::Connection::new`]) unless the host gives it
+    /// another. It replaces the read-only flag of [`Mcp::new`] and the whole configuration,
+    /// including what `query_tools`, [`Mcp::with_config`], [`Mcp::with_operator_notes`] and
+    /// [`Mcp::with_max_chars`] set before.
+    pub fn with_profile(mut self, profile: Profile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// The default profile ([`Mcp::with_profile`]).
+    pub fn profile(&self) -> &Profile {
+        &self.profile
     }
 
     /// Adds the operator's notes to the `initialize` instructions (under the heading "Notes
     /// from the operator of this server about this graph:"). The AI Chat prompt does not carry
     /// them: it has its own text.
     pub fn with_operator_notes(mut self, notes: Option<String>) -> Self {
-        Arc::make_mut(&mut self.config).instructions = match notes {
+        Arc::make_mut(&mut self.profile.config).instructions = match notes {
             Some(notes) => Instructions::Append(notes),
             None => Instructions::Builtin,
         };
@@ -128,13 +145,8 @@ impl Mcp {
 
     /// Sets the largest tool answer in characters (`None` keeps [`MAX_TEXT_CHARS`]).
     pub fn with_max_chars(mut self, max_chars: Option<usize>) -> Self {
-        Arc::make_mut(&mut self.config).answer_limit_chars = max_chars;
+        self.profile = self.profile.with_max_chars(max_chars);
         self
-    }
-
-    /// The largest tool answer in characters.
-    fn max_chars(&self) -> usize {
-        self.config.answer_limit_chars.unwrap_or(MAX_TEXT_CHARS)
     }
 
     /// The client sessions (stateless ids: the client names kept) and their estimated bytes
@@ -145,60 +157,49 @@ impl Mcp {
         (count, bytes + self.stats.bytes())
     }
 
-    /// Whether the endpoint offers only reading tools.
+    /// Whether the default profile offers only reading tools.
     pub fn read_only(&self) -> bool {
-        self.read_only
+        self.profile.read_only
     }
 
-    /// Whether saved queries are tools of their own (`--mcp-query-tools` or the
-    /// configuration's `saved_query_tools`).
+    /// Whether saved queries are tools of their own in the default profile
+    /// (`--mcp-query-tools` or the configuration's `saved_query_tools`).
     pub fn query_tools(&self) -> bool {
-        self.config.has_saved_query_tools()
+        self.profile.config.has_saved_query_tools()
     }
 
-    /// The configuration served.
+    /// The configuration of the default profile.
     pub fn config(&self) -> &McpConfig {
-        &self.config
+        &self.profile.config
     }
 
-    /// The instructions `initialize` answers.
+    /// The instructions `initialize` answers under the default profile.
     pub fn instructions_text(&self) -> String {
-        let mut instructions = match &self.config.instructions {
-            Instructions::Replace(text) => return text.clone(),
-            Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
-        };
-        if self.read_only {
-            instructions.push_str(READ_ONLY_NOTE);
-        }
-        if let Instructions::Append(notes) = &self.config.instructions {
-            instructions.push_str("\n\n");
-            instructions.push_str(OPERATOR_HEADING);
-            instructions.push_str("\n\n");
-            instructions.push_str(notes);
-        }
-        instructions
+        instructions_of(&self.profile)
     }
 
     /// The caller of the endpoint's tools.
     fn caller(&self) -> ToolCaller {
-        self.caller_for(ClientRef::new(MCP_CLIENT, None))
+        self.caller_for(ClientRef::new(MCP_CLIENT, None), &self.profile)
     }
 
-    /// The caller of the endpoint's tools for `client` (the request's MCP session as its key).
-    fn caller_for(&self, client: ClientRef) -> ToolCaller {
-        ToolCaller::new(client, self.read_only)
-            .with_config(self.config.clone())
-            .with_max_chars(self.max_chars())
+    /// The caller of the endpoint's tools for `client` (the request's MCP session as its key)
+    /// under `profile`.
+    fn caller_for(&self, client: ClientRef, profile: &Profile) -> ToolCaller {
+        ToolCaller::new(client, profile.read_only)
+            .with_profile(profile)
             .with_stats(self.stats.clone())
     }
 
-    /// The `tools/list` entries an agent gets now (saved-query tools read through `host`).
+    /// The `tools/list` entries an agent gets now under the default profile (saved-query tools
+    /// read through `host`).
     pub fn tool_listings(&self, host: &dyn Host) -> Result<Vec<Value>, McpError> {
         tool_listings(host, &self.caller())
     }
 
-    /// What the endpoint's prompt costs an agent's context: the instructions and every tool's
-    /// `tools/list` entry in characters (`graphersal mcp-cost`, the budget tests).
+    /// What the endpoint's prompt costs an agent's context under the default profile: the
+    /// instructions and every tool's `tools/list` entry in characters (`graphersal mcp-cost`,
+    /// the budget tests).
     pub fn prompt_cost(&self, host: &dyn Host) -> Result<PromptCost, McpError> {
         let tools = self
             .tool_listings(host)?
@@ -222,19 +223,32 @@ impl Mcp {
     }
 
     /// `{endpoint, readOnly, client: {name, version} | null}`: what a status page shows of the
-    /// endpoint (`client` = the last `initialize`'s client).
+    /// endpoint (`readOnly` of the default profile, `client` = the last `initialize`'s client).
     pub fn status(&self) -> Value {
         json!({
             "endpoint": "/mcp",
-            "readOnly": self.read_only,
+            "readOnly": self.profile.read_only,
             "client": self.client.lock().ok().and_then(|c| c.clone()),
         })
     }
 
     /// Answers one HTTP request to the endpoint (after the host's own checks, e.g. `Host` and
     /// `Origin`): `POST` carries one JSON-RPC message, `DELETE` ends an MCP session, every other
-    /// method is `405`. Session jobs run through `host` for the client `mcp`.
-    pub fn handle(&self, host: &dyn Host, mut request: McpRequest<'_>) -> McpResponse {
+    /// method is `405`. Session jobs run through `host` for the client `mcp`, under the default
+    /// profile.
+    pub fn handle(&self, host: &dyn Host, request: McpRequest<'_>) -> McpResponse {
+        self.handle_with_profile(host, &self.profile, request)
+    }
+
+    /// [`Mcp::handle`] under `profile`, which the host chose for this request (the graph its
+    /// resolver picked, the identity its request filter attached; never anything the client
+    /// says inside MCP). The MCP sessions, statistics and token stay the endpoint's.
+    pub fn handle_with_profile(
+        &self,
+        host: &dyn Host,
+        profile: &Profile,
+        mut request: McpRequest<'_>,
+    ) -> McpResponse {
         if let Some(token) = &self.token {
             let given = request
                 .header_value("Authorization")
@@ -253,7 +267,7 @@ impl Mcp {
             }
         }
         match request.method() {
-            "POST" => self.post(host, &mut request),
+            "POST" => self.post(host, profile, &mut request),
             "DELETE" => {
                 let Some(id) = request.header_value("Mcp-Session-Id") else {
                     return rpc_error(
@@ -279,8 +293,13 @@ impl Mcp {
 
     /// One `POST /mcp`: a JSON-RPC request, notification or response; a `4xx` answer before
     /// the message is dispatched counts as a refusal (unknown session or invalid request).
-    fn post(&self, host: &dyn Host, request: &mut McpRequest<'_>) -> McpResponse {
-        let answer = self.post_message(host, request);
+    fn post(
+        &self,
+        host: &dyn Host,
+        profile: &Profile,
+        request: &mut McpRequest<'_>,
+    ) -> McpResponse {
+        let answer = self.post_message(host, profile, request);
         match answer.status() {
             404 => self.stats.record_refusal(Refusal::UnknownSession),
             400..=499 => self.stats.record_refusal(Refusal::InvalidRequest),
@@ -289,7 +308,12 @@ impl Mcp {
         answer
     }
 
-    fn post_message(&self, host: &dyn Host, request: &mut McpRequest<'_>) -> McpResponse {
+    fn post_message(
+        &self,
+        host: &dyn Host,
+        profile: &Profile,
+        request: &mut McpRequest<'_>,
+    ) -> McpResponse {
         if let Some(accept) = request.header_value("Accept") {
             let accept = accept.to_ascii_lowercase();
             if !accept.contains("application/json") && !accept.contains("*/*") {
@@ -333,12 +357,15 @@ impl Mcp {
                 return rpc_error(status, Value::Null, INVALID_REQUEST, &message);
             }
         };
+        let identity = request.identity().map(str::to_string);
         let peer = Peer {
             host,
+            profile,
             key: session_id.as_deref(),
             client_digest: session_id
                 .as_deref()
                 .and_then(|id| self.sessions.client_of(id)),
+            identity: identity.as_deref(),
             stream: None,
         };
         let outcome = match parse_message(&body) {
@@ -400,11 +427,7 @@ impl Mcp {
             return Outcome::Accepted;
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
-        let client = match peer.key {
-            Some(key) => ClientRef::new(MCP_CLIENT, None).with_key(key),
-            None => ClientRef::new(MCP_CLIENT, None),
-        }
-        .with_request(&id.to_string());
+        let client = peer.client().with_request(&id.to_string());
         clear_busy();
         let dispatched = self.dispatch(peer, &client, method, &params);
         if let Some(message) = take_busy() {
@@ -431,8 +454,9 @@ impl Mcp {
         params: &Value,
     ) -> RpcResult {
         let host = peer.host;
+        let profile = peer.profile;
         let plain = |value: Value| Ok((value, None));
-        let caller = self.caller_for(client.clone());
+        let caller = self.caller_for(client.clone(), profile);
         match method {
             "initialize" => self.initialize(peer, params),
             "ping" => plain(json!({})),
@@ -488,7 +512,7 @@ impl Mcp {
                     Ok(outcome) => plain(tool_result(outcome.text, outcome.is_error)),
                     Err(CallRefused::Internal(message)) => Err((INTERNAL_ERROR, message)),
                     Err(CallRefused::Params(message)) => {
-                        let message = if self.read_only && message.contains("(read-only") {
+                        let message = if profile.read_only && message.contains("(read-only") {
                             message.replace(
                                 "(read-only: only reading tools)",
                                 "(the server runs with --mcp-read-only: only reading tools)",
@@ -501,7 +525,7 @@ impl Mcp {
                 }
             }
             "resources/list" => plain(json!({ "resources": RESOURCES.iter()
-                .filter(|r| self.config.lists_resource(r.name)).map(|r| json!({
+                .filter(|r| profile.config.lists_resource(r.name)).map(|r| json!({
                 "uri": r.uri, "name": r.name, "title": r.title,
                 "description": r.description, "mimeType": r.mime,
             })).collect::<Vec<_>>() })),
@@ -513,7 +537,7 @@ impl Mcp {
                 };
                 let context = Ctx { host, client };
                 let text =
-                    read_resource(&context, uri, self.read_only).map_err(|err| (-32603, err))?;
+                    read_resource(&context, uri, profile.read_only).map_err(|err| (-32603, err))?;
                 plain(json!({ "contents": [{
                     "uri": uri, "mimeType": resource.mime, "text": text,
                 }] }))
@@ -560,8 +584,8 @@ impl Mcp {
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }
-        let instructions = self.instructions_text();
-        let list_changed = peer.stream.is_some() && self.lists_change();
+        let instructions = instructions_of(peer.profile);
+        let list_changed = peer.stream.is_some() && lists_change(peer.profile);
         Ok((
             json!({
                 "protocolVersion": version,
@@ -570,7 +594,7 @@ impl Mcp {
                     "resources": { "listChanged": false },
                 },
                 "serverInfo": {
-                    "name": self.config.server_name.as_deref().unwrap_or(SERVER_NAME),
+                    "name": peer.profile.config.server_name.as_deref().unwrap_or(SERVER_NAME),
                     "title": SERVER_TITLE,
                     "version": env!("CARGO_PKG_VERSION"),
                 },
@@ -578,12 +602,6 @@ impl Mcp {
             }),
             session,
         ))
-    }
-
-    /// Whether the tool list can change while a client is connected: saved queries are tools
-    /// of their own (the rest of the list is fixed by the configuration).
-    pub(crate) fn lists_change(&self) -> bool {
-        self.config.has_saved_query_tools()
     }
 
     /// Registers a stream connection for the server's pushes.
@@ -600,24 +618,30 @@ impl Mcp {
     /// gets the notification after its answer instead. Nothing
     /// to do without stream connections or saved-query tools; over HTTP nothing is pushed.
     pub(crate) fn check_listings(&self, origin: Option<&Stream>) -> Result<(), McpError> {
-        if !self.lists_change() {
-            return Ok(());
-        }
         let streams: Vec<Arc<Stream>> = match self.streams.lock() {
             Ok(streams) => streams.iter().filter_map(Weak::upgrade).collect(),
             Err(_) => return Err(McpError::Failed("the stream registry is poisoned".into())),
         };
         let mut failure = Ok(());
-        // One listing per host (connections over the same host see the same catalog).
-        let mut seen: Vec<(*const (), Option<u64>)> = Vec::new();
-        for stream in streams.iter().filter(|stream| stream.has_listed()) {
+        // One listing per host and profile (connections over the same host with equal
+        // profiles see the same catalog).
+        let mut seen: Vec<(*const (), Arc<Profile>, Option<u64>)> = Vec::new();
+        for stream in streams
+            .iter()
+            .filter(|stream| lists_change(&stream.profile()) && stream.has_listed())
+        {
             let host = stream.host();
             let address = Arc::as_ptr(host) as *const ();
-            let now = match seen.iter().find(|(known, _)| *known == address) {
-                Some((_, now)) => *now,
+            let profile = stream.profile();
+            let now = match seen
+                .iter()
+                .find(|(known, by, _)| *known == address && **by == *profile)
+            {
+                Some((_, _, now)) => *now,
                 None => {
                     let client = ClientRef::new(MCP_CLIENT, None).with_key(stream.key());
-                    let now = match tool_listings(host.as_ref(), &self.caller_for(client)) {
+                    let caller = self.caller_for(client, &profile);
+                    let now = match tool_listings(host.as_ref(), &caller) {
                         Ok(listed) => Some(fingerprint(&Value::Array(listed))),
                         Err(err) => {
                             if failure.is_ok() {
@@ -626,7 +650,7 @@ impl Mcp {
                             None
                         }
                     };
-                    seen.push((address, now));
+                    seen.push((address, profile, now));
                     now
                 }
             };
@@ -654,15 +678,59 @@ impl Mcp {
     }
 }
 
-/// Who sent a message: the host its jobs run on and how the endpoint tells its clients apart.
+/// Who sent a message: the host its jobs run on, the profile the host chose for it and how the
+/// endpoint tells its clients apart.
 pub(crate) struct Peer<'a> {
     pub(crate) host: &'a dyn Host,
+    /// What the sender may do.
+    pub(crate) profile: &'a Profile,
     /// The MCP session id (HTTP) or the connection's key (stream), if any.
     pub(crate) key: Option<&'a str>,
     /// The client digest of the session, for the statistics.
     pub(crate) client_digest: Option<u64>,
+    /// The identity the host attached to the request or connection, if any.
+    pub(crate) identity: Option<&'a str>,
     /// The stream connection the message came on (none over HTTP).
     pub(crate) stream: Option<&'a Stream>,
+}
+
+impl Peer<'_> {
+    /// The client of the sender's jobs: `mcp` with its key and identity.
+    pub(crate) fn client(&self) -> ClientRef {
+        let client = ClientRef::new(MCP_CLIENT, None);
+        let client = match self.key {
+            Some(key) => client.with_key(key),
+            None => client,
+        };
+        match self.identity {
+            Some(identity) => client.with_identity(identity),
+            None => client,
+        }
+    }
+}
+
+/// Whether the tool list of `profile` can change while a client is connected: saved queries
+/// are tools of their own (the rest of the list is fixed by the configuration).
+fn lists_change(profile: &Profile) -> bool {
+    profile.config.has_saved_query_tools()
+}
+
+/// The instructions `initialize` answers under `profile`.
+fn instructions_of(profile: &Profile) -> String {
+    let mut instructions = match &profile.config.instructions {
+        Instructions::Replace(text) => return text.clone(),
+        Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
+    };
+    if profile.read_only {
+        instructions.push_str(READ_ONLY_NOTE);
+    }
+    if let Instructions::Append(notes) = &profile.config.instructions {
+        instructions.push_str("\n\n");
+        instructions.push_str(OPERATOR_HEADING);
+        instructions.push_str("\n\n");
+        instructions.push_str(notes);
+    }
+    instructions
 }
 
 /// What a message comes to, before a transport frames it.

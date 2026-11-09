@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::host::{ClientRef, Host};
+use crate::profile::Profile;
 use crate::protocol::{MCP_CLIENT, Mcp, Outcome, Peer, list_changed_notice, parse_message};
 use crate::stats::Refusal;
 
@@ -42,18 +43,26 @@ pub const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 ///   [`Connection::close`] (end of the stream) cancels every request still running.
 ///
 /// The connection's jobs run for the client `mcp` with [`Connection::key`] as its key, on the
-/// host it was built with, so a process can serve connections over different hosts.
+/// host it was built with, so a process can serve connections over different hosts (each its
+/// own graph) through one [`Mcp`], whose statistics, tool catalog code and stream registry stay
+/// shared. What the connection may do is its [`Profile`]: the endpoint's default
+/// ([`Mcp::profile`]) unless the host gives it another ([`Connection::with_profile`]); the
+/// client never chooses it inside MCP, and it never changes while the connection is open.
 pub struct Connection {
     mcp: Arc<Mcp>,
     stream: Arc<Stream>,
 }
 
 impl Connection {
-    /// A new connection to `mcp` (its configuration, statistics and tool catalog), its session
-    /// jobs run by `host`. It is registered with `mcp` for the server's pushes until dropped.
+    /// A new connection to `mcp` (its default profile, statistics and tool catalog), its
+    /// session jobs run by `host`. It is registered with `mcp` for the server's pushes until
+    /// dropped.
     pub fn new(mcp: Arc<Mcp>, host: Arc<dyn Host>) -> Self {
+        let profile = Arc::new(mcp.profile().clone());
         let stream = Arc::new(Stream {
             host,
+            profile: Mutex::new(profile),
+            identity: Mutex::new(None),
             key: format!("{:032x}", rand::random::<u128>()),
             state: Mutex::new(State::default()),
             outbound: Mutex::new(None),
@@ -62,6 +71,32 @@ impl Connection {
         });
         mcp.add_stream(Arc::downgrade(&stream));
         Self { mcp, stream }
+    }
+
+    /// Serves `profile` instead of the endpoint's default: the configuration, read-only flag,
+    /// answer limit and access policy the HOST chose for this connection (from its handshake,
+    /// the graph it serves, the identity it established). Set before the connection serves its
+    /// first message; it stays for the connection's life (a host's later change of its
+    /// profiles reaches only the connections it builds afterwards).
+    pub fn with_profile(self, profile: Profile) -> Self {
+        if let Ok(mut slot) = self.stream.profile.lock() {
+            *slot = Arc::new(profile);
+        }
+        self
+    }
+
+    /// The identity the host established for this connection (the user of a socket after its
+    /// handshake), carried to the connection's session jobs ([`ClientRef::identity`]).
+    pub fn with_identity(self, identity: &str) -> Self {
+        if let Ok(mut slot) = self.stream.identity.lock() {
+            *slot = Some(identity.to_string());
+        }
+        self
+    }
+
+    /// The profile the connection serves.
+    pub fn profile(&self) -> Profile {
+        self.stream.profile().as_ref().clone()
     }
 
     /// Sends the server's own messages (one JSON-RPC message per string, without a line end) to
@@ -103,10 +138,14 @@ impl Connection {
         {
             running.push(id.clone());
         }
+        let profile = self.stream.profile().clone();
+        let identity = self.stream.identity();
         let peer = Peer {
             host: self.stream.host.as_ref(),
+            profile: &profile,
             key: Some(&self.stream.key),
             client_digest: self.stream.digest(),
+            identity: identity.as_deref(),
             stream: Some(&self.stream),
         };
         let outcome = self.mcp.message(&peer, message);
@@ -151,6 +190,10 @@ impl Connection {
             .map(|running| running.clone())
             .unwrap_or_default();
         let client = ClientRef::new(MCP_CLIENT, None).with_key(&self.stream.key);
+        let client = match self.stream.identity() {
+            Some(identity) => client.with_identity(&identity),
+            None => client,
+        };
         for request in running {
             self.stream.host.cancel_request(&client, &request);
         }
@@ -207,6 +250,10 @@ impl std::fmt::Debug for Connection {
 /// reference of every open one).
 pub(crate) struct Stream {
     host: Arc<dyn Host>,
+    /// The connection's profile (set by the host before the first message).
+    profile: Mutex<Arc<Profile>>,
+    /// The identity the host established for the connection.
+    identity: Mutex<Option<String>>,
     key: String,
     state: Mutex<State>,
     outbound: Mutex<Option<Sender<String>>>,
@@ -241,6 +288,21 @@ impl Stream {
 
     pub(crate) fn host(&self) -> &Arc<dyn Host> {
         &self.host
+    }
+
+    /// The connection's profile (shared: the registry lists the tools of each profile once).
+    pub(crate) fn profile(&self) -> Arc<Profile> {
+        match self.profile.lock() {
+            Ok(profile) => profile.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn identity(&self) -> Option<String> {
+        self.identity
+            .lock()
+            .ok()
+            .and_then(|identity| identity.clone())
     }
 
     fn with_init<T>(&self, read: impl FnOnce(&Init) -> T) -> Option<T> {

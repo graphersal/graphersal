@@ -38,7 +38,7 @@ fn off() -> HttpError {
 pub(crate) fn status(context: &Context) -> Value {
     match &context.mcp {
         None => Value::Null,
-        Some(mcp) => endpoint_status(mcp),
+        Some(_) => endpoint_status(context),
     }
 }
 
@@ -56,8 +56,19 @@ mod enabled {
     use crate::http::{HttpError, Request, Response};
     use crate::runs::{RunDetails, RunKind};
 
-    pub(crate) fn endpoint_status(mcp: &Mcp) -> Value {
-        mcp.status()
+    /// The endpoint's status with `readOnly` of the context's profile.
+    pub(crate) fn endpoint_status(context: &Context) -> Value {
+        let (Some(mcp), Some(profile)) = (context.mcp(), context.mcp_profile()) else {
+            return Value::Null;
+        };
+        let mut status = mcp.status();
+        status["readOnly"] = json!(profile.read_only());
+        status
+    }
+
+    /// Whether the context's MCP profile is read-only (`false` without an endpoint).
+    fn profile_read_only(context: &Context) -> bool {
+        context.mcp_profile().is_some_and(|p| p.read_only())
     }
 
     /// `GET /api/mcp/stats`: the endpoint's usage statistics (memory only, since the start), or
@@ -70,7 +81,7 @@ mod enabled {
             .stats()
             .to_json()
             .map_err(|err| HttpError(500, err.to_string()))?;
-        answer["readOnly"] = json!(mcp.read_only());
+        answer["readOnly"] = json!(profile_read_only(context));
         answer["statelessSessions"] = json!(mcp.stateless_sessions());
         Ok(Response::json(200, &answer))
     }
@@ -92,11 +103,18 @@ mod enabled {
         };
         let headers = request.headers().to_vec();
         let method = request.method().as_str().to_string();
+        let identity = request.identity().map(str::to_string);
         let mut mcp_request = McpRequest::new(&method, request.body());
         for (name, value) in &headers {
             mcp_request = mcp_request.header(name, value);
         }
-        let (status, headers, body) = mcp.handle(context, mcp_request).into_parts();
+        if let Some(identity) = &identity {
+            mcp_request = mcp_request.with_identity(identity);
+        }
+        let profile = context.mcp_profile().unwrap_or_else(|| mcp.profile());
+        let (status, headers, body) = mcp
+            .handle_with_profile(context, profile, mcp_request)
+            .into_parts();
         let mut answer = Response::new(status, body);
         for (name, value) in &headers {
             answer = answer.with_header(name, value);
@@ -115,7 +133,9 @@ mod enabled {
 
     /// The server's client of an endpoint caller.
     fn client_of(client: &ClientRef) -> Client {
-        Client::with_detail(client.name(), client.detail()).with_key(client.key())
+        let mut caller = Client::with_detail(client.name(), client.detail()).with_key(client.key());
+        caller.identity = client.identity().map(str::to_string);
+        caller
     }
 
     /// The key the server cancels a caller's runs by (`mcp:<session id>`, `ai:<conversation>`).
@@ -155,8 +175,8 @@ mod enabled {
                 Some(store) => graphersal_session::store::found_damage_value(&**store)
                     .map_err(|err| McpError::Failed(err.to_string()))?,
             };
-            if let Some(mcp) = &self.mcp {
-                info["mcpReadOnly"] = json!(mcp.read_only());
+            if self.mcp.is_some() {
+                info["mcpReadOnly"] = json!(profile_read_only(self));
             }
             Ok(())
         }
@@ -175,8 +195,12 @@ mod enabled {
             cancel: &CancelToken,
             text: &str,
         ) -> u64 {
-            // Called on the thread of the request (or the agent's turn): its identity, if any.
-            let identity = CLIENT.with(|c| c.borrow().identity.clone());
+            // The identity the endpoint carries (a request's or a connection's), else the one
+            // of the thread of the request (or the agent's turn), if any.
+            let identity = client
+                .identity()
+                .map(str::to_string)
+                .or_else(|| CLIENT.with(|c| c.borrow().identity.clone()));
             self.runs.start_with(
                 &run_key(client),
                 client.request(),
@@ -210,8 +234,11 @@ mod disabled {
     /// No endpoint: the type has no value.
     pub(crate) enum Mcp {}
 
-    pub(crate) fn endpoint_status(mcp: &Mcp) -> Value {
-        match *mcp {}
+    pub(crate) fn endpoint_status(context: &Context) -> Value {
+        match context.mcp.as_deref() {
+            Some(mcp) => match *mcp {},
+            None => Value::Null,
+        }
     }
 
     pub(crate) fn stats(_context: &Context) -> Result<Response, HttpError> {

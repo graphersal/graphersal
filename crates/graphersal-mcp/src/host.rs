@@ -25,6 +25,9 @@ pub struct ClientRef {
     /// The JSON-RPC id of the request the jobs answer (its JSON text), which the client's
     /// `notifications/cancelled` names ([`Host::cancel_request`]).
     request: Option<String>,
+    /// The identity the host attached to the request or connection
+    /// ([`crate::McpRequest::with_identity`], [`crate::Connection::with_identity`]).
+    identity: Option<String>,
 }
 
 impl ClientRef {
@@ -35,7 +38,20 @@ impl ClientRef {
             detail: detail.map(str::to_string),
             key: None,
             request: None,
+            identity: None,
         }
+    }
+
+    /// The same client with the identity the host established for it (a user name, a token's
+    /// owner).
+    pub fn with_identity(mut self, identity: &str) -> Self {
+        self.identity = Some(identity.to_string());
+        self
+    }
+
+    /// The identity of [`ClientRef::with_identity`], if any.
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
     }
 
     /// The same client answering the JSON-RPC request `id` (its JSON text: `7`, `"a"`).

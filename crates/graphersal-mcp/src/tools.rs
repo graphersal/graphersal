@@ -1,16 +1,18 @@
 //! The tool handlers: [`call_tool`] runs one tool for a [`ToolCaller`], every tool a thin
 //! wrapper of one session operation; saved queries as tools; the `query` and `gql` runs.
 
+use graphersal::auth::AccessPolicy;
 use graphersal::exec::CancelToken;
-use graphersal_session::{RunOptions, Session, playground_authorizer, read_only_authorizer};
+use graphersal_session::{RunOptions, Session};
 use serde_json::{Value, json};
 
 use crate::answer::{PAGING_ARGS, Page, compact, fit, page_of, paging_properties, query_text};
 use std::sync::Arc;
 
-use crate::catalog::{all_tools, offered_tools};
+use crate::catalog::{Tool, all_tools, offered_tools};
 use crate::config::McpConfig;
 use crate::host::{ClientRef, Ctx, Host, McpError, RunGuard};
+use crate::profile::{Profile, authorizer, policy_allows_tool};
 use crate::protocol::MAX_TEXT_CHARS;
 use crate::stats::McpStats;
 
@@ -33,6 +35,9 @@ pub struct ToolCaller {
     pub(crate) config: Arc<McpConfig>,
     /// The endpoint's usage statistics (the `usage_statistics` tool); none for the AI Chat.
     pub(crate) stats: Option<Arc<McpStats>>,
+    /// The access policy of the caller's profile ([`Profile`]); `None`: the playground's
+    /// authorizer of the mode.
+    pub(crate) policy: Option<AccessPolicy>,
 }
 
 impl ToolCaller {
@@ -48,7 +53,28 @@ impl ToolCaller {
             max_chars: MAX_TEXT_CHARS,
             config: Arc::new(McpConfig::default()),
             stats: None,
+            policy: None,
         }
+    }
+
+    /// Serves `profile`: its read-only flag, configuration, answer limit and access policy
+    /// (what [`ToolCaller::new`]'s `read_only`, [`ToolCaller::with_config`] and
+    /// [`ToolCaller::with_max_chars`] set before is replaced).
+    pub fn with_profile(mut self, profile: &Profile) -> Self {
+        self.read_only = profile.read_only;
+        self.config = profile.config.clone();
+        self.max_chars = profile.max_chars();
+        self.policy = profile.policy.clone();
+        self
+    }
+
+    /// The built-in tools offered to this caller: those of its mode and configuration that its
+    /// access policy allows.
+    pub(crate) fn offered(&self) -> Vec<Tool> {
+        offered_tools(self.read_only, &self.config)
+            .into_iter()
+            .filter(|tool| policy_allows_tool(self.policy.as_ref(), tool.name))
+            .collect()
     }
 
     /// Answers `usage_statistics` from the endpoint's `stats`.
@@ -126,7 +152,8 @@ impl CallRefused {
 /// MCP endpoint and the AI Chat agent list the same catalog.
 pub fn tool_listings(host: &dyn Host, caller: &ToolCaller) -> Result<Vec<Value>, McpError> {
     let read_only = caller.read_only;
-    let mut listed: Vec<Value> = offered_tools(read_only, &caller.config)
+    let mut listed: Vec<Value> = caller
+        .offered()
         .into_iter()
         .map(|tool| tool.listing(read_only))
         .collect();
@@ -176,10 +203,7 @@ fn call_tool_with(
             is_error: true,
         },
     };
-    let Some(tool) = offered_tools(caller.read_only, &caller.config)
-        .into_iter()
-        .find(|t| t.name == name)
-    else {
+    let Some(tool) = caller.offered().into_iter().find(|t| t.name == name) else {
         if caller.has_query_tools() && !all_tools().iter().any(|t| t.name == name) {
             let wanted = name.to_string();
             let entry = context
@@ -220,6 +244,8 @@ fn call_tool_with(
             ""
         } else if !caller.config.offers(name) {
             " (not offered by this server's configuration)"
+        } else if !policy_allows_tool(caller.policy.as_ref(), name) {
+            " (not allowed by this connection's access policy)"
         } else {
             " (read-only: only reading tools)"
         };
@@ -333,8 +359,11 @@ pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// `get_schema` / `infer_schema`: the schema summary by default (the same text for both: the
-/// observed graph with the stored schema laid over it), the schema JSON with `format: "json"`
-/// (the stored or the inferred one); `labels` narrows either to some labels.
+/// observed graph with the stored schema laid over it), without the schema's descriptions
+/// unless `descriptions: true` (issue #34: the descriptions are about a third of a large
+/// graph's summary; the resource `graphersal://schema-summary` keeps them); the schema JSON
+/// with `format: "json"` (the stored or the inferred one); `labels` narrows either to some
+/// labels.
 fn schema_answer(
     context: &Ctx<'_>,
     caller: &ToolCaller,
@@ -357,11 +386,15 @@ fn schema_answer(
     };
     match str_arg(args, "format").unwrap_or("summary") {
         "summary" => {
-            let spec = if labels.is_empty() {
-                Value::Null
-            } else {
-                serde_json::json!({ "labels": labels })
+            let descriptions = match args.get("descriptions") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(on)) => *on,
+                Some(other) => return Err(format!("descriptions is true or false, not {other}")),
             };
+            let mut spec = json!({ "descriptions": descriptions });
+            if !labels.is_empty() {
+                spec["labels"] = json!(labels);
+            }
             Ok(context.call(move |s| s.schema_summary_text(&spec))??)
         }
         "json" => {
@@ -977,11 +1010,7 @@ pub(crate) fn run_script(
         offset: Some(page.offset),
         ..RunOptions::default()
     };
-    let authorizer = if caller.read_only {
-        read_only_authorizer()
-    } else {
-        playground_authorizer()
-    };
+    let authorizer = authorizer(caller.read_only, caller.policy.as_ref());
     // A token of this run alone (the caller's own: an AI Chat turn's), registered with the host
     // before the job is queued, so a cancel of it is never lost and reaches no other run.
     let cancel = caller.cancel.clone().unwrap_or_default();

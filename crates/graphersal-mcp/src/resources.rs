@@ -29,7 +29,7 @@ pub(crate) const RESOURCES: [Resource; 7] = [
         uri: "graphersal://schema-summary",
         name: "schema-summary",
         title: "Schema summary",
-        description: "The schema summary text: get_schema's default answer (format \"summary\").",
+        description: "The full schema summary text with the schema's descriptions (get_schema with descriptions: true).",
         mime: "text/plain",
     },
     Resource {

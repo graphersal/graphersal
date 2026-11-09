@@ -2,8 +2,10 @@
 //! `graphersal --server --mcp`, the dev server of `graphersal-cli`, and its AI Chat), so an AI
 //! agent works with the same graph and session as the browser.
 //!
-//! **Internal, EXPERIMENTAL, no stability guarantees.** Published only because `graphersal-cli`
-//! depends on it; its API changes with the servers in any release.
+//! **Internal, EXPERIMENTAL, no stability guarantees.** Published because `graphersal-cli`
+//! depends on it, and for hosts of Graphersal's own servers; its API changes with the servers in
+//! any release (a patch release included): a crate that depends on it pins the exact version
+//! (`graphersal-mcp = "=0.x.y"`) during 0.x.
 //!
 //! # Host boundary
 //!
@@ -36,6 +38,28 @@
 //! description: a sentence or two and one example where it helps (the GQL support list is the
 //! resource `graphersal://gql-reference`). [`Mcp::prompt_cost`] measures what the instructions
 //! and the tool list cost an agent's context.
+//!
+//! # Profiles and hosts per connection
+//!
+//! What a client may do is a [`Profile`]: an [`McpConfig`], the read-only flag, the answer limit
+//! and an optional `graphersal::auth::AccessPolicy` that the engine enforces on every query run
+//! (once per execution, before the optimizer: a refused write is a tool error naming
+//! `Permission denied`). A policy that allows reading plus exactly the data writes of some saved
+//! queries' inferred effects is a `use`-like profile: the agent runs those queries and writes
+//! nothing else (a policy matches action and resource kinds, not labels); the session's own
+//! writing tools (`set_schema`, the index and compression tools, ...) are offered only where the
+//! policy allows their writes. The endpoint has a default profile ([`Mcp::with_profile`], what
+//! [`Mcp::new`] and [`Mcp::with_config`] set); the HOST picks another for a connection
+//! ([`Connection::with_profile`]) or an HTTP request ([`Mcp::handle_with_profile`]), from what
+//! it knows (its handshake, the graph its resolver picked, the identity its request filter
+//! attached), never from anything the client says inside MCP. A connection keeps its profile
+//! for its life.
+//!
+//! Each [`Connection`] carries its own [`Host`] (and so its own graph and session), and an
+//! HTTP request is answered with the host the server passes; one [`Mcp`] serves them all, its
+//! statistics, MCP sessions, token, stream registry and tool catalog code shared by the
+//! process. An identity the host established ([`Connection::with_identity`],
+//! [`McpRequest::with_identity`]) travels with the session jobs ([`ClientRef::identity`]).
 //!
 //! # Protocol
 //!
@@ -82,7 +106,13 @@
 //!
 //! A read-only endpoint lists only the reading tools and runs `query` and `gql` under
 //! [`read_only_authorizer`](graphersal_session::read_only_authorizer) (creating, updating,
-//! deleting data, the schema or a catalog definition is denied).
+//! deleting data, the schema or a catalog definition is denied); a profile with an access
+//! policy runs them under that policy instead (read-only: without its writes).
+//!
+//! `get_schema` / `infer_schema` answer the schema summary without the stored schema's
+//! descriptions by default (issue #34: about a third of a large graph's summary, written to the
+//! agent's prompt cache in every conversation); `descriptions: true` and the resource
+//! `graphersal://schema-summary` give the full summary.
 //!
 //! Saved queries (`book/src/users_guide/saved_queries.md`): `list_saved_queries` and
 //! `run_saved_query` are always offered, with the resource `graphersal://saved-queries`; the
@@ -145,6 +175,7 @@ mod catalog;
 mod config;
 mod connection;
 mod host;
+mod profile;
 mod protocol;
 mod resources;
 mod sessions;
@@ -159,6 +190,7 @@ mod tests;
 pub use config::{MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError};
 pub use connection::{Connection, DEFAULT_PROGRESS_INTERVAL};
 pub use host::{ClientRef, Executor, Host, Job, McpError};
+pub use profile::Profile;
 pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
 };

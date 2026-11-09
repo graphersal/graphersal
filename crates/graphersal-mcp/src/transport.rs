@@ -14,6 +14,7 @@ pub struct McpRequest<'a> {
     method: String,
     headers: Vec<(String, String)>,
     body: Box<dyn Read + 'a>,
+    identity: Option<String>,
 }
 
 impl<'a> McpRequest<'a> {
@@ -23,7 +24,21 @@ impl<'a> McpRequest<'a> {
             method: method.to_string(),
             headers: Vec::new(),
             body: Box::new(body),
+            identity: None,
         }
+    }
+
+    /// The identity the host established for the request (its request filter's: a user, a
+    /// token's owner), carried to the request's session jobs ([`crate::ClientRef::identity`]).
+    /// The endpoint decides nothing by it; the host may (its run observer, its executor).
+    pub fn with_identity(mut self, identity: &str) -> Self {
+        self.identity = Some(identity.to_string());
+        self
+    }
+
+    /// The identity of [`McpRequest::with_identity`], if any.
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
     }
 
     /// Adds the header `name: value` (names compare ASCII case-insensitively; the first one of
