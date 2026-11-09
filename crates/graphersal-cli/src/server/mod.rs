@@ -4,11 +4,12 @@
 //! run registry, the playground HTTP API (one endpoint per [`graphersal_session::Session`]
 //! method, so the answers are the structures the WebAssembly build returns), the `Host`/`Origin`
 //! checks, the embedded playground UI (a file of `--ui-dir` or `./playground` winning over the
-//! embedded copy) and the MCP endpoint's host. This module is its host over `tiny_http`: it
-//! parses nothing itself (`Cli` did), decides where to listen ([`bind`]), loads the graph,
-//! prints the start banner, runs the accept loops, answers the health probes `GET /healthz` /
-//! `/readyz` ([`health`]) and the 503s while loading or stopping, converts each request to a
-//! `graphersal_serve::Request` and its answer back, and handles SIGINT/SIGTERM.
+//! embedded copy), the MCP endpoint's host, and the lifecycle (`graphersal_serve::Server`: the
+//! health probes `GET /healthz` / `/readyz` and the 503s while loading or stopping). This
+//! module is its host over `tiny_http`: it parses nothing itself (`Cli` did), decides where to
+//! listen ([`bind`]), loads the graph, prints the start banner, runs the accept loops, converts
+//! each request to a `graphersal_serve::Request` and its answer back, tells the `Server` when
+//! the graph is loaded and when a SIGINT/SIGTERM stops it, and handles the signals.
 //!
 //! Threads: one session thread (64 MiB stack, like the CLI's script thread) owns the
 //! [`Session`] and runs the jobs one after the other; every HTTP request gets a thread of its
@@ -32,11 +33,11 @@
 //! covers every session, import and load of this process.
 //!
 //! The read-only serving mode (`--server --read-only`) queues the session jobs on the reader
-//! pool ([`pool`], a `graphersal_serve::JobQueue`). MCP (`--mcp`): `POST /mcp` is a Model
-//! Context Protocol endpoint on the same session ([`mcp`]). AI Chat (`--ai FILE`):
-//! `/api/ai/conversations*`, an LLM agent loop on the same tools (`ai`), mounted through
-//! `graphersal_serve::Hooks` with the CLI's other additions to `GET /api/info` and the
-//! statistics (the embedding models it lists).
+//! pool ([`pool`], plugged into serve's executor-policy point `graphersal_serve::JobQueue`).
+//! MCP (`--mcp`): `POST /mcp` is a Model Context Protocol endpoint on the same session
+//! ([`mcp`]). AI Chat (`--ai FILE`): `/api/ai/conversations*`, an LLM agent loop on the same
+//! tools (`ai`), mounted through serve's extra-routes point `graphersal_serve::Hooks` with the
+//! CLI's other additions to `GET /api/info` and the statistics (the embedding models it lists).
 
 use std::io::Cursor;
 use std::path::Path;
@@ -52,7 +53,7 @@ use graphersal_serve::{
 };
 use graphersal_session::{Session, SessionPresets};
 use serde_json::{Value, json};
-use tiny_http::{Header, Method, Request, Server};
+use tiny_http::{Header, Request, Server};
 
 use crate::cli::{Cli, DEFAULT_UI_DIR, EXIT_OK, EXIT_USAGE_ERROR, GraphSpec, ScriptBudget};
 
@@ -195,6 +196,13 @@ pub fn run(cli: &Cli) -> i32 {
     // handler ignores SIGTERM): the running query is cancelled, `/readyz` answers 503, and a
     // Store (added once it is open) is closed cleanly before the exit.
     let stop = Arc::new(crate::signals::Stop::default());
+    // The lifecycle (probes, loading/stopping 503s) is graphersal-serve's: the first signal
+    // tells it the server stops, before the drain or the store's close.
+    let lifecycle = Arc::new(graphersal_serve::Server::new());
+    {
+        let lifecycle = lifecycle.clone();
+        stop.set_on_signal(Arc::new(move || lifecycle.stop()));
+    }
     stop.install(EXIT_OK, "Stopping: the dev server exits.");
     // The listeners bind before the graph loads, so the health endpoints answer during a long
     // Store open (`/healthz` 200, `/readyz` 503) and a taken port fails the start at once.
@@ -226,8 +234,8 @@ pub fn run(cli: &Cli) -> i32 {
         .then(|| Server::http(("::1", port)).ok())
         .flatten();
     let serving = Arc::new(Serving {
+        lifecycle: lifecycle.clone(),
         context: OnceLock::new(),
-        stop: stop.clone(),
         max_connections: cli.max_connections.or(pool
             .is_some()
             .then_some(crate::cli::DEFAULT_MAX_CONNECTIONS)),
@@ -573,6 +581,8 @@ pub fn run(cli: &Cli) -> i32 {
         ai: ai.clone(),
     });
     let context = Context::builder(runner, plan.host_check(port))
+        // This binary installs the counting allocator (`alloc-tracking`).
+        .memory_tracked(true)
         .runs(runs)
         .ui(ui)
         .source(source)
@@ -601,7 +611,10 @@ pub fn run(cli: &Cli) -> i32 {
         errln!("warning: cannot start the scheduled-jobs thread: {err}");
     }
     // From here on the requests reach the API (before: health endpoints and 503 answers).
-    let _ = serving.context.set(context);
+    let _ = serving.context.set(context.clone());
+    if let Err(err) = lifecycle.ready(context) {
+        errln!("warning: {err}");
+    }
     // The address is the only line on stdout (tests and scripts read it), printed once the
     // API serves. `outln!` flushes (so `docker logs` shows it at once); a closed stdout loses
     // the line and the server keeps serving.
@@ -844,13 +857,23 @@ impl JobQueue for pool::Pool {
     fn status(&self) -> Value {
         pool::Pool::status(self)
     }
+
+    fn scheduled_jobs_refusal(&self) -> String {
+        NOT_SERVING.to_string()
+    }
 }
 
-/// What the accept loops share: the API's [`Context`] once the graph is loaded, and the
-/// signal state (readiness turns 503 at the first SIGINT/SIGTERM).
+/// The answer of what the read-only serving mode does not offer (its scheduled-jobs refusal).
+const NOT_SERVING: &str = "not available in the read-only serving mode (--server --read-only): \
+    scheduled jobs, the Store menu, views, saving and every write belong to a server started \
+    without --read-only";
+
+/// What the accept loops share: graphersal-serve's lifecycle front (probes, loading/stopping
+/// 503s, then the API), and the API's [`Context`] once the graph is loaded (for the MCP
+/// endpoint's refusal count at the connection cap).
 struct Serving {
+    lifecycle: Arc<graphersal_serve::Server>,
     context: OnceLock<Arc<Context>>,
-    stop: Arc<crate::signals::Stop>,
     /// `--max-connections` (the read-only serving mode's default without it): the requests
     /// handled at once; `None`: no cap.
     max_connections: Option<usize>,
@@ -875,16 +898,20 @@ fn accept(server: &Server, serving: &Arc<Serving>) {
                 mcp.stats()
                     .record_refusal(graphersal_mcp::Refusal::TooManyConnections);
             }
-            let response = health(serving, &request).unwrap_or_else(|| {
-                Answer::json(
-                    503,
-                    &json!({ "error": format!(
+            let method = graphersal_serve::Method::parse(request.method().as_str());
+            let response = serving
+                .lifecycle
+                .probe(&method, request.url())
+                .unwrap_or_else(|| {
+                    Answer::json(
+                        503,
+                        &json!({ "error": format!(
                         "the server is busy: it handles {max} requests at once \
                          (--max-connections); retry in a moment"
                     ) }),
-                )
-                .with_header("Retry-After", "1")
-            });
+                    )
+                    .with_header("Retry-After", "1")
+                });
             let _ = request.respond(tiny_answer(response));
             continue;
         }
@@ -1171,26 +1198,8 @@ fn handle(serving: &Serving, mut request: Request) {
         std::mem::forget(request);
         return;
     }
-    // The probes: no Host/Origin check, no lock, no session (see `health`).
-    if let Some(response) = health(serving, &request) {
-        let _ = request.respond(tiny_answer(response));
-        return;
-    }
-    let Some(context) = serving.context.get() else {
-        let _ = request.respond(tiny_answer(Answer::json(
-            503,
-            &json!({ "error": "the server is still loading its graph; GET /readyz answers \
-                200 when it serves queries" }),
-        )));
-        return;
-    };
-    if serving.stop.stopping() {
-        let _ = request.respond(tiny_answer(Answer::json(
-            503,
-            &json!({ "error": "the server is stopping" }),
-        )));
-        return;
-    }
+    // The probes and the loading/stopping 503s come first in `Server::handle`: no Host/Origin
+    // check, no lock, no session.
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
@@ -1205,7 +1214,7 @@ fn handle(serving: &Serving, mut request: Request) {
         for (name, value) in &headers {
             converted = converted.with_header(name, value);
         }
-        graphersal_serve::handle(context, converted)
+        serving.lifecycle.handle(converted)
     };
     let _ = request.respond(tiny_answer(response));
 }
@@ -1220,39 +1229,6 @@ fn tiny_answer(answer: Answer) -> TinyAnswer {
         }
     }
     response
-}
-
-/// `GET`/`HEAD /healthz` (liveness: 200 while the process answers HTTP) and `/readyz`
-/// (readiness: 200 when the graph is loaded and no stop signal arrived, else 503), or `None`
-/// for every other path. Answered before the Host/Origin checks, so a Kubernetes probe
-/// (`Host: <pod IP>:<port>`) and a Docker `HEALTHCHECK` work in every bind mode: they read
-/// nothing of the graph, take no lock and never wait for the session thread (a long query
-/// cannot fail liveness), and have no side effect.
-fn health(serving: &Serving, request: &Request) -> Option<Answer> {
-    let path = request.url().split('?').next().unwrap_or_default();
-    if path != "/healthz" && path != "/readyz" {
-        return None;
-    }
-    let method = request.method();
-    if !matches!(method, Method::Get | Method::Head) {
-        return Some(Answer::json(
-            405,
-            &json!({ "error": format!("method {method} is not allowed on {path}") }),
-        ));
-    }
-    // Probes come every few seconds: never above trace.
-    tracing::trace!(target: "graphersal::server", "{method} {path}");
-    if path == "/healthz" {
-        return Some(Answer::json(200, &json!({ "status": "ok" })));
-    }
-    let (status, state) = if serving.stop.stopping() {
-        (503, "stopping")
-    } else if serving.context.get().is_none() {
-        (503, "loading")
-    } else {
-        (200, "ready")
-    };
-    Some(Answer::json(status, &json!({ "status": state })))
 }
 
 /// [`graphersal_serve::Request::json_body`], for the AI Chat's endpoints.

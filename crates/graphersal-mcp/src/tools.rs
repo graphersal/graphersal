@@ -987,7 +987,9 @@ pub(crate) fn run_script(
     let cancel = caller.cancel.clone().unwrap_or_default();
     let _run = RunGuard {
         host: context.host,
-        run: context.host.run_started(context.client, &cancel),
+        run: context
+            .host
+            .run_started_with_text(context.client, &cancel, &script),
     };
     let answer = context.call(move |s| {
         let text = s.execute_with_cancel(&script, &options, authorizer, &cancel);

@@ -20,7 +20,8 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 
 /// What the signal handler stops, filled in as the process learns it: the dev server installs
 /// the handler before its graph is loaded and adds the store and the session's cancellation
-/// token later. [`Stop::stopping`] turns true at the first signal (the server's readiness).
+/// token later. The first signal runs [`Stop::set_on_signal`]'s callback before anything else
+/// (the dev server tells `graphersal_serve::Server` it stops: `/readyz` 503).
 #[derive(Default)]
 pub struct Stop {
     store: Mutex<Option<Arc<Store>>>,
@@ -29,6 +30,8 @@ pub struct Stop {
     drain: Mutex<Option<Drain>>,
     /// Runs beside the cancel of [`Stop::set_cancel`] ([`Stop::set_on_stop`]).
     on_stop: Mutex<Option<Drain>>,
+    /// Runs first at the first signal ([`Stop::set_on_signal`]).
+    on_signal: Mutex<Option<Drain>>,
     signals: AtomicUsize,
 }
 
@@ -71,10 +74,13 @@ impl Stop {
         }
     }
 
-    /// Whether a signal arrived: the process is stopping.
+    /// What the first signal runs before anything else (the drain, the cancel, the store's
+    /// close): the dev server's "stopping" for its readiness. Set it before [`Stop::install`].
     #[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
-    pub fn stopping(&self) -> bool {
-        self.signals.load(Ordering::SeqCst) > 0
+    pub fn set_on_signal(&self, on_signal: Drain) {
+        if let Ok(mut slot) = self.on_signal.lock() {
+            *slot = Some(on_signal);
+        }
     }
 
     /// Installs the process's one handler: the first signal cancels the running query, closes
@@ -95,6 +101,9 @@ impl Stop {
         if self.signals.fetch_add(1, Ordering::SeqCst) > 0 {
             errln!("Interrupted again: exiting without waiting for the store to close.");
             std::process::exit(EXIT_INTERRUPTED);
+        }
+        if let Some(on_signal) = self.on_signal.lock().ok().and_then(|slot| slot.clone()) {
+            on_signal();
         }
         if let Some(drain) = self.drain.lock().ok().and_then(|slot| slot.clone()) {
             // The handler thread stays free for a second signal meanwhile.

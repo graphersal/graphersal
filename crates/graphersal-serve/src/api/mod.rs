@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 
 use crate::context::{CLIENT, Client, Context, position};
 use crate::http::{HttpError, Method, Request, Response};
+use crate::runs::RunKind;
 use crate::ui::Ui;
 use crate::{job_workers, mcp, runs};
 
@@ -59,9 +60,12 @@ fn client_id(request: &Request) -> String {
         .unwrap_or_default()
 }
 
-/// Answers one request of the API: the `Host`/`Origin` checks, then the endpoint (`/mcp`,
-/// `/openapi.json`, `/api/...`, else a static file of the UI). A failure is answered as
-/// `{"error": message}`; a `503` (the host's job queue is busy) carries `Retry-After: 1`.
+/// Answers one request of the API with the context that serves it: the `Host`/`Origin` checks
+/// (always), the host's request filter ([`crate::RequestFilter`], if any), then the endpoint (`/mcp`,
+/// `/openapi.json`, `/api/...`, the host's extra routes, else a static file of the UI). A
+/// failure is answered as `{"error": message}`; a `503` (the host's job queue is busy) carries
+/// `Retry-After: 1`. A host with a lifecycle (probes, loading, stopping) or several graphs calls
+/// [`crate::Server::handle`], which ends here.
 ///
 /// The client of the request (`X-Graphersal-Client`, `mcp` for `/mcp`) is this thread's client
 /// from here on: the change feed and the run registry name it.
@@ -72,32 +76,35 @@ pub fn handle(context: &Arc<Context>, mut request: Request) -> Response {
         client_id(&request)
     };
     CLIENT.with(|c| *c.borrow_mut() = Client::with_detail(&client, None));
-    match route(context, &mut request) {
-        Ok(response) => response,
-        // Busy (the host's job queue): the client retries.
-        Err(HttpError(503, message)) => {
+    let answer = context
+        .check
+        .check(&request)
+        .and_then(|()| match &context.filter {
+            Some(filter) => filter.filter(&mut request),
+            None => Ok(()),
+        })
+        .and_then(|()| {
+            let identity = request.identity().map(str::to_string);
+            CLIENT.with(|c| c.borrow_mut().identity = identity);
+            route(context, &mut request)
+        });
+    answer.unwrap_or_else(error_response)
+}
+
+/// The answer of a failed request: `{"error": message}`; a `503` (the host's job queue is busy)
+/// also with `Retry-After: 1`, so the client retries.
+pub(crate) fn error_response(error: HttpError) -> Response {
+    match error {
+        HttpError(503, message) => {
             Response::json(503, &json!({ "error": message })).with_header("Retry-After", "1")
         }
-        Err(HttpError(status, message)) => Response::json(status, &json!({ "error": message })),
+        HttpError(status, message) => Response::json(status, &json!({ "error": message })),
     }
 }
 
+/// Routes a request the checks ([`crate::HostCheck::check`]: DNS rebinding, cross-site
+/// requests) and the host's filter accepted.
 fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, HttpError> {
-    // DNS rebinding and cross-site requests: only this server's own address is served.
-    let host = match request.header("Host") {
-        Some(host) if context.check.is_own_host(host) => host.to_string(),
-        _ => {
-            return Err(HttpError(403, context.check.unknown_host_message()));
-        }
-    };
-    if let Some(origin) = request.header("Origin")
-        && !context.check.is_own_origin(origin, &host)
-    {
-        return Err(HttpError(
-            403,
-            format!("cross-origin request from {origin} refused"),
-        ));
-    }
     let url = request.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
     let method = request.method().clone();
@@ -138,7 +145,13 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
         (
             Method::Post,
             "jobs/define" | "jobs/drop" | "jobs/enable" | "jobs/schedule" | "jobs/run",
-        ) if context.queue().is_some() => Err(HttpError(409, NOT_SERVING.to_string())),
+        ) if context.queue().is_some() => Err(HttpError(
+            409,
+            context
+                .queue()
+                .map(|queue| queue.scheduled_jobs_refusal())
+                .unwrap_or_default(),
+        )),
         (Method::Get, "graph") => value(context.call_fallible(|s| s.info())?),
         (Method::Post, "execute") => {
             let body = request.json_body()?;
@@ -156,7 +169,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             };
             let run_id = run_id_of(&body)?;
             let cancel = CancelToken::new();
-            let _run = context.register_run(run_id.as_deref(), cancel.clone());
+            let _run = context.register_run(
+                run_id.as_deref(),
+                cancel.clone(),
+                RunKind::Query,
+                Some(&script),
+            );
             let answer = context.call(move |s| {
                 s.execute_with_cancel(&script, &options, playground_authorizer(), &cancel)
             });
@@ -642,11 +660,6 @@ fn openapi() -> Value {
     spec
 }
 
-/// The answer of what the read-only serving mode does not offer.
-const NOT_SERVING: &str = "not available in the read-only serving mode (--server --read-only): \
-    scheduled jobs, the Store menu, views, saving and every write belong to a server started \
-    without --read-only";
-
 /// `GET /api/info`: what the UI needs to switch to this server; answered without the session.
 fn info(context: &Context) -> Value {
     let mut info = info_fields(context);
@@ -668,8 +681,8 @@ fn info_fields(context: &Context) -> Value {
         // The OpenAPI description of this API (EXPERIMENTAL).
         "openapi": "/openapi.json",
         "version": env!("CARGO_PKG_VERSION"),
-        // The binary installs the counting allocator and queries run on one thread.
-        "memoryTracked": true,
+        // The host installs the counting allocator (`ContextBuilder::memory_tracked`).
+        "memoryTracked": context.memory_tracked,
         "source": context.source.as_ref().map(|p| p.display().to_string()),
         "saveable": context.source.is_some(),
         // The --schema file the graph was loaded with.
