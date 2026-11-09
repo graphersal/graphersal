@@ -11,8 +11,7 @@ description = "Command line REPL and one-shot query runner for the Graphersal gr
 readme = "README.md"
 keywords = ["graph", "gremlin", "tinkerpop", "repl", "cli"]
 categories = ["command-line-utilities", "database"]
-# The playground UI and the OpenAPI description are graphersal-serve's (`openapi.json` here is a
-# symbolic link to it, read by `tests/server_tests.rs`).
+# The playground UI and the OpenAPI description are graphersal-serve's.
 include = ["/src/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
 
 # `cargo binstall graphersal-cli`: the prebuilt archives of the GitHub Release
