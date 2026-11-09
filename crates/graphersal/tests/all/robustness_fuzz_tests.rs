@@ -1165,19 +1165,24 @@ fn run_inner_with(script: &str, kind: GraphKind, timeout_ms: i64, memory_limit: 
     scope.push("big_string", "x".repeat(100_000));
     let big: graphersal::script::rhai::Array = (0..10_000_i64).map(Dynamic::from).collect();
     scope.push("big_list", big);
-    match graphersal::exec::memory_limit_scope(memory_limit, || {
-        engine.eval_with_scope::<Dynamic>(&mut scope, script)
-    }) {
-        Ok(value) => match graphersal::script::try_render_value(
-            value,
-            VisualizeFormat::Auto,
-            &RenderOptions::new(),
-        ) {
-            Ok(_) => Outcome::Ok,
-            Err(text) => Outcome::Error(text),
-        },
-        Err(err) => Outcome::Error(graphersal::script::map_eval_error(err, &limits).to_string()),
-    }
+    // Rendering runs inside the scope too: a script that returns a traversal without a terminal
+    // step (`g.v().merge_v(..)`) executes it while it is rendered, so outside the scope that
+    // execution ran under the process ceiling instead of the case's one.
+    graphersal::exec::memory_limit_scope(memory_limit, || {
+        match engine.eval_with_scope::<Dynamic>(&mut scope, script) {
+            Ok(value) => match graphersal::script::try_render_value(
+                value,
+                VisualizeFormat::Auto,
+                &RenderOptions::new(),
+            ) {
+                Ok(_) => Outcome::Ok,
+                Err(text) => Outcome::Error(text),
+            },
+            Err(err) => {
+                Outcome::Error(graphersal::script::map_eval_error(err, &limits).to_string())
+            }
+        }
+    })
 }
 
 /// Runs `script` on a fresh graph of `kind` in its own thread, under `catch_unwind` and a
@@ -1998,6 +2003,26 @@ fn unbounded_repeat_stops_at_the_memory_limit() {
                 "seed {seed} on {kind:?} took {elapsed:?}"
             );
         }
+    }
+}
+
+/// A script that returns a traversal without a terminal step executes it while its result is
+/// rendered: that execution stops at the case's `memory.limit` too. Rendered outside the case's
+/// scope it ran under the process ceiling, so only `traversal.max_materialized_bytes` (1 GiB)
+/// stopped it, at about 1.5 GB of live heap per case.
+#[test]
+fn a_rendered_traversal_stops_at_the_case_memory_limit() {
+    let script =
+        r#"g.with("bulk.merge", false).inject(1).repeat(__.constant([1, 2, 3, 4]).unfold())"#;
+    for kind in [GraphKind::Modern, GraphKind::Empty] {
+        let outcome = guarded(Duration::from_secs(60), move || {
+            run_inner_with(script, kind, 60_000, 64 * 1024 * 1024)
+        })
+        .unwrap_or_else(|outcome| outcome);
+        assert!(
+            matches!(&outcome, Outcome::Error(text) if text.contains("'memory.limit' exceeded")),
+            "{kind:?}: {script}\n  -> {outcome:?}"
+        );
     }
 }
 
