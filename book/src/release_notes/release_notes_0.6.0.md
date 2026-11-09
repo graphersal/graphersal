@@ -208,6 +208,10 @@ step. What 0.6.0 writes can stop an older version from using a store:
 - **Two new `--mcp-config` keys.** `saved_query_tools.write_note` (`"default"`, `"none"` or your
   own text with `{effects}`) sets the note at the end of a writing saved query's tool description;
   `server_title` sets `serverInfo.title` in `initialize` (until now always "Graphersal dev server").
+- **A served graph shuts down cleanly.** `graphersal_serve::start_job_ticker` returns a
+  `JobTicker` (`stop()`), neither the ticker nor the job workers keep the context alive, and
+  `Context::background_runs()` reports scheduled-job runs still in progress; `Context::call` and
+  `call_fallible` return `ServeError` (HTTP answers unchanged).
 - **Read-only serving has a reader pool**: stateless MCP session ids, per-client limits, parallel
   readers ([Read-only serving mode](../persistence/dev_server.md#read-only-serving-mode)).
 - **MCP usage statistics in memory**: `/api/mcp/stats`, a playground dialog and the opt-in tool
