@@ -2611,6 +2611,7 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
         uris,
         [
             "graphersal://schema",
+            "graphersal://schema-summary",
             "graphersal://statistics",
             "graphersal://dsl-reference",
             "graphersal://examples",

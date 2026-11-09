@@ -22,8 +22,15 @@ pub(crate) const RESOURCES: [Resource; 7] = [
         uri: "graphersal://schema",
         name: "schema",
         title: "Stored schema",
-        description: "The schema stored in the graph (graphersal-schema-v2 JSON), or null.",
+        description: "The stored schema JSON, or null: get_schema with format \"json\".",
         mime: "application/json",
+    },
+    Resource {
+        uri: "graphersal://schema-summary",
+        name: "schema-summary",
+        title: "Schema summary",
+        description: "The schema summary text: get_schema's default answer (format \"summary\").",
+        mime: "text/plain",
     },
     Resource {
         uri: "graphersal://statistics",
@@ -56,16 +63,6 @@ pub(crate) const RESOURCES: [Resource; 7] = [
                       parameters, language rhai or gql, status), as list_saved_queries returns \
                       them: check them before writing a new query.",
         mime: "application/json",
-    },
-    // Listed only when the configuration names it (`resources`), but always readable: the
-    // same text as the get_schema tool's default answer.
-    Resource {
-        uri: "graphersal://schema-summary",
-        name: "schema-summary",
-        title: "Schema summary",
-        description: "A compact map of the graph: labels with counts, keys with types, edge \
-                      label endpoint pairs, indexes, schema mode (the get_schema tool's answer).",
-        mime: "text/plain",
     },
     // Listed only when the configuration names it (`resources`), but always readable: the
     // short `gql` description points to it.

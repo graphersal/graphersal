@@ -784,9 +784,8 @@ cannot close the view; the user does (**Back to the live graph**).
 
 Resources (read with `resources/read`): `graphersal://gql-reference` (the GQL subset the
 `gql` tool supports, its write semantics and examples, about 13 KB; the `gql` description points
-to it), `graphersal://schema` (the stored schema), `graphersal://schema-summary` (the schema
-summary, the default answer of `get_schema`; readable always, listed only when the configuration's
-`resources` names it),
+to it), `graphersal://schema` (the stored schema JSON: `get_schema` with `format: "json"`),
+`graphersal://schema-summary` (the schema summary text: `get_schema`'s default answer),
 `graphersal://statistics`, `graphersal://dsl-reference` (every step and function of the language
 with its signatures, both spellings, a one-line description and a runnable example with its result,
 generated from the engine's function docs, about 55 KB),

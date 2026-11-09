@@ -512,7 +512,7 @@ fn the_gql_reference_is_listed_and_readable() {
         .iter()
         .filter_map(|r| r["uri"].as_str())
         .collect();
-    assert_eq!(uris.len(), 6);
+    assert_eq!(uris.len(), 7);
     assert!(uris.contains(&"graphersal://gql-reference"), "{uris:?}");
     let read = rpc(
         &mcp,
@@ -574,7 +574,7 @@ fn the_schema_tools_answer_the_summary_and_the_json_on_request() {
     assert!(inferred["edges"]["knows"].is_object(), "{inferred}");
     let wrong = call(&mcp, &host, "get_schema", json!({"format": "yaml"}));
     assert_eq!(wrong["isError"], true, "{wrong}");
-    // The same text as a resource (readable, listed only when configured).
+    // The same text as a resource (listed by default beside graphersal://schema).
     let read = rpc(
         &mcp,
         &host,
