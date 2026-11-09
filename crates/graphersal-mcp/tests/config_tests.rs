@@ -638,3 +638,116 @@ fn the_knowledge_graph_example_stays_within_its_budget() {
     );
     assert!(PromptCost::tokens(cost.total_chars()) <= 1_200, "{cost:?}");
 }
+
+#[test]
+fn the_write_note_of_saved_query_tools_is_configurable() {
+    let host = TestHost::modern();
+    let mcp = Mcp::new(false, None, false);
+    let script = "g.define_query(#{name: \"add_note\", description: \"Adds a note.\", params: \
+                  #{text: #{schema: #{type: \"string\"}}}, body: \"fn add_note(text) { \
+                  g.add_v(\\\"note\\\").property(\\\"text\\\", text) }\"}); 0";
+    let answer = call(&mcp, &host, "query", json!({"script": script}));
+    assert_eq!(answer["isError"], false, "{answer}");
+    let description = |config: &str| -> String {
+        let listed = Mcp::new(false, None, false)
+            .with_config(parse(config).expect("parses"))
+            .tool_listings(&host)
+            .expect("lists");
+        let tool = listed.iter().find(|t| t["name"] == "add_note").unwrap();
+        tool["description"].as_str().unwrap().to_string()
+    };
+    let default = description(r#"{"saved_query_tools": {}}"#);
+    assert!(
+        default.starts_with("Adds a note. Saved query that CHANGES DATA (")
+            && default.ends_with(
+                "); run it only when the user asked for that change. The same as \
+                 run_saved_query."
+            ),
+        "{default}"
+    );
+    assert_eq!(
+        description(r#"{"saved_query_tools": {"write_note": "default"}}"#),
+        default
+    );
+    assert_eq!(
+        description(r#"{"saved_query_tools": {"write_note": "none"}}"#),
+        "Adds a note."
+    );
+    let effects = default
+        .trim_start_matches("Adds a note. Saved query that CHANGES DATA (")
+        .split(");")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(!effects.is_empty(), "{default}");
+    assert_eq!(
+        description(r#"{"saved_query_tools": {"write_note": " Writes: {effects}. "}}"#),
+        format!("Adds a note. Writes: {effects}.")
+    );
+    // The note does not change a reading query, nor the configuration without the key.
+    assert_eq!(
+        parse(r#"{"saved_query_tools": {"write_note": "default"}}"#).unwrap(),
+        parse(r#"{"saved_query_tools": {}}"#).unwrap()
+    );
+    for bad in [
+        r#"{"saved_query_tools": {"write_note": ""}}"#,
+        r#"{"saved_query_tools": {"write_note": "  "}}"#,
+        r#"{"saved_query_tools": {"write_note": false}}"#,
+        r#"{"saved_query_tools": {"write_note": "a\nb"}}"#,
+    ] {
+        let err = parse(bad).unwrap_err();
+        assert!(err.contains("saved_query_tools.write_note"), "{bad}: {err}");
+    }
+    let long = format!(
+        r#"{{"saved_query_tools": {{"write_note": "{}"}}}}"#,
+        "x".repeat(1001)
+    );
+    assert!(parse(&long).unwrap_err().contains("write_note"));
+    let err = parse(r#"{"saved_query_tools": {"write_notes": "none"}}"#).unwrap_err();
+    assert!(
+        err.contains("did you mean \"saved_query_tools.write_note\""),
+        "{err}"
+    );
+}
+
+#[test]
+fn server_title_sets_the_initialize_title() {
+    let host = TestHost::modern();
+    let init = |mcp: &Mcp| {
+        rpc(
+            mcp,
+            &host,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18"}),
+        )
+    };
+    let plain = init(&Mcp::new(false, None, false));
+    assert_eq!(
+        plain["result"]["serverInfo"]["title"],
+        "Graphersal dev server"
+    );
+    // server_name alone keeps the built-in title.
+    let named = init(
+        &Mcp::new(false, None, false).with_config(parse(r#"{"server_name": "memory"}"#).unwrap()),
+    );
+    assert_eq!(named["result"]["serverInfo"]["name"], "memory");
+    assert_eq!(
+        named["result"]["serverInfo"]["title"],
+        "Graphersal dev server"
+    );
+    let titled = init(&Mcp::new(false, None, false).with_config(
+        parse(r#"{"server_name": "memory", "server_title": "Graphersal memory"}"#).unwrap(),
+    ));
+    assert_eq!(titled["result"]["serverInfo"]["name"], "memory");
+    assert_eq!(titled["result"]["serverInfo"]["title"], "Graphersal memory");
+    for bad in [
+        r#"{"server_title": ""}"#,
+        r#"{"server_title": 1}"#,
+        r#"{"server_title": "a\tb"}"#,
+    ] {
+        let err = parse(bad).unwrap_err();
+        assert!(err.contains("server_title"), "{bad}: {err}");
+    }
+    let err = parse(r#"{"server_titel": "x"}"#).unwrap_err();
+    assert!(err.contains("did you mean \"server_title\""), "{err}");
+}

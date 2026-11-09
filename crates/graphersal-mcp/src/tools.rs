@@ -4,7 +4,7 @@
 use graphersal::auth::AccessPolicy;
 use graphersal::exec::CancelToken;
 use graphersal_session::{RunOptions, Session};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::answer::{PAGING_ARGS, Page, compact, fit, page_of, paging_properties, query_text};
 use std::sync::Arc;
@@ -38,6 +38,9 @@ pub struct ToolCaller {
     /// The access policy of the caller's profile ([`Profile`]); `None`: the playground's
     /// authorizer of the mode.
     pub(crate) policy: Option<AccessPolicy>,
+    /// The bound saved-query parameters of the caller's profile
+    /// ([`Profile::with_bound_params`]).
+    pub(crate) bound: Map<String, Value>,
 }
 
 impl ToolCaller {
@@ -54,17 +57,19 @@ impl ToolCaller {
             config: Arc::new(McpConfig::default()),
             stats: None,
             policy: None,
+            bound: Map::new(),
         }
     }
 
-    /// Serves `profile`: its read-only flag, configuration, answer limit and access policy
-    /// (what [`ToolCaller::new`]'s `read_only`, [`ToolCaller::with_config`] and
-    /// [`ToolCaller::with_max_chars`] set before is replaced).
+    /// Serves `profile`: its read-only flag, configuration, answer limit, access policy and
+    /// bound saved-query parameters (what [`ToolCaller::new`]'s `read_only`,
+    /// [`ToolCaller::with_config`] and [`ToolCaller::with_max_chars`] set before is replaced).
     pub fn with_profile(mut self, profile: &Profile) -> Self {
         self.read_only = profile.read_only;
         self.config = profile.config.clone();
         self.max_chars = profile.max_chars();
         self.policy = profile.policy.clone();
+        self.bound = profile.bound_params.clone();
         self
     }
 
@@ -163,7 +168,8 @@ pub fn tool_listings(host: &dyn Host, caller: &ToolCaller) -> Result<Vec<Value>,
             client: &caller.client,
         };
         listed.extend(
-            query_tool_listings(&context, read_only, &caller.config).map_err(McpError::Failed)?,
+            query_tool_listings(&context, read_only, &caller.config, &caller.bound)
+                .map_err(McpError::Failed)?,
         );
     }
     Ok(listed)
@@ -237,7 +243,12 @@ fn call_tool_with(
                     }
                 }
                 call["params"] = Value::Object(params);
-                return Ok(outcome(run_saved_query(context, caller, &call)));
+                return Ok(outcome(run_saved_query_with(
+                    context,
+                    caller,
+                    &call,
+                    Some(entry),
+                )));
             }
         }
         let why = if !all_tools().iter().any(|t| t.name == name) {
@@ -835,25 +846,79 @@ pub(crate) fn run_saved_query(
     caller: &ToolCaller,
     args: &Value,
 ) -> Result<String, String> {
+    run_saved_query_with(context, caller, args, None)
+}
+
+/// [`run_saved_query`] with the query's session entry when the caller already read it. The
+/// caller's bound parameters ([`Profile::with_bound_params`]) replace the client's values of the
+/// parameters the query declares; the `call:` line shows the call without them.
+fn run_saved_query_with(
+    context: &Ctx<'_>,
+    caller: &ToolCaller,
+    args: &Value,
+    entry: Option<Value>,
+) -> Result<String, String> {
     let name = str_arg(args, "name").ok_or("missing argument \"name\" (list_saved_queries)")?;
-    let params = match args.get("params") {
+    let mut params = match args.get("params") {
         None | Some(Value::Null) => Value::Null,
         Some(Value::String(text)) => serde_json::from_str(text)
             .map_err(|err| format!("argument \"params\" is not a JSON object: {err}"))?,
         Some(other) => other.clone(),
     };
-    let script = graphersal_session::queries::query_call_text(name, &params)?;
-    if caller.read_only {
-        let wanted = name.to_string();
-        let entry = context.call(move |s| s.get_query(&wanted))??;
-        if entry["writes"].as_bool().unwrap_or(false) {
-            return Err(format!(
-                "the saved query \"{name}\" changes data, and this server is read-only for MCP"
-            ));
+    let entry = match entry {
+        Some(entry) => Some(entry),
+        None if caller.read_only || !caller.bound.is_empty() => {
+            let wanted = name.to_string();
+            Some(context.call(move |s| s.get_query(&wanted))??)
+        }
+        None => None,
+    };
+    let declared: Vec<&str> = entry
+        .as_ref()
+        .and_then(|entry| entry["params"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|param| param["name"].as_str())
+        .collect();
+    let bound: Vec<(&String, &Value)> = caller
+        .bound
+        .iter()
+        .filter(|(key, _)| declared.contains(&key.as_str()))
+        .collect();
+    if !bound.is_empty() {
+        // Only an object (or no parameters) takes bound values; anything else is refused by
+        // the call text below.
+        if params.is_null() {
+            params = Value::Object(Map::new());
+        }
+        if let Some(map) = params.as_object_mut() {
+            for (key, _) in &bound {
+                map.remove(key.as_str());
+            }
         }
     }
+    // The call as the client sees it (without the bound parameters), then the call run.
+    let shown = graphersal_session::queries::query_call_text(name, &params)?;
+    let script = if bound.is_empty() {
+        shown.clone()
+    } else {
+        if let Some(map) = params.as_object_mut() {
+            for (key, value) in bound {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        graphersal_session::queries::query_call_text(name, &params)?
+    };
+    if caller.read_only
+        && let Some(entry) = &entry
+        && entry["writes"].as_bool().unwrap_or(false)
+    {
+        return Err(format!(
+            "the saved query \"{name}\" changes data, and this server is read-only for MCP"
+        ));
+    }
     let page = page_of(args, caller)?;
-    let head = format!("call: {script}");
+    let head = format!("call: {shown}");
     run_result(run_script(
         context,
         caller,
@@ -866,10 +931,12 @@ pub(crate) fn run_saved_query(
 
 /// With `--mcp-query-tools`: every saved query as a tool listing (`inputSchema` from its
 /// parameters); a query named like a built-in tool is left out (`run_saved_query` reaches it).
+/// A parameter bound by the caller's profile (`bound`) is left out of the schema.
 pub(crate) fn query_tool_listings(
     context: &Ctx<'_>,
     read_only: bool,
     config: &McpConfig,
+    bound: &Map<String, Value>,
 ) -> Result<Vec<Value>, String> {
     let list = saved_queries(context, None, None, read_only)?;
     let paging = config.saved_query_paging();
@@ -887,10 +954,15 @@ pub(crate) fn query_tool_listings(
             }
             let mut properties = serde_json::Map::new();
             let mut required = Vec::new();
+            let mut declared = Vec::new();
             for param in entry["params"].as_array().into_iter().flatten() {
                 let Some(param_name) = param["name"].as_str() else {
                     continue;
                 };
+                declared.push(param_name);
+                if bound.contains_key(param_name) {
+                    continue;
+                }
                 let mut schema = param["schema"].clone();
                 if let (Some(default), Some(map)) = (param.get("default"), schema.as_object_mut()) {
                     map.insert("default".into(), default.clone());
@@ -904,7 +976,9 @@ pub(crate) fn query_tool_listings(
             // `paging_params: false`, the defaults apply).
             if paging {
                 for (key, value) in paging_properties("results") {
-                    properties.entry(key).or_insert(value);
+                    if !declared.contains(&key) {
+                        properties.entry(key).or_insert(value);
+                    }
                 }
             }
             let mut description = entry["description"]
@@ -921,11 +995,7 @@ pub(crate) fn query_tool_listings(
                 .filter_map(Value::as_str)
                 .collect();
             if writes {
-                description.push_str(&format!(
-                    " Saved query that CHANGES DATA ({}); run it only when the user asked for \
-                     that change. The same as run_saved_query.",
-                    effects.join(", ")
-                ));
+                description.push_str(&config.write_note().text(&effects));
             }
             if let Some(error) = entry["error"].as_str() {
                 description.push_str(&format!(" It cannot run: {error}"));

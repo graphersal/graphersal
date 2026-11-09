@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use graphersal::auth::{AccessPolicy, ActionKind, Authorizer, ResourceKind};
 use graphersal_session::{playground_authorizer, read_only_authorizer};
+use serde_json::{Map, Value};
 
 use crate::config::McpConfig;
 use crate::protocol::MAX_TEXT_CHARS;
@@ -33,6 +34,10 @@ use crate::protocol::MAX_TEXT_CHARS;
 /// definition's `Create`/`Update`/`Delete`); otherwise they are left out of `tools/list` and a
 /// call of one is refused like a tool the configuration does not offer.
 ///
+/// Bound saved-query parameters ([`Profile::with_bound_params`]) fix parameters for the
+/// connection: a host that serves one project (a user, a tenant) per connection binds the
+/// parameter that names it, and the agent can neither see nor change it.
+///
 /// [`Mcp`](crate::Mcp) has a default profile ([`Mcp::profile`](crate::Mcp::profile)); a host
 /// gives a connection another with [`Connection::with_profile`](crate::Connection::with_profile)
 /// or an HTTP request with [`Mcp::handle_with_profile`](crate::Mcp::handle_with_profile). A
@@ -43,6 +48,7 @@ pub struct Profile {
     pub(crate) config: Arc<McpConfig>,
     pub(crate) read_only: bool,
     pub(crate) policy: Option<AccessPolicy>,
+    pub(crate) bound_params: Map<String, Value>,
 }
 
 impl Profile {
@@ -53,6 +59,7 @@ impl Profile {
             config: Arc::new(McpConfig::default()),
             read_only,
             policy: None,
+            bound_params: Map::new(),
         }
     }
 
@@ -67,6 +74,35 @@ impl Profile {
     pub fn with_access_policy(mut self, policy: AccessPolicy) -> Self {
         self.policy = Some(policy);
         self
+    }
+
+    /// Binds saved-query parameters for this profile: name -> value, added to the parameters
+    /// bound before (a name bound again takes the new value).
+    ///
+    /// A bound parameter is left out of every saved-query tool's input schema in `tools/list`
+    /// (its `properties` and `required`), and a `tools/call` of a saved-query tool or of
+    /// `run_saved_query` gets it set to the bound value, whatever the client sent, for every
+    /// saved query that declares a parameter of that name (a query that does not declare it is
+    /// called unchanged). The answer's `call:` line shows the call without the bound
+    /// parameters. `list_saved_queries` and the resource `graphersal://saved-queries` still list
+    /// a query's declared parameters, bound ones included.
+    ///
+    /// ```
+    /// use graphersal_mcp::Profile;
+    /// use serde_json::json;
+    ///
+    /// let profile = Profile::new(false)
+    ///     .with_bound_params([("project".to_string(), json!("/work/a"))]);
+    /// assert_eq!(profile.bound_params()["project"], json!("/work/a"));
+    /// ```
+    pub fn with_bound_params(mut self, params: impl IntoIterator<Item = (String, Value)>) -> Self {
+        self.bound_params.extend(params);
+        self
+    }
+
+    /// The bound saved-query parameters ([`Profile::with_bound_params`]).
+    pub fn bound_params(&self) -> &Map<String, Value> {
+        &self.bound_params
     }
 
     /// Sets the largest tool answer in characters (`None`: [`MAX_TEXT_CHARS`]).

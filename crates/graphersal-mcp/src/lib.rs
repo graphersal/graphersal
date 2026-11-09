@@ -58,7 +58,9 @@
 //! ([`Connection::with_profile`]) or an HTTP request ([`Mcp::handle_with_profile`]), from what
 //! it knows (its handshake, the graph its resolver picked, the identity its request filter
 //! attached), never from anything the client says inside MCP. A connection keeps its profile
-//! for its life.
+//! for its life. A profile can also bind saved-query parameters ([`Profile::with_bound_params`]:
+//! the project or tenant of the connection), which the agent then neither sees in the
+//! saved-query tools' schemas nor can set in a call.
 //!
 //! Each [`Connection`] carries its own [`Host`] (and so its own graph and session), and an
 //! HTTP request is answered with the host the server passes; one [`Mcp`] serves them all, its
