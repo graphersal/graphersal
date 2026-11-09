@@ -786,7 +786,7 @@ mod store {
             let store = Store::create(&dir, options()).unwrap();
             let graph = store.graph();
             exec(
-                &graph,
+                graph,
                 r#"g.add_v("User").property(T.id, "1").property("email", "a@x").iterate();
                    g.add_v("User").property(T.id, "2").property("email", "b@x").iterate();
                    g.create_index(#{label: "User", key: "email", unique: true})"#,
@@ -794,12 +794,12 @@ mod store {
             store.checkpoint(None).unwrap();
             // After the checkpoint: a swap through an intermediate value, a refused write.
             exec(
-                &graph,
+                graph,
                 r#"g.v("1").property("email", "t@x").v("2").property("email", "a@x").v("1").property("email", "b@x").iterate()"#,
             );
             assert!(
                 run(
-                    &graph,
+                    graph,
                     r#"g.add_v("User").property("email", "a@x").iterate()"#
                 )
                 .is_err()
@@ -809,15 +809,15 @@ mod store {
         let store = Store::open(&dir, options()).unwrap();
         assert!(store.open_report().commits_replayed >= 1);
         let graph = store.graph();
-        check(&graph);
+        check(graph);
         assert_eq!(
-            ok(&graph, r#"g.v("1").values("email").next()"#).to_string(),
+            ok(graph, r#"g.v("1").values("email").next()"#).to_string(),
             "b@x"
         );
         let info = graph.read().property_indexes().unwrap();
         assert!(info[0].unique);
         violates(
-            &graph,
+            graph,
             r#"g.add_v("User").property("email", "a@x").iterate()"#,
             "User_email",
         );
@@ -830,7 +830,7 @@ mod store {
             let store = Store::create(&dir, options()).unwrap();
             let graph = store.graph();
             exec(
-                &graph,
+                graph,
                 r#"g.add_v("User").property(T.id, "1").property("email", "a@x").iterate();
                    g.add_v("User").property(T.id, "2").property("email", "a@x").iterate()"#,
             );
@@ -855,7 +855,7 @@ mod store {
             .unwrap()
             .unwrap();
         assert_eq!(report.values[0].examples, vec!["1", "2"]);
-        check(&graph);
+        check(graph);
         let records = store
             .journal()
             .unwrap()
@@ -878,12 +878,12 @@ mod store {
         assert!(field("recommendation").contains("g.drop_index(\"User_email\")"));
         // The fix: deduplicate, drop, create again.
         exec(
-            &graph,
+            graph,
             r#"g.v("2").property("email", "b@x").iterate();
                g.drop_index("User_email");
                g.create_index(#{label: "User", key: "email", unique: true})"#,
         );
         assert!(graph.read().property_indexes().unwrap()[0].unique);
-        check(&graph);
+        check(graph);
     }
 }

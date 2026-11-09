@@ -828,7 +828,7 @@ impl<S: GraphStorage> Graph<S> {
                 .catalog_change()
                 .map_err(GraphError::from)?
             {
-                CatalogChange::Set(definition) => definitions.push(definition),
+                CatalogChange::Set(definition) => definitions.push(*definition),
                 // An index name may be held by either index kind (a removal of a name not
                 // stored is skipped).
                 CatalogChange::Remove(kind, name) if kind.is_property_index() => {

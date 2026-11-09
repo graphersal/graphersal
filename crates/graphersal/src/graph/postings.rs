@@ -50,7 +50,7 @@ pub(crate) enum Removed {
     /// The slot was not there.
     Absent,
     /// The slot was removed, others remain.
-    Removed,
+    Remaining,
     /// The slot was the only one: the caller drops the key.
     Emptied,
 }
@@ -63,9 +63,7 @@ impl RunsStore {
                 if only == slot {
                     return false;
                 }
-                let mut run = Vec::with_capacity(2);
-                run.push(only.min(slot));
-                run.push(only.max(slot));
+                let run = vec![only.min(slot), only.max(slot)];
                 *postings = Postings::Many(self.allocate(Runs::Flat(run)));
                 true
             }
@@ -99,7 +97,7 @@ impl RunsStore {
                         *self = RunsStore::default();
                     }
                 }
-                Removed::Removed
+                Removed::Remaining
             }
         }
     }
@@ -340,7 +338,7 @@ mod tests {
         check(&store, &postings);
         assert_eq!(collect(&store, &postings), vec![3, 5]);
         assert_eq!(store.remove(&mut postings, 4), Removed::Absent);
-        assert_eq!(store.remove(&mut postings, 5), Removed::Removed);
+        assert_eq!(store.remove(&mut postings, 5), Removed::Remaining);
         assert_eq!(postings, Postings::One(3));
         assert_eq!(store.table_bytes(), 0, "no run left: no table either");
         assert_eq!(store.remove(&mut postings, 3), Removed::Emptied);
@@ -350,9 +348,9 @@ mod tests {
         let mut postings = Postings::One(10);
         assert!(store.insert(&mut postings, 11));
         assert_eq!((other, postings), (Postings::Many(0), Postings::Many(1)));
-        assert_eq!(store.remove(&mut other, 2), Removed::Removed);
+        assert_eq!(store.remove(&mut other, 2), Removed::Remaining);
         assert_eq!(store.free, vec![0]);
-        assert_eq!(store.remove(&mut postings, 11), Removed::Removed);
+        assert_eq!(store.remove(&mut postings, 11), Removed::Remaining);
         assert_eq!(store.table_bytes(), 0);
         // Past one chunk, descending (splits) and ascending (appends).
         let mut postings = Postings::One(u32::MAX);
@@ -380,7 +378,7 @@ mod tests {
         assert!(shrunk.heap_bytes(&postings) <= store.heap_bytes(&postings));
         // Remove all but one, checking on the way.
         for (n, slot) in expected.iter().skip(1).enumerate() {
-            assert_eq!(store.remove(&mut postings, *slot), Removed::Removed);
+            assert_eq!(store.remove(&mut postings, *slot), Removed::Remaining);
             if n % 997 == 0 {
                 check(&store, &postings);
             }

@@ -1253,13 +1253,14 @@ type KeySlice<'a> = std::slice::Iter<'a, CompactString>;
 
 /// The entries of a [`PropertyMap`] in order ([`PropertyMap::iter`]).
 #[derive(Clone)]
-pub struct Iter<'a>(
-    Either<
-        indexmap::map::Iter<'a, CompactString, ElementProperty>,
-        std::iter::Zip<KeySlice<'a>, std::slice::Iter<'a, ElementProperty>>,
-        std::iter::Zip<KeySlice<'a>, CodedValues<'a>>,
-    >,
-);
+pub struct Iter<'a>(IterRepr<'a>);
+
+/// The representation-specific iterator behind [`Iter`].
+type IterRepr<'a> = Either<
+    indexmap::map::Iter<'a, CompactString, ElementProperty>,
+    std::iter::Zip<KeySlice<'a>, std::slice::Iter<'a, ElementProperty>>,
+    std::iter::Zip<KeySlice<'a>, CodedValues<'a>>,
+>;
 wrap_iter!(Iter<'a>, (&'a CompactString, &'a ElementProperty));
 
 impl fmt::Debug for Iter<'_> {
@@ -1269,13 +1270,14 @@ impl fmt::Debug for Iter<'_> {
 }
 
 /// The entries of a [`PropertyMap`] in order, values mutable ([`PropertyMap::iter_mut`]).
-pub struct IterMut<'a>(
-    Either<
-        indexmap::map::IterMut<'a, CompactString, ElementProperty>,
-        std::iter::Zip<KeySlice<'a>, std::slice::IterMut<'a, ElementProperty>>,
-        std::iter::Empty<(&'a CompactString, &'a mut ElementProperty)>,
-    >,
-);
+pub struct IterMut<'a>(IterMutRepr<'a>);
+
+/// The representation-specific iterator behind [`IterMut`].
+type IterMutRepr<'a> = Either<
+    indexmap::map::IterMut<'a, CompactString, ElementProperty>,
+    std::iter::Zip<KeySlice<'a>, std::slice::IterMut<'a, ElementProperty>>,
+    std::iter::Empty<(&'a CompactString, &'a mut ElementProperty)>,
+>;
 wrap_iter!(IterMut<'a>, (&'a CompactString, &'a mut ElementProperty));
 
 impl fmt::Debug for IterMut<'_> {

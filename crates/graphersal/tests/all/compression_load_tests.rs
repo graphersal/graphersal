@@ -54,7 +54,7 @@ fn item(i: usize) -> PropertyMap {
         ("kind", ElementProperty::from(["a", "bb", "ccc", ""][i % 4])),
         ("n", ElementProperty::from((i % 5) as i64)),
         ("f", ElementProperty::from([1.0f64, 2.5, 1.0][i % 3])),
-        ("flag", ElementProperty::Boolean(i % 2 == 0)),
+        ("flag", ElementProperty::Boolean(i.is_multiple_of(2))),
         (
             "day",
             temporal(TemporalKind::Date, ["2024-01-01", "2024-02-29"][i % 2]),
@@ -75,7 +75,7 @@ fn item(i: usize) -> PropertyMap {
         ),
         (
             "meta",
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 object(vec![("a", 1i64.into()), ("b", "two".into())])
             } else {
                 object(vec![("b", "two".into()), ("a", 1i64.into())])
@@ -88,7 +88,7 @@ fn item(i: usize) -> PropertyMap {
         ("nothing", ElementProperty::Null),
         (
             "note",
-            if i % 3 == 0 {
+            if i.is_multiple_of(3) {
                 ElementProperty::from("short")
             } else {
                 ElementProperty::from(format!(

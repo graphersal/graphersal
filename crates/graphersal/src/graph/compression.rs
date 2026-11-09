@@ -2412,9 +2412,12 @@ impl TraversalGraph {
                     }
                 }
             }
-            let joined = handles
-                .into_iter()
-                .fold(true, |all, handle| handle.join().is_ok() && all);
+            // Every handle is joined, also after a failed one: a panicked thread left unjoined
+            // would make `scope` panic.
+            let mut joined = true;
+            for handle in handles {
+                joined &= handle.join().is_ok();
+            }
             started && joined
         })
     }

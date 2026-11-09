@@ -1937,7 +1937,7 @@ mod v040_checkpointed {
         let images = crash_images(&base, |dir| Store::upgrade_in_place(&dir).is_ok());
         assert!(!images.is_empty());
         for (step, image) in images.iter().enumerate() {
-            match Store::open(&image.deep_copy(), StoreOptions::new()) {
+            match Store::open(image.deep_copy(), StoreOptions::new()) {
                 Err(PersistError::OlderFormat { found: 3, .. }) => {}
                 Ok(store) => {
                     let last = store.graph().read().last_commit_seq();
@@ -1977,7 +1977,7 @@ mod v040_checkpointed {
         let images = crash_images(&base, |dir| import(dir).is_ok());
         assert!(!images.is_empty());
         for (step, image) in images.iter().enumerate() {
-            match Store::open(&image.deep_copy(), StoreOptions::new()) {
+            match Store::open(image.deep_copy(), StoreOptions::new()) {
                 Err(PersistError::Store {
                     cause: StoreFailure::ModelUnavailable,
                     ..

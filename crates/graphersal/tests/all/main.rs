@@ -12,6 +12,11 @@
 //! ceiling uses the thread-scoped `graphersal::exec::memory_limit_scope`. Per-file feature gates
 //! (`#![cfg(feature = ..)]`) stay at the top of the module files themselves.
 
+#![allow(
+    clippy::mutable_key_type,
+    reason = "`ElementProperty` keys reach a `ValueDictionary` (`OnceLock` slots, a `Mutex` for appends) through a coded `PropertyMap`; `Hash`/`Eq` read the decoded values and a slot is set once and never changes, so a key's hash is stable"
+)]
+
 mod add_edge_endpoint_tests;
 mod add_element_parameters_tests;
 mod add_property_fold_tests;
