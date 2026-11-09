@@ -21,11 +21,11 @@ def test_an_each_index_and_a_chain_are_created_listed_and_served():
         graph.execute('g.v().has("tags", __.unfold().is("go")).values("name").to_list()')
     ) == ["marko", "vadas"]
     profile = graph.execute('g.v().has("tags", __.unfold().is("go")).profile().to_string()')
-    assert "[index: vertex tags each, any label]" in profile
+    assert "[index: vertex tags each, any label, exact]" in profile
     lowered = graph.execute(
         'g.v().has_label("person").has("tags", __.unfold().to_lower().is("rust")).profile().to_string()'
     )
-    assert "[index: vertex person.tags each to_lower]" in lowered
+    assert "[index: vertex person.tags each to_lower, exact]" in lowered
 
 
 def test_a_chain_in_the_wrong_order_is_refused():

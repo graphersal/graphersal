@@ -69,7 +69,9 @@ pub(super) fn route(
     let slice = |job: SliceJob| {
         let cancel = CancelToken::new();
         let _run = context.register_run(None, cancel.clone(), RunKind::Layout, None)?;
-        context.call_fallible(move |s| job(s, &cancel))
+        context
+            .call_fallible(move |s| job(s, &cancel))
+            .map_err(HttpError::from)
     };
     match endpoint {
         "layout" => {

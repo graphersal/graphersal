@@ -958,7 +958,7 @@ fn graph_summary_now(context: &Context) -> Result<String, String> {
                 s.schema_summary_text(&Value::Null),
             )
         })
-        .map_err(|err| err.message().to_string())?;
+        .map_err(|err| err.to_string())?;
     let mut text = graph_summary(
         &info.map_err(|err| err.to_string())?,
         &statistics.map_err(|err| err.to_string())?,

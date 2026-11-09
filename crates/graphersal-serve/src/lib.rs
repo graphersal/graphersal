@@ -2,8 +2,10 @@
 //! Graphersal's servers for ONE graph, without an HTTP library:
 //!
 //! - the hosted graph runtime: one [`graphersal_session::Session`] on its session thread with
-//!   its job queue ([`spawn_session`], [`Context::call`]), the job workers of the scheduled jobs
-//!   ([`start_job_ticker`]), the run registry with the client-scoped cancel ([`Runs`]);
+//!   its job queue ([`spawn_session`], [`Context::call`]; its failures are [`ServeError`]s, an
+//!   HTTP host answers them through `From<ServeError> for HttpError`), the job workers of the
+//!   scheduled jobs ([`start_job_ticker`], stopped through its [`JobTicker`] or when the last
+//!   context is gone), the run registry with the client-scoped cancel ([`Runs`]);
 //! - the playground HTTP API as an HTTP-library-free boundary: the host converts each request
 //!   of its own server into a [`Request`], calls [`Server::handle`] (or [`handle`] with one
 //!   context), and writes the [`Response`] back;
@@ -28,7 +30,7 @@
 //! | Run observer + cancel handle: every run's start and end, with a handle that cancels it | none | [`RunObserver`], [`Runs::with_observer`] |
 //! | Request filter: sees each request before routing, refuses it or attaches an identity | none beyond the loopback/`Host`/`Origin` checks, which always run first | [`RequestFilter`], [`ContextBuilder::filter`] ([`HostCheck`]) |
 //! | Extra routes: the `/api/` endpoints the core does not know | `404` | [`Hooks::route`], [`ContextBuilder::hooks`] |
-//! | Activity / lifecycle hooks: ready, stopping, last activity | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] |
+//! | Activity / lifecycle hooks: ready, stopping, last activity, background work | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] (requests), [`Context::background_runs`] (scheduled-job runs on the job workers) |
 //! | Executor policy: how jobs reach the session | one session thread, unbounded queue | [`Runner`], [`JobQueue`] |
 //!
 //! With the feature `mcp`, one `graphersal_mcp::Mcp` endpoint can serve several graphs: each
@@ -69,8 +71,9 @@ mod extension_tests;
 
 pub use api::{SERVER_ID, handle};
 pub use context::{
-    Busy, BusyReason, Context, ContextBuilder, Hooks, Job, JobQueue, RequestFilter, Runner,
-    SCHEDULED_JOBS_REFUSAL, SESSION_STACK_BYTES, ServeError, spawn_session, start_job_ticker,
+    Busy, BusyReason, Context, ContextBuilder, Hooks, Job, JobQueue, JobTicker, RequestFilter,
+    Runner, SCHEDULED_JOBS_REFUSAL, SESSION_STACK_BYTES, ServeError, spawn_session,
+    start_job_ticker,
 };
 pub use host_check::{Exposure, HostCheck, HostRules};
 pub use http::{HttpError, MAX_BODY_BYTES, Method, Request, Response};
