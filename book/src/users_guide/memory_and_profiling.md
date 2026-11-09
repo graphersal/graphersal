@@ -190,7 +190,8 @@ The answer is a map:
   heap bytes (`max_bytes` 0 = no heap, then 32 B up to 1 MiB, `null` = above 1 MiB; each bucket
   with `values` and `bytes`, so "how many bytes sit in values above 2 KiB" is a sum);
   `max_value_bytes`; `strings` (`values`, `inline_values`, `heap_bytes`, `plain_bytes` and a
-  `distinct_estimate` from a HyperLogLog sketch, about 6.5 % standard error); `vectors` per element
+  `distinct_estimate` from a HyperLogLog sketch, exact up to 32 distinct texts, above that about
+  6.5 % standard error); `vectors` per element
   kind and dimension; `compressed_*` and `deduped_*` values with the `rules` and `indexes` on the
   key. `leaf` is `false` when some value is an object: the row then aggregates the nested keys
   (`nested_values` counts them). `path` is a jpath (`$.name`); rows are top-level keys today.
