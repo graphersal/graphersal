@@ -193,11 +193,7 @@ impl RecommendedAction {
                 }
                 fields.push(format!("key: {}", text(key)));
                 if let Some(transform) = transform {
-                    let names: Vec<String> = transform
-                        .names()
-                        .into_iter()
-                        .map(|name| text(name))
-                        .collect();
+                    let names: Vec<String> = transform.names().into_iter().map(text).collect();
                     fields.push(match names.as_slice() {
                         [one] => format!("transform: {one}"),
                         many => format!("transform: [{}]", many.join(", ")),

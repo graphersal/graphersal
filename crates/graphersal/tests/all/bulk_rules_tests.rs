@@ -797,7 +797,7 @@ fn applying_recommendations_is_all_or_nothing() {
         .to_string();
     assert!(err.contains(name.as_str()), "{err}");
     assert_eq!(graph.read().last_commit_seq(), seq);
-    assert_eq!(rule_names(&graph.read()), [name.clone()]);
+    assert_eq!(rule_names(&graph.read()), [name.as_str()]);
     invariant(&graph.read());
     // No ids: nothing to do, no commit.
     let none: [&str; 0] = [];

@@ -81,7 +81,8 @@ fn a_repeated_nested_object_costs_its_values_only() {
 fn queries_over_nested_objects_return_what_plain_values_give() {
     let graph = methods(200, 7);
     let g = || graph.traversal();
-    let wanted = hashes("ACM:3", &format!("{:016x}", 10 % 13));
+    // Vertex 10 of `methods`: its hash is `i % 13` = 10.
+    let wanted = hashes("ACM:3", &format!("{:016x}", 10));
     assert_eq!(
         g().v(None)
             .has("_hashes", wanted.clone())

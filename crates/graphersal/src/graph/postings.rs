@@ -63,9 +63,7 @@ impl RunsStore {
                 if only == slot {
                     return false;
                 }
-                let mut run = Vec::with_capacity(2);
-                run.push(only.min(slot));
-                run.push(only.max(slot));
+                let run = vec![only.min(slot), only.max(slot)];
                 *postings = Postings::Many(self.allocate(Runs::Flat(run)));
                 true
             }

@@ -56,7 +56,7 @@ fn item(i: usize) -> PropertyMap {
         ("n", ElementProperty::from((i % 5) as i64)),
         // 1.0 is not the int 1: identity keeps the type.
         ("f", ElementProperty::from([1.0f64, 2.5, 1.0][i % 3])),
-        ("flag", ElementProperty::Boolean(i % 2 == 0)),
+        ("flag", ElementProperty::Boolean(i.is_multiple_of(2))),
         (
             "day",
             temporal(TemporalKind::Date, ["2024-01-01", "2024-02-29"][i % 2]),
@@ -79,7 +79,7 @@ fn item(i: usize) -> PropertyMap {
         // The same entries in another order: two values.
         (
             "meta",
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 object(vec![("a", 1i64.into()), ("b", "two".into())])
             } else {
                 object(vec![("b", "two".into()), ("a", 1i64.into())])
@@ -298,8 +298,8 @@ fn writes_of_every_kind_keep_the_rows_coded_and_the_content_exact() {
         r#"g.v("i15").drop().iterate()"#,
         r#"g.e("r2").drop().iterate()"#,
     ] {
-        eval_value(shared_coded.clone(), script).unwrap();
-        eval_value(shared_plain.clone(), script).unwrap();
+        let _ = eval_value(shared_coded.clone(), script).unwrap();
+        let _ = eval_value(shared_plain.clone(), script).unwrap();
         invariant(&shared_coded.read());
         assert_same(
             &exact(&shared_coded.read()),
@@ -371,7 +371,7 @@ fn change_sets_carry_plain_values_before_and_after() {
         r#"g.v("i4").drop().iterate()"#,
     ] {
         let shared = shared(std::mem::take(&mut graph));
-        eval_value(shared.clone(), script).unwrap();
+        let _ = eval_value(shared.clone(), script).unwrap();
         graph = Arc::try_unwrap(shared).ok().unwrap().into_inner();
     }
     let seen = seen.lock().unwrap();
@@ -419,7 +419,7 @@ fn define_drop_and_recompress_code_and_uncode_the_rows() {
     // Overwrites leave unused entries; recompress rebuilds the dictionary from the rows.
     let shared = shared(graph);
     for i in 0..20 {
-        eval_value(
+        let _ = eval_value(
             shared.clone(),
             &format!(
                 r#"g.v("i1").property("note", "a temporary long note number {i} of i1").iterate()"#
@@ -475,13 +475,13 @@ fn a_min_bytes_rule_keeps_short_strings_in_the_row() {
     invariant(&graph);
     // A long value written to a short-string key is coded, a short one written back is not.
     let shared = shared(graph);
-    eval_value(
+    let _ = eval_value(
         shared.clone(),
         r#"g.v("i1").property("kind", "a kind that is long enough to code").iterate()"#,
     )
     .unwrap();
     assert!(coded(&shared.read(), "i1", "kind"));
-    eval_value(
+    let _ = eval_value(
         shared.clone(),
         r#"g.v("i1").property("kind", "a").iterate()"#,
     )
@@ -534,7 +534,7 @@ fn a_rule_with_min_bytes_zero_is_stored_as_it_is() {
 fn overwrites_in_many_units_keep_the_dictionary_bounded() {
     let graph = shared(coded_graph(10));
     for i in 0..1500 {
-        eval_value(
+        let _ = eval_value(
             graph.clone(),
             &format!(r#"g.v("i2").property("n", {})"#, 1000 + i),
         )
@@ -666,8 +666,8 @@ fn a_property_index_on_a_coded_key_serves_and_follows_writes() {
         r#"g.v("i2").property("kind", "zzz").iterate()"#,
         r#"g.v("i3").properties("kind").drop().iterate()"#,
     ] {
-        eval_value(graph.clone(), script).unwrap();
-        eval_value(plain.clone(), script).unwrap();
+        let _ = eval_value(graph.clone(), script).unwrap();
+        let _ = eval_value(plain.clone(), script).unwrap();
     }
     for kind in ["a", "bb", "zzz", ""] {
         let query =
@@ -739,7 +739,7 @@ fn the_advisor_recommends_dedup_for_repeated_values_of_any_type() {
     assert!(!ids.iter().any(|id| id.ends_with(":serial")), "{ids:?}");
     // Applying it saves what it promised (within 2 %).
     let before = graph.read().memory_usage().unwrap().unwrap().property_bytes;
-    eval_value(Arc::new(graph), "1").unwrap();
+    let _ = eval_value(Arc::new(graph), "1").unwrap();
     let mut applied = repeated_graph(50_000);
     applied
         .traversal_mut()
