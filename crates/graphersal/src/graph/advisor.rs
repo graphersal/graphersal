@@ -236,7 +236,7 @@ impl RecommendedAction {
 pub(crate) enum CatalogChange {
     /// Store this new definition (an index under its default name, a rule under the
     /// suggested name).
-    Set(crate::graph::definition::Definition),
+    Set(Box<crate::graph::definition::Definition>),
     /// Remove the definition of this kind and name.
     Remove(crate::graph::definition::DefinitionKind, String),
 }
@@ -265,7 +265,10 @@ impl RecommendedAction {
                     }
                 }
                 .with_transform(transform.clone());
-                CatalogChange::Set(Definition::property_index(index.default_name(), index))
+                CatalogChange::Set(Box::new(Definition::property_index(
+                    index.default_name(),
+                    index,
+                )))
             }
             RecommendedAction::DropIndex { name } => {
                 CatalogChange::Remove(DefinitionKind::PROPERTY_INDEX, name.clone())
@@ -285,7 +288,7 @@ impl RecommendedAction {
                 .with_codec(candidate.codec)
                 .with_min_bytes(candidate.min_bytes)
                 .with_dictionary(candidate.dictionary);
-                CatalogChange::Set(Definition::compression(name.as_str(), rule))
+                CatalogChange::Set(Box::new(Definition::compression(name.as_str(), rule)))
             }
             RecommendedAction::DropCompression { name } => {
                 CatalogChange::Remove(DefinitionKind::COMPRESSION, name.clone())

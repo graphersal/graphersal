@@ -14,6 +14,10 @@
 
 // Rule 11: every public item has a `///` doc comment (denied in CI through `-D warnings`).
 #![warn(missing_docs)]
+#![allow(
+    clippy::mutable_key_type,
+    reason = "`ElementProperty` keys reach a `ValueDictionary` (`OnceLock` slots, a `Mutex` for appends) through a coded `PropertyMap`; `Hash`/`Eq` read the decoded values and a slot is set once and never changes, so a key's hash is stable"
+)]
 
 use core::fmt;
 

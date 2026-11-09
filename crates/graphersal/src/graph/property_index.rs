@@ -2074,7 +2074,7 @@ impl IndexState {
         let before = self.runs.heap_bytes(postings);
         match self.runs.remove(postings, slot) {
             Removed::Absent => return,
-            Removed::Removed => {
+            Removed::Remaining => {
                 let after = self.runs.heap_bytes(postings);
                 self.heap = (self.heap + after).saturating_sub(before);
             }
