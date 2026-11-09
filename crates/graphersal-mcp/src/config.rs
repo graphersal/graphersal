@@ -20,8 +20,40 @@ pub const MAX_INSTRUCTIONS_CHARS: usize = 20_000;
 /// The smallest answer limit in characters (room for a status line, some results and notes).
 pub const MIN_ANSWER_CHARS: usize = 1000;
 
-/// The longest `server_name`.
+/// The longest `server_name` and `server_title`.
 const MAX_SERVER_NAME_CHARS: usize = 100;
+
+/// The longest custom `saved_query_tools.write_note`.
+const MAX_WRITE_NOTE_CHARS: usize = 1000;
+
+/// The note a writing saved query's tool description ends with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WriteNote {
+    /// "Saved query that CHANGES DATA (<effects>); run it only when the user asked for that
+    /// change. The same as run_saved_query."
+    #[default]
+    Default,
+    /// No note.
+    None,
+    /// The operator's text, `{effects}` replaced by the query's effect texts.
+    Custom(String),
+}
+
+impl WriteNote {
+    /// The text appended to the description of a query that writes `effects` (with its leading
+    /// space; empty for [`WriteNote::None`]).
+    pub(crate) fn text(&self, effects: &[&str]) -> String {
+        match self {
+            Self::Default => format!(
+                " Saved query that CHANGES DATA ({}); run it only when the user asked for that \
+                 change. The same as run_saved_query.",
+                effects.join(", ")
+            ),
+            Self::None => String::new(),
+            Self::Custom(text) => format!(" {}", text.replace("{effects}", &effects.join(", "))),
+        }
+    }
+}
 
 /// What the endpoint answers `initialize` as its instructions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +79,8 @@ pub(crate) struct SavedQueryTools {
     /// Whether the tools take `offset`/`max_rows`/`max_items` (default no: the defaults apply
     /// and a call may still pass them).
     paging_params: bool,
+    /// The note a writing query's description ends with.
+    pub(crate) write_note: WriteNote,
 }
 
 impl SavedQueryTools {
@@ -57,6 +91,7 @@ impl SavedQueryTools {
             names: None,
             exclude: Vec::new(),
             paging_params: false,
+            write_note: WriteNote::Default,
         }
     }
 
@@ -91,6 +126,7 @@ impl SavedQueryTools {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpConfig {
     pub(crate) server_name: Option<String>,
+    pub(crate) server_title: Option<String>,
     pub(crate) instructions: Instructions,
     /// Built-in tools offered (`None`: all of the mode).
     pub(crate) include: Option<Vec<String>>,
@@ -140,8 +176,9 @@ pub(crate) const DEFAULT_RESOURCES: [&str; 7] = [
     "gql-reference",
 ];
 
-const TOP_KEYS: [&str; 7] = [
+const TOP_KEYS: [&str; 8] = [
     "server_name",
+    "server_title",
     "instructions",
     "descriptions",
     "tools",
@@ -168,18 +205,10 @@ impl McpConfig {
         check_keys(&top, &TOP_KEYS, "")?;
         let mut config = McpConfig::default();
         if let Some(value) = top.get("server_name") {
-            let name = string(value, "server_name")?;
-            let chars = name.chars().count();
-            if name.trim().is_empty()
-                || chars > MAX_SERVER_NAME_CHARS
-                || name.chars().any(char::is_control)
-            {
-                return Err(McpConfigError::new(format!(
-                    "\"server_name\" must be 1..{MAX_SERVER_NAME_CHARS} characters without \
-                     control characters"
-                )));
-            }
-            config.server_name = Some(name);
+            config.server_name = Some(server_label(value, "server_name")?);
+        }
+        if let Some(value) = top.get("server_title") {
+            config.server_title = Some(server_label(value, "server_title")?);
         }
         if let Some(value) = top.get("instructions") {
             config.instructions = parse_instructions(value, read_file)?;
@@ -339,6 +368,13 @@ impl McpConfig {
             Some(names) => names.iter().any(|n| n == name),
             None => DEFAULT_RESOURCES.contains(&name),
         }
+    }
+
+    /// The note a writing saved query's tool description ends with.
+    pub(crate) fn write_note(&self) -> &WriteNote {
+        self.saved_query_tools
+            .as_ref()
+            .map_or(&WriteNote::Default, |s| &s.write_note)
     }
 
     /// Whether saved-query tools take the paging arguments.
@@ -505,12 +541,13 @@ fn parse_saved_query_tools(value: &Value) -> Result<SavedQueryTools, McpConfigEr
     let Value::Object(map) = value else {
         return Err(McpConfigError::new(
             "\"saved_query_tools\" must be an object: {\"folders\": [..], \"names\": [..], \
-             \"exclude\": [..], \"paging_params\": false} ({} = every saved query)",
+             \"exclude\": [..], \"paging_params\": false, \"write_note\": \"default\"} ({} = \
+             every saved query)",
         ));
     };
     check_keys(
         map,
-        &["folders", "names", "exclude", "paging_params"],
+        &["folders", "names", "exclude", "paging_params", "write_note"],
         "saved_query_tools.",
     )?;
     let list = |key: &str| -> Result<Option<Vec<String>>, McpConfigError> {
@@ -527,12 +564,53 @@ fn parse_saved_query_tools(value: &Value) -> Result<SavedQueryTools, McpConfigEr
             ));
         }
     };
+    let write_note = match map.get("write_note") {
+        None => WriteNote::Default,
+        Some(value) => {
+            let key = "saved_query_tools.write_note";
+            let text = string(value, key)?;
+            match text.as_str() {
+                "default" => WriteNote::Default,
+                "none" => WriteNote::None,
+                _ => {
+                    let text = text.trim().to_string();
+                    let chars = text.chars().count();
+                    if text.is_empty()
+                        || chars > MAX_WRITE_NOTE_CHARS
+                        || text.chars().any(char::is_control)
+                    {
+                        return Err(McpConfigError::new(format!(
+                            "\"{key}\" is \"default\", \"none\" or the note's text (1..\
+                             {MAX_WRITE_NOTE_CHARS} characters without control characters; \
+                             {{effects}} stands for what the query changes)"
+                        )));
+                    }
+                    WriteNote::Custom(text)
+                }
+            }
+        }
+    };
     Ok(SavedQueryTools {
         folders: list("folders")?,
         names: list("names")?,
         exclude: list("exclude")?.unwrap_or_default(),
         paging_params,
+        write_note,
     })
+}
+
+/// `server_name` / `server_title`: 1..[`MAX_SERVER_NAME_CHARS`] characters, not blank, no
+/// control characters.
+fn server_label(value: &Value, key: &str) -> Result<String, McpConfigError> {
+    let name = string(value, key)?;
+    let chars = name.chars().count();
+    if name.trim().is_empty() || chars > MAX_SERVER_NAME_CHARS || name.chars().any(char::is_control)
+    {
+        return Err(McpConfigError::new(format!(
+            "\"{key}\" must be 1..{MAX_SERVER_NAME_CHARS} characters without control characters"
+        )));
+    }
+    Ok(name)
 }
 
 /// Every key of `map` is in `known` or starts with `_`; `prefix` names the object.

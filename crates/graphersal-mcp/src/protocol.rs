@@ -595,7 +595,7 @@ impl Mcp {
                 },
                 "serverInfo": {
                     "name": peer.profile.config.server_name.as_deref().unwrap_or(SERVER_NAME),
-                    "title": SERVER_TITLE,
+                    "title": peer.profile.config.server_title.as_deref().unwrap_or(SERVER_TITLE),
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "instructions": instructions,

@@ -607,12 +607,13 @@ graphersal --graph kb.gstore --read-only --server --mcp --mcp-config mcp-kb-read
 | Key | Meaning | Default |
 |---|---|---|
 | `server_name` | The `serverInfo.name` of `initialize` (1 to 100 characters) | `graphersal-dev` |
+| `server_title` | The `serverInfo.title` of `initialize` (1 to 100 characters), the name a client shows | `Graphersal dev server` |
 | `instructions` | `{"mode": "builtin" \| "append" \| "replace", "text": ".."}` or `{"mode": .., "file": "notes.md"}` (UTF-8, 1 to 20000 characters): `builtin` the built-in text (+ the read-only note), `append` the built-in text with the operator's text under "Notes from the operator of this server about this graph:" (what `--mcp-instructions` does), `replace` the operator's text only | `builtin` |
 | `descriptions` | Kept so that older files still load: `short`, the only style, changes nothing. `full` (the long descriptions of 0.5.2 and before) was removed: an A/B test of Claude Code with Sonnet on read and write tasks measured the same accuracy, fewer failed calls (above all fewer calls of a tool by its bare name) and about 20 to 27 K fewer input tokens per task with the short texts; a file that still says `full` is refused at start with a message (remove the key) | `short` |
 | `tools.include` | The built-in tools offered (in their usual order); a tool not offered is not callable either | every tool of the mode but `usage_statistics` (offered only when named here) |
 | `tools.exclude` | Built-in tools left out | none |
 | `tools.overrides` | `{"<tool>": {"description": ".."}}`: the operator's description instead of the built-in one (the input schema never changes) | none |
-| `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: true` lists `offset`/`max_rows`/`max_items` in their schemas (by default they are left out: the defaults apply and a call may still pass them). The description is the query's own text (a query that writes adds what it changes). `run_saved_query` still reaches every saved query | no saved-query tools |
+| `saved_query_tools` | Saved queries as tools of their own: `{}` = every saved query (what `--mcp-query-tools` does), `folders` (each with its subfolders), `names`, `exclude` (names); `paging_params: true` lists `offset`/`max_rows`/`max_items` in their schemas (by default they are left out: the defaults apply and a call may still pass them). The description is the query's own text; a query that writes adds a note with what it changes, which `write_note` sets: `"default"` (the built-in note: "Saved query that CHANGES DATA (...); run it only when the user asked for that change. The same as run_saved_query."), `"none"` (no note; the tool's `readOnlyHint`/`destructiveHint` annotations still say it writes), or the operator's text (1 to 1000 characters, `{effects}` stands for what the query changes). `run_saved_query` still reaches every saved query | no saved-query tools |
 | `resources` | The resources listed by `resources/list`, by name: `schema`, `statistics`, `dsl-reference`, `examples`, `saved-queries`, `gql-reference`. Every resource stays readable | all six |
 | `answer_limit_chars` | The largest tool answer in characters (at least 1000), like `--mcp-max-chars` | 60000 |
 
@@ -804,7 +805,12 @@ names its effects), an `inputSchema` built from its parameter schemas (defaults 
 required parameters in `required`, no other properties; the paging parameters only with
 `saved_query_tools.paging_params: true`) and annotations from its effects
 (`readOnlyHint` false for a query that writes, `destructiveHint` when it updates or deletes);
-calling it is `run_saved_query` with those arguments. `tools/list` reflects the catalog at the time of the
+calling it is `run_saved_query` with those arguments. A program that embeds the endpoint
+(the `graphersal-mcp` crate) can bind parameters per connection (`Profile::with_bound_params`,
+for example the project a connection serves): a bound parameter is left out of every
+saved-query tool's `inputSchema`, and every call of a saved query that declares it, through its
+own tool or `run_saved_query`, runs with the bound value whatever the client sent (the answer's
+`call:` line leaves it out). `tools/list` reflects the catalog at the time of the
 call; the endpoint has no event stream, so it announces `tools.listChanged: false` and a client
 lists the tools again to see a changed catalog. A saved query named like a built-in tool
 (`statistics`, ...) is not listed as a tool of its own; `run_saved_query` reaches it.
