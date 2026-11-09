@@ -79,7 +79,9 @@ cargo bench -p graphersal --bench graph --features io,script,display,serde
 cargo bench -p graphersal --bench graph --features io,script,display,serde --no-run   # compile check only (the bench target requires these features)
 cargo llvm-cov --package graphersal --features script,io,display,serde,persist,gql   # three-run recipe: book/src/for_developers/test_coverage.md; last measured numbers: same page
 # robustness: the fast fuzz budget runs in every `cargo test` (tests/all/robustness_*); the LONG budget is a release gate
-# (overflow checks kept in release; findings -> target/robustness-findings.txt; ROBUSTNESS_REPLAY=<seed> replays one case):
+# (overflow checks kept in release; findings -> target/robustness-findings.txt; ROBUSTNESS_REPLAY=<seed> replays one case;
+# on macOS its RSS keeps the high-water mark of the concurrent case peaks (freed pages stay resident until memory
+# pressure; live heap between cases is a few MB, issue #33): run it under an RSS watchdog with WD_MAX_KB=8000000):
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=7 \
   cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_fuzz_tests::fuzz_long -- --ignored
 ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_input_tests::

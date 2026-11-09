@@ -333,6 +333,8 @@ thread_local! {
 
 /// Runs `run` with the memory ceiling of this thread's executions lowered to at most `bytes`
 /// (the process ceiling still applies when it is lower). Restored afterwards, also on a panic.
+/// Only executions that run inside `run` are bounded: a traversal a script returns without a
+/// terminal step executes when its value is rendered, so the rendering belongs inside `run` too.
 ///
 /// Test support for the crate's own suites (fuzzers and conformance runners that bound each case
 /// while other tests run in the same process); not part of the supported API: the ceiling a host
