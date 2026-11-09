@@ -1,15 +1,18 @@
-//! The playground UI the dev server serves: a file of the UI directory (`--ui-dir`, or
-//! `./playground` when it exists) wins, else the copy embedded at build time (`build.rs`), so the
-//! binary serves the UI on its own.
+//! The playground UI the server serves: a file of the UI directory (the CLI's `--ui-dir`, or
+//! `./playground` when it exists) wins, else the copy embedded at build time (`build.rs`,
+//! feature `ui-assets`), so the binary serves the UI on its own. Without the feature only a UI
+//! directory serves.
 
 use std::path::{Path, PathBuf};
+
+use crate::context::ServeError;
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/ui_files.rs"));
 }
 
 /// Where the UI comes from: an optional directory over the embedded copy.
-pub(super) struct Ui {
+pub struct Ui {
     /// The canonical UI directory whose files win over the embedded ones; `None` = embedded only.
     dir: Option<PathBuf>,
 }
@@ -23,9 +26,14 @@ fn embedded(relative: &str) -> Option<&'static [u8]> {
 }
 
 impl Ui {
+    /// The embedded copy alone (no UI directory).
+    pub fn embedded() -> Self {
+        Self { dir: None }
+    }
+
     /// The UI of `--ui-dir`: an explicit directory must exist (a usage error otherwise); the
     /// default `./playground` is used when it exists, else the embedded copy alone.
-    pub(super) fn resolve(given: Option<&str>, default: &str) -> Result<Self, String> {
+    pub fn resolve(given: Option<&str>, default: &str) -> Result<Self, ServeError> {
         let Some(given) = given else {
             let dir = std::fs::canonicalize(default)
                 .ok()
@@ -35,19 +43,21 @@ impl Ui {
         let hint = "Help: --ui-dir names a directory whose files override the embedded \
                     playground UI (for working on the UI); leave it out to serve the embedded UI.";
         let path = std::fs::canonicalize(given).map_err(|err| {
-            format!("Error: the UI directory '{given}' (--ui-dir) is not usable: {err}\n{hint}")
+            ServeError::Ui(format!(
+                "Error: the UI directory '{given}' (--ui-dir) is not usable: {err}\n{hint}"
+            ))
         })?;
         if !path.is_dir() {
-            return Err(format!(
+            return Err(ServeError::Ui(format!(
                 "Error: the UI directory '{}' (--ui-dir) is not a directory\n{hint}",
                 path.display()
-            ));
+            )));
         }
         Ok(Self { dir: Some(path) })
     }
 
     /// The start banner's `UI` row: where the UI comes from.
-    pub(super) fn banner(&self) -> String {
+    pub fn banner(&self) -> String {
         match &self.dir {
             None => "embedded".to_string(),
             Some(dir) => format!("{} (embedded fallback)", dir.display()),
@@ -57,7 +67,7 @@ impl Ui {
     /// The bytes of `relative` (already decoded, without a leading `/`; `""` or a directory
     /// means its `index.html`) and its file name for the content type; `None` when the path is
     /// not a UI file or leaves the UI root.
-    pub(super) fn read(&self, relative: &str) -> Option<(Vec<u8>, String)> {
+    pub fn read(&self, relative: &str) -> Option<(Vec<u8>, String)> {
         if relative.contains('\\')
             || relative.contains('\0')
             || relative
@@ -99,7 +109,8 @@ fn read_from_dir(root: &Path, relative: &str) -> Option<(Vec<u8>, String)> {
     Some((bytes, name))
 }
 
-#[cfg(test)]
+// The tests read the embedded copy (feature `ui-assets`).
+#[cfg(all(test, feature = "ui-assets"))]
 mod tests {
     use super::*;
 

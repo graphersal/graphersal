@@ -13,6 +13,7 @@ Python package and the web playground are released with the same number:
 | `graphersal` | crates.io | the library: engine, Rhai DSL, I/O, persistence (feature flags) |
 | `graphersal-session` | crates.io | the playground session logic, published because the CLI depends on it; internal, no stability guarantees |
 | `graphersal-mcp` | crates.io | the MCP endpoint of the servers (protocol, tools, resources, operator configuration), published because the CLI depends on it; internal, no stability guarantees |
+| `graphersal-serve` | crates.io | the hosting core of the dev server (session thread, run registry, the playground HTTP API without an HTTP library, the embedded playground UI), published because the CLI depends on it; internal, no stability guarantees |
 | `graphersal-cli` | crates.io | the `graphersal` binary: REPL, one-shot runner, `graphersal store`, the dev server |
 | `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for four platforms, with `SHA256SUMS` and build provenance attestations |
 | `graphersal-storage-tests` | crates.io | the `GraphStorage` conformance suite, EXPERIMENTAL like the trait (pin the exact version) |
@@ -29,7 +30,7 @@ minor release (0.4 to 0.5) may break them, and its release notes list every brea
   EXPERIMENTAL, the DSL and the schema format.
 - EXPERIMENTAL (may change in any 0.5.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
-- Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
+- Internal: `graphersal-session`, `graphersal-mcp`, `graphersal-serve`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
   says otherwise), the experimental AI Chat.
 - The storage format has its own version numbers ([Format Versions and Upgrade](../persistence/store_versions.md)):
@@ -108,7 +109,9 @@ machine and are compared with the previous release, not per change.
 
 1. Tag the release commit: `git tag -a v0.2.0 -m "Graphersal 0.2.0" && git push origin v0.2.0` (the tag equals the workspace `version`).
 2. The crates go to crates.io by hand, in dependency order: `cargo publish -p graphersal`, then
-   `graphersal-storage-tests`, `graphersal-session`, `graphersal-mcp` and `graphersal-cli`.
+   `graphersal-storage-tests`, `graphersal-session`, `graphersal-mcp`, `graphersal-serve` and `graphersal-cli`.
+   Before `graphersal-serve`, run `crates/graphersal-serve/prepare-package.sh`: it copies the playground UI
+   the crate embeds into its git-ignored `ui/` (check with `cargo package -p graphersal-serve --list`).
 3. The workflow `release.yml`, started on the tag: `gh workflow run Release --ref v0.2.0`. It checks that the
    tag matches the version and that the version's release notes exist, then runs two independent parts:
    - **PyPI.** It builds the four-platform wheels and the sdist through `python.yml` (which also runs the

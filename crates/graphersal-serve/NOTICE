@@ -1,0 +1,40 @@
+Graphersal
+Copyright 2024-2026 Aleksandr Dederer
+
+Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE).
+
+Graphersal is an independent project. It is compatible with, and inspired by, the Apache
+TinkerPop graph computing framework and its Gremlin traversal language. It is not part of
+Apache TinkerPop, and it is not affiliated with, endorsed by or sponsored by the Apache
+Software Foundation.
+
+Apache, Apache TinkerPop, TinkerPop and Gremlin are trademarks of the Apache Software
+Foundation. They are used here only to describe compatibility.
+
+------------------------------------------------------------------------
+Apache TinkerPop
+------------------------------------------------------------------------
+
+This repository contains files from Apache TinkerPop (https://tinkerpop.apache.org),
+version 3.8.2 (tag 3.8.2, commit 952d8d8e4c3cd37ed8e192ecb97348e6e82594a9), licensed under
+the Apache License, Version 2.0, and used unmodified unless stated otherwise, in the
+TinkerPop conformance test suite (in the source tree under
+crates/graphersal/tests/tinkerpop/, which carries its own LICENSE and NOTICE):
+
+  - features/       the Gremlin Gherkin feature files (each with its Apache-2.0 header), from
+                    gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
+  - data/           the sample graphs tinkerpop-modern, tinkerpop-crew, tinkerpop-sink and
+                    grateful-dead, from data/
+  - api-3.8.2.txt   a list of traversal API names derived from
+                    gremlin-language/src/main/antlr4/Gremlin.g4 and gremlin-core's __.java
+
+The "modern" sample graph that the library can build in code reproduces the same TinkerPop
+sample data.
+
+The NOTICE of Apache TinkerPop reads, as far as it pertains to these files:
+
+  Apache TinkerPop
+  Copyright 2015-2026 The Apache Software Foundation.
+
+  This product includes software developed at
+  The Apache Software Foundation (http://www.apache.org/).

@@ -1,9 +1,8 @@
-//! Embeds the playground UI into the binary (feature `dev-server`).
+//! Embeds the playground UI into the crate (feature `ui-assets`).
 //!
-//! The UI is read from `ui/` next to this file: in the repository it is a symbolic link to
-//! `../../playground`, in a packaged crate (`cargo package` follows the link) a real copy. When
-//! `ui/` is not usable (a checkout without symbolic links turns the link into a text file), the
-//! repository's `../../playground` is used. Only the entries of [`ENTRIES`] are embedded (the
+//! The UI is read from the repository's `../../playground` when it exists (a checkout), else
+//! from `ui/` next to this file: the copy `prepare-package.sh` makes before `cargo package`
+//! (git-ignored, so a stale copy in a checkout is never embedded). Only the entries of [`ENTRIES`] are embedded (the
 //! same list as `include` in `Cargo.toml`): never `pkg/`, `tests/`, the scripts or the README.
 //! Hidden files (`.DS_Store`, ...) are skipped. The generated `ui_files.rs` in `OUT_DIR` is one
 //! sorted table of `(relative path, include_bytes!(..))`.
@@ -18,19 +17,19 @@ fn main() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let target = out.join("ui_files.rs");
     println!("cargo::rerun-if-changed=build.rs");
-    if std::env::var_os("CARGO_FEATURE_DEV_SERVER").is_none() {
+    if std::env::var_os("CARGO_FEATURE_UI_ASSETS").is_none() {
         std::fs::write(&target, "pub static UI_FILES: &[(&str, &[u8])] = &[];\n")
             .expect("ui_files.rs is writable");
         return;
     }
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let root = [manifest.join("ui"), manifest.join("../../playground")]
+    let root = [manifest.join("../../playground"), manifest.join("ui")]
         .into_iter()
         .find(|dir| dir.join("index.html").is_file())
         .unwrap_or_else(|| {
             panic!(
-                "the playground UI is missing: neither {}/ui nor the repository's playground/ \
-                 holds index.html",
+                "the playground UI is missing: neither the repository's playground/ nor {}/ui \
+                 (prepare-package.sh) holds index.html",
                 manifest.display()
             )
         });

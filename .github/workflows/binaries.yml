@@ -75,9 +75,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # `crates/graphersal-cli/ui` is a symbolic link to `../../playground`. On Windows git checks
-      # it out as a text file (core.symlinks is false there), and build.rs then reads the
-      # repository's playground/ directly, so the embedded UI is the same on every platform.
+      # graphersal-serve's build.rs embeds the repository's playground/ directly (no symbolic
+      # link), so the embedded UI is the same on every platform.
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:

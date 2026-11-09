@@ -7116,9 +7116,10 @@ fn several_recommendations_are_applied_at_once_over_http_and_mcp() {
 #[test]
 fn the_openapi_description_matches_the_router() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let file: Value =
-        serde_json::from_str(&std::fs::read_to_string(manifest.join("openapi.json")).unwrap())
-            .unwrap();
+    let file: Value = serde_json::from_str(
+        &std::fs::read_to_string(manifest.join("../graphersal-serve/openapi.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(file["info"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(
         file["info"]["title"]
@@ -7131,7 +7132,10 @@ fn the_openapi_description_matches_the_router() {
 
     // Every route of the router's source is described.
     let mut routes: Vec<(String, String)> = Vec::new();
-    for source in ["src/server/mod.rs", "src/server/store.rs"] {
+    for source in [
+        "../graphersal-serve/src/api/mod.rs",
+        "../graphersal-serve/src/api/store.rs",
+    ] {
         let text = std::fs::read_to_string(manifest.join(source)).unwrap();
         for line in text.lines() {
             let line = line.trim();

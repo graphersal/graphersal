@@ -1,4 +1,4 @@
-//! The runs of the dev server that a client may cancel: every query (`POST /api/execute`, an MCP
+//! The runs of the server that a client may cancel: every query (`POST /api/execute`, an MCP
 //! `query`/`gql`/saved query, an AI Chat tool call) and every force-layout slice.
 //!
 //! Each run gets a [`CancelToken`] of its own, registered here BEFORE its job is queued for a
@@ -23,11 +23,11 @@ use std::sync::{Mutex, MutexGuard};
 use graphersal::exec::CancelToken;
 
 /// The longest client id of a run (`runId`) the server accepts.
-pub(super) const MAX_ALIAS_CHARS: usize = 128;
+pub(crate) const MAX_ALIAS_CHARS: usize = 128;
 
 /// One registered run.
 struct Run {
-    /// The client's key ([`super::Client::pool_key`]): `page:<tab>`, `mcp:<session>`, `ai:<id>`.
+    /// The client's key (`Client::pool_key`): `page:<tab>`, `mcp:<session>`, `ai:<id>`.
     client: String,
     /// The client's own id of the run, if it sent one.
     alias: Option<String>,
@@ -42,12 +42,12 @@ struct State {
 
 /// The registry of cancellable runs (one per server).
 #[derive(Default)]
-pub(super) struct Runs {
+pub struct Runs {
     state: Mutex<State>,
 }
 
 /// Removes its run from the registry when dropped (also when the job panics or is refused).
-pub(super) struct Registered<'a> {
+pub struct Registered<'a> {
     runs: &'a Runs,
     id: u64,
 }
@@ -68,7 +68,7 @@ impl Runs {
 
     /// Registers a run of `client` stopped by `token`, with the client's own id `alias`;
     /// returns its id for [`Self::end`].
-    pub(super) fn start(&self, client: &str, alias: Option<&str>, token: CancelToken) -> u64 {
+    pub fn start(&self, client: &str, alias: Option<&str>, token: CancelToken) -> u64 {
         let mut state = self.lock();
         state.next += 1;
         let id = state.next;
@@ -84,7 +84,7 @@ impl Runs {
     }
 
     /// [`Self::start`] ended by dropping the answer.
-    pub(super) fn register(
+    pub fn register(
         &self,
         client: &str,
         alias: Option<&str>,
@@ -97,22 +97,22 @@ impl Runs {
     }
 
     /// The run `id` ended.
-    pub(super) fn end(&self, id: u64) {
+    pub fn end(&self, id: u64) {
         self.lock().runs.remove(&id);
     }
 
     /// Cancels the runs of `client`; whether there was one.
-    pub(super) fn cancel_client(&self, client: &str) -> bool {
+    pub fn cancel_client(&self, client: &str) -> bool {
         self.cancel_where(|run| run.client == client) > 0
     }
 
     /// Cancels the runs of `client` with its own id `alias`; whether there was one.
-    pub(super) fn cancel_alias(&self, client: &str, alias: &str) -> bool {
+    pub fn cancel_alias(&self, client: &str, alias: &str) -> bool {
         self.cancel_where(|run| run.client == client && run.alias.as_deref() == Some(alias)) > 0
     }
 
     /// Cancels every run (the graceful stop); how many there were.
-    pub(super) fn cancel_all(&self) -> usize {
+    pub fn cancel_all(&self) -> usize {
         self.cancel_where(|_| true)
     }
 
@@ -128,7 +128,7 @@ impl Runs {
 
     /// How many runs are registered.
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.lock().runs.len()
     }
 }

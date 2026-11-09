@@ -4,6 +4,7 @@ members = [
     "crates/graphersal",
     "crates/graphersal-cli",
     "crates/graphersal-mcp",
+    "crates/graphersal-serve",
     "crates/graphersal-session",
     "crates/graphersal-storage-tests",
     "crates/graphersal-wasm",
@@ -16,6 +17,7 @@ default-members = [
     "crates/graphersal",
     "crates/graphersal-cli",
     "crates/graphersal-mcp",
+    "crates/graphersal-serve",
     "crates/graphersal-session",
     "crates/graphersal-storage-tests",
     "crates/graphersal-wasm",
@@ -60,6 +62,7 @@ panic = "abort"
 graphersal = { path = "crates/graphersal", version = "0.5.2" }
 graphersal-session = { path = "crates/graphersal-session", version = "0.5.2" }
 graphersal-mcp = { path = "crates/graphersal-mcp", version = "0.5.2" }
+graphersal-serve = { path = "crates/graphersal-serve", version = "0.5.2" }
 graphersal-storage-tests = { path = "crates/graphersal-storage-tests", version = "0.5.2" }
 
 # Core Graph & Algorithms

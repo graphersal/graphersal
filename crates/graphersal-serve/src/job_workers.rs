@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use graphersal::jobs::JobRun;
 
-use super::{CLIENT, Client, Context, SESSION_STACK_BYTES, as_client};
+use crate::context::{CLIENT, Client, Context, SESSION_STACK_BYTES, as_client};
 
 /// One run for a worker.
 struct Work {
@@ -28,13 +28,13 @@ struct Work {
 
 /// The workers by job group.
 #[derive(Default)]
-pub(super) struct JobWorkers {
+pub(crate) struct JobWorkers {
     lanes: Mutex<HashMap<String, Sender<Work>>>,
 }
 
 /// Starts `run` on its group's worker. A run no worker can take is recorded as failed, so its job
 /// is free again.
-pub(super) fn start(
+pub(crate) fn start(
     context: &Arc<Context>,
     before: Option<(usize, u64)>,
     run: JobRun,

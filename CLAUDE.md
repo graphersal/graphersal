@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `crates/graphersal/tests/opencypher/CLAUDE.md` | openCypher TCK (GQL), vendored data, attribution wording rule |
 | `crates/graphersal-cli/CLAUDE.md` | REPL, output rules, dev server, MCP host adapter, AI Chat, `embed-model` |
 | `crates/graphersal-mcp/CLAUDE.md` | MCP endpoint: protocol, transport/host boundary, tool catalog and handlers, answer shaping, instructions |
+| `crates/graphersal-serve/CLAUDE.md` | hosting core of the dev server: session thread and job queue, run registry, HTTP boundary and router, Host/Origin checks, embedded UI, MCP host glue, hooks |
 | `crates/graphersal-session/CLAUDE.md` | session modules, any-storage session |
 | `playground/CLAUDE.md` | playground UI structure |
 | `bindings/py-graphersal/CLAUDE.md` | Python binding, GIL rule |
@@ -29,7 +30,8 @@ Nested files under `crates/graphersal/src/` are kept out of the published crate 
 
 - `crates/graphersal`: the core library. Almost all work happens here.
 - `crates/graphersal-cli`: the REPL, a one-shot scriptable query runner, `graphersal store ...`, and `--server`: the DEV server serving the embedded playground with this process as the engine, optionally with MCP (`--mcp`) and the AI Chat (`--ai`).
-- `crates/graphersal-mcp`: the MCP endpoint (protocol, tools, resources, answer shaping) over a `graphersal-session` session, independent of any HTTP library: the host adapts its requests to `McpRequest`/`McpResponse` and runs the session jobs through its `Executor` (today the dev server; its AI Chat calls the same tools). Publishable but internal, EXPERIMENTAL.
+- `crates/graphersal-mcp`: the MCP endpoint (protocol, tools, resources, answer shaping) over a `graphersal-session` session, independent of any HTTP library: the host adapts its requests to `McpRequest`/`McpResponse` and runs the session jobs through its `Executor` (today `graphersal-serve` behind the dev server; its AI Chat calls the same tools). Publishable but internal, EXPERIMENTAL.
+- `crates/graphersal-serve`: the minimal hosting core of the dev server for ONE graph, without an HTTP library: session thread + job queue, job workers, run registry, the playground HTTP API as its own `Request`/`Response` boundary (`handle`), the Host/Origin checks, the embedded playground UI (feature `ui-assets`, its `build.rs`) and the `graphersal-mcp` host glue (feature `mcp`); the CLI plugs in its reader pool (`JobQueue`) and AI Chat (`Hooks`). Native only. Publishable but internal, EXPERIMENTAL.
 - `crates/graphersal-session`: the playground session logic (JSON in, JSON out), shared by `graphersal-wasm` and the dev server; serves any storage. Publishable but internal.
 - `crates/graphersal-wasm`: the engine as WebAssembly (wasm-bindgen, `publish = false`), a thin wrapper of `graphersal-session`; its JS API is internal to the playground (an npm package is planned).
 - `playground/`: the static browser playground (Vue, no bundler) on `graphersal-wasm` in a Web Worker, or on the dev server.
@@ -72,6 +74,7 @@ TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io
 cargo test  --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
 OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck   # rewrite its baseline AND the generated blocks of book/src/gql/tck_compliance.md
 cargo test  --package graphersal-cli                          # CLI contract (tests/cli_tests.rs) and the dev server (tests/server_tests.rs, port 0)
+cargo test  --package graphersal-serve --all-features         # the dev server's hosting core: HTTP boundary without an HTTP library
 cargo test  --package graphersal-storage-tests                # GraphStorage conformance for TraversalGraph, its wrappers and Forwarding
 cargo test  --package graphersal --doc --features script,io
 RUSTDOCFLAGS="-D warnings" cargo doc --package graphersal --no-deps                                   # also with --features script,io,display,serde,persist,gql

@@ -1101,7 +1101,7 @@ The API follows the playground's engine boundary (`playground/js/engine/engine.j
 `{"error": "..."}` with a 4xx status (422 for a failing schema operation).
 
 An **OpenAPI 3.1 description** of every endpoint below is part of each release:
-[`crates/graphersal-cli/openapi.json`](https://github.com/graphersal/graphersal/blob/main/crates/graphersal-cli/openapi.json)
+[`crates/graphersal-serve/openapi.json`](https://github.com/graphersal/graphersal/blob/main/crates/graphersal-serve/openapi.json)
 in the repository, and a running server answers it at `GET /openapi.json` (also
 `GET /api/openapi.json`; `GET /api/info` names it as `openapi`), with the server's own version in
 `info.version`. Generate a client from it, or open it in any OpenAPI viewer; pin the Graphersal

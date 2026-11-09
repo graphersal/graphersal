@@ -9,15 +9,15 @@
 
 use graphersal::exec::CancelToken;
 
+use super::value;
+use crate::context::Context;
+use crate::http::{HttpError, Method, Request, Response};
 use graphersal_session::Session;
 use graphersal_session::layout::LayoutRequest;
 use serde_json::{Value, json};
-use tiny_http::{Method, Request};
-
-use super::{Answer, Context, HttpError, json_body, value};
 
 /// The slice budget when a request names none, in milliseconds.
-pub const DEFAULT_BUDGET_MS: f64 = 100.0;
+pub(crate) const DEFAULT_BUDGET_MS: f64 = 100.0;
 
 fn budget(body: &Value) -> f64 {
     body.get("budgetMs")
@@ -54,14 +54,14 @@ pub(super) fn route(
     request: &mut Request,
     method: &Method,
     endpoint: &str,
-) -> Result<Answer, HttpError> {
+) -> Result<Response, HttpError> {
     if *method != Method::Post {
         return Err(HttpError(
             405,
             format!("method {method} is not allowed on /api/{endpoint}"),
         ));
     }
-    let body = json_body(request)?;
+    let body = request.json_body()?;
     let budget_ms = budget(&body);
     // A slice is a run of the page with a token of its own: the page's Stop (`POST
     // /api/cancel` without a `runId`) ends it, also while it waits for the session.

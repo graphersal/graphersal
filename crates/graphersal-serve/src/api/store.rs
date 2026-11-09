@@ -1,4 +1,4 @@
-//! The `/api/store/...` endpoints of a dev server on a Store directory (`--graph <dir>`): thin
+//! The `/api/store/...` endpoints of a server on a Store directory (`--graph <dir>`): thin
 //! HTTP wrappers of the session's Store operations (`graphersal_session::store`), which the
 //! WebAssembly playground runs on its stores in memory as well. Each one runs on the session
 //! thread; the actions that swap the session's graph (view, back to live, rollback, attic
@@ -14,22 +14,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::{download, query_value, value};
+use crate::context::Context;
+use crate::http::{HttpError, Method, Request, Response};
 use graphersal::persist::{SINGLE_FILE_EXTENSION, Store, store_dir_at};
 use graphersal_session::store::{target_label, target_of};
 use graphersal_session::{ForkInto, Session, StoreError};
 use serde_json::{Value, json};
-use tiny_http::{Method, Request};
-
-use super::{Answer, Context, HttpError, download, json_body, json_response, query_value, value};
 
 /// Routes `/api/store` and `/api/store/...` (`endpoint` without the `/api/` prefix).
-pub(super) fn route(
+pub(crate) fn route(
     context: &Context,
     request: &mut Request,
     method: &Method,
     endpoint: &str,
     query: &str,
-) -> Result<Answer, HttpError> {
+) -> Result<Response, HttpError> {
     match (method, endpoint) {
         (Method::Get, "store") => match &context.store {
             None => value(json!({ "store": null })),
@@ -47,12 +47,12 @@ pub(super) fn route(
         }
         (Method::Post, "store/checkpoint") => {
             own_store(context)?;
-            let name = body_text(&json_body(request)?, "name");
+            let name = body_text(&request.json_body()?, "name");
             value(session_call(context, move |s| s.store_checkpoint(&name))?)
         }
         (Method::Post, "store/mark") => {
             own_store(context)?;
-            let name = body_text(&json_body(request)?, "name");
+            let name = body_text(&request.json_body()?, "name");
             value(session_call(context, move |s| s.store_mark(&name))?)
         }
         (Method::Get, "store/snapshot") => {
@@ -70,7 +70,7 @@ pub(super) fn route(
         }
         (Method::Post, "store/view") => {
             own_store(context)?;
-            let body = json_body(request)?;
+            let body = request.json_body()?;
             // Queued behind the running jobs of every client: none of them is cancelled.
             let answer = session_call(context, move |s| s.store_open_view(&body))?;
             set_view(context, Some(answer["view"].clone()));
@@ -84,7 +84,7 @@ pub(super) fn route(
         }
         (Method::Post, "store/fork") => {
             let store = own_store(context)?;
-            let body = json_body(request)?;
+            let body = request.json_body()?;
             let target = target_of(&body).map_err(http)?;
             let new_dir = fork_dir(
                 store_path(&store)?,
@@ -97,7 +97,7 @@ pub(super) fn route(
         }
         (Method::Post, "store/rollback") => {
             own_store(context)?;
-            let body = json_body(request)?;
+            let body = request.json_body()?;
             let answer = session_call(context, move |s| s.store_rollback(&body));
             set_view(context, None);
             value(answer?)
@@ -122,7 +122,7 @@ pub(super) fn route(
         }
         (Method::Post, "store/attic/fork") => {
             let store = own_store(context)?;
-            let body = json_body(request)?;
+            let body = request.json_body()?;
             let id = body_text(&body, "id");
             if id.is_empty() {
                 return Err(HttpError::bad_request("expected {\"id\": \"...\"}"));
@@ -149,7 +149,7 @@ pub(super) fn route(
         }
         (Method::Post, "store/backup") => {
             let store = own_store(context)?;
-            let body = json_body(request)?;
+            let body = request.json_body()?;
             let full = body.get("full").and_then(Value::as_bool).unwrap_or(false);
             let from_memory = body
                 .get("from_memory")
@@ -172,7 +172,7 @@ pub(super) fn route(
             let body = if request.body_length() == Some(0) {
                 json!({})
             } else {
-                json_body(request)?
+                request.json_body()?
             };
             let drop_marks = body
                 .get("dropMarks")
@@ -186,7 +186,7 @@ pub(super) fn route(
                 Err(err) => match err.data {
                     Some(Value::Object(mut fields)) => {
                         fields.insert("error".into(), Value::String(err.message));
-                        Ok(json_response(err.status, &Value::Object(fields)))
+                        Ok(Response::json(err.status, &Value::Object(fields)))
                     }
                     _ => Err(http(err)),
                 },
@@ -259,7 +259,7 @@ fn body_text(body: &Value, key: &str) -> String {
 }
 
 fn body_id(request: &mut Request) -> Result<String, HttpError> {
-    let id = body_text(&json_body(request)?, "id");
+    let id = body_text(&request.json_body()?, "id");
     if id.is_empty() {
         return Err(HttpError::bad_request("expected {\"id\": \"...\"}"));
     }
@@ -278,7 +278,7 @@ fn query_number(query: &str, key: &str, what: &str) -> Result<Option<usize>, Htt
 
 /// The read-only view the session serves, or `null` for the live graph (mirrored here so
 /// `GET /api/info` answers without the session thread).
-pub(super) fn current_view(context: &Context) -> Value {
+pub(crate) fn current_view(context: &Context) -> Value {
     context
         .view
         .lock()
@@ -287,7 +287,7 @@ pub(super) fn current_view(context: &Context) -> Value {
         .unwrap_or(Value::Null)
 }
 
-pub(super) fn set_view(context: &Context, view: Option<Value>) {
+pub(crate) fn set_view(context: &Context, view: Option<Value>) {
     if let Ok(mut current) = context.view.lock() {
         *current = view.filter(|v| !v.is_null());
     }
@@ -436,7 +436,7 @@ fn percent_decode_component(text: &str) -> Option<String> {
 }
 
 /// `models=without`: a `.gsnap` download without the store's embedding models.
-pub(super) fn model_copy_of(query: &str) -> Result<graphersal::persist::ModelCopy, HttpError> {
+pub(crate) fn model_copy_of(query: &str) -> Result<graphersal::persist::ModelCopy, HttpError> {
     match query_value(query, "models").as_deref() {
         None | Some("with") => Ok(graphersal::persist::ModelCopy::Include),
         Some("without") => Ok(graphersal::persist::ModelCopy::Exclude),

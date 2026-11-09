@@ -1,6 +1,6 @@
 # graphersal-mcp
 
-Agent guidance for the MCP endpoint (`--mcp [--mcp-read-only] [--mcp-token] [--mcp-query-tools] [--mcp-max-chars N] [--mcp-config FILE]`, `POST /mcp` of `graphersal --server`) and the tools the AI Chat shares with it. Publishable, internal, EXPERIMENTAL like `graphersal-session` (`#![warn(missing_docs)]`, no stability promise). No HTTP library, no tokio. The host today is the dev server (`crates/graphersal-cli/src/server/mcp.rs`: `tiny_http` <-> `McpRequest`/`McpResponse`, `Executor` = `Context::call`'s session-thread queue, `Host` over `Context`; CLI guidance `crates/graphersal-cli/CLAUDE.md`).
+Agent guidance for the MCP endpoint (`--mcp [--mcp-read-only] [--mcp-token] [--mcp-query-tools] [--mcp-max-chars N] [--mcp-config FILE]`, `POST /mcp` of `graphersal --server`) and the tools the AI Chat shares with it. Publishable, internal, EXPERIMENTAL like `graphersal-session` (`#![warn(missing_docs)]`, no stability promise). No HTTP library, no tokio. The host today is `graphersal-serve` (`crates/graphersal-serve/src/mcp.rs`, feature `mcp`: its `Request` <-> `McpRequest`/`McpResponse`, `Executor` = `Context::call`'s session-thread queue, `Host` over `Context`; guidance `crates/graphersal-serve/CLAUDE.md`), behind the CLI dev server's `tiny_http` adapter (`crates/graphersal-cli/CLAUDE.md`).
 
 ## Layout
 
