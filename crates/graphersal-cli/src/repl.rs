@@ -124,6 +124,12 @@ const COMMANDS: &[(&str, &str, &str)] = &[
          the rest counted); with a number: sampled",
     ),
     (
+        "schema",
+        "[label ...]",
+        "the schema summary: labels with counts, keys with types, edge from->to pairs, indexes, \
+         schema mode; with labels: those labels in detail (every key, edges out/in)",
+    ),
+    (
         "workload",
         "",
         "the workload statistics of a store's graph (queries, properties, locks, jobs)",
@@ -169,6 +175,17 @@ fn memory_report(graph: &graphersal::storage::Graph, args: &str) -> String {
     }
     match graphersal::storage::AnyGraph::memory_report(graph, &request) {
         Ok(report) => report.to_string(),
+        Err(err) => graphersal::error::format_diagnostic(&*err),
+    }
+}
+
+/// The text of `/schema [label ...]`: the schema summary of `graph`, the named labels in
+/// detail when some are given.
+fn schema_summary(graph: &graphersal::storage::Graph, args: &str) -> String {
+    let labels: Vec<&str> = args.split_whitespace().collect();
+    let request = graphersal::schema::SchemaSummaryRequest::new().with_labels(labels);
+    match graphersal::storage::AnyGraph::schema_summary(graph, &request) {
+        Ok(summary) => summary.to_string(),
         Err(err) => graphersal::error::format_diagnostic(&*err),
     }
 }
@@ -655,6 +672,20 @@ fn command_list() -> String {
         let usage = format!("/set {} {}", option.name, option.args);
         out.push_str(&format!("  {:<28} {}\n", usage.trim_end(), option.summary));
     }
+    out.push_str("\nGraph\n");
+    for (name, args, summary) in COMMANDS {
+        if matches!(*name, "help" | "set" | "exit") {
+            continue;
+        }
+        let usage = format!("/{name} {args}");
+        // The first clause of the summary: the full text is `/help <command>`.
+        let short = summary.split([':', ';', '(']).next().unwrap_or(summary);
+        out.push_str(&format!(
+            "  {:<28} {}\n",
+            usage.trim_end(),
+            short.trim_end()
+        ));
+    }
     out.push_str(
         "\nSession\n  /exit                        close the graph and leave (Ctrl-D too)\n\n\
          A script runs when its input ends with `;`; Enter on a line without it continues the \
@@ -865,6 +896,7 @@ Use /exit or CTRL-D to exit; CTRL-C breaks the line input
                             }
                             "memory" => outln!("{}", memory_answer(&arc_graph, args)),
                             "workload" => outln!("{}", workload_report(&arc_graph)),
+                            "schema" => outln!("{}", schema_summary(&arc_graph, args)),
                             "help" => {
                                 if let Some(helper) = rl.helper() {
                                     outln!("{}", helper.catalogue.help(args, spelling));
@@ -1260,9 +1292,9 @@ mod tests {
         let c = catalogue();
         assert_eq!(
             displays(&c, "/", Spelling::Snake),
-            ["/exit", "/help", "/memory", "/set", "/workload"]
+            ["/exit", "/help", "/memory", "/schema", "/set", "/workload"]
         );
-        assert_eq!(displays(&c, "/s", Spelling::Snake), ["/set"]);
+        assert_eq!(displays(&c, "/s", Spelling::Snake), ["/schema", "/set"]);
         let set = displays(&c, "/set ", Spelling::Snake);
         for option in ["format", "max-rows", "no-limit", "spelling", "safe-limits"] {
             assert!(set.iter().any(|n| n == option), "{option}: {set:?}");

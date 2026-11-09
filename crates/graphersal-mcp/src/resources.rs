@@ -17,13 +17,20 @@ pub(crate) struct Resource {
     pub(crate) mime: &'static str,
 }
 
-pub(crate) const RESOURCES: [Resource; 6] = [
+pub(crate) const RESOURCES: [Resource; 7] = [
     Resource {
         uri: "graphersal://schema",
         name: "schema",
         title: "Stored schema",
-        description: "The schema stored in the graph (graphersal-schema-v2 JSON), or null.",
+        description: "The stored schema JSON, or null: get_schema with format \"json\".",
         mime: "application/json",
+    },
+    Resource {
+        uri: "graphersal://schema-summary",
+        name: "schema-summary",
+        title: "Schema summary",
+        description: "The schema summary text: get_schema's default answer (format \"summary\").",
+        mime: "text/plain",
     },
     Resource {
         uri: "graphersal://statistics",
@@ -79,6 +86,9 @@ pub(crate) fn read_resource(
 ) -> Result<String, String> {
     match uri {
         "graphersal://schema" => Ok(context.call(|s| s.get_schema_text())??),
+        "graphersal://schema-summary" => {
+            Ok(context.call(|s| s.schema_summary_text(&Value::Null))??)
+        }
         "graphersal://gql-reference" => Ok(gql_reference_text()),
         "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,

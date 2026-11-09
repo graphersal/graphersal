@@ -63,8 +63,8 @@ pub use crate::graph::schema::{
     Annotations, Constraints, DefaultFunction, EdgeConnection, EdgeSchema, GraphSchema, JsonType,
     META_SCHEMA_JSON, PropertySchema, SCHEMA_FORMAT_URL, SchemaChange, SchemaChangeKind,
     SchemaDiff, SchemaFormat, SchemaInferer, SchemaMode, SchemaPatch, SchemaPattern, SchemaRow,
-    SchemaValidation, SchemaViolationReport, ValueType, VectorSchema, VertexSchema, ViolationGroup,
-    ViolationKind, VisualizeFormat, type_of,
+    SchemaSummary, SchemaSummaryRequest, SchemaValidation, SchemaViolationReport, ValueType,
+    VectorSchema, VertexSchema, ViolationGroup, ViolationKind, VisualizeFormat, type_of,
 };
 pub use crate::graph::schema::{
     MAX_GROUPS, PRINTED_GROUPS, SAMPLE_ID_CHARS, SAMPLE_IDS, UNLABELED,

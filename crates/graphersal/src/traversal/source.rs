@@ -1683,6 +1683,53 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         Ok(self.storage.infer_schema()?)
     }
 
+    /// The schema summary: a compact text map of the graph (labels with counts, their keys with
+    /// value types and how often they occur, the endpoint label pairs of every edge label, the
+    /// property indexes, the schema mode) with the stored schema's declarations laid over it;
+    /// its `Display` is the text. One walk over every element: the counts are exact, the value
+    /// types sampled per label (see [`SchemaSummaryRequest`](crate::schema::SchemaSummaryRequest)).
+    /// Writes nothing. Asks an attached authorizer for `Read` on the schema (like
+    /// [`Self::infer_schema`]); fails with `TraverserError::Cancelled` when the request's token
+    /// (or the running thread's [`CancelToken`](crate::CancelToken)) is cancelled.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::schema::SchemaSummaryRequest;
+    ///
+    /// let graph = TraversalGraph::tinkerpop_modern();
+    /// let g = graph.traversal();
+    /// let text = g.schema_summary(&SchemaSummaryRequest::new()).unwrap().to_string();
+    /// assert!(text.starts_with("graph: 6 vertices, 6 edges; 2 vertex labels, 2 edge labels"));
+    /// assert!(text.contains("knows 2 person->person: weight float"), "{text}");
+    /// // One label in detail: every key, and the edges going out and coming in.
+    /// let person = SchemaSummaryRequest::new().with_labels(["person"]);
+    /// let text = g.schema_summary(&person).unwrap().to_string();
+    /// assert!(text.contains("edges out: created->software 4, knows->person 2"), "{text}");
+    /// ```
+    pub fn schema_summary(
+        &self,
+        request: &crate::graph::schema::SchemaSummaryRequest,
+    ) -> TraverserResult<crate::graph::schema::SchemaSummary> {
+        self.authorize_schema("schema_summary", crate::graph::Action::Read)?;
+        let started = web_time::Instant::now();
+        let summary = match (
+            request.cancel_token(),
+            crate::traversal::cancel::CancelToken::current(),
+        ) {
+            (None, Some(token)) => crate::graph::schema::summary::compute(
+                &self.storage,
+                &request.clone().with_cancel(token),
+            ),
+            _ => crate::graph::schema::summary::compute(&self.storage, request),
+        }?;
+        summary.ok_or_else(|| {
+            TraverserError::Cancelled {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            }
+            .into()
+        })
+    }
+
     /// The changes from the stored schema to `schema` and whether they are backward compatible
     /// (see [`SchemaDiff`]). Looks at no data; asks an attached authorizer for `Read` on the
     /// schema.

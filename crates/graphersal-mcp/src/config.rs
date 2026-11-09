@@ -130,8 +130,9 @@ impl std::error::Error for McpConfigError {}
 
 /// The resources listed without a `resources` key (`graphersal://gql-reference` holds the GQL
 /// support list the `gql` description points to).
-pub(crate) const DEFAULT_RESOURCES: [&str; 6] = [
+pub(crate) const DEFAULT_RESOURCES: [&str; 7] = [
     "schema",
+    "schema-summary",
     "statistics",
     "dsl-reference",
     "examples",

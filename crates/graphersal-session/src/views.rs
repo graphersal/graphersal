@@ -4,7 +4,7 @@ use crate::error::SessionError;
 use std::collections::BTreeMap;
 
 use graphersal::prelude::*;
-use graphersal::schema::PropertySchema;
+use graphersal::schema::{PropertySchema, SchemaSummaryRequest};
 use graphersal::script::rhai;
 use graphersal::storage::MemoryReportRequest;
 use serde_json::{Map, Value, json};
@@ -373,6 +373,71 @@ pub fn memory_stats_view(stats: Option<graphersal::storage::MemoryStats>) -> Val
         }),
         None => Value::Null,
     }
+}
+
+/// The request of a schema summary spec `{labels?, max_keys?, max_labels?, descriptions?}`
+/// (`null`: the whole graph with the defaults; `labels` a label or a list of labels to detail;
+/// [`crate::Session::schema_summary_text`]), or what is wrong with it.
+pub fn schema_summary_request(spec: &Value) -> Result<SchemaSummaryRequest, SessionError> {
+    const KEYS: [&str; 4] = ["labels", "max_keys", "max_labels", "descriptions"];
+    let mut request = SchemaSummaryRequest::new();
+    let fields = match spec {
+        Value::Null => return Ok(request),
+        Value::Object(fields) => fields,
+        _ => {
+            return Err(
+                "the schema summary spec is a JSON object {labels?, max_keys?, \
+                        max_labels?, descriptions?}"
+                    .into(),
+            );
+        }
+    };
+    if let Some(unknown) = fields.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return Err(format!(
+            "unknown key '{unknown}' in the schema summary spec (keys: {})",
+            KEYS.join(", ")
+        )
+        .into());
+    }
+    for key in ["max_keys", "max_labels"] {
+        match fields.get(key) {
+            None | Some(Value::Null) => {}
+            Some(value) => match value.as_u64().filter(|n| *n > 0) {
+                Some(n) => {
+                    let n = usize::try_from(n).unwrap_or(usize::MAX);
+                    request = if key == "max_keys" {
+                        request.with_max_keys(n)
+                    } else {
+                        request.with_max_labels(n)
+                    };
+                }
+                None => return Err(format!("{key} must be a positive integer, not {value}").into()),
+            },
+        }
+    }
+    match fields.get("labels") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(label)) => request = request.with_labels([label.clone()]),
+        Some(Value::Array(labels)) => {
+            let mut names = Vec::with_capacity(labels.len());
+            for label in labels {
+                match label.as_str() {
+                    Some(name) => names.push(name.to_string()),
+                    None => return Err(format!("labels holds label names, not {label}").into()),
+                }
+            }
+            request = request.with_labels(names);
+        }
+        Some(other) => {
+            return Err(format!("labels is a label or a list of labels, not {other}").into());
+        }
+    }
+    match fields.get("descriptions") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(on)) => request = request.with_descriptions(*on),
+        Some(other) => return Err(format!("descriptions is true or false, not {other}").into()),
+    }
+    Ok(request)
 }
 
 /// The request of a memory report spec `{sample_every?, max_elements?, limit?, max_rows?,
