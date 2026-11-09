@@ -840,3 +840,45 @@ fn the_identity_of_the_request_filter_reaches_the_mcp_runs() {
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].0.identity(), Some("alice"));
 }
+
+#[test]
+fn a_time_zone_the_session_refuses_is_an_error_of_the_job_ticker() {
+    let context = Context::builder(session_on("empty"), check()).build();
+    let err = crate::start_job_ticker(&context, Some("Nowhere/Land".to_string()))
+        .expect_err("an unknown zone is refused");
+    assert!(matches!(err, crate::ServeError::Session(_)), "{err:?}");
+    assert!(err.to_string().contains("Nowhere/Land"), "{err}");
+    // A zone the session knows starts the ticker as before.
+    crate::start_job_ticker(&context, Some("Europe/Berlin".to_string()))
+        .expect("a known zone is taken");
+}
+
+#[test]
+fn a_setup_failure_keeps_the_hosts_error_as_its_source() {
+    let err = spawn_session(
+        SessionPresets::new(),
+        |_session| -> Result<(), std::io::Error> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Error: no such graph file",
+            ))
+        },
+        None,
+    )
+    .expect_err("the setup fails");
+    assert!(matches!(err, crate::ServeError::Setup(_)), "{err:?}");
+    assert_eq!(err.to_string(), "Error: no such graph file");
+    let source = std::error::Error::source(&err).expect("the host's error is the source");
+    let io = source
+        .downcast_ref::<std::io::Error>()
+        .expect("the source is the host's own error type");
+    assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+    // A `String` diagnostic is shown as it is.
+    let err = spawn_session(
+        SessionPresets::new(),
+        |_session| -> Result<(), String> { Err("Error: cannot load".to_string()) },
+        None,
+    )
+    .expect_err("the setup fails");
+    assert_eq!(err.to_string(), "Error: cannot load");
+}

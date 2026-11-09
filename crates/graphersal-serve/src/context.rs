@@ -59,31 +59,43 @@ pub const SESSION_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// A failure of the runtime: a thread that cannot start, a graph that cannot be loaded.
 ///
 /// `#[non_exhaustive]`: further failures may be added.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ServeError {
-    /// The session could not be set up (the host's diagnostic, shown as it is).
-    Setup(String),
+    /// The session could not be set up: the host's own error of [`spawn_session`]'s `setup`,
+    /// shown as it is and kept as the [`std::error::Error::source`].
+    Setup(Arc<dyn std::error::Error + Send + Sync>),
     /// A thread could not be started or ended early.
     Thread(String),
     /// The UI directory is not usable (the diagnostic, shown as it is).
     Ui(String),
     /// A lifecycle step out of order ([`crate::Server::ready`] twice).
     Lifecycle(String),
+    /// A session job of the runtime failed (the session thread is gone, the queue refused the
+    /// job, or the session refused the work: [`start_job_ticker`]'s time zone).
+    Session(String),
 }
 
 impl fmt::Display for ServeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Setup(message)
-            | Self::Thread(message)
+            Self::Setup(source) => fmt::Display::fmt(source, f),
+            Self::Thread(message)
             | Self::Ui(message)
-            | Self::Lifecycle(message) => f.write_str(message),
+            | Self::Lifecycle(message)
+            | Self::Session(message) => f.write_str(message),
         }
     }
 }
 
-impl std::error::Error for ServeError {}
+impl std::error::Error for ServeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Setup(source) => Some(source.as_ref()),
+            Self::Thread(_) | Self::Ui(_) | Self::Lifecycle(_) | Self::Session(_) => None,
+        }
+    }
+}
 
 /// Why a [`JobQueue`] did not take a job. Every one is a `503` with `Retry-After: 1`.
 ///
@@ -355,19 +367,24 @@ pub(crate) fn position(session: &Session) -> Result<(usize, u64), graphersal::er
 
 /// Starts the session thread: a [`Session`] with `presets` on a thread of
 /// [`SESSION_STACK_BYTES`], set up by `setup` (load the graph; its answer is returned here once
-/// it is done). Then the thread runs the jobs of the returned queue one after the other, or,
+/// it is done; its error, any `std::error::Error + Send + Sync` or a `String` diagnostic, comes
+/// back as [`ServeError::Setup`]). Then the thread runs the jobs of the returned queue one after the other, or,
 /// with `takeover` (the first worker of the host's [`JobQueue`]), hands the session to it.
 ///
 /// Work outside a request (loading at start) is technical in the workload statistics;
 /// [`Context::call`] sets each request's channel. A job that panics is a bug: the session (its
 /// graph rolled back by the unit) serves on.
-pub fn spawn_session<T: Send + 'static>(
+pub fn spawn_session<T, E>(
     presets: SessionPresets,
-    setup: impl FnOnce(&mut Session) -> Result<T, String> + Send + 'static,
+    setup: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
     takeover: Option<Job>,
-) -> Result<(Sender<Job>, T), ServeError> {
+) -> Result<(Sender<Job>, T), ServeError>
+where
+    T: Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+{
     let (jobs, queue) = channel::<Job>();
-    let (ready, started) = channel::<Result<T, String>>();
+    let (ready, started) = channel::<Result<T, E>>();
     std::thread::Builder::new()
         .name("graphersal-session".to_string())
         .stack_size(SESSION_STACK_BYTES)
@@ -394,7 +411,9 @@ pub fn spawn_session<T: Send + 'static>(
     let started = started.recv().map_err(|_| {
         ServeError::Thread("Error: the session thread stopped while loading the graph".to_string())
     })?;
-    started.map(|t| (jobs, t)).map_err(ServeError::Setup)
+    started
+        .map(|t| (jobs, t))
+        .map_err(|err| ServeError::Setup(Arc::from(err.into())))
 }
 
 /// Runs the jobs of `queue` on `session` until every sender is gone.
@@ -821,10 +840,25 @@ const JOB_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// Ticks the session's scheduled jobs (book page "Scheduled Jobs") from a thread of its own,
 /// in the time zone `zone` (the machine's; `None`: the session's default). Each tick is a short
 /// session job like a browser call that only decides what is due; the work happens on
-/// job worker threads (one per job group). `Err` when the thread cannot start.
+/// job worker threads (one per job group). `Err` when the session does not take the time
+/// zone ([`ServeError::Session`]: an unknown zone, or the session job could not run; then no
+/// ticker starts) or when the thread cannot start.
 pub fn start_job_ticker(context: &Arc<Context>, zone: Option<String>) -> Result<(), ServeError> {
     if let Some(zone) = zone {
-        let _ = context.call(move |session| session.set_time_zone(&zone));
+        let named = zone.clone();
+        context
+            .call(move |session| session.set_time_zone(&zone))
+            .map_err(|err| {
+                ServeError::Session(format!(
+                    "cannot set the time zone '{named}' of the scheduled jobs: {}",
+                    err.message()
+                ))
+            })?
+            .map_err(|err| {
+                ServeError::Session(format!(
+                    "cannot set the time zone '{named}' of the scheduled jobs: {err}"
+                ))
+            })?;
     }
     let context = context.clone();
     std::thread::Builder::new()

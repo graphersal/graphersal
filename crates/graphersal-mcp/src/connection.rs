@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -79,18 +79,23 @@ impl Connection {
     /// first message; it stays for the connection's life (a host's later change of its
     /// profiles reaches only the connections it builds afterwards).
     pub fn with_profile(self, profile: Profile) -> Self {
-        if let Ok(mut slot) = self.stream.profile.lock() {
-            *slot = Arc::new(profile);
-        }
+        // A poisoned slot is still set: dropping the host's profile would serve the default.
+        *self
+            .stream
+            .profile
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(profile);
         self
     }
 
     /// The identity the host established for this connection (the user of a socket after its
     /// handshake), carried to the connection's session jobs ([`ClientRef::identity`]).
     pub fn with_identity(self, identity: &str) -> Self {
-        if let Ok(mut slot) = self.stream.identity.lock() {
-            *slot = Some(identity.to_string());
-        }
+        *self
+            .stream
+            .identity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(identity.to_string());
         self
     }
 
@@ -133,10 +138,12 @@ impl Connection {
             .get("method")
             .and(message.get("id"))
             .map(Value::to_string);
-        if let Some(id) = &request
-            && let Ok(mut running) = self.stream.in_flight.lock()
-        {
-            running.push(id.clone());
+        if let Some(id) = &request {
+            self.stream
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(id.clone());
         }
         let profile = self.stream.profile().clone();
         let identity = self.stream.identity();
@@ -149,11 +156,15 @@ impl Connection {
             stream: Some(&self.stream),
         };
         let outcome = self.mcp.message(&peer, message);
-        if let Some(id) = &request
-            && let Ok(mut running) = self.stream.in_flight.lock()
-            && let Some(at) = running.iter().position(|known| known == id)
-        {
-            running.swap_remove(at);
+        if let Some(id) = &request {
+            let mut running = self
+                .stream
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(at) = running.iter().position(|known| known == id) {
+                running.swap_remove(at);
+            }
         }
         let mut lines = self.outcome_lines(outcome);
         if self.stream.take_list_changed() {
@@ -183,12 +194,13 @@ impl Connection {
     /// their [`Connection::handle`] calls. Also done when the connection is dropped.
     pub fn close(&self) {
         self.stream.set_outbound(None);
+        // Also after a panic of a holder: every request still running is cancelled.
         let running = self
             .stream
             .in_flight
             .lock()
-            .map(|running| running.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let client = ClientRef::new(MCP_CLIENT, None).with_key(&self.stream.key);
         let client = match self.stream.identity() {
             Some(identity) => client.with_identity(&identity),
@@ -292,17 +304,17 @@ impl Stream {
 
     /// The connection's profile (shared: the registry lists the tools of each profile once).
     pub(crate) fn profile(&self) -> Arc<Profile> {
-        match self.profile.lock() {
-            Ok(profile) => profile.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        self.profile
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn identity(&self) -> Option<String> {
         self.identity
             .lock()
-            .ok()
-            .and_then(|identity| identity.clone())
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn with_init<T>(&self, read: impl FnOnce(&Init) -> T) -> Option<T> {

@@ -88,7 +88,7 @@ pub(crate) fn route(
             let target = target_of(&body).map_err(http)?;
             let new_dir = fork_dir(
                 store_path(&store)?,
-                is_single_file(&store),
+                is_single_file(&store)?,
                 &body,
                 &target_label(&target),
             )?;
@@ -129,7 +129,7 @@ pub(crate) fn route(
             }
             let new_dir = fork_dir(
                 store_path(&store)?,
-                is_single_file(&store),
+                is_single_file(&store)?,
                 &body,
                 &format!("attic-{id}"),
             )?;
@@ -156,7 +156,7 @@ pub(crate) fn route(
                 .or_else(|| body.get("fromMemory"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let target = backup_dir(store_path(&store)?, is_single_file(&store), &body)?;
+            let target = backup_dir(store_path(&store)?, is_single_file(&store)?, &body)?;
             let into = store_dir_at(target);
             value(session_call(context, move |s| {
                 s.store_backup(into, full, from_memory)
@@ -293,9 +293,19 @@ pub(crate) fn set_view(context: &Context, view: Option<Value>) {
     }
 }
 
-/// Whether the store is a single file (its backend keeps garbage to compact).
-fn is_single_file(store: &Store) -> bool {
-    store.dir().space_usage().unwrap().is_some()
+/// Whether the store is a single file (its backend keeps garbage to compact); a failure to
+/// read the backend's space usage is a `500`.
+fn is_single_file(store: &Store) -> Result<bool, HttpError> {
+    store
+        .dir()
+        .space_usage()
+        .map(|usage| usage.is_some())
+        .map_err(|err| {
+            HttpError(
+                500,
+                format!("could not read the store's space usage: {err}"),
+            )
+        })
 }
 
 /// Keeps letters, digits, `.`, `_` and `-` (the rest becomes `-`).

@@ -7,6 +7,11 @@
 //! any release (a patch release included): a crate that depends on it pins the exact version
 //! (`graphersal-mcp = "=0.x.y"`) during 0.x.
 //!
+//! `serde_json::Value` appears in the public API on purpose (the client's `initialize` data,
+//! [`Connection::client_info`] and [`Connection::client_capabilities`]): this crate is a JSON
+//! boundary like `graphersal-session`, an exception to the engine's rule of no third-party types
+//! in the API.
+//!
 //! # Host boundary
 //!
 //! The crate depends on no HTTP library and on no way of running jobs:
