@@ -5446,6 +5446,7 @@ mod ai_chat {
         );
     }
 
+    #[cfg(unix)] // sends SIGTERM with `kill`
     /// Issue #31: in the read-only serving mode a graceful stop past the drain timeout cancels
     /// the query of an AI Chat turn too (it runs under its conversation's own token, which the
     /// run registry holds): the query stops within the grace instead of running on until the
@@ -8267,6 +8268,7 @@ mod read_only_serving {
         assert!(!stderr.contains("short-secret"), "{stderr}");
     }
 
+    #[cfg(unix)] // sends SIGTERM with `kill`
     /// Sends SIGTERM to the server.
     fn terminate(server: &DevServer) {
         let status = Command::new("kill")
@@ -8276,6 +8278,7 @@ mod read_only_serving {
         assert!(status.success());
     }
 
+    #[cfg(unix)] // only the SIGTERM tests use it
     /// Waits for the server's exit, which must be a success.
     fn assert_exits_0(server: &mut DevServer) {
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -8289,6 +8292,7 @@ mod read_only_serving {
         assert!(exit.success(), "{exit:?}");
     }
 
+    #[cfg(unix)] // sends SIGTERM with `kill`
     #[test]
     fn sigterm_lets_a_running_query_finish_within_the_drain_timeout() {
         // The drain timeout only has to outlast the query, however slow the machine is: the
@@ -8315,6 +8319,7 @@ mod read_only_serving {
         assert_exits_0(&mut server);
     }
 
+    #[cfg(unix)] // sends SIGTERM with `kill`
     #[test]
     fn sigterm_refuses_new_queries_and_cancels_past_the_drain_timeout_then_exits_0() {
         let mut server = start(&[
