@@ -177,14 +177,39 @@ pub enum McpError {
     /// the client has too many jobs running, the host is stopping): the endpoint answers the
     /// request with HTTP `503` and `Retry-After`, so the client retries it later.
     Busy(String),
+    /// Reading or writing the stream of a connection failed ([`crate::serve_lines`]).
+    #[non_exhaustive]
+    Io {
+        /// The kind of the I/O error.
+        kind: std::io::ErrorKind,
+        /// The I/O error's text.
+        message: String,
+    },
 }
 
 impl McpError {
     /// The message.
     pub fn message(&self) -> &str {
         match self {
-            Self::Unavailable(message) | Self::Failed(message) | Self::Busy(message) => message,
+            Self::Unavailable(message)
+            | Self::Failed(message)
+            | Self::Busy(message)
+            | Self::Io { message, .. } => message,
         }
+    }
+
+    /// An [`McpError::Io`] of `err`.
+    pub fn io(err: &std::io::Error) -> Self {
+        Self::Io {
+            kind: err.kind(),
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<std::io::Error> for McpError {
+    fn from(err: std::io::Error) -> Self {
+        Self::io(&err)
     }
 }
 

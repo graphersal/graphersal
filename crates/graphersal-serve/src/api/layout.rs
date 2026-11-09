@@ -68,7 +68,7 @@ pub(super) fn route(
     // /api/cancel` without a `runId`) ends it, also while it waits for the session.
     let slice = |job: SliceJob| {
         let cancel = CancelToken::new();
-        let _run = context.register_run(None, cancel.clone(), RunKind::Layout, None);
+        let _run = context.register_run(None, cancel.clone(), RunKind::Layout, None)?;
         context.call_fallible(move |s| job(s, &cancel))
     };
     match endpoint {

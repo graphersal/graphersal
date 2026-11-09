@@ -46,6 +46,11 @@
 //! [`Hooks::route`]). It is published because `graphersal-cli` depends on it, and for hosts of
 //! Graphersal's own servers; its API changes in any release (a patch release included): a crate
 //! that depends on it pins the exact version (`graphersal-serve = "=0.x.y"`) during 0.x.
+//!
+//! `serde_json::Value` appears in the public API on purpose ([`JobQueue::status`],
+//! [`Hooks::add_info`], [`Hooks::add_process_statistics`], [`ContextBuilder::presets`],
+//! [`Request::json_body`], [`Response::json`]): this crate is a JSON boundary like
+//! `graphersal-session`, an exception to the engine's rule of no third-party types in the API.
 
 #![warn(missing_docs)]
 

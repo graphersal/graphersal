@@ -201,24 +201,38 @@ mod enabled {
                 .identity()
                 .map(str::to_string)
                 .or_else(|| CLIENT.with(|c| c.borrow().identity.clone()));
-            self.runs.start_with(
-                &run_key(client),
-                client.request(),
-                cancel.clone(),
-                RunDetails {
-                    kind: Some(RunKind::Tool),
-                    text: (!text.is_empty()).then(|| text.to_string()),
-                    identity,
-                },
-            )
+            // The Host trait answers plain values: a registry failure is logged and the run is
+            // not registered (id 0, which no run has: the registry counts from 1).
+            self.runs
+                .start_with(
+                    &run_key(client),
+                    client.request(),
+                    cancel.clone(),
+                    RunDetails {
+                        kind: Some(RunKind::Tool),
+                        text: (!text.is_empty()).then(|| text.to_string()),
+                        identity,
+                    },
+                )
+                .unwrap_or_else(|err| {
+                    tracing::warn!(target: "graphersal::server", %err, "cannot register an MCP run");
+                    0
+                })
         }
 
         fn run_ended(&self, run: u64) {
-            self.runs.end(run);
+            if let Err(err) = self.runs.end(run) {
+                tracing::warn!(target: "graphersal::server", %err, run, "cannot end an MCP run");
+            }
         }
 
         fn cancel_request(&self, client: &ClientRef, request: &str) -> bool {
-            self.runs.cancel_alias(&run_key(client), request)
+            self.runs
+                .cancel_alias(&run_key(client), request)
+                .unwrap_or_else(|err| {
+                    tracing::warn!(target: "graphersal::server", %err, "cannot cancel an MCP run");
+                    false
+                })
         }
     }
 }

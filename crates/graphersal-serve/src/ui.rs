@@ -33,6 +33,9 @@ impl Ui {
 
     /// The UI of `--ui-dir`: an explicit directory must exist (a usage error otherwise); the
     /// default `./playground` is used when it exists, else the embedded copy alone.
+    ///
+    /// The directory is an OVERLAY on purpose: it may hold only the files one wants to
+    /// override; every other file comes from the embedded copy ([`Ui::read`]).
     pub fn resolve(given: Option<&str>, default: &str) -> Result<Self, ServeError> {
         let Some(given) = given else {
             let dir = std::fs::canonicalize(default)
@@ -67,6 +70,10 @@ impl Ui {
     /// The bytes of `relative` (already decoded, without a leading `/`; `""` or a directory
     /// means its `index.html`) and its file name for the content type; `None` when the path is
     /// not a UI file or leaves the UI root.
+    ///
+    /// A file of the UI directory wins; a file it does not hold, or cannot read, comes from the
+    /// embedded copy. That fallback is deliberate (user decision 2026-11-10): `--ui-dir` is an
+    /// overlay holding only the overridden files, not a full copy of the UI.
     pub fn read(&self, relative: &str) -> Option<(Vec<u8>, String)> {
         if relative.contains('\\')
             || relative.contains('\0')
@@ -189,5 +196,27 @@ mod tests {
         assert!(ui.read("./index.html").is_none());
         assert!(ui.read("pkg/graphersal_wasm.js").is_none());
         assert!(ui.read("README.md").is_none());
+    }
+
+    /// `--ui-dir` is an overlay: a directory with one file serves that file and the embedded
+    /// copy for every other one.
+    #[test]
+    fn a_ui_directory_overlays_the_embedded_copy() {
+        let dir =
+            std::env::temp_dir().join(format!("graphersal_ui_overlay_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<p>mine</p>").unwrap();
+        let ui = Ui::resolve(dir.to_str(), "unused").unwrap();
+        let (bytes, name) = ui.read("").unwrap();
+        assert_eq!(
+            (bytes.as_slice(), name.as_str()),
+            (&b"<p>mine</p>"[..], "index.html")
+        );
+        let (bytes, name) = ui.read("js/main.js").unwrap();
+        assert_eq!(name, "js/main.js");
+        assert_eq!(bytes, embedded("js/main.js").unwrap());
+        assert_eq!(ui.read("reset/").unwrap().1, "reset/index.html");
+        assert!(ui.read("missing.js").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
