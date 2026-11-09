@@ -689,22 +689,42 @@ pub(crate) fn push_step_into<'g, S: GraphStorage + 'g>(
                     .count()
                     + 1;
                 let target = &mut steps[index];
-                let args_rejected =
-                    args.and_then(
-                        |args| match target.push_modulator_args(args, modulator_name) {
-                            ArgsModulation::Accepted => None,
+                let args_rejected = args.and_then(|args| {
+                    // A list of names goes to every step taking `from()`/`to()`; one holding a
+                    // vertex value only to a step taking endpoints (`add_e()`).
+                    let names: Option<Vec<String>> = args
+                        .iter()
+                        .map(|arg| match arg {
+                            crate::value::EndpointArg::Name(name) => Some(name.clone()),
+                            crate::value::EndpointArg::Vertex(_)
+                            | crate::value::EndpointArg::NotAVertex(_) => None,
+                        })
+                        .collect();
+                    let modulation = match names {
+                        Some(names) => target.push_modulator_args(names, modulator_name),
+                        None => match target.push_modulator_endpoints(args, modulator_name) {
+                            ArgsModulation::Accepted => ArgsModulation::Accepted,
+                            // A step taking only labels (`path()`) gets no label, which it
+                            // reports as its own argument error; any other step rejects it.
                             ArgsModulation::Unsupported => {
-                                let rendered = target.get_name();
-                                let name = user_step_name(&rendered);
-                                Some(StepModulatorRejected {
-                                    step: name.clone(),
-                                    position,
-                                    modulator: args_reason::MODULATOR,
-                                    reason: format!("{name}(){}", args_reason::NOT_ACCEPTED),
-                                })
+                                target.push_modulator_args(Vec::new(), modulator_name)
                             }
                         },
-                    );
+                    };
+                    match modulation {
+                        ArgsModulation::Accepted => None,
+                        ArgsModulation::Unsupported => {
+                            let rendered = target.get_name();
+                            let name = user_step_name(&rendered);
+                            Some(StepModulatorRejected {
+                                step: name.clone(),
+                                position,
+                                modulator: args_reason::MODULATOR,
+                                reason: format!("{name}(){}", args_reason::NOT_ACCEPTED),
+                            })
+                        }
+                    }
+                });
                 let by_rejected =
                     by.and_then(|by| match target.push_modulator_by(by, modulator_name) {
                         ByModulation::Accepted => None,

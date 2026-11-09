@@ -86,6 +86,21 @@ pub(crate) fn rhai_strings<T: AsRef<str>>(items: &[T]) -> String {
     )
 }
 
+/// `from()`/`to()` arguments joined with `, `: a name as a string literal, a vertex as TinkerPop's
+/// console prints it (`v[2]`), a refused value as its type (`<edge>`).
+pub(crate) fn endpoint_args(items: &[crate::value::EndpointArg]) -> String {
+    join_cut(items.iter().map(endpoint_arg), items.len())
+}
+
+/// One item of [`endpoint_args`].
+pub(crate) fn endpoint_arg(item: &crate::value::EndpointArg) -> String {
+    match item {
+        crate::value::EndpointArg::Name(name) => rhai_string(name),
+        crate::value::EndpointArg::Vertex(id) => format!("v[{id}]"),
+        crate::value::EndpointArg::NotAVertex(kind) => format!("<{kind}>"),
+    }
+}
+
 /// `parts` joined with `, `; after [`MAX_LITERAL_ITEMS`] of `total` parts: `, …` and the count.
 fn join_cut(parts: impl Iterator<Item = String>, total: usize) -> String {
     let mut out = parts.take(MAX_LITERAL_ITEMS).collect::<Vec<_>>().join(", ");

@@ -420,7 +420,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Builds a string from a template, filling %{key} with the element's properties or map values (see the book page Step - format).",
         "g.v(1).format(\"%{name} is %{age}\").next()" => "marko is 29";
     "traversal" "from":
-        "Sets the out vertex of the edge add_e() creates: a vertex id, a path label or a child traversal; for path() it starts the window at a label.",
+        "Sets the out vertex of the edge add_e() creates: a vertex, a vertex id, a path label or a child traversal; for path() it starts the window at a label.",
         "g.add_e(\"knows\").from(\"2\").to(\"4\").out_v().values(\"name\").next()" => "vadas";
     "traversal" "get_schema":
         "Returns the graph's stored schema as a map (unit when none is stored).",
@@ -718,7 +718,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Within repeat(): runs the loop body exactly n times.",
         "g.v(1).repeat(__.out()).times(2).values(\"name\").to_list()" => "[\"ripple\", \"lop\"]";
     "traversal" "to":
-        "Sets the in vertex of the edge add_e() creates (vertex id, path label or child traversal); with a Direction it moves like out()/in()/both().",
+        "Sets the in vertex of the edge add_e() creates (vertex, vertex id, path label or child traversal); with a Direction it moves like out()/in()/both().",
         "g.v(1).to(Direction.OUT, \"knows\").values(\"name\").to_list()" => "[\"josh\", \"vadas\"]";
     "traversal" "to_e":
         "Moves to the incident edges in the given Direction, optionally only edges with the given labels.",

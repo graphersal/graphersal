@@ -414,3 +414,204 @@ fn a_list_of_names_creates_one_edge_per_name() {
     run(&graph, r#"g.V("1").addE("x").to(["2","3"]).toList()"#);
     assert_eq!(int(&graph, r#"g.V("1").outE("x").count().next()"#), 2);
 }
+
+/// The id and the out-/in-vertex ids of the one edge labelled `label`.
+fn ends(graph: &Arc<Graph>, label: &str) -> (i64, String, String) {
+    let count = int(
+        graph,
+        &format!(r#"g.E().hasLabel("{label}").count().next()"#),
+    );
+    let id = |dir: &str| {
+        eval_value(
+            graph.clone(),
+            &format!(r#"g.E().hasLabel("{label}").{dir}().id().next()"#),
+        )
+        .unwrap_or_else(|e| panic!("{label}: {e}"))
+        .into_string()
+        .unwrap_or_else(|_| panic!("{label}: not a string id"))
+    };
+    (count, id("outV"), id("inV"))
+}
+
+#[test]
+fn a_vertex_value_is_an_endpoint_in_both_spellings() {
+    // TinkerPop's `from(Vertex)` / `to(Vertex)`: a vertex a query returned, passed back.
+    for script in [
+        r#"let a = g.V("1").next(); let b = g.V("2").next(); g.addE("x").from(a).to(b).toList()"#,
+        r#"let a = g.V("1").next(); let b = g.V("2").next(); g.add_e("x").to(b).from(a).toList()"#,
+        r#"let b = g.V("2").next(); g.V("1").addE("x").to(b).toList()"#,
+        r#"let a = g.V("1").next(); g.V("2").addE("x").from(a).toList()"#,
+        r#"let a = g.V("1").next(); g.V("2").addE("x").from([a]).toList()"#,
+        // An edge endpoint value (`e.out_v`) is a vertex too.
+        // `e[0]` is `1-knows->2`.
+        r#"let e = g.E("0").next(); g.addE("x").from(e.out_v).to(e.in_v).toList()"#,
+    ] {
+        let graph = modern();
+        run(&graph, script);
+        let (count, out_v, in_v) = ends(&graph, "x");
+        assert_eq!(
+            (count, out_v.as_str(), in_v.as_str()),
+            (1, "1", "2"),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn a_list_of_vertices_creates_one_edge_per_vertex() {
+    let graph = modern();
+    run(
+        &graph,
+        r#"let vs = g.V("2","3").toList(); g.V("1").addE("x").to(vs).toList()"#,
+    );
+    assert_eq!(
+        int(
+            &graph,
+            r#"g.V("1").outE("x").inV().hasId("2","3").count().next()"#
+        ),
+        2
+    );
+}
+
+#[test]
+fn a_vertex_value_is_never_read_as_a_step_label_or_side_effect_key() {
+    // The vertex `v[2]` names itself by its id, not the label `"2"` or the side effect `"2"`
+    // holding another vertex.
+    for script in [
+        r#"let b = g.V("2").next(); g.V("3").as("2").V("1").addE("x").to(b).toList()"#,
+        r#"let b = g.V("2").next(); g.withSideEffect("2", "3").V("1").addE("x").to(b).toList()"#,
+    ] {
+        let graph = modern();
+        run(&graph, script);
+        let (count, out_v, in_v) = ends(&graph, "x");
+        assert_eq!(
+            (count, out_v.as_str(), in_v.as_str()),
+            (1, "1", "2"),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn a_vertex_value_no_longer_in_the_graph_fails() {
+    let graph = modern();
+    let report = fail(
+        &graph,
+        r#"let b = g.V("2").next(); g.V("2").drop().iterate(); g.V("1").addE("x").to(b).toList()"#,
+    );
+    assert!(report.contains("2"), "{report}");
+    assert_eq!(int(&graph, r#"g.E().hasLabel("x").count().next()"#), 0);
+}
+
+#[test]
+fn an_edge_value_is_not_an_endpoint() {
+    // The edge `e[2]` shares its id with the vertex `v[2]`; the edge must not be read as it.
+    let graph = modern();
+    let report = fail(
+        &graph,
+        r#"let e = g.E("2").next(); g.V("1").addE("x").to(e).toList()"#,
+    );
+    assert!(report.contains("edge"), "{report}");
+    assert_eq!(int(&graph, r#"g.E().hasLabel("x").count().next()"#), 0);
+}
+
+#[test]
+fn a_vertex_value_from_a_child_traversal_or_a_side_effect_is_an_endpoint() {
+    for script in [
+        r#"let b = g.V("2").next(); g.V("1").addE("x").to(__.constant(b)).toList()"#,
+        r#"let b = g.V("2").next(); g.withSideEffect("b", b).V("1").addE("x").to("b").toList()"#,
+    ] {
+        let graph = modern();
+        run(&graph, script);
+        let (count, out_v, in_v) = ends(&graph, "x");
+        assert_eq!(
+            (count, out_v.as_str(), in_v.as_str()),
+            (1, "1", "2"),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn profile_renders_a_vertex_endpoint() {
+    let graph = modern();
+    let profile = eval_value(
+        graph.clone(),
+        r#"let b = g.V("2").next(); g.V("1").addE("x").to(b).profile().to_string()"#,
+    )
+    .unwrap()
+    .into_string()
+    .unwrap();
+    assert!(profile.contains(r#"add_e("x").to(v[2])"#), "{profile}");
+}
+
+#[test]
+fn rust_api_takes_vertex_values_for_endpoints() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let a = graph.traversal_mut().v("1").next().unwrap().unwrap();
+    let b = graph.traversal_mut().v("2").next().unwrap().unwrap();
+    // A step label and a side effect named like `b`'s id never shadow the vertex.
+    let edge = graph
+        .traversal_mut()
+        .with_side_effect("2", "4")
+        .v("3")
+        .as_("2")
+        .add_e("x")
+        .from(a.clone())
+        .to(&b)
+        .next()
+        .unwrap();
+    let Some(ElementProperty::Edge(edge)) = edge else {
+        panic!("{edge:?}");
+    };
+    assert_eq!((edge.out_v().id(), edge.in_v().id()), ("1", "2"));
+
+    // An edge's endpoint and a list of vertices.
+    let created = graph
+        .traversal_mut()
+        .v("1")
+        .add_e("y")
+        .to(vec![a.clone(), b.clone()])
+        .count()
+        .next()
+        .unwrap();
+    assert_eq!(created, Some(ElementProperty::from(2)));
+    let edge = graph
+        .traversal_mut()
+        .add_e("z")
+        .from(edge.in_v())
+        .to(edge.out_v())
+        .next()
+        .unwrap();
+    let Some(ElementProperty::Edge(edge)) = edge else {
+        panic!("{edge:?}");
+    };
+    assert_eq!((edge.out_v().id(), edge.in_v().id()), ("2", "1"));
+
+    // An edge value is never read as the id of a vertex (`e[2]` shares its id with `v[2]`).
+    let e2 = graph.traversal_mut().e("2").next().unwrap().unwrap();
+    let err = graph
+        .traversal_mut()
+        .v("1")
+        .add_e("w")
+        .to(e2)
+        .next()
+        .expect_err("an edge is not an endpoint");
+    assert!(err.to_string().contains("edge"), "{err}");
+}
+
+#[test]
+fn only_add_e_takes_a_vertex_value_in_from_and_to() {
+    let graph = modern();
+    // A path window is bounded by step labels only.
+    let report = fail(
+        &graph,
+        r#"let b = g.V("2").next(); g.V("1").as("a").out().path().from(b).toList()"#,
+    );
+    assert!(report.contains("exactly one step label"), "{report}");
+    let report = fail(
+        &graph,
+        r#"let b = g.V("2").next(); g.V("1").out().to(b).toList()"#,
+    );
+    assert!(report.contains("does not take from()/to()"), "{report}");
+}

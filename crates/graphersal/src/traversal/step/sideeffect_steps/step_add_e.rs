@@ -9,6 +9,20 @@ enum Endpoint<'g, S: GraphStorage + 'g> {
     Name(String),
     /// A child traversal; its first result is the endpoint (TinkerPop's `TraversalUtil.produce`).
     Traversal(AnonymousTraversal<'g, S>),
+    /// A vertex given as a value (TinkerPop's `from(Vertex)`): the vertex of this id.
+    Vertex(CompactString),
+    /// A value that is never an endpoint (an edge given as a value); fails with its type name.
+    NotAVertex(&'static str),
+}
+
+impl<'g, S: GraphStorage + 'g> From<EndpointArg> for Endpoint<'g, S> {
+    fn from(arg: EndpointArg) -> Self {
+        match arg {
+            EndpointArg::Name(name) => Endpoint::Name(name),
+            EndpointArg::Vertex(id) => Endpoint::Vertex(id),
+            EndpointArg::NotAVertex(kind) => Endpoint::NotAVertex(kind),
+        }
+    }
 }
 
 impl<'g, S: GraphStorage + 'g> Clone for Endpoint<'g, S> {
@@ -16,6 +30,8 @@ impl<'g, S: GraphStorage + 'g> Clone for Endpoint<'g, S> {
         match self {
             Endpoint::Name(name) => Endpoint::Name(name.clone()),
             Endpoint::Traversal(traversal) => Endpoint::Traversal(traversal.clone()),
+            Endpoint::Vertex(id) => Endpoint::Vertex(id.clone()),
+            Endpoint::NotAVertex(kind) => Endpoint::NotAVertex(kind),
         }
     }
 }
@@ -25,6 +41,9 @@ impl<'g, S: GraphStorage + 'g> fmt::Display for Endpoint<'g, S> {
         match self {
             Endpoint::Name(name) => f.write_str(&crate::value::literal::rhai_string(name)),
             Endpoint::Traversal(traversal) => write!(f, "{traversal}"),
+            // As `crate::value::literal::endpoint_arg` renders them.
+            Endpoint::Vertex(id) => write!(f, "v[{id}]"),
+            Endpoint::NotAVertex(kind) => write!(f, "<{kind}>"),
         }
     }
 }
@@ -178,7 +197,8 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Adds an edge from the incoming vertex (or, with `from()`/`to()`, between the named
     /// vertices). `from()`/`to()` come right after it, with any number of `property()` calls in
     /// between (`add_e("knows").property("weight", 1).from("a").to("b")`); an endpoint is a step
-    /// label, a side-effect key, a vertex id or a traversal (see [`Self::from_by`]). A traversal
+    /// label, a side-effect key, a vertex id, a vertex value (see [`Self::from`]) or a traversal
+    /// (see [`Self::from_by`]). A traversal
     /// label is given with [`Self::add_e_by`].
     ///
     /// Deviations from TinkerPop (also on the "addE() endpoints" page of the user's guide): a
@@ -264,6 +284,9 @@ fn resolve_vertex<S: GraphStorage>(
         other => return Err(not_a_vertex(kind_of(other))),
     }
     let id: CompactString = match value.into_node_property(context.storage)? {
+        // A vertex value (`constant(v)`, a side effect holding one): the vertex of its id.
+        ElementProperty::Vertex(vertex) => return resolve_vertex_value(context, vertex.id()),
+        ElementProperty::Edge(_) => return Err(not_a_vertex("edge")),
         ElementProperty::String(text) => text,
         ElementProperty::Number(number) => match number.as_i64() {
             Some(int) => compact_str::format_compact!("{int}"),
@@ -276,6 +299,17 @@ fn resolve_vertex<S: GraphStorage>(
         .storage
         .get_vertex_by_id(&id)?
         .ok_or_else(|| not_a_vertex("null"))
+}
+
+/// The vertex a vertex value stands for: the vertex of its id, which must still be in the graph.
+fn resolve_vertex_value<S: GraphStorage>(
+    context: &TraverserContext<'_, S>,
+    id: &str,
+) -> TraverserResult<S::VertexId> {
+    context
+        .storage
+        .get_vertex_by_id(id)?
+        .ok_or_else(|| Box::new(GraphError::vertex_not_found(id).into()))
 }
 
 /// The vertex a name stands for: the object last labelled so on the path (`as()`), else the side
@@ -342,6 +376,8 @@ impl<'g, S: GraphStorage + 'g> StepAddE<'g, S> {
                     Some(found) => resolve_vertex(context, found.value)?,
                     None => return Err(not_a_vertex("null")),
                 },
+                Endpoint::Vertex(id) => resolve_vertex_value(context, id)?,
+                Endpoint::NotAVertex(kind) => return Err(not_a_vertex(*kind)),
             };
             out.push(id);
         }
@@ -490,7 +526,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
         PathRequirement::labels(self.from.iter().chain(self.to.iter()).flatten().filter_map(
             |endpoint| match endpoint {
                 Endpoint::Name(name) => Some(name.as_str()),
-                Endpoint::Traversal(_) => None,
+                Endpoint::Traversal(_) | Endpoint::Vertex(_) | Endpoint::NotAVertex(_) => None,
             },
         ))
     }
@@ -523,6 +559,20 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
             self.from = names;
         } else if modulator_name.eq("to") {
             self.to = names;
+        }
+        ArgsModulation::Accepted
+    }
+
+    fn push_modulator_endpoints(
+        &mut self,
+        args: Vec<EndpointArg>,
+        modulator_name: &str,
+    ) -> ArgsModulation {
+        let endpoints = Some(args.into_iter().map(Endpoint::from).collect());
+        if modulator_name.eq("from") {
+            self.from = endpoints;
+        } else if modulator_name.eq("to") {
+            self.to = endpoints;
         }
         ArgsModulation::Accepted
     }

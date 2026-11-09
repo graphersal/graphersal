@@ -20,6 +20,11 @@ fn strings(arg: &[CompactString]) -> ArgStrings {
     }
 }
 
+/// The `from()`/`to()` argument list; an empty list is no argument, as for [`strings`].
+fn endpoints(arg: &[crate::value::EndpointArg]) -> crate::value::EndpointArgs {
+    crate::value::EndpointArgs((!arg.is_empty()).then(|| arg.to_vec()))
+}
+
 impl ScriptMergeArg {
     /// The engine input of a `mergeV(..)`/`mergeE(..)` argument.
     fn lower<'g, S: GraphStorage + 'g>(&self) -> MergeInput<'g, S> {
@@ -511,8 +516,8 @@ impl ScriptGraphTraversalSource {
                 Step::GlobPath(pattern, options) => {
                     graph.glob_path_with(pattern.as_str(), options.convert_to_anonymous())
                 }
-                Step::From(arg) => graph.from(strings(arg)),
-                Step::To(arg) => graph.to(strings(arg)),
+                Step::From(arg) => graph.from(endpoints(arg)),
+                Step::To(arg) => graph.to(endpoints(arg)),
                 Step::AddE(label) => match label {
                     Some(label) => graph.add_e(label.clone()),
                     None => graph.add_e(None),

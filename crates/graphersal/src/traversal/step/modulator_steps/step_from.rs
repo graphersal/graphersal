@@ -1,10 +1,10 @@
 use crate::graph::GraphStorage;
 use crate::*;
 
-/// A `from()` modulator: step labels / vertex ids, or one child traversal (`from(__.V(..))`),
+/// A `from()` modulator: step labels / vertex ids / vertices, or one child traversal (`from(__.V(..))`),
 /// moved into the modulated step when the modulator is pushed (see `push_step_into`).
 struct StepFrom<'g, S: GraphStorage + 'g> {
-    args: Option<Vec<String>>,
+    args: Option<Vec<EndpointArg>>,
     traversal: Option<AnonymousTraversal<'g, S>>,
 }
 
@@ -22,12 +22,8 @@ impl<'g, S: GraphStorage + 'g> fmt::Display for StepFrom<'g, S> {
         match (&self.args, &self.traversal) {
             (_, Some(traversal)) => write!(f, "from({traversal})"),
             (Some(args), None) => match args.as_slice() {
-                [one] => write!(f, "from({})", crate::value::literal::rhai_string(one)),
-                _ => write!(
-                    f,
-                    "from({})",
-                    crate::value::literal::rhai_string_array(args)
-                ),
+                [one] => write!(f, "from({})", crate::value::literal::endpoint_arg(one)),
+                _ => write!(f, "from([{}])", crate::value::literal::endpoint_args(args)),
             },
             (None, None) => write!(f, "from()"),
         }
@@ -38,7 +34,10 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Modulates the step right before it (TinkerPop's `FromToModulating`). After `add_e()` it
     /// names the vertex (or vertices, for a list of step labels/ids) an edge is created *from*.
     /// `add_e()` may be followed by `property()` calls before `from()`/`to()`; an endpoint may also
-    /// be a traversal ([`GraphTraversalSource::from_by`]) or a side-effect key. Deviations from
+    /// be a vertex value (an [`ElementProperty::Vertex`] a query returned, a
+    /// [`VertexValue`](crate::prelude::VertexValue) or an edge's
+    /// [`VertexRef`](crate::prelude::VertexRef): that vertex, by its id, never read as a step label
+    /// or side-effect key), a traversal ([`GraphTraversalSource::from_by`]) or a side-effect key. Deviations from
     /// TinkerPop (list of names, plain vertex ids, string-compared ids) are on the "addE() endpoints"
     /// page of the user's guide and in [`GraphTraversalSource::add_e`].
     /// After `path()`, `simple_path()` or `cyclic_path()` it names the step label where the
@@ -69,12 +68,8 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// [`TraverserError::InvalidModulator`] when the traversal executes, or earlier still when
     /// the plan-time validation pass finds it in a
     /// branch that never runs.
-    pub fn from<T: Into<ArgStrings>>(self, args: T) -> Self {
-        let args = match args.into() {
-            ArgStrings::None => None,
-            ArgStrings::String(v) => Some(vec![v]),
-            ArgStrings::List(v) => Some(v),
-        };
+    pub fn from<T: Into<EndpointArgs>>(self, args: T) -> Self {
+        let args = args.into().0;
         self.push_step(GraphStep::Modulator(
             "from",
             Box::new(StepFrom {
@@ -89,12 +84,8 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Modulates the step right before it, inside a child traversal (`__.add_e(...).from(...)`);
     /// see [`GraphTraversalSource::from`] for the accepted arguments and the steps that take
     /// `from()`.
-    pub fn from<T: Into<ArgStrings>>(self, args: T) -> Self {
-        let args = match args.into() {
-            ArgStrings::None => None,
-            ArgStrings::String(v) => Some(vec![v]),
-            ArgStrings::List(v) => Some(v),
-        };
+    pub fn from<T: Into<EndpointArgs>>(self, args: T) -> Self {
+        let args = args.into().0;
         let step = GraphStep::Modulator(
             "from",
             Box::new(StepFrom {
@@ -135,7 +126,7 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepModulator<'g, S> for StepFrom<'g, S> {
-    fn get_args(&mut self) -> Option<Vec<String>> {
+    fn get_args(&mut self) -> Option<Vec<EndpointArg>> {
         self.args.take()
     }
 
