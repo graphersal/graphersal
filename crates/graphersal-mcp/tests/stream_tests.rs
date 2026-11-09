@@ -120,7 +120,7 @@ impl Host for TestHost {
 struct Client {
     to_server: Option<std::io::PipeWriter>,
     lines: Receiver<String>,
-    server: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    server: Option<std::thread::JoinHandle<Result<(), McpError>>>,
     /// Lines read while waiting for another one.
     seen: Vec<Value>,
 }
@@ -187,7 +187,7 @@ impl Client {
     }
 
     /// Closes the input and waits for the server to end; the lines left.
-    fn close(mut self) -> (std::io::Result<()>, Vec<Value>) {
+    fn close(mut self) -> (Result<(), McpError>, Vec<Value>) {
         drop(self.to_server.take());
         let result = self
             .server

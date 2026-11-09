@@ -138,7 +138,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             let cancelled = match run_id {
                 Some(id) => context.runs.cancel_alias(&key, &id),
                 None => context.runs.cancel_client(&key),
-            };
+            }
+            .map_err(|err| HttpError(500, err.to_string()))?;
             Ok(Response::json(200, &json!({ "cancelled": cancelled })))
         }
         // Scheduled jobs belong to a Store, which the read-only serving mode does not open.
@@ -174,7 +175,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
                 cancel.clone(),
                 RunKind::Query,
                 Some(&script),
-            );
+            )?;
             let answer = context.call(move |s| {
                 s.execute_with_cancel(&script, &options, playground_authorizer(), &cancel)
             });

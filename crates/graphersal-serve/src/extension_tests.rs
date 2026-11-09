@@ -816,7 +816,10 @@ fn an_mcp_connection_of_a_context_runs_there_with_its_identity() {
     assert_eq!(started[0].0.client(), format!("mcp:{}", connection.key()));
     // Without an endpoint there is no connection.
     let plain = Context::builder(session_on("empty"), check()).build();
-    assert!(plain.mcp_connection().is_none());
+    let missing = plain
+        .mcp_connection()
+        .expect_err("no endpoint, no connection");
+    assert!(missing.to_string().contains("no MCP endpoint"), "{missing}");
 }
 
 #[cfg(feature = "mcp")]

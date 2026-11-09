@@ -74,6 +74,9 @@ pub enum ServeError {
     /// A session job of the runtime failed (the session thread is gone, the queue refused the
     /// job, or the session refused the work: [`start_job_ticker`]'s time zone).
     Session(String),
+    /// The context has no MCP endpoint ([`Context::mcp_connection`] without
+    /// [`ContextBuilder::mcp`] or [`ContextBuilder::shared_mcp`]).
+    NoMcp(String),
 }
 
 impl fmt::Display for ServeError {
@@ -83,7 +86,8 @@ impl fmt::Display for ServeError {
             Self::Thread(message)
             | Self::Ui(message)
             | Self::Lifecycle(message)
-            | Self::Session(message) => f.write_str(message),
+            | Self::Session(message)
+            | Self::NoMcp(message) => f.write_str(message),
         }
     }
 }
@@ -92,7 +96,11 @@ impl std::error::Error for ServeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Setup(source) => Some(source.as_ref()),
-            Self::Thread(_) | Self::Ui(_) | Self::Lifecycle(_) | Self::Session(_) => None,
+            Self::Thread(_)
+            | Self::Ui(_)
+            | Self::Lifecycle(_)
+            | Self::Session(_)
+            | Self::NoMcp(_) => None,
         }
     }
 }
@@ -671,16 +679,22 @@ impl Context {
     }
 
     /// A new MCP connection (one MCP session over a stream: `graphersal_mcp::serve_lines`)
-    /// whose jobs run on this context's session, under this context's profile; `None`
-    /// without an endpoint. The host picks the context (its graph and profile) from its own
-    /// handshake, as the graph resolver does for a request.
+    /// whose jobs run on this context's session, under this context's profile;
+    /// [`ServeError::NoMcp`] without an endpoint. The host picks the context (its graph and
+    /// profile) from its own handshake, as the graph resolver does for a request.
     #[cfg(feature = "mcp")]
-    pub fn mcp_connection(self: &Arc<Self>) -> Option<graphersal_mcp::Connection> {
-        let mcp = self.mcp.clone()?;
+    pub fn mcp_connection(self: &Arc<Self>) -> Result<graphersal_mcp::Connection, ServeError> {
+        let mcp = self.mcp.clone().ok_or_else(|| {
+            ServeError::NoMcp(
+                "the context has no MCP endpoint: build it with ContextBuilder::mcp or \
+                 ContextBuilder::shared_mcp"
+                    .to_string(),
+            )
+        })?;
         let profile = self.mcp_profile.clone();
         let host: Arc<dyn graphersal_mcp::Host> = self.clone();
         let connection = graphersal_mcp::Connection::new(mcp, host);
-        Some(match profile {
+        Ok(match profile {
             Some(profile) => connection.with_profile(profile),
             None => connection,
         })
@@ -721,28 +735,30 @@ impl Context {
 
     /// Registers a run of this request's client stopped by `cancel` (the client's own id of
     /// it: `alias`; what it does: `kind` and its query `text`, for the run observer) until the
-    /// answer is dropped; register it BEFORE its job is queued.
+    /// answer is dropped; register it BEFORE its job is queued. A registry failure is a `500`.
     pub(crate) fn register_run(
         &self,
         alias: Option<&str>,
         cancel: CancelToken,
         kind: runs::RunKind,
         text: Option<&str>,
-    ) -> runs::Registered<'_> {
+    ) -> Result<runs::Registered<'_>, HttpError> {
         let (key, identity) = CLIENT.with(|c| {
             let client = c.borrow();
             (client.pool_key(), client.identity.clone())
         });
-        self.runs.register_with(
-            &key,
-            alias,
-            cancel,
-            runs::RunDetails {
-                kind: Some(kind),
-                text: text.map(str::to_string),
-                identity,
-            },
-        )
+        self.runs
+            .register_with(
+                &key,
+                alias,
+                cancel,
+                runs::RunDetails {
+                    kind: Some(kind),
+                    text: text.map(str::to_string),
+                    identity,
+                },
+            )
+            .map_err(|err| HttpError(500, err.to_string()))
     }
 
     /// Runs `job` on the session thread and waits for its answer. A job that changes the

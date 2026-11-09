@@ -29,6 +29,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use graphersal::exec::CancelToken;
 
+use crate::context::ServeError;
+
 /// The longest client id of a run (`runId`) the server accepts.
 pub(crate) const MAX_ALIAS_CHARS: usize = 128;
 
@@ -189,7 +191,9 @@ pub struct Registered<'a> {
 
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        self.runs.end(self.id);
+        if let Err(err) = self.runs.end(self.id) {
+            tracing::warn!(target: "graphersal::server", %err, run = self.id, "cannot end a run");
+        }
     }
 }
 
@@ -211,7 +215,14 @@ impl Runs {
 
     /// Registers a run of `client` stopped by `token`, with the client's own id `alias`;
     /// returns its id for [`Self::end`]. An observer sees it as [`RunKind::Other`].
-    pub fn start(&self, client: &str, alias: Option<&str>, token: CancelToken) -> u64 {
+    ///
+    /// The registry's methods answer `Result` (it is shared state); none fails today.
+    pub fn start(
+        &self,
+        client: &str,
+        alias: Option<&str>,
+        token: CancelToken,
+    ) -> Result<u64, ServeError> {
         self.start_with(client, alias, token, RunDetails::default())
     }
 
@@ -222,7 +233,7 @@ impl Runs {
         alias: Option<&str>,
         token: CancelToken,
         details: RunDetails,
-    ) -> u64 {
+    ) -> Result<u64, ServeError> {
         let mut state = self.lock();
         state.next += 1;
         let id = state.next;
@@ -256,7 +267,7 @@ impl Runs {
         if let (Some(observer), Some(info)) = (&self.observer, told) {
             observer.run_started(&info, RunHandle { token });
         }
-        id
+        Ok(id)
     }
 
     /// [`Self::start`] ended by dropping the answer.
@@ -265,11 +276,11 @@ impl Runs {
         client: &str,
         alias: Option<&str>,
         token: CancelToken,
-    ) -> Registered<'_> {
-        Registered {
+    ) -> Result<Registered<'_>, ServeError> {
+        Ok(Registered {
             runs: self,
-            id: self.start(client, alias, token),
-        }
+            id: self.start(client, alias, token)?,
+        })
     }
 
     /// [`Self::register`] with what the run does (for the observer).
@@ -279,15 +290,15 @@ impl Runs {
         alias: Option<&str>,
         token: CancelToken,
         details: RunDetails,
-    ) -> Registered<'_> {
-        Registered {
+    ) -> Result<Registered<'_>, ServeError> {
+        Ok(Registered {
             runs: self,
-            id: self.start_with(client, alias, token, details),
-        }
+            id: self.start_with(client, alias, token, details)?,
+        })
     }
 
     /// The run `id` ended.
-    pub fn end(&self, id: u64) {
+    pub fn end(&self, id: u64) -> Result<(), ServeError> {
         let ended = self.lock().runs.remove(&id);
         if let (
             Some(observer),
@@ -299,21 +310,25 @@ impl Runs {
         {
             observer.run_ended(&info, started.elapsed());
         }
+        Ok(())
     }
 
     /// Cancels the runs of `client`; whether there was one.
-    pub fn cancel_client(&self, client: &str) -> bool {
-        self.cancel_where(|run| run.client == client) > 0
+    pub fn cancel_client(&self, client: &str) -> Result<bool, ServeError> {
+        Ok(self.cancel_where(|run| run.client == client) > 0)
     }
 
     /// Cancels the runs of `client` with its own id `alias`; whether there was one.
-    pub fn cancel_alias(&self, client: &str, alias: &str) -> bool {
-        self.cancel_where(|run| run.client == client && run.alias.as_deref() == Some(alias)) > 0
+    pub fn cancel_alias(&self, client: &str, alias: &str) -> Result<bool, ServeError> {
+        Ok(
+            self.cancel_where(|run| run.client == client && run.alias.as_deref() == Some(alias))
+                > 0,
+        )
     }
 
     /// Cancels every run (the graceful stop); how many there were.
-    pub fn cancel_all(&self) -> usize {
-        self.cancel_where(|_| true)
+    pub fn cancel_all(&self) -> Result<usize, ServeError> {
+        Ok(self.cancel_where(|_| true))
     }
 
     fn cancel_where(&self, matches: impl Fn(&Run) -> bool) -> usize {
@@ -341,23 +356,29 @@ mod tests {
     fn a_cancel_reaches_only_the_runs_it_names() {
         let runs = Runs::default();
         let tokens: Vec<CancelToken> = (0..4).map(|_| CancelToken::new()).collect();
-        let _a1 = runs.register("page:a", Some("1"), tokens[0].clone());
-        let _a2 = runs.register("page:a", Some("2"), tokens[1].clone());
-        let _b1 = runs.register("page:b", Some("1"), tokens[2].clone());
-        let _m = runs.register("mcp:s", None, tokens[3].clone());
+        let _a1 = runs
+            .register("page:a", Some("1"), tokens[0].clone())
+            .unwrap();
+        let _a2 = runs
+            .register("page:a", Some("2"), tokens[1].clone())
+            .unwrap();
+        let _b1 = runs
+            .register("page:b", Some("1"), tokens[2].clone())
+            .unwrap();
+        let _m = runs.register("mcp:s", None, tokens[3].clone()).unwrap();
 
-        assert!(runs.cancel_alias("page:a", "2"));
+        assert!(runs.cancel_alias("page:a", "2").unwrap());
         let cancelled = |tokens: &[CancelToken]| -> Vec<bool> {
             tokens.iter().map(CancelToken::is_cancelled).collect()
         };
         assert_eq!(cancelled(&tokens), [false, true, false, false]);
         // Another client's id of the same text is not this client's run.
-        assert!(!runs.cancel_alias("page:c", "1"));
+        assert!(!runs.cancel_alias("page:c", "1").unwrap());
         assert_eq!(cancelled(&tokens), [false, true, false, false]);
 
-        assert!(runs.cancel_client("page:a"));
+        assert!(runs.cancel_client("page:a").unwrap());
         assert_eq!(cancelled(&tokens), [true, true, false, false]);
-        assert_eq!(runs.cancel_all(), 4);
+        assert_eq!(runs.cancel_all().unwrap(), 4);
         assert_eq!(cancelled(&tokens), [true, true, true, true]);
     }
 
@@ -365,11 +386,11 @@ mod tests {
     fn an_ended_run_is_no_longer_cancelled() {
         let runs = Runs::default();
         let token = CancelToken::new();
-        drop(runs.register("page:a", Some("1"), token.clone()));
+        drop(runs.register("page:a", Some("1"), token.clone()).unwrap());
         assert_eq!(runs.len(), 0);
-        assert!(!runs.cancel_client("page:a"));
-        assert!(!runs.cancel_alias("page:a", "1"));
-        assert_eq!(runs.cancel_all(), 0);
+        assert!(!runs.cancel_client("page:a").unwrap());
+        assert!(!runs.cancel_alias("page:a", "1").unwrap());
+        assert_eq!(runs.cancel_all().unwrap(), 0);
         assert!(!token.is_cancelled());
     }
 }

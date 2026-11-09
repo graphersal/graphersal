@@ -328,7 +328,9 @@ pub fn run(cli: &Cli) -> i32 {
             stop.set_cancel(cancel.clone());
             let runs = runs.clone();
             stop.set_on_stop(Arc::new(move || {
-                runs.cancel_all();
+                if let Err(err) = runs.cancel_all() {
+                    tracing::warn!(target: "graphersal::server", %err, "cannot cancel the running queries");
+                }
             }));
         }
         Some(pool) => {
@@ -344,7 +346,12 @@ pub fn run(cli: &Cli) -> i32 {
                     "Stopping: no new queries; the running ones get {} s to finish.",
                     timeout.as_secs()
                 );
-                let drained = pool.drain(timeout, || runs.cancel_all());
+                let drained = pool.drain(timeout, || {
+                    runs.cancel_all().unwrap_or_else(|err| {
+                        tracing::warn!(target: "graphersal::server", %err, "cannot cancel the running queries");
+                        0
+                    })
+                });
                 if drained.cancelled > 0 {
                     errln!(
                         "{} running queries were cancelled after the drain timeout.",

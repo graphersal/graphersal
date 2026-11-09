@@ -501,7 +501,7 @@ mod tests {
         let (reply, answer) = channel();
         let (release, released) = channel::<()>();
         let cancel = CancelToken::new();
-        let run = runs.start(key, None, cancel.clone());
+        let run = runs.start(key, None, cancel.clone()).unwrap();
         let job: Job = Box::new(move |session| {
             let _ = released.recv();
             let text = session.execute_with_cancel(
@@ -531,18 +531,18 @@ mod tests {
         let (a, a_answer, a_run) = run("a");
         let (b, b_answer, b_run) = run("b");
         wait_until(&pool, |state| state.running.len() == 2);
-        assert!(runs.cancel_client("a"));
+        assert!(runs.cancel_client("a").unwrap());
         let a_text = a_answer.recv().unwrap();
         a.join().unwrap().unwrap();
-        runs.end(a_run);
+        runs.end(a_run).unwrap();
         assert!(a_text.contains("ancel"), "{a_text}");
         // "b" still runs: the cancel of "a" did not reach it.
         assert!(!b.is_finished());
         assert_eq!(pool.status()["running"], 1);
-        assert!(runs.cancel_client("b"));
+        assert!(runs.cancel_client("b").unwrap());
         let b_text = b_answer.recv().unwrap();
         b.join().unwrap().unwrap();
-        runs.end(b_run);
+        runs.end(b_run).unwrap();
         assert!(b_text.contains("ancel"), "{b_text}");
     }
 
@@ -553,7 +553,7 @@ mod tests {
         let (job, release, answer, _) = registered_query(&runs, "a", SHORT);
         let thread = submit(&pool, "a", job);
         wait_until(&pool, |state| state.running.len() == 1);
-        assert!(runs.cancel_client("a"));
+        assert!(runs.cancel_client("a").unwrap());
         drop(release);
         let text = answer.recv().unwrap();
         thread.join().unwrap().unwrap();
@@ -573,7 +573,7 @@ mod tests {
         drop(release);
         let queued = submit(&pool, "a", job);
         wait_until(&pool, |state| state.queue.len() == 1);
-        assert!(runs.cancel_client("a"));
+        assert!(runs.cancel_client("a").unwrap());
         drop(busy_release);
         let busy_text = busy_answer.recv().unwrap();
         busy.join().unwrap().unwrap();
@@ -590,11 +590,11 @@ mod tests {
         let (job, release, answer, run) = registered_query(&runs, "a", SHORT);
         let thread = submit(&pool, "a", job);
         wait_until(&pool, |state| state.running.len() == 1);
-        assert!(runs.cancel_client("a"));
+        assert!(runs.cancel_client("a").unwrap());
         drop(release);
         let text = answer.recv().unwrap();
         thread.join().unwrap().unwrap();
-        runs.end(run);
+        runs.end(run).unwrap();
         assert!(text.contains("ancel"), "{text}");
 
         let (job, release, answer, _) = registered_query(&runs, "a", SHORT);
@@ -615,7 +615,9 @@ mod tests {
         let drained = {
             let pool = pool.clone();
             let runs = runs.clone();
-            std::thread::spawn(move || pool.drain(Duration::ZERO, || runs.cancel_all()))
+            std::thread::spawn(move || {
+                pool.drain(Duration::ZERO, || runs.cancel_all().unwrap_or(0))
+            })
         };
         // With no timeout to wait for, the drain cancels in the same lock hold that sets the flag.
         wait_until(&pool, |state| state.draining);

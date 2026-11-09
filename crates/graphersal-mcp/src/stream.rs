@@ -8,6 +8,7 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use serde_json::Value;
 
 use crate::connection::Connection;
+use crate::host::McpError;
 use crate::protocol::{INTERNAL_ERROR, INVALID_REQUEST, PARSE_ERROR, error_body, parse_message};
 use crate::stats::Refusal;
 use crate::transport::MAX_BODY_BYTES;
@@ -28,8 +29,8 @@ const MAX_IN_FLIGHT: usize = 32;
 /// malformed JSON or text that is not UTF-8, `-32600` for a batch or a line over 16 MiB) and the
 /// connection goes on; an empty line is skipped. The end of `read` ends the connection: the
 /// runs of requests still running are cancelled ([`Connection::close`]), their answers are
-/// still written, and the function returns once they are. `Err` is the first read or write
-/// failure (after a write failure the remaining answers are dropped; reading goes on to the
+/// still written, and the function returns once they are. `Err` ([`McpError::Io`]) is the
+/// first read or write failure, or a writer thread that could not start or panicked (after a write failure the remaining answers are dropped; reading goes on to the
 /// end of `read`).
 ///
 /// A host that reads a handshake line first (graphersal-memory's daemon) passes the same
@@ -38,7 +39,7 @@ pub fn serve_lines<R: BufRead, W: Write + Send>(
     connection: &Connection,
     mut read: R,
     write: W,
-) -> io::Result<()> {
+) -> Result<(), McpError> {
     let (sender, lines) = channel::<String>();
     connection.set_outbound(Some(sender.clone()));
     let running = (Mutex::new(0usize), Condvar::new());
@@ -50,7 +51,7 @@ pub fn serve_lines<R: BufRead, W: Write + Send>(
             Ok(writer) => writer,
             Err(err) => {
                 connection.set_outbound(None);
-                return Err(err);
+                return Err(McpError::io(&err));
             }
         };
         let send = |message: Value| {
@@ -135,7 +136,7 @@ pub fn serve_lines<R: BufRead, W: Write + Send>(
         let written = writer
             .join()
             .unwrap_or_else(|_| Err(io::Error::other("the writer thread panicked")));
-        read_result.and(written)
+        read_result.and(written).map_err(McpError::from)
     })
 }
 
