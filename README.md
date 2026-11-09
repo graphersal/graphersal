@@ -182,7 +182,7 @@ docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD/my.gstore:/data/graph.gstore:ro"
 
 ```toml
 [dependencies]
-graphersal = { version = "0.5", features = ["script", "io", "display", "gql"] }
+graphersal = { version = "0.6", features = ["script", "io", "display", "gql"] }
 ```
 
 ```rust
@@ -252,7 +252,7 @@ Graphersal 0.5 is an early release line, built with the care of a database:
 - **A public storage format.** Snapshots, the write-ahead log and the Store are described byte by
   byte in the [format specification](https://graphersal.dev/persistence/format.html); every
   decoder treats its input as hostile.
-- **Clear stability labels.** Within 0.5.x the public API of `graphersal` (outside the items
+- **Clear stability labels.** Within 0.6.x the public API of `graphersal` (outside the items
   marked experimental), the DSL and the schema format change only additively. GQL, the storage
   traits (`GraphStorage`, `PersistentStorage`, `StoreDir`) and the AI Chat are experimental, and the
   dev server's HTTP API is internal.

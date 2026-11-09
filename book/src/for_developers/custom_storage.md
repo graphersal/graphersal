@@ -5,9 +5,9 @@ application) can bring its own in-memory storage instead: any type that implemen
 `GraphStorage` trait. The engine, the Rhai DSL, saved queries, the session of the playground and
 the dev server (`graphersal-session`) and the persist Store then work over it.
 
-> **EXPERIMENTAL in 0.5.x.** `GraphStorage`, `PersistentStorage`, `AnyGraph` and the conformance
-> crate `graphersal-storage-tests` may change in any 0.5.x release. Pin the exact versions
-> (`graphersal = "=0.4.0"`, `graphersal-storage-tests = "=0.4.0"`). `graphersal-session` is
+> **EXPERIMENTAL in 0.6.x.** `GraphStorage`, `PersistentStorage`, `AnyGraph` and the conformance
+> crate `graphersal-storage-tests` may change in any 0.6.x release. Pin the exact versions
+> (`graphersal = "=0.6.0"`, `graphersal-storage-tests = "=0.6.0"`). `graphersal-session` is
 > internal and has no stability guarantees at all.
 
 ## How it fits together

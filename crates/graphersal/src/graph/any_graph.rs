@@ -39,7 +39,7 @@ pub(crate) mod sealed {
 }
 
 /// A shared graph of ANY storage type, as one object-safe type: what the front ends (the
-/// script layer, a session) hold as `Arc<dyn AnyGraph>`. EXPERIMENTAL in 0.5.x, like
+/// script layer, a session) hold as `Arc<dyn AnyGraph>`. EXPERIMENTAL in 0.6.x, like
 /// [`GraphStorage`]: methods are added as the front ends need them.
 ///
 /// **Sealed:** only [`Graph<S>`](Graph) implements it (a blanket implementation for every
