@@ -11,7 +11,8 @@
 //!
 //! - **Transport**: the host's HTTP server turns a request to its MCP path into an
 //!   [`McpRequest`] (method, headers, body), calls [`Mcp::handle`] and sends the
-//!   [`McpResponse`] (status, headers, body) back.
+//!   [`McpResponse`] (status, headers, body) back; or the host serves a [`Connection`] over a
+//!   byte stream ([`serve_lines`], see "Connections" below).
 //! - **Jobs**: every tool is a thin wrapper of one [`Session`](graphersal_session::Session)
 //!   operation; the host's [`Executor`] runs it (the dev server queues it on its session thread
 //!   like the browser's calls, so the server's limits apply, the UI's Stop cancels a running MCP
@@ -51,6 +52,28 @@
 //! Bearer <token>` (`401` otherwise). The host's own checks (`Host`/`Origin`, the bind address)
 //! come before [`Mcp::handle`].
 //!
+//! # Connections
+//!
+//! The protocol works at the message level: a [`Connection`] is one MCP session (whether and
+//! how it initialized: the protocol version, the client's info and capabilities) over the host
+//! it was built with; [`Connection::handle`] answers one JSON-RPC message with the lines to send
+//! back, and the server's own messages go to the connection's outbound channel. [`serve_lines`]
+//! serves a connection over newline-delimited JSON-RPC (MCP's stdio framing) on any
+//! `BufRead`/`Write` pair with blocking std I/O: a plain stdio server, or a socket after a host's
+//! own handshake. The HTTP path is an adapter over the same message handling: it maps the
+//! `Mcp-Session-Id` (table or signed ids) to the session and frames the outcome as HTTP; its
+//! answers are the stream's byte for byte.
+//!
+//! Only a stream carries the server's pushes (HTTP has no stream here, and none is planned):
+//! `notifications/tools/list_changed` when saved queries are tools of their own and a tool call
+//! of any client (or [`Mcp::check_tools_changed`]) changed the listing a stream client last got,
+//! announced in its `initialize` as `tools.listChanged: true` (HTTP keeps `false`); and
+//! `notifications/progress` while a `tools/call` runs whose request carried
+//! `_meta.progressToken` (a heartbeat: the engine reports no finer progress). Cancellation
+//! (`notifications/cancelled`) works on both paths through the host's runs registry
+//! ([`Host::cancel_request`], keyed by the session id or the [`Connection::key`]); the end of
+//! a stream cancels its running requests.
+//!
 //! Hand-written JSON-RPC rather than the `rmcp` SDK: `rmcp` needs the tokio runtime and an async
 //! HTTP stack (axum/hyper), dozens of crates for an endpoint whose whole protocol surface is
 //! seven methods.
@@ -69,8 +92,9 @@
 //! and refuses a call of one that does. With query tools every saved query is also a tool of
 //! its own (name, description, `inputSchema` from the parameter schemas, `readOnlyHint` /
 //! `destructiveHint` from its effects); `tools/list` reflects the catalog at the time of the
-//! call. The endpoint has no SSE stream, so it cannot send `notifications/tools/list_changed`
-//! (`listChanged: false`): a client re-lists the tools to see a changed catalog.
+//! call. Over HTTP the endpoint has no SSE stream, so it cannot send
+//! `notifications/tools/list_changed` (`listChanged: false`): a client re-lists the tools to
+//! see a changed catalog. A stream [`Connection`] gets the notification.
 //!
 //! The endpoint works with the in-memory GRAPH only: it has no persistence tools (no
 //! checkpoint, mark, view, rollback, attic, backup or compaction; fewer tools keep an agent's
@@ -119,11 +143,13 @@
 mod answer;
 mod catalog;
 mod config;
+mod connection;
 mod host;
 mod protocol;
 mod resources;
 mod sessions;
 mod stats;
+mod stream;
 mod tools;
 mod transport;
 
@@ -131,6 +157,7 @@ mod transport;
 mod tests;
 
 pub use config::{MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError};
+pub use connection::{Connection, DEFAULT_PROGRESS_INTERVAL};
 pub use host::{ClientRef, Executor, Host, Job, McpError};
 pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
@@ -138,5 +165,6 @@ pub use protocol::{
 pub use resources::gql_reference_text;
 pub use sessions::{MAX_CLIENT_NAMES, SessionKey};
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
+pub use stream::serve_lines;
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};
 pub use transport::{McpRequest, McpResponse};
