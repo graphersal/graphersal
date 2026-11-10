@@ -2,6 +2,9 @@
 //! "Embeddings", "Embedding Models in a Store" and "Command line"). The download cache is the
 //! library's [`ModelCache`]; a model serves a database only once it is imported into it.
 //!
+//! COPIED to graphersal-memory `src/download.rs` (the Model2Vec download): if you change the
+//! download here, check whether the copy needs the same change, and vice versa.
+//!
 //! The only network access of the binary besides the AI Chat: `download` fetches the three
 //! files of a Model2Vec model (`config.json`, `tokenizer.json`, `model.safetensors`) from
 //! `<endpoint>/<repo>/resolve/<revision>/<file>` (endpoint `https://huggingface.co`, or
