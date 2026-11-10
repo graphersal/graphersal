@@ -2,6 +2,7 @@
 # First-boot setup of the DigitalOcean droplet that serves the static sites of Graphersal:
 #   graphersal.dev        the book (mdBook output), plus /schema/v1 (the schema meta-schema)
 #   play.graphersal.dev   the WebAssembly playground
+#   memory.graphersal.dev the graphersal-memory site (a static page; noindex while it is a draft)
 #   www.*, graphersal.com, graphersal.org   permanent redirects to https://graphersal.dev
 #
 # Paste it into "Startup Scripts" (user data) when creating the droplet (Ubuntu 24.04 LTS, with an
@@ -21,6 +22,7 @@ LETSENCRYPT_EMAIL=""
 
 PRIMARY="graphersal.dev"
 PLAY="play.graphersal.dev"
+MEMORY="memory.graphersal.dev"
 REDIRECTS="www.graphersal.dev graphersal.com www.graphersal.com graphersal.org www.graphersal.org"
 WEB_ROOT="/var/www/graphersal"
 DEPLOY_USER="deploy"
@@ -85,8 +87,8 @@ if [ -f /root/.ssh/authorized_keys ]; then
 fi
 
 # --- web root with placeholder pages until the first deploy -------------------------------------
-install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$WEB_ROOT" "$WEB_ROOT/book" "$WEB_ROOT/play" "$WEB_ROOT/schema"
-for site in book play; do
+install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$WEB_ROOT" "$WEB_ROOT/book" "$WEB_ROOT/play" "$WEB_ROOT/schema" "$WEB_ROOT/memory"
+for site in book play memory; do
   if [ ! -e "$WEB_ROOT/$site/index.html" ]; then
     printf '<!doctype html><meta charset="utf-8"><title>Graphersal</title><p>Graphersal: coming soon.</p>\n' \
       > "$WEB_ROOT/$site/index.html"
@@ -151,6 +153,24 @@ server {
 }
 EOF
 ln -sf /etc/nginx/sites-available/graphersal /etc/nginx/sites-enabled/graphersal
+# The graphersal-memory site: its own file and its own certificate (graphersal-certs), so it can
+# change or go without touching the sites above. noindex while the product is unreleased.
+cat > /etc/nginx/sites-available/graphersal-memory <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $MEMORY;
+    root $WEB_ROOT/memory;
+
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    location / {
+        add_header Cache-Control "no-cache";
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+ln -sf /etc/nginx/sites-available/graphersal-memory /etc/nginx/sites-enabled/graphersal-memory
 rm -f /etc/nginx/sites-enabled/default
 # compress text; .wasm too (nginx leaves it out by default)
 cat > /etc/nginx/conf.d/graphersal-gzip.conf <<'EOF'
@@ -192,6 +212,14 @@ email_args=(--register-unsafely-without-email)
 if [ -n "$LETSENCRYPT_EMAIL" ]; then email_args=(-m "$LETSENCRYPT_EMAIL"); fi
 certbot --nginx --non-interactive --agree-tos "\${email_args[@]}" --redirect \\
   --cert-name graphersal --expand "\${ready[@]}"
+# The graphersal-memory site has a certificate of its own.
+a=\$(dig +short A $MEMORY @1.1.1.1 | tail -n1)
+if [ -n "\$ip4" ] && [ "\$a" = "\$ip4" ]; then
+  certbot --nginx --non-interactive --agree-tos "\${email_args[@]}" --redirect \\
+    --cert-name graphersal-memory -d $MEMORY
+else
+  waiting+=("$MEMORY")
+fi
 if [ \${#waiting[@]} -gt 0 ]; then
   echo "Not covered yet (DNS does not point at \$ip4\${ip6:+ / \$ip6}): \${waiting[*]}"
   echo "Run sudo graphersal-certs again when they do."

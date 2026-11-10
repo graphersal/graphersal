@@ -8,6 +8,7 @@ DigitalOcean droplet:
 | `https://graphersal.dev/` | the book (`mdbook build book`) |
 | `https://graphersal.dev/schema/v1` | the schema meta-schema (`crates/graphersal/src/graph/schema/graphersal-schema-v1.json`), the URL every schema names in `"$schema"` |
 | `https://play.graphersal.dev/` | the playground (`playground/` with its `pkg/`) |
+| `https://memory.graphersal.dev/` | the graphersal-memory site: one static page (`index.html` + `assets/`), its source kept outside this repository; served with `noindex` while it is a draft |
 | `www.*`, `graphersal.com`, `graphersal.org` | a permanent redirect to `https://graphersal.dev/` |
 
 ## The droplet (once)
@@ -43,7 +44,7 @@ DigitalOcean droplet:
    systemctl daemon-reload && systemctl restart nginx
    ```
 2. DNS (the registrar's DNS, which keeps its e-mail forwarding): A and AAAA records for `@`,
-   `www` and `play` of `graphersal.dev`, and for `@` and `www` of `graphersal.com` and
+   `www`, `play` and `memory` of `graphersal.dev`, and for `@` and `www` of `graphersal.com` and
    `graphersal.org`, all pointing at the droplet.
 3. When the names resolve: `ssh root@<droplet> graphersal-certs`. It requests the HTTPS
    certificate for every name that points at the droplet and lists the others; run it again when
@@ -62,6 +63,18 @@ DigitalOcean droplet:
 deploy/build-site.sh       # target/site/: the book, the playground, the schema
 deploy/deploy.sh           # uploads it to graphersal-web (or: deploy/deploy.sh <ssh host>)
 ```
+
+The graphersal-memory site has its own nginx file (`/etc/nginx/sites-available/graphersal-memory`)
+and its own certificate (`graphersal-memory`, requested by `graphersal-certs`), so it changes
+without touching the other sites. A deploy is one rsync from the folder holding its `index.html`
+(the folder's `README.md` and dot files stay local):
+
+```bash
+rsync -rlzcO --delete --exclude README.md --exclude '.*' ./ graphersal-web:/var/www/graphersal/memory/
+```
+
+Before the product's launch remove the two `X-Robots-Tag` lines from that nginx file (and from
+`droplet-setup.sh`), then `sudo nginx -t && sudo systemctl reload nginx`.
 
 ## Caching
 
