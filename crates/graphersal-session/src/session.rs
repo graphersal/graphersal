@@ -2112,9 +2112,13 @@ pub fn trailing_terminal(script: &str) -> Option<&'static str> {
         }
     }
     let before = code[..open?].trim_end();
+    // The byte after the last character that cannot be part of a name (that character may be
+    // several bytes long: a `(` inside a string literal can sit after any text).
     let name_start = before
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .map_or(0, |i| i + 1);
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '_'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
     if !before[..name_start].trim_end().ends_with('.') {
         return None;
     }
@@ -3646,6 +3650,22 @@ mod tests {
         assert_eq!(trailing_terminal("g.v().out()"), None);
         assert_eq!(trailing_terminal("let x = 1"), None);
         assert_eq!(trailing_terminal("next()"), None);
+    }
+
+    /// A multi-byte character right before the last call's `(` (here inside a string literal
+    /// with an unbalanced parenthesis) is skipped whole, never cut (it panicked before).
+    #[test]
+    fn trailing_terminal_skips_multibyte_characters_whole() {
+        assert_eq!(
+            trailing_terminal(r#"g.query("remember", #{body: "сделано: е(1"})"#),
+            None
+        );
+        assert_eq!(trailing_terminal("let x = \"ё\"; ё(1)"), None);
+        assert_eq!(
+            trailing_terminal("\"🙂\".len() + g.v().to_list()"),
+            Some("to_list")
+        );
+        assert_eq!(trailing_terminal("x = \"е\" + g.v().next()"), Some("next"));
     }
 
     /// Host presets: options on every source of a run (a query still overrides them), Rhai
