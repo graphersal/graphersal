@@ -362,7 +362,11 @@ impl Catalogue {
         spelling: Spelling,
     ) -> (usize, Vec<Pair>) {
         let text = &before[lead..];
-        let start = text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        let start = text
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let partial = &text[start..];
         let words: Vec<&str> = text[..start].split_whitespace().collect();
         let names: Vec<String> = match words.as_slice() {
@@ -1312,6 +1316,18 @@ mod tests {
         assert!(displays(&c, "/help P.", Spelling::Snake).contains(&"P.eq".to_string()));
         // A `//` comment is a script, not a command.
         assert_eq!(classify("// note"), Input::Script);
+    }
+
+    /// A multi-byte space (U+00A0) before the partial word is skipped whole (it panicked before).
+    #[test]
+    fn a_multibyte_space_in_a_command_line_completes() {
+        let c = catalogue();
+        assert_eq!(
+            displays(&c, "/set\u{a0}max-r", Spelling::Snake),
+            ["max-rows"]
+        );
+        let (start, _) = c.complete("/set\u{a0}ma", "/set\u{a0}ma".len(), Spelling::Snake);
+        assert_eq!(start, "/set\u{a0}".len());
     }
 
     #[test]
