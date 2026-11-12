@@ -166,6 +166,7 @@ graphersal --graph new/ --create-store --server          # create the store when
 graphersal --graph g.graphml --schema schema.json --server   # a graph file loaded against its schema
 graphersal --graph large --server --timeout 5000 --memory-limit auto   # limits apply to every query
 graphersal --graph modern --server --ui-dir ~/src/graphersal/playground # its files win over the embedded UI
+graphersal --graph modern --server --ui-profile demo   # the pages show another UI profile (EXPERIMENTAL)
 graphersal --graph export.gsnap --server                  # a .gsnap: the models it carries serve every query (in memory)
 graphersal --graph db.gstore --read-only --server --mcp --mcp-read-only   # every write refused; the store is not written
 graphersal health                                        # exit 0 when http://127.0.0.1:8080/healthz answers 200

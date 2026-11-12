@@ -11,6 +11,7 @@
 import { ref, reactive, computed, watch, onBeforeUnmount, nextTick, markRaw } from 'vue';
 import { state, isDark, toast, schemaChanged, openQueryTab } from '../store.js';
 import { storage, cssVar } from '../util.js';
+import { loadScript } from '../cdn-script.js';
 import { engineSchemaApi } from '../schema/api.js';
 import { SchemaFlow } from '../schema/flow.js';
 import { SchemaPanelSync } from '../schema/panel-sync.js';
@@ -28,12 +29,18 @@ const TABS = [
   { id: 'mermaid', label: 'Mermaid' },
 ];
 
-// Mermaid is large: it is imported on first use of the Mermaid tab only.
-const MERMAID_URL = 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs';
+// Mermaid is large: it is loaded on first use of the Mermaid tab only, as cdnjs's single-file
+// build (global `mermaid`) with the SRI hash cdnjs publishes. (The ESM build loads dozens of
+// chunk files that an import map's integrity list would each have to pin.)
+export const MERMAID_SCRIPT = Object.freeze({
+  src: 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.17.2/mermaid.min.js',
+  integrity: 'sha512-vVGqEG+fvZZAmwA11LG1aLNuXQnraqZPVkL17zv1/0qDtAmoPl70hXI6oZZI4IL57LgjerTteCCpTs1pKIWLmw==',
+});
 let mermaidPromise = null;
 function loadMermaid() {
   if (!mermaidPromise) {
-    mermaidPromise = import(MERMAID_URL).then((m) => m.default).catch((err) => {
+    const loaded = window.mermaid ? Promise.resolve() : loadScript(MERMAID_SCRIPT);
+    mermaidPromise = loaded.then(() => window.mermaid).catch((err) => {
       mermaidPromise = null;
       throw err;
     });

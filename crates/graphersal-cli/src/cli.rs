@@ -239,7 +239,7 @@ USAGE:
     graphersal [OPTIONS]                 # interactive REPL (/help lists its commands)
     graphersal [OPTIONS] <SCRIPT>        # evaluate SCRIPT, print the result, exit
     graphersal [OPTIONS] --in            # evaluate the script read from stdin, print the result, exit
-    graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR]
+    graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR] [--ui-profile P]
                [--mcp [--mcp-read-only] [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
                [--mcp-max-chars N] [--mcp-config FILE]]
                [--ai FILE] [--read-only [--workers N] [--queue N] [--queue-timeout S]
@@ -412,6 +412,13 @@ OPTIONS:
         --ui-dir <DIR>     A directory whose files --server serves instead of the playground
                            UI embedded in the binary (a file missing there comes from the
                            embedded copy); default ./playground when it exists.
+        --ui-profile <NAME|FILE>
+                           With --server: the playground UI profile the pages show: a built-in
+                           name (full, the default: the whole playground; demo) or a JSON file
+                           holding a profile object (EXPERIMENTAL; format in the book's Web
+                           Playground page). Its tab modules are files of the UI: put them into
+                           --ui-dir. An unknown name or an invalid object shows as an error in
+                           the page.
         --mcp              With --server: also serve an MCP endpoint (Streamable HTTP) on
                            http://127.0.0.1:<port>/mcp, on the same graph and session as the
                            browser, for an AI agent (Claude Code: claude mcp add --transport
@@ -1174,6 +1181,10 @@ pub struct Cli {
     /// `--ui-dir`: a directory whose files the dev server serves over the embedded playground
     /// UI; `None` is [`DEFAULT_UI_DIR`] when it exists, else the embedded UI alone.
     pub ui_dir: Option<String>,
+    /// `--ui-profile`: the playground UI profile the dev server's pages show (`GET /api/info`
+    /// `uiProfile`): a built-in profile's name as a JSON string, or the profile object read
+    /// from a file; `None`: the built-in `full` profile (the playground as it always was).
+    pub ui_profile: Option<serde_json::Value>,
     /// `--create-store`: a `--graph <dir>` that is not a store yet is created.
     pub create_store: bool,
     /// `--on-damage`: the damage policy of a store `--create-store` creates.
@@ -1291,6 +1302,7 @@ impl Default for Cli {
             port: DEFAULT_PORT,
             host: None,
             ui_dir: None,
+            ui_profile: None,
             create_store: false,
             read_only: false,
             on_damage: None,
@@ -1335,6 +1347,7 @@ impl Cli {
         // rejects them instead of ignoring them.
         let mut display_flag: Option<String> = None;
         let mut mcp_config_path: Option<String> = None;
+        let mut ui_profile_arg: Option<String> = None;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -1417,6 +1430,7 @@ impl Cli {
                 "--host" => cli.host = Some(value(&mut args)?),
                 "--allowed-host" => cli.allowed_hosts.push(value(&mut args)?),
                 "--ui-dir" => cli.ui_dir = Some(value(&mut args)?),
+                "--ui-profile" => ui_profile_arg = Some(value(&mut args)?),
                 "--mcp" => cli.mcp = true,
                 "--mcp-read-only" => cli.mcp_read_only = true,
                 "--mcp-query-tools" => cli.mcp_query_tools = true,
@@ -1686,6 +1700,16 @@ impl Cli {
         if cli.max_connections.is_some() && !server {
             return Err("--max-connections needs --server".to_string());
         }
+        if let Some(arg) = ui_profile_arg {
+            if !server {
+                return Err(
+                    "--ui-profile needs --server: it chooses what the dev server's playground \
+                     pages show"
+                        .to_string(),
+                );
+            }
+            cli.ui_profile = Some(read_ui_profile(&arg)?);
+        }
         if !cli.allowed_hosts.is_empty() && !server {
             return Err(
                 "--allowed-host needs --server: it names the dev server behind a reverse proxy"
@@ -1815,6 +1839,40 @@ pub fn read_mcp_config(
         .check(read_only)
         .map_err(|err| format!("--mcp-config {path}: {err}"))?;
     Ok(config)
+}
+
+/// Whether a `--ui-profile` value is a profile name (lowercase letters, digits and `-`, starting
+/// with a letter, at most 40 characters) rather than a file.
+pub(crate) fn is_ui_profile_name(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    matches!(chars.next(), Some('a'..='z'))
+        && raw.len() <= 40
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
+/// Reads a `--ui-profile` value: a built-in profile's name (`full`, `demo`: the playground
+/// checks the name and shows an unknown one as an error) becomes a JSON string; anything else
+/// is a JSON file holding one profile object (checked in full by the playground, which shows an
+/// invalid one as an error).
+fn read_ui_profile(raw: &str) -> Result<serde_json::Value, String> {
+    if is_ui_profile_name(raw) {
+        return Ok(serde_json::Value::String(raw.to_string()));
+    }
+    let text = std::fs::read_to_string(raw).map_err(|err| {
+        format!(
+            "--ui-profile {raw}: cannot read the file ({err})\nHelp: --ui-profile takes a \
+             built-in profile's name (full, demo) or a JSON file holding a profile object"
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("--ui-profile {raw}: the file is not JSON ({err})"))?;
+    if !value.is_object() {
+        return Err(format!(
+            "--ui-profile {raw}: the file must hold one JSON object (a profile: {{\"name\", \
+             \"title\", \"startTab\", \"can\", \"tabs\", ...}})"
+        ));
+    }
+    Ok(value)
 }
 
 /// Parses a `--spelling` / `/set spelling` value: `snake` or `camel`.
@@ -2532,6 +2590,41 @@ mod tests {
     }
 
     #[cfg(feature = "dev-server")]
+    #[test]
+    fn ui_profile_takes_a_name_or_a_json_file_and_needs_server() {
+        let cli = Cli::parse(["--server", "--ui-profile", "demo"]).unwrap();
+        assert_eq!(cli.ui_profile, Some(serde_json::json!("demo")));
+        // An unknown name passes: the playground shows it as an error.
+        let cli = Cli::parse(["--server", "--ui-profile", "nope-2"]).unwrap();
+        assert_eq!(cli.ui_profile, Some(serde_json::json!("nope-2")));
+        assert!(Cli::parse(["--server"]).unwrap().ui_profile.is_none());
+        let err = Cli::parse(["--ui-profile", "demo"]).unwrap_err();
+        assert!(err.contains("--ui-profile needs --server"), "{err}");
+
+        let dir =
+            std::env::temp_dir().join(format!("graphersal-ui-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("profile.json");
+        std::fs::write(
+            &file,
+            r#"{"name": "mine", "title": "Mine", "startTab": "play"}"#,
+        )
+        .unwrap();
+        let path = file.to_str().unwrap();
+        let cli = Cli::parse(["--server", "--ui-profile", path]).unwrap();
+        assert_eq!(cli.ui_profile.unwrap()["name"], "mine");
+        std::fs::write(&file, "[1]").unwrap();
+        let err = Cli::parse(["--server", "--ui-profile", path]).unwrap_err();
+        assert!(err.contains("must hold one JSON object"), "{err}");
+        std::fs::write(&file, "{").unwrap();
+        let err = Cli::parse(["--server", "--ui-profile", path]).unwrap_err();
+        assert!(err.contains("is not JSON"), "{err}");
+        let missing = dir.join("missing.json");
+        let err = Cli::parse(["--server", "--ui-profile", missing.to_str().unwrap()]).unwrap_err();
+        assert!(err.contains("cannot read the file"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn mcp_config_is_read_and_checked_while_parsing() {
         let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");

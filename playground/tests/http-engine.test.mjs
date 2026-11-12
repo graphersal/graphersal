@@ -386,3 +386,15 @@ test('the current state downloads with the models unless they are left out', asy
   assert.equal((await engine.saveGraph('snapshot', { withModels: false })).withoutModels, true);
   assert.deepEqual(urls, [`${BASE}api/export?format=gsnap`, `${BASE}api/export?format=gsnap&models=without`]);
 });
+
+test('info() passes the UI profile and the read-only flag on', async () => {
+  const plain = new HttpEngine(INFO, { base: BASE, fetch: fakeFetch({}).fetch });
+  assert.equal((await plain.info()).uiProfile, null, 'none: the page shows full');
+  assert.equal((await plain.info()).readOnly, false);
+  const profile = { name: 'memory', title: 'Memory', startTab: 'o', tabs: [{ id: 'o', title: 'O', module: 'o.js' }] };
+  for (const uiProfile of ['demo', profile]) {
+    const engine = new HttpEngine({ ...INFO, uiProfile, readOnly: true }, { base: BASE, fetch: fakeFetch({}).fetch });
+    assert.deepEqual((await engine.info()).uiProfile, uiProfile);
+    assert.equal((await engine.info()).readOnly, true);
+  }
+});

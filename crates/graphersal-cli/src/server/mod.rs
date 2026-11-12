@@ -599,8 +599,13 @@ pub fn run(cli: &Cli) -> i32 {
         .store(store)
         .commit_seq(commit_seq)
         .mcp(mcp)
-        .hooks(hooks)
-        .build();
+        .hooks(hooks);
+    // `--ui-profile`: what the playground pages show (`GET /api/info` `uiProfile`).
+    let context = match cli.ui_profile.clone() {
+        Some(profile) => context.ui_profile(profile),
+        None => context,
+    }
+    .build();
     // The dev server's own parts of every memory report (MCP sessions, AI Chat
     // conversations), held weakly by the engine: registered for as long as this function runs.
     let server_memory: Arc<dyn graphersal::storage::MemorySource> = Arc::new(ServerMemory {

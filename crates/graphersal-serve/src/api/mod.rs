@@ -716,6 +716,11 @@ fn info_fields(context: &Context) -> Value {
         // The MCP endpoint (`--mcp`): `{readOnly, endpoint, client}`, or null.
         "mcp": mcp::status(context),
     });
+    // The playground UI profile (`ContextBuilder::ui_profile`); absent without one, so the
+    // answer of a host that sets none is unchanged.
+    if let Some(profile) = &context.ui_profile {
+        info["uiProfile"] = profile.clone();
+    }
     context.hooks.add_info(context, &mut info);
     info
 }

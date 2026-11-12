@@ -492,6 +492,9 @@ pub struct Context {
     pub(crate) filter: Option<Arc<dyn RequestFilter>>,
     /// Whether the host process counts its allocations (`GET /api/info` `memoryTracked`).
     pub(crate) memory_tracked: bool,
+    /// The playground UI profile `GET /api/info` names (`uiProfile`), or `None`: the field is
+    /// absent and the UI shows its built-in `full` profile.
+    pub(crate) ui_profile: Option<Value>,
     /// The session presets, as `GET /api/info` reports them.
     pub(crate) presets: Value,
     /// `--read-only` (or a Store opened read-only): the graph refuses every write and
@@ -536,6 +539,7 @@ pub struct ContextBuilder {
     hooks: Option<Arc<dyn Hooks>>,
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
+    ui_profile: Option<Value>,
 }
 
 impl ContextBuilder {
@@ -638,6 +642,19 @@ impl ContextBuilder {
         self
     }
 
+    /// The playground UI profile this context's pages show, as `GET /api/info` `uiProfile`
+    /// tells the UI: the name of a built-in profile (`"full"`, the playground as it always was;
+    /// `"demo"`) or a profile object (`{name, title, startTab, can, tabs, cards, files}`, the
+    /// format of the playground's `js/ui-profiles.js`); default: none, the field is absent and
+    /// the UI shows `full`. The core passes the value through unchecked: the UI validates it
+    /// and shows an unknown name or an invalid object as an error, never as another profile.
+    /// The files a profile object's tabs load (`files` + `module`) are the host's to serve:
+    /// [`Ui`] serves only the embedded playground and the UI directory (EXPERIMENTAL).
+    pub fn ui_profile(mut self, profile: Value) -> Self {
+        self.ui_profile = Some(profile);
+        self
+    }
+
     /// The context.
     pub fn build(self) -> Arc<Context> {
         Arc::new(Context {
@@ -652,6 +669,7 @@ impl ContextBuilder {
             check: self.check,
             filter: self.filter,
             memory_tracked: self.memory_tracked,
+            ui_profile: self.ui_profile,
             presets: self.presets,
             read_only: self.read_only,
             store: self.store,
@@ -690,6 +708,7 @@ impl Context {
             hooks: None,
             filter: None,
             memory_tracked: false,
+            ui_profile: None,
         }
     }
 

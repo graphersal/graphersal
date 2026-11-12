@@ -137,6 +137,11 @@ export class HttpEngine extends Engine {
       // The AI Chat (`--ai FILE`): {provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn},
       // or null (the server runs without --ai).
       ai: i.ai || null,
+      // --read-only (or a Store this process may not write): every write is refused.
+      readOnly: !!i.readOnly,
+      // The UI profile the server names (`--ui-profile`, `ContextBuilder::ui_profile`): a
+      // built-in name or a profile object (js/ui-profiles.js validates it), or null: `full`.
+      uiProfile: i.uiProfile === undefined ? null : i.uiProfile,
     };
   }
 

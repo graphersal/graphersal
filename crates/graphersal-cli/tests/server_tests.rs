@@ -646,6 +646,42 @@ fn info_execute_graph_and_static_files() {
 }
 
 #[test]
+fn the_ui_profile_flag_reaches_the_info() {
+    // Without the flag the field is absent: the page shows the built-in `full` profile.
+    let server = start(&["--graph", "empty"]);
+    assert!(
+        get(server.port, "/api/info")
+            .json()
+            .get("uiProfile")
+            .is_none()
+    );
+    drop(server);
+    let server = start(&["--graph", "empty", "--ui-profile", "demo"]);
+    assert_eq!(get(server.port, "/api/info").json()["uiProfile"], "demo");
+    drop(server);
+    // A profile file: its object as it is (the page validates it).
+    let ui = ui_dir("profile");
+    let file = ui.parent().unwrap().join("profile.json");
+    std::fs::write(
+        &file,
+        r#"{"name": "mine", "title": "Mine", "startTab": "hello", "can": {"theme": true},
+            "tabs": [{"id": "hello", "title": "Hello", "module": "hello.js"}], "files": "mine/"}"#,
+    )
+    .unwrap();
+    let server = start(&[
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--ui-profile",
+        file.to_str().unwrap(),
+    ]);
+    let info = get(server.port, "/api/info").json();
+    assert_eq!(info["uiProfile"]["name"], "mine");
+    assert_eq!(info["uiProfile"]["tabs"][0]["module"], "hello.js");
+}
+
+#[test]
 fn malformed_and_foreign_requests_are_4xx_json() {
     let ui = ui_dir("malformed");
     let server = start(&["--graph", "empty", "--ui-dir", ui.to_str().unwrap()]);

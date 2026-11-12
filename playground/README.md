@@ -1034,12 +1034,15 @@ refresh rerun the same selection with the same offset. Run all tabs runs whole t
 | Cytoscape.js | 3.34.3 | cdnjs | classic script (`cytoscape`) | Graph and schema drawing (Detailed tier) |
 | sigma.js | 3.0.3 | cdnjs `sigma.min.js` (UMD) | classic script (`Sigma`), injected on first use with SRI (`js/graph/sigma-renderer.js`) | Fast tier (WebGL) |
 | graphology | 0.26.0 | cdnjs `graphology.umd.min.js` | classic script (`graphology`), injected on first use with SRI | The Fast tier's graph model |
-| Mermaid | 11.17.2 | jsDelivr `mermaid.esm.min.mjs` | dynamic `import()` on first use | Schema diagram tab |
+| Mermaid | 11.17.2 | cdnjs `mermaid.min.js` (single file) | classic script (`mermaid`), injected on first use with SRI (`MERMAID_SCRIPT` in `js/components/schema-panel.js`) | Schema diagram tab |
 
-Integrity: the classic scripts carry cdnjs's SRI hashes (also the two the Fast tier injects, pinned
-in `FAST_LIBRARIES`); the import map has an `integrity` section
-with the sha384 of every mapped module (browsers that do not support import-map integrity ignore
-it). Mermaid is imported lazily and split into chunks, so it has no SRI.
+Integrity: every CDN file carries SRI. The classic scripts carry cdnjs's SRI hashes (also the
+three injected on first use through `js/cdn-script.js`: the Fast tier's two, pinned in
+`FAST_LIBRARIES`, and Mermaid's single-file build, `MERMAID_SCRIPT`; Mermaid's ESM build was
+split into dozens of chunks no integrity list could pin); the import map has an `integrity`
+section with the hash of every mapped module (browsers that do not support import-map integrity
+ignore it). `tests/ui-profiles.test.mjs` checks that every script and mapped module of
+`index.html` has one.
 
 **Why CodeMirror 6 instead of Monaco.** CodeMirror is far smaller than Monaco (no web workers, no AMD loader), themes through
 CSS custom properties (light/dark without reconfiguration), works on touch devices, and its

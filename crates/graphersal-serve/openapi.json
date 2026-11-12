@@ -69,7 +69,7 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused). Answered without the session.",
+        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL). Answered without the session.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {

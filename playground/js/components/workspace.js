@@ -4,12 +4,17 @@
 // vertically between its visible panels, and the two columns horizontally. Hidden panels are
 // left out of the splits; a collapsed panel keeps only its header. Visibility, collapse state and
 // sizes are saved in localStorage (best effort).
+//
+// UI profiles (js/ui-profiles.js): the top bar's buttons and the panels show only when the
+// profile lets the user reach them (`can`); a profile with several tabs gets a tab row under the
+// top bar, its module tabs (components/profile-tab.js) take the place of the panels while shown.
+// The built-in `full` profile has one tab (the workspace): the page as it always was.
 
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { state, reveal, cycleTheme, saveGraph, saveCurrentSnapshot, registerSnapshotChoice, saveSchema, saveToSource, isServerMode, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
+import { state, reveal, cycleTheme, saveGraph, saveCurrentSnapshot, registerSnapshotChoice, saveSchema, saveToSource, isServerMode, can, onWorkspaceTab, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
 import { viewBanner, backupBanner } from '../store-model.js';
 import { mcpBadgeTitle } from '../change-feed.js';
-import { navigate } from '../router.js';
+import { navigate, navigateTab, hashOf } from '../router.js';
 import { storage, debounce, splitGraphName } from '../util.js';
 import { formatCount } from '../statistics.js';
 import { QueryEditor } from './query-editor.js';
@@ -26,6 +31,7 @@ import { SnapshotChoiceDialog } from './snapshot-choice-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
 import { JournalToasts } from './journal-toasts.js';
 import { McpStatsDialog } from './mcp-stats.js';
+import { ProfileTab } from './profile-tab.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -70,7 +76,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -93,8 +99,11 @@ export const Workspace = {
     let splits = [];
 
     const persist = () => storage.set('layout', JSON.parse(JSON.stringify(layout)));
-    const columnPanels = (col) => PANELS.filter((p) => p.column === col).map((p) => p.id);
-    const isShown = (id) => (maximized.value ? maximized.value === id : layout.visible[id]);
+    // The panels the profile offers (`panel.<id>`); the others are never shown nor listed.
+    const allowed = (id) => can(`panel.${id}`);
+    const availablePanels = computed(() => PANELS.filter((p) => allowed(p.id)));
+    const columnPanels = (col) => PANELS.filter((p) => p.column === col && allowed(p.id)).map((p) => p.id);
+    const isShown = (id) => allowed(id) && (maximized.value ? maximized.value === id : layout.visible[id]);
     const isCollapsed = (id) => !maximized.value && layout.collapsed[id];
     const leftCount = computed(() => columnPanels('left').filter(isShown).length);
     const rightCount = computed(() => columnPanels('right').filter(isShown).length);
@@ -117,6 +126,7 @@ export const Workspace = {
       splits.forEach((s) => s.destroy());
       splits = [];
       [left.value, right.value, ...PANELS.map((p) => panelEl(p.id))].forEach(clearStyles);
+      if (!onWorkspaceTab()) return; // a module tab is shown: the panels are hidden (no sizes)
       narrow.value = window.innerWidth < NARROW_PX;
 
       const cols = [
@@ -231,11 +241,13 @@ export const Workspace = {
     }
     function showAll() {
       maximized.value = null; // any layout change from the menu restores the normal layout
-      PANELS.forEach((p) => { layout.visible[p.id] = true; });
+      availablePanels.value.forEach((p) => { layout.visible[p.id] = true; });
       persist();
     }
 
     watch(() => [JSON.stringify(layout.visible), JSON.stringify(layout.collapsed), maximized.value], scheduleRebuild);
+    // Back on the workspace tab: the splits are measured again (they were hidden).
+    watch(onWorkspaceTab, (shown) => { if (shown) scheduleRebuild(); });
     // The catalog follows the graph: a load, a run that changed it (a define_query or
     // define_compression or create_index in a script too), a change made elsewhere (change feed), a store swap.
     watch(() => state.graphVersion, () => {
@@ -244,7 +256,7 @@ export const Workspace = {
       refreshIndexes();
     }, { immediate: true });
     watch(() => state.focusPanel, (req) => {
-      if (!req) return;
+      if (!req || !allowed(req.panel)) return;
       if (maximized.value && maximized.value !== req.panel) maximized.value = null;
       if (!layout.visible[req.panel] || layout.collapsed[req.panel]) show(req.panel);
       nextTick(() => {
@@ -301,7 +313,14 @@ export const Workspace = {
       formatCount, shareDialog, snapshotChoice, saveCurrentSnapshot, openShareDialog, openOptimize, mcpStatsDialog,
       openMcpStats: () => mcpStatsDialog.value && mcpStatsDialog.value.open(),
       graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
-      state, layout, main, left, right, narrow, leftCount, rightCount, PANELS,
+      state, layout, main, left, right, narrow, leftCount, rightCount, PANELS: availablePanels,
+      can, onWorkspaceTab, hashOf,
+      ui: computed(() => state.ui),
+      moduleTab: computed(() => {
+        const tab = state.ui.tab(state.profileTab);
+        return tab && tab.module ? tab : null;
+      }),
+      showTab: (id) => navigateTab(id),
       editorRef: panelRefs.editor, resultsRef: panelRefs.results, graphRef: panelRefs.graph,
       schemaRef: panelRefs.schema, profileRef: panelRefs.profile,
       toggleCollapse, hide, show, toggleVisible, resetLayout, showAll, cycleTheme, maximized, isShown, isCollapsed, toggleMaximize, saveGraph, saveSchema, saveToSource,
@@ -327,11 +346,12 @@ export const Workspace = {
   template: `
   <div class="workspace">
     <header class="topbar">
-      <a class="brand" href="#/" title="Back to the start page">Graphersal <small class="hide-narrow">Playground</small></a>
+      <a v-if="ui.name === 'full'" class="brand" href="#/" title="Back to the start page">Graphersal <small class="hide-narrow">Playground</small></a>
+      <a v-else class="brand" :href="hashOf(serverMode ? 'play' : 'start')" :title="serverMode ? ui.title : 'Back to the start page'">{{ ui.title }}</a>
       <span v-if="state.versionLabel" class="version-label hide-narrow" :title="state.versionLabel.title">{{ state.versionLabel.text }}</span>
-      <span v-if="serverMode" class="badge danger dev-badge"
+      <span v-if="can('devBadge')" class="badge danger dev-badge"
             :title="'Connected to the dev server (graphersal --server) on ' + location.host + ': DEV mode, unstable, local only, not for production. ' + (state.engineInfo.store ? 'Queries run in that process on the graph of the Store directory ' + state.engineInfo.store + ': every commit is persisted and survives a restart.' : 'Queries run in that process on its in-memory graph' + (state.engineInfo.source ? ' (from ' + state.engineInfo.source + ')' : '') + '; nothing is saved unless you save it.')">DEV SERVER · unstable</span>
-      <button v-if="serverMode && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
+      <button v-if="can('mcp') && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
             :title="mcpBadgeTitle(state.engineInfo.mcp, location.host) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
       <template v-if="state.graph">
         <span class="graph-name" :title="state.graph.name"><span v-if="graphName.dir" class="graph-name-dir"><bdi>{{ graphName.dir }}</bdi></span><span class="graph-name-base">{{ graphName.base }}</span></span>
@@ -340,12 +360,12 @@ export const Workspace = {
         </span>
       </template>
       <span class="spacer"></span>
-      <button v-if="state.graph && !serverMode" type="button" class="btn share-btn" @click="openShareDialog" :disabled="state.running"
+      <button v-if="state.graph && can('share')" type="button" class="btn share-btn" @click="openShareDialog" :disabled="state.running"
               title="Share as link: a link that opens this tab's query with the graph (small graphs only)">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2L8 3.8" /><path d="M9.5 6.5a3 3 0 0 0-4.2 0L2.7 9.1a3 3 0 0 0 4.2 4.2L8 12.2" /></svg>
         <span>Share<span class="hide-narrow"> link</span></span>
       </button>
-      <drop-menu button-class="btn" title="Show, hide and collapse panels" menu-style="min-width: 260px">
+      <drop-menu v-if="can('view') && onWorkspaceTab()" button-class="btn" title="Show, hide and collapse panels" menu-style="min-width: 260px">
         <template #trigger>View ▾</template>
           <div class="menu-title">Panels</div>
           <div v-for="p in PANELS" :key="p.id" class="menu-item" style="cursor:default">
@@ -368,11 +388,11 @@ export const Workspace = {
           <button class="menu-item" @click="showAll">Show all panels</button>
           <button class="menu-item" @click="resetLayout">Reset layout</button>
       </drop-menu>
-      <catalog-menu v-if="state.graph"></catalog-menu>
-      <button v-if="state.graph" type="button" class="btn hide-narrow" @click="openOptimize()"
+      <catalog-menu v-if="state.graph && can('catalog')"></catalog-menu>
+      <button v-if="state.graph && can('optimize')" type="button" class="btn hide-narrow" @click="openOptimize()"
               title="Optimize: the storage advisor's recommendations (indexes, compression) with Apply, the workload statistics with charts, the memory report">Optimize</button>
-      <store-menu v-if="(serverMode && state.engineInfo.store) || (state.engineInfo && state.engineInfo.storeMemory && state.graph)"></store-menu>
-      <drop-menu v-if="state.graph" class="hide-narrow" button-class="btn" title="Download the graph data, its schema or a snapshot: one file per entry" menu-style="min-width: 300px">
+      <store-menu v-if="can('store') && ((serverMode && state.engineInfo.store) || (state.engineInfo && state.engineInfo.storeMemory && state.graph))"></store-menu>
+      <drop-menu v-if="state.graph && can('save')" class="hide-narrow" button-class="btn" title="Download the graph data, its schema or a snapshot: one file per entry" menu-style="min-width: 300px">
         <template #trigger>{{ state.saving ? 'Saving…' : 'Save ▾' }}</template>
           <div class="menu-title">Graph data (no schema inside)</div>
           <button class="menu-item" :disabled="state.saving || state.running" @click="saveGraph('graphson')"
@@ -392,14 +412,14 @@ export const Workspace = {
                     title="One packed snapshot (.gsnap): lossless binary with every value type, the schema and the catalog (saved queries, compression rules); a store that keeps embedding models asks whether they go with it; load it back with Load from file">Snapshot (.gsnap): data + schema + catalog</button>
           </template>
       </drop-menu>
-      <button v-if="serverMode && state.engineInfo.saveable" class="btn hide-narrow" @click="saveToSource" :disabled="!state.graph || state.saving || state.running"
+      <button v-if="can('saveToFile') && serverMode && state.engineInfo.saveable" class="btn hide-narrow" @click="saveToSource" :disabled="!state.graph || state.saving || state.running"
               :title="'Write the graph back to ' + state.engineInfo.source + ' (on the server; atomic). Never automatic.'">Save to file</button>
-      <button v-if="!serverMode" class="btn hide-narrow" @click="changeGraph" title="Choose another graph">Change graph</button>
-      <button class="icon-btn" @click="openSettings" title="Settings: display limits (Alt+,)" aria-label="Settings">⚙</button>
-      <button class="icon-btn" @click="cycleTheme" :title="'Theme: ' + state.theme + ' (Alt+T)'" aria-label="Toggle theme">
+      <button v-if="can('changeGraph') && !serverMode" class="btn hide-narrow" @click="changeGraph" title="Choose another graph">Change graph</button>
+      <button v-if="can('settings')" class="icon-btn" @click="openSettings" title="Settings: display limits (Alt+,)" aria-label="Settings">⚙</button>
+      <button v-if="can('theme')" class="icon-btn" @click="cycleTheme" :title="'Theme: ' + state.theme + ' (Alt+T)'" aria-label="Toggle theme">
         <span v-if="state.theme === 'dark'">☾</span><span v-else-if="state.theme === 'light'">☀</span><span v-else>◐</span>
       </button>
-      <button class="icon-btn" @click="openHelp" title="Help and keyboard shortcuts (F1)" aria-label="Help">?</button>
+      <button v-if="can('help')" class="icon-btn" @click="openHelp" title="Help and keyboard shortcuts (F1)" aria-label="Help">?</button>
     </header>
     <div v-if="serverMode && state.engineInfo.maintenance" class="notice" role="alert">
       <b>Maintenance mode: read-only.</b> The store {{ state.engineInfo.store }} has damage
@@ -415,14 +435,20 @@ export const Workspace = {
     <div v-if="serverMode && state.engineInfo.backup" class="notice" role="status">
       <b>Backup: read-only.</b> {{ backupBanner(state.engineInfo.backup) }}
     </div>
+    <nav v-if="ui.tabs.length > 1" class="profile-nav" role="tablist" aria-label="Tabs">
+      <a v-for="t in ui.tabs" :key="t.id" class="profile-nav-tab" :class="{ active: t.id === state.profileTab }"
+         role="tab" :aria-selected="String(t.id === state.profileTab)" :href="hashOf('play', t.id)"
+         @click.prevent="showTab(t.id)">{{ t.title }}</a>
+    </nav>
     <div v-if="state.storeView" class="notice info store-view-banner" role="status">
       <b>{{ viewBanner(state.storeView) }}.</b>
       Queries read this past state of the store; writes are refused. The live graph is unchanged.
       <button class="btn small" :disabled="state.storeBusy || !!state.storeTask" :aria-busy="String(!!state.storeTask && state.storeTask.id === 'live')" @click="leaveView">{{ state.storeTask && state.storeTask.id === 'live' ? 'Going back…' : 'Back to the live graph' }}</button>
     </div>
-    <change-burst-banner v-if="serverMode"></change-burst-banner>
+    <change-burst-banner v-if="serverMode && ui.hasWorkspace" v-show="onWorkspaceTab()"></change-burst-banner>
 
-    <div class="ws-main" :class="{ vertical: narrow }" ref="main" v-show="leftCount + rightCount > 0">
+    <keep-alive :max="12"><profile-tab v-if="moduleTab" :key="moduleTab.id" :tab="moduleTab" :params="state.profileParams"></profile-tab></keep-alive>
+    <div v-if="ui.hasWorkspace" class="ws-main" :class="{ vertical: narrow }" ref="main" v-show="onWorkspaceTab() && leftCount + rightCount > 0">
       <div class="ws-col" ref="left" v-show="leftCount > 0">
         <query-editor ref="editorRef" v-show="isShown('editor')" :collapsed="layout.collapsed.editor" :maximized="maximized === 'editor'" data-panel="editor" @toggle-maximize="toggleMaximize('editor')"
                       shortcut="Alt+1" @toggle-collapse="toggleCollapse('editor')" @hide="hide('editor')"></query-editor>
@@ -438,12 +464,12 @@ export const Workspace = {
                        shortcut="Alt+5" @toggle-collapse="toggleCollapse('profile')" @hide="hide('profile')"></profile-panel>
       </div>
     </div>
-    <div v-if="leftCount === 0 && rightCount === 0" class="ws-empty">
+    <div v-if="ui.hasWorkspace && onWorkspaceTab() && leftCount === 0 && rightCount === 0" class="ws-empty">
       <p>All panels are hidden.</p>
       <button class="btn" @click="showAll">Show all panels</button>
     </div>
     <catalog-dialogs></catalog-dialogs>
-    <journal-toasts></journal-toasts>
+    <journal-toasts v-if="ui.hasWorkspace"></journal-toasts>
     <optimize-panel></optimize-panel>
     <share-dialog ref="shareDialog"></share-dialog>
     <snapshot-choice-dialog ref="snapshotChoice"></snapshot-choice-dialog>
