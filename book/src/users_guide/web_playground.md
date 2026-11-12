@@ -236,7 +236,7 @@ unless something asks for another one. A profile names:
 | `tabs` | the tabs: `{"id", "title", "builtin": "workspace"}` (the workspace of this page, at most once) or `{"id", "title", "module": "<path>.js"}` (a tab of the profile's own); with more than one tab the page shows a tab row under the top bar |
 | `startTab` | the tab the page opens on |
 | `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
-| `cards` | card templates per label for the profile's tabs (may be empty) |
+| `cards` | card templates per label for the profile's tabs (may be empty; see [Cards](#cards)) |
 | `files` | where the module files are: `""` (next to the page) or a path ending in `/` on the same origin |
 
 The `can` keys: the top bar's `devBadge`, `mcp`, `share`, `view`, `catalog`, `optimize`, `store`,
@@ -256,8 +256,8 @@ NAME|FILE` (a built-in name or a JSON file with a profile object) and tells the 
 `ContextBuilder::ui_profile`. A profile name the page does not know, or an object that breaks a
 rule above, is shown as an error naming every problem, never replaced by another profile. The
 built-in `demo` profile is a small example: a tab of its own that lists the people of the modern
-graph through a saved query (it shows the script that defines the query when the graph has none)
-and the workspace without the catalog, the optimizer, the store and the examples.
+graph through a saved query as cards (it shows the script that defines the query when the graph
+has none) and the workspace without the catalog, the optimizer, the store and the examples.
 
 **A profile's own tabs.** A module tab is an ES module (`files` + `module`, loaded when the tab
 is first shown) whose default export is a Vue component. It gets two props: `params`, the tab's
@@ -267,7 +267,7 @@ parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **prof
 |---|---|
 | `query(name, params)` | calls the saved query `name` with named arguments through the page's engine (the dev server's `POST /api/query`, the browser engine's worker), under the engine's rules (read-only mode, access policy); the caller passes every parameter; resolves to its results, rejects with `{message, help}` |
 | `markdown(text)` | the text through the playground's safe Markdown renderer (never HTML) |
-| `card(label, row)` | a card of `row` by the profile's card template for `label` |
+| `card(label, row, options)` | a card of `row` by the profile's card template for `label` (see [Cards](#cards)) |
 | `toast(kind, text)` | a notification: `info`, `success`, `warn` or `error` |
 | `navigate(tab, params)` | shows another tab of the profile (and puts it into the address) |
 | `theme` | `mode`, `dark` and `token(name)`, the value of a colour token such as `accent` |
@@ -277,6 +277,72 @@ A module that cannot be loaded, has no default export or fails while rendering s
 card in its tab; the other tabs keep working. The profile's files are served like the rest of
 the page: with the dev server, put them into the `--ui-dir` directory (an overlay over the
 embedded playground). The details of the API are in the playground's `js/profile-api.js`.
+
+### Cards
+
+`api.card(label, row, options)` shows one row of a saved query (an element, a map such as
+`value_map()` returns, or a single value) by the profile's **card template** for `label`. A label
+without a template gets a plain card: the label and every field of the row. The `full` profile
+defines no cards; the `demo` profile's Hello tab shows the people of the modern graph as cards.
+
+A template says which fields go where; every key is optional and an unknown key is an error:
+
+| Key | What it shows |
+|---|---|
+| `title` | the heading: a field (or a list of fields, the first present wins); without one, the label |
+| `subtitle` | one muted line of parts joined with ` · ` |
+| `badges` | small pills after the title; a badge shows when its field (or its `when`) is present and true |
+| `body` | a field holding Markdown: rendered by the playground's safe renderer in the full card (never HTML), a one-line plain-text excerpt in the compact card |
+| `excerpt` | the characters of that excerpt (default 160, `0`: none) |
+| `fields` | a key/value list in the full card; long values collapse like everywhere else (setting *Collapse values above*); left out, every field the other parts do not show; `[]`, none |
+| `actions` | default buttons `{id, text, kind, when, unless, title}` (kind `default`, `primary` or `danger`) |
+
+A **field** is a dot-separated path (`name`, `author.name`, `tags.0`); on an element it is looked
+up in the properties first, then on the element (`id`, `label`). A one-item list, as
+`value_map()` returns every property, is shown as its item. A **part** is a field or an object
+`{field, title, text, prefix, format, tone, when, unless}`: `title` names the field in `fields`,
+`text` replaces the value by a fixed text, `prefix` comes before the value, `format` is `text`
+(the default; lists joined with commas), `date`, `datetime` (an ISO text or milliseconds since
+1970, shown in UTC), `count` (a list's length) or `markdown` (`fields` only), `tone` colours a
+badge (`neutral`, `accent`, `ok`, `warn`, `danger`, or a map from the value to a tone), and
+`when`/`unless` show the part only when another field is (or is not) present and true. A field
+that is absent, `null`, empty text or an empty list renders nothing.
+
+```json
+"cards": {
+  "memory": {
+    "title": ["title", "slug"],
+    "subtitle": ["kind", "scope", "source", {"field": "updated", "format": "date"}],
+    "badges": [
+      {"field": "pinned", "text": "pinned", "tone": "accent"},
+      {"field": "superseded_by", "text": "replaced", "tone": "warn"},
+      {"field": "conflicts", "text": "conflict", "tone": "danger"}
+    ],
+    "body": "body",
+    "fields": [{"field": "why", "title": "Why", "format": "markdown"}, {"field": "links", "title": "Links"}],
+    "actions": [
+      {"id": "pin", "text": "Pin", "unless": "pinned"},
+      {"id": "forget", "text": "Forget", "kind": "danger", "unless": "imported_at"}
+    ]
+  }
+}
+```
+
+The module chooses how a card is shown with `options` (all optional):
+
+| Option | Meaning |
+|---|---|
+| `variant` | `"full"` (the default: body and fields) or `"compact"` (a list row: title, subtitle, badges, excerpt) |
+| `selected` | `true` marks the card as the current one |
+| `onOpen(row)` | the title becomes a button and a click on the card calls it (to open the full card of a list row) |
+| `actions` | the buttons, in place of the template's |
+| `onAction(id, row)` | called when a button is clicked; without it the card shows no buttons. While the promise it returns is pending, the card's buttons are disabled; a failure shows as an error notification |
+
+Actions are the module's: the template only names the buttons, and the module decides what a
+click does (call a saved query, navigate, show a notification). Cards take their colours from the
+page's theme, so they follow light and dark mode, and they wrap on a narrow screen.
+
+### Allow-list mode
 
 A host built on the dev server's core can serve such a profile in **allow-list mode** (`GET
 /api/info` `apiMode: "allow-list"`): the server answers only the saved queries the host selected,
