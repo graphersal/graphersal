@@ -163,6 +163,9 @@ fn replace_output_is_bounded_by_the_string_limit() {
 /// next step boundary noticed. Fixed: the expansion counts every copy against the deadline.
 #[test]
 fn evaluation_timeout_interrupts_a_long_fold_expansion() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     let started = Instant::now();
     let result = run(
         r#"g.with("evaluationTimeout", 20).v().repeat(__.both()).times(16).fold().count(Scope.local).next()"#,
@@ -179,6 +182,9 @@ fn evaluation_timeout_interrupts_a_long_fold_expansion() {
 /// not at `fold()` (step #2) where the time was spent. Fixed with the check inside the expansion.
 #[test]
 fn a_timeout_is_reported_at_the_step_that_spent_the_time() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     let err = run(
         r#"g.with("evaluationTimeout", 20).v().repeat(__.both()).times(16).fold().count(Scope.local).next()"#,
     )

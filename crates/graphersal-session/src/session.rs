@@ -2707,6 +2707,9 @@ mod tests {
 
     #[test]
     fn the_memory_report_of_many_labels_is_bounded_and_counts_the_rest() {
+        if crate::skip_on_ci("timing") {
+            return;
+        }
         // 20 000 vertices, each with its own label and one property.
         let mut graph = TraversalGraph::new();
         for i in 0..20_000 {

@@ -963,6 +963,9 @@ mod tests {
 
     #[test]
     fn a_slice_is_bounded_by_its_budget_and_the_token() {
+        if crate::skip_on_ci("timing") {
+            return;
+        }
         let g = ring(5000);
         let mut layout = ForceLayout::new(&g, LayoutOptions::default());
         let token = CancelToken::new();

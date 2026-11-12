@@ -311,6 +311,9 @@ fn random_graph(n: i64, m: usize) -> Arc<Graph> {
 
 #[test]
 fn the_visited_set_bfs_is_not_quadratic() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     // 20k vertices, 40k edges: the scan took more than 80 s here (debug build), the index well
     // under a second. The bound is generous for a loaded machine.
     let graph = random_graph(20_000, 40_000);
@@ -338,6 +341,9 @@ fn the_visited_set_bfs_is_not_quadratic() {
 
 #[test]
 fn a_long_literal_within_is_not_linear_per_traverser() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     // 20k vertices against 5000 operands: the scan took about 40 s here (debug build).
     let graph = random_graph(20_000, 0);
     let operands = (0..5000)

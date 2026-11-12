@@ -163,6 +163,10 @@ Use it to verify a new step or DSL binding end to end, confirm a pushdown with `
 
 `--test opencypher_tck` measures GQL against the vendored openCypher TCK 2024.3 (`crates/graphersal/tests/opencypher/`), with its own ratchet baseline. Same principle (W43, user decision): an unimplemented construct is fine; a supported one follows the TCK unless a user decision says otherwise; "wrong behaviour of supported constructs" is driven to 0. Licence wording: never call Graphersal's GQL "Cypher" or "openCypher" (the upstream Attribution Notice). Details: `crates/graphersal/tests/opencypher/CLAUDE.md`.
 
+### Tests that depend on the machine
+
+A test whose result depends on how much CPU time or memory the machine gives it (an upper bound on wall-clock time, a speed ratio, measured process memory such as RSS or the tracked live heap) starts with `if skip_on_ci("timing") { return; }` (or `"memory"`): on a CI runner (`CI` set) it skips itself, since we do not control the runner's CPU or memory; locally it runs. The helper lives in `tests/all/ci_support.rs` for `tests/all`, in `graphersal-session`'s `lib.rs` (`cfg(test)`) and as a copy in each other test target that needs it; playground tests check `process.env.CI`. Lower bounds (a timeout really waited), deadlines that only stop a hung test and allocation counts stay unconditional. The local `cargo test` before a release is where these tests are checked (`book/src/for_developers/release_plan.md`).
+
 ## Architecture (graphersal)
 
 Each paragraph is a map; the nested file named holds the detail.

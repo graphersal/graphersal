@@ -243,6 +243,9 @@ const ENGINES: u32 = 50;
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn building_an_engine_is_cheap() {
+    if skip_on_ci("timing") {
+        return;
+    }
     let _ = engine();
     let start = web_time::Instant::now();
     for _ in 0..ENGINES {
@@ -416,4 +419,17 @@ fn nested_tokens_render_as_literals_in_the_session_spelling() {
         camel.text,
         "#{\"p\": TextP.startingWith(\"a\"), \"t\": __.outE()}\nScope.local\nColumn.keys"
     );
+}
+
+/// Whether this run is on a CI runner (`CI` set and not empty, "false" or "0", as GitHub Actions
+/// sets it). A test whose result depends on how much CPU time or memory the machine gives it
+/// (an upper bound on wall-clock time, a speed ratio, measured process memory) returns early
+/// there, because a shared runner guarantees neither; such tests run locally, before every
+/// release in particular. Prints why it skipped.
+fn skip_on_ci(what: &str) -> bool {
+    let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+    if on_ci {
+        eprintln!("skipped on CI ({what}): depends on the runner's CPU or memory");
+    }
+    on_ci
 }

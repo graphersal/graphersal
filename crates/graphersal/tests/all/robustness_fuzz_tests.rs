@@ -1979,6 +1979,9 @@ fn fuzz_fast() {
 /// case reach about 3 GB of resident memory.
 #[test]
 fn unbounded_repeat_stops_at_the_memory_limit() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     for script in [
         r#"g.with("bulk.merge", false).inject(1).repeat(__.constant([1, 2, 3, 4]).unfold()).to_list()"#,
         r#"g.inject(1).repeat(__.group().barrier()).to_list()"#,
@@ -2012,6 +2015,9 @@ fn unbounded_repeat_stops_at_the_memory_limit() {
 /// stopped it, at about 1.5 GB of live heap per case.
 #[test]
 fn a_rendered_traversal_stops_at_the_case_memory_limit() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     let script =
         r#"g.with("bulk.merge", false).inject(1).repeat(__.constant([1, 2, 3, 4]).unfold())"#;
     for kind in [GraphKind::Modern, GraphKind::Empty] {

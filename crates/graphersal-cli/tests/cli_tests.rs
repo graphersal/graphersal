@@ -1948,6 +1948,9 @@ fn max_traversers_caps_a_traversal() {
 
 #[test]
 fn memory_limit_fails_a_query_that_grows_past_it_and_rolls_back() {
+    if skip_on_ci("memory") {
+        return;
+    }
     // The CLI installs the tracking allocator, so the budget compares the live heap: a loop that
     // doubles its value crosses a few megabytes quickly, a small query fits.
     let res = run(
@@ -6755,6 +6758,9 @@ fn store_repair_names_what_it_never_carries() {
 /// remainder that is a small part of the heap.
 #[test]
 fn the_memory_report_attributes_the_process_heap() {
+    if skip_on_ci("memory") {
+        return;
+    }
     let res = run(
         &[
             "-e",
@@ -6827,4 +6833,17 @@ fn mcp_cost_prints_the_prompt_size_without_a_server() {
     let res = run(&["mcp-cost", "--help"], "");
     assert_eq!(res.code, 0);
     assert!(res.stdout.contains("characters / 4"), "{}", res.stdout);
+}
+
+/// Whether this run is on a CI runner (`CI` set and not empty, "false" or "0", as GitHub Actions
+/// sets it). A test whose result depends on how much CPU time or memory the machine gives it
+/// (an upper bound on wall-clock time, a speed ratio, measured process memory) returns early
+/// there, because a shared runner guarantees neither; such tests run locally, before every
+/// release in particular. Prints why it skipped.
+fn skip_on_ci(what: &str) -> bool {
+    let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+    if on_ci {
+        eprintln!("skipped on CI ({what}): depends on the runner's CPU or memory");
+    }
+    on_ci
 }

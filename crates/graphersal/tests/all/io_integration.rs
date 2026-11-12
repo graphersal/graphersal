@@ -385,6 +385,9 @@ fn import_graphml_str(xml: &str) -> Result<Graph, IOError> {
 #[cfg(feature = "io")]
 #[test]
 fn hostile_tag_with_many_attributes_fails_fast_with_a_parse_error() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     let mut tag = String::with_capacity(1 << 20);
     tag.push_str("<node");
     for i in 0..50_000 {

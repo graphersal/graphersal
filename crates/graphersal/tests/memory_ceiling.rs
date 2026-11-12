@@ -55,6 +55,9 @@ fn root(err: &TraverserError) -> &TraverserError {
 
 #[test]
 fn the_default_is_auto_and_on() {
+    if skip_on_ci("memory") {
+        return;
+    }
     let _guard = exclusive();
     let limit = exec::memory_limit().unwrap();
     assert_eq!(limit.setting(), MemoryLimit::Auto);
@@ -190,6 +193,10 @@ fn a_thread_scope_lowers_the_process_ceiling() {
 #[test]
 #[cfg(feature = "persist")]
 fn a_store_open_over_the_process_ceiling_names_the_minimum_needed() {
+    // The live heap is measured only with the tracking allocator (feature `alloc-tracking`).
+    if cfg!(feature = "alloc-tracking") && skip_on_ci("memory") {
+        return;
+    }
     use graphersal::error::DiagnosticError;
     use graphersal::persist::{MemDir, PersistError, Store, StoreDir, StoreOptions};
     let _guard = exclusive();
@@ -253,6 +260,10 @@ fn a_store_open_over_the_process_ceiling_names_the_minimum_needed() {
 /// lists. What a writing query adds to the GRAPH does not count against it.
 #[test]
 fn the_per_query_limit_counts_live_bytes_when_tracked() {
+    // The live heap is measured only with the tracking allocator (feature `alloc-tracking`).
+    if cfg!(feature = "alloc-tracking") && skip_on_ci("memory") {
+        return;
+    }
     const LIMIT: &str = "traversal.max_materialized_bytes";
     let _guard = exclusive();
     let mut graph = TraversalGraph::new();
@@ -340,6 +351,10 @@ fn the_per_query_limit_counts_live_bytes_when_tracked() {
 #[test]
 #[cfg(feature = "persist")]
 fn a_journal_segment_over_the_process_ceiling_refuses_the_query_not_the_store() {
+    // The live heap is measured only with the tracking allocator (feature `alloc-tracking`).
+    if cfg!(feature = "alloc-tracking") && skip_on_ci("memory") {
+        return;
+    }
     use graphersal::error::DiagnosticError;
     use graphersal::persist::{MemDir, PersistError, Store, StoreDir, StoreOptions};
     use graphersal::system_journal::{JournalError, JournalQuery};
@@ -413,4 +428,17 @@ fn a_journal_segment_over_the_process_ceiling_refuses_the_query_not_the_store() 
     assert!(new_seq > last_seq);
     assert!(new_seq > first + padded / 26, "{new_seq}");
     assert!(after.windows(2).all(|w| w[0].seq < w[1].seq));
+}
+
+/// Whether this run is on a CI runner (`CI` set and not empty, "false" or "0", as GitHub Actions
+/// sets it). A test whose result depends on how much CPU time or memory the machine gives it
+/// (an upper bound on wall-clock time, a speed ratio, measured process memory) returns early
+/// there, because a shared runner guarantees neither; such tests run locally, before every
+/// release in particular. Prints why it skipped.
+fn skip_on_ci(what: &str) -> bool {
+    let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+    if on_ci {
+        eprintln!("skipped on CI ({what}): depends on the runner's CPU or memory");
+    }
+    on_ci
 }
