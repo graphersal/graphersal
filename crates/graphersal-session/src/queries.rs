@@ -278,6 +278,105 @@ pub fn gql_call_text(query: &str, params: &Value) -> Result<String, SessionError
     call_text("g.gql", query, params, "the parameters of a GQL query")
 }
 
+/// Which saved queries a client may call by name: folders (each with its subfolders), names,
+/// and names excluded from both. `graphersal-mcp` offers the selected queries as tools of their
+/// own (`saved_query_tools` of its configuration), `graphersal-serve`'s allow-list mode answers
+/// `POST /api/query` only for them; one code for both.
+///
+/// ```
+/// use graphersal_session::queries::SavedQuerySelection;
+///
+/// let selection = SavedQuerySelection::of(["memory"], ["ui_status"]).excluding(["memory_raw"]);
+/// assert!(selection.selects("recall", Some("memory")));
+/// assert!(selection.selects("recall", Some("memory/sub")));
+/// assert!(!selection.selects("recall", Some("memory-old")));
+/// assert!(selection.selects("ui_status", None));
+/// assert!(!selection.selects("memory_raw", Some("memory")));
+/// assert!(!selection.selects("other", None));
+/// assert!(SavedQuerySelection::all().selects("other", None));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedQuerySelection {
+    /// Folders (each with its subfolders); `None`: no restriction unless `names` is given.
+    folders: Option<Vec<String>>,
+    /// Query names; `None`: no selection by name.
+    names: Option<Vec<String>>,
+    /// Query names never selected.
+    exclude: Vec<String>,
+}
+
+impl SavedQuerySelection {
+    /// Every saved query (the default).
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// The saved queries in `folders` (each with its subfolders, segment-wise: `memory` holds
+    /// `memory/sub`, not `memory-old`) and those named in `names`. Both empty: none.
+    pub fn of<F, N>(folders: F, names: N) -> Self
+    where
+        F: IntoIterator,
+        F::Item: Into<String>,
+        N: IntoIterator,
+        N::Item: Into<String>,
+    {
+        Self {
+            folders: Some(folders.into_iter().map(Into::into).collect()),
+            names: Some(names.into_iter().map(Into::into).collect()),
+            exclude: Vec::new(),
+        }
+    }
+
+    /// The selection as a configuration file states it: `folders` / `names` `None` when the
+    /// key is absent (both absent: every saved query), `exclude` the names never selected.
+    pub fn from_parts(
+        folders: Option<Vec<String>>,
+        names: Option<Vec<String>>,
+        exclude: Vec<String>,
+    ) -> Self {
+        Self {
+            folders,
+            names,
+            exclude,
+        }
+    }
+
+    /// This selection without the queries named in `names` (added to the excluded ones).
+    pub fn excluding<N>(mut self, names: N) -> Self
+    where
+        N: IntoIterator,
+        N::Item: Into<String>,
+    {
+        self.exclude.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Whether the saved query `name` in `folder` (`None`: no folder) is selected.
+    pub fn selects(&self, name: &str, folder: Option<&str>) -> bool {
+        if self.exclude.iter().any(|n| n == name) {
+            return false;
+        }
+        if self.folders.is_none() && self.names.is_none() {
+            return true;
+        }
+        let by_name = self
+            .names
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|n| n == name));
+        let by_folder = self.folders.as_ref().is_some_and(|folders| {
+            folder.is_some_and(|folder| {
+                folders.iter().any(|f| {
+                    folder == f
+                        || folder
+                            .strip_prefix(f.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+            })
+        });
+        by_name || by_folder
+    }
+}
+
 /// `<head>("<first>"[, #{args}])`; `what` names the arguments in the error of a non-object.
 fn call_text(head: &str, first: &str, args: &Value, what: &str) -> Result<String, SessionError> {
     let mut out = format!("{head}({}", rhai_string(first));
@@ -696,6 +795,68 @@ impl Session {
         }
     }
 
+    /// Runs the saved query `name` with the named arguments `params` (a JSON object as
+    /// [`query_call_text`] takes it; `null`: none) under `authorizer`, stopped by `cancel`: the
+    /// call behind the playground profile API's `query(name, params)`, `POST /api/query` of the
+    /// dev server and the WebAssembly engine's `runSavedQuery`. One run like
+    /// [`Self::execute_with_cancel`] (a unit, journaled, in the change feed), without the
+    /// display and the drawn subgraph. Answers `{ok: true, results, mutated, changes}`
+    /// (`results`: every result as JSON, never cut; `changes`: `{data, schema, definitions}`)
+    /// or `{ok: false, error: {message, help?, ...}, mutated, changes}` (the error JSON of a
+    /// run: an unknown query, a parameter the schema refuses, a write the authorizer denies).
+    pub fn run_saved_query(
+        &mut self,
+        name: &str,
+        params: &Value,
+        authorizer: std::sync::Arc<dyn graphersal::auth::Authorizer>,
+        cancel: &graphersal::exec::CancelToken,
+    ) -> Value {
+        let unchanged = json!({"data": false, "schema": false, "definitions": false});
+        let script = match query_call_text(name, params) {
+            Ok(script) => script,
+            Err(err) => {
+                let message = err.to_string();
+                return json!({"ok": false, "error": {"message": message, "diagnostic": message},
+                              "mutated": false, "changes": unchanged});
+            }
+        };
+        let options = crate::RunOptions {
+            max_rows: Some(1),
+            max_items: Some(1),
+            subgraph_max_elements: Some(0),
+            ..crate::RunOptions::default()
+        };
+        let text = self.execute_with_cancel(&script, &options, authorizer, cancel);
+        let answer: Value = match serde_json::from_str(&text) {
+            Ok(answer) => answer,
+            Err(err) => {
+                let message = format!("malformed engine answer: {err}");
+                return json!({"ok": false, "error": {"message": message, "diagnostic": message},
+                              "mutated": false, "changes": unchanged});
+            }
+        };
+        let ok = answer["ok"].as_bool().unwrap_or(false);
+        let mutated = answer["mutated"].as_bool().unwrap_or(false);
+        let changes = match answer.get("changes") {
+            Some(changes) if changes.is_object() => changes.clone(),
+            _ => unchanged,
+        };
+        let execution = answer.get("execution").cloned().unwrap_or(Value::Null);
+        if ok {
+            let results = match execution.get("results") {
+                Some(results) if results.is_array() => results.clone(),
+                _ => Value::Array(Vec::new()),
+            };
+            json!({"ok": true, "results": results, "mutated": mutated, "changes": changes})
+        } else {
+            let error = match execution.get("error") {
+                Some(error) if error.is_object() => error.clone(),
+                _ => json!({"message": format!("the saved query \"{name}\" failed")}),
+            };
+            json!({"ok": false, "error": error, "mutated": mutated, "changes": changes})
+        }
+    }
+
     /// Drops the saved query `name`: `true`, or `false` when there was none. One commit.
     pub fn drop_query(&mut self, name: &str) -> Result<bool, SessionError> {
         self.graph.drop_definition(DefinitionKind::QUERY, name)
@@ -976,6 +1137,138 @@ mod tests {
             ],
             "body": "fn older_than(label, age) {\n  g.v().has_label(label).has(\"age\", P.gt(age)).values(\"name\")\n}",
         })
+    }
+
+    #[test]
+    fn run_saved_query_answers_results_or_the_error_of_the_run() {
+        use graphersal::auth::{AccessPolicy, ActionKind, ResourceKind};
+        use graphersal::exec::CancelToken;
+        let mut s = modern();
+        let answer = s.define_query(&json!({
+            "name": "add_person",
+            "params": [{"name": "name", "schema": {"type": "string"}}],
+            "body": "fn add_person(name) { g.add_v(\"person\").property(\"name\", name).values(\"name\") }",
+        }));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let answer = s.define_query(&json!({
+            "name": "names",
+            "body": "fn names() { g.v().has_label(\"person\").values(\"name\").order() }",
+        }));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let cancel = CancelToken::new();
+
+        // Every result, never cut by a display limit.
+        let read = s.run_saved_query(
+            "names",
+            &Value::Null,
+            crate::playground_authorizer(),
+            &cancel,
+        );
+        assert_eq!(
+            read,
+            json!({"ok": true, "results": ["josh", "marko", "peter", "vadas"], "mutated": false,
+                   "changes": {"data": false, "schema": false, "definitions": false}})
+        );
+        let added = s.run_saved_query(
+            "add_person",
+            &json!({"name": "ann"}),
+            crate::playground_authorizer(),
+            &cancel,
+        );
+        assert_eq!(added["ok"], true, "{added}");
+        assert_eq!(added["results"], json!(["ann"]));
+        assert_eq!(added["mutated"], true);
+        assert_eq!(added["changes"]["data"], true);
+
+        // The authorizer decides: a policy without writes refuses the call before it runs.
+        let reading = crate::authorizer_for(false, Some(&AccessPolicy::read_only()));
+        let refused = s.run_saved_query("add_person", &json!({"name": "bob"}), reading, &cancel);
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(refused["mutated"], false);
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Permission denied")),
+            "{refused}"
+        );
+        let writing = AccessPolicy::read_only()
+            .allow(ActionKind::Create, ResourceKind::Data)
+            .allow(ActionKind::Update, ResourceKind::Data);
+        let allowed = s.run_saved_query(
+            "add_person",
+            &json!({"name": "bob"}),
+            crate::authorizer_for(false, Some(&writing)),
+            &cancel,
+        );
+        assert_eq!(allowed["ok"], true, "{allowed}");
+        // Read-only on top of a policy denies its writes.
+        let refused = s.run_saved_query(
+            "add_person",
+            &json!({"name": "cy"}),
+            crate::authorizer_for(true, Some(&writing)),
+            &cancel,
+        );
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(
+            run(&mut s, "g.v().count().next()")["execution"]["results"][0],
+            8
+        );
+
+        // Unknown queries, bad arguments, a cancelled token: errors in the answer.
+        for (name, params) in [
+            ("nope", Value::Null),
+            ("add_person", json!({"name": 5})),
+            ("add_person", json!([1])),
+        ] {
+            let failed = s.run_saved_query(name, &params, crate::playground_authorizer(), &cancel);
+            assert_eq!(failed["ok"], false, "{name} {params}: {failed}");
+            assert!(failed["error"]["message"].is_string(), "{failed}");
+            assert_eq!(failed["mutated"], false);
+        }
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let stopped = s.run_saved_query(
+            "names",
+            &Value::Null,
+            crate::playground_authorizer(),
+            &cancelled,
+        );
+        assert_eq!(stopped["ok"], false, "{stopped}");
+    }
+
+    #[test]
+    fn authorizer_for_keeps_the_playground_authorizers_without_a_policy() {
+        use graphersal::auth::{AccessPolicy, ActionKind, ResourceKind};
+        let mut s = modern();
+        let cancel = graphersal::exec::CancelToken::new();
+        let answer = s.define_query(&json!({
+            "name": "add_x",
+            "body": "fn add_x() { g.add_v(\"x\").count() }",
+        }));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let read_only = s.run_saved_query(
+            "add_x",
+            &Value::Null,
+            crate::authorizer_for(true, None),
+            &cancel,
+        );
+        assert_eq!(read_only["ok"], false, "{read_only}");
+        let playground = s.run_saved_query(
+            "add_x",
+            &Value::Null,
+            crate::authorizer_for(false, None),
+            &cancel,
+        );
+        assert_eq!(playground["ok"], true, "{playground}");
+        // A policy is used as given.
+        let policy = AccessPolicy::allow_all().deny(ActionKind::Create, ResourceKind::Data);
+        let denied = s.run_saved_query(
+            "add_x",
+            &Value::Null,
+            crate::authorizer_for(false, Some(&policy)),
+            &cancel,
+        );
+        assert_eq!(denied["ok"], false, "{denied}");
     }
 
     #[test]

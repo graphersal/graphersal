@@ -38,8 +38,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
+use graphersal::auth::AccessPolicy;
 use graphersal::exec::CancelToken;
 use graphersal::persist::Store;
+use graphersal_session::queries::SavedQuerySelection;
 use graphersal_session::{Session, SessionPresets};
 use serde_json::{Value, json};
 
@@ -519,6 +521,17 @@ pub struct Context {
     pub(crate) mcp_profile: Option<graphersal_mcp::Profile>,
     /// What the host adds.
     pub(crate) hooks: Arc<dyn Hooks>,
+    /// The allow-list mode of the HTTP API ([`ContextBuilder::api_allow_list`]); `None`: every
+    /// endpoint.
+    pub(crate) allow_list: Option<Arc<AllowList>>,
+}
+
+/// The allow-list mode of a context's HTTP API: the saved queries `POST /api/query` runs and
+/// the access policy they run under.
+#[derive(Debug)]
+pub(crate) struct AllowList {
+    pub(crate) selection: SavedQuerySelection,
+    pub(crate) policy: AccessPolicy,
 }
 
 /// Builds a [`Context`].
@@ -540,6 +553,7 @@ pub struct ContextBuilder {
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
     ui_profile: Option<Value>,
+    allow_list: Option<AllowList>,
 }
 
 impl ContextBuilder {
@@ -655,6 +669,26 @@ impl ContextBuilder {
         self
     }
 
+    /// The **allow-list mode** of the HTTP API (EXPERIMENTAL, like this crate): the context
+    /// answers only `GET /api/info` (with `apiMode: "allow-list"`), `GET /api/changes` and
+    /// `POST /api/query` `{name, params}` for the saved queries `selection` selects, each run
+    /// under `policy` (the engine authorizes the run once, before it starts: a write the policy
+    /// does not allow changes nothing and answers `{ok: false, error}`). Every other `/api/`
+    /// endpoint (the host's extra routes included), `/mcp` and a saved query outside the
+    /// selection (or one that does not exist) answer `403` with a plain message. Static files
+    /// of the UI and `/openapi.json` stay served (they carry no data). The [`HostCheck`] and
+    /// the request filter still run first. No parameter is bound by the server: the caller
+    /// passes every parameter. Default: off (every endpoint; `POST /api/query` runs any saved
+    /// query under the playground's authorizer).
+    ///
+    /// A host builds the policy from the effects of the queries it selects, for example
+    /// `AccessPolicy::read_only()` plus their `Create`/`Update`/`Delete` on `Data`
+    /// (`graphersal::auth`).
+    pub fn api_allow_list(mut self, selection: SavedQuerySelection, policy: AccessPolicy) -> Self {
+        self.allow_list = Some(AllowList { selection, policy });
+        self
+    }
+
     /// The context.
     pub fn build(self) -> Arc<Context> {
         Arc::new(Context {
@@ -683,6 +717,7 @@ impl ContextBuilder {
             #[cfg(feature = "mcp")]
             mcp_profile: self.mcp_profile,
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
+            allow_list: self.allow_list.map(Arc::new),
         })
     }
 }
@@ -709,7 +744,13 @@ impl Context {
             filter: None,
             memory_tracked: false,
             ui_profile: None,
+            allow_list: None,
         }
+    }
+
+    /// Whether the HTTP API is in allow-list mode ([`ContextBuilder::api_allow_list`]).
+    pub fn is_allow_list(&self) -> bool {
+        self.allow_list.is_some()
     }
 
     /// The MCP endpoint, if the server has one.

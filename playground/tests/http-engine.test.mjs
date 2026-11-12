@@ -398,3 +398,31 @@ test('info() passes the UI profile and the read-only flag on', async () => {
     assert.equal((await engine.info()).readOnly, true);
   }
 });
+
+test('runSavedQuery posts {name, params} to /api/query; a refusal rejects with the server text', async () => {
+  const answer = { ok: true, results: [{ name: 'marko' }], mutated: false, changes: { data: false, schema: false, definitions: false } };
+  const { fetch, calls } = fakeFetch({
+    'POST /api/query': (init) => {
+      const body = JSON.parse(init.body);
+      if (body.name === 'hidden') return [403, { error: 'the saved query "hidden" is not offered by this server' }];
+      return [200, answer];
+    },
+  });
+  const engine = new HttpEngine({ ...INFO, apiMode: 'allow-list' }, { base: BASE, fetch });
+  assert.deepEqual(await engine.runSavedQuery('people', { min_age: 30, project: 'p' }), answer);
+  const call = calls.find((c) => c.path === '/api/query');
+  assert.equal(call.method, 'POST');
+  assert.equal(call.init.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(call.init.body), { name: 'people', params: { min_age: 30, project: 'p' } });
+  assert.deepEqual(JSON.parse((await engine.runSavedQuery('people'), calls.at(-1).init.body)), { name: 'people', params: {} });
+  await assert.rejects(engine.runSavedQuery('hidden', {}), (e) => e.status === 403 && /not offered by this server/.test(e.message));
+});
+
+test('info() names the API mode: allow-list only when the server says so', async () => {
+  const plain = new HttpEngine(INFO, { base: BASE, fetch: fakeFetch({}).fetch });
+  assert.equal((await plain.info()).apiMode, 'full');
+  const allow = new HttpEngine({ ...INFO, apiMode: 'allow-list' }, { base: BASE, fetch: fakeFetch({}).fetch });
+  assert.equal((await allow.info()).apiMode, 'allow-list');
+  const odd = new HttpEngine({ ...INFO, apiMode: 'something' }, { base: BASE, fetch: fakeFetch({}).fetch });
+  assert.equal((await odd.info()).apiMode, 'full');
+});

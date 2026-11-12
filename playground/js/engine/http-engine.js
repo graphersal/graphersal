@@ -142,6 +142,9 @@ export class HttpEngine extends Engine {
       // The UI profile the server names (`--ui-profile`, `ContextBuilder::ui_profile`): a
       // built-in name or a profile object (js/ui-profiles.js validates it), or null: `full`.
       uiProfile: i.uiProfile === undefined ? null : i.uiProfile,
+      // 'allow-list' (`ContextBuilder::api_allow_list`): the server answers only `info`,
+      // `changes` and `query` (runSavedQuery) of its selected saved queries; else 'full'.
+      apiMode: i.apiMode === 'allow-list' ? 'allow-list' : 'full',
     };
   }
 
@@ -378,6 +381,15 @@ export class HttpEngine extends Engine {
 
   async previewQuery(name, args) {
     return this.request('POST', 'queries/preview', JSON.stringify({ name, args: args || {} }));
+  }
+
+  /**
+   * `POST /api/query`: also the only query endpoint of a server in allow-list mode
+   * (`info().apiMode`). A refusal of the server (403: a saved query it does not offer; 400: a
+   * malformed call) rejects like every request, with the server's text and `status`.
+   */
+  async runSavedQuery(name, params) {
+    return this.request('POST', 'query', JSON.stringify({ name, params: params || {} }));
   }
 
   /** The catalog file's text (every kind) exactly as the server writes it. */

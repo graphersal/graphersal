@@ -3,7 +3,7 @@
 
 use graphersal::auth::AccessPolicy;
 use graphersal::exec::CancelToken;
-use graphersal_session::{RunOptions, Session};
+use graphersal_session::{RunOptions, Session, authorizer_for};
 use serde_json::{Map, Value, json};
 
 use crate::answer::{PAGING_ARGS, Page, compact, fit, page_of, paging_properties, query_text};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::catalog::{Tool, all_tools, offered_tools};
 use crate::config::McpConfig;
 use crate::host::{ClientRef, Ctx, Host, McpError, RunGuard};
-use crate::profile::{Profile, authorizer, policy_allows_tool};
+use crate::profile::{Profile, policy_allows_tool};
 use crate::protocol::MAX_TEXT_CHARS;
 use crate::stats::McpStats;
 
@@ -1080,7 +1080,7 @@ pub(crate) fn run_script(
         offset: Some(page.offset),
         ..RunOptions::default()
     };
-    let authorizer = authorizer(caller.read_only, caller.policy.as_ref());
+    let authorizer = authorizer_for(caller.read_only, caller.policy.as_ref());
     // A token of this run alone (the caller's own: an AI Chat turn's), registered with the host
     // before the job is queued, so a cancel of it is never lost and reaches no other run.
     let cancel = caller.cancel.clone().unwrap_or_default();

@@ -29,7 +29,7 @@ import {
 import { mapPosition } from './editor/run-selection.js';
 import { keysBySchema } from './editor/gql-complete.js';
 import { normalizeSizeBy } from './graph/size-by.js';
-import { BUILTIN_PROFILES, createUi, resolveProfile, requestedProfile } from './ui-profiles.js';
+import { BUILTIN_PROFILES, checkApiMode, createUi, resolveProfile, requestedProfile } from './ui-profiles.js';
 
 const HISTORY_MAX = 100;
 
@@ -209,6 +209,7 @@ function applyProfile() {
   state.profileRequested = requested;
   try {
     const profile = resolveProfile(server ? state.engineInfo.uiProfile : requested);
+    checkApiMode(profile, server ? state.engineInfo.apiMode : 'full');
     state.ui = markRaw(createUi(profile, { server }));
     state.profileTab = profile.startTab;
     state.profileError = null;
@@ -1347,24 +1348,41 @@ export async function runSavedQuery(name, args) {
 
 /**
  * The profile API's `query(name, params)` (js/profile-api.js): calls the saved query through
- * the current engine as `g.query(name, #{..})` and answers `{ok, results}` or `{ok: false,
- * error}`; a run that changed the graph updates the graph info like a run of the workspace.
+ * the current engine's `runSavedQuery` (dev server: `POST /api/query`; WebAssembly: the
+ * worker's `runSavedQuery`) and answers `{ok, results}` or `{ok: false, error: {message,
+ * help}}` (a refusal of the server included); a run that changed the graph updates the graph
+ * info like a run of the workspace.
  * Not a tab's run: no history, no result panel.
  */
 export async function profileQuery(name, params) {
   await engineReady();
   if (!state.engine) return { ok: false, error: { message: 'The engine is not available.' } };
-  const script = await state.engine.queryCallText(name, params);
-  // The display and the result's subgraph are not used: keep them small.
-  const res = await state.engine.execute(script, { max_rows: 1, max_items: 1, subgraph_max_elements: 0 });
-  if (res.graph && state.graph) state.graph = res.graph;
-  if (res.mutated) state.graphVersion++;
+  let res;
+  try {
+    // The dev server's `POST /api/query` (the only query endpoint in allow-list mode), the
+    // WebAssembly engine's `runSavedQuery`: one answer for both.
+    res = await state.engine.runSavedQuery(name, params);
+  } catch (err) {
+    return { ok: false, error: { message: err && err.message ? err.message : String(err), help: '' } };
+  }
+  if (!res) return { ok: false, error: { message: `The saved query "${name}" failed.`, help: '' } };
+  if (res.mutated) {
+    // The workspace shows the served graph only when it attached it (never in allow-list mode).
+    if (state.graph) {
+      try {
+        state.graph = await state.engine.graphInfo();
+      } catch (err) {
+        // The counts stay as they were; the change feed or the next run refreshes them.
+      }
+    }
+    state.graphVersion++;
+  }
   if (changedData(res)) state.dataVersion++;
   if (!res.ok) {
-    const error = (res.execution && res.execution.error) || {};
+    const error = res.error || {};
     return { ok: false, error: { message: error.message || `The saved query "${name}" failed.`, help: error.help || '' } };
   }
-  return { ok: true, results: (res.execution && res.execution.results) || [] };
+  return { ok: true, results: Array.isArray(res.results) ? res.results : [] };
 }
 
 /**

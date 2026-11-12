@@ -26,7 +26,7 @@ use std::sync::mpsc::channel;
 
 use graphersal::{GraphSource, exec::CancelToken};
 use graphersal_session::store::{backup_value, damage_value, found_damage_value};
-use graphersal_session::{RunOptions, playground_authorizer, views};
+use graphersal_session::{RunOptions, authorizer_for, playground_authorizer, views};
 use serde_json::{Value, json};
 
 use crate::context::{CLIENT, Client, Context, position};
@@ -41,6 +41,8 @@ mod store;
 #[cfg(feature = "mcp")]
 pub(crate) use store::current_view;
 
+#[cfg(test)]
+mod allow_list_tests;
 #[cfg(test)]
 mod boundary_tests;
 
@@ -108,6 +110,9 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
     let url = request.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
     let method = request.method().clone();
+    if context.allow_list.is_some() && !allow_listed(&method, path) {
+        return Err(HttpError(403, allow_list_refusal(&method, path)));
+    }
     if path == "/mcp" {
         return mcp::route(context, request);
     }
@@ -154,6 +159,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
                 .unwrap_or_default(),
         )),
         (Method::Get, "graph") => value(context.call_fallible(|s| s.info())?),
+        (Method::Post, "query") => run_saved_query(context, request),
         (Method::Post, "execute") => {
             let body = request.json_body()?;
             let script = body
@@ -579,6 +585,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             | "changes"
             | "cancel"
             | "graph"
+            | "query"
             | "execute"
             | "schema"
             | "schema/stored"
@@ -646,6 +653,94 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             }
         }
     }
+}
+
+/// What a context in allow-list mode answers besides the static files and `/openapi.json`
+/// ([`crate::ContextBuilder::api_allow_list`]).
+const ALLOW_LISTED: [(Method, &str); 3] = [
+    (Method::Get, "info"),
+    (Method::Get, "changes"),
+    (Method::Post, "query"),
+];
+
+/// Whether a context in allow-list mode answers `method` on `path`: the three endpoints of
+/// [`ALLOW_LISTED`], the static files and `/openapi.json`; never another `/api/` endpoint or
+/// `/mcp`.
+fn allow_listed(method: &Method, path: &str) -> bool {
+    match path.strip_prefix("/api/") {
+        Some(endpoint) => ALLOW_LISTED
+            .iter()
+            .any(|(m, e)| m == method && *e == endpoint),
+        None => path != "/mcp",
+    }
+}
+
+/// The `403` text of a request a context in allow-list mode does not answer.
+fn allow_list_refusal(method: &Method, path: &str) -> String {
+    format!(
+        "{method} {path} is not offered by this server: it answers only GET /api/info, \
+         GET /api/changes and POST /api/query (allow-list mode)"
+    )
+}
+
+/// `POST /api/query` `{name, params?, runId?}`: one run of the saved query `name` with the
+/// named arguments `params` (an object; absent or `null`: none), answered `{ok, results |
+/// error, mutated, changes}` (`Session::run_saved_query`). In allow-list mode only a selected
+/// saved query runs (anything else is `403`), under the context's policy; otherwise any saved
+/// query, under the playground's authorizer. No parameter is bound by the server.
+fn run_saved_query(context: &Arc<Context>, request: &mut Request) -> Result<Response, HttpError> {
+    let body = request.json_body()?;
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            HttpError::bad_request("expected {\"name\": \"<saved query>\", \"params\": {...}}")
+        })?
+        .to_string();
+    let params = match body.get("params") {
+        None => Value::Null,
+        Some(params @ (Value::Null | Value::Object(_))) => params.clone(),
+        Some(_) => {
+            return Err(HttpError::bad_request(
+                "\"params\" is a JSON object (parameter name -> value)",
+            ));
+        }
+    };
+    let run_id = run_id_of(&body)?;
+    // The call text names the run for the run observer (and refuses a value no Rhai literal
+    // holds before anything is queued).
+    let script = graphersal_session::queries::query_call_text(&name, &params)
+        .map_err(|err| HttpError::bad_request(err.to_string()))?;
+    let allow_list = context.allow_list.clone();
+    let authorizer = match &allow_list {
+        Some(allow) => authorizer_for(context.read_only, Some(&allow.policy)),
+        None => playground_authorizer(),
+    };
+    let cancel = CancelToken::new();
+    let _run = context.register_run(
+        run_id.as_deref(),
+        cancel.clone(),
+        RunKind::Query,
+        Some(&script),
+    )?;
+    let answer = context.call(move |s| -> Result<Value, HttpError> {
+        if let Some(allow) = &allow_list {
+            let entry = s
+                .get_query(&name)
+                .map_err(|err| HttpError(500, err.to_string()))?;
+            // An unknown query is refused like an unselected one: the answer does not tell
+            // which saved queries exist.
+            if entry.is_null() || !allow.selection.selects(&name, entry["folder"].as_str()) {
+                return Err(HttpError(
+                    403,
+                    format!("the saved query \"{name}\" is not offered by this server"),
+                ));
+            }
+        }
+        Ok(s.run_saved_query(&name, &params, authorizer, &cancel))
+    })??;
+    Ok(Response::json(200, &answer))
 }
 
 /// The OpenAPI description of this HTTP API (`openapi.json` beside the crate's manifest,
@@ -716,6 +811,11 @@ fn info_fields(context: &Context) -> Value {
         // The MCP endpoint (`--mcp`): `{readOnly, endpoint, client}`, or null.
         "mcp": mcp::status(context),
     });
+    // The allow-list mode (`ContextBuilder::api_allow_list`): the page uses only `info`,
+    // `changes` and `query`; absent otherwise, so a full server's answer is unchanged.
+    if context.allow_list.is_some() {
+        info["apiMode"] = json!("allow-list");
+    }
     // The playground UI profile (`ContextBuilder::ui_profile`); absent without one, so the
     // answer of a host that sets none is unchanged.
     if let Some(profile) = &context.ui_profile {

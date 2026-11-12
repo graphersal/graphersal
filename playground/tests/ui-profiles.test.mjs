@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_PROFILES, BUILTIN_NAMES, CAN_KEYS, CAN_GROUPS, ProfileError, validateProfile,
   resolveProfile, createUi, profileFromHash, tabRouteFromHash, routeHash, RESERVED_PARAMS,
+  checkApiMode,
 } from '../js/ui-profiles.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -202,5 +203,18 @@ test('every lazily loaded CDN file carries SRI', () => {
       assert.match(after, /integrity: 'sha(384|512)-[A-Za-z0-9+/=]+'/, `${file}: ${m[1]}`);
     }
     assert.ok(!/\bimport\(\s*'https:/.test(text), `${file}: no dynamic import of a CDN module`);
+  }
+});
+
+test('checkApiMode: a server in allow-list mode refuses a profile with the workspace', () => {
+  const modules = validateProfile(minimal());
+  for (const mode of [undefined, 'full', 'allow-list']) checkApiMode(modules, mode);
+  for (const profile of [BUILTIN_PROFILES.full, BUILTIN_PROFILES.demo]) {
+    checkApiMode(profile);
+    checkApiMode(profile, 'full');
+    assert.throws(() => checkApiMode(profile, 'allow-list'), (e) => e instanceof ProfileError
+      && /cannot be shown by this server/.test(e.message)
+      && /allow-list mode/.test(e.message)
+      && e.problems.length === 2);
   }
 });

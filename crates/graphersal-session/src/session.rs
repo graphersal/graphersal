@@ -1864,6 +1864,33 @@ pub fn read_only_authorizer() -> Arc<dyn Authorizer> {
     Arc::new(policy)
 }
 
+/// The authorizer of a client with its own access `policy` (an MCP connection's profile in
+/// `graphersal-mcp`, the allow-list mode of `graphersal-serve`'s HTTP API): one code for both.
+/// Without a policy it is [`playground_authorizer`] (or [`read_only_authorizer`] when
+/// `read_only`), what the dev server always used; with one it is the policy itself, and
+/// read-only denies creating, updating and deleting data, the schema and catalog definitions on
+/// top of it.
+pub fn authorizer_for(read_only: bool, policy: Option<&AccessPolicy>) -> Arc<dyn Authorizer> {
+    match policy {
+        None if read_only => read_only_authorizer(),
+        None => playground_authorizer(),
+        Some(policy) if read_only => {
+            let mut policy = policy.clone();
+            for resource in [
+                ResourceKind::Data,
+                ResourceKind::Schema,
+                ResourceKind::Definition,
+            ] {
+                for action in [ActionKind::Create, ActionKind::Update, ActionKind::Delete] {
+                    policy = policy.deny(action, resource);
+                }
+            }
+            Arc::new(policy)
+        }
+        Some(policy) => Arc::new(policy.clone()),
+    }
+}
+
 fn null_raw() -> Box<RawValue> {
     RawValue::from_string("null".to_string()).unwrap_or_default()
 }

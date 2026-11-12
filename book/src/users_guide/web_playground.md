@@ -265,7 +265,7 @@ parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **prof
 
 | Member | What it does |
 |---|---|
-| `query(name, params)` | calls the saved query `name` with named arguments through the page's engine, under the engine's rules (read-only mode, access policy); resolves to its results, rejects with `{message, help}` |
+| `query(name, params)` | calls the saved query `name` with named arguments through the page's engine (the dev server's `POST /api/query`, the browser engine's worker), under the engine's rules (read-only mode, access policy); the caller passes every parameter; resolves to its results, rejects with `{message, help}` |
 | `markdown(text)` | the text through the playground's safe Markdown renderer (never HTML) |
 | `card(label, row)` | a card of `row` by the profile's card template for `label` |
 | `toast(kind, text)` | a notification: `info`, `success`, `warn` or `error` |
@@ -277,6 +277,11 @@ A module that cannot be loaded, has no default export or fails while rendering s
 card in its tab; the other tabs keep working. The profile's files are served like the rest of
 the page: with the dev server, put them into the `--ui-dir` directory (an overlay over the
 embedded playground). The details of the API are in the playground's `js/profile-api.js`.
+
+A host built on the dev server's core can serve such a profile in **allow-list mode** (`GET
+/api/info` `apiMode: "allow-list"`): the server answers only the saved queries the host selected,
+so only a profile whose tabs are all modules can be shown there (a profile with the workspace is
+an error naming the reason). See [the HTTP API](../persistence/dev_server.md#the-http-api-experimental).
 
 ## The graph drawing
 

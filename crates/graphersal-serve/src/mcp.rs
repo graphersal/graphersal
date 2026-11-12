@@ -36,6 +36,10 @@ fn off() -> HttpError {
 /// `{readOnly, endpoint, client: {name, version} | null}` for `GET /api/info` and
 /// `/api/changes`, or null without `--mcp`.
 pub(crate) fn status(context: &Context) -> Value {
+    // In allow-list mode `/mcp` is refused: no endpoint to show.
+    if context.allow_list.is_some() {
+        return Value::Null;
+    }
     match &context.mcp {
         None => Value::Null,
         Some(_) => endpoint_status(context),

@@ -430,6 +430,13 @@ export class WasmEngine extends Engine {
     return this.call('previewQuery', name, plain(args || {}));
   }
 
+  async runSavedQuery(name, params) {
+    const res = await this.call('runSavedQuery', name, plain(params || {}));
+    // A committed change moves the graph's counts: keep the cached GraphInfo current.
+    if (res && res.mutated) this.graph = await this.call('info');
+    return res;
+  }
+
   async saveCatalog() {
     return this.call('saveCatalog');
   }
