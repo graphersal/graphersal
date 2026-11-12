@@ -397,6 +397,27 @@ fn the_hosts_hooks_add_fields_and_endpoints() {
     assert_eq!(unknown.status(), 404);
 }
 
+#[test]
+fn the_ui_profile_is_answered_in_the_info_only_when_set() {
+    // Without one the field is absent (the UI shows its built-in `full` profile).
+    let info = body_json(&handle(&context(), request(Method::Get, "/api/info", b"")));
+    assert!(info.get("uiProfile").is_none(), "{info}");
+    // A name and an object pass through unchanged (the UI validates them).
+    for profile in [
+        json!("demo"),
+        json!({"name": "memory", "title": "Memory", "startTab": "overview",
+               "can": {}, "tabs": [{"id": "overview", "title": "Overview",
+               "module": "overview.js"}], "files": "/memory/"}),
+    ] {
+        let context = Context::builder(session_runner(), check())
+            .ui_profile(profile.clone())
+            .build();
+        let info = body_json(&handle(&context, request(Method::Get, "/api/info", b"")));
+        assert_eq!(info["uiProfile"], profile);
+        assert_eq!(info["server"], crate::SERVER_ID);
+    }
+}
+
 /// A queue that refuses every job (the read-only serving mode's pool when full).
 struct FullQueue;
 

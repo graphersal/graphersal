@@ -25,6 +25,8 @@ enum Kind {
     Path,
     /// `--graph`: a path unless it names a sample graph.
     Graph,
+    /// `--ui-profile`: a path unless it is a profile name.
+    NameOrPath,
     /// A string or an array of strings, one occurrence of the repeatable flag each.
     Repeat,
 }
@@ -62,6 +64,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("host", Kind::Value),
     ("allowed-host", Kind::Repeat),
     ("ui-dir", Kind::Path),
+    ("ui-profile", Kind::NameOrPath),
     ("mcp", Kind::Switch),
     ("mcp-read-only", Kind::Switch),
     ("mcp-token", Kind::Value),
@@ -108,6 +111,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--host",
     "--allowed-host",
     "--ui-dir",
+    "--ui-profile",
     "--mcp-token",
     "--mcp-instructions",
     "--mcp-max-chars",
@@ -229,6 +233,15 @@ fn translate(text: &str, base: &Path) -> Result<Vec<String>, String> {
             Kind::Graph => {
                 let spec = scalar(key, value)?;
                 let spec = if is_sample_graph(&spec) {
+                    spec
+                } else {
+                    resolve(&spec, base)
+                };
+                out.push(format!("--{key}={spec}"));
+            }
+            Kind::NameOrPath => {
+                let spec = scalar(key, value)?;
+                let spec = if crate::cli::is_ui_profile_name(&spec) {
                     spec
                 } else {
                     resolve(&spec, base)

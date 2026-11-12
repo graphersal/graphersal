@@ -21,6 +21,7 @@ import { PALETTE_SIZE, slotColor } from './palette.js';
 import { TIER_CAPABILITIES } from './renderer.js';
 import { detectWebGL } from './tiers.js';
 import { SIZE_RANGE, sizeOf } from './size-by.js';
+import { loadScript } from '../cdn-script.js';
 
 /** The pinned scripts (cdnjs, exact versions, SRI hashes from cdnjs). */
 export const FAST_LIBRARIES = Object.freeze([
@@ -41,22 +42,6 @@ export const FAST_EDGE_EVENTS_MAX = 20000;
 
 /** sigma's graph y axis points up, the engine's and Cytoscape's down: positions are mirrored. */
 const Y_SIGN = -1;
-
-function loadScript({ src, integrity }) {
-  return new Promise((resolve, reject) => {
-    const el = document.createElement('script');
-    el.src = src;
-    el.integrity = integrity;
-    el.crossOrigin = 'anonymous';
-    el.referrerPolicy = 'no-referrer';
-    el.onload = () => resolve();
-    el.onerror = () => {
-      el.remove();
-      reject(new Error(`could not load ${src} (offline, or blocked)`));
-    };
-    document.head.appendChild(el);
-  });
-}
 
 let loading = null;
 

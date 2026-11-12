@@ -4,7 +4,7 @@
 import { ref, reactive, onMounted } from 'vue';
 import { state, loadGraph, loadSchema, cycleTheme, saveGraph, saveSchema, saveCatalogFile, loadCatalogFile } from '../store.js';
 import { catalogTotal } from '../compression.js';
-import { navigate } from '../router.js';
+import { navigate, hashOf } from '../router.js';
 import { LINKS } from '../config.js';
 import { loadChoice, droppedFiles } from '../load-dialog.js';
 
@@ -118,12 +118,13 @@ export const StartPage = {
       pickDialogSchema: () => dlgSchemaInput.value && dlgSchemaInput.value.click(),
       pickSchema: () => schemaInput.value && schemaInput.value.click(),
       resume: () => navigate('play'),
+      startHash: () => hashOf('start'),
     };
   },
   template: `
   <div class="start">
     <header class="topbar">
-      <a class="brand" href="#/">Graphersal <small>Playground</small></a>
+      <a class="brand" :href="startHash()">Graphersal <small>Playground</small></a>
       <span v-if="state.versionLabel" class="version-label hide-narrow" :title="state.versionLabel.title">{{ state.versionLabel.text }}</span>
       <span class="spacer"></span>
       <button class="icon-btn" @click="cycleTheme" :title="'Theme: ' + state.theme + ' (Alt+T)'" aria-label="Toggle theme">

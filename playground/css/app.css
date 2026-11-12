@@ -608,6 +608,55 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
   color: var(--text-muted);
 }
 
+/* UI profiles (js/ui-profiles.js): the tab row of a profile with several tabs, its module tabs
+   (components/profile-tab.js) and the stand-in card of api.card (components/profile-card-stub.js). */
+.profile-nav {
+  display: flex;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+  flex: none;
+}
+.profile-nav-tab {
+  padding: 7px 12px 6px;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+.profile-nav-tab:hover { color: var(--text); }
+.profile-nav-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.profile-tab {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.profile-tab-error {
+  max-width: 720px;
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.profile-tab-error-head { margin: 0 0 6px; font-weight: 600; color: var(--danger); }
+.profile-tab-error-msg { margin: 0 0 6px; white-space: pre-wrap; }
+.profile-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 12px;
+  margin: 0 0 8px;
+}
+.profile-card-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.profile-card-fields { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+.profile-card-fields dt { color: var(--text-muted); }
+.profile-card-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.boot.profile-error p { max-width: 640px; text-align: left; }
+
 .gutter {
   flex: none;
   background: transparent;
@@ -1516,6 +1565,8 @@ table.cc-estimate-table tr.cc-best td { background: var(--ok-soft); }
   font-size: 13px;
 }
 .toast.error { border-color: var(--danger); }
+.toast.warn { border-color: var(--warn); }
+.toast.success { border-color: var(--ok); }
 .toast-action { margin-left: 8px; }
 
 /* Journal notifications (components/journal-toasts.js): top right, below the top bar; never

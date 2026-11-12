@@ -50,6 +50,11 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
   used that way when it exists (a repository checkout), else the embedded UI alone. An explicit
   `--ui-dir` that does not exist is a usage error. The stderr banner says where the UI comes from:
   `UI: embedded` or `UI: <dir> (embedded fallback)` (in its Server section). A path leaving the UI root (`..`) is a 404.
+- `--ui-profile <NAME|FILE>` (EXPERIMENTAL) chooses the [UI profile](../users_guide/web_playground.md#ui-profiles)
+  the pages show: a built-in name (`full`, the default: the whole playground; `demo`) or a JSON
+  file holding a profile object. `GET /api/info` names it as `uiProfile`; a profile's tab modules
+  are files of the UI, so put them into the `--ui-dir` directory. An unknown name or an invalid
+  object is not refused at start: the page shows it as an error (never another profile).
 - After the graph is in memory, stderr shows **what was loaded and how the server runs**, in
   sections under the warning box, one `key: value` row per fact (long values wrap under their
   column; the `claude mcp add` command never wraps, so it copies in one piece):
@@ -144,9 +149,9 @@ graphersal --args-file args.json -e 'g.v().count()'   # a repeatable flag adds t
   A number is written as a number (`"port": 8080`), a string as a string. `eval` repeats: a string
   or an array of strings. Every flag of `graphersal --help` is a key except
   `help`, `version` and `args-file`.
-- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`, `mcp-config`) resolve against the
+- **Relative paths** (`graph`, `schema`, `ui-dir`, `ui-profile`, `ai`, `mcp-instructions`, `mcp-config`) resolve against the
   directory of the args file, not the working directory. The sample names (`modern`, `empty`,
-  `large`, `tree`) stay as written.
+  `large`, `tree`) and a `ui-profile` name (`full`, `demo`) stay as written.
 - **The command line wins.** The file's arguments come first, as if typed before the others: a flag
   given on the command line replaces the file's, a repeatable flag (`--eval`) adds to it. The
   usual validation runs on the merged arguments, so a file with `"server": true` plus

@@ -1061,3 +1061,65 @@ fn the_runtime_errors_of_call_answer_the_http_status_of_before() {
         HttpError::new(500, "the request failed inside the session")
     );
 }
+
+#[cfg(feature = "ui-assets")]
+/// A host that serves the files of its own UI profile before the core (graphersal-memory's
+/// `ui` process): the path below `/memory/` is its own, every other request goes to
+/// [`Server::handle`], whose [`crate::Ui`] answers the playground's files. Public API only:
+/// [`HostCheck::check`] keeps the same `Host`/`Origin` rules for the host's own files.
+fn host_with_profile_files(server: &Server, check: &HostCheck, request: Request<'_>) -> Response {
+    if let Some(name) = request.url().strip_prefix("/memory/") {
+        if let Err(err) = check.check(&request) {
+            return Response::text(err.status(), err.message().to_string());
+        }
+        return match name {
+            "overview.js" => {
+                Response::new(200, b"export default { template: '<p>hi</p>' };".to_vec())
+                    .with_header("Content-Type", "text/javascript; charset=utf-8")
+                    .with_header("X-Content-Type-Options", "nosniff")
+            }
+            _ => Response::text(404, "not found".to_string()),
+        };
+    }
+    server.handle(request)
+}
+
+#[cfg(feature = "ui-assets")]
+#[test]
+fn a_host_serves_its_profile_files_first_and_the_core_the_rest() {
+    let profile = json!({"name": "memory", "title": "Memory", "startTab": "overview",
+        "can": {"theme": true}, "tabs": [{"id": "overview", "title": "Overview",
+        "module": "overview.js"}], "files": "/memory/"});
+    let server = Server::new();
+    server
+        .ready(
+            Context::builder(session_on("empty"), check())
+                .ui_profile(profile.clone())
+                .build(),
+        )
+        .expect("ready once");
+    let check = check();
+    // The profile reaches the page through /api/info.
+    let info = host_with_profile_files(&server, &check, get("/api/info"));
+    assert_eq!(body_json(&info)["uiProfile"], profile);
+    // The host's own module.
+    let module = host_with_profile_files(&server, &check, get("/memory/overview.js"));
+    assert_eq!(module.status(), 200);
+    assert!(String::from_utf8_lossy(module.body()).starts_with("export default"));
+    // The playground's files still come from the core's UI.
+    let page = host_with_profile_files(&server, &check, get("/"));
+    assert_eq!(page.status(), 200, "the embedded or directory index.html");
+    let model = host_with_profile_files(&server, &check, get("/js/ui-profiles.js"));
+    assert_eq!(
+        model.status(),
+        200,
+        "the profile model is part of the playground"
+    );
+    // The host's files keep the core's Host check.
+    let foreign = Request::new(Method::Get, "/memory/overview.js", Cursor::new(&b""[..]))
+        .with_header("Host", "evil.example:8080");
+    assert_eq!(
+        host_with_profile_files(&server, &check, foreign).status(),
+        403
+    );
+}

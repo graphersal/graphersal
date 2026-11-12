@@ -14,7 +14,9 @@
 //! - the `Host`/`Origin` checks of a listening server ([`HostCheck`]; where it listens is the
 //!   host's decision);
 //! - the playground UI: a UI directory over the copy embedded at build time ([`Ui`], feature
-//!   `ui-assets`);
+//!   `ui-assets`), and the UI profile its pages show ([`ContextBuilder::ui_profile`], `GET
+//!   /api/info` `uiProfile`; a host whose profile brings its own files serves them itself
+//!   before [`Server::handle`], or puts them into the [`Ui`] directory, an overlay);
 //! - the glue that implements `graphersal-mcp`'s `Host`/`Executor` over the runtime and serves
 //!   `POST /mcp` (feature `mcp`).
 //!
@@ -51,6 +53,7 @@
 //!
 //! `serde_json::Value` appears in the public API on purpose ([`JobQueue::status`],
 //! [`Hooks::add_info`], [`Hooks::add_process_statistics`], [`ContextBuilder::presets`],
+//! [`ContextBuilder::ui_profile`],
 //! [`Request::json_body`], [`Response::json`]): this crate is a JSON boundary like
 //! `graphersal-session`, an exception to the engine's rule of no third-party types in the API.
 

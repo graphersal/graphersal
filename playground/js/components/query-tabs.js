@@ -12,7 +12,7 @@
 import { ref, nextTick, watch } from 'vue';
 import {
   state, switchTab, newTab, newGqlTab, newChatTab, closeTab, closeOtherTabs, duplicateTab, renameTab, moveTab, runAllTabs,
-  openShareDialog, saveTabAsQuery, isServerMode,
+  openShareDialog, saveTabAsQuery, can,
 } from '../store.js';
 import { modKey } from '../util.js';
 import { DropMenu } from './drop-menu.js';
@@ -85,7 +85,7 @@ export const QueryTabs = {
 
     return {
       state, editing, draftName, strip, modKey, tabTitle, openShare: openShareDialog, saveTabAsQuery,
-      serverMode: isServerMode,
+      can,
       switchTab, closeTab, closeOtherTabs, duplicateTab, runAllTabs,
       newTab: () => newTab(), newGqlTab: () => newGqlTab(), newChatTab: () => newChatTab(), startRename, commitRename, cancelRename, onAux, onDragStart, onDrop,
     };
@@ -112,19 +112,19 @@ export const QueryTabs = {
     </div>
     <drop-menu button-class="icon-btn qtab-add" title="New tab: a query (Alt+N) or an AI Chat" aria-label="New tab" align="start" menu-style="min-width: 200px">
       <template #trigger>+</template>
-      <button class="menu-item" @click="newTab">Query <span class="spacer"></span><kbd>Alt+N</kbd></button>
-      <button class="menu-item" @click="newGqlTab" title="A query tab in GQL: MATCH … RETURN … with a Parameters field"><span class="qtab-lang" aria-hidden="true">GQL</span> GQL query</button>
-      <button class="menu-item" @click="newChatTab"><span class="qtab-ai-mark" aria-hidden="true">✦</span> AI Chat</button>
+      <button v-if="can('tab.query')" class="menu-item" @click="newTab">Query <span class="spacer"></span><kbd>Alt+N</kbd></button>
+      <button v-if="can('tab.gql')" class="menu-item" @click="newGqlTab" title="A query tab in GQL: MATCH … RETURN … with a Parameters field"><span class="qtab-lang" aria-hidden="true">GQL</span> GQL query</button>
+      <button v-if="can('tab.ai')" class="menu-item" @click="newChatTab"><span class="qtab-ai-mark" aria-hidden="true">✦</span> AI Chat</button>
     </drop-menu>
     <drop-menu button-class="icon-btn" title="Tab actions" aria-label="Tab actions" menu-style="min-width: 240px">
       <template #trigger>⋯</template>
-      <button class="menu-item" @click="newTab">New tab <span class="spacer"></span><kbd>Alt+N</kbd></button>
-      <button class="menu-item" @click="newGqlTab">New GQL query tab</button>
-      <button class="menu-item" @click="newChatTab">New AI Chat tab</button>
+      <button v-if="can('tab.query')" class="menu-item" @click="newTab">New tab <span class="spacer"></span><kbd>Alt+N</kbd></button>
+      <button v-if="can('tab.gql')" class="menu-item" @click="newGqlTab">New GQL query tab</button>
+      <button v-if="can('tab.ai')" class="menu-item" @click="newChatTab">New AI Chat tab</button>
       <button class="menu-item" @click="duplicateTab()">Duplicate tab</button>
       <button class="menu-item" @click="startRename(state.tab)">Rename tab</button>
       <div class="menu-sep"></div>
-      <button v-if="!serverMode()" class="menu-item" @click="openShare()" :disabled="state.running || !state.graph" title="A link that opens this tab's query with the graph (small graphs only)">Share as link…</button>
+      <button v-if="can('share')" class="menu-item" @click="openShare()" :disabled="state.running || !state.graph" title="A link that opens this tab's query with the graph (small graphs only)">Share as link…</button>
       <button class="menu-item" @click="saveTabAsQuery()" :disabled="!state.graph || state.tab.kind === 'ai' || !state.tab.script.trim()"
               title="Store this tab's query in the graph as a saved query: a GQL tab (or a tab holding one g.gql(…) call) is saved as a GQL query with its $parameters">Save as query…</button>
       <div class="menu-sep"></div>

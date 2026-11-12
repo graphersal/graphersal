@@ -2,7 +2,7 @@
 
 import { createApp, ref, onMounted, onBeforeUnmount } from 'vue';
 import {
-  state, init, cycleTheme, reveal, newTab, closeTab, switchTabNumber, switchTabRelative,
+  state, init, cycleTheme, reveal, newTab, closeTab, switchTabNumber, switchTabRelative, can, onWorkspaceTab,
 } from './store.js';
 import { applyRoute } from './router.js';
 import { StartPage } from './components/start-page.js';
@@ -25,9 +25,21 @@ const App = {
     }
 
     function onKey(e) {
-      if (e.key === 'F1' || (e.key === '?' && !isEditable(e.target) && !e.ctrlKey && !e.metaKey)) {
+      if (can('help') && (e.key === 'F1' || (e.key === '?' && !isEditable(e.target) && !e.ctrlKey && !e.metaKey))) {
         e.preventDefault();
         help.value && help.value.open();
+        return;
+      }
+      // The query-tab and panel shortcuts belong to the workspace tab (a profile's module tab
+      // has none); theme and settings follow the profile.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && state.route === 'play' && !onWorkspaceTab()) {
+        if (e.code === 'KeyT' && can('theme')) {
+          e.preventDefault();
+          cycleTheme();
+        } else if (e.code === 'Comma' && can('settings')) {
+          e.preventDefault();
+          settings.value && settings.value.open();
+        }
         return;
       }
       if (e.altKey && !e.ctrlKey && !e.metaKey && state.route === 'play') {
@@ -43,6 +55,7 @@ const App = {
         }
         if (e.code === 'KeyN') {
           e.preventDefault();
+          if (!can('tab.query')) return;
           newTab();
           reveal('editor');
         } else if (e.code === 'KeyW') {
@@ -56,10 +69,10 @@ const App = {
           reveal(PANEL_KEYS[e.code]);
         } else if (e.code === 'KeyT') {
           e.preventDefault();
-          cycleTheme();
+          if (can('theme')) cycleTheme();
         } else if (e.code === 'Comma') {
           e.preventDefault();
-          settings.value && settings.value.open();
+          if (can('settings')) settings.value && settings.value.open();
         }
       }
     }
@@ -92,6 +105,7 @@ const App = {
     <div v-if="bootError" class="boot"><p>The playground failed to start: {{ bootError }}</p></div>
     <div v-else-if="!state.ready" class="boot"><div class="boot-logo"></div><p>Loading the playground and its engine…</p></div>
     <build-missing v-else-if="state.engineMissing"></build-missing>
+    <div v-else-if="state.profileError" class="boot profile-error" role="alert"><p><b>The page cannot be shown.</b></p><p>{{ state.profileError }}</p></div>
     <start-page v-else-if="state.route === 'start' && !(state.engineInfo && state.engineInfo.server)" @help="openHelp"></start-page>
     <workspace v-else @help="openHelp" @settings="openSettings"></workspace>
     <help-dialog ref="help"></help-dialog>

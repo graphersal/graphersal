@@ -220,6 +220,64 @@ with **Save ▸ Data** (GraphSON) and attach the file instead.
 The book uses these links: every example that runs on a sample graph has a **▶** run button next
 to each of its queries (or a **Run in the playground** link under a block with one query).
 
+## UI profiles
+
+> **EXPERIMENTAL.** UI profiles and the profile API may change in any release, like the dev
+> server's hosting core.
+
+One playground code base serves several pages: a **UI profile** says what the page shows. The
+playground as described on this page is the built-in profile `full`, and it is what you get
+unless something asks for another one. A profile names:
+
+| Key | Meaning |
+|---|---|
+| `name` | lowercase letters, digits and `-` |
+| `title` | the page title and the top bar's name |
+| `tabs` | the tabs: `{"id", "title", "builtin": "workspace"}` (the workspace of this page, at most once) or `{"id", "title", "module": "<path>.js"}` (a tab of the profile's own); with more than one tab the page shows a tab row under the top bar |
+| `startTab` | the tab the page opens on |
+| `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
+| `cards` | card templates per label for the profile's tabs (may be empty) |
+| `files` | where the module files are: `""` (next to the page) or a path ending in `/` on the same origin |
+
+The `can` keys: the top bar's `devBadge`, `mcp`, `share`, `view`, `catalog`, `optimize`, `store`,
+`save`, `saveToFile`, `changeGraph`, `settings`, `theme`, `help`; the panels `panel.editor`,
+`panel.results`, `panel.graph`, `panel.schema`, `panel.profile`; the Query panel's `examples`
+and its tab kinds `tab.query`, `tab.gql`, `tab.ai`. What the engine cannot do stays off whatever
+the profile says (the Store menu needs a store, the MCP badge an MCP endpoint, Save to file a
+graph file on the server). `full` sets every key; Share, Examples and Change graph only in the
+browser playground, the DEV SERVER badge, the MCP badge and Save to file only with the dev
+server: exactly the page as it was before profiles.
+
+**Choosing a profile.** The browser playground takes a built-in profile from its address:
+`#/play?profile=demo` (the parameter stays in the address, so a reload keeps it; a link that
+names no profile opens `full`). The dev server takes it from `graphersal --server --ui-profile
+NAME|FILE` (a built-in name or a JSON file with a profile object) and tells the page through
+`GET /api/info` (`uiProfile`); a host built on the server's core sets it with
+`ContextBuilder::ui_profile`. A profile name the page does not know, or an object that breaks a
+rule above, is shown as an error naming every problem, never replaced by another profile. The
+built-in `demo` profile is a small example: a tab of its own that lists the people of the modern
+graph through a saved query (it shows the script that defines the query when the graph has none)
+and the workspace without the catalog, the optimizer, the store and the examples.
+
+**A profile's own tabs.** A module tab is an ES module (`files` + `module`, loaded when the tab
+is first shown) whose default export is a Vue component. It gets two props: `params`, the tab's
+parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **profile API**:
+
+| Member | What it does |
+|---|---|
+| `query(name, params)` | calls the saved query `name` with named arguments through the page's engine, under the engine's rules (read-only mode, access policy); resolves to its results, rejects with `{message, help}` |
+| `markdown(text)` | the text through the playground's safe Markdown renderer (never HTML) |
+| `card(label, row)` | a card of `row` by the profile's card template for `label` |
+| `toast(kind, text)` | a notification: `info`, `success`, `warn` or `error` |
+| `navigate(tab, params)` | shows another tab of the profile (and puts it into the address) |
+| `theme` | `mode`, `dark` and `token(name)`, the value of a colour token such as `accent` |
+| `info` | the profile's name and title, whether the engine is the dev server, its version and read-only flag |
+
+A module that cannot be loaded, has no default export or fails while rendering shows an error
+card in its tab; the other tabs keep working. The profile's files are served like the rest of
+the page: with the dev server, put them into the `--ui-dir` directory (an overlay over the
+embedded playground). The details of the API are in the playground's `js/profile-api.js`.
+
 ## The graph drawing
 
 ### What the panel shows

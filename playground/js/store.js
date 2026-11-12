@@ -29,6 +29,7 @@ import {
 import { mapPosition } from './editor/run-selection.js';
 import { keysBySchema } from './editor/gql-complete.js';
 import { normalizeSizeBy } from './graph/size-by.js';
+import { BUILTIN_PROFILES, createUi, resolveProfile, requestedProfile } from './ui-profiles.js';
 
 const HISTORY_MAX = 100;
 
@@ -68,6 +69,19 @@ export const state = reactive({
   ready: false,
   engine: null,
   engineInfo: null,
+  // The UI profile (js/ui-profiles.js `createUi`): what the page shows. `full` until init()
+  // resolved the delivered one; not reactive inside (markRaw), replaced as a whole.
+  ui: markRaw(createUi(BUILTIN_PROFILES.full)),
+  // The delivered profile could not be used (an unknown name, an invalid object): the page
+  // shows this text instead of the app, never another profile.
+  profileError: null,
+  // The WebAssembly playground's `profile` link parameter at start (null: none), so the router
+  // knows when the address asks for another profile (it reloads the page then).
+  profileRequested: null,
+  // The profile tab shown (`state.ui.tabs`) and its parameters from the address; the router
+  // sets both (`#/play?tab=<id>&k=v`).
+  profileTab: 'play',
+  profileParams: {},
   // The header's version (js/build-info.js `versionLabel`): {text, title}, or null.
   versionLabel: null,
   engineMissing: false, // the WebAssembly build is not there: the page explains how to build it
@@ -165,9 +179,43 @@ export function engineReady() {
   return engineGate.ready;
 }
 
-/** Whether the engine is the CLI's dev server (HTTP) rather than the WebAssembly worker. */
+/**
+ * Whether the engine is the CLI's dev server (HTTP) rather than the WebAssembly worker. An
+ * ENGINE check (what the engine can do: one served graph, its files, its change feed); what the
+ * page offers goes through the profile (`can`).
+ */
 export function isServerMode() {
   return !!(state.engineInfo && state.engineInfo.server);
+}
+
+/** Whether the profile lets the user reach `key` (js/ui-profiles.js `CAN_KEYS`) on this engine. */
+export function can(key) {
+  return state.ui.can(key);
+}
+
+/** Whether the shown profile tab is the built-in workspace. */
+export function onWorkspaceTab() {
+  return state.ui.hasWorkspace && state.profileTab === state.ui.workspaceTab;
+}
+
+/**
+ * Resolves the delivered UI profile: the dev server's `info().uiProfile` (a name or an object),
+ * else the WebAssembly playground's `profile` link parameter (built-in names only); none is
+ * `full`. A profile that cannot be used sets `state.profileError`.
+ */
+function applyProfile() {
+  const server = isServerMode();
+  const requested = server ? null : requestedProfile(typeof window !== 'undefined' ? window.location.hash : '');
+  state.profileRequested = requested;
+  try {
+    const profile = resolveProfile(server ? state.engineInfo.uiProfile : requested);
+    state.ui = markRaw(createUi(profile, { server }));
+    state.profileTab = profile.startTab;
+    state.profileError = null;
+    if (typeof document !== 'undefined') document.title = profile.title;
+  } catch (err) {
+    state.profileError = err && err.message ? err.message : String(err);
+  }
 }
 
 export async function init() {
@@ -186,6 +234,7 @@ export async function init() {
       state.storeView = state.engineInfo.view || null;
       const build = state.engineInfo.server ? null : await loadBuildInfo();
       state.versionLabel = versionLabel(state.engineInfo.version, build);
+      applyProfile();
     }
   } finally {
     engineGate.open();
@@ -719,9 +768,9 @@ export function registerShareDialog(open) {
 
 /** Opens the share dialog: the top bar's Share button and the tab menu's "Share as link…". */
 export function openShareDialog() {
-  // Over the dev server there is nothing to share: a link opens the public playground, which
-  // has neither the server's graph nor its store.
-  if (isServerMode()) return;
+  // The profile decides (`full`: the WebAssembly playground only: over the dev server a link
+  // would open the public playground, which has neither the server's graph nor its store).
+  if (!can('share')) return;
   if (shareDialogOpener) shareDialogOpener();
 }
 
@@ -1294,6 +1343,28 @@ export async function runSavedQuery(name, args) {
     return null;
   }
   return run(script, tab.id);
+}
+
+/**
+ * The profile API's `query(name, params)` (js/profile-api.js): calls the saved query through
+ * the current engine as `g.query(name, #{..})` and answers `{ok, results}` or `{ok: false,
+ * error}`; a run that changed the graph updates the graph info like a run of the workspace.
+ * Not a tab's run: no history, no result panel.
+ */
+export async function profileQuery(name, params) {
+  await engineReady();
+  if (!state.engine) return { ok: false, error: { message: 'The engine is not available.' } };
+  const script = await state.engine.queryCallText(name, params);
+  // The display and the result's subgraph are not used: keep them small.
+  const res = await state.engine.execute(script, { max_rows: 1, max_items: 1, subgraph_max_elements: 0 });
+  if (res.graph && state.graph) state.graph = res.graph;
+  if (res.mutated) state.graphVersion++;
+  if (changedData(res)) state.dataVersion++;
+  if (!res.ok) {
+    const error = (res.execution && res.execution.error) || {};
+    return { ok: false, error: { message: error.message || `The saved query "${name}" failed.`, help: error.help || '' } };
+  }
+  return { ok: true, results: (res.execution && res.execution.results) || [] };
 }
 
 /**
