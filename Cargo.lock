@@ -501,7 +501,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bitmask-enum",
  "compact_str 0.10.0",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ctrlc",
  "graphersal",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-mcp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
  "graphersal-session",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-serve"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
  "graphersal-mcp",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-session"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
  "graphersal-storage-tests",
@@ -701,14 +701,14 @@ dependencies = [
 
 [[package]]
 name = "graphersal-storage-tests"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
 ]
 
 [[package]]
 name = "graphersal-wasm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
  "graphersal-session",
@@ -1047,7 +1047,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "py-graphersal"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "graphersal",
  "pyo3",
@@ -1520,15 +1520,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1811,7 +1811,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2209,7 +2209,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
