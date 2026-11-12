@@ -1332,6 +1332,9 @@ fn hops_merge_on_the_large_graph() {
 
 #[test]
 fn a_pattern_at_the_edge_limit_runs_quickly_and_one_past_it_is_refused() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     // A chain of 70 vertices: a 64-hop path starts at each of the first 6.
     let mut graph = TraversalGraph::new();
     let mut previous: Option<VertexHandle> = None;

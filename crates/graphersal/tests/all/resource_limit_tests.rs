@@ -17,14 +17,17 @@ fn modern() -> Arc<Graph> {
 }
 
 /// Runs `script` under `limits` and returns the error text; fails the test when it succeeds or
-/// takes longer than ten seconds (a limit that does not stop the script quickly is no limit).
+/// takes longer than ten seconds (a limit that does not stop the script quickly is no limit;
+/// the time is not checked on CI runners, `crate::ci_support`).
 fn limit_error(script: &str, limits: &ScriptLimits) -> String {
     let started = Instant::now();
     let result = eval_value_with_limits(modern(), script, HashMap::new(), limits);
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "limit took too long for: {script}"
-    );
+    if !crate::ci_support::skip_on_ci("timing") {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "limit took too long for: {script}"
+        );
+    }
     match result {
         Ok(value) => panic!("expected a resource limit error for `{script}`, got {value:?}"),
         Err(err) => err.to_string(),

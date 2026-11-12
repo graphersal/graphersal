@@ -2,7 +2,7 @@
 //!
 //! **EXPERIMENTAL**, like the trait itself: the `GraphStorage` trait and this suite may change
 //! in any minor release before 1.0 (also in a 0.6.x release). Pin the exact version
-//! (`graphersal-storage-tests = "=0.6.0"`, the same version as `graphersal`).
+//! (`graphersal-storage-tests = "=0.6.1"`, the same version as `graphersal`).
 //!
 //! The contract is derived from the trait documentation and from the behaviour of
 //! [`TraversalGraph`](graphersal::TraversalGraph), the reference implementation; where the

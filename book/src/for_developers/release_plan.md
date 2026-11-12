@@ -58,8 +58,12 @@ Before a version is tagged:
   format, clippy, every test suite incl. the TinkerPop suite, the feature and wasm32 matrices, the MSRV, the
   playground tests;
 - the checks CI leaves out pass locally: `RUSTDOCFLAGS="-D warnings" cargo doc` with the feature sets of
-  `CLAUDE.md`, `mdbook build book`, and the TinkerPop suite on the foreign storage
-  (`GRAPHERSAL_TEST_STORAGE=forwarding`);
+  `CLAUDE.md`, `mdbook build book`, the TinkerPop suite on the foreign storage
+  (`GRAPHERSAL_TEST_STORAGE=forwarding`), and the tests that depend on the machine's CPU time or
+  memory (an upper bound on wall-clock time, a speed ratio, measured process memory): they skip
+  themselves on a CI runner (the environment variable `CI`, which GitHub Actions sets, through the
+  helper `skip_on_ci`), because a shared runner guarantees neither, so the plain local
+  `cargo test` runs (without `CI`) are the only place they are checked;
 - `cargo deny check` (licences, RustSec advisories, duplicate crates, sources) passes against `deny.toml`;
 - the long fuzz budgets pass: robustness, the merge checkpoint, the verified backups and the closed-store
   catalog commits (below; a fast budget of each runs in every `cargo test`), and the ignored test of a commit

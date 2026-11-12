@@ -12,6 +12,8 @@ import {
 import { actionDisabled } from '../js/store-model.js';
 
 const UTC = () => 0;
+// On a CI runner (`CI` set) time bounds are not checked: the runner's CPU is not ours.
+const onCi = !!process.env.CI && process.env.CI !== 'false' && process.env.CI !== '0';
 const BERLIN_SUMMER = () => 120; // +02:00
 const NEW_YORK = () => -240; // -04:00
 /** Microseconds of an ISO time. */
@@ -193,7 +195,8 @@ test('a large history: 20 000 snapshots and 5 000 marks are grouped once, quickl
   assert.equal(idx.days.get('2020-01-01').snapshots.length, 24);
   assert.equal(idx.days.get('2020-01-01').marks.length, 6);
   assert.equal(idx.max.total, 30);
-  assert.ok(ms < 1000, `grouping took ${ms} ms`);
+  // A time bound depends on the runner's CPU: not checked on CI (`CI` set), as in the Rust tests.
+  if (!onCi) assert.ok(ms < 1000, `grouping took ${ms} ms`);
   assert.equal(recentHistory(store).snapshots[0].commitSeq, 19999);
 });
 

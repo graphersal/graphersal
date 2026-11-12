@@ -1159,6 +1159,9 @@ mod repeat_merge {
 
         #[test]
         fn times_eight_count_runs_fast_and_exact() {
+            if crate::ci_support::skip_on_ci("timing") {
+                return;
+            }
             let graph = grateful();
             let lock = graph.read();
             let count = lock
@@ -1197,6 +1200,9 @@ mod repeat_merge {
         #[cfg(feature = "script")]
         #[test]
         fn rhai_form_of_the_grateful_count() {
+            if crate::ci_support::skip_on_ci("timing") {
+                return;
+            }
             let graph = std::sync::Arc::new(grateful());
             let out = crate::script_host::eval_value(
                 graph,

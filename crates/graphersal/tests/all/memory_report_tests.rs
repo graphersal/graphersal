@@ -731,6 +731,9 @@ fn many_labels(n: usize) -> TraversalGraph {
 
 #[test]
 fn many_labels_get_a_bounded_report_with_the_rest_counted() {
+    if crate::ci_support::skip_on_ci("timing") {
+        return;
+    }
     let graph = many_labels(20_000);
     let started = std::time::Instant::now();
     let report = full(&graph);

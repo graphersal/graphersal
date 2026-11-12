@@ -7240,6 +7240,9 @@ fn exit_within(child: &mut Child, seconds: u64) -> std::process::ExitStatus {
 /// both answer while a query holds the session (they never wait for it).
 #[test]
 fn health_endpoints_answer_any_host_and_while_a_query_runs() {
+    if skip_on_ci("timing") {
+        return;
+    }
     let ui = ui_dir("health");
     let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
     let port = server.port;
@@ -7952,7 +7955,10 @@ mod read_only_serving {
 
     use serde_json::{Value, json};
 
-    use super::{Answer, DevServer, JSON, McpClient, execute, get, mcp_post, post, request, start};
+    use super::{
+        Answer, DevServer, JSON, McpClient, execute, get, mcp_post, post, request, skip_on_ci,
+        start,
+    };
 
     /// A query of the page `page` (`X-Graphersal-Client`).
     fn page_execute(port: u16, page: &str, script: &str) -> Answer {
@@ -8022,6 +8028,9 @@ mod read_only_serving {
 
     #[test]
     fn mcp_calls_run_in_parallel_on_the_workers() {
+        if skip_on_ci("timing") {
+            return;
+        }
         let server = start(&[
             "--graph",
             "modern",
@@ -8339,8 +8348,12 @@ mod read_only_serving {
         let started = Instant::now();
         terminate(&server);
         // Not ready any more (once the signal is handled), and no new query is taken.
+        let timed = !skip_on_ci("timing");
         while get(port, "/readyz").status != 503 {
-            assert!(started.elapsed() < Duration::from_secs(3), "still ready");
+            assert!(
+                !timed || started.elapsed() < Duration::from_secs(3),
+                "still ready"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(page_execute(port, "c", "1 + 1").status, 503);
@@ -8744,4 +8757,17 @@ fn save_to_file_keeps_the_models_of_a_served_snapshot() {
     let info = run(&[os("store"), os("info"), again.as_os_str()]);
     assert!(info.contains("model2vec/acme/tiny"), "{info}");
     assert!(!info.contains("its blob is missing"), "{info}");
+}
+
+/// Whether this run is on a CI runner (`CI` set and not empty, "false" or "0", as GitHub Actions
+/// sets it). A test whose result depends on how much CPU time or memory the machine gives it
+/// (an upper bound on wall-clock time, a speed ratio, measured process memory) returns early
+/// there, because a shared runner guarantees neither; such tests run locally, before every
+/// release in particular. Prints why it skipped.
+fn skip_on_ci(what: &str) -> bool {
+    let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+    if on_ci {
+        eprintln!("skipped on CI ({what}): depends on the runner's CPU or memory");
+    }
+    on_ci
 }
