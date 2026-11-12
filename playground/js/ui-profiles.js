@@ -361,6 +361,24 @@ export function routeHash({ route = 'play', profile = null, tab = null, params =
 }
 
 /**
+ * Checks that `profile` can be shown by a server in the API mode `apiMode` (`info().apiMode`):
+ * a server in allow-list mode answers only its selected saved queries (`POST /api/query`), the
+ * change feed and its info, so a profile with the built-in workspace (which reads the whole
+ * served graph) cannot be shown there. Throws a ProfileError; any other mode passes.
+ * @param {Object} profile  A profile from `resolveProfile`.
+ * @param {string} [apiMode]  'full' (default) or 'allow-list'.
+ */
+export function checkApiMode(profile, apiMode = 'full') {
+  if (apiMode !== 'allow-list') return;
+  if (profile.tabs.some((t) => t.builtin === 'workspace')) {
+    throw new ProfileError(`The UI profile ${quote(profile.name)} cannot be shown by this server`, [
+      'the server answers only its saved queries (allow-list mode), and the profile has the built-in workspace, which reads the whole graph',
+      'serve a profile whose tabs are modules of its own',
+    ]);
+  }
+}
+
+/**
  * The profile as the components use it.
  * @param {Object} profile  A profile from `resolveProfile`.
  * @param {{server: boolean}} engine  Whether the engine is the dev server (else WebAssembly).

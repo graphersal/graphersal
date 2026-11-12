@@ -79,7 +79,7 @@ pub(crate) fn skip_on_ci(what: &str) -> bool {
 
 pub use error::SessionError;
 pub use session::{
-    RunOptions, Session, SessionPresets, SessionTemplate, playground_authorizer,
+    RunOptions, Session, SessionPresets, SessionTemplate, authorizer_for, playground_authorizer,
     read_only_authorizer,
 };
 pub use storage::{

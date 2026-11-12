@@ -18,9 +18,10 @@
 //       current engine, under the engine's rules (the dev server's read-only mode, its access
 //       policy). Resolves to the query's results (what `to_list()` returns, as the engine's
 //       JSON values); rejects with a ProfileQueryError ({message, help}) when the engine
-//       refuses or the query fails. Today the call runs as the script `g.query(name, #{..})`;
-//       on a server with the saved-query endpoint it becomes `POST /api/query` {name, params}
-//       with the same answer.
+//       refuses or the query fails. On the dev server the call is `POST /api/query` {name,
+//       params} (the only query endpoint of a server in allow-list mode, which runs only its
+//       selected saved queries under its access policy); on WebAssembly the worker's
+//       `runSavedQuery`; the server binds no parameter.
 //   markdown(text) -> VNode
 //       The text rendered by the playground's safe Markdown renderer (never HTML: links are
 //       checked, raw HTML is shown as text). Use it in a render function or as

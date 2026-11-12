@@ -897,6 +897,26 @@ impl Playground {
         Ok(to_text(&self.session.preview_query(name, &args)))
     }
 
+    /// The profile API's `query(name, params)`: one run of the saved query `name` with the
+    /// named arguments `params` (JSON text of an object), under the playground's authorizer:
+    /// `{ok, results, mutated, changes}` or `{ok: false, error, mutated, changes}`
+    /// (`graphersal_session::Session::run_saved_query`, the dev server's `POST /api/query`).
+    #[wasm_bindgen(js_name = runSavedQuery)]
+    pub fn run_saved_query(&mut self, name: &str, params: &str) -> Result<String, JsError> {
+        let params: Value = if params.trim().is_empty() {
+            Value::Null
+        } else {
+            body_json(params)?
+        };
+        let answer = self.session.run_saved_query(
+            name,
+            &params,
+            graphersal_session::playground_authorizer(),
+            &graphersal::exec::CancelToken::new(),
+        );
+        Ok(to_text(&answer))
+    }
+
     /// "Catalog ▸ Save catalog": the whole catalog (saved queries, compression rules, every
     /// other kind) as its JSON exchange form (`{"definitions": [..]}`).
     #[wasm_bindgen(js_name = saveCatalog)]

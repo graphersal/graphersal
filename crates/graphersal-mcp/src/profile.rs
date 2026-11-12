@@ -6,8 +6,7 @@
 
 use std::sync::Arc;
 
-use graphersal::auth::{AccessPolicy, ActionKind, Authorizer, ResourceKind};
-use graphersal_session::{playground_authorizer, read_only_authorizer};
+use graphersal::auth::{AccessPolicy, ActionKind, ResourceKind};
 use serde_json::{Map, Value};
 
 use crate::config::McpConfig;
@@ -129,29 +128,6 @@ impl Profile {
     /// The largest tool answer in characters.
     pub fn max_chars(&self) -> usize {
         self.config.answer_limit_chars.unwrap_or(MAX_TEXT_CHARS)
-    }
-}
-
-/// The authorizer of a caller's query runs: its policy (read-only: without writes), else the
-/// playground's authorizer of the mode.
-pub(crate) fn authorizer(read_only: bool, policy: Option<&AccessPolicy>) -> Arc<dyn Authorizer> {
-    match policy {
-        None if read_only => read_only_authorizer(),
-        None => playground_authorizer(),
-        Some(policy) if read_only => {
-            let mut policy = policy.clone();
-            for resource in [
-                ResourceKind::Data,
-                ResourceKind::Schema,
-                ResourceKind::Definition,
-            ] {
-                for action in [ActionKind::Create, ActionKind::Update, ActionKind::Delete] {
-                    policy = policy.deny(action, resource);
-                }
-            }
-            Arc::new(policy)
-        }
-        Some(policy) => Arc::new(policy.clone()),
     }
 }
 

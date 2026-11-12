@@ -679,6 +679,13 @@ export class Engine {
   async previewQuery(name, args) { throw notImplemented('previewQuery'); }
 
   /**
+   * One run of the saved query `name` with the named arguments `params` (the profile API's
+   * `query`; the dev server's `POST /api/query`): `{ok: true, results, mutated, changes}` or
+   * `{ok: false, error: {message, help?}, mutated, changes}`. Results are never cut.
+   */
+  async runSavedQuery(name, params) { throw notImplemented('runSavedQuery'); }
+
+  /**
    * "Catalog ▸ Save catalog": the whole catalog (saved queries, compression rules, every other
    * kind) as JSON text (`{"definitions": [..]}`).
    */

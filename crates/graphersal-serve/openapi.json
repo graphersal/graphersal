@@ -69,7 +69,7 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL). Answered without the session.",
+        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403). Answered without the session.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {
@@ -231,6 +231,71 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/query": {
+      "post": {
+        "tags": [
+          "Queries"
+        ],
+        "summary": "Run a saved query",
+        "description": "One run of the saved query `name` with the named arguments `params` (an object; absent or null: none), as ONE unit like `POST /api/execute` but without the display: `{ok: true, results, mutated, changes}` (`results`: every result as JSON, never cut; `changes`: `{data, schema, definitions}`) or `{ok: false, error: {message, help?, ...}, mutated, changes}` with status 200 (an unknown query, a parameter its schema refuses, a write the authorizer denies). The server binds no parameter: the caller passes every one. The playground profile API's `query(name, params)` calls it. A full server runs any saved query under the playground's authorizer; a server in allow-list mode (`GET /api/info` `apiMode: \"allow-list\"`, EXPERIMENTAL) runs only the saved queries its host selected, under the host's access policy, and answers 403 `the saved query \"<name>\" is not offered by this server` for any other name (an unknown one included).",
+        "operationId": "postApiQuery",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "params": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "description": "The named arguments (parameter name -> value)."
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "The page's own id of this run: `POST /api/cancel` with it cancels exactly this run."
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "403": {
+            "description": "Allow-list mode: a saved query the server does not offer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

@@ -34,6 +34,7 @@
 //! | Extra routes: the `/api/` endpoints the core does not know | `404` | [`Hooks::route`], [`ContextBuilder::hooks`] |
 //! | Activity / lifecycle hooks: ready, stopping, last activity, background work | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] (requests), [`Context::background_runs`] (scheduled-job runs on the job workers) |
 //! | Executor policy: how jobs reach the session | one session thread, unbounded queue | [`Runner`], [`JobQueue`] |
+//! | Allow-list mode of the HTTP API: only `GET /api/info`, `GET /api/changes` and `POST /api/query` for the selected saved queries, under the host's access policy; everything else under `/api/` and `/mcp` is `403` | every endpoint | [`ContextBuilder::api_allow_list`], [`Context::is_allow_list`] |
 //!
 //! With the feature `mcp`, one `graphersal_mcp::Mcp` endpoint can serve several graphs: each
 //! context gets the same endpoint ([`ContextBuilder::shared_mcp`]; its statistics, MCP sessions

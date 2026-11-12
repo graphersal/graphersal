@@ -1119,6 +1119,22 @@ in the repository, and a running server answers it at `GET /openapi.json` (also
 version you read it from. The schemas in it are deliberately loose (objects with the documented
 keys); the table below and the linked pages describe every answer.
 
+**Allow-list mode** (EXPERIMENTAL, for hosts built on the server's core, `graphersal-serve`; the
+`graphersal` CLI never turns it on): a host that serves a UI profile to a page it does not fully
+trust with the graph builds its context with `ContextBuilder::api_allow_list(selection, policy)`.
+The server then answers only `GET /api/info` (with `apiMode: "allow-list"`), `GET /api/changes`
+and `POST /api/query` for the saved queries the selection names (folders with their subfolders,
+names, excluded names: `graphersal_session::queries::SavedQuerySelection`), each run under the
+access policy (`graphersal::auth::AccessPolicy`: a write the policy does not allow is refused by
+the engine before the query runs, as an answer with `ok: false`). Every other `/api/` endpoint
+(the host's own extra routes too) and `/mcp` answer `403` "`<METHOD> <path>` is not offered by
+this server: it answers only GET /api/info, GET /api/changes and POST /api/query (allow-list
+mode)"; a saved query outside the selection, or one that does not exist, answers `403` "the
+saved query "`<name>`" is not offered by this server". The `Host`/`Origin` checks and the host's
+request filter still run first; the static files of the page and `/openapi.json` stay served.
+The page then shows only a profile whose tabs are its own modules: a profile with the built-in
+workspace (which reads the whole graph) is shown as an error.
+
 | Endpoint | Engine method |
 |---|---|
 | `GET /api/info` | `info()` (`server: "graphersal-dev"`, `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database) |
@@ -1131,6 +1147,7 @@ keys); the table below and the linked pages describe every answer.
 | `DELETE /api/ai/conversations/<id>` | drops the conversation (history, pending call, running query) |
 | `GET /api/graph` | `graphInfo()` |
 | `POST /api/execute` `{script, options}` | `execute(script, options)` |
+| `POST /api/query` `{name, params?, runId?}` | `runSavedQuery(name, params)`, the profile API's `query`: one run of the saved query `name` with the named arguments `params` (the caller passes every parameter; the server binds none), without the display: `{ok: true, results, mutated, changes}` (every result, never cut) or `{ok: false, error: {message, help?}, mutated, changes}` (an unknown query, a parameter its schema refuses, a denied write; status 200). A malformed call is a 400 |
 | `POST /api/cancel` | `stop(runId)`: cancels the page's run `runId` (body `{"runId": ".."}`, the id given to `POST /api/execute`), or without a body every run of the page (queries, layout slices); never another client's: `{cancelled}` |
 | `GET /api/schema` | `schema()` (the schema views) |
 | `GET /api/schema/stored`, `GET /api/schema/infer` | `getSchema()`, `inferSchema()` |

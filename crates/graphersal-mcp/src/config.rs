@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use graphersal_session::queries::SavedQuerySelection;
 use serde_json::{Map, Value};
 
 use crate::catalog::{Kind, all_tools};
@@ -70,12 +71,9 @@ pub(crate) enum Instructions {
 /// Which saved queries are tools of their own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SavedQueryTools {
-    /// Folders (each with its subfolders); `None`: every folder unless `names` is given.
-    folders: Option<Vec<String>>,
-    /// Query names; `None`: no selection by name.
-    names: Option<Vec<String>>,
-    /// Query names never offered as tools.
-    exclude: Vec<String>,
+    /// Folders (with subfolders), names, exclude: the session's selection, one code with
+    /// `graphersal-serve`'s allow-list mode.
+    selection: SavedQuerySelection,
     /// Whether the tools take `offset`/`max_rows`/`max_items` (default no: the defaults apply
     /// and a call may still pass them).
     paging_params: bool,
@@ -87,9 +85,7 @@ impl SavedQueryTools {
     /// Every saved query (`--mcp-query-tools`).
     pub(crate) fn all() -> Self {
         Self {
-            folders: None,
-            names: None,
-            exclude: Vec::new(),
+            selection: SavedQuerySelection::all(),
             paging_params: false,
             write_note: WriteNote::Default,
         }
@@ -97,27 +93,7 @@ impl SavedQueryTools {
 
     /// Whether the saved query `name` in `folder` is a tool.
     pub(crate) fn selects(&self, name: &str, folder: Option<&str>) -> bool {
-        if self.exclude.iter().any(|n| n == name) {
-            return false;
-        }
-        if self.folders.is_none() && self.names.is_none() {
-            return true;
-        }
-        let by_name = self
-            .names
-            .as_ref()
-            .is_some_and(|names| names.iter().any(|n| n == name));
-        let by_folder = self.folders.as_ref().is_some_and(|folders| {
-            folder.is_some_and(|folder| {
-                folders.iter().any(|f| {
-                    folder == f
-                        || folder
-                            .strip_prefix(f.as_str())
-                            .is_some_and(|rest| rest.starts_with('/'))
-                })
-            })
-        });
-        by_name || by_folder
+        self.selection.selects(name, folder)
     }
 }
 
@@ -591,9 +567,11 @@ fn parse_saved_query_tools(value: &Value) -> Result<SavedQueryTools, McpConfigEr
         }
     };
     Ok(SavedQueryTools {
-        folders: list("folders")?,
-        names: list("names")?,
-        exclude: list("exclude")?.unwrap_or_default(),
+        selection: SavedQuerySelection::from_parts(
+            list("folders")?,
+            list("names")?,
+            list("exclude")?.unwrap_or_default(),
+        ),
         paging_params,
         write_note,
     })
