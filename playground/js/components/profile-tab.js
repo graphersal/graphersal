@@ -10,7 +10,7 @@ import { navigateTab } from '../router.js';
 import { cssVar } from '../util.js';
 import { createProfileApi } from '../profile-api.js';
 import { MarkdownView } from './markdown-view.js';
-import { ProfileCardStub } from './profile-card-stub.js';
+import { ProfileCard } from './profile-card.js';
 
 /** Toast kinds of the profile API onto the page's toast classes. */
 const TOAST_CLASS = { info: 'info', success: 'success', warn: 'warn', error: 'error' };
@@ -26,7 +26,12 @@ export function profileApiFor() {
     server: isServerMode(),
     runQuery: profileQuery,
     renderMarkdown: (text) => h(MarkdownView, { text }),
-    renderCard: (label, row) => h(ProfileCardStub, { label, row, template: state.ui.profile.cards[label] || null }),
+    renderCard: (label, row, options) => h(ProfileCard, {
+      label,
+      row,
+      template: Object.prototype.hasOwnProperty.call(state.ui.profile.cards, label) ? state.ui.profile.cards[label] : null,
+      options,
+    }),
     showToast: (text, kind) => toast(text, TOAST_CLASS[kind], kind === 'error' || kind === 'warn' ? 9000 : 5000),
     navigate: navigateTab,
     themeState: () => ({ mode: state.theme, dark: isDark() }),

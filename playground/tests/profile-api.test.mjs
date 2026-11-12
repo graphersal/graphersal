@@ -111,3 +111,16 @@ test('theme and info', () => {
   const wasm = harness({ server: false, engineInfo: undefined }).api;
   assert.deepEqual([wasm.info.server, wasm.info.version, wasm.info.readOnly], [false, null, false]);
 });
+
+test('card passes checked options to the renderer and refuses bad ones before rendering', () => {
+  const seen = [];
+  const { api } = harness({ renderCard: (label, row, options) => { seen.push([label, row, options]); return { vnode: 'card' }; } });
+  const onOpen = () => {};
+  api.card('memory', { slug: 's' }, { variant: 'compact', selected: true, onOpen });
+  assert.deepEqual(seen[0], ['memory', { slug: 's' }, { variant: 'compact', selected: true, onOpen, actions: null, onAction: null }]);
+  api.card(undefined, null);
+  assert.deepEqual(seen[1], ['', null, { variant: 'full', selected: false, onOpen: null, actions: null, onAction: null }]);
+  assert.throws(() => api.card('memory', {}, { variant: 'big' }), /api\.card: "variant" must be one of full, compact/);
+  assert.throws(() => api.card('memory', {}, { actions: [{ id: 'x', text: 'X' }], onAction: 1 }), /"onAction" must be a function/);
+  assert.equal(seen.length, 2, 'nothing rendered for bad options');
+});

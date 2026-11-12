@@ -26,9 +26,23 @@
 //       The text rendered by the playground's safe Markdown renderer (never HTML: links are
 //       checked, raw HTML is shown as text). Use it in a render function or as
 //       `<component :is="api.markdown(text)" />`.
-//   card(label, row) -> VNode
-//       The card of `row` (an element or a map of fields) by the profile's card template for
-//       `label` (`cards` in the profile); without a template, a plain list of the row's fields.
+//   card(label, row, options = {}) -> VNode
+//       The card of `row` (an element, a map of fields or a value, as `query` returns them) by
+//       the profile's card template for `label` (`cards` in the profile; the format is
+//       js/profile-cards.js); without a template, the label and a plain list of the row's
+//       fields. Options (all optional; an unknown one throws a TypeError):
+//         variant   'full' (default: the opened card with its Markdown body and fields) or
+//                   'compact' (a list row: title, subtitle, badges, a one-line body excerpt);
+//         selected  true marks the card as the current one (accent border, aria-current);
+//         onOpen    (row) => void: the title becomes a button and a click on the card opens it
+//                   (typically: show the full card of a compact row);
+//         actions   [{id, text, kind?, when?, unless?, title?, disabled?}]: the buttons, in
+//                   place of the template's `actions` (kind 'default' | 'primary' | 'danger';
+//                   `when`/`unless` are field refs of the row);
+//         onAction  (id, row) => void | Promise: called on a button's click. Without it the
+//                   card shows no buttons. While a returned promise is pending the card's
+//                   buttons are disabled; a rejection is shown as an error toast.
+//       Missing fields render nothing; nothing of the row is ever rendered as HTML.
 //   toast(kind, text)
 //       A notification: kind 'info' | 'success' | 'warn' | 'error'.
 //   navigate(tab, params = {})
@@ -47,6 +61,8 @@
 //       `info()` answer (a frozen copy; fields may be added).
 // Pure: every dependency is injected (`createProfileApi`), so tests/profile-api.test.mjs runs
 // it under Node; components/profile-tab.js wires it to the store and Vue.
+
+import { checkCardOptions } from './profile-cards.js';
 
 /** The version of the profile API; a change that breaks a module raises it. */
 export const PROFILE_API_VERSION = 1;
@@ -87,7 +103,8 @@ function freezeCopy(value) {
  * @param {boolean} deps.server           Whether the engine is the dev server.
  * @param {(name: string, params: Object) => Promise<{ok: boolean, results?: Array, error?: {message: string, help?: string}}>} deps.runQuery
  * @param {(text: string) => *} deps.renderMarkdown  A VNode of the safe Markdown renderer.
- * @param {(label: string, row: *) => *} deps.renderCard  A VNode of the card of `row`.
+ * @param {(label: string, row: *, options: Object) => *} deps.renderCard  A VNode of the card of
+ *   `row`; `options` checked by js/profile-cards.js `checkCardOptions`.
  * @param {(text: string, kind: string) => void} deps.showToast
  * @param {(tab: string, params: Object) => void} deps.navigate  Throws for an unknown tab.
  * @param {() => {mode: string, dark: boolean}} deps.themeState
@@ -135,8 +152,9 @@ export function createProfileApi(deps) {
     markdown(text) {
       return deps.renderMarkdown(text === undefined || text === null ? '' : String(text));
     },
-    card(label, row) {
-      return deps.renderCard(String(label === undefined || label === null ? '' : label), row);
+    card(label, row, options) {
+      const checked = checkCardOptions(options);
+      return deps.renderCard(String(label === undefined || label === null ? '' : label), row, checked);
     },
     toast(kind, text) {
       if (!TOAST_KINDS.includes(kind)) throw new TypeError(`api.toast: the kind must be one of ${TOAST_KINDS.join(', ')}.`);

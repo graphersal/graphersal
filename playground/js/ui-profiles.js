@@ -24,12 +24,14 @@
 //             tabs, ids [a-z][a-z0-9-]* and unique; at most one builtin tab. A module tab's
 //             module is loaded with `import(files + module)`: it default-exports a Vue
 //             component that gets the props `api` (js/profile-api.js) and `params`.
-//   cards     {<label>: card template}: the cards of `api.card(label, row)` (filled by the
-//             cards stage; an object, may be empty)
+//   cards     {<label>: card template}: the cards of `api.card(label, row, options)`; the
+//             template format and its checks are js/profile-cards.js (an object, may be empty)
 //   files     the base path of the module files, '' (the page's own directory) or a path
 //             ending in '/' (relative to the page, or absolute on its origin); never another
 //             origin, never '..'.
 // Pure: no DOM, no Vue; tested in tests/ui-profiles.test.mjs.
+
+import { cardsProblems } from './profile-cards.js';
 
 /** The keys of `can`, grouped as the UI shows them. */
 export const CAN_GROUPS = Object.freeze({
@@ -127,7 +129,18 @@ export const BUILTIN_PROFILES = deepFreeze({
       { id: 'hello', title: 'Hello', module: 'hello.js' },
       { id: 'play', title: 'Playground', builtin: 'workspace' },
     ],
-    cards: {},
+    // The person card of the Hello tab (js/profile-cards.js): `senior` and `about` are fields
+    // the tab adds to each row of its saved query; `city` is never there (renders nothing).
+    cards: {
+      person: {
+        title: 'name',
+        subtitle: [{ field: 'age', prefix: 'age ' }, 'city'],
+        badges: [{ field: 'senior', text: '30+', tone: 'accent' }, { field: 'city', tone: 'ok' }],
+        body: 'about',
+        fields: [{ field: 'name', title: 'Name' }, { field: 'age', title: 'Age' }, { field: 'city', title: 'City' }],
+        actions: [{ id: 'hello', text: 'Say hello', kind: 'primary' }],
+      },
+    },
     files: 'js/profiles/demo/',
   },
 });
@@ -248,7 +261,7 @@ export function validateProfile(input) {
     }
   }
 
-  if (input.cards !== undefined && !isPlainObject(input.cards)) problems.push('"cards" must be an object');
+  if (input.cards !== undefined) problems.push(...cardsProblems(input.cards));
   const files = input.files === undefined ? '' : input.files;
   if (typeof files !== 'string' || (files !== '' && (!files.endsWith('/') || !isSafePath(files)))) {
     problems.push('"files" must be "" or a path ending in "/" on this origin (no "..", no scheme)');
