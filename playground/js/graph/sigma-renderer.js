@@ -219,9 +219,34 @@ export class SigmaRenderer {
     ctx.fillText(data.label, x, y);
   }
 
+  /**
+   * A profile graph view's resolved node style (js/profile-graph.js) as sigma attributes: its
+   * colour (an opacity below 1 blended over the surface: WebGL draws opaque nodes), its size
+   * scaled from the Detailed tier's pixels, a faded colour of its own. Shapes and dashed borders
+   * are not drawn in this tier.
+   */
+  styledNode(style, baseSize) {
+    const color = style.opacity < 1 ? mix(style.color, this.theme.surface, style.opacity) : style.color;
+    return {
+      styled: true,
+      color,
+      fadedColor: mix(style.color, this.theme.surface, 0.22),
+      size: Math.max(2, baseSize * (style.size / 24)) + Math.min(3, style.borderWidth / 2),
+    };
+  }
+
+  /** A profile graph view's resolved edge style as sigma attributes (solid lines only). */
+  styledEdge(style) {
+    return {
+      styled: true,
+      color: style.opacity < 1 ? mix(style.color, this.theme.surface, style.opacity) : style.color,
+      size: Math.max(0.5, style.width * 0.6),
+    };
+  }
+
   reduceNode(attrs) {
     const i = attrs.i;
-    if (this.selNodes && !this.selNodes[i]) return { ...attrs, color: this.slotFaded[attrs.slot], label: null };
+    if (this.selNodes && !this.selNodes[i]) return { ...attrs, color: attrs.fadedColor || this.slotFaded[attrs.slot], label: null };
     if (this.hoverNodes.has(i)) return { ...attrs, highlighted: true };
     return attrs;
   }
@@ -293,7 +318,7 @@ export class SigmaRenderer {
       const slots = view.labels.map((l) => (this.palette ? this.palette.slot(l) : PALETTE_SIZE));
       for (let i = 0; i < n; i++) {
         const slot = slots[view.vertexLabel[i]];
-        graph.addNode(String(i), {
+        const attrs = {
           i,
           slot,
           x: xy && 2 * i + 1 < xy.length ? xy[2 * i] : 0,
@@ -301,15 +326,19 @@ export class SigmaRenderer {
           size: sizeAt(i),
           color: this.slotColors[slot],
           label: vertexCaption(view, i, this.options.showIds),
-        });
+        };
+        if (view.nodeStyle) Object.assign(attrs, this.styledNode(view.nodeStyle[i], attrs.size));
+        graph.addNode(String(i), attrs);
       }
       for (let j = 0; j < m; j++) {
-        graph.addDirectedEdgeWithKey(String(j), String(view.edgeSource[j]), String(view.edgeTarget[j]), {
+        const attrs = {
           j,
           size: 1,
           color: this.theme.edge,
           caption: edgeCaption(view, j, false),
-        });
+        };
+        if (view.edgeStyle) Object.assign(attrs, this.styledEdge(view.edgeStyle[j]));
+        graph.addDirectedEdgeWithKey(String(j), String(view.edgeSource[j]), String(view.edgeTarget[j]), attrs);
       }
       this.sigma.setSetting('enableEdgeEvents', m <= FAST_EDGE_EVENTS_MAX);
     }
@@ -397,6 +426,14 @@ export class SigmaRenderer {
     this.sigma.refresh();
   }
 
+  /** Zooms by `factor` around the middle of the view (optional method of the renderer interface). */
+  zoomBy(factor) {
+    if (!this.sigma || this.isHidden()) return;
+    const camera = this.sigma.getCamera();
+    const state = camera.getState();
+    camera.setState({ ...state, ratio: Math.min(4, Math.max(0.005, state.ratio / factor)) });
+  }
+
   select(ids) {
     this.selection = ids;
     if (!this.added) return;
@@ -480,12 +517,14 @@ export class SigmaRenderer {
     this.dark = !!dark;
     this.readTheme();
     if (this.added) {
+      // A profile graph view's styled elements keep their colours: the view draws its data again
+      // with the theme's colours (components/profile-graph.js).
       this.graph.updateEachNodeAttributes((key, attrs) => {
-        attrs.color = this.slotColors[attrs.slot];
+        if (!attrs.styled) attrs.color = this.slotColors[attrs.slot];
         return attrs;
       }, { attributes: ['color'] });
       this.graph.updateEachEdgeAttributes((key, attrs) => {
-        attrs.color = this.theme.edge;
+        if (!attrs.styled) attrs.color = this.theme.edge;
         return attrs;
       }, { attributes: ['color'] });
     }

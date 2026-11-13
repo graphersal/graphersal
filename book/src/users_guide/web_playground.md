@@ -237,6 +237,7 @@ unless something asks for another one. A profile names:
 | `startTab` | the tab the page opens on |
 | `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
 | `cards` | card templates per label for the profile's tabs (may be empty; see [Cards](#cards)) |
+| `graph` | styles of the profile's graph views per label, classes and legend entries (may be empty; see [Graph views](#graph-views)) |
 | `files` | where the module files are: `""` (next to the page) or a path ending in `/` on the same origin |
 
 The `can` keys: the top bar's `devBadge`, `mcp`, `share`, `view`, `catalog`, `optimize`, `store`,
@@ -257,7 +258,8 @@ NAME|FILE` (a built-in name or a JSON file with a profile object) and tells the 
 rule above, is shown as an error naming every problem, never replaced by another profile. The
 built-in `demo` profile is a small example: a tab of its own that lists the people of the modern
 graph through a saved query as cards (it shows the script that defines the query when the graph
-has none) and the workspace without the catalog, the optimizer, the store and the examples.
+has none), a Graph tab that draws them as a graph view, and the workspace without the catalog,
+the optimizer, the store and the examples.
 
 **A profile's own tabs.** A module tab is an ES module (`files` + `module`, loaded when the tab
 is first shown) whose default export is a Vue component. It gets two props: `params`, the tab's
@@ -268,6 +270,8 @@ parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **prof
 | `query(name, params)` | calls the saved query `name` with named arguments through the page's engine (the dev server's `POST /api/query`, the browser engine's worker), under the engine's rules (read-only mode, access policy); the caller passes every parameter; resolves to its results, rejects with `{message, help}` |
 | `markdown(text)` | the text through the playground's safe Markdown renderer (never HTML) |
 | `card(label, row, options)` | a card of `row` by the profile's card template for `label` (see [Cards](#cards)) |
+| `graph(data, options)` | a graph view of `{nodes, edges}`, styled by the profile's `graph` key (see [Graph views](#graph-views)) |
+| `mergeGraph(base, addition)` | the union of two graph datas without duplicates, with the ids it added |
 | `toast(kind, text)` | a notification: `info`, `success`, `warn` or `error` |
 | `navigate(tab, params)` | shows another tab of the profile (and puts it into the address) |
 | `theme` | `mode`, `dark` and `token(name)`, the value of a colour token such as `accent` |
@@ -341,6 +345,89 @@ The module chooses how a card is shown with `options` (all optional):
 Actions are the module's: the template only names the buttons, and the module decides what a
 click does (call a saved query, navigate, show a notification). Cards take their colours from the
 page's theme, so they follow light and dark mode, and they wrap on a narrow screen.
+
+### Graph views
+
+`api.graph(data, options)` draws a graph that the module builds, typically from saved queries,
+with the same drawing code as the [Graph panel](#the-graph-drawing): Cytoscape for ordinary
+sizes, the Fast tier (WebGL) for large views. The data is
+
+```json
+{
+  "nodes": [{"id": "a", "label": "memory", "caption": "Graph first", "data": {"kind": "feedback"}, "classes": ["pinned"]}],
+  "edges": [{"id": "e1", "source": "a", "target": "b", "label": "supersedes", "data": {}}]
+}
+```
+
+`id` is a text or a number (unique per kind), `label` chooses the style and the card template,
+`caption` is the text under the node (else the style's `caption` field of `data`, else the label),
+`data` holds the element's fields (what its card shows), `classes` names style classes. Every
+edge's `source` and `target` must be nodes of the data. Data that breaks a rule is not drawn: the
+view shows every problem instead (`nodes[1].id "a" is used twice`, `edges[0].target "zz" is not
+a node of the data`, ...).
+
+The profile's `graph` key styles the views per label (`"*"` applies to every label; the label's
+own entry on top of it):
+
+```json
+"graph": {
+  "nodes": {
+    "memory": {"color": "--accent", "shape": "ellipse", "size": 24, "caption": "slug"},
+    "session": {"shape": "round-rectangle", "color": "#8a93a3"}
+  },
+  "edges": {
+    "supersedes": {"arrow": true, "width": 2},
+    "conflicts_with": {"color": "--danger", "arrow": false},
+    "relates_to": {"color": "--text-faint", "width": 0.8}
+  },
+  "classes": {"pinned": {"border": {"width": 4}}},
+  "legend": [{"text": "loaded at every session start", "node": {"border": {"width": 4}}}]
+}
+```
+
+| Key | Values |
+|---|---|
+| `color` | `#rgb`, `#rrggbb` or a colour token of the page (`--accent`, `--danger`, ...: follows light and dark mode); a node without one takes its label's colour from the Graph panel's palette |
+| `shape` (node) | `ellipse`, `round-rectangle`, `rectangle`, `diamond`, `triangle`, `hexagon`, `star` |
+| `size` (node) | 6 to 96 pixels (default 24) |
+| `border` (node) | `{width: 0..12, color, style}` |
+| `style` (edge), `border.style` | `solid`, `dashed`, `dotted` |
+| `arrow` (edge) | `true` (default) or `false` |
+| `width` (edge) | 0.5 to 12 pixels (default 1.6) |
+| `opacity` | 0.05 to 1 |
+| `caption` | a field path of `data` (as in [Cards](#cards)) |
+
+A **class** carries the same keys (node and edge keys together). Three are built in: `faded`
+(opacity 0.3), `bold` (a thick border, a wide edge) and `dashed`; a profile class of the same
+name replaces one, and an unknown name changes nothing. The module can also style each element
+itself with `styleOf(element, kind)`, which returns `{classes, ...keys}` or `null`. Later wins:
+the defaults, `"*"`, the label's entry, the element's `classes`, the classes `styleOf` returns,
+then the keys `styleOf` returns. The legend under the drawing lists the labels drawn (the key
+`legendLabels`: `true` by default, `"nodes"` or `"edges"` for only those, `false` for none: a
+profile that colours by classes lists its own entries), then the profile's `legend` entries,
+then the module's.
+
+| Option | Meaning |
+|---|---|
+| `styleOf(element, kind)` | per-element style (above) |
+| `onSelect(selection)` | a click chose `{kind, id, label, data, element}`, or empty space (`null`) |
+| `onExpand(node)` | a double click on a node, or the side card's **Expand** button: the module reads the node's neighbours and merges them in with `api.mergeGraph` |
+| `selected` | `{kind, id}` or `null`: the selection set from outside (for example a tab parameter) |
+| `card` | `true` or `{actions, onAction(id, selection), expand}`: a side card of the selected element through `api.card(label, element.data, ...)`; `expand` names the Expand button (`false`: none; a function `(selection) => text or false` decides per node) |
+| `legend` | `true` (default), `false`, or extra entries `[{text, node}]` / `[{text, edge}]` |
+| `layout` | `cose` (default), `circle`, `concentric`, `breadthfirst` or `grid` |
+| `height` | the drawing's CSS height (default `520px`) |
+| `highlight` | what a selection highlights: `neighbours` (default: the element with its neighbours), `element`, `none` |
+| `emptyText` | the text of a view without nodes |
+
+A click selects (the rest fades), a double click on empty space or **Fit** fits the drawing, Esc
+clears the selection; the toolbar zooms, picks the layout and lays the drawing out again. When
+the module replaces the data (an expansion merged in, new styles), the nodes it had keep their
+positions and the new ones appear next to their neighbours, without a new layout. The view itself
+never writes: a module changes the graph through `query` from its card's buttons. The Fast tier
+draws every node as a circle and every line solid. On a server in allow-list mode the engine's
+force layout is not available: the browser's force layout runs up to 1,500 nodes, a larger view
+is drawn as a grid.
 
 ### Allow-list mode
 

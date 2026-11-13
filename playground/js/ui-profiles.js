@@ -26,12 +26,15 @@
 //             component that gets the props `api` (js/profile-api.js) and `params`.
 //   cards     {<label>: card template}: the cards of `api.card(label, row, options)`; the
 //             template format and its checks are js/profile-cards.js (an object, may be empty)
+//   graph     the styles of `api.graph` views per label, classes and legend entries: the
+//             format and its checks are js/profile-graph.js (an object, may be empty)
 //   files     the base path of the module files, '' (the page's own directory) or a path
 //             ending in '/' (relative to the page, or absolute on its origin); never another
 //             origin, never '..'.
 // Pure: no DOM, no Vue; tested in tests/ui-profiles.test.mjs.
 
 import { cardsProblems } from './profile-cards.js';
+import { graphSpecProblems } from './profile-graph.js';
 
 /** The keys of `can`, grouped as the UI shows them. */
 export const CAN_GROUPS = Object.freeze({
@@ -75,7 +78,7 @@ export const BUILTIN_TABS = Object.freeze(['workspace']);
 export const MAX_TABS = 12;
 
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const PROFILE_KEYS = Object.freeze(['name', 'title', 'startTab', 'can', 'tabs', 'cards', 'files']);
+const PROFILE_KEYS = Object.freeze(['name', 'title', 'startTab', 'can', 'tabs', 'cards', 'graph', 'files']);
 const TAB_KEYS = Object.freeze(['id', 'title', 'builtin', 'module']);
 
 const allCan = (value) => Object.freeze(Object.fromEntries(CAN_KEYS.map((key) => [key, value])));
@@ -102,11 +105,12 @@ export const BUILTIN_PROFILES = deepFreeze({
     },
     tabs: [{ id: 'play', title: 'Playground', builtin: 'workspace' }],
     cards: {},
+    graph: {},
     files: '',
   },
   // A small profile for the tests and the smoke check: the workspace without the catalog,
-  // optimizer, store, share, examples and AI Chat, plus one tab of its own that calls the
-  // profile API (js/profiles/demo/).
+  // optimizer, store, share, examples and AI Chat, plus two tabs of its own that call the
+  // profile API (js/profiles/demo/: cards in Hello, the graph view in Graph).
   demo: {
     name: 'demo',
     title: 'Graphersal Demo',
@@ -127,6 +131,7 @@ export const BUILTIN_PROFILES = deepFreeze({
     },
     tabs: [
       { id: 'hello', title: 'Hello', module: 'hello.js' },
+      { id: 'graph', title: 'Graph', module: 'graph.js' },
       { id: 'play', title: 'Playground', builtin: 'workspace' },
     ],
     // The person card of the Hello tab (js/profile-cards.js): `senior` and `about` are fields
@@ -140,6 +145,19 @@ export const BUILTIN_PROFILES = deepFreeze({
         fields: [{ field: 'name', title: 'Name' }, { field: 'age', title: 'Age' }, { field: 'city', title: 'City' }],
         actions: [{ id: 'hello', text: 'Say hello', kind: 'primary' }],
       },
+    },
+    // The Graph tab's styles (js/profile-graph.js): people and software per label, the two edge
+    // labels, a legend entry for the faded class the tab sets while a person is expanded.
+    graph: {
+      nodes: {
+        person: { shape: 'ellipse', caption: 'name' },
+        software: { shape: 'round-rectangle', color: '--warn', size: 28 },
+      },
+      edges: {
+        knows: { color: '--accent', width: 2 },
+        created: { style: 'dashed' },
+      },
+      legend: [{ text: 'not next to the expanded person', node: { opacity: 0.3 } }],
     },
     files: 'js/profiles/demo/',
   },
@@ -180,10 +198,10 @@ function isSafePath(path) {
 }
 
 /**
- * Checks a profile object and returns its normalized, frozen copy (`cards` defaults to `{}`,
- * `files` to ''). Throws a ProfileError naming every problem.
+ * Checks a profile object and returns its normalized, frozen copy (`cards` and `graph` default
+ * to `{}`, `files` to ''). Throws a ProfileError naming every problem.
  * @param {*} input
- * @returns {Readonly<{name:string, title:string, startTab:string, can:Object, tabs:Array, cards:Object, files:string}>}
+ * @returns {Readonly<{name:string, title:string, startTab:string, can:Object, tabs:Array, cards:Object, graph:Object, files:string}>}
  */
 export function validateProfile(input) {
   const problems = [];
@@ -262,6 +280,7 @@ export function validateProfile(input) {
   }
 
   if (input.cards !== undefined) problems.push(...cardsProblems(input.cards));
+  if (input.graph !== undefined) problems.push(...graphSpecProblems(input.graph));
   const files = input.files === undefined ? '' : input.files;
   if (typeof files !== 'string' || (files !== '' && (!files.endsWith('/') || !isSafePath(files)))) {
     problems.push('"files" must be "" or a path ending in "/" on this origin (no "..", no scheme)');
@@ -275,6 +294,7 @@ export function validateProfile(input) {
     can,
     tabs,
     cards: JSON.parse(JSON.stringify(input.cards || {})),
+    graph: JSON.parse(JSON.stringify(input.graph || {})),
     files,
   });
 }

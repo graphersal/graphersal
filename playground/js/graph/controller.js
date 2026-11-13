@@ -13,7 +13,7 @@
 // data and KEEPS THE POSITIONS (the new renderer gets them as a preset); a layout the renderer
 // does not have (`capabilities.layouts`) runs as the engine's force layout, with a note.
 
-import { layoutFor } from '../graph-data.js';
+import { layoutFor, DRAW_TUNING } from '../graph-data.js';
 import { layoutInputOf, runEngineLayout, DEFAULT_SLICE_MS } from './layout-client.js';
 
 /** The number of vertices of the data (`kind` 'data': a compact view; 'schema': `{nodes}`). */
@@ -45,10 +45,15 @@ export function layoutIn(caps, chosen, requested) {
 export class GraphController {
   /**
    * @param {{renderer: import('./renderer.js').Renderer, engine?: Object,
-   *          isHidden?: () => boolean, onState?: (state:Object) => void, budgetMs?: number}} options
+   *          isHidden?: () => boolean, onState?: (state:Object) => void, budgetMs?: number,
+   *          tuning?: Object}} options
+   *   `tuning`: the `layoutFor` tuning (js/graph-data.js `DRAW_TUNING`); a drawing without an
+   *   engine layout (the profile graph view on a server in allow-list mode) lets `cose` run
+   *   for more vertices.
    */
-  constructor({ renderer, engine = null, isHidden = () => false, onState = () => {}, budgetMs = DEFAULT_SLICE_MS }) {
+  constructor({ renderer, engine = null, isHidden = () => false, onState = () => {}, budgetMs = DEFAULT_SLICE_MS, tuning = DRAW_TUNING }) {
     this.renderer = renderer;
+    this.tuning = tuning;
     this.engine = engine;
     this.isHidden = isHidden;
     this.onState = onState;
@@ -154,7 +159,7 @@ export class GraphController {
       this.setState({ layout: null, note: null });
       return;
     }
-    const chosen = layoutIn(this.renderer.capabilities, layoutFor(name, n), name);
+    const chosen = layoutIn(this.renderer.capabilities, layoutFor(name, n, this.tuning), name);
     if (chosen.name === 'engine') {
       this.pending = null;
       await this.runEngine(seq, chosen.note);

@@ -69,6 +69,21 @@ function buildStyle(kind, plan, dark) {
     ...slots,
     // Vertex size by degree (`options.nodeScale`, js/graph/size-by.js): a node with a `size`.
     ...(schema ? [] : [{ selector: 'node[size]', style: { width: 'data(size)', height: 'data(size)' } }]),
+    // A profile graph view's own styles (js/profile-graph.js; graph-data.js `toCyElements` gives
+    // its elements the class and the data). The selection rules below still win.
+    ...(schema ? [] : [{
+      selector: 'node.styled',
+      style: {
+        'background-color': 'data(color)',
+        shape: 'data(shape)',
+        width: 'data(nsize)',
+        height: 'data(nsize)',
+        opacity: 'data(opacity)',
+        'border-width': 'data(borderWidth)',
+        'border-color': 'data(borderColor)',
+        'border-style': 'data(borderStyle)',
+      },
+    }]),
     {
       selector: 'edge',
       style: {
@@ -89,6 +104,17 @@ function buildStyle(kind, plan, dark) {
         'loop-sweep': '-60deg',
       },
     },
+    ...(schema ? [] : [{
+      selector: 'edge.styled',
+      style: {
+        'line-color': 'data(color)',
+        'target-arrow-color': 'data(color)',
+        'target-arrow-shape': plan.arrows ? 'data(arrow)' : 'none',
+        'line-style': 'data(lineStyle)',
+        width: 'data(width)',
+        opacity: 'data(opacity)',
+      },
+    }]),
     { selector: 'edge.no-label', style: { label: '' } },
     { selector: '.faded', style: { opacity: 0.22 } },
     // A label the Graph panel's filter hides, in the label overview (a schema drawing).
@@ -352,6 +378,16 @@ export class CytoscapeRenderer {
 
   resize() {
     this.cy.resize();
+  }
+
+  /**
+   * Zooms by `factor` around the middle of the view (optional method of the renderer interface:
+   * the profile graph view's zoom buttons).
+   */
+  zoomBy(factor) {
+    if (!this.cy || this.isHidden()) return;
+    const level = Math.min(this.cy.maxZoom(), Math.max(this.cy.minZoom(), this.cy.zoom() * factor));
+    this.cy.zoom({ level, renderedPosition: { x: this.container.clientWidth / 2, y: this.container.clientHeight / 2 } });
   }
 
   select(ids) {
