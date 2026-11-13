@@ -116,9 +116,13 @@ export function vertexCaption(view, i, showIds = false) {
   return name ?? `${label || 'v'}:${id}`;
 }
 
-/** The caption of edge `j`: its label, with `edgeIds` `id · label`. */
+/**
+ * The caption of edge `j`: its label (a profile graph view's own caption, `edgeName[j]`, when it
+ * has one), with `edgeIds` `id · label`.
+ */
 export function edgeCaption(view, j, edgeIds = false) {
-  const label = edgeLabelOf(view, j);
+  const named = view.edgeName ? view.edgeName[j] : null;
+  const label = named === null || named === undefined ? edgeLabelOf(view, j) : named;
   return edgeIds ? `${view.edgeIds[j]} · ${label}` : label;
 }
 
@@ -222,12 +226,14 @@ export function toCyElements(view, { showIds = false, edgeIds = false, slotOf, p
       classes: classes[view.vertexLabel[i]],
       data: { id: 'n' + id, kind: 'vertex', elementId: id, index: i, label: vertexLabelOf(view, i), caption: vertexCaption(view, i, showIds) },
     };
+    if (view.nodeStyle) styleNode(out[i], view.nodeStyle[i]);
     if (positions) out[i].position = { x: positions[2 * i], y: positions[2 * i + 1] };
   }
   for (let j = 0; j < edgeCount(view); j++) {
     const id = view.edgeIds[j];
     out[n + j] = {
       group: 'edges',
+      ...(view.edgeStyle ? styledEdgeParts(view.edgeStyle[j]) : {}),
       data: {
         id: 'e' + id,
         kind: 'edge',
@@ -237,10 +243,43 @@ export function toCyElements(view, { showIds = false, edgeIds = false, slotOf, p
         source: 'n' + view.vertexIds[view.edgeSource[j]],
         target: 'n' + view.vertexIds[view.edgeTarget[j]],
         caption: edgeCaption(view, j, edgeIds),
+        ...(view.edgeStyle ? styledEdgeData(view.edgeStyle[j]) : {}),
       },
     };
   }
   return out;
+}
+
+// A profile graph view (js/profile-graph.js `styledView`) carries a resolved style per element:
+// its Cytoscape elements get the class `styled` and the style as data, which the Detailed
+// renderer's `node.styled` / `edge.styled` rules map (js/graph/cytoscape-renderer.js). Views
+// without styles (every Graph panel view) are untouched.
+
+function styleNode(def, style) {
+  def.classes += ' styled';
+  Object.assign(def.data, {
+    color: style.color,
+    shape: style.shape,
+    nsize: style.size,
+    opacity: style.opacity,
+    borderWidth: style.borderWidth,
+    borderColor: style.borderColor,
+    borderStyle: style.borderStyle,
+  });
+}
+
+function styledEdgeParts() {
+  return { classes: 'styled' };
+}
+
+function styledEdgeData(style) {
+  return {
+    color: style.color,
+    lineStyle: style.lineStyle,
+    arrow: style.arrow ? 'triangle' : 'none',
+    width: style.width,
+    opacity: style.opacity,
+  };
 }
 
 /** The legend: the vertex labels of a view in first-use order, at most `max`. */

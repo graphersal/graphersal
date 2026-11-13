@@ -11,12 +11,24 @@ import { cssVar } from '../util.js';
 import { createProfileApi } from '../profile-api.js';
 import { MarkdownView } from './markdown-view.js';
 import { ProfileCard } from './profile-card.js';
+import { ProfileGraph } from './profile-graph.js';
+import { checkCardOptions } from '../profile-cards.js';
 
 /** Toast kinds of the profile API onto the page's toast classes. */
 const TOAST_CLASS = { info: 'info', success: 'success', warn: 'warn', error: 'error' };
 
 /** The async components by module URL: a tab shown again does not load its module again. */
 const loaded = new Map();
+
+/** The card of `row` by the profile's template for `label` (`options` already checked). */
+function renderCard(label, row, options) {
+  return h(ProfileCard, {
+    label,
+    row,
+    template: Object.prototype.hasOwnProperty.call(state.ui.profile.cards, label) ? state.ui.profile.cards[label] : null,
+    options,
+  });
+}
 
 /** The profile API of one tab (wired to the store, the router and Vue). */
 export function profileApiFor() {
@@ -26,11 +38,13 @@ export function profileApiFor() {
     server: isServerMode(),
     runQuery: profileQuery,
     renderMarkdown: (text) => h(MarkdownView, { text }),
-    renderCard: (label, row, options) => h(ProfileCard, {
-      label,
-      row,
-      template: Object.prototype.hasOwnProperty.call(state.ui.profile.cards, label) ? state.ui.profile.cards[label] : null,
+    renderCard,
+    // The graph view (components/profile-graph.js); its side card goes through the same card path.
+    renderGraph: (data, options) => h(ProfileGraph, {
+      data,
       options,
+      spec: state.ui.profile.graph || {},
+      renderCard: (label, row, cardOptions) => renderCard(String(label), row, checkCardOptions(cardOptions)),
     }),
     showToast: (text, kind) => toast(text, TOAST_CLASS[kind], kind === 'error' || kind === 'warn' ? 9000 : 5000),
     navigate: navigateTab,

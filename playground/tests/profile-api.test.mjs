@@ -40,7 +40,7 @@ test('the api object is frozen and versioned', () => {
   assert.equal(api.version, PROFILE_API_VERSION);
   assert.equal(PROFILE_API_VERSION, 1);
   assert.ok(Object.isFrozen(api));
-  assert.deepEqual(Object.keys(api).sort(), ['card', 'info', 'markdown', 'navigate', 'query', 'theme', 'toast', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['card', 'graph', 'info', 'markdown', 'mergeGraph', 'navigate', 'query', 'theme', 'toast', 'version']);
 });
 
 test('query: name and params go to the engine, results come back', async () => {

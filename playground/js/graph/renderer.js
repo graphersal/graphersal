@@ -71,6 +71,9 @@
  * @property {(options?:{full?:boolean, transparent?:boolean}) => Promise<Blob>} exportPng
  * @property {(dark:boolean) => void} setTheme   Re-reads the theme's colours.
  * @property {() => void} destroy
+ * @property {(factor:number) => void} [zoomBy]
+ *   OPTIONAL (not in RENDERER_METHODS): zooms by `factor` (> 1 in, < 1 out) around the middle of
+ *   the view; the profile graph view's zoom buttons use it when the renderer has it.
  */
 
 /** Every method a renderer has (the contract the node test checks). */

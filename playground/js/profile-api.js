@@ -43,6 +43,39 @@
 //                   card shows no buttons. While a returned promise is pending the card's
 //                   buttons are disabled; a rejection is shown as an error toast.
 //       Missing fields render nothing; nothing of the row is ever rendered as HTML.
+//   graph(data, options = {}) -> VNode
+//       The graph view of `data` = {nodes: [{id, label, caption?, data?, classes?}], edges: [{id,
+//       source, target, label, caption?, data?, classes?}]} (typically built from saved queries;
+//       the format and its checks are js/profile-graph.js), drawn with the Graph panel's drawing
+//       code (Cytoscape; sigma.js on WebGL for large views) and styled by the profile's `graph`
+//       key per label plus the module's per-element styles. Render it like a card (in a render
+//       function, or `<component :is="api.graph(data, options)" />`); keep the data in a ref and
+//       replace it to change the drawing (vertices it had keep their positions). Options (all
+//       optional; an unknown one throws a TypeError; js/profile-graph.js `checkGraphOptions`):
+//         styleOf   (element, kind) => {classes?, ...style} | null: per-element style on top of
+//                   the profile's (`classes` names: the profile's `graph.classes` or the
+//                   built-in `faded`, `bold`, `dashed`);
+//         onSelect  (selection) => void: a click chose {kind, id, label, data, element} or
+//                   empty space (null);
+//         onExpand  (node) => void | Promise: a double click on a node (or the side card's
+//                   Expand button): merge its neighbours in with `api.mergeGraph`;
+//         selected  {kind: 'node'|'edge', id} | null: the selection set from outside;
+//         card      false (default) | true | {actions, onAction, expand}: the side card of the
+//                   selected element through `api.card(label, element.data, ...)` (`actions` a
+//                   list or (selection) => list; `onAction(id, selection)`; `expand` the Expand
+//                   button's text, false for none);
+//         legend    true (default: the labels drawn and the profile's `graph.legend`) | false |
+//                   extra entries [{text, node: style} | {text, edge: style}];
+//         layout    'cose' (default) | 'circle' | 'concentric' | 'breadthfirst' | 'grid';
+//         height    the drawing's CSS height (default '520px');
+//         highlight 'neighbours' (default) | 'element' | 'none': what a selection highlights;
+//         emptyText the text of a view without nodes.
+//       Invalid data shows its problems in the view (GraphDataError); the graph itself never
+//       writes: a module writes through `query` from its card actions.
+//   mergeGraph(base, addition) -> {graph, added: {nodes, edges}}
+//       The union of two graph datas without duplicates (an element in both keeps its place and
+//       takes `addition`'s content); `added` lists the new ids. Throws a GraphDataError for
+//       invalid data.
 //   toast(kind, text)
 //       A notification: kind 'info' | 'success' | 'warn' | 'error'.
 //   navigate(tab, params = {})
@@ -63,6 +96,7 @@
 // it under Node; components/profile-tab.js wires it to the store and Vue.
 
 import { checkCardOptions } from './profile-cards.js';
+import { checkGraphOptions, mergeGraph } from './profile-graph.js';
 
 /** The version of the profile API; a change that breaks a module raises it. */
 export const PROFILE_API_VERSION = 1;
@@ -105,6 +139,8 @@ function freezeCopy(value) {
  * @param {(text: string) => *} deps.renderMarkdown  A VNode of the safe Markdown renderer.
  * @param {(label: string, row: *, options: Object) => *} deps.renderCard  A VNode of the card of
  *   `row`; `options` checked by js/profile-cards.js `checkCardOptions`.
+ * @param {(data: *, options: Object) => *} [deps.renderGraph]  A VNode of the graph view of
+ *   `data`; `options` checked by js/profile-graph.js `checkGraphOptions`.
  * @param {(text: string, kind: string) => void} deps.showToast
  * @param {(tab: string, params: Object) => void} deps.navigate  Throws for an unknown tab.
  * @param {() => {mode: string, dark: boolean}} deps.themeState
@@ -155,6 +191,14 @@ export function createProfileApi(deps) {
     card(label, row, options) {
       const checked = checkCardOptions(options);
       return deps.renderCard(String(label === undefined || label === null ? '' : label), row, checked);
+    },
+    graph(data, options) {
+      const checked = checkGraphOptions(options);
+      if (typeof deps.renderGraph !== 'function') throw new Error('api.graph: this page has no graph view.');
+      return deps.renderGraph(data, checked);
+    },
+    mergeGraph(base, addition) {
+      return mergeGraph(base, addition);
     },
     toast(kind, text) {
       if (!TOAST_KINDS.includes(kind)) throw new TypeError(`api.toast: the kind must be one of ${TOAST_KINDS.join(', ')}.`);
