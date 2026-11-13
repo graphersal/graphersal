@@ -153,6 +153,10 @@ test('mergeGraph: the union without duplicates; fresher content, old order; adde
   // The merged data is valid data again; an addition with a dangling edge is refused.
   assert.doesNotThrow(() => checkGraphData(graph));
   assert.throws(() => mergeGraph(base, { edges: [{ id: 'x', source: 'a', target: 'nope' }] }), GraphDataError);
+  // An edge of the addition may end at a node of the base.
+  const linked = mergeGraph(base, { nodes: [{ id: 'f' }], edges: [{ id: 'x', source: 'f', target: 'b', label: 'about' }] });
+  assert.deepEqual(linked.added, { nodes: ['f'], edges: ['x'] });
+  assert.doesNotThrow(() => checkGraphData(linked.graph));
 });
 
 test('resolveNodeStyle: defaults, then "*", the label, the classes, then styleOf', () => {
@@ -242,6 +246,13 @@ test('legendEntries: labels drawn, then the profile\'s entries, then the extra o
   assert.equal(entries[4].style.color, '#888888', 'an entry without a colour is neutral (no palette slot taken)');
   assert.equal(entries[5].style.lineStyle, 'dashed');
   assert.ok(entries[4].extra && !entries[0].extra);
+  // legendLabels keeps only the edge labels (or the node labels, or none).
+  const edgesOnly = legendEntries(g, { ...spec, legendLabels: 'edges' }, [], ctx());
+  assert.deepEqual(edgesOnly.map((e) => e.text), ['supersedes', 'about', 'loaded at every start']);
+  assert.deepEqual(legendEntries(g, { legendLabels: 'nodes' }, [], ctx()).map((e) => e.text), ['memory', 'session']);
+  assert.deepEqual(legendEntries(g, { legendLabels: false }, [], ctx()), []);
+  assert.deepEqual(graphSpecProblems({ legendLabels: 'edges' }), []);
+  assert.deepEqual(graphSpecProblems({ legendLabels: 'all' }), ['"graph.legendLabels" must be true, false, "nodes" or "edges"']);
 });
 
 test('carryPositions: kept vertices stay, new ones go next to their neighbours', () => {

@@ -19,7 +19,8 @@
 //     nodes:   {<label> | "*": {color, shape, size, opacity, border: {width, color, style}, caption}},
 //     edges:   {<label> | "*": {color, style, arrow, width, opacity, caption}},
 //     classes: {<name>: {any of the node and edge keys}},
-//     legend:  [{text, node: {node keys}} | {text, edge: {edge keys}}]
+//     legend:  [{text, node: {node keys}} | {text, edge: {edge keys}}],
+//     legendLabels: true | false | "nodes" | "edges"
 //   }
 //
 // `color` '#rgb' / '#rrggbb' or a CSS colour token of the page ('--accent': follows the theme);
@@ -27,7 +28,9 @@
 // Graph panel's colours). `shape` one of NODE_SHAPES; `size` NODE_SIZE px; `opacity` 0.05..1;
 // `border.style` and an edge's `style` one of LINE_STYLES; `arrow` true/false (default true);
 // `width` EDGE_WIDTH px; `caption` a field path of `data` (js/profile-cards.js paths). "*" applies
-// to every label, the label's own entry on top of it.
+// to every label, the label's own entry on top of it. `legendLabels` says which labels drawn the
+// legend lists by itself before the `legend` entries (default true: node and edge labels; a
+// profile that colours by classes lists its own entries and keeps only "edges", say).
 //
 // A style is resolved in this order, later wins: the defaults, `"*"`, the label's entry, each
 // class of the element (`classes`, then the classes `styleOf` returns; a class is the profile's
@@ -54,7 +57,10 @@ export const BORDER_KEYS = Object.freeze(['width', 'color', 'style']);
 export const EDGE_STYLE_KEYS = Object.freeze(['color', 'style', 'arrow', 'width', 'opacity', 'caption']);
 
 /** The keys of the profile's `graph`. */
-export const GRAPH_SPEC_KEYS = Object.freeze(['nodes', 'edges', 'classes', 'legend']);
+export const GRAPH_SPEC_KEYS = Object.freeze(['nodes', 'edges', 'classes', 'legend', 'legendLabels']);
+
+/** The values of the spec's `legendLabels`: which labels drawn the legend lists by itself. */
+export const LEGEND_LABELS = Object.freeze([true, false, 'nodes', 'edges']);
 
 /** The keys of an element of the data. */
 export const NODE_KEYS = Object.freeze(['id', 'label', 'caption', 'data', 'classes']);
@@ -189,6 +195,9 @@ export function graphSpecProblems(spec) {
     }
   }
   if (spec.legend !== undefined) problems.push(...legendProblems(spec.legend, 'graph.legend'));
+  if (spec.legendLabels !== undefined && !LEGEND_LABELS.includes(spec.legendLabels)) {
+    problems.push('"graph.legendLabels" must be true, false, "nodes" or "edges"');
+  }
   return problems;
 }
 
@@ -248,10 +257,12 @@ function classesProblems(classes, at) {
  * Throws a GraphDataError naming every problem (unknown keys, missing or duplicate ids, an edge
  * whose end is not a node of the data, ...).
  * @param {*} input
+ * @param {{knownNodes?: ?Set<string>}} [options]  `knownNodes`: ids of nodes outside `input` that
+ *   an edge may end at (`mergeGraph`: the base's nodes).
  * @returns {{nodes: Array<{id:string, label:string, caption:?string, data:Object, classes:string[]}>,
  *            edges: Array<{id:string, source:string, target:string, label:string, caption:?string, data:Object, classes:string[]}>}}
  */
-export function checkGraphData(input) {
+export function checkGraphData(input, { knownNodes = null } = {}) {
   if (!isPlainObject(input)) throw new GraphDataError(['it must be an object {nodes, edges}']);
   const problems = [];
   for (const key of Object.keys(input)) {
@@ -311,7 +322,9 @@ export function checkGraphData(input) {
     edgeIds.add(edge.id);
     for (const end of ['source', 'target']) {
       if (!isId(raw[end])) problems.push(`edges[${i}].${end} must be the id of a node`);
-      else if (!nodeIds.has(String(raw[end]))) problems.push(`edges[${i}].${end} ${quote(raw[end])} is not a node of the data`);
+      else if (!nodeIds.has(String(raw[end])) && !(knownNodes && knownNodes.has(String(raw[end])))) {
+        problems.push(`edges[${i}].${end} ${quote(raw[end])} is not a node of the data`);
+      }
     }
     edge.source = isId(raw.source) ? String(raw.source) : '';
     edge.target = isId(raw.target) ? String(raw.target) : '';
@@ -322,8 +335,9 @@ export function checkGraphData(input) {
 }
 
 /**
- * The union of two graph datas (both as `checkGraphData` takes them): every node and edge of
- * `base`, then those of `addition` whose ids are new. An element in both keeps its place and
+ * The union of two graph datas (both as `checkGraphData` takes them; an edge of `addition` may
+ * end at a node of `base`): every node and edge of `base`, then those of `addition` whose ids
+ * are new. An element in both keeps its place and
  * takes `addition`'s content (the fresher read). `added` names the new ids, so a module can say
  * "nothing new" and the view can place the new vertices next to the one expanded.
  * @param {Object} base
@@ -332,7 +346,8 @@ export function checkGraphData(input) {
  */
 export function mergeGraph(base, addition) {
   const a = checkGraphData(base || { nodes: [], edges: [] });
-  const b = checkGraphData(addition || { nodes: [], edges: [] });
+  // An edge of the addition may end at a node of the base (a neighbour already drawn).
+  const b = checkGraphData(addition || { nodes: [], edges: [] }, { knownNodes: new Set(a.nodes.map((n) => n.id)) });
   const merge = (left, right) => {
     const index = new Map(left.map((el, i) => [el.id, i]));
     const out = left.slice();
@@ -517,21 +532,25 @@ export function styledView(graph, spec, ctx) {
 
 /**
  * The legend: one entry per node label and per edge label of the data (first-use order, with
- * the style a plain element of that label gets), then the profile's `graph.legend` entries, then
- * the `extra` ones (the `legend` option). Each entry: `{kind: 'node'|'edge', text, style}` with a
+ * the style a plain element of that label gets; the spec's `legendLabels` keeps only the node
+ * or edge labels, or none), then the profile's `graph.legend` entries, then the `extra` ones
+ * (the `legend` option). Each entry: `{kind: 'node'|'edge', text, style}` with a
  * resolved style.
  */
 export function legendEntries(graph, spec, extra, ctx) {
   const out = [];
   const seen = { node: new Set(), edge: new Set() };
   const plainCtx = { ...ctx, styleOf: null };
-  for (const n of graph.nodes) {
+  const which = spec && spec.legendLabels !== undefined ? spec.legendLabels : true;
+  const listNodes = which === true || which === 'nodes';
+  const listEdges = which === true || which === 'edges';
+  for (const n of listNodes ? graph.nodes : []) {
     if (seen.node.has(n.label)) continue;
     seen.node.add(n.label);
     const style = resolveNodeStyle({ id: n.label, label: n.label, caption: n.label || '(no label)', data: {}, classes: [] }, spec, plainCtx);
     out.push({ kind: 'node', text: n.label || '(no label)', style });
   }
-  for (const e of graph.edges) {
+  for (const e of listEdges ? graph.edges : []) {
     if (seen.edge.has(e.label)) continue;
     seen.edge.add(e.label);
     const style = resolveEdgeStyle({ id: e.label, label: e.label, caption: e.label || '(no label)', data: {}, classes: [] }, spec, plainCtx);

@@ -402,8 +402,10 @@ A **class** carries the same keys (node and edge keys together). Three are built
 name replaces one, and an unknown name changes nothing. The module can also style each element
 itself with `styleOf(element, kind)`, which returns `{classes, ...keys}` or `null`. Later wins:
 the defaults, `"*"`, the label's entry, the element's `classes`, the classes `styleOf` returns,
-then the keys `styleOf` returns. The legend under the drawing lists the labels drawn, then the
-profile's `legend` entries, then the module's.
+then the keys `styleOf` returns. The legend under the drawing lists the labels drawn (the key
+`legendLabels`: `true` by default, `"nodes"` or `"edges"` for only those, `false` for none: a
+profile that colours by classes lists its own entries), then the profile's `legend` entries,
+then the module's.
 
 | Option | Meaning |
 |---|---|
