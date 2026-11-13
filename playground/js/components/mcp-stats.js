@@ -34,7 +34,7 @@ export const McpStatsDialog = {
     return { dlg, close, load, loading, error, model };
   },
   template: `
-  <dialog ref="dlg" aria-labelledby="mcp-stats-title" @click.self="close" style="max-width: min(980px, 96vw)">
+  <dialog ref="dlg" class="mcp-stats-dialog" aria-labelledby="mcp-stats-title" @click.self="close">
     <div class="dialog-head">
       <h2 id="mcp-stats-title">MCP usage</h2><span class="spacer"></span>
       <button class="btn" @click="load" :disabled="loading">{{ loading ? 'Loading…' : 'Refresh' }}</button>
