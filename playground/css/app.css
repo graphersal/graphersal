@@ -295,6 +295,9 @@ input[type="number"] { width: 80px; }
 .dev-badge { font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
 /* The MCP badge (graphersal --server --mcp): an AI agent may work on the same graph. */
 .mcp-badge { font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; cursor: pointer; border: none; font-family: inherit; }
+/* MCP usage: 150px wider than a plain dialog, so its tables fit without a horizontal scroll. */
+dialog.mcp-stats-dialog { width: min(830px, calc(100% - 32px)); }
+@media (min-width: 862px) { dialog.mcp-stats-dialog .dialog-body { overflow-x: hidden; } }
 
 .muted { color: var(--text-muted); }
 .faint { color: var(--text-faint); }
