@@ -21,7 +21,14 @@
 //   change feed (`changes()`, `GET /api/changes`) tells this page's own changes from those of
 //   another tab or of an AI agent over MCP (`info().mcp`: the server was started with `--mcp`);
 // - the AI Chat (`info().ai`: the server was started with `--ai FILE`, EXPERIMENTAL): the
-//   `ai*` methods drive `/api/ai/conversations*` (js/ai-chat.js); the agent runs in the server.
+//   `ai*` methods drive `/api/ai/conversations*` (js/ai-chat.js); the agent runs in the server;
+// - a host page may add request headers (EXPERIMENTAL), e.g. `Authorization: Bearer <token>`
+//   for a server that requires a token: a classic script that runs before the playground's
+//   modules sets `window.GRAPHERSAL_ENGINE = {headers: {...}}`; it is read ONCE, when the engine
+//   is detected (`hostHeaders`), and every request of this engine carries the headers (the
+//   engine's own headers win on a clash). The values are never logged nor put into a URL; with
+//   host headers `snapshotUrl` answers null (a plain link cannot carry a header, so the Store
+//   menu hides those download links). Unused, nothing changes.
 
 import { Engine } from './engine.js';
 import { newClientId } from '../change-feed.js';
@@ -32,6 +39,59 @@ export const SERVER_ID = 'graphersal-dev';
 
 /** The playground root (the directory of index.html): the dev server serves it at `/`. */
 const DEFAULT_BASE = new URL('../../', import.meta.url);
+
+/** The global a host page sets before the playground's modules run (see the header). */
+export const HOST_CONFIG_GLOBAL = 'GRAPHERSAL_ENGINE';
+
+/** A header name: an HTTP token (RFC 9110). */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/** Headers the engine sets itself; a host cannot replace them. */
+const OWN_HEADERS = Object.freeze(['accept', 'content-type', 'x-graphersal-client']);
+
+/**
+ * The request headers a host asks for (`config.headers`, `config` being
+ * `window.GRAPHERSAL_ENGINE` unless given): a frozen copy of the valid entries and the problems of
+ * the others. An entry is valid when its name is an HTTP token not set by the engine itself
+ * (`Accept`, `Content-Type`, `X-Graphersal-Client`) and its value a string without line breaks.
+ * A problem names the header, never its value (a value can be a secret).
+ * @param {*} [config]
+ * @returns {{headers: Readonly<Object<string,string>>, problems: string[]}}
+ */
+export function hostHeaders(config = globalThis[HOST_CONFIG_GLOBAL]) {
+  const headers = {};
+  const problems = [];
+  if (config === undefined || config === null) return { headers: Object.freeze(headers), problems };
+  if (typeof config !== 'object' || Array.isArray(config)) {
+    return { headers: Object.freeze(headers), problems: [`window.${HOST_CONFIG_GLOBAL} must be an object`] };
+  }
+  const given = config.headers;
+  if (given === undefined || given === null) return { headers: Object.freeze(headers), problems };
+  if (typeof given !== 'object' || Array.isArray(given)) {
+    return { headers: Object.freeze(headers), problems: [`window.${HOST_CONFIG_GLOBAL}.headers must be an object of header names and texts`] };
+  }
+  for (const [name, value] of Object.entries(given)) {
+    if (!HEADER_NAME.test(name)) {
+      problems.push(`the header name ${JSON.stringify(name)} is not valid`);
+    } else if (OWN_HEADERS.includes(name.toLowerCase())) {
+      problems.push(`the header ${name} is set by the engine itself`);
+    } else if (typeof value !== 'string' || /[\r\n\0]/.test(value)) {
+      problems.push(`the header ${name} must be a text without line breaks`);
+    } else {
+      headers[name] = value;
+    }
+  }
+  return { headers: Object.freeze(headers), problems };
+}
+
+/** The host headers of the page, read once; problems warned by header name only. */
+function readHostHeaders() {
+  const { headers, problems } = hostHeaders();
+  if (problems.length && typeof console !== 'undefined') {
+    console.warn(`window.${HOST_CONFIG_GLOBAL}: ${problems.join('; ')} (ignored)`);
+  }
+  return headers;
+}
 
 /** A schema or patch as JSON text: objects are serialized, strings pass unchanged. */
 function asJson(value) {
@@ -47,13 +107,19 @@ export function withPositions(status) {
 export class HttpEngine extends Engine {
   /**
    * @param {Object} info  The answer of `GET /api/info`.
-   * @param {{base?: URL|string, fetch?: Function}} [options]  `base`: the server root;
-   *   `fetch`: the fetch implementation (tests pass a fake).
+   * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
+   *   `base`: the server root; `fetch`: the fetch implementation (tests pass a fake);
+   *   `headers`: the host's request headers (default: `window.GRAPHERSAL_ENGINE.headers`, read
+   *   now; checked by `hostHeaders`).
    */
   constructor(info, options = {}) {
     super();
     this.base = new URL('api/', options.base || DEFAULT_BASE);
     this.fetch = options.fetch || globalThis.fetch.bind(globalThis);
+    /** The host's headers, sent with every request (never logged). */
+    this.hostHeaders = options.headers !== undefined
+      ? hostHeaders({ headers: options.headers }).headers
+      : readHostHeaders();
     this.serverInfo = info;
     this.graph = null;
     this.stopRequested = false;
@@ -65,27 +131,35 @@ export class HttpEngine extends Engine {
    * Asks the serving origin whether it is a Graphersal dev server. Resolves to an HttpEngine,
    * or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
    * is used then).
-   * @param {{base?: URL|string, fetch?: Function}} [options]
+   * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
    * @returns {Promise<HttpEngine|null>}
    */
   static async detect(options = {}) {
     const fetchImpl = options.fetch || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
     if (!fetchImpl) return null;
+    const headers = options.headers !== undefined
+      ? hostHeaders({ headers: options.headers }).headers
+      : readHostHeaders();
     try {
       const url = new URL('api/info', options.base || DEFAULT_BASE);
-      const r = await fetchImpl(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+      const r = await fetchImpl(url, { cache: 'no-store', headers: { ...headers, Accept: 'application/json' } });
       if (!r.ok) return null;
       const info = JSON.parse(await r.text());
       if (!info || info.server !== SERVER_ID) return null;
-      return new HttpEngine(info, { ...options, fetch: fetchImpl });
+      return new HttpEngine(info, { ...options, fetch: fetchImpl, headers });
     } catch (err) {
       return null;
     }
   }
 
+  /** The headers of a request: the host's, then `own`, then this page's client id. */
+  headers(own = {}) {
+    return { ...this.hostHeaders, ...own, 'X-Graphersal-Client': this.clientId };
+  }
+
   /** One request; resolves to the parsed JSON answer, rejects with the server's error text. */
   async request(method, path, body) {
-    const init = { method, cache: 'no-store', headers: { Accept: 'application/json', 'X-Graphersal-Client': this.clientId } };
+    const init = { method, cache: 'no-store', headers: this.headers({ Accept: 'application/json' }) };
     if (method !== 'GET') {
       init.headers['Content-Type'] = 'application/json';
       init.body = body === undefined ? '' : body;
@@ -190,7 +264,7 @@ export class HttpEngine extends Engine {
   async requestBytes(path) {
     let r;
     try {
-      r = await this.fetch(new URL(path, this.base), { method: 'GET', cache: 'no-store' });
+      r = await this.fetch(new URL(path, this.base), { method: 'GET', cache: 'no-store', headers: { ...this.hostHeaders } });
     } catch (err) {
       throw new Error(`The dev server is not reachable (${err && err.message ? err.message : err}); is graphersal --server still running?`);
     }
@@ -244,9 +318,11 @@ export class HttpEngine extends Engine {
 
   /**
    * The download URL of the stored snapshot at `commit` (packed `.gsnap`), with the store's
-   * embedding models unless `withModels` is false.
+   * embedding models unless `withModels` is false. Null when the host sets request headers: a
+   * plain download link cannot carry them (the Store menu then hides the link).
    */
   snapshotUrl(commit, withModels = true) {
+    if (Object.keys(this.hostHeaders).length) return null;
     const without = withModels ? '' : '&models=without';
     return new URL(`store/snapshot?commit=${encodeURIComponent(String(commit))}${without}`, this.base).href;
   }
@@ -396,7 +472,7 @@ export class HttpEngine extends Engine {
   async saveCatalog() {
     let r;
     try {
-      r = await this.fetch(new URL('catalog/export', this.base), { method: 'GET', cache: 'no-store', headers: { 'X-Graphersal-Client': this.clientId } });
+      r = await this.fetch(new URL('catalog/export', this.base), { method: 'GET', cache: 'no-store', headers: this.headers() });
     } catch (err) {
       throw new Error(`The dev server is not reachable (${err && err.message ? err.message : err}); is graphersal --server still running?`);
     }

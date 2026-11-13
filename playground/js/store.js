@@ -234,8 +234,8 @@ export async function init() {
       state.engineInfo = await engine.info();
       state.storeView = state.engineInfo.view || null;
       const build = state.engineInfo.server ? null : await loadBuildInfo();
-      state.versionLabel = versionLabel(state.engineInfo.version, build);
       applyProfile();
+      state.versionLabel = versionLabel(state.engineInfo.version, build, state.profileError ? null : state.ui.profile);
     }
   } finally {
     engineGate.open();

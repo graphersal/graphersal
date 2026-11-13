@@ -3,7 +3,7 @@
 // Run: node --test playground/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
+import { HttpEngine, SERVER_ID, hostHeaders } from '../js/engine/http-engine.js';
 import { createReadyGate } from '../js/ready.js';
 
 const BASE = 'http://127.0.0.1:8080/';
@@ -425,4 +425,100 @@ test('info() names the API mode: allow-list only when the server says so', async
   assert.equal((await allow.info()).apiMode, 'allow-list');
   const odd = new HttpEngine({ ...INFO, apiMode: 'something' }, { base: BASE, fetch: fakeFetch({}).fetch });
   assert.equal((await odd.info()).apiMode, 'full');
+});
+
+// The host's request headers (`window.GRAPHERSAL_ENGINE = {headers}`, EXPERIMENTAL).
+
+test('hostHeaders: valid entries are kept, problems name the header but never its value', () => {
+  assert.deepEqual(hostHeaders(undefined), { headers: {}, problems: [] });
+  assert.deepEqual(hostHeaders({}), { headers: {}, problems: [] });
+  const secret = 'Bearer s3cr3t';
+  const { headers, problems } = hostHeaders({
+    headers: {
+      Authorization: secret,
+      'X-Extra': 'one',
+      'bad name': 'x',
+      Accept: 'text/html',
+      'x-graphersal-client': 'other',
+      'X-Broken': 'a\r\nInjected: 1',
+      'X-Number': 7,
+    },
+  });
+  assert.deepEqual(headers, { Authorization: secret, 'X-Extra': 'one' });
+  assert.ok(Object.isFrozen(headers));
+  assert.equal(problems.length, 5, problems.join('\n'));
+  assert.ok(problems.every((p) => !p.includes('s3cr3t') && !p.includes('Injected') && !p.includes('other')), problems.join('\n'));
+  assert.match(hostHeaders('token').problems[0], /must be an object/);
+  assert.match(hostHeaders({ headers: [] }).problems[0], /headers must be an object/);
+});
+
+test('host headers: read once from window.GRAPHERSAL_ENGINE and sent with every request', async () => {
+  const response = { ok: true, terminal: 'execute', execution: { results: [1], error: null, profile: null }, graph: {} };
+  const gsnap = new Uint8Array([1, 2, 3]);
+  const { fetch, calls } = fakeFetch({
+    'GET /api/info': [200, INFO],
+    'POST /api/execute': [200, response],
+    'POST /api/query': [200, { ok: true, results: [] }],
+    'GET /api/changes': [200, { seq: 1, changes: [] }],
+    'GET /api/catalog/export': [200, '{"definitions":[]}\n'],
+  });
+  const withBytes = async (url, init = {}) => {
+    if (new URL(url).pathname === '/api/export') {
+      calls.push({ method: 'GET', path: '/api/export', init });
+      return { ok: true, status: 200, arrayBuffer: async () => gsnap.buffer };
+    }
+    return fetch(url, init);
+  };
+  globalThis.GRAPHERSAL_ENGINE = { headers: { Authorization: 'Bearer abc' } };
+  let engine;
+  try {
+    engine = await HttpEngine.detect({ base: BASE, fetch: withBytes });
+  } finally {
+    delete globalThis.GRAPHERSAL_ENGINE;
+  }
+  // Read once: a later change of the global does not reach the engine.
+  globalThis.GRAPHERSAL_ENGINE = { headers: { Authorization: 'Bearer changed' } };
+  try {
+    await engine.execute('g.v().count()');
+    await engine.runSavedQuery('memory.memories', {});
+    await engine.changes();
+    await engine.saveCatalog();
+    await engine.saveGraph('snapshot');
+  } finally {
+    delete globalThis.GRAPHERSAL_ENGINE;
+  }
+  assert.deepEqual(calls.map((c) => c.path.split('?')[0]),
+    ['/api/info', '/api/execute', '/api/query', '/api/changes', '/api/catalog/export', '/api/export']);
+  for (const call of calls) {
+    assert.equal(call.init.headers.Authorization, 'Bearer abc', call.path);
+    assert.ok(!call.path.includes('abc'), `the token is never in a URL: ${call.path}`);
+  }
+  // The engine's own headers stay as they were.
+  assert.equal(calls[1].init.headers['Content-Type'], 'application/json');
+  assert.equal(calls[1].init.headers['X-Graphersal-Client'], engine.clientId);
+  // A download link cannot carry a header: no snapshot links then.
+  assert.equal(engine.snapshotUrl(3), null);
+});
+
+test('host headers: unused, requests and snapshot links are exactly as before', async () => {
+  const { fetch, calls } = fakeFetch({ 'GET /api/info': [200, INFO], 'GET /api/changes': [200, { seq: 1, changes: [] }] });
+  const engine = await HttpEngine.detect({ base: BASE, fetch });
+  await engine.changes();
+  assert.deepEqual(calls[0].init.headers, { Accept: 'application/json' });
+  assert.deepEqual(calls[1].init.headers, { Accept: 'application/json', 'X-Graphersal-Client': engine.clientId });
+  assert.equal(engine.snapshotUrl(3), `${BASE}api/store/snapshot?commit=3`);
+  // Invalid host headers are ignored with a warning that names no value.
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (text) => warnings.push(text);
+  globalThis.GRAPHERSAL_ENGINE = { headers: { 'bad name': 'secret-value' } };
+  try {
+    const odd = new HttpEngine(INFO, { base: BASE, fetch });
+    assert.deepEqual(odd.hostHeaders, {});
+  } finally {
+    delete globalThis.GRAPHERSAL_ENGINE;
+    console.warn = warn;
+  }
+  assert.equal(warnings.length, 1);
+  assert.ok(!warnings[0].includes('secret-value'), warnings[0]);
 });
