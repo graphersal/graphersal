@@ -233,6 +233,7 @@ unless something asks for another one. A profile names:
 |---|---|
 | `name` | lowercase letters, digits and `-` |
 | `title` | the page title and the top bar's name |
+| `version` | optional: the version of the product the profile belongs to (`"0.1.0"`); the top bar shows it (`v0.1.0`) beside the name instead of the engine's version, which moves into its tooltip |
 | `tabs` | the tabs: `{"id", "title", "builtin": "workspace"}` (the workspace of this page, at most once) or `{"id", "title", "module": "<path>.js"}` (a tab of the profile's own); with more than one tab the page shows a tab row under the top bar |
 | `startTab` | the tab the page opens on |
 | `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
@@ -435,6 +436,30 @@ A host built on the dev server's core can serve such a profile in **allow-list m
 /api/info` `apiMode: "allow-list"`): the server answers only the saved queries the host selected,
 so only a profile whose tabs are all modules can be shown there (a profile with the workspace is
 an error naming the reason). See [the HTTP API](../persistence/dev_server.md#the-http-api-experimental).
+
+### Request headers of a host
+
+> **EXPERIMENTAL**, like UI profiles.
+
+A host whose server wants more on every request than the playground sends (for example a token,
+`Authorization: Bearer <token>`) tells the playground before it starts: a classic script that
+runs before the playground's modules sets
+
+```html
+<script>
+  window.GRAPHERSAL_ENGINE = { headers: { Authorization: 'Bearer ' + token } };
+</script>
+```
+
+The page reads it once, when it finds the server, and every request it sends to the server's
+`/api/` carries these headers (the API calls of the workspace and of the profile API alike; the
+page's own `Accept`, `Content-Type` and `X-Graphersal-Client` cannot be replaced). A header with an
+invalid name or a value that is not a single line of text is left out with a warning in the
+browser console that names the header, never its value. The values never go into an address or
+a log. A plain link cannot carry a header, so with host headers the Store menu shows no download
+links of stored snapshots (*Download current state* still works). Without the setting the page
+sends exactly what it always sent. Requests a profile's modules send themselves, to endpoints of
+the host's own, add the header themselves.
 
 ## The graph drawing
 

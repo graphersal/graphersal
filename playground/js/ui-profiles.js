@@ -15,6 +15,10 @@
 // never ignored):
 //   name      [a-z][a-z0-9-]*, at most 40 characters
 //   title     the page title and the top bar's brand (1..80 characters)
+//   version   optional: the version of the product the profile belongs to (1..40 characters,
+//             e.g. "0.1.0"); the top bar then shows it (`v0.1.0`) beside the brand instead of
+//             the engine's version, which moves into its tooltip. Absent: the engine's version
+//             as always.
 //   startTab  the id of the tab the page opens on
 //   can       {key: value}: what the user can reach. Keys: CAN_KEYS. A value is true, false,
 //             'wasm' (only with the WebAssembly engine) or 'server' (only with the dev server);
@@ -78,7 +82,7 @@ export const BUILTIN_TABS = Object.freeze(['workspace']);
 export const MAX_TABS = 12;
 
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const PROFILE_KEYS = Object.freeze(['name', 'title', 'startTab', 'can', 'tabs', 'cards', 'graph', 'files']);
+const PROFILE_KEYS = Object.freeze(['name', 'title', 'version', 'startTab', 'can', 'tabs', 'cards', 'graph', 'files']);
 const TAB_KEYS = Object.freeze(['id', 'title', 'builtin', 'module']);
 
 const allCan = (value) => Object.freeze(Object.fromEntries(CAN_KEYS.map((key) => [key, value])));
@@ -199,9 +203,9 @@ function isSafePath(path) {
 
 /**
  * Checks a profile object and returns its normalized, frozen copy (`cards` and `graph` default
- * to `{}`, `files` to ''). Throws a ProfileError naming every problem.
+ * to `{}`, `files` to ''; `version` only when given). Throws a ProfileError naming every problem.
  * @param {*} input
- * @returns {Readonly<{name:string, title:string, startTab:string, can:Object, tabs:Array, cards:Object, graph:Object, files:string}>}
+ * @returns {Readonly<{name:string, title:string, version?:string, startTab:string, can:Object, tabs:Array, cards:Object, graph:Object, files:string}>}
  */
 export function validateProfile(input) {
   const problems = [];
@@ -217,6 +221,10 @@ export function validateProfile(input) {
   }
   if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 80) {
     problems.push('"title" must be a text of 1 to 80 characters');
+  }
+  if (input.version !== undefined
+    && (typeof input.version !== 'string' || !input.version.trim() || input.version.length > 40 || /\s/.test(input.version))) {
+    problems.push('"version" must be a text of 1 to 40 characters without spaces (e.g. "0.1.0")');
   }
 
   const can = {};
@@ -290,6 +298,7 @@ export function validateProfile(input) {
   return deepFreeze({
     name: input.name,
     title: input.title,
+    ...(input.version === undefined ? {} : { version: input.version }),
     startTab: input.startTab,
     can,
     tabs,

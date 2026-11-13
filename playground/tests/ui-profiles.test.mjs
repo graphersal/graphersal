@@ -218,3 +218,11 @@ test('checkApiMode: a server in allow-list mode refuses a profile with the works
       && e.problems.length === 2);
   }
 });
+
+test('version: optional product version, kept only when given', () => {
+  assert.equal('version' in validateProfile(minimal()), false);
+  assert.equal(validateProfile(minimal({ version: '0.1.0' })).version, '0.1.0');
+  for (const version of ['', ' ', '0.1 beta', 'x'.repeat(41), 1, null]) {
+    assert.throws(() => validateProfile(minimal({ version })), /"version" must be a text of 1 to 40 characters/, String(version));
+  }
+});
