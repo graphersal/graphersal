@@ -413,7 +413,7 @@ then the module's.
 | `onSelect(selection)` | a click chose `{kind, id, label, data, element}`, or empty space (`null`) |
 | `onExpand(node)` | a double click on a node, or the side card's **Expand** button: the module reads the node's neighbours and merges them in with `api.mergeGraph` |
 | `selected` | `{kind, id}` or `null`: the selection set from outside (for example a tab parameter) |
-| `card` | `true` or `{actions, onAction(id, selection), expand}`: a side card of the selected element through `api.card(label, element.data, ...)`; `expand` names the Expand button (`false`: none) |
+| `card` | `true` or `{actions, onAction(id, selection), expand}`: a side card of the selected element through `api.card(label, element.data, ...)`; `expand` names the Expand button (`false`: none; a function `(selection) => text or false` decides per node) |
 | `legend` | `true` (default), `false`, or extra entries `[{text, node}]` / `[{text, edge}]` |
 | `layout` | `cose` (default), `circle`, `concentric`, `breadthfirst` or `grid` |
 | `height` | the drawing's CSS height (default `520px`) |

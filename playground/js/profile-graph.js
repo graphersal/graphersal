@@ -592,7 +592,7 @@ export const HIGHLIGHT_MODES = Object.freeze(['neighbours', 'element', 'none']);
  *   card       false (default: no side card) | true | {actions, onAction, expand}: the side card
  *              of the selected element through `api.card` (js/profile-cards.js; `actions` a list
  *              or (element) => list; `expand` a button text that calls onExpand, default "Expand"
- *              when onExpand is given, false for none)
+ *              when onExpand is given, false for none, or (selection) => text | false per node)
  *   legend     true (default) | false | [{text, node} | {text, edge}]: extra legend entries
  *   layout     one of GRAPH_LAYOUTS (default 'cose')
  *   height     the drawing's height (CSS length, default '520px')
@@ -623,7 +623,9 @@ export function checkGraphOptions(options) {
       }
       if (card.actions !== undefined && !Array.isArray(card.actions) && typeof card.actions !== 'function') problems.push('"card.actions" must be a list or a function (element) => list');
       if (card.onAction !== undefined && typeof card.onAction !== 'function') problems.push('"card.onAction" must be a function');
-      if (card.expand !== undefined && card.expand !== false && (typeof card.expand !== 'string' || !card.expand.trim())) problems.push('"card.expand" must be a button text or false');
+      if (card.expand !== undefined && card.expand !== false && typeof card.expand !== 'function' && (typeof card.expand !== 'string' || !card.expand.trim())) {
+        problems.push('"card.expand" must be a button text, false or a function (selection) => text | false');
+      }
     }
   }
   if (options.legend !== undefined && typeof options.legend !== 'boolean') problems.push(...legendProblems(options.legend, 'legend'));

@@ -249,7 +249,7 @@ export const ProfileGraph = {
           return renderer;
         }, { redraw: false });
       }
-      const positions = shownIds && old ? carryPositions(shownIds, old, checked.value.graph, { anchor: lastExpanded }) : null;
+      const positions = shownIds && old ? carryPositions(shownIds, old, checked.value.graph, { anchor: lastExpanded, spacing: 90 }) : null;
       shownSig = sig;
       shownIds = v.vertexIds.slice();
       if (!positions) userMoved = false;
@@ -412,8 +412,9 @@ export const ProfileGraph = {
         if (Array.isArray(actions)) opts.actions = actions;
         if (card.onAction) opts.onAction = (id) => card.onAction(id, sel);
       }
-      const expandText = typeof card === 'object' && card.expand !== undefined ? card.expand : 'Expand';
-      const canExpand = sel.kind === 'node' && props.options.onExpand && expandText !== false;
+      const option = typeof card === 'object' && card.expand !== undefined ? card.expand : 'Expand';
+      const expandText = typeof option === 'function' ? option(sel) : option;
+      const canExpand = sel.kind === 'node' && props.options.onExpand && typeof expandText === 'string' && expandText.trim() !== '';
       return h('aside', { class: 'profile-graph-side', 'aria-label': `Selected ${sel.kind}` }, [
         h('div', { class: 'profile-graph-side-head' }, [
           h('span', { class: 'badge' }, sel.label || sel.kind),

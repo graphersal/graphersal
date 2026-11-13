@@ -317,11 +317,12 @@ test('checkGraphOptions: defaults, and every mistake named', () => {
   for (const part of [
     'unknown option "onClick"', '"styleOf" must be a function', '"selected" must be null or {kind: "node"|"edge", id}',
     '"card" has the unknown key "extra"', '"card.actions" must be a list or a function', '"card.onAction" must be a function',
-    '"card.expand" must be a button text or false', '"legend" must be a list', '"layout" must be one of cose, circle',
+    '"card.expand" must be a button text, false or a function', '"legend" must be a list', '"layout" must be one of cose, circle',
     '"height" must be a CSS length', '"highlight" must be one of neighbours, element, none', '"emptyText" must be a text',
   ]) assert.ok(err.message.includes(part), `missing: ${part}\n${err.message}`);
   assert.equal(checkGraphOptions({ card: true }).card, true);
   assert.equal(checkGraphOptions({ card: { expand: false } }).card.expand, false);
+  assert.equal(typeof checkGraphOptions({ card: { expand: (sel) => (sel.label === 'memory' ? 'Expand' : false) } }).card.expand, 'function');
 });
 
 test('colorOf: hex as it is, tokens resolved, the fallback otherwise', () => {

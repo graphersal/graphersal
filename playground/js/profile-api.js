@@ -63,7 +63,7 @@
 //         card      false (default) | true | {actions, onAction, expand}: the side card of the
 //                   selected element through `api.card(label, element.data, ...)` (`actions` a
 //                   list or (selection) => list; `onAction(id, selection)`; `expand` the Expand
-//                   button's text, false for none);
+//                   button's text, false for none, or (selection) => text | false per node);
 //         legend    true (default: the labels drawn and the profile's `graph.legend`) | false |
 //                   extra entries [{text, node: style} | {text, edge: style}];
 //         layout    'cose' (default) | 'circle' | 'concentric' | 'breadthfirst' | 'grid';
