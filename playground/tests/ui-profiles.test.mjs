@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_PROFILES, BUILTIN_NAMES, CAN_KEYS, CAN_GROUPS, ProfileError, validateProfile,
   resolveProfile, createUi, profileFromHash, tabRouteFromHash, routeHash, RESERVED_PARAMS,
-  checkApiMode,
+  checkApiMode, headerProblems,
 } from '../js/ui-profiles.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -225,4 +225,36 @@ test('version: optional product version, kept only when given', () => {
   for (const version of ['', ' ', '0.1 beta', 'x'.repeat(41), 1, null]) {
     assert.throws(() => validateProfile(minimal({ version })), /"version" must be a text of 1 to 40 characters/, String(version));
   }
+});
+
+test('header: a top-bar module, validated like a module tab, kept only when given', () => {
+  const ok = validateProfile(minimal({ header: { module: 'top/header.js' } }));
+  assert.deepEqual(ok.header, { module: 'top/header.js' });
+  assert.ok(Object.isFrozen(ok.header));
+  assert.equal('header' in validateProfile(minimal()), false, 'absent stays absent');
+  const ui = createUi(validateProfile(minimal({ header: { module: 'h.mjs' }, files: 'p/' })));
+  assert.equal(ui.moduleUrl(ui.header, 'http://127.0.0.1:8080/'), 'http://127.0.0.1:8080/p/h.mjs');
+  assert.equal(createUi(validateProfile(minimal())).header, null);
+  const bad = (header, part) => {
+    assert.throws(() => validateProfile(minimal({ header })), (e) => e instanceof ProfileError && e.message.includes(part), part);
+  };
+  for (const module of ['../x.js', 'https://evil.example/x.js', '//evil.example/x.js', '/abs.js', 'a/./b.js', 'x.css', 'a\\b.js', 'x.js?v=1', 3, undefined]) {
+    bad({ module }, '"header.module" must be');
+  }
+  bad({ module: 'h.js', params: {} }, '"header" has the unknown key "params"');
+  bad('h.js', '"header" must be an object');
+  bad([], '"header" must be an object');
+  assert.deepEqual(headerProblems({ module: 'h.js' }), []);
+  assert.equal(headerProblems({ title: 'x' }).length, 2, 'the unknown key and the missing module');
+});
+
+test('demo: its header module file exists; the workspace renders the header left of the buttons', () => {
+  const demo = BUILTIN_PROFILES.demo;
+  assert.ok(existsSync(root + demo.files + demo.header.module));
+  const ws = readFileSync(root + 'js/components/workspace.js', 'utf8');
+  const spacer = ws.indexOf('<span class="spacer"></span>', ws.indexOf('<header class="topbar">'));
+  const header = ws.indexOf('<profile-header');
+  const theme = ws.indexOf("can('theme')");
+  const share = ws.indexOf("can('share')", spacer);
+  assert.ok(spacer > 0 && spacer < header && header < share && header < theme, 'spacer < header module < Share < theme');
 });

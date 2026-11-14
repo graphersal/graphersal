@@ -28,6 +28,11 @@
 //             tabs, ids [a-z][a-z0-9-]* and unique; at most one builtin tab. A module tab's
 //             module is loaded with `import(files + module)`: it default-exports a Vue
 //             component that gets the props `api` (js/profile-api.js) and `params`.
+//   header    optional: {module: '<path>.js'}, a module of the profile rendered in the top bar
+//             (right of the spacer, left of the top bar's buttons): loaded like a module tab's
+//             module, it default-exports a Vue component that gets the prop `api` (no
+//             `params`); one per page, shown on every tab (a choice that affects every tab,
+//             such as a project filter, belongs here rather than inside each tab).
 //   cards     {<label>: card template}: the cards of `api.card(label, row, options)`; the
 //             template format and its checks are js/profile-cards.js (an object, may be empty)
 //   graph     the styles of `api.graph` views per label, classes and legend entries: the
@@ -82,8 +87,9 @@ export const BUILTIN_TABS = Object.freeze(['workspace']);
 export const MAX_TABS = 12;
 
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const PROFILE_KEYS = Object.freeze(['name', 'title', 'version', 'startTab', 'can', 'tabs', 'cards', 'graph', 'files']);
+const PROFILE_KEYS = Object.freeze(['name', 'title', 'version', 'startTab', 'can', 'tabs', 'header', 'cards', 'graph', 'files']);
 const TAB_KEYS = Object.freeze(['id', 'title', 'builtin', 'module']);
+const HEADER_KEYS = Object.freeze(['module']);
 
 const allCan = (value) => Object.freeze(Object.fromEntries(CAN_KEYS.map((key) => [key, value])));
 
@@ -114,7 +120,7 @@ export const BUILTIN_PROFILES = deepFreeze({
   },
   // A small profile for the tests and the smoke check: the workspace without the catalog,
   // optimizer, store, share, examples and AI Chat, plus two tabs of its own that call the
-  // profile API (js/profiles/demo/: cards in Hello, the graph view in Graph).
+  // profile API (js/profiles/demo/: cards in Hello, the graph view in Graph) and a top-bar module.
   demo: {
     name: 'demo',
     title: 'Graphersal Demo',
@@ -138,6 +144,8 @@ export const BUILTIN_PROFILES = deepFreeze({
       { id: 'graph', title: 'Graph', module: 'graph.js' },
       { id: 'play', title: 'Playground', builtin: 'workspace' },
     ],
+    // The top-bar module (js/profiles/demo/header.js): the engine's kind and a Graph button.
+    header: { module: 'header.js' },
     // The person card of the Hello tab (js/profile-cards.js): `senior` and `about` are fields
     // the tab adds to each row of its saved query; `city` is never there (renders nothing).
     cards: {
@@ -201,11 +209,32 @@ function isSafePath(path) {
   return !path.split('/').some((segment) => segment === '..' || segment === '.');
 }
 
+/** Whether `module` is a module file path below `files`: relative, a .js/.mjs file, safe. */
+const isModulePath = (module) => typeof module === 'string' && /\.m?js$/.test(module) && !module.startsWith('/') && isSafePath(module);
+
+/**
+ * The problems of a profile's `header` key (`{module: '<path>.js'}`): an empty list when it is
+ * valid. Unknown keys are problems.
+ * @param {*} header
+ * @returns {string[]}
+ */
+export function headerProblems(header) {
+  if (!isPlainObject(header)) return ['"header" must be an object {"module": "<path>.js"}'];
+  const problems = [];
+  for (const key of Object.keys(header)) {
+    if (!HEADER_KEYS.includes(key)) problems.push(`"header" has the unknown key ${quote(key)} (the keys are ${HEADER_KEYS.join(', ')})`);
+  }
+  if (!isModulePath(header.module)) {
+    problems.push('"header.module" must be a relative path of a .js file below "files" (no "..", no scheme)');
+  }
+  return problems;
+}
+
 /**
  * Checks a profile object and returns its normalized, frozen copy (`cards` and `graph` default
- * to `{}`, `files` to ''; `version` only when given). Throws a ProfileError naming every problem.
+ * to `{}`, `files` to ''; `version` and `header` only when given). Throws a ProfileError naming every problem.
  * @param {*} input
- * @returns {Readonly<{name:string, title:string, version?:string, startTab:string, can:Object, tabs:Array, cards:Object, graph:Object, files:string}>}
+ * @returns {Readonly<{name:string, title:string, version?:string, startTab:string, can:Object, tabs:Array, header?:{module:string}, cards:Object, graph:Object, files:string}>}
  */
 export function validateProfile(input) {
   const problems = [];
@@ -276,7 +305,7 @@ export function validateProfile(input) {
         if (!BUILTIN_TABS.includes(tab.builtin)) {
           problems.push(`${at}.builtin must be one of ${BUILTIN_TABS.join(', ')}`);
         }
-      } else if (typeof tab.module !== 'string' || !/\.m?js$/.test(tab.module) || tab.module.startsWith('/') || !isSafePath(tab.module)) {
+      } else if (!isModulePath(tab.module)) {
         problems.push(`${at}.module must be a relative path of a .js file below "files" (no "..", no scheme)`);
       }
       tabs.push(Object.freeze({ ...tab }));
@@ -287,6 +316,7 @@ export function validateProfile(input) {
     }
   }
 
+  if (input.header !== undefined) problems.push(...headerProblems(input.header));
   if (input.cards !== undefined) problems.push(...cardsProblems(input.cards));
   if (input.graph !== undefined) problems.push(...graphSpecProblems(input.graph));
   const files = input.files === undefined ? '' : input.files;
@@ -302,6 +332,7 @@ export function validateProfile(input) {
     startTab: input.startTab,
     can,
     tabs,
+    ...(input.header === undefined ? {} : { header: { module: input.header.module } }),
     cards: JSON.parse(JSON.stringify(input.cards || {})),
     graph: JSON.parse(JSON.stringify(input.graph || {})),
     files,
@@ -455,11 +486,13 @@ export function createUi(profile, { server = false } = {}) {
       if (value === 'server') return server;
       return value === true;
     },
+    /** The profile's top-bar module (`{module}`), or null when it has none. */
+    header: profile.header || null,
     /** The tab `id`, or null. */
     tab(id) {
       return profile.tabs.find((t) => t.id === id) || null;
     },
-    /** The URL of a module tab's file, resolved against `base` (the page's address). */
+    /** The URL of a module tab's (or the header's) file, resolved against `base` (the page's address). */
     moduleUrl(tab, base) {
       return new URL(profile.files + tab.module, base).href;
     },
