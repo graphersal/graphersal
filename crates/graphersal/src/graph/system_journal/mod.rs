@@ -5,12 +5,14 @@
 //!
 //! Every graph has one ([`crate::graph::Graph::system_journal`]): in memory (the newest
 //! [`MEMORY_CAPACITY`] records), or the Store's, which keeps it in `journal/` segments. Records
-//! are written by the engine only (declared kinds, `catalogue.rs`); hosts read them
-//! ([`SystemJournal::query`], [`SystemJournal::subscribe`]) and forward them
+//! are of declared kinds: the engine's (`catalogue.rs`, written by the crate only) and a host's
+//! (`host.rs`, declared at run time and written through [`SystemJournal::record`]); hosts read
+//! them ([`SystemJournal::query`], [`SystemJournal::subscribe`]) and forward them
 //! ([`JournalSink`]). The journal decides nothing: a failed write never fails an operation.
 
 pub(crate) mod catalogue;
 pub(crate) mod collapse;
+pub(crate) mod host;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -635,6 +637,31 @@ pub enum JournalError {
         /// The operation.
         operation: String,
     },
+    /// A host's event kind declaration was refused (`system_journal::declare`).
+    #[error("the system journal event kind `{kind}` cannot be declared: {reason}")]
+    #[non_exhaustive]
+    InvalidDeclaration {
+        /// The kind's code.
+        kind: String,
+        /// What is wrong.
+        reason: String,
+    },
+    /// A host recorded an event of a kind nobody declared ([`SystemJournal::record`]).
+    #[error("the system journal event kind `{kind}` is not declared")]
+    #[non_exhaustive]
+    Undeclared {
+        /// The kind's code.
+        kind: String,
+    },
+    /// A host's event does not match its kind's declaration ([`SystemJournal::record`]).
+    #[error("the system journal event of kind `{kind}` was refused: {reason}")]
+    #[non_exhaustive]
+    InvalidEvent {
+        /// The kind's code.
+        kind: String,
+        /// What is wrong.
+        reason: String,
+    },
 }
 
 impl JournalError {
@@ -659,6 +686,23 @@ impl JournalError {
             }
             JournalError::Unsupported { .. } => {
                 "This journal cannot do that here (an in-memory journal has no files)."
+            }
+            JournalError::InvalidDeclaration { .. } => {
+                "Give the kind a code like `myhost.job_failed` and a source like `myhost.jobs`, \
+                 whose first segment names the host (not `store`, `journal`, `auth` or another \
+                 segment of the engine's events), a description, fields named once, and a \
+                 collapse key of declared fields; declare each code with one declaration per \
+                 process (book page \"System Journal\", section \"Host events\")."
+            }
+            JournalError::Undeclared { .. } => {
+                "Declare the kind first with system_journal::declare(HostEventKind::new(..)), \
+                 once per process, then record its events (book page \"System Journal\", \
+                 section \"Host events\")."
+            }
+            JournalError::InvalidEvent { .. } => {
+                "Give every required field of the kind's declaration, each once, and only \
+                 declared fields (system_journal::declared_kinds lists them); the engine's own \
+                 kinds are written by the engine only."
             }
         }
     }
@@ -739,7 +783,7 @@ pub(crate) struct Draft {
     pub(crate) time: i64,
 }
 
-/// What the engine reports (crate-internal: hosts do not write records): a message plus the
+/// What the engine reports (crate-internal: hosts record through `host::HostEvent`): a message plus the
 /// envelope's optional parts and the kind's declared fields.
 pub(crate) struct Event {
     message: String,
@@ -809,7 +853,8 @@ impl Event {
         debug_assert!(
             catalogue::EVENT_KINDS
                 .iter()
-                .any(|declared| std::ptr::eq(*declared, kind)),
+                .any(|declared| std::ptr::eq(*declared, kind))
+                || host::is_declared(kind),
             "undeclared journal event kind {}",
             kind.code
         );
@@ -1291,35 +1336,37 @@ impl SystemJournal {
     /// of the records that end the operation it starts).
     pub(crate) fn emit_op(&self, kind: &'static EventKind, event: Event) -> u64 {
         let time = self.clock.now();
-        let draft = event.into_draft(kind, time);
-        let mut seq = 0;
+        self.admit(event.into_draft(kind, time)).unwrap_or(0)
+    }
+
+    /// [`Self::emit`] at `time` (never earlier than the last record).
+    pub(crate) fn emit_at(&self, kind: &'static EventKind, event: Event, time: i64) {
+        self.admit(event.into_draft(kind, time));
+    }
+
+    /// Hands `draft` to the collapser (which writes it, or counts it as a repeat) and delivers
+    /// what was written. Returns the draft's seq when it was written.
+    fn admit(&self, draft: Draft) -> Option<u64> {
+        let kind = draft.kind;
+        let mut seq = None;
         {
             let mut state = self.state.lock();
             let state = &mut *state;
             let mut collapser = std::mem::take(&mut state.collapse);
-            collapser.admit(draft, &mut |draft| {
-                seq = self.write_locked(state, draft);
-                seq
+            collapser.admit(draft, &mut |written| {
+                let written_kind = written.kind;
+                let written_seq = self.write_locked(state, written);
+                // The collapser may write `journal.repeated` records before or after it.
+                if seq.is_none() && std::ptr::eq(written_kind, kind) {
+                    seq = Some(written_seq);
+                }
+                written_seq
             });
             state.collapse = collapser;
         }
         self.changed.notify_all();
         self.deliver();
         seq
-    }
-
-    /// [`Self::emit`] at `time` (never earlier than the last record).
-    pub(crate) fn emit_at(&self, kind: &'static EventKind, event: Event, time: i64) {
-        let draft = event.into_draft(kind, time);
-        {
-            let mut state = self.state.lock();
-            let state = &mut *state;
-            let mut collapser = std::mem::take(&mut state.collapse);
-            collapser.admit(draft, &mut |draft| self.write_locked(state, draft));
-            state.collapse = collapser;
-        }
-        self.changed.notify_all();
-        self.deliver();
     }
 
     fn close_groups(&self, state: &mut State, time: i64) {

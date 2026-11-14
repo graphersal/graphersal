@@ -31,7 +31,7 @@ Every record has the same envelope plus typed fields:
 | `time` | microseconds since the Unix epoch (UTC), from the instance clock that also times the commits: a record about commit N is never earlier than commit N |
 | `level` | `error`, `warn`, `notice` or `info` (most severe first) |
 | `source` | a dotted hierarchy: `store`, `store.backup`, `store.damage`, `auth`, `clock` |
-| `kind` | the stable event code (`store.backup_done`); every kind is declared below |
+| `kind` | the stable event code (`store.backup_done`); every kind is declared: the engine's below, a host's by the host ([Host events](#host-events)) |
 | `message` | the rendered English text |
 | `op`, `parent` | the operation a record belongs to, and its parent operation (when set) |
 | `commit` | the commit in the WAL the event relates to (when set) |
@@ -172,6 +172,66 @@ while it holds, a `journal.state_reminder` repeats its current values once per h
   allows it. The Rust API itself asks nothing (it is the host's).
 
 The journal has no DSL access yet.
+
+## Host events
+
+A host built on the engine (a server, a daemon embedding a Store) records its own operational
+events in the same journal, beside the engine's: a panic it caught, an item it failed to process,
+its own start and stop, an install change. They then show wherever the journal shows
+(`graphersal store journal`, the MCP `journal` tool, `/api/journal`, the playground), with the
+same filters, collapsing, sinks and `tracing` mirror.
+
+A host kind is declared once per process with `graphersal::system_journal::declare`, like a kind
+of the catalogue below: a stable code, a source, a level, one sentence and its fields, and
+optionally a collapse key ("Repeats and states"; host kinds are events, not states).
+
+```rust
+# use graphersal::prelude::*;
+use graphersal::system_journal::{HostEvent, HostEventKind, Level, declare};
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let graph = Graph::new(TraversalGraph::new());
+
+declare(
+    HostEventKind::new("myhost.job_failed", "myhost.jobs", Level::Error,
+                       "A background job of the host failed.")
+        .field("job", "the job's name")
+        .optional_field("cause", "the error")
+        .collapse_by(["job"]),
+)?;
+
+let seq = graph.system_journal()?.record(
+    HostEvent::new("myhost.job_failed", "the job nightly panicked")
+        .field("job", "nightly")
+        .field("cause", "index out of bounds"),
+)?;
+# assert!(seq.is_some());
+# Ok(())
+# }
+```
+
+The rules:
+
+- The code has two or more dotted segments, the source one or more, each of lowercase ASCII
+  letters, digits and `_`, starting with a letter. The first segment of both names the host: it
+  may not be a first segment of the engine's own codes or sources (`store`, `journal`, `auth`,
+  `clock`, ...) nor `graphersal`, so `source_prefix("store")` never returns a host record. Pick
+  a prefix naming your product: an engine release that adds a new first segment is listed in its
+  release notes.
+- A declaration holds for the whole process and every journal in it. Declaring the same kind
+  again with the same declaration is a no-op (a component may declare its kinds at every start);
+  a different declaration of a declared code, or a code of the engine's catalogue, is refused
+  (`JournalError::InvalidDeclaration`). `declared_kinds()` lists the declarations.
+- `SystemJournal::record` refuses an undeclared kind (`JournalError::Undeclared`), an engine kind,
+  a field that is not declared or given twice, and a missing required field
+  (`JournalError::InvalidEvent`): nothing is written then. Fields are kept in declaration order.
+- Otherwise a host record is written like an engine record: timed by the instance clock, `error`
+  records durable at once and the others batched, and a failed write of the stored journal is a
+  lost record, never an error of `record`. It returns the record's `seq` (the `op` of later
+  records of the same operation, `HostEvent::op`), or `None` when it was counted as a repeat.
+  The principal defaults to the thread's channel (`host` unless a front end set one).
+- Records keep the engine's layout: a reader of any version shows a host record by its message
+  and fields, like a kind of a newer version. A host record holds names, counts, durations and
+  ids like every record: never data values, query text or secrets.
 
 ## Event catalogue
 
