@@ -65,16 +65,21 @@ export const ProfileTabError = {
   `,
 };
 
+/** The default export of the profile module at `url` (a Vue component), or a rejection naming why not. */
+export function importComponent(url) {
+  return import(url).then((m) => {
+    const comp = m && m.default;
+    if (!comp || (typeof comp !== 'object' && typeof comp !== 'function')) {
+      throw new Error('the module has no default export (a Vue component)');
+    }
+    return comp;
+  });
+}
+
 function asyncTab(url, title) {
   if (!loaded.has(url)) {
     loaded.set(url, markRaw(defineAsyncComponent({
-      loader: () => import(url).then((m) => {
-        const comp = m && m.default;
-        if (!comp || (typeof comp !== 'object' && typeof comp !== 'function')) {
-          throw new Error('the module has no default export (a Vue component)');
-        }
-        return comp;
-      }),
+      loader: () => importComponent(url),
       loadingComponent: { template: '<p class="muted profile-tab-loading">Loading…</p>' },
       delay: 150,
       onError(error, retry, fail) {

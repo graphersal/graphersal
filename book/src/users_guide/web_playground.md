@@ -236,6 +236,7 @@ unless something asks for another one. A profile names:
 | `version` | optional: the version of the product the profile belongs to (`"0.1.0"`); the top bar shows it (`v0.1.0`) beside the name instead of the engine's version, which moves into its tooltip |
 | `tabs` | the tabs: `{"id", "title", "builtin": "workspace"}` (the workspace of this page, at most once) or `{"id", "title", "module": "<path>.js"}` (a tab of the profile's own); with more than one tab the page shows a tab row under the top bar |
 | `startTab` | the tab the page opens on |
+| `header` | optional: `{"module": "<path>.js"}`, a module of the profile shown in the top bar on every tab; see "The top-bar module" below |
 | `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
 | `cards` | card templates per label for the profile's tabs (may be empty; see [Cards](#cards)) |
 | `graph` | styles of the profile's graph views per label, classes and legend entries (may be empty; see [Graph views](#graph-views)) |
@@ -279,7 +280,18 @@ parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **prof
 | `info` | the profile's name and title, whether the engine is the dev server, its version and read-only flag |
 
 A module that cannot be loaded, has no default export or fails while rendering shows an error
-card in its tab; the other tabs keep working. The profile's files are served like the rest of
+card in its tab; the other tabs keep working.
+
+**The top-bar module.** A choice that affects every tab (a project filter, a status text)
+belongs in the top bar, not inside each tab: the profile key `header: {"module": "<path>.js"}`
+names a module (loaded from `files` like a tab's) whose default export the page renders in the
+top bar, right of the free space and left of the bar's buttons, on every tab. It gets the same
+`api` prop as a module tab and no `params`. Keep it small: the bar lets it shrink and never
+grows wider than the window, so hide parts of it on narrow screens with media queries of its own
+(or the playground's `hide-narrow` class, hidden below 760 px). A header module that cannot be
+loaded or fails shows a small "Header module failed" marker in the bar (its tooltip names the
+module and the error); the tabs keep working. The `demo` profile has one: the engine's kind and
+a button that opens its Graph tab. The profile's files are served like the rest of
 the page: with the dev server, put them into the `--ui-dir` directory (an overlay over the
 embedded playground). The details of the API are in the playground's `js/profile-api.js`.
 

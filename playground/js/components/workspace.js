@@ -8,6 +8,8 @@
 // UI profiles (js/ui-profiles.js): the top bar's buttons and the panels show only when the
 // profile lets the user reach them (`can`); a profile with several tabs gets a tab row under the
 // top bar, its module tabs (components/profile-tab.js) take the place of the panels while shown.
+// A profile's top-bar module (`header`, components/profile-header.js) sits right of the spacer,
+// left of the bar's buttons, on every tab.
 // The built-in `full` profile has one tab (the workspace): the page as it always was.
 
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
@@ -32,6 +34,7 @@ import { ChangeBurstBanner } from './change-burst-banner.js';
 import { JournalToasts } from './journal-toasts.js';
 import { McpStatsDialog } from './mcp-stats.js';
 import { ProfileTab } from './profile-tab.js';
+import { ProfileHeader } from './profile-header.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -76,7 +79,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab, ProfileHeader },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -360,6 +363,7 @@ export const Workspace = {
         </span>
       </template>
       <span class="spacer"></span>
+      <profile-header v-if="ui.header" :header="ui.header"></profile-header>
       <button v-if="state.graph && can('share')" type="button" class="btn share-btn" @click="openShareDialog" :disabled="state.running"
               title="Share as link: a link that opens this tab's query with the graph (small graphs only)">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2L8 3.8" /><path d="M9.5 6.5a3 3 0 0 0-4.2 0L2.7 9.1a3 3 0 0 0 4.2 4.2L8 12.2" /></svg>

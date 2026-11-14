@@ -647,6 +647,26 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
 }
 .profile-tab-error-head { margin: 0 0 6px; font-weight: 600; color: var(--danger); }
 .profile-tab-error-msg { margin: 0 0 6px; white-space: pre-wrap; }
+/* The profile's top-bar module (components/profile-header.js): it may shrink (min-width: 0), so
+   the bar never overflows; the module hides parts of its own under its media queries
+   (`hide-narrow` works inside it as everywhere in the top bar). */
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.profile-header > * { min-width: 0; max-width: 100%; }
+.profile-header-error {
+  padding: 2px 8px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  color: var(--danger);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: help;
+}
 .profile-card {
   border: 1px solid var(--border);
   border-radius: 8px;
