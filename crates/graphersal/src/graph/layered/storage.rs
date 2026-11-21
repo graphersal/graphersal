@@ -14,7 +14,7 @@ use crate::error::{DefinitionError, GraphError, SchemaError};
 use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
-use crate::graph::hooks::{CommitHook, RollbackReason};
+use crate::graph::hooks::{CommitHook, Mark, RollbackReason};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
 use crate::graph::storage::{StorageIdentity, UnitMark};
@@ -36,6 +36,9 @@ const PROPERTY_INDEXES: &str = "property index definitions on a layered graph ye
 
 /// The `operation` of the refusal of a compression rule on a layer.
 const COMPRESSION_RULES: &str = "compression rules on a layered graph yet";
+
+/// The `operation` of the refusal of a compression estimate over a layer's changed elements.
+const COMPRESSION_ESTIMATE: &str = "compression estimates over a layered graph's changes yet";
 
 /// The `operation` of the refusal of an embedding model definition on a layer.
 const MODELS: &str = "embedding model definitions on a layered graph yet";
@@ -402,10 +405,20 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::compression_stats(&*self.base, name)
     }
 
+    /// The base's estimate while the layer has not added, removed or modified any element of
+    /// the kind asked about (its values are then the base's); otherwise refused, as compression
+    /// rules are on a layer (plan decision P5): the base's figures would miss the layer's values.
     fn estimate_compression(
         &self,
         request: &CompressionEstimateRequest,
     ) -> Result<CompressionEstimate, GraphError> {
+        let touched = match request.element() {
+            ElementKind::Vertex => self.delta.vertices_touched(),
+            ElementKind::Edge => self.delta.edges_touched(),
+        };
+        if touched {
+            return Err(GraphError::unsupported(COMPRESSION_ESTIMATE));
+        }
         GraphStorage::estimate_compression(&*self.base, request)
     }
 
@@ -611,6 +624,19 @@ impl GraphStorage for LayeredGraph {
     /// The commit sequence number of the layer's last outermost unit that changed something.
     fn last_commit_seq(&self) -> Result<u64, GraphError> {
         Ok(self.units.last_commit_seq())
+    }
+
+    /// `TraversalGraph`'s mark: refused while a unit is open, then the journal slot of the
+    /// layer's hooks records it (no journal can be attached to a layer yet: stage 3).
+    fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {
+        if self.units.is_recording() {
+            return Err(GraphError::MarkUnavailable {
+                reason: "a mark cannot be set while a unit (a traversal or a transaction) is open",
+            });
+        }
+        let (commit_seq, last_committed_at) =
+            (self.units.last_commit_seq(), self.units.last_committed_at());
+        self.units.hooks.mark(name, commit_seq, last_committed_at)
     }
 
     /// The write rules of `insert_vertex`, then the id (unique across base and delta, the

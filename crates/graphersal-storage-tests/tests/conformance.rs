@@ -20,6 +20,36 @@ conformance!(forwarding, base = Forwarding::default() => base);
 conformance!(forwarding_by_mut_ref, base = Forwarding::default() => &mut base);
 // A layer over an empty base: every element the items create lives in the layer's delta.
 conformance!(layered_empty_base, base = graphersal::storage::LayeredGraph::default() => base);
+// A layer over a base with no live element but with vacant slots (a vertex with a self-loop,
+// a labelled vertex and an edge between them, all dropped before freezing) and advanced id
+// sequences: the items' elements live in the delta beside dead base slots, so the base's
+// slot space, generations and sequences are in play (see `vacant_base`). The same base as a
+// plain `TraversalGraph` is the control: the items hold on such a storage at all.
+conformance!(traversal_graph_vacant, base = vacant_base() => base);
+conformance!(
+    layered_vacant_base,
+    base = vacant_base() => graphersal::storage::LayeredGraph::over(Arc::new(base)).unwrap()
+);
+
+/// A `TraversalGraph` whose elements were all dropped: no live element, vacant vertex and edge
+/// slots with bumped generations, raised auto-id sequences (auto and numeric explicit ids).
+fn vacant_base() -> TraversalGraph {
+    let mut graph = TraversalGraph::new();
+    let a = contract::vertex(
+        &mut graph,
+        None,
+        &["n"],
+        contract::props(&[("k", 1.into())]),
+    );
+    let b = contract::vertex(&mut graph, Some("41"), &["m", "n"], contract::props(&[]));
+    contract::edge(&mut graph, None, Some("l"), a, b, contract::props(&[]));
+    contract::edge(&mut graph, Some("17"), None, a, a, contract::props(&[]));
+    graph.drop_vertex(a).unwrap();
+    graph.drop_vertex(b).unwrap();
+    assert_eq!(GraphStorage::vertex_count(&graph).unwrap(), 0);
+    assert_eq!(GraphStorage::edge_count(&graph).unwrap(), 0);
+    graph
+}
 
 /// Populates `storage` and checks that the blanket read-only view `&S` reads it and refuses
 /// every write, claims no capability and refuses commit hooks.

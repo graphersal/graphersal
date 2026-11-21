@@ -233,6 +233,11 @@ impl UnitLog {
         self.last_commit_seq
     }
 
+    /// The commit time of the last outermost unit that changed something.
+    pub(crate) fn last_committed_at(&self) -> i64 {
+        self.last_committed_at
+    }
+
     /// The start of the outermost open unit.
     pub(crate) fn started_at(&self) -> Option<i128> {
         self.started_at
