@@ -1742,7 +1742,7 @@ impl PropertyIndexRange {
 /// as 30 days) with ties broken by the fields: an order consistent with that equality, so
 /// equality, `P.within` and ranges on durations are all exact slices.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum IndexKey {
+pub(crate) enum IndexKey {
     Null,
     Bool(bool),
     /// `(canonical float64 value, 0 = int64 / 1 = float64, the int64 or 0)`.
@@ -1981,8 +1981,12 @@ fn key_bounds((start, end): SetBounds) -> Option<(Bound<IndexKey>, Bound<IndexKe
 // ---------------------------------------------------------------------------------------------
 
 /// One active index: each key once with the slots of its elements (by key, then slot).
+///
+/// Crate-internal beyond this file for the index overlays of a layered graph
+/// (`graph/layered/index.rs`), which read a base's states in place and keep states of their
+/// own over the layer's slots (the same keys, the same maintenance through [`Self::account`]).
 #[derive(Debug, Clone)]
-struct IndexState {
+pub(crate) struct IndexState {
     name: CompactString,
     element: ElementKind,
     /// `None`: label-less (every element of the kind).
@@ -2027,11 +2031,131 @@ impl IndexState {
         }
     }
 
+    /// A state with the same definition (name, element, label, key, transform, unique) and no
+    /// entries: what an index overlay of a layered graph starts its own parts from.
+    pub(crate) fn empty_like(&self) -> IndexState {
+        IndexState::new(
+            &self.name,
+            self.element,
+            self.label.as_deref(),
+            &self.key,
+            self.transform.clone(),
+            self.unique,
+        )
+    }
+
+    /// The index's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The element kind it indexes.
+    pub(crate) fn element(&self) -> ElementKind {
+        self.element
+    }
+
+    /// Its label, `None` for a label-less index.
+    pub(crate) fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// The top-level property key it indexes.
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Its transform.
+    pub(crate) fn transform(&self) -> Option<&PropertyIndexTransform> {
+        self.transform.as_ref()
+    }
+
+    /// The number of (key, slot) entries.
+    pub(crate) fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether it holds no entry and skips no value.
+    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0 && self.skipped == 0
+    }
+
+    /// The elements whose non-null value it does not hold.
+    pub(crate) fn skipped(&self) -> u64 {
+        self.skipped
+    }
+
+    /// The heap bytes of the keys and the postings as counted with every write.
+    pub(crate) fn heap(&self) -> u64 {
+        self.heap
+    }
+
+    /// The keys inside `range` in key order, each with its postings (slots ascending);
+    /// `None` when the range holds nothing (bounds of different kinds, a non-scalar bound, no
+    /// bound, a lower bound past the upper one). The slices `index_slice` and [`Self::count`]
+    /// read, for a reader that merges several states key by key.
+    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn range_postings<'a>(
+        &'a self,
+        range: &PropertyIndexRange,
+    ) -> Option<impl Iterator<Item = (&'a IndexKey, crate::graph::postings::Iter<'a>)> + 'a> {
+        let bounds = set_bounds(range).and_then(key_bounds)?;
+        Some(
+            self.entries
+                .range(bounds)
+                .map(|(key, postings)| (key, self.runs.iter(postings))),
+        )
+    }
+
+    /// Every key in key order with its postings (slots ascending).
+    pub(crate) fn postings(
+        &self,
+    ) -> impl Iterator<Item = (&IndexKey, crate::graph::postings::Iter<'_>)> + '_ {
+        self.entries
+            .iter()
+            .map(|(key, postings)| (key, self.runs.iter(postings)))
+    }
+
+    /// Every slot holding a key equal to `key` by [`Self::other_holder`]'s equality (`has()`'s:
+    /// an `int64` and a `float64` of the same value are equal, two `int64`s only when they are
+    /// the same number), by key then slot; nothing for a `null` key, which is not part of
+    /// uniqueness. Unlike `other_holder` it names every holder, so a reader that must skip some
+    /// slots (an overlay's excluded base slots) can.
+    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn holders<'a>(&'a self, key: &IndexKey) -> Box<dyn Iterator<Item = u32> + 'a> {
+        match key {
+            IndexKey::Null => Box::new(std::iter::empty()),
+            IndexKey::Number(value, kind, int) => {
+                let (kind, int) = (*kind, *int);
+                let lower = IndexKey::Number(*value, 0, i64::MIN);
+                let upper = IndexKey::Number(*value, 1, i64::MAX);
+                Box::new(
+                    self.entries
+                        .range(lower..=upper)
+                        .filter(move |(held, _)| match held {
+                            IndexKey::Number(_, held_kind, held_int) => {
+                                *held_kind != kind || kind == 1 || *held_int == int
+                            }
+                            _ => false,
+                        })
+                        .flat_map(|(_, postings)| self.runs.iter(postings)),
+                )
+            }
+            _ => match self.entries.get(key) {
+                Some(postings) => Box::new(self.runs.iter(postings)),
+                None => Box::new(std::iter::empty()),
+            },
+        }
+    }
+
     /// Puts in (`insert`) or takes out the entry of a stored value of the element at `slot`: its
     /// key, or the `skipped` count for a non-null value the index does not hold.
     /// With `each` an array puts in (takes out) one key per element, an element held twice
     /// once (the postings hold a slot once per key).
-    fn account(&mut self, insert: bool, value: &ElementProperty, slot: u32) {
+    pub(crate) fn account(&mut self, insert: bool, value: &ElementProperty, slot: u32) {
         let transform = self.transform.take();
         let skipped = value_keys(transform.as_ref(), value, |key| {
             if insert {
@@ -2093,7 +2217,7 @@ impl IndexState {
     }
 
     /// Whether both hold the same keys with the same slots (whatever their runs look like).
-    fn same_entries(&self, other: &IndexState) -> bool {
+    pub(crate) fn same_entries(&self, other: &IndexState) -> bool {
         self.entries.len() == other.entries.len()
             && self
                 .entries
@@ -2103,7 +2227,7 @@ impl IndexState {
     }
 
     /// The heap bytes of the keys and the postings, walked from the real containers.
-    fn walked_heap(&self) -> u64 {
+    pub(crate) fn walked_heap(&self) -> u64 {
         self.entries
             .iter()
             .map(|(key, postings)| key.heap_bytes() + self.runs.heap_bytes(postings))
@@ -2113,7 +2237,7 @@ impl IndexState {
     /// The number of elements inside `range` (exact: the sum of the postings' lengths of the
     /// keys in it); `None` for an `each` index whose slice holds more than one key (an element
     /// may be held under several of them).
-    fn count(&self, range: &PropertyIndexRange) -> Option<u64> {
+    pub(crate) fn count(&self, range: &PropertyIndexRange) -> Option<u64> {
         let Some(bounds) = set_bounds(range).and_then(key_bounds) else {
             return Some(0);
         };
@@ -2207,7 +2331,7 @@ impl IndexState {
     }
 
     /// Whether the index keys array elements (its transform starts with `each`).
-    fn has_each(&self) -> bool {
+    pub(crate) fn has_each(&self) -> bool {
         self.transform
             .as_ref()
             .is_some_and(PropertyIndexTransform::has_each)
@@ -2217,7 +2341,7 @@ impl IndexState {
     /// bytes), plus the heap of the keys and the runs (the real containers' capacities, kept
     /// with every write and compared with a walk by `check_property_indexes`) and the table of
     /// runs.
-    fn stats(&self) -> PropertyIndexStats {
+    pub(crate) fn stats(&self) -> PropertyIndexStats {
         let entry = (std::mem::size_of::<IndexKey>() + std::mem::size_of::<Postings>()) as u64 + 8;
         PropertyIndexStats {
             entries: self.len,
@@ -2346,6 +2470,23 @@ impl PropertyIndexes {
         properties: Option<&PropertyMap>,
         only_key: Option<&str>,
     ) {
+        self.slot_entries(element, insert, slot, labels, properties, only_key, true);
+    }
+
+    /// [`Self::element_entries`] for any `slot` (an index overlay of a layered graph keys its
+    /// parts by the layer's slots); `label_less` false leaves the label-less indexes out (a
+    /// label change of an element: only the indexes of the labels it lost or gained change).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn slot_entries<'l>(
+        &mut self,
+        element: ElementKind,
+        insert: bool,
+        slot: u32,
+        labels: impl Iterator<Item = &'l str>,
+        properties: Option<&PropertyMap>,
+        only_key: Option<&str>,
+        label_less: bool,
+    ) {
         let Some(properties) = properties else {
             return;
         };
@@ -2353,6 +2494,7 @@ impl PropertyIndexes {
             ElementKind::Vertex => (&self.vertex, &self.vertex_any),
             ElementKind::Edge => (&self.edge, &self.edge_any),
         };
+        let any: &[usize] = if label_less { any } else { &[] };
         // The label-less indexes hold the element once, whatever its labels.
         for position in any {
             let Some(index) = self.indexes.get_mut(*position) else {
@@ -2441,6 +2583,31 @@ impl PropertyIndexes {
             .iter()
             .filter_map(|position| self.indexes.get(*position))
             .find(|index| index.key == key && index.transform.as_ref() == transform)
+    }
+
+    /// The number of installed indexes (their positions are `0..len`).
+    pub(crate) fn len(&self) -> usize {
+        self.indexes.len()
+    }
+
+    /// The installed index at `position`.
+    pub(crate) fn state(&self, position: usize) -> Option<&IndexState> {
+        self.indexes.get(position)
+    }
+
+    /// The same indexes at the same positions with the same lookups, every one empty
+    /// ([`IndexState::empty_like`]); no disabled unique index (they hold nothing). What a
+    /// layered graph keeps its overlay parts in.
+    pub(crate) fn empty_like(&self) -> PropertyIndexes {
+        PropertyIndexes {
+            indexes: self.indexes.iter().map(IndexState::empty_like).collect(),
+            vertex: self.vertex.clone(),
+            edge: self.edge.clone(),
+            vertex_any: self.vertex_any.clone(),
+            edge_any: self.edge_any.clone(),
+            unique: self.unique,
+            disabled: Vec::new(),
+        }
     }
 
     /// The estimated heap footprint of every index, in bytes.
@@ -2669,6 +2836,18 @@ impl TraversalGraph {
             self.slot_id(index.element, conflict.slot)
                 .unwrap_or_default(),
         )
+    }
+
+    /// The installed index named `name` (a layered graph reads it in place as the shared base
+    /// part of its overlay); `None` when no such index is installed (absent, of a type this
+    /// version does not serve, or a disabled unique one).
+    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn index_state(&self, name: &str) -> Option<&IndexState> {
+        self.property_indexes
+            .indexes
+            .iter()
+            .find(|index| index.name == name)
     }
 
     /// The report of the unique index `name` when it is not served because its data holds
@@ -3125,5 +3304,122 @@ mod tests {
         graph.check_property_indexes().unwrap();
         graph.drop_vertex(v).unwrap();
         graph.check_property_indexes().unwrap();
+    }
+
+    /// The crate-internal API the layered graph's overlays read (S4.1): a state found by name,
+    /// its range postings in key-then-slot order (the slice `index_slice` reads), every holder
+    /// of a key by `other_holder`'s equality, an empty copy of the definition, and slot entries
+    /// with and without the label-less indexes.
+    #[test]
+    fn the_overlay_api_reads_what_lookups_read() {
+        let mut graph = TraversalGraph::new();
+        for (age, labels) in [
+            (int(29), vec!["person"]),
+            (ElementProperty::from(29.0), vec!["person"]),
+            (int(30), vec!["person", "x"]),
+            (ElementProperty::Null, vec!["person"]),
+        ] {
+            let mut props = PropertyMap::default();
+            props.insert("age", age);
+            graph
+                .insert_vertex(None, labels.into_iter().map(Into::into).collect(), props)
+                .unwrap();
+        }
+        for (name, definition) in [
+            (
+                "age",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+            ),
+            (
+                "any_age",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "age"),
+            ),
+        ] {
+            graph
+                .set_definition(Definition::property_index(name, definition))
+                .unwrap();
+        }
+        assert!(graph.index_state("nope").is_none());
+        let state = graph.index_state("age").unwrap();
+        assert_eq!(
+            (state.name(), state.key(), state.label()),
+            ("age", "age", Some("person"))
+        );
+        let range = PropertyIndexRange::new(Bound::Included(int(29)), Bound::Included(int(30)));
+        let slices: Vec<(IndexKey, Vec<u32>)> = state
+            .range_postings(&range)
+            .unwrap()
+            .map(|(key, slots)| (key.clone(), slots.collect()))
+            .collect();
+        assert_eq!(slices.len(), 3, "29, 29.0 and 30: {slices:?}");
+        let flat: Vec<u32> = slices.iter().flat_map(|(_, slots)| slots.clone()).collect();
+        let sliced: Vec<u32> = graph
+            .index_slice(ElementKind::Vertex, Some("person"), "age", None, &range)
+            .unwrap()
+            .collect();
+        assert_eq!(flat, sliced);
+        assert_eq!(state.count(&range), Some(3));
+        let mixed = PropertyIndexRange::new(
+            Bound::Included(int(1)),
+            Bound::Included(ElementProperty::from("a")),
+        );
+        assert!(state.range_postings(&mixed).is_none());
+        // 29 is held by the int and the float of that value; 29.5 by nobody; null never.
+        let key = IndexKey::of(&int(29)).unwrap();
+        assert_eq!(state.holders(&key).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(state.other_holder(&key, Some(0)), Some(1));
+        let float = IndexKey::of(&ElementProperty::from(29.5)).unwrap();
+        assert_eq!(state.holders(&float).count(), 0);
+        assert_eq!(state.holders(&IndexKey::Null).count(), 0);
+        assert_eq!(state.postings().count(), 4);
+        // An empty copy, filled through slot entries under any slot.
+        let mut copy = graph.property_indexes.empty_like();
+        assert_eq!(copy.len(), 2);
+        assert!(copy.state(0).is_some_and(IndexState::is_empty));
+        let mut props = PropertyMap::default();
+        props.insert("age", int(7));
+        let slot = 1 << 31;
+        copy.slot_entries(
+            ElementKind::Vertex,
+            true,
+            slot,
+            ["x"].into_iter(),
+            Some(&props),
+            None,
+            false,
+        );
+        assert_eq!(
+            copy.bytes(),
+            0,
+            "no index of label x, the label-less left out"
+        );
+        copy.slot_entries(
+            ElementKind::Vertex,
+            true,
+            slot,
+            ["person"].into_iter(),
+            Some(&props),
+            None,
+            true,
+        );
+        let held: Vec<u32> = (0..2)
+            .flat_map(|position| {
+                copy.state(position)
+                    .unwrap()
+                    .holders(&IndexKey::of(&int(7)).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(held, vec![slot, slot]);
+        copy.slot_entries(
+            ElementKind::Vertex,
+            false,
+            slot,
+            ["person"].into_iter(),
+            Some(&props),
+            Some("other"),
+            true,
+        );
+        assert_eq!(copy.state(0).unwrap().len(), 1, "another key: unchanged");
     }
 }

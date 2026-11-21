@@ -81,17 +81,26 @@
 //!
 //! The delta stores what the write rules (`graph/write_rules.rs`) returned: no check runs here.
 //! Values are stored uncompressed (plan P5).
+//!
+//! # Property-index overlays (S4.1)
+//!
+//! The delta also keeps the index overlays of the layer (`indexes`, module `index`): every
+//! function here that adds, removes or changes an added element or an image, or removes or
+//! restores a base element, keeps them in step, so the writes and the undo path (which calls
+//! the same functions) maintain them alike. With no index that is one branch per call.
 
 use compact_str::CompactString;
 use fnv::FnvBuildHasher;
 
 use super::dirty::SlotBits;
-use super::handle::{LayeredEdge, LayeredVertex, MAX_BASE_SLOTS};
+use super::handle::{DELTA_BIT, LayeredEdge, LayeredVertex, MAX_BASE_SLOTS};
+use super::index::LayerIndexes;
 use crate::error::GraphError;
 use crate::graph::handle::{EdgeGenerations, FIRST_GENERATION, Generations};
 use crate::graph::labels::{LabelSetId, Labels};
+use crate::graph::schema::ElementKind;
 use crate::graph::shape::ShapeTable;
-use crate::graph::topology::{Direction, NodeIndex};
+use crate::graph::topology::{Direction, EdgeIndex, NodeIndex};
 use crate::graph::undo::restore_stored_property;
 use crate::graph::{
     EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, MemoryStats, TraversalGraph,
@@ -163,6 +172,9 @@ pub(crate) struct Delta {
     /// Per label: the base edges relabeled to it, in the order they gained it (a removal moves
     /// the last one into its place, as a label bucket does).
     gained_edge_labels: hashbrown::HashMap<CompactString, Vec<EdgeHandle>, FnvBuildHasher>,
+    /// The property-index overlays (module docs, `index`): kept in step by every function
+    /// below that changes what an index would hold.
+    indexes: LayerIndexes,
 }
 
 /// The copied-up state of a modified base edge: what a write may change (its endpoints and id
@@ -301,6 +313,7 @@ impl Default for Delta {
             lost_vertex_labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
             relabeled_edges: SlotBits::default(),
             gained_edge_labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
+            indexes: LayerIndexes::default(),
         }
     }
 }
@@ -322,6 +335,164 @@ fn delta_slots_exhausted() -> GraphError {
 }
 
 impl Delta {
+    /// The empty delta of a new layer over `base`: one index overlay per index the base has
+    /// installed.
+    pub(crate) fn over(base: &TraversalGraph) -> Self {
+        Self {
+            indexes: LayerIndexes::inherit(base),
+            ..Self::default()
+        }
+    }
+
+    /// The property-index overlays.
+    #[inline]
+    pub(crate) fn indexes(&self) -> &LayerIndexes {
+        &self.indexes
+    }
+
+    // --------------------------------------------------------------------------------------
+    // Index overlay maintenance (module docs): the delta entries of a delta node (an added
+    // vertex under bit 31 + its slot, a stub's image under its base vertex's slot) and of an
+    // added edge or an edge image. The callers pass live slots only.
+    // --------------------------------------------------------------------------------------
+
+    /// Puts in or takes out the delta entries of delta node `index` (its labels and map) under
+    /// layer slot `slot`; `only_key`: the indexes on that key only.
+    #[inline]
+    fn index_node(&mut self, index: NodeIndex, slot: u32, insert: bool, only_key: Option<&str>) {
+        if self.indexes.is_empty() {
+            return;
+        }
+        if let Some(vertex) = self.graph.node_weight(index) {
+            self.indexes.delta_entries(
+                ElementKind::Vertex,
+                insert,
+                slot,
+                self.labels.set(vertex.1).iter().map(CompactString::as_str),
+                Some(&vertex.2),
+                only_key,
+                true,
+            );
+        }
+    }
+
+    /// The delta entries of delta node `index` under the labels of a label change: out for
+    /// the labels in `old` and not in `new`, in for those in `new` and not in `old` (the
+    /// label-less indexes do not change).
+    #[inline]
+    fn index_node_relabel(
+        &mut self,
+        index: NodeIndex,
+        slot: u32,
+        old: &[CompactString],
+        new: &[CompactString],
+    ) {
+        if self.indexes.is_empty() {
+            return;
+        }
+        if let Some(vertex) = self.graph.node_weight(index) {
+            let lost = old.iter().filter(|label| !new.contains(label));
+            self.indexes.delta_entries(
+                ElementKind::Vertex,
+                false,
+                slot,
+                lost.map(CompactString::as_str),
+                Some(&vertex.2),
+                None,
+                false,
+            );
+            let gained = new.iter().filter(|label| !old.contains(label));
+            self.indexes.delta_entries(
+                ElementKind::Vertex,
+                true,
+                slot,
+                gained.map(CompactString::as_str),
+                Some(&vertex.2),
+                None,
+                false,
+            );
+        }
+    }
+
+    /// Puts in or takes out the delta entries of the added edge in delta edge slot `index`.
+    #[inline]
+    fn index_delta_edge(&mut self, index: EdgeIndex, insert: bool, only_key: Option<&str>) {
+        if self.indexes.is_empty() {
+            return;
+        }
+        if let Some(weight) = self.graph.edge_weight(index) {
+            self.indexes.delta_entries(
+                ElementKind::Edge,
+                insert,
+                index.slot() | DELTA_BIT,
+                self.labels.name_str(weight.1).into_iter(),
+                weight.2.as_ref(),
+                only_key,
+                true,
+            );
+        }
+    }
+
+    /// Puts in or takes out the delta entries of the image of the base edge in `slot`.
+    #[inline]
+    fn index_edge_image(&mut self, slot: u32, insert: bool, only_key: Option<&str>) {
+        if self.indexes.is_empty() {
+            return;
+        }
+        if let Some(image) = self.edge_images.get(&slot) {
+            self.indexes.delta_entries(
+                ElementKind::Edge,
+                insert,
+                slot,
+                image.label.as_deref().into_iter(),
+                image.properties.as_ref(),
+                only_key,
+                true,
+            );
+        }
+    }
+
+    /// The delta entries of an edge relabeled from `old` to `new` with the map `properties`
+    /// (an added edge or an image) under layer slot `slot`: out under the old label, in under
+    /// the new one (the label-less indexes do not change).
+    #[inline]
+    fn index_edge_relabel(
+        indexes: &mut LayerIndexes,
+        slot: u32,
+        old: Option<&str>,
+        new: Option<&str>,
+        properties: Option<&PropertyMap>,
+    ) {
+        if indexes.is_empty() || old == new {
+            return;
+        }
+        indexes.delta_entries(
+            ElementKind::Edge,
+            false,
+            slot,
+            old.into_iter(),
+            properties,
+            None,
+            false,
+        );
+        indexes.delta_entries(
+            ElementKind::Edge,
+            true,
+            slot,
+            new.into_iter(),
+            properties,
+            None,
+            false,
+        );
+    }
+
+    /// The key a property write changes, cloned only while an index exists (the overlay
+    /// maintenance takes the key's entries out before the write and puts them back after it).
+    #[inline]
+    fn indexed_key(&self, key: &CompactString) -> Option<CompactString> {
+        (!self.indexes.is_empty()).then(|| key.clone())
+    }
+
     /// Vertices the delta adds to the base count (added minus removed base vertices; stubs are
     /// not vertices).
     #[inline]
@@ -703,6 +874,7 @@ impl Delta {
         for label in labels {
             self.index.insert_node_label(label, handle);
         }
+        self.index_node(index, index.slot() | DELTA_BIT, true, None);
         Ok(LayeredVertex::from_delta(handle))
     }
 
@@ -775,6 +947,7 @@ impl Delta {
         if let Some(label) = label {
             self.index.insert_edge_label(label, handle);
         }
+        self.index_delta_edge(index, true, None);
         Ok(LayeredEdge::from_delta(handle))
     }
 
@@ -799,6 +972,7 @@ impl Delta {
             (true, Some((source, target))) => Some((self.end_of(source), self.end_of(target))),
             _ => None,
         };
+        self.index_delta_edge(local.index(), false, None);
         let (id, label, properties, _) = self.graph.remove_edge(local.index())?;
         let label = self.labels.name(label).cloned();
         statistics.edge_removed(label.as_deref());
@@ -911,6 +1085,7 @@ impl Delta {
             }
         }
         let local = node.to_delta();
+        self.index_node(index, index.slot() | DELTA_BIT, false, None);
         let (id, labels, properties, _) = self.graph.remove_node(index)?;
         let labels = self.labels.set(labels).to_vec();
         statistics.vertex_removed(&labels);
@@ -942,11 +1117,15 @@ impl Delta {
             return None;
         }
         let weight = base.edge_weight(edge)?;
-        // The label it has now: its image's, when a write changed it.
+        // The label it has now: its image's, when a write changed it. The overlays: an image's
+        // entries leave the delta part (its base entries are masked already), else the base
+        // entries are masked now.
         let image = if self.imaged_edges.contains(slot) {
+            self.index_edge_image(slot, false, None);
             self.imaged_edges.clear(slot);
             self.edge_images.remove(&slot)
         } else {
+            self.indexes.masked_edge(base, edge, true);
             None
         };
         let mut position = None;
@@ -989,7 +1168,10 @@ impl Delta {
             .and_then(|weight| base.labels.name(weight.1))
             .cloned();
         match image {
-            None => statistics.edge_added(base_label.as_deref()),
+            None => {
+                statistics.edge_added(base_label.as_deref());
+                self.indexes.masked_edge(base, edge, false);
+            }
             Some(mut image) => {
                 statistics.edge_added(image.label.as_deref());
                 if image.label != base_label {
@@ -1001,6 +1183,7 @@ impl Delta {
                 self.shapes.adopt_optional(&mut image.properties);
                 self.edge_images.insert(slot, image);
                 self.imaged_edges.set_growing(slot);
+                self.index_edge_image(slot, true, None);
             }
         }
     }
@@ -1025,6 +1208,13 @@ impl Delta {
         let base_labels = base.labels.set(vertex.1);
         let stub = self.stub_index(node);
         let imaged = self.imaged_vertices.contains(slot);
+        // The overlays: an image's entries leave the delta part (its base entries are masked
+        // already), else the base entries are masked now.
+        if imaged && self.graph.node_weight(stub).is_some() {
+            self.index_node(stub, slot, false, None);
+        } else {
+            self.indexes.masked_vertex(base, node, true);
+        }
         let mut image_labels = None;
         match self.graph.node_weight(stub) {
             Some(weight) if imaged => {
@@ -1093,6 +1283,7 @@ impl Delta {
         }) = image
         else {
             statistics.vertex_added(base_labels);
+            self.indexes.masked_vertex(base, node, false);
             return Ok(());
         };
         statistics.vertex_added(&labels);
@@ -1116,6 +1307,7 @@ impl Delta {
         }
         self.imaged_vertices.set_growing(slot);
         self.vertex_image_count += 1;
+        self.index_node(stub, slot, true, None);
         Ok(())
     }
 
@@ -1150,6 +1342,9 @@ impl Delta {
         }
         self.imaged_vertices.set_growing(slot);
         self.vertex_image_count += 1;
+        // The overlays: the base entries masked, the image's (equal so far) in the delta part.
+        self.indexes.masked_vertex(base, node, true);
+        self.index_node(stub, slot, true, None);
         Ok((stub, false))
     }
 
@@ -1162,10 +1357,18 @@ impl Delta {
         change: PropertyChange,
     ) -> Result<(bool, OldProperty), GraphError> {
         let (stub, existed) = self.vertex_image(base, node)?;
+        let slot = node.index().slot();
+        let indexed = self.indexed_key(change.key());
+        if let Some(key) = &indexed {
+            self.index_node(stub, slot, false, Some(key));
+        }
         let old = match self.graph.node_weight_mut(stub) {
             Some(weight) => change.apply(&mut self.shapes, &mut weight.2),
             None => None,
         };
+        if let Some(key) = &indexed {
+            self.index_node(stub, slot, true, Some(key));
+        }
         Ok((existed, old))
     }
 
@@ -1180,21 +1383,27 @@ impl Delta {
         old: OldProperty,
     ) -> Result<(), GraphError> {
         let (stub, _) = self.vertex_image(base, node)?;
+        let slot = node.index().slot();
+        self.index_node(stub, slot, false, Some(key));
         if let Some(weight) = self.graph.node_weight_mut(stub) {
             restore_stored_property(&mut self.shapes, &mut weight.2, key, old);
         }
+        self.index_node(stub, slot, true, Some(key));
         Ok(())
     }
 
     /// Drops the image of the base vertex `node` whatever it holds (an undo of the write that
     /// copied it up: its labels are the base's again, so no label lookup changes). The stub
     /// and the dirty bit stay.
-    pub(crate) fn clear_vertex_image(&mut self, node: VertexHandle) {
+    pub(crate) fn clear_vertex_image(&mut self, base: &TraversalGraph, node: VertexHandle) {
         let slot = node.index().slot();
         if !self.imaged_vertices.contains(slot) {
             return;
         }
         let stub = self.stub_index(node);
+        // The overlays: the image's entries out of the delta part, the base's out of masked.
+        self.index_node(stub, slot, false, None);
+        self.indexes.masked_vertex(base, node, false);
         if let Some(image) = self.graph.node_weight_mut(stub) {
             image.1 = LabelSetId::EMPTY;
             image.2 = PropertyMap::default();
@@ -1229,6 +1438,7 @@ impl Delta {
             .set(std::mem::replace(&mut weight.1, new_set))
             .to_vec();
         statistics.vertex_relabeled(&old, &new_labels);
+        self.index_node_relabel(stub, slot, &old, &new_labels);
         for label in old.iter().filter(|l| !new_labels.contains(l)) {
             if base_labels.contains(label) {
                 self.lost_vertex_labels
@@ -1270,7 +1480,7 @@ impl Delta {
         {
             return;
         }
-        self.clear_vertex_image(node);
+        self.clear_vertex_image(base, node);
     }
 
     /// Copies the live base edge `edge` up when it has no image yet (label and logical
@@ -1293,6 +1503,9 @@ impl Delta {
             },
         );
         self.imaged_edges.set_growing(slot);
+        // The overlays: the base entries masked, the image's (equal so far) in the delta part.
+        self.indexes.masked_edge(base, edge, true);
+        self.index_edge_image(slot, true, None);
         Ok(false)
     }
 
@@ -1306,7 +1519,12 @@ impl Delta {
         change: PropertyChange,
     ) -> Result<(bool, OldProperty, bool), GraphError> {
         let existed = self.edge_image(base, edge)?;
-        let Some(image) = self.edge_images.get_mut(&edge.index().slot()) else {
+        let slot = edge.index().slot();
+        let indexed = self.indexed_key(change.key());
+        if let Some(key) = &indexed {
+            self.index_edge_image(slot, false, Some(key));
+        }
+        let Some(image) = self.edge_images.get_mut(&slot) else {
             return Ok((existed, None, false));
         };
         let map_was_none = image.properties.is_none();
@@ -1320,6 +1538,9 @@ impl Delta {
                 None => None,
             },
         };
+        if let Some(key) = &indexed {
+            self.index_edge_image(slot, true, Some(key));
+        }
         Ok((existed, old, map_was_none))
     }
 
@@ -1334,7 +1555,9 @@ impl Delta {
         map_was_none: bool,
     ) -> Result<(), GraphError> {
         self.edge_image(base, edge)?;
-        if let Some(image) = self.edge_images.get_mut(&edge.index().slot()) {
+        let slot = edge.index().slot();
+        self.index_edge_image(slot, false, Some(key));
+        if let Some(image) = self.edge_images.get_mut(&slot) {
             if map_was_none {
                 image.properties = None;
             } else {
@@ -1342,13 +1565,17 @@ impl Delta {
                 restore_stored_property(&mut self.shapes, map, key, old);
             }
         }
+        self.index_edge_image(slot, true, Some(key));
         Ok(())
     }
 
     /// The edge counterpart of [`Self::clear_vertex_image`]: its label is the base's again.
-    pub(crate) fn clear_edge_image(&mut self, edge: EdgeHandle) {
+    pub(crate) fn clear_edge_image(&mut self, base: &TraversalGraph, edge: EdgeHandle) {
         let slot = edge.index().slot();
         if self.imaged_edges.contains(slot) {
+            // The overlays: the image's entries out of the delta part, the base's out of masked.
+            self.index_edge_image(slot, false, None);
+            self.indexes.masked_edge(base, edge, false);
             self.edge_images.remove(&slot);
             self.imaged_edges.clear(slot);
             self.relabeled_edges.clear(slot);
@@ -1378,6 +1605,13 @@ impl Delta {
         let Some(image) = self.edge_images.get_mut(&slot) else {
             return Err(GraphError::edge_removed());
         };
+        Self::index_edge_relabel(
+            &mut self.indexes,
+            slot,
+            image.label.as_deref(),
+            label.as_deref(),
+            image.properties.as_ref(),
+        );
         let old = std::mem::replace(&mut image.label, label.clone());
         statistics.edge_relabeled(old.as_deref(), label.as_deref());
         let mut old_position = None;
@@ -1448,7 +1682,7 @@ impl Delta {
             _ => false,
         };
         if same_properties && image.label.as_ref() == base.labels.name(weight.1) {
-            self.clear_edge_image(edge);
+            self.clear_edge_image(base, edge);
         }
     }
 
@@ -1474,6 +1708,7 @@ impl Delta {
             .set(std::mem::replace(&mut vertex.1, new_set))
             .to_vec();
         statistics.vertex_relabeled(&old, &new_labels);
+        self.index_node_relabel(local.index(), node.slot(), &old, &new_labels);
         for label in old.iter().filter(|l| !new_labels.contains(l)) {
             self.index.remove_node_label(label, local);
         }
@@ -1501,6 +1736,13 @@ impl Delta {
             .labels
             .name(std::mem::replace(&mut weight.1, new_id))
             .cloned();
+        Self::index_edge_relabel(
+            &mut self.indexes,
+            edge.slot(),
+            old.as_deref(),
+            label.as_deref(),
+            weight.2.as_ref(),
+        );
         statistics.edge_relabeled(old.as_deref(), label.as_deref());
         if let Some(old) = &old {
             self.index.remove_edge_label(old, local);
@@ -1519,8 +1761,16 @@ impl Delta {
         key: CompactString,
         value: ElementProperty,
     ) -> OldProperty {
-        let vertex = live_vertex_mut(&mut self.graph, node)?;
+        let index = live_vertex_mut(&mut self.graph, node).map(|_| node.to_delta().index())?;
+        let indexed = self.indexed_key(&key);
+        if let Some(key) = &indexed {
+            self.index_node(index, node.slot(), false, Some(key));
+        }
+        let vertex = self.graph.node_weight_mut(index)?;
         let (position, old) = self.shapes.insert_full(&mut vertex.2, key, value);
+        if let Some(key) = &indexed {
+            self.index_node(index, node.slot(), true, Some(key));
+        }
         old.map(|old| (position, old))
     }
 
@@ -1533,38 +1783,61 @@ impl Delta {
         value: ElementProperty,
     ) -> (OldProperty, bool) {
         let local = edge.to_delta();
-        let Some(weight) = self
+        if self
             .graph
-            .edge_weight_mut(local.index())
-            .filter(|weight| weight.3.own == local.generation())
-        else {
+            .edge_weight(local.index())
+            .is_none_or(|weight| weight.3.own != local.generation())
+        {
+            return (None, false);
+        }
+        let indexed = self.indexed_key(&key);
+        if let Some(key) = &indexed {
+            self.index_delta_edge(local.index(), false, Some(key));
+        }
+        let Some(weight) = self.graph.edge_weight_mut(local.index()) else {
             return (None, false);
         };
         let map_was_none = weight.2.is_none();
         let map = weight.2.get_or_insert_with(PropertyMap::default);
         let (position, old) = self.shapes.insert_full(map, key, value);
+        if let Some(key) = &indexed {
+            self.index_delta_edge(local.index(), true, Some(key));
+        }
         (old.map(|old| (position, old)), map_was_none)
     }
 
     /// Removes one property of a live delta vertex (absent: nothing); returns its old state.
     pub(crate) fn drop_vertex_property(&mut self, node: LayeredVertex, key: &str) -> OldProperty {
-        let vertex = live_vertex_mut(&mut self.graph, node)?;
-        self.shapes
+        let index = live_vertex_mut(&mut self.graph, node).map(|_| node.to_delta().index())?;
+        self.index_node(index, node.slot(), false, Some(key));
+        let vertex = self.graph.node_weight_mut(index)?;
+        let old = self
+            .shapes
             .shift_remove_full(&mut vertex.2, key)
-            .map(|(position, _, old)| (position, old))
+            .map(|(position, _, old)| (position, old));
+        self.index_node(index, node.slot(), true, Some(key));
+        old
     }
 
     /// Removes one property of a live delta edge (absent: nothing); returns its old state.
     pub(crate) fn drop_edge_property(&mut self, edge: LayeredEdge, key: &str) -> OldProperty {
         let local = edge.to_delta();
-        let weight = self
+        if self
+            .graph
+            .edge_weight(local.index())
+            .is_none_or(|weight| weight.3.own != local.generation())
+        {
+            return None;
+        }
+        self.index_delta_edge(local.index(), false, Some(key));
+        let old = self
             .graph
             .edge_weight_mut(local.index())
-            .filter(|weight| weight.3.own == local.generation())?;
-        let map = weight.2.as_mut()?;
-        self.shapes
-            .shift_remove_full(map, key)
-            .map(|(position, _, old)| (position, old))
+            .and_then(|weight| weight.2.as_mut())
+            .and_then(|map| self.shapes.shift_remove_full(map, key))
+            .map(|(position, _, old)| (position, old));
+        self.index_delta_edge(local.index(), true, Some(key));
+        old
     }
 
     /// Undoes one property write of the added vertex `id`: `key` back to `old`.
@@ -1573,9 +1846,15 @@ impl Delta {
             tracing::error!(%id, "layer undo: added vertex of a property write not found");
             return;
         };
-        if let Some(vertex) = live_vertex_mut(&mut self.graph, node) {
+        let index = node.to_delta().index();
+        if live_vertex_mut(&mut self.graph, node).is_none() {
+            return;
+        }
+        self.index_node(index, node.slot(), false, Some(key));
+        if let Some(vertex) = self.graph.node_weight_mut(index) {
             restore_stored_property(&mut self.shapes, &mut vertex.2, key, old);
         }
+        self.index_node(index, node.slot(), true, Some(key));
     }
 
     /// Undoes one property write of the added edge `id`; `map_was_none` puts back an edge
@@ -1592,11 +1871,15 @@ impl Delta {
             return;
         };
         let local = edge.to_delta();
-        if let Some(weight) = self
+        if self
             .graph
-            .edge_weight_mut(local.index())
-            .filter(|weight| weight.3.own == local.generation())
+            .edge_weight(local.index())
+            .is_none_or(|weight| weight.3.own != local.generation())
         {
+            return;
+        }
+        self.index_delta_edge(local.index(), false, Some(key));
+        if let Some(weight) = self.graph.edge_weight_mut(local.index()) {
             if map_was_none {
                 weight.2 = None;
             } else {
@@ -1604,6 +1887,7 @@ impl Delta {
                 restore_stored_property(&mut self.shapes, map, key, old);
             }
         }
+        self.index_delta_edge(local.index(), true, Some(key));
     }
 
     /// What the delta holds in memory, sorted into [`MemoryStats`]' buckets
@@ -1617,7 +1901,9 @@ impl Delta {
     ///   base elements (`lost_vertex_labels`, `gained_edge_labels`);
     /// - `property_bytes`: the property maps of the added elements and of the vertex images
     ///   (in their stubs), the edge images (with their map's table entry), and the shape table
-    ///   (`shape_bytes`).
+    ///   (`shape_bytes`);
+    /// - `property_index_bytes`: the layer-owned parts of the index overlays (masked and delta;
+    ///   the shared base parts are the base's, in its total).
     pub(crate) fn memory(&self) -> MemoryStats {
         use crate::value::compact_string_heap_bytes as string_heap;
         use crate::value::estimated_element_heap_bytes as map_heap;
@@ -1675,6 +1961,7 @@ impl Delta {
             index_bytes,
             property_bytes,
             shape_bytes,
+            property_index_bytes: self.indexes.bytes(),
             ..MemoryStats::default()
         }
     }

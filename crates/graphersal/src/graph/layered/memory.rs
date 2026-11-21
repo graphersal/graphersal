@@ -3,7 +3,8 @@
 //!
 //! - [`MemoryStats::total_bytes`] of a layer is what the layer itself holds: the delta
 //!   (`Delta::memory`: added elements, stubs, images, tombstones, label structures, indexes,
-//!   shapes) plus the dirty bitsets, which the layer allocates for every base slot (one bit per
+//!   shapes, and the layer-owned parts of the property-index overlays as
+//!   `property_index_bytes`) plus the dirty bitsets, which the layer allocates for every base slot (one bit per
 //!   base vertex and base edge slot: 1/8 byte each, the only part of an untouched layer that
 //!   grows with the base). Like `TraversalGraph`'s figure it leaves out the schema, the catalog,
 //!   the statistics and the undo log of an open unit.
