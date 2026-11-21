@@ -15,7 +15,7 @@ use graphersal::{
     ElementProperty, GraphSource,
     exec::{RenderOptions, Spelling},
     prelude::Graph,
-    storage::LayeredGraph,
+    storage::{LayerBase, LayeredGraph},
 };
 use graphersal_session::storage::SessionGraph;
 use rhai::{Dynamic, Engine, Scope};
@@ -963,8 +963,10 @@ impl GraphSpec {
     /// Opens the graph as the frozen base of a new, empty layer (`--layer`): the data is
     /// loaded as [`Self::load_with_schema`] loads it, a Store read-only without its lock
     /// (nothing in it is written; a layer is in memory only), and the session runs on a
-    /// [`LayeredGraph`] over it: writes go to the layer, the base never changes. A base the
-    /// layer cannot carry (`LayeredGraph::over` refuses it) is an invalid invocation.
+    /// [`LayeredGraph`] over it: writes go to the layer, the base never changes. The layer is
+    /// made through a [`LayerBase`], so the embedding models the base's database attached (a
+    /// Store's, a `.gsnap`'s) serve it. A base the layer cannot carry (`LayeredGraph::over`
+    /// refuses it) is an invalid invocation.
     pub fn open_layer(&self, schema: Option<&SchemaSource>) -> Result<Opened, StartError> {
         let base = match self {
             GraphSpec::Store(path) => {
@@ -975,15 +977,27 @@ impl GraphSpec {
             }
             _ => self.load_with_schema(schema)?,
         };
-        let layer = LayeredGraph::over(Arc::new(base.into_inner())).map_err(|err| {
+        // The base keeps the models its database attached to the loaded graph (a Store's,
+        // a `.gsnap`'s), so the layer serves them as the base would.
+        let refused = |err: graphersal::error::GraphError| {
             StartError::usage(format!(
                 "{}\nnote: --layer cannot run over this graph yet; run without --layer to use \
                  it directly",
                 graphersal::error::format_diagnostic(&err)
             ))
-        })?;
+        };
+        let base = LayerBase::from_graph(base)
+            .map_err(refused)?
+            .with_name(match self {
+                GraphSpec::File(path) | GraphSpec::Store(path) => path.as_str(),
+                GraphSpec::Modern => "modern",
+                GraphSpec::Empty => "empty",
+                GraphSpec::Large => "large",
+                GraphSpec::FileTree => "tree",
+            });
+        let layer: Graph<LayeredGraph> = base.new_layer().map_err(refused)?;
         Ok(Opened {
-            graph: Arc::new(Graph::<LayeredGraph>::new(layer)),
+            graph: Arc::new(layer),
             store: None,
         })
     }

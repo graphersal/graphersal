@@ -5613,6 +5613,105 @@ mod embed_models {
         assert!(!banner.contains("note: loaded"), "{banner}");
     }
 
+    /// `--layer` over a Store holding a model (S4.6): the layer serves the Store's models, so
+    /// `embed()`, a vector rule of the base's schema and a text `nearest` run on the layer as
+    /// on the Store; the start notes name the model, and the Store is never written.
+    #[test]
+    fn a_layer_over_a_store_serves_its_models() {
+        let base = fresh_dir("m2v_layer");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "apache-2.0",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "-e",
+                r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{text: #{type: "string"}, emb: #{type: "array", format: "vector", embedder: "acme/tiny", from: "text"}}}}}})"#,
+                "-e",
+                r#"g.add_v("doc").property("text", "graph").iterate()"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+
+        let on_store = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--read-only",
+                "-e",
+                r#"embed("graph vector", #{embedder: "acme/tiny"}).to_string()"#,
+            ],
+            &[],
+        );
+        assert_eq!(on_store.code, 0, "{}", on_store.stderr);
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--layer",
+                "-e",
+                r#"embed("graph vector", #{embedder: "acme/tiny"}).to_string()"#,
+                "-e",
+                r#"g.add_v("doc").property("text", "vector").iterate()"#,
+                "-e",
+                r#"g.v().has_label("doc").has("emb").count().next()"#,
+                "-e",
+                r#"g.v().nearest("emb", "vector", 1).values("text").next()"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let lines: Vec<&str> = res.stdout.lines().map(str::trim).collect();
+        assert_eq!(lines.len(), 3, "{}", res.stdout);
+        assert_eq!(
+            lines[0],
+            on_store.stdout.trim(),
+            "the layer embeds as the store"
+        );
+        assert!(lines[0].contains("vector(["), "{}", res.stdout);
+        assert_eq!(&lines[1..], ["2", "vector"], "{}", res.stdout);
+        // The start notes list the model the layer serves.
+        assert!(res.stderr.contains("acme/tiny"), "{}", res.stderr);
+        assert!(
+            res.stderr.contains("\n  licence: Apache-2.0\n"),
+            "{}",
+            res.stderr
+        );
+
+        // The store keeps its one doc: the layer's write stayed in the layer.
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "-e",
+                r#"g.v().has_label("doc").count().next()"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_eq!(res.stdout.trim(), "1");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn import_takes_a_downloaded_repository_by_its_name() {
         let base = fresh_dir("m2v_import_cached");
