@@ -530,7 +530,10 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "g.v(1).labels().next()" => "[\"person\"]";
     "traversal" "layer":
         "Yields the layer origin of each vertex or edge: \"base\", \"added\" or \"modified\"; on a graph without layers always \"base\" (Graphersal extension).",
-        "g.v().group_count().by(__.layer()).next().values()" => "[6]";
+        "g.v(1).out_e().layer().to_list()" => "[\"base\", \"base\", \"base\"]";
+    "traversal" "layer_diff":
+        "Returns what a layered graph changed against its frozen base as a map of added, removed and modified vertices and edges (base and layer values side by side), filtered by #{kinds, labels} and cut at #{limit} (truncated); empty on a graph without layers (Graphersal extension).",
+        "g.layer_diff()" => "#{\"added\": [], \"modified\": [], \"removed\": [], \"truncated\": false}";
     "traversal" "length":
         "Yields the length of each string in characters (Unicode scalar values, see the book page Type Conversion and length()).",
         "g.v(1).values(\"name\").length().next()" => "5";

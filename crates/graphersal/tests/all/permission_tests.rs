@@ -692,6 +692,41 @@ mod access_policy {
     }
 
     #[test]
+    fn the_layer_diff_asks_for_read_on_data() {
+        let graph = modern();
+        for script in ["g.layer_diff()", "g.layer_diff(#{limit: 1})"] {
+            assert_denied(
+                run(&graph, script, AccessPolicy::deny_all()),
+                "layer_diff",
+                "Read Data",
+            );
+            assert!(run(&graph, script, AccessPolicy::read_only()).is_ok());
+        }
+        // The Rust API asks the same request once an authorizer is attached.
+        let guard = graph.read();
+        let err = guard
+            .traversal()
+            .with_authorizer(Arc::new(AccessPolicy::deny_all()))
+            .layer_diff(&graphersal::storage::LayerDiffRequest::new())
+            .unwrap_err();
+        let TraverserError::PermissionDenied { step, request, .. } = err.root_cause() else {
+            panic!("{err:?}");
+        };
+        assert_eq!(step, "layer_diff");
+        assert_eq!(
+            request.as_request(),
+            AccessRequest::new(Action::Read, Resource::data(None, None))
+        );
+        assert!(
+            guard
+                .traversal()
+                .with_authorizer(Arc::new(AccessPolicy::read_only()))
+                .layer_diff(&graphersal::storage::LayerDiffRequest::new())
+                .is_ok_and(|diff| diff.is_empty())
+        );
+    }
+
+    #[test]
     fn shrink_to_fit_asks_for_update_on_data() {
         let graph = modern();
         // Storage maintenance: a read-only policy refuses it, like the other maintenance
