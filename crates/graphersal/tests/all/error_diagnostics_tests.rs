@@ -12831,3 +12831,61 @@ fn unique_index_errors_carry_their_help() {
         "{conflict}"
     );
 }
+
+/// `has_layer()` with a name that is not a layer origin fails before the traversal runs (also
+/// inside a child no traverser reaches), and its help lists the three origins with a runnable
+/// fix built from the failing name.
+#[test]
+fn unknown_layer_origin_help_lists_the_origins() {
+    let graph = GraphSource::tinkerpop_modern();
+    let lock = graph.read();
+    let rust = lock
+        .traversal()
+        .v(None)
+        .has_layer(vec!["added", "new"])
+        .to_list()
+        .unwrap_err();
+    // Unreached: `limit(0)` lets no traverser into the child.
+    let unreached = lock
+        .traversal()
+        .v(None)
+        .limit(0)
+        .where_t(__::has_layer("new"))
+        .to_list()
+        .unwrap_err();
+    for err in [&rust, &unreached] {
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::UnknownLayerOrigin { name, .. } if name == "new"
+            ),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("\"new\""), "{text}");
+        let help = err.help().unwrap();
+        for origin in ["\"base\"", "\"added\"", "\"modified\""] {
+            assert!(help.contains(origin), "{help}");
+        }
+        assert!(
+            help.contains("g.v().has_layer(\"added\") instead of g.v().has_layer(\"new\")"),
+            "{help}"
+        );
+        assert!(help.contains("g.v().layer()"), "{help}");
+    }
+}
+
+/// The same error through the Rhai DSL, and the fix in its help runs.
+#[cfg(feature = "script")]
+#[test]
+fn unknown_layer_origin_help_in_the_dsl() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let err = eval_value(graph.clone(), r#"g.v().has_layer("new").to_list()"#).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("not a layer origin"), "{text}");
+    assert!(text.contains("g.v().has_layer(\"added\")"), "{text}");
+    let fixed = eval_value(graph, r#"g.v().has_layer("added").count().next()"#).unwrap();
+    assert_eq!(fixed.to_string(), "0");
+}

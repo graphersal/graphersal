@@ -970,3 +970,54 @@ fn layer_reads_are_forwarded_and_can_fail() {
         Some(LayerOrigin::Base)
     );
 }
+
+/// A failing layer read fails the `layer()` / `has_layer()` step that reads it (vertices and
+/// edges), as a storage error at that step, never a panic or a made-up origin; once the backend
+/// is back the same queries answer.
+#[test]
+fn a_layer_read_failure_fails_the_layer_steps() {
+    let storage = modern();
+    let faults = storage.faults();
+    Faults::set(&faults.layer, true);
+    let errors = [
+        GraphTraversalSource::new(&storage)
+            .v(None)
+            .layer()
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .e(None)
+            .layer()
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .v(None)
+            .has_layer("added")
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .e(None)
+            .has_layer("base")
+            .count()
+            .next()
+            .unwrap_err(),
+    ];
+    for err in &errors {
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::Graph(GraphError::StorageFailed { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(err.step_location().is_some(), "{err:?}");
+    }
+    Faults::set(&faults.layer, false);
+    let count = GraphTraversalSource::new(&storage)
+        .v(None)
+        .has_layer("base")
+        .count()
+        .next()
+        .unwrap();
+    assert_eq!(count.and_then(|c| c.as_i64()), Some(6));
+}

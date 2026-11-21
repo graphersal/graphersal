@@ -108,6 +108,8 @@ pub(super) enum Step {
     Label,
     /// `labels()` (D4): the plural counterpart to `Label`, exposing a vertex's full label set.
     Labels,
+    /// `layer()`: the layer origin of each vertex or edge.
+    Layer,
     Id,
     Identity,
     /// `sack()`: reads the traverser's sack (`null` without `withSack`).
@@ -196,6 +198,10 @@ pub(super) enum Step {
     HasLabel(Vec<CompactString>),
     /// `hasLabel()` without arguments: keeps the elements that have a label at all.
     HasAnyLabel,
+    /// `has_layer(origins...)`: keeps the elements of the named layer origins.
+    HasLayer(Vec<CompactString>),
+    /// `has_layer()` without arguments: keeps every vertex and edge.
+    HasAnyLayer,
     /// `hasId(P)`: a predicate other than `eq`/`within` over the element id.
     HasIdP(ArgP),
     /// `hasKey(P)`: a predicate over a property key.

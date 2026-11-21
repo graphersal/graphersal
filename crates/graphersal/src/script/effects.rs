@@ -139,6 +139,7 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
                 "hasKey",
                 "has_value",
                 "hasValue",
+                "has_layer",
                 "has_p",
                 "is",
                 "is_",
