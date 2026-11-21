@@ -47,9 +47,13 @@
 //! copy it up into an image in the delta on the first write that changes something (a write
 //! of an identical value changes nothing and copies nothing); an image identical to the base
 //! element again is dropped. The layer keeps its own copy of the base's
-//! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
-//! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
-//! wrote before the failure (units and rollback: S1.8).
+//! statistics, updated per write.
+//!
+//! Units (S1.8): `GraphStorage::capabilities` claims `writable` and `atomic`. The layer keeps
+//! an undo log of its own (`units`) with `TraversalGraph`'s semantics: a unit records the
+//! inverse of every write to the delta, nested units are savepoints (log positions), a rollback
+//! replays the log in reverse down to the mark, so a failing traversal leaves nothing; the
+//! auto-id sequences are never rolled back. Change capture and commit hooks: S1.9.
 //!
 //! Schema and catalog (S1.7): the layer copies the base's schema and catalog when it is created
 //! and from then on reads and writes only its copies; the base's are never read again nor
@@ -66,6 +70,7 @@ mod delta;
 mod dirty;
 mod handle;
 mod storage;
+mod units;
 mod write;
 
 use std::sync::Arc;
@@ -80,6 +85,7 @@ use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
 use dirty::SlotBits;
 use handle::MAX_BASE_SLOTS;
+use units::UnitLog;
 
 /// A [`GraphStorage`](crate::graph::GraphStorage) made of a frozen base graph shared by any
 /// number of layers and a layer of its own: added elements, removed and modified base
@@ -89,9 +95,9 @@ use handle::MAX_BASE_SLOTS;
 /// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices), changes or
 /// drops what it added, and changes and drops base elements (a changed base element is copied
 /// into the layer). It keeps its own copies of the base's schema and catalog (saved queries,
-/// jobs; index, compression and model definitions are not supported on a layer yet). It has
-/// no units yet (`atomic` is not claimed): a traversal that fails keeps what it wrote before
-/// the failure.
+/// jobs; index, compression and model definitions are not supported on a layer yet). It is
+/// atomic (units with an undo log of its own: a traversal that fails leaves nothing), without
+/// change capture yet (no commit hooks, no dry runs).
 ///
 /// ```
 /// use std::sync::Arc;
@@ -135,6 +141,8 @@ pub struct LayeredGraph {
     /// changed only by the layer's catalog writes (the kinds without storage machinery, see
     /// `storage::check_layer_kind`).
     catalog: Catalog,
+    /// The undo log of the open units (`units`): what makes a unit of the layer atomic.
+    units: UnitLog,
 }
 
 impl LayeredGraph {
@@ -168,6 +176,7 @@ impl LayeredGraph {
             edge_sequence: base.edge_sequence,
             schema,
             catalog: base.definitions.clone(),
+            units: UnitLog::default(),
             base,
         }
     }
@@ -502,6 +511,53 @@ mod tests {
             layer.statistics,
             GraphStatistics::from_storage(&layer).unwrap()
         );
+    }
+
+    /// A rolled-back unit leaves the delta's own bookkeeping as before: no image, no
+    /// tombstone, no relabeled or gained edge, the kinds untouched again for the property-index
+    /// lookups; the dirty bits and the stubs the unit made may stay (invisible).
+    #[test]
+    fn a_rollback_restores_the_delta_bookkeeping() {
+        use crate::graph::hooks::RollbackReason;
+        let mut layer = LayeredGraph::over(Arc::new(TraversalGraph::tinkerpop_modern())).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        let lop = layer.get_vertex_by_id("3").unwrap().unwrap();
+        let knows = layer.get_edge_by_id("0").unwrap().unwrap();
+        let mark = layer.begin_unit().unwrap();
+        layer
+            .set_vertex_property(marko, "age".into(), 30.into())
+            .unwrap();
+        layer.remove_vertex_label(marko, "person").unwrap();
+        layer.add_vertex_label(lop, "x".into()).unwrap();
+        layer.set_edge_label(knows, "met".into()).unwrap();
+        layer
+            .insert_edge(None, None, lop, marko, PropertyMap::default())
+            .unwrap();
+        layer.drop_vertex(marko).unwrap();
+        assert!(layer.delta.vertices_touched() && layer.delta.edges_touched());
+        layer
+            .rollback_unit(mark, &RollbackReason::failed(&"test"))
+            .unwrap();
+        assert!(!layer.delta.vertices_touched(), "no image, no tombstone");
+        assert!(!layer.delta.edges_touched());
+        assert!(!layer.delta.imaged_vertices.contains(marko.slot()));
+        assert!(!layer.delta.is_removed_vertex(marko.slot()));
+        assert!(
+            layer
+                .delta
+                .lost_vertex_label("person")
+                .is_none_or(|lost| !lost.contains(marko.slot()))
+        );
+        assert_eq!(layer.delta.vertices_by_label("x").count(), 0);
+        assert_eq!(layer.delta.gained_edges("met").count(), 0);
+        assert!(!layer.delta.relabeled_edges().contains(knows.slot()));
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        assert_eq!(layer.edge_count().unwrap(), 6);
+        assert_eq!(
+            layer.statistics,
+            GraphStatistics::from_storage(&layer).unwrap()
+        );
+        assert_eq!(layer.statistics, layer.base.statistics);
     }
 
     #[test]

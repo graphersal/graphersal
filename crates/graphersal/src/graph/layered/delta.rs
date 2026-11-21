@@ -92,6 +92,7 @@ use crate::graph::handle::{EdgeGenerations, FIRST_GENERATION, Generations};
 use crate::graph::labels::{LabelSetId, Labels};
 use crate::graph::shape::ShapeTable;
 use crate::graph::topology::{Direction, NodeIndex};
+use crate::graph::undo::restore_stored_property;
 use crate::graph::{
     EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, TraversalGraph, VertexHandle,
 };
@@ -166,12 +167,53 @@ pub(crate) struct Delta {
 /// The copied-up state of a modified base edge: what a write may change (its endpoints and id
 /// never change).
 #[derive(Debug)]
-struct EdgeImage {
+pub(crate) struct EdgeImage {
     /// `None` for an unlabeled edge.
     label: Option<CompactString>,
     /// As the base stores it: `None` when the base edge has no map and no write gave it one.
     properties: Option<PropertyMap>,
 }
+
+/// The copied-up state of a modified base vertex taken out of the layer by its drop: what an
+/// undo of the drop puts back into a new stub.
+#[derive(Debug)]
+pub(crate) struct VertexCopy {
+    labels: Vec<CompactString>,
+    properties: PropertyMap,
+}
+
+/// An endpoint of a removed added edge, named so that an undo finds it again: a base vertex by
+/// its handle (base handles never change), an added vertex by its id (an undone drop of it
+/// gives it a new handle).
+#[derive(Debug)]
+pub(crate) enum End {
+    /// A base vertex (the edge was linked to its stub).
+    Base(VertexHandle),
+    /// An added vertex.
+    Delta(CompactString),
+}
+
+/// An added edge taken out of the delta: everything an undo needs to store it again.
+#[derive(Debug)]
+pub(crate) struct RemovedEdge {
+    id: CompactString,
+    label: Option<CompactString>,
+    properties: Option<PropertyMap>,
+    from: End,
+    to: End,
+}
+
+/// An added vertex taken out of the delta (its edges are [`RemovedEdge`]s of their own).
+#[derive(Debug)]
+pub(crate) struct RemovedVertex {
+    id: CompactString,
+    labels: Vec<CompactString>,
+    properties: PropertyMap,
+}
+
+/// The old state of one top-level property: its position and value, or `None` when it was
+/// absent (what an undo restores, `graph::undo::restore_stored_property`).
+pub(crate) type OldProperty = Option<(usize, ElementProperty)>;
 
 /// One property change of a base element, as the write rules returned it.
 pub(crate) enum PropertyChange {
@@ -182,6 +224,13 @@ pub(crate) enum PropertyChange {
 }
 
 impl PropertyChange {
+    /// The key the change writes or removes.
+    pub(crate) fn key(&self) -> &CompactString {
+        match self {
+            PropertyChange::Set(key, _) | PropertyChange::Drop(key) => key,
+        }
+    }
+
     /// `true` when applying the change to `current` (the element's map as the layer reads it)
     /// would change nothing: the key holds an identical value (`identity_eq`, so `1` and `1.0`
     /// differ) or, for a drop, is absent. Such a write creates no image (plan P6).
@@ -194,15 +243,17 @@ impl PropertyChange {
         }
     }
 
-    /// Applies the change to an image map, the value made logical first.
-    fn apply(self, shapes: &mut ShapeTable, map: &mut PropertyMap) {
+    /// Applies the change to an image map, the value made logical first; returns the key's
+    /// old state.
+    fn apply(self, shapes: &mut ShapeTable, map: &mut PropertyMap) -> OldProperty {
         match self {
             PropertyChange::Set(key, value) => {
-                shapes.insert_full(map, key, logical(value));
+                let (position, old) = shapes.insert_full(map, key, logical(value));
+                old.map(|old| (position, old))
             }
-            PropertyChange::Drop(key) => {
-                shapes.shift_remove_full(map, &key);
-            }
+            PropertyChange::Drop(key) => shapes
+                .shift_remove_full(map, &key)
+                .map(|(position, _, old)| (position, old)),
         }
     }
 }
@@ -251,6 +302,17 @@ impl Default for Delta {
             gained_edge_labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
         }
     }
+}
+
+/// The weight of the live added vertex `node` in `graph` (`None` when stale).
+fn live_vertex_mut(
+    graph: &mut GraphType,
+    node: LayeredVertex,
+) -> Option<&mut crate::graph::VertexData> {
+    let local = node.to_delta();
+    graph
+        .node_weight_mut(local.index())
+        .filter(|vertex| vertex.3 == local.generation())
 }
 
 /// The delta slot store is full: the next slot would carry the tag bit itself.
@@ -664,19 +726,27 @@ impl Delta {
     }
 
     /// Removes a live delta edge with its index entries and retires its slot generation;
-    /// nothing for a stale handle.
-    pub(crate) fn remove_edge(&mut self, edge: LayeredEdge, statistics: &mut GraphStatistics) {
+    /// nothing for a stale handle. With `capture` (inside a unit) it returns what an undo needs
+    /// to store the edge again.
+    pub(crate) fn remove_edge(
+        &mut self,
+        edge: LayeredEdge,
+        statistics: &mut GraphStatistics,
+        capture: bool,
+    ) -> Option<RemovedEdge> {
         let local = edge.to_delta();
         if self
             .graph
             .edge_weight(local.index())
             .is_none_or(|weight| weight.3.own != local.generation())
         {
-            return;
+            return None;
         }
-        let Some((id, label, _, _)) = self.graph.remove_edge(local.index()) else {
-            return;
+        let ends = match (capture, self.graph.edge_endpoints(local.index())) {
+            (true, Some((source, target))) => Some((self.end_of(source), self.end_of(target))),
+            _ => None,
         };
+        let (id, label, properties, _) = self.graph.remove_edge(local.index())?;
         let label = self.labels.name(label).cloned();
         statistics.edge_removed(label.as_deref());
         if let Some(label) = &label {
@@ -684,15 +754,89 @@ impl Delta {
         }
         self.index.remove_edge(&id, local);
         self.edge_generations.bump(local.index().index());
+        let (from, to) = ends?;
+        Some(RemovedEdge {
+            id,
+            label,
+            properties,
+            from,
+            to,
+        })
+    }
+
+    /// How an undo names the endpoint in delta node slot `index` (see [`End`]).
+    fn end_of(&self, index: NodeIndex) -> End {
+        match self.stub_base(index) {
+            Some(base) => End::Base(base),
+            None => End::Delta(
+                self.graph
+                    .node_weight(index)
+                    .map(|vertex| vertex.0.clone())
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// The delta node slot (with the endpoint handle's generation) an undo links a restored
+    /// edge to: the stub of a base vertex (created again when its drop took it along), or the
+    /// added vertex with that id.
+    fn resolve_end(&mut self, end: &End) -> Result<VertexHandle, GraphError> {
+        match end {
+            End::Base(base) => {
+                let stub = self.stub_for(*base)?;
+                Ok(VertexHandle::new(stub, base.generation()))
+            }
+            End::Delta(id) => self
+                .vertex_by_id(id)
+                .map(|node| node.to_delta())
+                .ok_or_else(GraphError::vertex_removed),
+        }
+    }
+
+    /// Stores an added edge an undone drop took out again (a new slot and generation, at the
+    /// front of its endpoints' lists). The caller keeps the dirty bits of base endpoints set.
+    pub(crate) fn restore_edge(
+        &mut self,
+        removed: RemovedEdge,
+        statistics: &mut GraphStatistics,
+    ) -> Result<(), GraphError> {
+        let from = self.resolve_end(&removed.from)?;
+        let to = self.resolve_end(&removed.to)?;
+        self.insert_edge(
+            removed.id,
+            removed.label,
+            removed.properties.unwrap_or_default(),
+            from,
+            to,
+            statistics,
+        )?;
+        Ok(())
+    }
+
+    /// Stores an added vertex an undone drop took out again (a new slot and generation; its
+    /// edges come back through [`Self::restore_edge`]).
+    pub(crate) fn restore_vertex(
+        &mut self,
+        removed: RemovedVertex,
+        statistics: &mut GraphStatistics,
+    ) -> Result<(), GraphError> {
+        self.insert_vertex(removed.id, removed.labels, removed.properties, statistics)?;
+        Ok(())
     }
 
     /// Removes a live delta vertex, its incident edges (also those to base vertices: they leave
     /// the stubs' lists, the stubs stay) and every index entry, and retires the slot
-    /// generations; nothing for a stale handle.
-    pub(crate) fn remove_vertex(&mut self, node: LayeredVertex, statistics: &mut GraphStatistics) {
+    /// generations; nothing for a stale handle. Returns the removed vertex; with `removed_edges`
+    /// (inside a unit) the removed edges are pushed there, in removal order.
+    pub(crate) fn remove_vertex(
+        &mut self,
+        node: LayeredVertex,
+        statistics: &mut GraphStatistics,
+        mut removed_edges: Option<&mut Vec<RemovedEdge>>,
+    ) -> Option<RemovedVertex> {
         let index = self.delta_index(node);
         if index == NodeIndex::end() {
-            return;
+            return None;
         }
         // Each incident edge once: a self-loop is taken from the outgoing side only.
         let mut incident: Vec<LayeredEdge> = Vec::new();
@@ -708,12 +852,13 @@ impl Delta {
             }
         }
         for edge in incident {
-            self.remove_edge(edge, statistics);
+            let removed = self.remove_edge(edge, statistics, removed_edges.is_some());
+            if let (Some(sink), Some(removed)) = (removed_edges.as_deref_mut(), removed) {
+                sink.push(removed);
+            }
         }
         let local = node.to_delta();
-        let Some((id, labels, _, _)) = self.graph.remove_node(index) else {
-            return;
-        };
+        let (id, labels, properties, _) = self.graph.remove_node(index)?;
         let labels = self.labels.set(labels).to_vec();
         statistics.vertex_removed(&labels);
         self.index.remove_node(&id, local);
@@ -721,25 +866,29 @@ impl Delta {
             self.index.remove_node_label(label, local);
         }
         self.node_generations.bump(index.index());
+        Some(RemovedVertex {
+            id,
+            labels,
+            properties,
+        })
     }
 
     /// Tombstones the live base edge `edge` (the caller checked it through the write rules and
     /// sets the dirty bits of the edge and of both endpoints) and counts it out of the
-    /// statistics as `TraversalGraph`'s raw remove does. Nothing for an edge already removed or
-    /// stale.
+    /// statistics as `TraversalGraph`'s raw remove does. Nothing (`None`) for an edge already
+    /// removed or stale. Returns what an undo puts back: the image the edge had and its
+    /// position among the base edges relabeled to the image's label.
     pub(crate) fn remove_base_edge(
         &mut self,
         base: &TraversalGraph,
         edge: EdgeHandle,
         statistics: &mut GraphStatistics,
-    ) {
+    ) -> Option<(Option<EdgeImage>, Option<usize>)> {
         let slot = edge.index().slot();
         if self.removed_edges.contains(slot) {
-            return;
+            return None;
         }
-        let Some(weight) = base.edge_weight(edge) else {
-            return;
-        };
+        let weight = base.edge_weight(edge)?;
         // The label it has now: its image's, when a write changed it.
         let image = if self.imaged_edges.contains(slot) {
             self.imaged_edges.clear(slot);
@@ -747,13 +896,14 @@ impl Delta {
         } else {
             None
         };
-        match image {
+        let mut position = None;
+        match &image {
             Some(image) => {
                 statistics.edge_removed(image.label.as_deref());
                 if self.relabeled_edges.contains(slot) {
                     self.relabeled_edges.clear(slot);
                     if let Some(label) = &image.label {
-                        self.remove_gained_edge(label, edge);
+                        position = self.remove_gained_edge(label, edge);
                     }
                 }
             }
@@ -761,29 +911,68 @@ impl Delta {
         }
         self.removed_edges.set_growing(slot);
         self.removed_edge_count += 1;
+        Some((image, position))
+    }
+
+    /// Undoes [`Self::remove_base_edge`]: clears the tombstone, counts the edge back into the
+    /// statistics and puts its image back (with its relabeled bit and its old position among
+    /// the base edges relabeled to its label). The dirty bits stay set.
+    pub(crate) fn restore_base_edge(
+        &mut self,
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        image: Option<EdgeImage>,
+        position: Option<usize>,
+        statistics: &mut GraphStatistics,
+    ) {
+        let slot = edge.index().slot();
+        if !self.removed_edges.contains(slot) {
+            return;
+        }
+        self.removed_edges.clear(slot);
+        self.removed_edge_count = self.removed_edge_count.saturating_sub(1);
+        let base_label = base
+            .edge_weight(edge)
+            .and_then(|weight| base.labels.name(weight.1))
+            .cloned();
+        match image {
+            None => statistics.edge_added(base_label.as_deref()),
+            Some(mut image) => {
+                statistics.edge_added(image.label.as_deref());
+                if image.label != base_label {
+                    self.relabeled_edges.set_growing(slot);
+                    if let Some(label) = &image.label {
+                        self.insert_gained_edge(label.clone(), edge, position);
+                    }
+                }
+                self.shapes.adopt_optional(&mut image.properties);
+                self.edge_images.insert(slot, image);
+                self.imaged_edges.set_growing(slot);
+            }
+        }
     }
 
     /// Tombstones the live base vertex `node` and removes its stub, if it has one (the caller
     /// removed every incident edge first, base and added, and sets the vertex's dirty bit),
     /// with its image and the label memberships the image had; counts it out of the
     /// statistics, with the labels it has now, as `TraversalGraph`'s raw remove does. Nothing
-    /// for a vertex already removed or stale.
+    /// (`None`) for a vertex already removed or stale; else `Some` of the image it had, which
+    /// an undo puts back.
     pub(crate) fn remove_base_vertex(
         &mut self,
         base: &TraversalGraph,
         node: VertexHandle,
         statistics: &mut GraphStatistics,
-    ) {
+    ) -> Option<Option<VertexCopy>> {
         let slot = node.index().slot();
         if self.removed_vertices.contains(slot) {
-            return;
+            return None;
         }
-        let Some(vertex) = base.vertex_weight(node) else {
-            return;
-        };
+        let vertex = base.vertex_weight(node)?;
         let base_labels = base.labels.set(vertex.1);
         let stub = self.stub_index(node);
         let imaged = self.imaged_vertices.contains(slot);
+        let mut image_labels = None;
         match self.graph.node_weight(stub) {
             Some(weight) if imaged => {
                 let current = self.labels.set(weight.1).to_vec();
@@ -801,21 +990,80 @@ impl Delta {
                 }
                 self.imaged_vertices.clear(slot);
                 self.vertex_image_count -= 1;
+                image_labels = Some(current);
             }
             _ => statistics.vertex_removed(base_labels),
         }
         self.removed_vertices.set_growing(slot);
         self.removed_vertex_count += 1;
+        let mut copy = None;
         if stub != NodeIndex::end() {
             // Empty by now; `remove_node` would unlink a leftover edge without its index
             // entries, so the caller's order (edges first) is what keeps the indexes exact.
-            self.graph.remove_node(stub);
+            let removed = self.graph.remove_node(stub);
             self.node_generations.bump(stub.index());
             self.stubs.remove(&slot);
             if let Some(entry) = self.stub_bases.get_mut(stub.index()) {
                 *entry = None;
             }
+            if let (Some(labels), Some((_, _, properties, _))) = (image_labels, removed) {
+                copy = Some(VertexCopy { labels, properties });
+            }
         }
+        Some(copy)
+    }
+
+    /// Undoes [`Self::remove_base_vertex`]: clears the tombstone, counts the vertex back into
+    /// the statistics and puts its image back into a new stub, with its label memberships and
+    /// lost-label bits. The dirty bit stays set; the added edges the drop took along come back
+    /// through [`Self::restore_edge`].
+    pub(crate) fn restore_base_vertex(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+        image: Option<VertexCopy>,
+        statistics: &mut GraphStatistics,
+    ) -> Result<(), GraphError> {
+        let slot = node.index().slot();
+        if !self.removed_vertices.contains(slot) {
+            return Ok(());
+        }
+        let Some(vertex) = base.vertex_weight(node) else {
+            return Err(GraphError::vertex_removed());
+        };
+        self.removed_vertices.clear(slot);
+        self.removed_vertex_count = self.removed_vertex_count.saturating_sub(1);
+        let base_labels = base.labels.set(vertex.1);
+        let Some(VertexCopy {
+            labels,
+            mut properties,
+        }) = image
+        else {
+            statistics.vertex_added(base_labels);
+            return Ok(());
+        };
+        statistics.vertex_added(&labels);
+        let stub = self.stub_for(node)?;
+        self.shapes.adopt(&mut properties);
+        let label_set = self.labels.intern_set(&labels);
+        let Some(weight) = self.graph.node_weight_mut(stub) else {
+            return Err(GraphError::vertex_removed());
+        };
+        weight.1 = label_set;
+        weight.2 = properties;
+        let member = VertexHandle::new(stub, weight.3);
+        for label in labels.iter().filter(|l| !base_labels.contains(l)) {
+            self.index.insert_node_label(label.clone(), member);
+        }
+        for label in base_labels.iter().filter(|l| !labels.contains(l)) {
+            self.lost_vertex_labels
+                .entry(label.clone())
+                .or_default()
+                .set_growing(slot);
+        }
+        self.imaged_vertices.set_growing(slot);
+        self.vertex_image_count += 1;
+        Ok(())
     }
 
     // --------------------------------------------------------------------------------------
@@ -852,29 +1100,66 @@ impl Delta {
         Ok((stub, false))
     }
 
-    /// Applies one property change to the image of the live base vertex `node`.
+    /// Applies one property change to the image of the live base vertex `node`; returns
+    /// whether the image existed before and the key's old state.
     pub(crate) fn change_base_vertex_property(
         &mut self,
         base: &TraversalGraph,
         node: VertexHandle,
         change: PropertyChange,
-    ) -> Result<bool, GraphError> {
+    ) -> Result<(bool, OldProperty), GraphError> {
         let (stub, existed) = self.vertex_image(base, node)?;
+        let old = match self.graph.node_weight_mut(stub) {
+            Some(weight) => change.apply(&mut self.shapes, &mut weight.2),
+            None => None,
+        };
+        Ok((existed, old))
+    }
+
+    /// Undoes one property change of the image of the base vertex `node`: puts `key` back to
+    /// `old` (copying the vertex up again when a return to clean dropped the image since: the
+    /// image then equalled the base vertex, which the write left with the same labels).
+    pub(crate) fn restore_base_vertex_property(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+        key: &str,
+        old: OldProperty,
+    ) -> Result<(), GraphError> {
+        let (stub, _) = self.vertex_image(base, node)?;
         if let Some(weight) = self.graph.node_weight_mut(stub) {
-            change.apply(&mut self.shapes, &mut weight.2);
+            restore_stored_property(&mut self.shapes, &mut weight.2, key, old);
         }
-        Ok(existed)
+        Ok(())
+    }
+
+    /// Drops the image of the base vertex `node` whatever it holds (an undo of the write that
+    /// copied it up: its labels are the base's again, so no label lookup changes). The stub
+    /// and the dirty bit stay.
+    pub(crate) fn clear_vertex_image(&mut self, node: VertexHandle) {
+        let slot = node.index().slot();
+        if !self.imaged_vertices.contains(slot) {
+            return;
+        }
+        let stub = self.stub_index(node);
+        if let Some(image) = self.graph.node_weight_mut(stub) {
+            image.1 = LabelSetId::EMPTY;
+            image.2 = PropertyMap::default();
+        }
+        self.imaged_vertices.clear(slot);
+        self.vertex_image_count -= 1;
     }
 
     /// Gives the image of the live base vertex `node` the label list `new_labels` (from the
-    /// write rules) and keeps the label lookups (module docs) and the statistics in step.
+    /// write rules) and keeps the label lookups (module docs) and the statistics in step;
+    /// returns whether the image existed before and the old label list.
     pub(crate) fn set_base_vertex_labels(
         &mut self,
         base: &TraversalGraph,
         node: VertexHandle,
         new_labels: Vec<CompactString>,
         statistics: &mut GraphStatistics,
-    ) -> Result<bool, GraphError> {
+    ) -> Result<(bool, Vec<CompactString>), GraphError> {
         let (stub, existed) = self.vertex_image(base, node)?;
         let Some(vertex) = base.vertex_weight(node) else {
             return Err(GraphError::vertex_removed());
@@ -910,7 +1195,7 @@ impl Delta {
                 self.index.insert_node_label(label, member);
             }
         }
-        Ok(existed)
+        Ok((existed, old))
     }
 
     /// Drops the image of the base vertex `node` when it is identical to the base vertex again
@@ -932,12 +1217,7 @@ impl Delta {
         {
             return;
         }
-        if let Some(image) = self.graph.node_weight_mut(stub) {
-            image.1 = LabelSetId::EMPTY;
-            image.2 = PropertyMap::default();
-        }
-        self.imaged_vertices.clear(slot);
-        self.vertex_image_count -= 1;
+        self.clear_vertex_image(node);
     }
 
     /// Copies the live base edge `edge` up when it has no image yet (label and logical
@@ -964,39 +1244,78 @@ impl Delta {
     }
 
     /// Applies one property change to the image of the live base edge `edge` (a set gives an
-    /// edge without a map one, as `TraversalGraph` does).
+    /// edge without a map one, as `TraversalGraph` does); returns whether the image existed
+    /// before, the key's old state and whether the image had no map before.
     pub(crate) fn change_base_edge_property(
         &mut self,
         base: &TraversalGraph,
         edge: EdgeHandle,
         change: PropertyChange,
-    ) -> Result<bool, GraphError> {
+    ) -> Result<(bool, OldProperty, bool), GraphError> {
         let existed = self.edge_image(base, edge)?;
-        if let Some(image) = self.edge_images.get_mut(&edge.index().slot()) {
-            match change {
-                PropertyChange::Set(..) => {
-                    let map = image.properties.get_or_insert_with(PropertyMap::default);
-                    change.apply(&mut self.shapes, map);
-                }
-                PropertyChange::Drop(_) => {
-                    if let Some(map) = image.properties.as_mut() {
-                        change.apply(&mut self.shapes, map);
-                    }
-                }
+        let Some(image) = self.edge_images.get_mut(&edge.index().slot()) else {
+            return Ok((existed, None, false));
+        };
+        let map_was_none = image.properties.is_none();
+        let old = match change {
+            PropertyChange::Set(..) => {
+                let map = image.properties.get_or_insert_with(PropertyMap::default);
+                change.apply(&mut self.shapes, map)
             }
-        }
-        Ok(existed)
+            PropertyChange::Drop(_) => match image.properties.as_mut() {
+                Some(map) => change.apply(&mut self.shapes, map),
+                None => None,
+            },
+        };
+        Ok((existed, old, map_was_none))
     }
 
-    /// Relabels the image of the live base edge `edge` (the write rules passed and the label
-    /// differs), keeping the label lookups (module docs) and the statistics in step.
+    /// The edge counterpart of [`Self::restore_base_vertex_property`]; `map_was_none` puts
+    /// back an image without a map.
+    pub(crate) fn restore_base_edge_property(
+        &mut self,
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        key: &str,
+        old: OldProperty,
+        map_was_none: bool,
+    ) -> Result<(), GraphError> {
+        self.edge_image(base, edge)?;
+        if let Some(image) = self.edge_images.get_mut(&edge.index().slot()) {
+            if map_was_none {
+                image.properties = None;
+            } else {
+                let map = image.properties.get_or_insert_with(PropertyMap::default);
+                restore_stored_property(&mut self.shapes, map, key, old);
+            }
+        }
+        Ok(())
+    }
+
+    /// The edge counterpart of [`Self::clear_vertex_image`]: its label is the base's again.
+    pub(crate) fn clear_edge_image(&mut self, edge: EdgeHandle) {
+        let slot = edge.index().slot();
+        if self.imaged_edges.contains(slot) {
+            self.edge_images.remove(&slot);
+            self.imaged_edges.clear(slot);
+            self.relabeled_edges.clear(slot);
+        }
+    }
+
+    /// Relabels the image of the live base edge `edge` to `label` (`None`: unlabeled; the
+    /// write rules passed and the label differs, or an undo puts the old label back), keeping
+    /// the label lookups (module docs) and the statistics in step. A relabeled edge joins the
+    /// list of its new label at its end, or at `position` (an undo: the place it had there).
+    /// Returns whether the image existed before, the old label and the place the edge had in
+    /// the list of the old label (what an undo hands back as `position`).
     pub(crate) fn set_base_edge_label(
         &mut self,
         base: &TraversalGraph,
         edge: EdgeHandle,
-        label: CompactString,
+        label: Option<CompactString>,
+        position: Option<usize>,
         statistics: &mut GraphStatistics,
-    ) -> Result<bool, GraphError> {
+    ) -> Result<(bool, Option<CompactString>, Option<usize>), GraphError> {
         let existed = self.edge_image(base, edge)?;
         let slot = edge.index().slot();
         let base_label = base
@@ -1006,32 +1325,55 @@ impl Delta {
         let Some(image) = self.edge_images.get_mut(&slot) else {
             return Err(GraphError::edge_removed());
         };
-        let old = std::mem::replace(&mut image.label, Some(label.clone()));
-        statistics.edge_relabeled(old.as_deref(), Some(label.as_str()));
+        let old = std::mem::replace(&mut image.label, label.clone());
+        statistics.edge_relabeled(old.as_deref(), label.as_deref());
+        let mut old_position = None;
         if old != base_label
             && let Some(old) = &old
         {
-            self.remove_gained_edge(old, edge);
+            old_position = self.remove_gained_edge(old, edge);
         }
-        if Some(&label) == base_label.as_ref() {
+        if label == base_label {
             self.relabeled_edges.clear(slot);
         } else {
             self.relabeled_edges.set_growing(slot);
-            self.gained_edge_labels.entry(label).or_default().push(edge);
+            if let Some(label) = label {
+                self.insert_gained_edge(label, edge, position);
+            }
         }
-        Ok(existed)
+        Ok((existed, old, old_position))
     }
 
-    /// Removes `edge` from the base edges relabeled to `label` (the last one takes its place).
-    fn remove_gained_edge(&mut self, label: &str, edge: EdgeHandle) {
-        let Some(members) = self.gained_edge_labels.get_mut(label) else {
-            return;
-        };
-        if let Some(position) = members.iter().position(|member| *member == edge) {
+    /// Removes `edge` from the base edges relabeled to `label` (the last one takes its place,
+    /// as in a label bucket); returns the place it had.
+    fn remove_gained_edge(&mut self, label: &str, edge: EdgeHandle) -> Option<usize> {
+        let members = self.gained_edge_labels.get_mut(label)?;
+        let position = members.iter().position(|member| *member == edge);
+        if let Some(position) = position {
             members.swap_remove(position);
         }
         if members.is_empty() {
             self.gained_edge_labels.remove(label);
+        }
+        position
+    }
+
+    /// Adds `edge` to the base edges relabeled to `label`: at the end, or back at `position`
+    /// (the exact inverse of [`Self::remove_gained_edge`]: the member that took its place moves
+    /// back to the end).
+    fn insert_gained_edge(
+        &mut self,
+        label: CompactString,
+        edge: EdgeHandle,
+        position: Option<usize>,
+    ) {
+        let members = self.gained_edge_labels.entry(label).or_default();
+        members.push(edge);
+        let last = members.len() - 1;
+        if let Some(position) = position
+            && position < last
+        {
+            members.swap(position, last);
         }
     }
 
@@ -1053,25 +1395,25 @@ impl Delta {
             _ => false,
         };
         if same_properties && image.label.as_ref() == base.labels.name(weight.1) {
-            self.edge_images.remove(&slot);
-            self.imaged_edges.clear(slot);
+            self.clear_edge_image(edge);
         }
     }
 
-    /// Replaces the label set of a live delta vertex with `new_labels` (from the write rules).
+    /// Replaces the label set of a live delta vertex with `new_labels` (from the write rules);
+    /// returns the old label list (empty for a stale handle).
     pub(crate) fn set_vertex_labels(
         &mut self,
         node: LayeredVertex,
         new_labels: Vec<CompactString>,
         statistics: &mut GraphStatistics,
-    ) {
+    ) -> Vec<CompactString> {
         let local = node.to_delta();
         let Some(vertex) = self
             .graph
             .node_weight_mut(local.index())
             .filter(|vertex| vertex.3 == local.generation())
         else {
-            return;
+            return Vec::new();
         };
         let new_set = self.labels.intern_set(&new_labels);
         let old = self
@@ -1085,92 +1427,129 @@ impl Delta {
         for label in new_labels.into_iter().filter(|l| !old.contains(l)) {
             self.index.insert_node_label(label, local);
         }
+        old
     }
 
-    /// Relabels a live delta edge (the write rules passed).
+    /// Relabels a live delta edge to `label` (`None`: unlabeled, an undo only; the write rules
+    /// passed); returns the old label (`None` also for a stale handle).
     pub(crate) fn set_edge_label(
         &mut self,
         edge: LayeredEdge,
-        label: CompactString,
+        label: Option<CompactString>,
         statistics: &mut GraphStatistics,
-    ) {
+    ) -> Option<CompactString> {
+        let local = edge.to_delta();
+        let weight = self
+            .graph
+            .edge_weight_mut(local.index())
+            .filter(|weight| weight.3.own == local.generation())?;
+        let new_id = self.labels.intern_name(label.as_deref());
+        let old = self
+            .labels
+            .name(std::mem::replace(&mut weight.1, new_id))
+            .cloned();
+        statistics.edge_relabeled(old.as_deref(), label.as_deref());
+        if let Some(old) = &old {
+            self.index.remove_edge_label(old, local);
+        }
+        if let Some(label) = label {
+            self.index.insert_edge_label(label, local);
+        }
+        old
+    }
+
+    /// Sets one property of a live delta vertex to the value the write rules returned; returns
+    /// the key's old state.
+    pub(crate) fn set_vertex_property(
+        &mut self,
+        node: LayeredVertex,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> OldProperty {
+        let vertex = live_vertex_mut(&mut self.graph, node)?;
+        let (position, old) = self.shapes.insert_full(&mut vertex.2, key, value);
+        old.map(|old| (position, old))
+    }
+
+    /// Sets one property of a live delta edge to the value the write rules returned; returns
+    /// the key's old state and whether the edge had no map before.
+    pub(crate) fn set_edge_property(
+        &mut self,
+        edge: LayeredEdge,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> (OldProperty, bool) {
         let local = edge.to_delta();
         let Some(weight) = self
             .graph
             .edge_weight_mut(local.index())
             .filter(|weight| weight.3.own == local.generation())
         else {
+            return (None, false);
+        };
+        let map_was_none = weight.2.is_none();
+        let map = weight.2.get_or_insert_with(PropertyMap::default);
+        let (position, old) = self.shapes.insert_full(map, key, value);
+        (old.map(|old| (position, old)), map_was_none)
+    }
+
+    /// Removes one property of a live delta vertex (absent: nothing); returns its old state.
+    pub(crate) fn drop_vertex_property(&mut self, node: LayeredVertex, key: &str) -> OldProperty {
+        let vertex = live_vertex_mut(&mut self.graph, node)?;
+        self.shapes
+            .shift_remove_full(&mut vertex.2, key)
+            .map(|(position, _, old)| (position, old))
+    }
+
+    /// Removes one property of a live delta edge (absent: nothing); returns its old state.
+    pub(crate) fn drop_edge_property(&mut self, edge: LayeredEdge, key: &str) -> OldProperty {
+        let local = edge.to_delta();
+        let weight = self
+            .graph
+            .edge_weight_mut(local.index())
+            .filter(|weight| weight.3.own == local.generation())?;
+        let map = weight.2.as_mut()?;
+        self.shapes
+            .shift_remove_full(map, key)
+            .map(|(position, _, old)| (position, old))
+    }
+
+    /// Undoes one property write of the added vertex `id`: `key` back to `old`.
+    pub(crate) fn restore_vertex_property(&mut self, id: &str, key: &str, old: OldProperty) {
+        let Some(node) = self.vertex_by_id(id) else {
+            tracing::error!(%id, "layer undo: added vertex of a property write not found");
             return;
         };
-        let new_id = self.labels.intern_name(Some(label.as_str()));
-        let old = self
-            .labels
-            .name(std::mem::replace(&mut weight.1, new_id))
-            .cloned();
-        statistics.edge_relabeled(old.as_deref(), Some(label.as_str()));
-        if let Some(old) = &old {
-            self.index.remove_edge_label(old, local);
-        }
-        self.index.insert_edge_label(label, local);
-    }
-
-    /// Sets one property of a live delta vertex to the value the write rules returned.
-    pub(crate) fn set_vertex_property(
-        &mut self,
-        node: LayeredVertex,
-        key: CompactString,
-        value: ElementProperty,
-    ) {
-        let local = node.to_delta();
-        if let Some(vertex) = self
-            .graph
-            .node_weight_mut(local.index())
-            .filter(|vertex| vertex.3 == local.generation())
-        {
-            self.shapes.insert_full(&mut vertex.2, key, value);
+        if let Some(vertex) = live_vertex_mut(&mut self.graph, node) {
+            restore_stored_property(&mut self.shapes, &mut vertex.2, key, old);
         }
     }
 
-    /// Sets one property of a live delta edge to the value the write rules returned.
-    pub(crate) fn set_edge_property(
+    /// Undoes one property write of the added edge `id`; `map_was_none` puts back an edge
+    /// without a map.
+    pub(crate) fn restore_edge_property(
         &mut self,
-        edge: LayeredEdge,
-        key: CompactString,
-        value: ElementProperty,
+        id: &str,
+        key: &str,
+        old: OldProperty,
+        map_was_none: bool,
     ) {
+        let Some(edge) = self.edge_by_id(id) else {
+            tracing::error!(%id, "layer undo: added edge of a property write not found");
+            return;
+        };
         let local = edge.to_delta();
         if let Some(weight) = self
             .graph
             .edge_weight_mut(local.index())
             .filter(|weight| weight.3.own == local.generation())
         {
-            let map = weight.2.get_or_insert_with(PropertyMap::default);
-            self.shapes.insert_full(map, key, value);
-        }
-    }
-
-    /// Removes one property of a live delta vertex (absent: nothing).
-    pub(crate) fn drop_vertex_property(&mut self, node: LayeredVertex, key: &str) {
-        let local = node.to_delta();
-        if let Some(vertex) = self
-            .graph
-            .node_weight_mut(local.index())
-            .filter(|vertex| vertex.3 == local.generation())
-        {
-            self.shapes.shift_remove_full(&mut vertex.2, key);
-        }
-    }
-
-    /// Removes one property of a live delta edge (absent: nothing).
-    pub(crate) fn drop_edge_property(&mut self, edge: LayeredEdge, key: &str) {
-        let local = edge.to_delta();
-        if let Some(weight) = self
-            .graph
-            .edge_weight_mut(local.index())
-            .filter(|weight| weight.3.own == local.generation())
-            && let Some(map) = weight.2.as_mut()
-        {
-            self.shapes.shift_remove_full(map, key);
+            if map_was_none {
+                weight.2 = None;
+            } else {
+                let map = weight.2.get_or_insert_with(PropertyMap::default);
+                restore_stored_property(&mut self.shapes, map, key, old);
+            }
         }
     }
 }
