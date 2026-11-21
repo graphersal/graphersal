@@ -65,8 +65,8 @@ fn shared_reference_of_a_foreign_storage_is_read_only() {
 
 /// The read-only items on an untouched `LayeredGraph` over the modern graph (the write items of
 /// `conformance!` all start from an empty storage, see `layered_empty_base` above): the
-/// invariant checker, the traversal smoke against the reference, and the refusal of every write
-/// to a base element (tasks S1.4-S1.6 implement them).
+/// invariant checker, the traversal smoke against the reference, and the refusal of the writes
+/// the layer does not implement yet (the schema: task S1.7).
 #[test]
 fn untouched_layer_passes_the_read_only_items() {
     use graphersal::storage::LayeredGraph;
@@ -93,13 +93,47 @@ fn untouched_layer_passes_the_read_only_items() {
             "{result:?}"
         );
     };
-    unsupported(layer.add_vertex_label(a, "x".into()).map(drop));
-    unsupported(layer.set_vertex_property(a, "k".into(), 1.into()));
-    unsupported(layer.set_edge_property(e, "k".into(), 1.into()));
+    unsupported(layer.set_schema(graphersal::schema::GraphSchema::new()));
+    assert!(layer.contains_edge(e).unwrap());
     contract::assert_consistent(&layer);
     assert_eq!(layer.vertex_count().unwrap(), 6);
     graphersal_storage_tests::extension::capabilities_are_consistent(&mut layer);
     graphersal_storage_tests::extension::commit_hooks_follow_the_capability(&mut layer);
+}
+
+/// A layer over modern whose base elements were changed (properties, path writes, labels gained
+/// and lost, an edge relabeled, a change set back) passes the storage contract's consistency
+/// check, and the smoke queries match a `TraversalGraph` with the same writes.
+#[test]
+fn layer_with_modified_base_elements_is_consistent() {
+    use graphersal::storage::{GraphStorage, LayeredGraph};
+    use graphersal_storage_tests::smoke;
+
+    fn writes<S: GraphStorage>(s: &mut S) {
+        let a = s.get_vertex_by_id("1").unwrap().unwrap();
+        let b = s.get_vertex_by_id("2").unwrap().unwrap();
+        let e = s.out_edges(a).unwrap().next().unwrap();
+        s.set_vertex_property(a, "k".into(), 1.into()).unwrap();
+        s.set_vertex_property_path(b, &"m.n".parse().unwrap(), 2.into())
+            .unwrap();
+        s.add_vertex_label(a, "x".into()).unwrap();
+        s.remove_vertex_label(b, "person").unwrap();
+        s.set_edge_label(e, "y".into()).unwrap();
+        s.set_edge_property(e, "k".into(), 1.into()).unwrap();
+        s.drop_vertex_property("k", a).unwrap();
+    }
+    let mut base = TraversalGraph::new();
+    smoke::load_modern(&mut base);
+    let mut reference = TraversalGraph::new();
+    smoke::load_modern(&mut reference);
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    writes(&mut layer);
+    writes(&mut reference);
+    contract::assert_consistent(&layer);
+    assert_eq!(
+        smoke::run_queries(&mut layer),
+        smoke::run_queries(&mut reference)
+    );
 }
 
 /// A layer over modern with new edges at base vertices (every endpoint combination, base and

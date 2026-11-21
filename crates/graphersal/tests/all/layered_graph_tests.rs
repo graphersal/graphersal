@@ -4,18 +4,21 @@
 //! API, the typed traversal API, the Rhai DSL and GQL. The write path of new elements (S1.3):
 //! vertices and edges between them are stored in the layer and read exactly as in a
 //! `TraversalGraph` that received the base's data plus the same writes (ids, auto ids,
-//! statistics, scans, label lookups, adjacency); writes to base elements are refused and change
-//! nothing. New edges touching base vertices (S1.4): every combination of base and added
+//! statistics, scans, label lookups, adjacency). New edges touching base vertices (S1.4): every combination of base and added
 //! endpoints, self-loops, drops, the closed-schema topology, and a Rhai differential. Drops of
 //! base elements (S1.5): cascades, filtered reads, id reuse, stale handles, statistics and a
-//! Rhai differential (plan decision P4 for drop-then-add order).
+//! Rhai differential (plan decision P4 for drop-then-add order). Writes to base elements
+//! (S1.6): property, path and label writes copy the element up into an image; equal-value writes
+//! make none, an image equal to the base again is dropped; schema errors, coded and compressed
+//! bases, label lookups, property-index lookups and a Rhai differential.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use graphersal::prelude::*;
 use graphersal::storage::{
-    Graph, GraphStatistics, GraphStorage, IntoAnyGraph, LayeredEdge, LayeredGraph, LayeredVertex,
+    Graph, GraphStatistics, GraphStorage, IntoAnyGraph, JsonPath, LayeredEdge, LayeredGraph,
+    LayeredVertex,
 };
 
 fn modern_base() -> Arc<TraversalGraph> {
@@ -200,38 +203,18 @@ fn a_default_layer_is_over_an_empty_base() {
 fn every_write_is_refused_and_changes_nothing() {
     let mut layer = modern_layer();
     let marko = v(&layer, "1");
-    let knows = layer.out_edges(marko).unwrap().next().unwrap();
     let unsupported = |result: Result<(), GraphError>| {
         assert!(
             matches!(result, Err(GraphError::Unsupported { .. })),
             "{result:?}"
         );
     };
-    unsupported(layer.add_vertex_label(marko, "x".into()).map(drop));
-    unsupported(layer.remove_vertex_label(marko, "person").map(drop));
-    unsupported(layer.set_edge_label(knows, "x".into()).map(drop));
-    unsupported(layer.set_vertex_property(marko, "age".into(), 1.into()));
-    unsupported(layer.set_edge_property(knows, "weight".into(), 1.into()));
-    unsupported(layer.drop_vertex_property("age", marko));
-    unsupported(layer.drop_edge_property("weight", knows));
     unsupported(layer.set_schema(graphersal::schema::GraphSchema::new()));
     assert_eq!(layer.vertex_count().unwrap(), 6);
     assert_eq!(layer.edge_count().unwrap(), 6);
     assert_eq!(
         layer.vertex_properties(marko).unwrap().unwrap().get("age"),
         Some(&29.into())
-    );
-    assert!(layer.contains_edge(knows).unwrap());
-
-    // A traversal that writes to a base element fails with the same error.
-    let err = GraphTraversalSource::new(&mut layer)
-        .v("1")
-        .property("age", 1)
-        .next()
-        .unwrap_err();
-    assert!(
-        format!("{err:?}").contains("writes to base elements of a layered graph"),
-        "{err:?}"
     );
 }
 
@@ -338,12 +321,9 @@ fn rhai_reads_match_the_plain_graph() {
 #[cfg(feature = "script")]
 #[test]
 fn rhai_writes_fail_on_the_layer() {
-    let actual = render(layered_graph(), r#"g.V("1").property("age", 1).next()"#);
+    let actual = render(layered_graph(), r#"g.set_schema(g.infer_schema())"#);
     let err = actual.unwrap_err();
-    assert!(
-        err.contains("writes to base elements of a layered graph"),
-        "{err}"
-    );
+    assert!(err.contains("does not support"), "{err}");
 }
 
 /// Documented examples that read what the layer does not report yet: `g.mark` needs a journal
@@ -1992,6 +1972,953 @@ fn rhai_drop_scripts_match_the_plain_graph() {
     assert!(differences.is_empty(), "{}", differences.join("\n"));
     println!(
         "order-only differences (P4): {}\n{}",
+        order_only.len(),
+        order_only.join("\n")
+    );
+}
+
+// ------------------------------------------------------------------------------------------
+// Writes to base elements: copy-up images (S1.6)
+// ------------------------------------------------------------------------------------------
+
+fn path(text: &str) -> JsonPath {
+    text.parse().unwrap()
+}
+
+/// Property writes to base vertices and edges over modern (plain sets, new keys, drops, path
+/// writes and removals, a written vertex with an added edge, drops of written elements), the
+/// state after each step.
+fn write_base_properties<S: GraphStorage>(s: &mut S) -> Vec<State> {
+    let mut states = Vec::new();
+    let marko = vertex_of(s, "1");
+    let vadas = vertex_of(s, "2");
+    let josh = vertex_of(s, "4");
+    let knows = edge_of(s, "0");
+    let created = edge_of(s, "3");
+    s.set_vertex_property(marko, "age".into(), 30.into())
+        .unwrap();
+    states.push(state(s));
+    s.set_vertex_property(marko, "nick".into(), "mk".into())
+        .unwrap();
+    s.drop_vertex_property("age", vadas).unwrap();
+    states.push(state(s));
+    s.set_edge_property(knows, "weight".into(), 0.9.into())
+        .unwrap();
+    s.set_edge_property(knows, "since".into(), 2010.into())
+        .unwrap();
+    s.drop_edge_property("weight", created).unwrap();
+    states.push(state(s));
+    s.set_vertex_property_path(vadas, &path("meta.tags"), vec!["a"].into())
+        .unwrap();
+    s.set_vertex_property_path(vadas, &path("meta.tags[1]"), "b".into())
+        .unwrap();
+    s.set_edge_property_path(created, &path("info.by"), "x".into())
+        .unwrap();
+    states.push(state(s));
+    s.remove_vertex_property_path(vadas, &path("meta.tags[0]"))
+        .unwrap();
+    s.remove_edge_property_path(created, &path("info.by"))
+        .unwrap();
+    s.remove_vertex_property_path(vadas, &path("missing.key"))
+        .unwrap();
+    states.push(state(s));
+    s.remove_vertex_property_path(vadas, &path("meta")).unwrap();
+    states.push(state(s));
+    // Every property of josh removed, then one set again.
+    for key in ["name", "age"] {
+        s.drop_vertex_property(key, josh).unwrap();
+    }
+    s.set_vertex_property(josh, "age".into(), 32.into())
+        .unwrap();
+    states.push(state(s));
+    // A written vertex with an added edge, written again; then written elements dropped.
+    let n = s
+        .insert_vertex(None, vec!["n".into()], PropertyMap::default())
+        .unwrap();
+    s.insert_edge(None, Some("e".into()), marko, n, PropertyMap::default())
+        .unwrap();
+    s.set_vertex_property(marko, "age".into(), 31.into())
+        .unwrap();
+    states.push(state(s));
+    // A drop moves a bucket's last member in a `TraversalGraph` (plan P4): sorted buckets.
+    s.drop_edge(created).unwrap();
+    s.drop_vertex(marko).unwrap();
+    states.push(state(s).with_sorted_buckets());
+    states
+}
+
+#[test]
+fn property_writes_on_base_elements_read_like_a_traversal_graph() {
+    let base = modern_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let on_layer = write_base_properties(&mut layer);
+    let on_reference = write_base_properties(&mut TraversalGraph::tinkerpop_modern());
+    assert_eq!(on_layer.len(), on_reference.len());
+    for (step, (l, r)) in on_layer.iter().zip(&on_reference).enumerate() {
+        assert_eq!(l, r, "step {step}");
+    }
+    // The shared base is unchanged; a second layer over it sees none of it.
+    let untouched = state(&*base);
+    assert_eq!(untouched, state(&TraversalGraph::tinkerpop_modern()));
+    assert_eq!(state(&modern_layer()), untouched);
+    assert_eq!(state(&LayeredGraph::over(base).unwrap()), untouched);
+}
+
+/// Label writes to base vertices and edges that only ADD memberships (labels gained, edges
+/// relabeled to a label): exact, label-bucket order included, interleaved with added
+/// elements of the same label as a `TraversalGraph` appends both.
+fn add_base_labels<S: GraphStorage>(s: &mut S) -> Vec<State> {
+    let mut states = Vec::new();
+    let marko = vertex_of(s, "1");
+    let vadas = vertex_of(s, "2");
+    let lop = vertex_of(s, "3");
+    assert!(s.add_vertex_label(marko, "employee".into()).unwrap());
+    states.push(state(s));
+    s.insert_vertex(
+        Some("e1".into()),
+        vec!["employee".into()],
+        PropertyMap::default(),
+    )
+    .unwrap();
+    assert!(s.add_vertex_label(vadas, "employee".into()).unwrap());
+    assert!(!s.add_vertex_label(vadas, "employee".into()).unwrap());
+    assert!(!s.add_vertex_label(vadas, "person".into()).unwrap());
+    assert!(s.add_vertex_label(lop, "person".into()).unwrap());
+    states.push(state(s));
+    let knows = edge_of(s, "0");
+    let created = edge_of(s, "4");
+    assert!(s.set_edge_label(knows, "met".into()).unwrap());
+    assert!(!s.set_edge_label(knows, "met".into()).unwrap());
+    assert!(s.set_edge_label(created, "knows".into()).unwrap());
+    states.push(state(s));
+    s.set_vertex_property(marko, "age".into(), 1.into())
+        .unwrap();
+    s.set_edge_property(knows, "weight".into(), 2.into())
+        .unwrap();
+    states.push(state(s));
+    // A drop moves a bucket's last member in a `TraversalGraph` (plan P4): sorted buckets.
+    s.drop_vertex(marko).unwrap();
+    states.push(state(s).with_sorted_buckets());
+    states
+}
+
+#[test]
+fn label_additions_on_base_elements_read_like_a_traversal_graph() {
+    let on_layer = add_base_labels(&mut modern_layer());
+    let on_reference = add_base_labels(&mut TraversalGraph::tinkerpop_modern());
+    for (step, (l, r)) in on_layer.iter().zip(&on_reference).enumerate() {
+        assert_eq!(l, r, "step {step}");
+    }
+    let last = &on_layer[1].by_label;
+    assert!(
+        last.contains(&(
+            "employee".into(),
+            vec!["1".into(), "e1".into(), "2".into()],
+            vec![]
+        )),
+        "{last:?}"
+    );
+}
+
+/// Label writes that REMOVE memberships (labels dropped, edges relabeled away and back,
+/// vertices relabeled back to their base labels): the same as a `TraversalGraph` with every
+/// label bucket sorted. A `TraversalGraph` moves a bucket's last member into a removed one's
+/// place (and appends one that comes back); the layer keeps the base bucket's order (plan P4,
+/// the order class of S1.5).
+fn change_base_labels<S: GraphStorage>(s: &mut S) -> Vec<State> {
+    let mut states = Vec::new();
+    let marko = vertex_of(s, "1");
+    let vadas = vertex_of(s, "2");
+    let lop = vertex_of(s, "3");
+    assert!(s.remove_vertex_label(marko, "person").unwrap());
+    assert!(!s.remove_vertex_label(marko, "person").unwrap());
+    states.push(state(s).with_sorted_buckets());
+    assert!(s.add_vertex_label(vadas, "x".into()).unwrap());
+    assert!(s.add_vertex_label(vadas, "y".into()).unwrap());
+    assert!(s.remove_vertex_label(vadas, "person").unwrap());
+    assert!(s.remove_vertex_label(vadas, "x").unwrap());
+    states.push(state(s).with_sorted_buckets());
+    // Back to the base labels, in another order, then in the base order.
+    assert!(s.add_vertex_label(marko, "person".into()).unwrap());
+    assert!(s.add_vertex_label(lop, "a".into()).unwrap());
+    assert!(s.remove_vertex_label(lop, "software").unwrap());
+    assert!(s.add_vertex_label(lop, "software".into()).unwrap());
+    states.push(state(s).with_sorted_buckets());
+    assert!(s.remove_vertex_label(lop, "a").unwrap());
+    states.push(state(s).with_sorted_buckets());
+    let knows = edge_of(s, "0");
+    assert!(s.set_edge_label(knows, "met".into()).unwrap());
+    assert!(s.set_edge_label(knows, "created".into()).unwrap());
+    states.push(state(s).with_sorted_buckets());
+    assert!(s.set_edge_label(knows, "knows".into()).unwrap());
+    states.push(state(s).with_sorted_buckets());
+    s.insert_edge(
+        None,
+        Some("met".into()),
+        marko,
+        vadas,
+        PropertyMap::default(),
+    )
+    .unwrap();
+    assert!(s.set_edge_label(knows, "met".into()).unwrap());
+    states.push(state(s).with_sorted_buckets());
+    s.drop_edge(knows).unwrap();
+    s.drop_vertex(vadas).unwrap();
+    states.push(state(s).with_sorted_buckets());
+    states
+}
+
+#[test]
+fn label_removals_on_base_elements_match_up_to_bucket_order() {
+    let on_layer = change_base_labels(&mut modern_layer());
+    let on_reference = change_base_labels(&mut TraversalGraph::tinkerpop_modern());
+    for (step, (l, r)) in on_layer.iter().zip(&on_reference).enumerate() {
+        assert_eq!(l, r, "step {step}");
+    }
+}
+
+/// The layer's base vertex `id` reads straight from the base (no image): its map and label
+/// slice are the base's own.
+fn reads_the_base(layer: &LayeredGraph, base: &TraversalGraph, id: &str) -> bool {
+    let node = v(layer, id);
+    let on_base = base.get_vertex_by_id(id).unwrap().unwrap();
+    std::ptr::eq(
+        layer.vertex_properties(node).unwrap().unwrap(),
+        base.vertex_properties(on_base).unwrap().unwrap(),
+    ) && std::ptr::eq(
+        layer.vertex_labels(node).unwrap().as_ptr(),
+        base.vertex_labels(on_base).unwrap().as_ptr(),
+    )
+}
+
+/// The edge counterpart of [`reads_the_base`].
+fn edge_reads_the_base(layer: &LayeredGraph, base: &TraversalGraph, id: &str) -> bool {
+    let edge = edge_of(layer, id);
+    let on_base = base.get_edge_by_id(id).unwrap().unwrap();
+    std::ptr::eq(
+        layer.edge_properties(edge).unwrap().unwrap(),
+        base.edge_properties(on_base).unwrap().unwrap(),
+    ) && std::ptr::eq(
+        layer.edge_label(edge).unwrap().unwrap(),
+        base.edge_label(on_base).unwrap().unwrap(),
+    )
+}
+
+/// Plan P6: a write whose result is identical to the current value (`identity_eq`) creates no
+/// image; `1` and `1.0` are not identical.
+#[test]
+fn equal_value_writes_create_no_image() {
+    let base = modern_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let marko = v(&layer, "1");
+    let knows = edge_of(&layer, "0");
+    layer
+        .set_vertex_property(marko, "age".into(), 29.into())
+        .unwrap();
+    layer
+        .set_vertex_property(marko, "name".into(), "marko".into())
+        .unwrap();
+    layer.drop_vertex_property("missing", marko).unwrap();
+    layer
+        .set_vertex_property_path(marko, &path("name"), "marko".into())
+        .unwrap();
+    layer
+        .remove_vertex_property_path(marko, &path("missing.key"))
+        .unwrap();
+    assert!(!layer.add_vertex_label(marko, "person".into()).unwrap());
+    assert!(!layer.remove_vertex_label(marko, "nope").unwrap());
+    layer
+        .set_edge_property(knows, "weight".into(), 0.5.into())
+        .unwrap();
+    layer.drop_edge_property("missing", knows).unwrap();
+    assert!(!layer.set_edge_label(knows, "knows".into()).unwrap());
+    assert!(reads_the_base(&layer, &base, "1"));
+    assert!(edge_reads_the_base(&layer, &base, "0"));
+    assert_eq!(state(&layer), state(&*base));
+
+    // 29.0 is not identical to 29: an image, holding the float.
+    layer
+        .set_vertex_property(marko, "age".into(), 29.0.into())
+        .unwrap();
+    assert!(!reads_the_base(&layer, &base, "1"));
+    let age = layer.vertex_properties(marko).unwrap().unwrap()["age"].clone();
+    assert!(
+        matches!(&age, ElementProperty::Number(n) if n.is_f64()),
+        "{age:?}"
+    );
+    // And back: the image is identical to the base again and dropped.
+    layer
+        .set_vertex_property(marko, "age".into(), 29.into())
+        .unwrap();
+    assert!(reads_the_base(&layer, &base, "1"));
+    // The same for an edge: 1 replaces 1.0, then 1.0 again.
+    let josh = edge_of(&layer, "2");
+    layer
+        .set_edge_property(josh, "weight".into(), 1.into())
+        .unwrap();
+    assert!(!edge_reads_the_base(&layer, &base, "2"));
+    layer
+        .set_edge_property(josh, "weight".into(), 1.0.into())
+        .unwrap();
+    assert!(edge_reads_the_base(&layer, &base, "2"));
+    assert_eq!(state(&layer), state(&*base));
+}
+
+/// An image identical to its base element again is dropped (return to clean) after property,
+/// path and label writes; key order counts (a key dropped and set again moves to the end,
+/// as in a `TraversalGraph`), so such an image stays.
+#[test]
+fn an_image_equal_to_the_base_again_returns_to_clean() {
+    let base = modern_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let marko = v(&layer, "1");
+    let vadas = v(&layer, "2");
+    // Property set and set back.
+    layer
+        .set_vertex_property(marko, "age".into(), 1.into())
+        .unwrap();
+    layer
+        .set_vertex_property(marko, "x".into(), 1.into())
+        .unwrap();
+    layer.drop_vertex_property("x", marko).unwrap();
+    assert!(!reads_the_base(&layer, &base, "1"));
+    layer
+        .set_vertex_property(marko, "age".into(), 29.into())
+        .unwrap();
+    assert!(reads_the_base(&layer, &base, "1"));
+    // Path write and removal.
+    layer
+        .set_vertex_property_path(vadas, &path("meta.a"), 1.into())
+        .unwrap();
+    layer
+        .remove_vertex_property_path(vadas, &path("meta"))
+        .unwrap();
+    assert!(reads_the_base(&layer, &base, "2"));
+    // Labels: added and removed again.
+    layer.add_vertex_label(marko, "x".into()).unwrap();
+    layer.remove_vertex_label(marko, "x").unwrap();
+    assert!(reads_the_base(&layer, &base, "1"));
+    // A base label removed and added back is last no more: same set, same order -> clean.
+    layer.remove_vertex_label(marko, "person").unwrap();
+    layer.add_vertex_label(marko, "person".into()).unwrap();
+    assert!(reads_the_base(&layer, &base, "1"));
+    // A key dropped and set again moves to the end: not the base's order, the image stays,
+    // exactly as a `TraversalGraph` reorders it.
+    layer.drop_vertex_property("name", marko).unwrap();
+    layer
+        .set_vertex_property(marko, "name".into(), "marko".into())
+        .unwrap();
+    assert!(!reads_the_base(&layer, &base, "1"));
+    let keys: Vec<String> = layer
+        .vertex_properties(marko)
+        .unwrap()
+        .unwrap()
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(keys, ["age", "name"]);
+    // An edge: relabeled and back, a property set and back.
+    let knows = edge_of(&layer, "0");
+    layer.set_edge_label(knows, "met".into()).unwrap();
+    layer
+        .set_edge_property(knows, "weight".into(), 0.1.into())
+        .unwrap();
+    layer.set_edge_label(knows, "knows".into()).unwrap();
+    assert!(!edge_reads_the_base(&layer, &base, "0"));
+    layer
+        .set_edge_property(knows, "weight".into(), 0.5.into())
+        .unwrap();
+    assert!(edge_reads_the_base(&layer, &base, "0"));
+    // A vertex with an added edge returns to clean too and keeps its edge.
+    let n = layer
+        .insert_vertex(None, vec!["n".into()], PropertyMap::default())
+        .unwrap();
+    layer
+        .insert_edge(None, None, vadas, n, PropertyMap::default())
+        .unwrap();
+    layer
+        .set_vertex_property(vadas, "age".into(), 1.into())
+        .unwrap();
+    layer
+        .set_vertex_property(vadas, "age".into(), 27.into())
+        .unwrap();
+    assert!(reads_the_base(&layer, &base, "2"));
+    assert_eq!(layer.out_edges(vadas).unwrap().count(), 1);
+    // The by-label lookups follow every return.
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let r_marko = vertex_of(&reference, "1");
+    reference.drop_vertex_property("name", r_marko).unwrap();
+    reference
+        .set_vertex_property(r_marko, "name".into(), "marko".into())
+        .unwrap();
+    let rn = reference
+        .insert_vertex(None, vec!["n".into()], PropertyMap::default())
+        .unwrap();
+    let r_vadas = vertex_of(&reference, "2");
+    reference
+        .insert_edge(None, None, r_vadas, rn, PropertyMap::default())
+        .unwrap();
+    assert_eq!(
+        state(&layer).with_sorted_buckets(),
+        state(&reference).with_sorted_buckets()
+    );
+}
+
+/// The base's schema applies to writes on base elements exactly as in a `TraversalGraph`
+/// holding the same data: coercion, type and required violations, closed-mode labels and
+/// topology, path faults; a failed write leaves no trace.
+#[test]
+fn the_base_schema_applies_to_writes_on_base_elements() {
+    const SCHEMA: &str = r#"{
+      "mode": "closed",
+      "vertices": {
+        "person": {"schema": {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "score": {"type": "number"},
+          "meta": {"type": "object", "properties": {"n": {"type": "integer"}}}
+        }, "required": ["name"]}},
+        "software": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}}
+      },
+      "edges": {
+        "knows": {"schema": {"type": "object", "properties": {"w": {"type": "number"}}},
+                  "connections": [{"from": "person", "to": "person"}]},
+        "uses": {"connections": [{"from": "person", "to": "software"}]}
+      }
+    }"#;
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        graph
+            .set_schema(GraphSchema::from_json(SCHEMA).unwrap())
+            .unwrap();
+        let p = graph
+            .insert_vertex(
+                Some("p".into()),
+                vec!["person".into()],
+                props(&[("name", "p".into())]),
+            )
+            .unwrap();
+        let q = graph
+            .insert_vertex(
+                Some("q".into()),
+                vec!["person".into()],
+                props(&[("name", "q".into())]),
+            )
+            .unwrap();
+        let w = graph
+            .insert_vertex(
+                Some("w".into()),
+                vec!["software".into()],
+                props(&[("name", "w".into())]),
+            )
+            .unwrap();
+        graph
+            .insert_edge(
+                Some("k".into()),
+                Some("knows".into()),
+                p,
+                q,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        graph
+            .insert_edge(
+                Some("u".into()),
+                Some("uses".into()),
+                p,
+                w,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        graph
+    }
+    fn run<S: GraphStorage>(s: &mut S) -> (Vec<String>, State) {
+        let mut outcomes = Vec::new();
+        let mut record = |r: Result<String, GraphError>| {
+            outcomes.push(match r {
+                Ok(v) => v,
+                Err(e) => format!("{e:?}"),
+            })
+        };
+        let (p, q, w) = (vertex_of(s, "p"), vertex_of(s, "q"), vertex_of(s, "w"));
+        let (k, u) = (edge_of(s, "k"), edge_of(s, "u"));
+        let ok = |_| "ok".to_string();
+        record(s.set_vertex_property(q, "score".into(), 2.into()).map(ok));
+        record(s.set_vertex_property(q, "score".into(), "x".into()).map(ok));
+        record(s.set_vertex_property(q, "other".into(), 2.into()).map(ok));
+        record(s.drop_vertex_property("name", q).map(ok));
+        record(
+            s.set_vertex_property_path(p, &path("meta.n"), 1.5.into())
+                .map(ok),
+        );
+        record(
+            s.set_vertex_property_path(p, &path("meta.n"), 2.into())
+                .map(ok),
+        );
+        record(
+            s.set_vertex_property_path(p, &path("meta.zz"), 2.into())
+                .map(ok),
+        );
+        record(
+            s.set_vertex_property_path(p, &path("name.x"), 2.into())
+                .map(ok),
+        );
+        record(s.remove_vertex_property_path(p, &path("name")).map(ok));
+        record(s.add_vertex_label(w, "robot".into()).map(|b| b.to_string()));
+        record(
+            s.add_vertex_label(w, "person".into())
+                .map(|b| b.to_string()),
+        );
+        record(s.remove_vertex_label(q, "person").map(|b| b.to_string()));
+        record(s.set_edge_label(k, "uses".into()).map(|b| b.to_string()));
+        record(s.set_edge_label(u, "likes".into()).map(|b| b.to_string()));
+        record(s.set_edge_property(k, "w".into(), 3.into()).map(ok));
+        record(s.set_edge_property(k, "w".into(), "x".into()).map(ok));
+        record(s.set_edge_property(u, "w".into(), 1.into()).map(ok));
+        (outcomes, state(s))
+    }
+    let on_layer = run(&mut LayeredGraph::over(Arc::new(graph())).unwrap());
+    let on_reference = run(&mut graph());
+    assert_eq!(on_layer, on_reference);
+    let failures = on_layer.0.iter().filter(|o| *o != "ok").count();
+    assert!(failures >= 8, "{:?}", on_layer.0);
+    assert!(on_layer.0.iter().filter(|o| *o == "ok").count() >= 3);
+}
+
+/// A base whose values are stored coded (a top-level `dedup` rule), compressed (an lz4 rule)
+/// and deduplicated (a nested-path `dedup` rule): the layer copies an element up with the
+/// logical values, reads answer as on a `TraversalGraph` with the same rules and writes, and a
+/// write of the stored value is still recognized as equal.
+#[test]
+fn writes_on_coded_and_compressed_base_values() {
+    use graphersal::catalog::{Codec, CompressionDefinition};
+    use graphersal::storage::ElementKind;
+    fn long(seed: usize) -> String {
+        (0..120)
+            .map(|i| format!("word{} ", (seed * 7 + i) % 13))
+            .collect()
+    }
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for i in 0..4 {
+            let meta = ElementProperty::Object(Box::new(props(&[
+                (
+                    "file",
+                    format!("src/some/rather/long/path/file{}.rs", i % 2).into(),
+                ),
+                ("n", (i as i64).into()),
+            ])));
+            graph
+                .insert_vertex(
+                    Some(format!("d{i}").into()),
+                    vec!["doc".into()],
+                    props(&[
+                        ("kind", ["alpha", "beta"][i % 2].into()),
+                        ("body", long(i).into()),
+                        ("meta", meta),
+                    ]),
+                )
+                .unwrap();
+        }
+        let d0 = graph.get_vertex_by_id("d0").unwrap().unwrap();
+        let d1 = graph.get_vertex_by_id("d1").unwrap().unwrap();
+        graph
+            .insert_edge(
+                Some("r".into()),
+                Some("ref".into()),
+                d0,
+                d1,
+                props(&[("site", "here".into())]),
+            )
+            .unwrap();
+        let dedup = |element, label, key| {
+            CompressionDefinition::new(element, label, key)
+                .unwrap()
+                .with_codec(Codec::Dedup)
+        };
+        let mut g = graph.traversal_mut();
+        g.define_compression("kind", dedup(ElementKind::Vertex, "doc", "kind"))
+            .unwrap();
+        g.define_compression("file", dedup(ElementKind::Vertex, "doc", "meta.file"))
+            .unwrap();
+        g.define_compression("site", dedup(ElementKind::Edge, "ref", "site"))
+            .unwrap();
+        g.define_compression(
+            "body",
+            CompressionDefinition::new(ElementKind::Vertex, "doc", "body")
+                .unwrap()
+                .with_dictionary(false),
+        )
+        .unwrap();
+        drop(g);
+        graph
+    }
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<State> {
+        let mut states = Vec::new();
+        let d = |s: &S, i: usize| vertex_of(s, &format!("d{i}"));
+        let (d0, d1, d2, d3) = (d(s, 0), d(s, 1), d(s, 2), d(s, 3));
+        let r = edge_of(s, "r");
+        // Equal values: no change at all.
+        s.set_vertex_property(d0, "kind".into(), "alpha".into())
+            .unwrap();
+        s.set_vertex_property(d0, "body".into(), long(0).into())
+            .unwrap();
+        s.set_edge_property(r, "site".into(), "here".into())
+            .unwrap();
+        states.push(state(s));
+        s.set_vertex_property(d1, "extra".into(), 1.into()).unwrap();
+        s.set_vertex_property_path(d2, &path("meta.n"), 9.into())
+            .unwrap();
+        s.drop_vertex_property("body", d3).unwrap();
+        s.set_vertex_property(d0, "kind".into(), "gamma".into())
+            .unwrap();
+        s.set_edge_property(r, "w".into(), 1.into()).unwrap();
+        states.push(state(s));
+        s.remove_vertex_property_path(d2, &path("meta.file"))
+            .unwrap();
+        s.set_edge_property(r, "site".into(), "there".into())
+            .unwrap();
+        states.push(state(s));
+        states
+    }
+    let base = Arc::new(graph());
+    assert!(base.is_dedup_coded(ElementKind::Vertex, "d1", "kind"));
+    let stored = |id: &str| {
+        let node = base.get_vertex_by_id(id).unwrap().unwrap();
+        base.vertex_properties(node).unwrap().unwrap().clone()
+    };
+    assert!(
+        matches!(
+            stored("d1").get("body"),
+            Some(ElementProperty::Compressed(_))
+        ),
+        "the base stores the body compressed"
+    );
+    assert!(
+        stored("d2")["meta"].holds_compressed(),
+        "the base stores the nested file deduplicated"
+    );
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let on_layer = run(&mut layer);
+    let on_reference = run(&mut graph());
+    for (step, (l, r)) in on_layer.iter().zip(&on_reference).enumerate() {
+        assert_eq!(l, r, "step {step}");
+    }
+    // Equal writes made no image: d0 was read from the base until its kind changed; the
+    // images hold logical values only.
+    for id in ["d1", "d2", "d3"] {
+        let node = v(&layer, id);
+        let image = layer.vertex_properties(node).unwrap().unwrap();
+        assert!(
+            image.iter().all(|(_, value)| !value.holds_compressed()),
+            "{id}: {image:?}"
+        );
+        for (key, value) in stored(id).iter() {
+            if let Some(now) = image.get(key) {
+                if key == "meta" {
+                    continue;
+                }
+                assert_eq!(now, &value.to_logical(), "{id}.{key}");
+            }
+        }
+    }
+    let untouched = v(&layer, "d0");
+    assert_eq!(
+        layer.vertex_properties(untouched).unwrap().unwrap()["kind"],
+        ElementProperty::from("gamma")
+    );
+    // A fresh layer: the equal writes alone leave d0 and the edge reading the base.
+    let mut fresh = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let d0 = v(&fresh, "d0");
+    let r = edge_of(&fresh, "r");
+    fresh
+        .set_vertex_property(d0, "kind".into(), "alpha".into())
+        .unwrap();
+    fresh
+        .set_vertex_property(d0, "body".into(), long(0).into())
+        .unwrap();
+    fresh
+        .set_edge_property(r, "site".into(), "here".into())
+        .unwrap();
+    assert!(reads_the_base(&fresh, &base, "d0"));
+    assert!(edge_reads_the_base(&fresh, &base, "r"));
+}
+
+/// Plan S1.5 correction: a property index lookup never returns fewer elements than exist. While
+/// the layer has added, removed or changed an element of the kind asked about, the lookup and
+/// the count answer `None` (the caller scans); untouched, they are the base's.
+#[test]
+fn property_index_lookups_never_miss_layer_changes() {
+    use graphersal::catalog::{Definition, PropertyIndexDefinition};
+    use graphersal::storage::{ElementKind, PropertyIndexRange};
+    let mut base = TraversalGraph::tinkerpop_modern();
+    let mut g = base.traversal_mut();
+    g.set_definition(Definition::property_index(
+        "person_name",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+    ))
+    .unwrap();
+    g.set_definition(Definition::property_index(
+        "created_weight",
+        PropertyIndexDefinition::new(ElementKind::Edge, "created", "weight"),
+    ))
+    .unwrap();
+    drop(g);
+    let base = Arc::new(base);
+    let named = |name: &str| PropertyIndexRange::equal(name.into());
+    let lookup = |layer: &LayeredGraph, name: &str| {
+        layer
+            .vertices_by_property_index(Some("person"), "name", &named(name))
+            .unwrap()
+            .map(|found| found.count())
+    };
+    let count = |layer: &LayeredGraph,
+                 kind: ElementKind,
+                 label: &str,
+                 key: &str,
+                 value: ElementProperty| {
+        layer
+            .count_by_property_index(
+                kind,
+                Some(label),
+                key,
+                None,
+                &PropertyIndexRange::equal(value),
+            )
+            .unwrap()
+    };
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    assert_eq!(
+        lookup(&layer, "marko"),
+        Some(1),
+        "untouched: the base's index"
+    );
+    assert_eq!(
+        count(
+            &layer,
+            ElementKind::Vertex,
+            "person",
+            "name",
+            "marko".into()
+        ),
+        Some(1)
+    );
+    // An added edge alone leaves the vertex lookups to the base.
+    let (marko, vadas) = (v(&layer, "1"), v(&layer, "2"));
+    layer
+        .insert_edge(None, Some("x".into()), marko, vadas, PropertyMap::default())
+        .unwrap();
+    assert_eq!(lookup(&layer, "marko"), Some(1));
+    assert_eq!(
+        count(&layer, ElementKind::Edge, "created", "weight", 0.4.into()),
+        None,
+        "an added edge: the edge counts scan"
+    );
+    layer
+        .insert_vertex(
+            None,
+            vec!["person".into()],
+            props(&[("name", "zed".into())]),
+        )
+        .unwrap();
+    assert_eq!(lookup(&layer, "zed"), None);
+    assert_eq!(
+        count(&layer, ElementKind::Vertex, "person", "name", "zed".into()),
+        None
+    );
+    // Through traversals, against a `TraversalGraph` with the same indexes and writes: an
+    // added match, a renamed base vertex, a dropped one, a changed and a relabeled edge.
+    fn changes<S: GraphStorage>(s: &mut S) {
+        let (josh, peter) = (vertex_of(s, "4"), vertex_of(s, "6"));
+        s.insert_vertex(
+            None,
+            vec!["person".into()],
+            props(&[("name", "josh".into())]),
+        )
+        .unwrap();
+        s.set_vertex_property(josh, "name".into(), "joshua".into())
+            .unwrap();
+        s.drop_vertex(peter).unwrap();
+        let (lop, ripple) = (edge_of(s, "3"), edge_of(s, "4"));
+        s.set_edge_property(lop, "weight".into(), 1.0.into())
+            .unwrap();
+        s.set_edge_label(ripple, "made".into()).unwrap();
+    }
+    fn reads<S: GraphStorage>(s: &S) -> Vec<ElementProperty> {
+        let g = || GraphTraversalSource::new(s);
+        let mut out = Vec::new();
+        for name in ["josh", "joshua", "peter", "zed", "marko"] {
+            out.extend(
+                g().v(None)
+                    .has_label("person")
+                    .has("name", name)
+                    .id()
+                    .to_list()
+                    .unwrap(),
+            );
+            out.extend(
+                g().v(None)
+                    .has_label("person")
+                    .has("name", name)
+                    .count()
+                    .to_list()
+                    .unwrap(),
+            );
+        }
+        for weight in [0.4, 1.0, 0.2] {
+            out.extend(
+                g().e(None)
+                    .has_label("created")
+                    .has("weight", weight)
+                    .id()
+                    .to_list()
+                    .unwrap(),
+            );
+            out.extend(
+                g().e(None)
+                    .has_label("created")
+                    .has("weight", weight)
+                    .count()
+                    .to_list()
+                    .unwrap(),
+            );
+        }
+        out
+    }
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let mut g = reference.traversal_mut();
+    g.set_definition(Definition::property_index(
+        "person_name",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+    ))
+    .unwrap();
+    g.set_definition(Definition::property_index(
+        "created_weight",
+        PropertyIndexDefinition::new(ElementKind::Edge, "created", "weight"),
+    ))
+    .unwrap();
+    drop(g);
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    changes(&mut layer);
+    changes(&mut reference);
+    let expected = reads(&reference);
+    assert_eq!(reads(&layer), expected);
+    assert!(
+        expected.contains(&ElementProperty::from("7")),
+        "the added josh is found: {expected:?}"
+    );
+}
+
+/// Scripts that write to base elements (properties, `Cardinality.single`, jpath writes and
+/// removals, label additions, edge relabels, property drops, `mergeV` matches) and then
+/// traverse by label and property: the same result and the same graph state, label lookups
+/// included, exactly.
+#[cfg(feature = "script")]
+const RHAI_BASE_WRITES: &[&str] = &[
+    r#"g.V("1").property("age", 30).iterate(); g.V().has("age", gt(29)).values("name").toList()"#,
+    r#"g.V("1").property("age", 29).iterate(); g.V("1").valueMap().next()"#,
+    r#"g.V("1").property("age", 29.0).iterate(); [g.V("1").values("age").next(), g.V().has("age", 29).count().next()]"#,
+    r#"g.V().hasLabel("person").property("seen", true).iterate(); [g.V().has("seen", true).values("name").toList(), g.V().hasLabel("person").valueMap().toList()]"#,
+    r#"g.V("1").properties("age").drop().iterate(); g.V().hasLabel("person").values("age").toList()"#,
+    r#"g.V("4").properties().drop().iterate(); [g.V("4").valueMap().next(), g.V().has("name").count().next()]"#,
+    r#"g.E("0").property("weight", 0.7).iterate(); g.E().has("weight", gt(0.6)).id().toList()"#,
+    r#"g.E().hasLabel("created").properties("weight").drop().iterate(); g.E().valueMap().toList()"#,
+    r#"g.E("0").property("weight", 0.5).iterate(); g.E("0").valueMap().next()"#,
+    r#"g.V("2").property(jpath("meta.tags"), ["a"]).property(jpath("meta.tags[1]"), "b").iterate(); g.V("2").values(jpath("meta.tags")).next()"#,
+    r#"g.V("2").property(jpath("meta.tags"), ["a", "b"]).iterate(); g.V("2").remove_property(jpath("meta.tags[0]")).iterate(); g.V("2").valueMap().next()"#,
+    r#"g.E("1").property(jpath("info.by"), "x").iterate(); g.E("1").remove_property(jpath("info")).iterate(); g.E("1").valueMap().next()"#,
+    r#"g.V("1").property(Cardinality.single, "name", "marco").iterate(); g.V().has("name", "marco").id().toList()"#,
+    r#"g.V("1").property("age", 30).property("age", 29).iterate(); g.V("1").valueMap().next()"#,
+    r#"g.V("1").property("name", "x").iterate(); g.V("1").property("name", "marko").iterate(); g.V().has("name", "marko").outE().count().next()"#,
+    r#"g.V("1").addE("self").to(__.V("1")).property("w", 1).iterate(); g.V("1").property("age", 40).iterate(); [g.V("1").bothE().count().next(), g.V("1").values("age").next()]"#,
+    r#"g.V("4").property("age", 33).iterate(); g.V("4").drop().iterate(); [g.V().count().next(), g.statistics()]"#,
+    r#"g.mergeV(#{"T.label": "person", name: "marko"}).option(Merge.onMatch, #{age: 50}).values("age").next()"#,
+    r#"g.V("1").add_label("employee").iterate(); g.addV("employee").property("name", "e").iterate(); g.V("2").add_label("employee").iterate(); g.V().hasLabel("employee").values("name").toList()"#,
+    r#"g.V("3").add_label("person").iterate(); [g.V().hasLabel("person").values("name").toList(), g.V("3").labels().next(), g.statistics()]"#,
+    r#"g.E("0").set_label("met").iterate(); [g.E().hasLabel("met").id().toList(), g.E().hasLabel("knows").id().toList(), g.V("1").out("met").values("name").toList()]"#,
+    r#"g.E("0").set_label("created").iterate(); [g.E().hasLabel("created").id().toList(), g.V("1").out("created").values("name").toList()]"#,
+    r#"g.V("1").property("age", 30).iterate(); g.V("1").property(Cardinality.list, "age", 31).iterate()"#,
+    r#"g.V("1").property("age", "old").property("x", 1).iterate(); g.V("1").valueMap().next()"#,
+];
+
+/// Scripts that remove label memberships of base elements (labels dropped, edges relabeled
+/// away and back): compared exactly first; where only the order differs (a `TraversalGraph`
+/// moves a bucket's last member into a removed one's place, the layer keeps the base bucket's
+/// order: plan P4) the result and the state are compared sorted. Each result here is
+/// order-independent or sorted.
+#[cfg(feature = "script")]
+const RHAI_BASE_LABEL_REMOVALS: &[&str] = &[
+    r#"g.V("1").drop_label("person").iterate(); [g.V().hasLabel("person").values("name").order().toList(), g.V("1").labels().next()]"#,
+    r#"g.V("2").drop_label("person").add_label("person").iterate(); g.V().hasLabel("person").id().order().toList()"#,
+    r#"g.V("1").add_label("x").iterate(); g.V("1").drop_label("x").iterate(); [g.V().hasLabel("x").count().next(), g.statistics()]"#,
+    r#"g.E("0").set_label("met").iterate(); g.E("0").set_label("knows").iterate(); g.E().hasLabel("knows").id().order().toList()"#,
+    r#"g.V().hasLabel("software").drop_label("software").add_label("tool").iterate(); [g.V().hasLabel("tool").values("name").order().toList(), g.V().hasLabel("software").count().next(), g.V("1").out().labels().toList()]"#,
+    r#"g.E().hasLabel("knows").set_label("met").iterate(); g.addE("met").from(__.V("6")).to(__.V("1")).iterate(); g.E().hasLabel("met").id().order().toList()"#,
+];
+
+#[cfg(feature = "script")]
+const LABEL_STATE_SCRIPT: &str = r#"[
+    g.V().elementMap().toList(),
+    g.E().elementMap().toList(),
+    g.V().project("v", "labels", "out", "in").by(T.id).by(__.labels()).by(__.outE().id().fold()).by(__.inE().id().fold()).toList(),
+    g.V().hasLabel("person").id().toList(),
+    g.V().hasLabel("software").id().toList(),
+    g.V().hasLabel("employee").id().toList(),
+    g.V().hasLabel("tool").id().toList(),
+    g.E().hasLabel("knows").id().toList(),
+    g.E().hasLabel("created").id().toList(),
+    g.E().hasLabel("met").id().toList(),
+    g.statistics()
+]"#;
+
+#[cfg(feature = "script")]
+const SORTED_LABEL_STATE_SCRIPT: &str = r#"[
+    g.V().order().by(T.id).elementMap().toList(),
+    g.E().order().by(T.id).elementMap().toList(),
+    g.V().order().by(T.id).project("v", "labels", "out", "in").by(T.id).by(__.labels()).by(__.outE().id().fold()).by(__.inE().id().fold()).toList(),
+    g.V().hasLabel("person").id().order().toList(),
+    g.V().hasLabel("software").id().order().toList(),
+    g.V().hasLabel("employee").id().order().toList(),
+    g.V().hasLabel("tool").id().order().toList(),
+    g.E().hasLabel("knows").id().order().toList(),
+    g.E().hasLabel("created").id().order().toList(),
+    g.E().hasLabel("met").id().order().toList(),
+    g.statistics()
+]"#;
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_base_write_scripts_match_the_plain_graph() {
+    let mut differences = Vec::new();
+    let mut order_only = Vec::new();
+    for (script, may_reorder) in RHAI_BASE_WRITES
+        .iter()
+        .map(|s| (s, false))
+        .chain(RHAI_BASE_LABEL_REMOVALS.iter().map(|s| (s, true)))
+    {
+        let plain = plain_graph();
+        let layered = layered_graph();
+        let expected = render(Arc::clone(&plain), script);
+        let actual = render(Arc::clone(&layered), script);
+        let expected_state = render(Arc::clone(&plain), LABEL_STATE_SCRIPT);
+        let actual_state = render(Arc::clone(&layered), LABEL_STATE_SCRIPT);
+        if expected == actual && expected_state == actual_state {
+            continue;
+        }
+        if may_reorder
+            && expected == actual
+            && render(plain, SORTED_LABEL_STATE_SCRIPT)
+                == render(layered, SORTED_LABEL_STATE_SCRIPT)
+        {
+            order_only.push(*script);
+            continue;
+        }
+        differences.push(format!(
+            "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}\n  state TraversalGraph: {expected_state:?}\n  state LayeredGraph:   {actual_state:?}"
+        ));
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    println!(
+        "order-only differences of label lookups (P4): {}\n{}",
         order_only.len(),
         order_only.join("\n")
     );

@@ -4,7 +4,8 @@
 //! Every write of the layer calls its write-rule function first (nothing is mutated before the
 //! rule passed), then, for a create, `check_*_id_free`, then stores what the rule returned in
 //! the delta. The view answers with the layer's CURRENT state: base elements as the base holds
-//! them minus tombstones (images once S1.6 adds them), delta elements from the delta, ids
+//! them minus tombstones, images in place of the base state of modified ones, delta elements
+//! from the delta, ids
 //! across both.
 
 use std::ops::Deref;

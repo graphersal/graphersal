@@ -61,6 +61,17 @@ impl SlotBits {
         self.set(slot);
     }
 
+    /// Clears the bit of `slot` (nothing beyond the allocated bits). [`Self::any`] stays set: it
+    /// only lets a never-touched set skip the word load, so a stale `true` costs one load.
+    /// Never used on the dirty bits themselves (they are never cleared, plan invariant S1.5),
+    /// only on the sets read behind them (images, lost labels, relabeled edges).
+    #[inline]
+    pub(crate) fn clear(&mut self, slot: u32) {
+        if let Some(word) = self.words.get_mut((slot >> 6) as usize) {
+            *word &= !(1 << (slot & 63));
+        }
+    }
+
     /// The bit itself, without the [`Self::any`] shortcut.
     #[inline]
     fn word_contains(&self, slot: u32) -> bool {
@@ -107,5 +118,17 @@ mod tests {
         bits.set_growing(3);
         assert!(bits.contains(3) && bits.contains(200));
         assert_eq!(bits.words.len(), 4, "no growth for a covered slot");
+    }
+
+    #[test]
+    fn clear_unsets_one_slot_only() {
+        let mut bits = SlotBits::default();
+        bits.set_growing(70);
+        bits.set_growing(71);
+        bits.clear(70);
+        bits.clear(5000);
+        assert!(!bits.contains(70) && bits.contains(71));
+        bits.clear(71);
+        assert!(!bits.contains(71) && bits.any(), "any stays set");
     }
 }
