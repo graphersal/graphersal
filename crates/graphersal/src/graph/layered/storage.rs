@@ -1,7 +1,7 @@
 //! `impl GraphStorage for LayeredGraph`: the reads answer from the base (an untouched element
 //! with one bit test, no lookup) merged with the delta; every write runs its write rule
-//! (`graph/write_rules.rs`) first and then stores in the delta. Writes to base elements are
-//! not implemented yet.
+//! (`graph/write_rules.rs`) first and then stores in the delta. Drops of base elements leave a
+//! tombstone (S1.5); property and label writes to base elements are not implemented yet.
 
 use compact_str::CompactString;
 
@@ -20,8 +20,8 @@ use crate::graph::{
 };
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
 
-/// The operation a write to a base element names until the layer can change base elements
-/// (tasks S1.5, S1.6).
+/// The operation a property or label write to a base element names until the layer can change
+/// base elements (task S1.6).
 const BASE_WRITES: &str = "writes to base elements of a layered graph yet";
 
 /// `Ok` for a write to an element of the delta, [`GraphError::Unsupported`] for one to a base
@@ -318,7 +318,9 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::estimate_compression(&*self.base, request)
     }
 
-    /// The base's indexes: they cover every element of the layer while nothing is changed.
+    /// The base's indexes. The lookups below drop the base elements the layer removed (the
+    /// dirty-bit filter of the scans). Elements the layer ADDED are not in them yet (index
+    /// deltas: stage 4).
     fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
         GraphStorage::property_indexes(&*self.base)
     }
@@ -332,7 +334,11 @@ impl GraphStorage for LayeredGraph {
         Ok(
             GraphStorage::vertices_by_property_index(&*self.base, label, key, range)?.map(
                 |found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-                    Box::new(found.map(LayeredVertex::from_base))
+                    Box::new(
+                        found
+                            .filter(self.base_vertex_filter())
+                            .map(LayeredVertex::from_base),
+                    )
                 },
             ),
         )
@@ -347,7 +353,11 @@ impl GraphStorage for LayeredGraph {
         Ok(
             GraphStorage::edges_by_property_index(&*self.base, label, key, range)?.map(
                 |found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-                    Box::new(found.map(LayeredEdge::from_base))
+                    Box::new(
+                        found
+                            .filter(self.base_edge_filter())
+                            .map(LayeredEdge::from_base),
+                    )
                 },
             ),
         )
@@ -368,7 +378,11 @@ impl GraphStorage for LayeredGraph {
             range,
         )?
         .map(|found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-            Box::new(found.map(LayeredVertex::from_base))
+            Box::new(
+                found
+                    .filter(self.base_vertex_filter())
+                    .map(LayeredVertex::from_base),
+            )
         }))
     }
 
@@ -387,7 +401,11 @@ impl GraphStorage for LayeredGraph {
             range,
         )?
         .map(|found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-            Box::new(found.map(LayeredEdge::from_base))
+            Box::new(
+                found
+                    .filter(self.base_edge_filter())
+                    .map(LayeredEdge::from_base),
+            )
         }))
     }
 
@@ -399,6 +417,15 @@ impl GraphStorage for LayeredGraph {
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
+        // The base's count includes the base elements the layer removed: unknown once any
+        // element of that kind is dirty (the caller counts the filtered candidates instead).
+        let dirty = match element {
+            ElementKind::Vertex => self.dirty_vertices.any(),
+            ElementKind::Edge => self.dirty_edges.any(),
+        };
+        if dirty {
+            return Ok(None);
+        }
         GraphStorage::count_by_property_index(&*self.base, element, label, key, transform, range)
     }
 
@@ -605,13 +632,17 @@ impl GraphStorage for LayeredGraph {
         Ok(())
     }
 
-    /// A stale handle is a no-op (idempotent drop), as in `TraversalGraph`.
+    /// A stale handle is a no-op (idempotent drop), as in `TraversalGraph`. A base vertex is
+    /// tombstoned with its incident edges (`drop_base_vertex`).
     fn drop_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
         if !write_rules::drop_vertex(&*self, node) {
             return Ok(());
         }
-        delta_only(node.is_delta())?;
-        self.delta.remove_vertex(node, &mut self.statistics);
+        if node.is_delta() {
+            self.delta.remove_vertex(node, &mut self.statistics);
+        } else {
+            self.drop_base_vertex(node)?;
+        }
         Ok(())
     }
 
@@ -624,12 +655,16 @@ impl GraphStorage for LayeredGraph {
         Ok(())
     }
 
+    /// A stale handle is a no-op; a base edge is tombstoned (`drop_base_edge`).
     fn drop_edge(&mut self, edge: LayeredEdge) -> Result<(), GraphError> {
         if !write_rules::drop_edge(&*self, edge) {
             return Ok(());
         }
-        delta_only(edge.is_delta())?;
-        self.delta.remove_edge(edge, &mut self.statistics);
+        if edge.is_delta() {
+            self.delta.remove_edge(edge, &mut self.statistics);
+        } else {
+            self.drop_base_edge(edge);
+        }
         Ok(())
     }
 
@@ -655,6 +690,44 @@ impl GraphStorage for LayeredGraph {
 }
 
 impl LayeredGraph {
+    /// Drops the live base vertex `node` as `TraversalGraph::remove_vertex_raw` drops one: its
+    /// incident edges first, each once (a self-loop from the outgoing list only), in the order
+    /// of its lists (added edges at its stub, newest first, then its base edges), then the
+    /// vertex itself (its tombstone; its stub goes with it). The vertex stays dirty.
+    fn drop_base_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
+        let mut incident: Vec<LayeredEdge> = GraphStorage::out_edges(&*self, node)?.collect();
+        for edge in GraphStorage::in_edges(&*self, node)? {
+            if GraphStorage::edge_endpoints(&*self, edge)?.is_none_or(|(from, _)| from != node) {
+                incident.push(edge);
+            }
+        }
+        for edge in incident {
+            if edge.is_delta() {
+                self.delta.remove_edge(edge, &mut self.statistics);
+            } else {
+                self.drop_base_edge(edge);
+            }
+        }
+        self.dirty_vertices.set(node.slot());
+        self.delta
+            .remove_base_vertex(&self.base, node.to_base(), &mut self.statistics);
+        Ok(())
+    }
+
+    /// Drops the live base edge `edge`: its tombstone, and the dirty bits of the edge and of
+    /// both endpoints (one for a self-loop), so the base adjacency lists of each endpoint are
+    /// filtered (invariant of `base_adjacency_filter`).
+    fn drop_base_edge(&mut self, edge: LayeredEdge) {
+        let base = edge.to_base();
+        if let Ok(Some((from, to))) = GraphStorage::edge_endpoints(&*self.base, base) {
+            self.dirty_vertices.set(from.index().slot());
+            self.dirty_vertices.set(to.index().slot());
+        }
+        self.dirty_edges.set(edge.slot());
+        self.delta
+            .remove_base_edge(&self.base, base, &mut self.statistics);
+    }
+
     /// Stores a vertex the write rules accepted: its id checked, then the delta insert.
     fn store_vertex(
         &mut self,
