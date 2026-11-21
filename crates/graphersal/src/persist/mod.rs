@@ -8,7 +8,9 @@
 //!   [`TraversalGraph::write_snapshot`](crate::graph::TraversalGraph::write_snapshot) and
 //!   [`read_snapshot`] / [`TraversalGraph::read_snapshot`](crate::graph::TraversalGraph::read_snapshot).
 //!   Both work for any [`PersistentStorage`](crate::storage::PersistentStorage):
-//!   [`write_snapshot`] takes `&S`, [`read_snapshot_into`] loads into an empty `S`.
+//!   [`write_snapshot`] takes `&S`, [`read_snapshot_into`] loads into an empty `S`. A
+//!   [`LayeredGraph`](crate::storage::LayeredGraph) writes a layer snapshot (its delta and the
+//!   base it was built over), read back over that base with [`read_layer_snapshot`].
 //!   Values are written losslessly (every logical type, NaN payloads, property order,
 //!   multi-label vertices, unlabeled elements); loading does not validate against the schema
 //!   (the data was valid when it was committed), every byte is protected by CRC-32C.
@@ -50,6 +52,7 @@ mod dir;
 mod encoder;
 mod error;
 mod journal;
+pub(crate) mod layer;
 pub(crate) mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 mod model_cache;
@@ -78,8 +81,8 @@ pub use segment::{DEFAULT_CHUNK_BYTES, DEFAULT_SEGMENT_BYTES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use single_file::{SINGLE_FILE_EXTENSION, SingleFileDir};
 pub use snapshot::{
-    ReadOptions, SnapshotInfo, WriteOptions, read_snapshot, read_snapshot_info, read_snapshot_into,
-    write_graph_snapshot, write_snapshot,
+    ReadOptions, SnapshotInfo, WriteOptions, read_layer_snapshot, read_snapshot,
+    read_snapshot_info, read_snapshot_into, write_graph_snapshot, write_snapshot,
 };
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 // A journal header written by hand: a test attaching a journal to another storage than
@@ -108,7 +111,11 @@ pub const SNAPSHOT_EXTENSION: &str = "gsnap";
 /// The version of the file formats this build writes: packed snapshots, snapshot manifests and
 /// segments, WAL segments (format spec 15). This build also reads version 1 (Graphersal 0.1.x),
 /// which differs only by the temporal value tags it does not have, so a `.gsnap` written by
-/// 0.1.x loads here; a file of this version is not readable by a build of version 1.
+/// 0.1.x loads here; a file of this version is not readable by a build of version 1. The one
+/// exception: the packed header, manifest and layer file of a LAYER snapshot (a
+/// `LayeredGraph`'s, [`read_layer_snapshot`]) are written in version 5, so a build that reads
+/// only up to version 4 refuses it as newer instead of loading the layer's own elements as a
+/// whole graph (format spec 7.5, 15).
 pub const FORMAT_VERSION: u32 = codec::FORMAT_VERSION;
 
 /// The version of the Store format this build writes and reads: the version word of a store's

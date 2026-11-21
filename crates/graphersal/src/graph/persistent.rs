@@ -306,14 +306,18 @@ impl BasePatch {
     }
 }
 
-/// The parts of a layer an encoder writes ([`PersistentStorage::layer_parts`]): the changes
-/// to the base and the handles of the elements the layer added, every vertex before the edges
-/// (an encoder reads their ids, labels, properties and endpoints through the ordinary
-/// [`GraphStorage`] read methods).
+/// The parts of a layer an encoder writes ([`PersistentStorage::layer_parts`]): the identity
+/// of the base, the changes to the base and the handles of the elements the layer added, every
+/// vertex before the edges (an encoder reads their ids, labels, properties and endpoints
+/// through the ordinary [`GraphStorage`] read methods). A snapshot loader reads the parts of
+/// the EMPTY layer it loads into for its base's identity (a snapshot of a layer over another
+/// base is refused).
 ///
 /// **EXPERIMENTAL**, like [`PersistentStorage`]. Built with [`LayerParts::new`].
 #[non_exhaustive]
 pub struct LayerParts<'a, V, E> {
+    /// The identity of the base the layer is over (what a layer snapshot records).
+    pub base_ref: crate::graph::BaseRef,
     /// The changes to the base, by base element id: every removed base edge and vertex, every
     /// image, every removed base definition.
     pub patch: Vec<BasePatch>,
@@ -324,13 +328,15 @@ pub struct LayerParts<'a, V, E> {
 }
 
 impl<'a, V, E> LayerParts<'a, V, E> {
-    /// The parts from the patch and the added elements.
+    /// The parts from the base's identity, the patch and the added elements.
     pub fn new(
+        base_ref: crate::graph::BaseRef,
         patch: Vec<BasePatch>,
         vertices: Box<dyn Iterator<Item = V> + 'a>,
         edges: Box<dyn Iterator<Item = E> + 'a>,
     ) -> Self {
         Self {
+            base_ref,
             patch,
             vertices,
             edges,
@@ -341,6 +347,7 @@ impl<'a, V, E> LayerParts<'a, V, E> {
 impl<V, E> std::fmt::Debug for LayerParts<'_, V, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LayerParts")
+            .field("base_ref", &self.base_ref)
             .field("patch", &self.patch)
             .finish_non_exhaustive()
     }

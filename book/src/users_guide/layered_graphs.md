@@ -12,8 +12,9 @@ with the project's own repositories. Most of a project graph is the product itse
 costs about what the project adds or changes, not a copy of the product. Several layers can
 share one base in the same process.
 
-> **EXPERIMENTAL in 0.6.x.** Layers live in memory only: a layer cannot be saved yet (see
-> [Limitations](#limitations)). How the storage works inside, its capabilities and memory
+> **EXPERIMENTAL in 0.6.x.** From Rust a layer can be saved as a layer snapshot and read back
+> over its base; there is no layer Store yet, and the CLI, the dev server and Python keep
+> layers in memory only (see [Limitations](#limitations)). How the storage works inside, its capabilities and memory
 > figures are on the developer page [Layered Graphs](../for_developers/layered_graphs.md).
 
 ## Where an element comes from
@@ -205,8 +206,15 @@ assert_eq!(project_a.read().vertex_count().unwrap(), 7);
 assert_eq!(project_b.read().vertex_count().unwrap(), 6);
 ```
 
-`LayerBase::base_ref()` will name the base's identity (graph, commit) once layers can be saved;
-it is `None` for now.
+`LayerBase::base_ref()` names the base's identity: its graph lineage id, its last commit and
+that commit's time. A layer snapshot (`graphersal::persist::write_snapshot` of the layer, or
+`write_graph_snapshot` of its `Graph`) holds only what the layer added and changed plus that
+identity, so it is about the size of the project's changes, not of the product. It is read
+back over the same base with `graphersal::persist::read_layer_snapshot(reader, &options,
+&base)`; over another base (another graph, or the same product graph after more commits) it is
+refused with a message naming both bases, and `read_snapshot` refuses it as a whole graph. A
+base saved as a `.gsnap` or Store and loaded again keeps its identity and takes its layers'
+snapshots.
 
 `LayerDiff::to_property()` is the map of the table above with its keys in that order, and
 `LayerDiff::to_json()` its JSON text. A storage that has no layers answers `LayerOrigin::Base`
@@ -234,8 +242,9 @@ code written for layers already run.
 
 ## Limitations
 
-- **In memory only.** A layer cannot be saved, opened from a Store or journaled yet; it lives as
-  long as its process. Persistence of layers is planned.
+- **Snapshots only.** A layer can be saved as a layer snapshot from Rust (above), but not
+  opened as a Store or journaled into one yet; the CLI's `--layer`, the dev server and Python
+  keep it in memory. A layer Store is planned.
 - **One level.** The base is a plain graph; there is no layer over a layer. The base is frozen
   for good: when the product graph changes, project layers are rebuilt over the new base.
 - **Refused for now**, with an error naming the feature ("... not supported on a layered graph

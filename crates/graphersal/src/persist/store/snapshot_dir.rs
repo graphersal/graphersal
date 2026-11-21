@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 
 use super::super::StoreFile;
-use super::super::codec::{FORMAT_VERSION, crc, crc_append};
+use super::super::codec::{crc, crc_append};
 use super::super::encoder::{EncodeStats, SegmentOut, SnapshotEncoder};
 use super::super::error::PersistError;
 use super::super::manifest::{FIXED_BYTES, Manifest, ManifestFixed, is_element_kind};
@@ -227,6 +227,18 @@ pub(crate) fn write_graph_snapshot<S: PersistentStorage + ?Sized>(
             Ok(())
         })?;
         property_counts[slot] = totals.property_count;
+    }
+    // A layer's changes to its base: the layer file (format spec 7.5, kind 128) after the
+    // element segments, as in its packed form.
+    if let Some((base, patch)) = encoder.layer() {
+        let file = crate::persist::layer::encode(base, patch)?;
+        write_file(&tmp.join(crate::persist::layer::LAYER_FILE), |out| {
+            out.put(&file)
+        })?;
+        index.push((
+            crate::persist::layer::row(base, patch.len(), &file),
+            Vec::new(),
+        ));
     }
     let schema = encoder.schema()?;
     let (_, manifest, _) =
@@ -595,7 +607,8 @@ impl DirSnapshotReader {
         let mut parts = VecDeque::new();
         let mut head = Vec::with_capacity(16);
         head.extend_from_slice(PACKED_MAGIC);
-        head.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        // The layer version for a layer snapshot (format spec 7.5, 15), else the current one.
+        head.extend_from_slice(&manifest.version_word().to_le_bytes());
         head.extend_from_slice(&(2 + manifest.segments.len() as u32).to_le_bytes());
         let section = |kind: u8, len: u64| {
             let mut out = Vec::with_capacity(9);

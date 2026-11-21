@@ -6,8 +6,9 @@ changes or removes. From outside a layer is an ordinary storage (`GraphStorage`)
 traversal API, the Rhai DSL, GQL, saved queries and the session all run on it the same way they
 run on a `TraversalGraph`. The base never changes: each layer stores only its own difference.
 
-> **EXPERIMENTAL in 0.6.x**, like the `GraphStorage` trait. Persistence and a few catalog
-> kinds are not supported yet (see [Limitations](#limitations)).
+> **EXPERIMENTAL in 0.6.x**, like the `GraphStorage` trait. A layer can be saved as a layer
+> snapshot; a layer Store and a few catalog kinds are not supported yet (see
+> [Limitations](#limitations)).
 
 What a layer is for and how queries see it (`layer()`, `has_layer()`, `g.layer_diff()`, the
 CLI's `--layer`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This
@@ -84,9 +85,10 @@ that registry, a display name and the base's identity:
   catalog models, `embed()`, text `nearest` and `g.embedders()` on the layer use the base's
   models. `LayeredGraph::over_base(&base)` is the bare storage, without models.
 - The layer only uses the models: model definitions in the layer's catalog stay refused.
-- `base_ref()` is `Option<BaseRef>`, `None` for now. It will name the base's identity (graph
-  lineage id, commit sequence and commit time) when layers can be saved, so a saved layer is
-  checked against its base.
+- `base_ref()` is the base's identity, a `BaseRef` read from the frozen graph
+  (`BaseRef::of`): its lineage id, last commit sequence number and that commit's time (always
+  `Some` in this version). `LayeredGraph::base_ref()` answers the same for a bare layer. A
+  layer snapshot records it and is loaded only over a base of the same identity (below).
 
 ```rust
 use std::sync::Arc;
@@ -194,13 +196,24 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
 
 ## Limitations
 
-- **No snapshot format or Store yet.** A layer implements `PersistentStorage` (load sink,
-  replay of journaled change sets, `clear`, the journal slot, its own lineage id and auto-id
-  sequences), and `PersistentStorage::layer_parts` lists what a layer snapshot will hold: its
-  changes to the base as `BasePatch` entries, which name base elements by id (removed
-  vertices and edges, images of changed ones, base definitions it removed), and the elements
-  it added. `load_base_patch` and the ordinary load sink rebuild the same layer over the same
-  base. No file format and no Store take a layer yet, so it cannot be saved or opened.
+- **Layer snapshots, no layer Store yet.** A layer implements `PersistentStorage` (load
+  sink, replay of journaled change sets, `clear`, the journal slot, its own lineage id and
+  auto-id sequences). `persist::write_snapshot` (or `write_graph_snapshot` of a
+  `Graph<LayeredGraph>`) writes a **layer snapshot**: only the elements the layer added, as
+  ordinary segments, plus a layer file (format spec 7.5, segment kind 128) with the base's
+  identity and the layer's changes to the base (`BasePatch` entries by base element id:
+  removed vertices and edges, images of changed ones, base definitions it removed). Its size
+  follows the delta: a layer touching about 1 % of a 20,000-vertex base wrote under 3 % of the
+  base's snapshot. `persist::read_layer_snapshot(reader, options, &base)` (or
+  `read_snapshot_into` an empty `LayeredGraph::over(base)`) reads it back over the base:
+  the patch first, then the added elements. The kinds must agree (`read_snapshot` refuses a
+  layer snapshot, a layer refuses a whole-graph snapshot: `PersistError::SnapshotKindMismatch`)
+  and so must the base (`PersistError::LayerBaseMismatch` names both bases: rebuild the layer
+  or load it over its own base). The base's own snapshot or Store keeps its identity, so a
+  base saved and loaded again carries its layers. A layer snapshot's header, manifest and
+  layer file are of file format version 5 (plain snapshots stay at 4), so Graphersal 0.6.x
+  and older refuse it as written by a newer version. A layer Store (`Store` with WAL and
+  checkpoints over a layer) is not there yet.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):

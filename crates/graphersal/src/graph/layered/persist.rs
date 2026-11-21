@@ -306,6 +306,7 @@ impl PersistentStorage for LayeredGraph {
             }
         }
         Ok(Some(LayerParts::new(
+            self.base_ref(),
             patch,
             Box::new(self.delta.vertices()),
             Box::new(self.delta.edges()),

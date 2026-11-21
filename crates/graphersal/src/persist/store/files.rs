@@ -792,9 +792,13 @@ fn newer_file_version(path: &DirPath) -> std::io::Result<Option<(&'static str, u
         // intact and newer (`Some`).
         let copy = |at: u64| -> std::io::Result<Result<(), Option<u32>>> {
             let bytes = path.read_range(at, FIXED_BYTES)?;
-            Ok(ManifestFixed::decode(&bytes)
-                .map(|_| ())
-                .map_err(|err| err.newer_version))
+            // A layer snapshot's manifest (version 5, format spec 7.5, 15) is newer here too:
+            // this build has no layer Store yet (S3.3 accepts it in a layer store).
+            match ManifestFixed::decode(&bytes) {
+                Ok(fixed) if fixed.version.0 > FORMAT_VERSION => Ok(Err(Some(fixed.version.0))),
+                Ok(_) => Ok(Ok(())),
+                Err(err) => Ok(Err(err.newer_version)),
+            }
         };
         let found = match copy(0)? {
             Ok(()) => None,

@@ -12,8 +12,8 @@
 //! - **Base:** an `Arc<TraversalGraph>` nobody can change any more (the `Arc` is shared, so no
 //!   `&mut` exists). Reads of an untouched base element go straight to it, through the base's
 //!   own inlined accessors. [`LayerBase`] (`base`) carries it with the embedding models of its
-//!   database, a display name and its identity ([`BaseRef`], a placeholder); its `new_layer`
-//!   attaches those models to the layer's `Graph`.
+//!   database, a display name and its identity ([`BaseRef`]: lineage id, commit sequence
+//!   number, commit time); its `new_layer` attaches those models to the layer's `Graph`.
 //! - **Handles:** [`LayeredVertex`] and [`LayeredEdge`] are 8 bytes: a `u32` slot and a
 //!   generation. Bit 31 of the slot clear names a base slot (the base's handle, unchanged, no
 //!   lookup); set, it names a slot of the layer's own store. So a base must have fewer than 2^31

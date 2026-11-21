@@ -109,6 +109,31 @@ pub enum PersistError {
         found: String,
     },
 
+    /// A layer snapshot (format spec 7.5, segment kind 128) was loaded over another base than
+    /// the one the layer was built over ([`BaseRef`](crate::storage::BaseRef): lineage id,
+    /// commit sequence number, commit time). Nothing was loaded.
+    #[error(
+        "This layer was built over base {expected}, the given base is {given}; rebuild the layer \
+         over the given base, or load it over the base it was built on"
+    )]
+    #[non_exhaustive]
+    LayerBaseMismatch {
+        /// The base the layer snapshot names.
+        expected: crate::graph::BaseRef,
+        /// The base of the layer it was loaded into.
+        given: crate::graph::BaseRef,
+    },
+
+    /// The snapshot and the storage it is loaded into are of different kinds: a layer snapshot
+    /// (it holds only a layer's changes to its base, format spec 7.5 segment kind 128) loaded
+    /// as a whole graph, or a whole-graph snapshot loaded into a layer. Nothing was loaded.
+    #[error("{reason}")]
+    #[non_exhaustive]
+    SnapshotKindMismatch {
+        /// Which kind the snapshot is and what it was loaded into.
+        reason: String,
+    },
+
     /// The journals do not continue the snapshot without a gap: a commit is missing.
     #[error("Journal {journal} at byte {offset}: expected commit {expected}, found commit {found}")]
     #[non_exhaustive]
@@ -982,6 +1007,15 @@ impl PersistError {
                 expected: expected.clone(),
                 found: found.clone(),
             },
+            PersistError::LayerBaseMismatch { expected, given } => {
+                PersistError::LayerBaseMismatch {
+                    expected: *expected,
+                    given: *given,
+                }
+            }
+            PersistError::SnapshotKindMismatch { reason } => PersistError::SnapshotKindMismatch {
+                reason: reason.clone(),
+            },
             PersistError::Gap {
                 journal,
                 offset,
@@ -1167,6 +1201,18 @@ impl DiagnosticError for PersistError {
             PersistError::LineageMismatch { .. } => "Recover each graph from its own snapshot \
                  and journals: a journal is replayed only onto a snapshot of the same graph \
                  lineage (graph_id)."
+                .to_string(),
+            PersistError::LayerBaseMismatch { expected, .. } => format!(
+                "A layer snapshot holds only the layer's changes to its base, by element id, \
+                 so it loads only over the very base it was built on: {expected}. Load that \
+                 base (the Store or .gsnap it was saved as, at that commit) and read the layer \
+                 over it (persist::read_layer_snapshot), or rebuild the layer over the new \
+                 base: apply its changes again, or export the old layer whole and start over."
+            ),
+            PersistError::SnapshotKindMismatch { .. } => "A layer snapshot holds only a layer's \
+                 changes to its base: read it over that base with persist::read_layer_snapshot \
+                 (or read_snapshot_into an empty LayeredGraph over it). A whole-graph snapshot \
+                 is read with persist::read_snapshot (or TraversalGraph::read_snapshot)."
                 .to_string(),
             PersistError::Gap { .. } => "Pass every journal written since the snapshot, in \
                  order; when a journal file is lost, recover to a target before the gap \
