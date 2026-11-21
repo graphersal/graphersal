@@ -16,10 +16,13 @@
 //! (plan decision P5) and a Rhai differential. Units (S1.8): a rollback of every write kind
 //! restores the prior state, savepoints, commits and the commit count, units of their own for
 //! schema and catalog writes, transactions and dry runs, and Rhai differentials of failing
-//! traversals and whole-script units.
+//! traversals and whole-script units. Change capture (S1.9): the change set of every write
+//! kind equals a `TraversalGraph`'s for the same writes on the same data (committed and as a
+//! dry run), change sets apply across both, vetoes and rollbacks reach the hooks with their
+//! reason, the commit clock, and Rhai differentials of dry runs and captured commits.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use graphersal::prelude::*;
 use graphersal::storage::{
@@ -241,7 +244,7 @@ fn capabilities_claim_only_what_holds_now() {
     let layer = modern_layer();
     let caps = layer.capabilities().unwrap();
     assert!(caps.is_consistent());
-    assert!(caps.writable && caps.atomic && !caps.change_capture);
+    assert!(caps.writable && caps.atomic && caps.change_capture);
     assert!(!caps.immutable && !caps.durability && !caps.property_indexes);
     assert_eq!(
         caps.exact_property_index_lookups,
@@ -4363,8 +4366,8 @@ fn catalog_and_schema_writes_are_units_of_their_own() {
 }
 
 /// `Transactional::transaction` on a bare layer and on `Graph<LayeredGraph>`: `Ok` commits,
-/// `Err` rolls everything back, a failing nested transaction is a savepoint. `dry_run` needs
-/// change capture (task S1.9): it fails with `Unsupported` and leaves the layer as it was.
+/// `Err` rolls everything back, a failing nested transaction is a savepoint. `dry_run`
+/// reports its changes and leaves the layer as it was (S1.9).
 /// Compared with sorted lists: the rolled-back drop of marko stores the added edge `am` again
 /// ([`State::with_sorted_lists`]).
 #[test]
@@ -4407,18 +4410,37 @@ fn transactions_and_dry_runs_on_a_layer() {
     );
 
     let before = sorted_full_state(&layer);
-    let dry: Result<((), _), GraphError> = layer.dry_run(|l| {
-        let josh = l.get_vertex_by_id("4").unwrap().unwrap();
-        l.drop_vertex(josh)
-    });
-    assert!(
-        matches!(dry, Err(GraphError::Unsupported { .. })),
-        "a dry run needs change capture: {dry:?}"
+    let seq = layer.last_commit_seq().unwrap();
+    let ((), dry) = layer
+        .dry_run(|l| {
+            let josh = l.get_vertex_by_id("4").unwrap().unwrap();
+            l.drop_vertex(josh)
+        })
+        .unwrap();
+    let dropped: Vec<&str> = dry
+        .mutations()
+        .iter()
+        .map(|m| match m {
+            graphersal::changes::Mutation::DropEdge { .. } => "edge",
+            graphersal::changes::Mutation::DropVertex { .. } => "vertex",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        dropped.last(),
+        Some(&"vertex"),
+        "a dry run reports its changes, the cascaded edges first: {dry:?}"
     );
+    assert!(dropped.len() > 1 && dropped[..dropped.len() - 1].iter().all(|m| *m == "edge"));
     assert_eq!(
         sorted_full_state(&layer),
         before,
         "the dry run's writes were rolled back"
+    );
+    assert_eq!(
+        layer.last_commit_seq().unwrap(),
+        seq,
+        "a dry run is no commit"
     );
 
     let graph = Graph::new(prepared_layer());
@@ -4592,4 +4614,1085 @@ fn rhai_atomic_scripts_match_the_plain_graph() {
         order_only.iter().all(|script| script.contains("drop()")),
         "{order_only:?}"
     );
+}
+
+// ------------------------------------------------------------------------------------------
+// Change capture, commit hooks, dry runs (S1.9)
+// ------------------------------------------------------------------------------------------
+
+use graphersal::changes::{ChangeSet, CommitHook, CommitMetadata, HookError, Mutation};
+
+/// A hook recording its events (`before:<n mutations>`, `after`, `rollback:<reason>`), keeping
+/// every change set it accepted, vetoing while `veto` is set and panicking in `before_commit`
+/// while `panic` is set.
+#[derive(Clone, Default)]
+struct Recorder {
+    events: Arc<Mutex<Vec<String>>>,
+    accepted: Arc<Mutex<Vec<ChangeSet>>>,
+    veto: Arc<Mutex<bool>>,
+    panic: Arc<Mutex<bool>>,
+}
+
+/// The error a vetoing [`Recorder`] returns.
+#[derive(Debug)]
+struct NotToday;
+
+impl std::fmt::Display for NotToday {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not today")
+    }
+}
+
+impl std::error::Error for NotToday {}
+
+impl CommitHook for Recorder {
+    fn name(&self) -> &str {
+        "recorder"
+    }
+
+    fn before_commit(&mut self, changes: &ChangeSet) -> Result<(), HookError> {
+        self.log(format!("before:{}", changes.len()));
+        if *self.panic.lock().unwrap() {
+            panic!("the recorder panics");
+        }
+        if *self.veto.lock().unwrap() {
+            return Err(Box::new(NotToday));
+        }
+        self.accepted.lock().unwrap().push(changes.clone());
+        Ok(())
+    }
+
+    fn after_commit(&mut self, _: &ChangeSet) {
+        self.log("after".into());
+    }
+
+    fn after_rollback(&mut self, reason: &RollbackReason) {
+        let reason = match reason {
+            RollbackReason::Vetoed { hook, .. } => format!("vetoed by {hook}"),
+            RollbackReason::Failed { .. } => format!("failed: {}", reason.message()),
+            _ => "other".into(),
+        };
+        self.log(format!("rollback:{reason}"));
+    }
+}
+
+impl Recorder {
+    fn log(&self, event: String) {
+        self.events.lock().unwrap().push(event);
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    /// The mutations of every accepted change set, oldest first.
+    fn mutations(&self) -> Vec<Vec<Mutation>> {
+        self.accepted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.mutations().to_vec())
+            .collect()
+    }
+
+    /// A recorder registered on `s`.
+    fn on<S: GraphStorage>(s: &mut S) -> Self {
+        let recorder = Self::default();
+        s.register_commit_hook(Box::new(recorder.clone())).unwrap();
+        recorder
+    }
+}
+
+/// The writes of [`prepared_layer`] (after its base), on any storage holding modern.
+fn prepare_like_the_layer<S: GraphStorage>(s: &mut S) {
+    let a = s
+        .insert_vertex(
+            Some("a".into()),
+            vec!["person".into()],
+            props(&[("name", "ada".into())]),
+        )
+        .unwrap();
+    let b = s
+        .insert_vertex(
+            Some("b".into()),
+            vec!["person".into(), "robot".into()],
+            props(&[("name", "bob".into())]),
+        )
+        .unwrap();
+    let marko = vertex_of(s, "1");
+    let peter = vertex_of(s, "6");
+    s.insert_edge(
+        Some("ab".into()),
+        Some("knows".into()),
+        a,
+        b,
+        props(&[("w", 1.into())]),
+    )
+    .unwrap();
+    s.insert_edge(
+        Some("am".into()),
+        Some("likes".into()),
+        a,
+        marko,
+        PropertyMap::default(),
+    )
+    .unwrap();
+    s.insert_edge(
+        Some("pa".into()),
+        Some("knows".into()),
+        peter,
+        a,
+        PropertyMap::default(),
+    )
+    .unwrap();
+    s.insert_edge(Some("aa".into()), None, a, a, PropertyMap::default())
+        .unwrap();
+    s.set_vertex_property(marko, "age".into(), 30.into())
+        .unwrap();
+    s.add_vertex_label(vertex_of(s, "3"), "product".into())
+        .unwrap();
+    s.set_edge_property(edge_of(s, "0"), "weight".into(), 0.9.into())
+        .unwrap();
+    s.set_edge_label(edge_of(s, "2"), "friend".into()).unwrap();
+    s.drop_edge(edge_of(s, "3")).unwrap();
+    s.set_definition(graphersal::catalog::Definition::query(
+        "mine",
+        graphersal::catalog::QueryDefinition::new("fn mine() { 1 }"),
+    ))
+    .unwrap();
+}
+
+/// A `TraversalGraph` holding what [`prepared_layer`] reads: modern, the base's saved query,
+/// then the same writes.
+fn prepared_reference() -> TraversalGraph {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    graph
+        .traversal_mut()
+        .define_query(
+            "people",
+            graphersal::catalog::QueryDefinition::new(
+                r#"fn people() { g.v().has_label("person") }"#,
+            ),
+        )
+        .unwrap();
+    prepare_like_the_layer(&mut graph);
+    graph
+}
+
+/// Everything about a storage, every list sorted (adjacency, label buckets; elements by id),
+/// with schema and catalog: what two storages holding the same data answer whatever order
+/// their writes and undos left.
+fn canonical<S: GraphStorage>(
+    s: &S,
+) -> (
+    State,
+    Option<GraphSchema>,
+    Vec<graphersal::catalog::Definition>,
+) {
+    let mut state = sorted_state(s);
+    for vertex in &mut state.vertices {
+        vertex.3.sort();
+        vertex.4.sort();
+    }
+    (state, s.get_schema().unwrap(), definitions_of(s))
+}
+
+/// The names of the write kinds of [`apply_capture_kind`].
+const CAPTURE_KINDS: &[&str] = &[
+    "insert a vertex with an explicit id",
+    "add a vertex with an auto id",
+    "insert an edge between added vertices",
+    "insert an edge between base vertices without stubs",
+    "insert an edge from a base vertex to an added one",
+    "add an edge with an auto id",
+    "drop an added edge",
+    "drop an added vertex with edges to added and base vertices and a self-loop",
+    "drop a clean base edge",
+    "drop an imaged base edge",
+    "drop a relabeled base edge",
+    "drop an imaged base vertex with added edges",
+    "drop a clean base vertex",
+    "drop a base vertex with a gained label",
+    "drop a base vertex with an added edge at its stub",
+    "set a property of a clean base vertex",
+    "set a property of an imaged base vertex",
+    "a write that returns an image to clean",
+    "drop a property of a clean base vertex",
+    "drop an absent property of a base vertex",
+    "a path write on a base vertex",
+    "a path removal on an imaged base vertex",
+    "nested path writes and a nested path removal on a base vertex",
+    "set a property of a clean base edge",
+    "set a new property of an imaged base edge",
+    "an edge write that returns its image to clean",
+    "drop a property of a relabeled base edge",
+    "a path write on a base edge",
+    "identical values written to base elements",
+    "identical values written to added elements",
+    "add a label to a clean base vertex",
+    "remove a gained label (a return to clean)",
+    "remove a base label of an imaged vertex",
+    "relabel a clean base edge",
+    "relabel a relabeled base edge back to its base label",
+    "relabel a relabeled base edge to another label",
+    "property writes of added elements",
+    "label writes of added elements",
+    "set the schema",
+    "catalog writes",
+    "several writes to one base vertex, then its drop",
+    "a dropped base id reused, written, dropped again",
+    "an added vertex dropped and its id reused",
+    "writes undone by a savepoint",
+    "an element added and written in the unit, then dropped",
+];
+
+/// One write kind (by name, [`CAPTURE_KINDS`]) on any storage holding [`prepared_layer`]'s
+/// data.
+fn apply_capture_kind<S: GraphStorage>(s: &mut S, kind: &str) {
+    let v = |s: &S, id: &str| vertex_of(s, id);
+    let e = |s: &S, id: &str| edge_of(s, id);
+    match kind {
+        "insert a vertex with an explicit id" => {
+            s.insert_vertex(
+                Some("n1".into()),
+                vec!["x".into()],
+                props(&[("k", 1.into())]),
+            )
+            .unwrap();
+        }
+        "add a vertex with an auto id" => {
+            s.add_vertex(None, vec!["person".into()], PropertyMap::default())
+                .unwrap();
+        }
+        "insert an edge between added vertices" => {
+            let (a, b) = (v(s, "a"), v(s, "b"));
+            s.insert_edge(
+                Some("ba".into()),
+                Some("knows".into()),
+                b,
+                a,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        }
+        "insert an edge between base vertices without stubs" => {
+            let (ripple, vadas) = (v(s, "5"), v(s, "2"));
+            s.insert_edge(
+                Some("rv".into()),
+                Some("x".into()),
+                ripple,
+                vadas,
+                props(&[("w", 2.into())]),
+            )
+            .unwrap();
+        }
+        "insert an edge from a base vertex to an added one" => {
+            let (josh, a) = (v(s, "4"), v(s, "a"));
+            s.insert_edge(
+                Some("ja".into()),
+                Some("knows".into()),
+                josh,
+                a,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        }
+        "add an edge with an auto id" => {
+            let (marko, b) = (v(s, "1"), v(s, "b"));
+            s.add_edge(None, Some("knows".into()), marko, b, PropertyMap::default())
+                .unwrap();
+        }
+        "drop an added edge" => s.drop_edge(e(s, "ab")).unwrap(),
+        "drop an added vertex with edges to added and base vertices and a self-loop" => {
+            s.drop_vertex(v(s, "a")).unwrap()
+        }
+        "drop a clean base edge" => s.drop_edge(e(s, "4")).unwrap(),
+        "drop an imaged base edge" => s.drop_edge(e(s, "0")).unwrap(),
+        "drop a relabeled base edge" => s.drop_edge(e(s, "2")).unwrap(),
+        "drop an imaged base vertex with added edges" => s.drop_vertex(v(s, "1")).unwrap(),
+        "drop a clean base vertex" => s.drop_vertex(v(s, "5")).unwrap(),
+        "drop a base vertex with a gained label" => s.drop_vertex(v(s, "3")).unwrap(),
+        "drop a base vertex with an added edge at its stub" => s.drop_vertex(v(s, "6")).unwrap(),
+        "set a property of a clean base vertex" => s
+            .set_vertex_property(v(s, "2"), "age".into(), 28.into())
+            .unwrap(),
+        "set a property of an imaged base vertex" => s
+            .set_vertex_property(v(s, "1"), "name".into(), "M".into())
+            .unwrap(),
+        "a write that returns an image to clean" => s
+            .set_vertex_property(v(s, "1"), "age".into(), 29.into())
+            .unwrap(),
+        "drop a property of a clean base vertex" => {
+            s.drop_vertex_property("age", v(s, "4")).unwrap()
+        }
+        "drop an absent property of a base vertex" => {
+            s.drop_vertex_property("nope", v(s, "4")).unwrap();
+            s.drop_edge_property("nope", e(s, "4")).unwrap();
+            // Something real, so the unit commits.
+            s.set_vertex_property(v(s, "2"), "k".into(), 1.into())
+                .unwrap();
+        }
+        "a path write on a base vertex" => s
+            .set_vertex_property_path(v(s, "2"), &path("address.city"), "Berlin".into())
+            .unwrap(),
+        "a path removal on an imaged base vertex" => s
+            .remove_vertex_property_path(v(s, "1"), &path("name"))
+            .unwrap(),
+        "nested path writes and a nested path removal on a base vertex" => {
+            let vadas = v(s, "2");
+            s.set_vertex_property_path(vadas, &path("address.city"), "Berlin".into())
+                .unwrap();
+            s.set_vertex_property_path(vadas, &path("address.zip"), "10115".into())
+                .unwrap();
+            s.remove_vertex_property_path(vadas, &path("address.city"))
+                .unwrap();
+            s.remove_vertex_property_path(vadas, &path("address.none"))
+                .unwrap();
+        }
+        "set a property of a clean base edge" => s
+            .set_edge_property(e(s, "4"), "weight".into(), 0.5.into())
+            .unwrap(),
+        "set a new property of an imaged base edge" => s
+            .set_edge_property(e(s, "0"), "since".into(), 2000.into())
+            .unwrap(),
+        "an edge write that returns its image to clean" => s
+            .set_edge_property(e(s, "0"), "weight".into(), 0.5.into())
+            .unwrap(),
+        "drop a property of a relabeled base edge" => {
+            s.drop_edge_property("weight", e(s, "2")).unwrap()
+        }
+        "a path write on a base edge" => s
+            .set_edge_property_path(e(s, "5"), &path("info.by"), "x".into())
+            .unwrap(),
+        "identical values written to base elements" => {
+            let vadas = v(s, "2");
+            let age = s
+                .vertex_properties(vadas)
+                .unwrap()
+                .unwrap()
+                .get("age")
+                .cloned()
+                .unwrap();
+            s.set_vertex_property(vadas, "age".into(), age).unwrap();
+            // An imaged vertex, its image's value.
+            s.set_vertex_property(v(s, "1"), "age".into(), 30.into())
+                .unwrap();
+            s.set_vertex_property_path(v(s, "4"), &path("name"), "josh".into())
+                .unwrap();
+            let e4 = e(s, "4");
+            let weight = s
+                .edge_properties(e4)
+                .unwrap()
+                .unwrap()
+                .get("weight")
+                .cloned()
+                .unwrap();
+            s.set_edge_property(e4, "weight".into(), weight).unwrap();
+            s.set_edge_property(e(s, "0"), "weight".into(), 0.9.into())
+                .unwrap();
+            // Equal labels are no writes at all (on both).
+            s.add_vertex_label(v(s, "3"), "product".into()).unwrap();
+            s.set_edge_label(e(s, "2"), "friend".into()).unwrap();
+        }
+        "identical values written to added elements" => {
+            s.set_vertex_property(v(s, "a"), "name".into(), "ada".into())
+                .unwrap();
+            s.set_edge_property(e(s, "ab"), "w".into(), 1.into())
+                .unwrap();
+        }
+        "add a label to a clean base vertex" => {
+            s.add_vertex_label(v(s, "4"), "employee".into()).unwrap();
+        }
+        "remove a gained label (a return to clean)" => {
+            s.remove_vertex_label(v(s, "3"), "product").unwrap();
+        }
+        "remove a base label of an imaged vertex" => {
+            s.remove_vertex_label(v(s, "1"), "person").unwrap();
+        }
+        "relabel a clean base edge" => {
+            s.set_edge_label(e(s, "1"), "made".into()).unwrap();
+        }
+        "relabel a relabeled base edge back to its base label" => {
+            s.set_edge_label(e(s, "2"), "knows".into()).unwrap();
+        }
+        "relabel a relabeled base edge to another label" => {
+            s.set_edge_label(e(s, "2"), "mate".into()).unwrap();
+        }
+        "property writes of added elements" => {
+            let a = v(s, "a");
+            s.set_vertex_property(a, "name".into(), "ann".into())
+                .unwrap();
+            s.set_vertex_property(a, "age".into(), 3.into()).unwrap();
+            s.drop_vertex_property("name", v(s, "b")).unwrap();
+            let ab = e(s, "ab");
+            s.set_edge_property(ab, "w".into(), 2.into()).unwrap();
+            s.drop_edge_property("w", ab).unwrap();
+            s.set_edge_property(e(s, "am"), "since".into(), 1.into())
+                .unwrap();
+            s.set_vertex_property_path(a, &path("meta.tags"), "x".into())
+                .unwrap();
+        }
+        "label writes of added elements" => {
+            let a = v(s, "a");
+            s.add_vertex_label(a, "x".into()).unwrap();
+            s.remove_vertex_label(a, "person").unwrap();
+            s.set_edge_label(e(s, "ab"), "met".into()).unwrap();
+            s.set_edge_label(e(s, "aa"), "self".into()).unwrap();
+        }
+        "set the schema" => s
+            .set_schema(GraphSchema::new().with_mode(SchemaMode::Open))
+            .unwrap(),
+        "catalog writes" => {
+            use graphersal::catalog::{Definition, DefinitionKind, QueryDefinition};
+            s.set_definition(Definition::query(
+                "q1",
+                QueryDefinition::new("fn q1() { 1 }"),
+            ))
+            .unwrap();
+            s.set_definition(Definition::query(
+                "mine",
+                QueryDefinition::new("fn mine() { 2 }"),
+            ))
+            .unwrap();
+            assert!(
+                s.remove_definition(DefinitionKind::QUERY, "people")
+                    .unwrap()
+            );
+            assert!(
+                s.set_definitions(vec![
+                    Definition::query("q2", QueryDefinition::new("fn q2() { 1 }")),
+                    Definition::query("not valid", QueryDefinition::new("fn x() {}")),
+                ])
+                .is_err()
+            );
+        }
+        "several writes to one base vertex, then its drop" => {
+            let marko = v(s, "1");
+            s.set_vertex_property(marko, "age".into(), 31.into())
+                .unwrap();
+            s.add_vertex_label(marko, "x".into()).unwrap();
+            s.drop_vertex_property("name", marko).unwrap();
+            let n = s
+                .insert_vertex(Some("n2".into()), vec!["n".into()], PropertyMap::default())
+                .unwrap();
+            s.insert_edge(Some("mn".into()), None, marko, n, PropertyMap::default())
+                .unwrap();
+            s.drop_vertex(marko).unwrap();
+        }
+        "a dropped base id reused, written, dropped again" => {
+            s.drop_vertex(v(s, "2")).unwrap();
+            let n = s
+                .insert_vertex(
+                    Some("2".into()),
+                    vec!["person".into()],
+                    PropertyMap::default(),
+                )
+                .unwrap();
+            s.set_vertex_property(n, "k".into(), 1.into()).unwrap();
+            let a = v(s, "a");
+            s.insert_edge(Some("2a".into()), None, n, a, PropertyMap::default())
+                .unwrap();
+            s.drop_vertex(n).unwrap();
+            s.drop_vertex(a).unwrap();
+        }
+        "an added vertex dropped and its id reused" => {
+            s.drop_vertex(v(s, "b")).unwrap();
+            s.insert_vertex(Some("b".into()), vec!["y".into()], PropertyMap::default())
+                .unwrap();
+        }
+        "writes undone by a savepoint" => {
+            s.set_vertex_property(v(s, "2"), "age".into(), 1.into())
+                .unwrap();
+            let inner = s.begin_unit().unwrap();
+            s.set_vertex_property(v(s, "2"), "age".into(), 2.into())
+                .unwrap();
+            s.drop_vertex(v(s, "1")).unwrap();
+            s.set_edge_label(e(s, "4"), "y".into()).unwrap();
+            s.rollback_unit(inner, &RollbackReason::failed(&"inner"))
+                .unwrap();
+            s.set_vertex_property(v(s, "2"), "age".into(), 3.into())
+                .unwrap();
+        }
+        "an element added and written in the unit, then dropped" => {
+            let n = s
+                .insert_vertex(Some("n3".into()), vec!["n".into()], PropertyMap::default())
+                .unwrap();
+            s.set_vertex_property(n, "k".into(), 1.into()).unwrap();
+            s.add_vertex_label(n, "m".into()).unwrap();
+            let marko = v(s, "1");
+            let edge = s
+                .insert_edge(Some("nm".into()), Some("l".into()), n, marko, props(&[]))
+                .unwrap();
+            s.set_edge_property(edge, "w".into(), 1.into()).unwrap();
+            s.drop_vertex(n).unwrap();
+        }
+        other => panic!("unknown write kind {other}"),
+    }
+}
+
+/// Runs `kind` in one unit committed under a [`Recorder`] and returns the committed change
+/// set.
+fn committed_change_set<S: GraphStorage>(s: &mut S, kind: &str) -> ChangeSet {
+    let recorder = Recorder::on(s);
+    let seq = s.last_commit_seq().unwrap();
+    let mark = s.begin_unit().unwrap();
+    apply_capture_kind(s, kind);
+    s.commit_unit(mark).unwrap();
+    assert_eq!(s.last_commit_seq().unwrap(), seq + 1, "{kind}: one commit");
+    let accepted = recorder.accepted.lock().unwrap();
+    assert_eq!(
+        recorder.events(),
+        [format!("before:{}", accepted[0].len()), "after".to_string()],
+        "{kind}"
+    );
+    assert_eq!(accepted.len(), 1, "{kind}");
+    assert_eq!(accepted[0].commit_seq(), seq + 1, "{kind}");
+    accepted[0].clone()
+}
+
+/// For every write kind on a layer and on a `TraversalGraph` holding the same data: the
+/// committed change sets have the same mutations in the same order (base and added elements,
+/// drops with their cascades and the image a dropped element had, identical values, labels,
+/// schema, catalog, savepoints) and the same auto-id sequences after the unit; a dry run of
+/// the same writes returns the same mutations, is no commit and leaves everything as it was;
+/// and each side's change set applied to a fresh copy of the other side gives the other side's
+/// state.
+#[test]
+fn change_sets_match_a_traversal_graph_for_every_write_kind() {
+    let layer = prepared_layer();
+    let reference = prepared_reference();
+    assert_eq!(
+        canonical(&layer),
+        canonical(&reference),
+        "the two starting points hold the same data"
+    );
+    let mut differences = Vec::new();
+    for kind in CAPTURE_KINDS {
+        let mut layer = prepared_layer();
+        let mut reference = prepared_reference();
+        let on_layer = committed_change_set(&mut layer, kind);
+        let on_reference = committed_change_set(&mut reference, kind);
+        assert!(
+            !on_reference.is_empty(),
+            "{kind}: the writes change something"
+        );
+        if on_layer.mutations() != on_reference.mutations() {
+            differences.push(format!(
+                "{kind}\n  TraversalGraph: {:#?}\n  LayeredGraph:   {:#?}",
+                on_reference.mutations(),
+                on_layer.mutations()
+            ));
+            continue;
+        }
+        assert_eq!(
+            (on_layer.node_sequence(), on_layer.edge_sequence()),
+            (on_reference.node_sequence(), on_reference.edge_sequence()),
+            "{kind}: the auto-id sequences after the unit"
+        );
+        assert_eq!(
+            canonical(&layer),
+            canonical(&reference),
+            "{kind}: the states"
+        );
+
+        // The same writes as a dry run: the same change set, nothing left, no commit.
+        let mut dry = prepared_layer();
+        let before = canonical(&dry);
+        let seq = dry.last_commit_seq().unwrap();
+        let recorder = Recorder::on(&mut dry);
+        let mark = dry.begin_unit().unwrap();
+        apply_capture_kind(&mut dry, kind);
+        let discarded = dry.discard_unit(mark).unwrap();
+        assert_eq!(
+            discarded.mutations(),
+            on_layer.mutations(),
+            "{kind}: dry run"
+        );
+        assert_eq!(
+            (discarded.commit_seq(), discarded.committed_at()),
+            (0, 0),
+            "{kind}: a dry run is never committed"
+        );
+        assert_eq!(canonical(&dry), before, "{kind}: a dry run leaves nothing");
+        assert_eq!(dry.last_commit_seq().unwrap(), seq, "{kind}");
+        assert!(
+            recorder.events().is_empty(),
+            "{kind}: no hook hears a dry run"
+        );
+
+        // Across: the reference's change set applied to a fresh layer, and vice versa.
+        let mut applied = prepared_layer();
+        applied.apply_change_set(&on_reference).unwrap();
+        assert_eq!(
+            canonical(&applied),
+            canonical(&reference),
+            "{kind}: a TraversalGraph's change set applied to a layer"
+        );
+        let mut applied = prepared_reference();
+        applied.apply_change_set(&on_layer).unwrap();
+        assert_eq!(
+            canonical(&applied),
+            canonical(&layer),
+            "{kind}: a layer's change set applied to a TraversalGraph"
+        );
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+/// A veto in `before_commit` rolls the unit back through the layer's undo log (prepared state
+/// restored, no commit counted, `CommitRejected` naming the hook) and every hook hears
+/// `after_rollback` with the veto; a panic in `before_commit` rolls back too and the panic
+/// continues; the next commit works. The same events as on a `TraversalGraph`.
+#[test]
+fn a_veto_or_a_panicking_hook_rolls_the_unit_back() {
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<String> {
+        let recorder = Recorder::on(s);
+        let before = canonical(s);
+        let seq = s.last_commit_seq().unwrap();
+        *recorder.veto.lock().unwrap() = true;
+        let mark = s.begin_unit().unwrap();
+        apply_capture_kind(s, "several writes to one base vertex, then its drop");
+        apply_capture_kind(s, "set a property of a clean base edge");
+        let vetoed = s.commit_unit(mark).unwrap_err();
+        assert!(
+            matches!(&vetoed, GraphError::CommitRejected { hook, .. } if hook == "recorder"),
+            "{vetoed:?}"
+        );
+        assert_eq!(canonical(s), before, "the veto rolled everything back");
+        assert_eq!(s.last_commit_seq().unwrap(), seq);
+        assert_eq!(s.unit_started_at().unwrap(), None, "the unit is closed");
+        *recorder.veto.lock().unwrap() = false;
+
+        *recorder.panic.lock().unwrap() = true;
+        let mark = s.begin_unit().unwrap();
+        apply_capture_kind(s, "drop a clean base vertex");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = s.commit_unit(mark);
+        }));
+        assert!(panicked.is_err(), "the panic continues");
+        assert_eq!(canonical(s), before, "the panic rolled everything back");
+        assert_eq!(s.last_commit_seq().unwrap(), seq);
+        *recorder.panic.lock().unwrap() = false;
+
+        let mark = s.begin_unit().unwrap();
+        apply_capture_kind(s, "drop a clean base vertex");
+        s.commit_unit(mark).unwrap();
+        assert_eq!(s.last_commit_seq().unwrap(), seq + 1);
+        recorder.events()
+    }
+    let on_layer = run(&mut prepared_layer());
+    let on_reference = run(&mut prepared_reference());
+    assert_eq!(on_layer, on_reference);
+    assert_eq!(on_layer[1], "rollback:vetoed by recorder");
+    assert!(
+        on_layer[3].starts_with("rollback:failed: a panic"),
+        "{on_layer:?}"
+    );
+}
+
+/// `after_rollback` carries the reason; it is sent for an outermost unit that recorded
+/// anything, also when a savepoint undid it all since (the `changed` flag), and only an
+/// identical-value write (recorded, as on a `TraversalGraph`); never for an empty unit, a
+/// nested rollback, a dry run or a read-only unit; a schema change refused outside a unit
+/// sends nothing either (nothing was recorded). The same events as on a `TraversalGraph`.
+#[test]
+fn rollbacks_reach_the_hooks_with_their_reason() {
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<String> {
+        let recorder = Recorder::on(s);
+        let mark = s.begin_unit().unwrap();
+        s.set_vertex_property(vertex_of(s, "2"), "age".into(), 1.into())
+            .unwrap();
+        s.rollback_unit(mark, &RollbackReason::failed(&"boom"))
+            .unwrap();
+        let mark = s.begin_unit().unwrap();
+        let inner = s.begin_unit().unwrap();
+        s.drop_vertex(vertex_of(s, "1")).unwrap();
+        s.rollback_unit(inner, &RollbackReason::failed(&"inner"))
+            .unwrap();
+        recorder.log("after the savepoint".into());
+        s.rollback_unit(mark, &RollbackReason::failed(&"all undone already"))
+            .unwrap();
+        let mark = s.begin_unit().unwrap();
+        let _ = s.vertex_count().unwrap();
+        s.rollback_unit(mark, &RollbackReason::failed(&"read only"))
+            .unwrap();
+        let mark = s.begin_unit().unwrap();
+        s.set_vertex_property(vertex_of(s, "2"), "age".into(), 27.into())
+            .unwrap();
+        s.rollback_unit(mark, &RollbackReason::failed(&"identical value"))
+            .unwrap();
+        let mark = s.begin_unit().unwrap();
+        s.set_vertex_property(vertex_of(s, "2"), "age".into(), 5.into())
+            .unwrap();
+        let _ = s.discard_unit(mark).unwrap();
+        let closed = GraphSchema::new().with_mode(SchemaMode::Closed);
+        assert!(s.set_schema(closed).is_err());
+        recorder.events()
+    }
+    let on_layer = run(&mut prepared_layer());
+    let on_reference = run(&mut prepared_reference());
+    assert_eq!(on_layer, on_reference);
+    assert_eq!(
+        on_layer,
+        [
+            "rollback:failed: boom",
+            "after the savepoint",
+            "rollback:failed: all undone already",
+            "rollback:failed: identical value",
+        ]
+    );
+}
+
+/// The metadata of `transaction_with` reaches the hooks (outer unit wins), empty units and
+/// read-only units emit nothing, a sequence-only commit (`raise_id_sequences`) reaches the
+/// hooks without mutations, and an identical-value write is a commit: all as on a
+/// `TraversalGraph`.
+#[test]
+fn metadata_empty_and_sequence_only_commits_match_a_traversal_graph() {
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<String> {
+        let recorder = Recorder::on(s);
+        let start = s.last_commit_seq().unwrap();
+        let outer = CommitMetadata::new()
+            .with_principal("ann")
+            .with_attribute("why", "outer");
+        let kept: Result<(), GraphError> = s.transaction_with(outer, |s| {
+            let inner = CommitMetadata::new()
+                .with_principal("bob")
+                .with_attribute("why", "inner")
+                .with_attribute("extra", 1);
+            s.transaction_with(inner, |s| {
+                s.set_vertex_property(vertex_of(s, "2"), "age".into(), 1.into())
+            })
+        });
+        kept.unwrap();
+        let metadata = recorder.accepted.lock().unwrap()[0].metadata().clone();
+        recorder.log(format!(
+            "metadata {:?} {:?}",
+            metadata.principal(),
+            metadata.attributes()
+        ));
+        let mark = s.begin_unit().unwrap();
+        s.commit_unit(mark).unwrap();
+        let mark = s.begin_unit().unwrap();
+        s.raise_id_sequences(1000, 2000).unwrap();
+        s.commit_unit(mark).unwrap();
+        let sequence_only = recorder.accepted.lock().unwrap()[1].clone();
+        recorder.log(format!(
+            "sequence-only {} {} {}",
+            sequence_only.len(),
+            sequence_only.node_sequence(),
+            sequence_only.edge_sequence()
+        ));
+        let mark = s.begin_unit().unwrap();
+        s.set_vertex_property(vertex_of(s, "4"), "age".into(), 32.into())
+            .unwrap();
+        s.commit_unit(mark).unwrap();
+        recorder.log(format!("commits {}", s.last_commit_seq().unwrap() - start));
+        let mut events = recorder.events();
+        events.extend(recorder.mutations().iter().map(|m| format!("{m:?}")));
+        events
+    }
+    let on_layer = run(&mut prepared_layer());
+    let on_reference = run(&mut prepared_reference());
+    assert_eq!(on_layer, on_reference);
+    assert!(
+        on_layer.contains(&"commits 3".to_string()),
+        "the identical-value write is a commit: {on_layer:?}"
+    );
+}
+
+/// Commit times come from the layer's instance clock: never earlier than the base's last
+/// commit, increasing, shared with `commit_clock()`; the next unit never starts before the
+/// last commit; a dry run takes no time.
+#[test]
+fn commit_times_follow_the_layer_clock() {
+    let mut base = TraversalGraph::tinkerpop_modern();
+    let base_recorder = Recorder::on(&mut base);
+    let mark = base.begin_unit().unwrap();
+    let marko = vertex_of(&base, "1");
+    base.set_vertex_property(marko, "age".into(), 40.into())
+        .unwrap();
+    base.commit_unit(mark).unwrap();
+    let base_time = base_recorder.accepted.lock().unwrap()[0].committed_at();
+    assert!(base_time > 0);
+
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    let recorder = Recorder::on(&mut layer);
+    let clock = layer.commit_clock().unwrap().expect("a layer has a clock");
+    let mut times = Vec::new();
+    for age in [1, 2, 3] {
+        let mark = layer.begin_unit().unwrap();
+        let started = layer.unit_started_at().unwrap().unwrap();
+        if let Some(last) = times.last() {
+            assert!(
+                started >= i128::from(*last) * 1000,
+                "a unit never starts before the last commit"
+            );
+        }
+        layer
+            .set_vertex_property(v(&layer, "2"), "age".into(), age.into())
+            .unwrap();
+        layer.commit_unit(mark).unwrap();
+        let committed = recorder
+            .accepted
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .committed_at();
+        times.push(committed);
+        assert!(
+            clock.floor() >= committed,
+            "the clock handed out is the one commits use"
+        );
+    }
+    assert!(
+        times[0] >= base_time,
+        "never earlier than the base's last commit"
+    );
+    assert!(times.windows(2).all(|w| w[0] <= w[1]), "{times:?}");
+    assert!(layer.next_unit_started_at().unwrap().unwrap() >= i128::from(times[2]) * 1000);
+}
+
+/// The layer's capture on a base with coded and compressed values reports logical values, as
+/// a `TraversalGraph` with the same data and rules does.
+#[test]
+fn change_sets_over_a_compressed_base_hold_logical_values() {
+    use graphersal::catalog::{Codec, CompressionDefinition};
+    use graphersal::storage::ElementKind;
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        let long = "a long note that compresses well ".repeat(20);
+        let meta = |i: i64| {
+            ElementProperty::Object(Box::new(props(&[
+                ("file", "src/some/rather/long/path/file.rs".into()),
+                ("n", i.into()),
+            ])))
+        };
+        let a = graph
+            .insert_vertex(
+                Some("a".into()),
+                vec!["n".into()],
+                props(&[
+                    ("note", long.as_str().into()),
+                    ("kind", "alpha".into()),
+                    ("meta", meta(1)),
+                    ("k", 1.into()),
+                ]),
+            )
+            .unwrap();
+        let b = graph
+            .insert_vertex(
+                Some("b".into()),
+                vec!["n".into()],
+                props(&[
+                    ("note", long.as_str().into()),
+                    ("kind", "alpha".into()),
+                    ("meta", meta(2)),
+                ]),
+            )
+            .unwrap();
+        graph
+            .insert_edge(
+                Some("e".into()),
+                Some("l".into()),
+                a,
+                b,
+                props(&[("site", "here".into())]),
+            )
+            .unwrap();
+        let dedup = |element, label, key| {
+            CompressionDefinition::new(element, label, key)
+                .unwrap()
+                .with_codec(Codec::Dedup)
+        };
+        let mut g = graph.traversal_mut();
+        g.define_compression("kind", dedup(ElementKind::Vertex, "n", "kind"))
+            .unwrap();
+        g.define_compression("file", dedup(ElementKind::Vertex, "n", "meta.file"))
+            .unwrap();
+        g.define_compression("site", dedup(ElementKind::Edge, "l", "site"))
+            .unwrap();
+        g.define_compression(
+            "note",
+            CompressionDefinition::new(ElementKind::Vertex, "n", "note")
+                .unwrap()
+                .with_dictionary(false),
+        )
+        .unwrap();
+        drop(g);
+        graph
+    }
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<Vec<Mutation>> {
+        let recorder = Recorder::on(s);
+        let mark = s.begin_unit().unwrap();
+        s.set_vertex_property(vertex_of(s, "a"), "k".into(), 2.into())
+            .unwrap();
+        s.set_vertex_property(vertex_of(s, "a"), "note".into(), "short".into())
+            .unwrap();
+        s.set_vertex_property(vertex_of(s, "b"), "kind".into(), "alpha".into())
+            .unwrap();
+        s.set_vertex_property_path(vertex_of(s, "b"), &path("meta.n"), 3.into())
+            .unwrap();
+        s.set_edge_property(edge_of(s, "e"), "w".into(), 1.into())
+            .unwrap();
+        s.drop_vertex(vertex_of(s, "b")).unwrap();
+        s.commit_unit(mark).unwrap();
+        recorder.mutations()
+    }
+    let mut reference = graph();
+    let mut layer = LayeredGraph::over(Arc::new(graph())).unwrap();
+    let on_reference = run(&mut reference);
+    assert_eq!(run(&mut layer), on_reference);
+    let text = format!("{on_reference:?}");
+    assert!(
+        text.contains("a long note") && text.contains("long/path/file.rs"),
+        "{text}"
+    );
+}
+
+/// Each script as a dry run (`eval_value_dry_run`) on the plain modern graph and on a layer
+/// over it: the same result, the same change set, no commit, the state unchanged. Where the
+/// script drops elements, the order of the change set may differ only as the plan's order
+/// class allows (P4: label-bucket order after drops), checked by comparing it sorted.
+#[cfg(feature = "script")]
+#[test]
+fn rhai_dry_runs_match_the_plain_graph() {
+    let scripts: Vec<&str> = RHAI_CREATES
+        .iter()
+        .chain(RHAI_CROSS_EDGES)
+        .chain(RHAI_DROPS)
+        .chain(RHAI_DROP_THEN_ADD)
+        .chain(RHAI_BASE_WRITES)
+        .chain(RHAI_BASE_LABEL_REMOVALS)
+        .chain(RHAI_FAILING_WRITES)
+        .copied()
+        .collect();
+    fn dry<S>(
+        graph: Arc<Graph<S>>,
+        script: &str,
+    ) -> (
+        Result<(String, Vec<Mutation>), String>,
+        u64,
+        Result<String, String>,
+    )
+    where
+        S: GraphStorage + Default + Send + Sync + 'static,
+    {
+        // Unordered: an undone drop stores elements again in another list order (on the plain
+        // graph; the layer puts base elements back where the base holds them).
+        let before = render(Arc::clone(&graph), UNORDERED_STATE_SCRIPT);
+        let seq = graph.read().last_commit_seq().unwrap();
+        let result = crate::script_host::eval_value_dry_run(
+            Arc::clone(&graph),
+            &format!("({{ {script} }}).to_string()"),
+            HashMap::new(),
+            &crate::script_host::ScriptLimits::default(),
+        )
+        .map(|(value, changes)| (value.to_string(), changes.mutations().to_vec()))
+        .map_err(|err| err.to_string());
+        let after = render(Arc::clone(&graph), UNORDERED_STATE_SCRIPT);
+        assert_eq!(after, before, "{script}: a dry run leaves nothing");
+        assert_eq!(graph.read().last_commit_seq().unwrap(), seq, "{script}");
+        (result, seq, after)
+    }
+    let sorted = |mutations: &[Mutation]| {
+        let mut texts: Vec<String> = mutations.iter().map(|m| format!("{m:?}")).collect();
+        texts.sort();
+        texts
+    };
+    let mut differences = Vec::new();
+    let mut order_only = Vec::new();
+    let mut with_changes = 0;
+    for script in &scripts {
+        let expected = dry(plain_graph(), script).0;
+        let actual = dry(layered_graph(), script).0;
+        if let Ok((_, changes)) = &expected {
+            with_changes += usize::from(!changes.is_empty());
+        }
+        if expected == actual {
+            continue;
+        }
+        if let (Ok((e_value, e_changes)), Ok((a_value, a_changes))) = (&expected, &actual)
+            && script.contains("drop")
+            && sorted(e_changes) == sorted(a_changes)
+            && (e_value == a_value || script.contains("hasLabel"))
+        {
+            order_only.push(*script);
+            continue;
+        }
+        differences.push(format!(
+            "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}"
+        ));
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    assert!(
+        with_changes >= 40,
+        "the scripts really write: {with_changes}"
+    );
+    println!(
+        "order-only differences: {}\n{}",
+        order_only.len(),
+        order_only.join("\n")
+    );
+}
+
+/// The same scripts with a hook registered on `Graph<LayeredGraph>` and on the plain graph,
+/// each traversal a unit of its own: the hooks see the same commits with the same mutations
+/// (failing traversals none), and the same rollback events.
+#[cfg(feature = "script")]
+#[test]
+fn rhai_captured_commits_match_the_plain_graph() {
+    let scripts: Vec<&str> = RHAI_CREATES
+        .iter()
+        .chain(RHAI_CROSS_EDGES)
+        .chain(RHAI_DROPS)
+        .chain(RHAI_BASE_WRITES)
+        .chain(RHAI_FAILING_WRITES)
+        .copied()
+        .collect();
+    fn captured<S>(
+        graph: Arc<Graph<S>>,
+        script: &str,
+    ) -> (Result<String, String>, Vec<String>, Vec<Vec<Mutation>>)
+    where
+        S: GraphStorage + Default + Send + Sync + 'static,
+    {
+        let recorder = Recorder::default();
+        graph
+            .write()
+            .register_commit_hook(Box::new(recorder.clone()))
+            .unwrap();
+        let result = render(Arc::clone(&graph), script);
+        (result, recorder.events(), recorder.mutations())
+    }
+    let mut differences = Vec::new();
+    let mut commits = 0;
+    let mut compare = |script: &str,
+                       expected: (Result<String, String>, Vec<String>, Vec<Vec<Mutation>>),
+                       actual| {
+        commits += expected.2.len();
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}"
+            ));
+        }
+    };
+    for script in &scripts {
+        compare(
+            script,
+            captured(plain_graph(), script),
+            captured(layered_graph(), script),
+        );
+    }
+    // Schema and catalog scripts on the product base (with its saved query and jobs).
+    for script in RHAI_SCHEMA_SCRIPTS {
+        let plain = Arc::new(Graph::new(product_base()));
+        let layered = Arc::new(Graph::new(
+            LayeredGraph::over(Arc::new(product_base())).unwrap(),
+        ));
+        compare(script, captured(plain, script), captured(layered, script));
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    assert!(commits >= 60, "the hooks really saw commits: {commits}");
 }

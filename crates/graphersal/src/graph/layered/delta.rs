@@ -169,17 +169,17 @@ pub(crate) struct Delta {
 #[derive(Debug)]
 pub(crate) struct EdgeImage {
     /// `None` for an unlabeled edge.
-    label: Option<CompactString>,
+    pub(super) label: Option<CompactString>,
     /// As the base stores it: `None` when the base edge has no map and no write gave it one.
-    properties: Option<PropertyMap>,
+    pub(super) properties: Option<PropertyMap>,
 }
 
 /// The copied-up state of a modified base vertex taken out of the layer by its drop: what an
 /// undo of the drop puts back into a new stub.
 #[derive(Debug)]
 pub(crate) struct VertexCopy {
-    labels: Vec<CompactString>,
-    properties: PropertyMap,
+    pub(super) labels: Vec<CompactString>,
+    pub(super) properties: PropertyMap,
 }
 
 /// An endpoint of a removed added edge, named so that an undo finds it again: a base vertex by
@@ -196,19 +196,19 @@ pub(crate) enum End {
 /// An added edge taken out of the delta: everything an undo needs to store it again.
 #[derive(Debug)]
 pub(crate) struct RemovedEdge {
-    id: CompactString,
-    label: Option<CompactString>,
-    properties: Option<PropertyMap>,
-    from: End,
-    to: End,
+    pub(super) id: CompactString,
+    pub(super) label: Option<CompactString>,
+    pub(super) properties: Option<PropertyMap>,
+    pub(super) from: End,
+    pub(super) to: End,
 }
 
 /// An added vertex taken out of the delta (its edges are [`RemovedEdge`]s of their own).
 #[derive(Debug)]
 pub(crate) struct RemovedVertex {
-    id: CompactString,
-    labels: Vec<CompactString>,
-    properties: PropertyMap,
+    pub(super) id: CompactString,
+    pub(super) labels: Vec<CompactString>,
+    pub(super) properties: PropertyMap,
 }
 
 /// The old state of one top-level property: its position and value, or `None` when it was

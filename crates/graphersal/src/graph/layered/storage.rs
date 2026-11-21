@@ -11,11 +11,13 @@ use super::delta::{PropertyChange, VertexView};
 use super::handle::{LayeredEdge, LayeredVertex};
 use super::units::LayerUndo;
 use crate::error::{DefinitionError, GraphError, SchemaError};
+use crate::graph::change::{ChangeSet, CommitMetadata};
+use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
-use crate::graph::hooks::RollbackReason;
+use crate::graph::hooks::{CommitHook, RollbackReason};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
-use crate::graph::storage::UnitMark;
+use crate::graph::storage::{StorageIdentity, UnitMark};
 use crate::graph::topology::Direction;
 use crate::graph::write_rules::{self, PathRemoval};
 use crate::graph::{
@@ -527,14 +529,15 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::execution_policy(&*self.base)
     }
 
-    /// `writable` and `atomic` (the layer's undo log, `units`), not `change_capture` yet
-    /// (task S1.9). The property index lookups are the base's, so they are exact when the
-    /// base's are.
+    /// `writable`, `atomic` (the layer's undo log, `units`) and `change_capture` (commit hooks
+    /// and dry runs, the change set derived from that log). The property index lookups are the
+    /// base's, so they are exact when the base's are.
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         let base = GraphStorage::capabilities(&*self.base)?;
         Ok(StorageCapabilities::none()
             .with_writable(true)
             .with_atomic(true)
+            .with_change_capture(true)
             .with_exact_property_index_lookups(base.exact_property_index_lookups))
     }
 
@@ -553,20 +556,52 @@ impl GraphStorage for LayeredGraph {
         Ok(Some(self.units.next_started_at()))
     }
 
+    /// The unit's start; before the layer's unit opens, the time a
+    /// [`Graph`](crate::graph::Graph) pinned for the unit the current thread holds on this
+    /// storage (as `TraversalGraph`).
     fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
-        Ok(self.units.started_at())
+        Ok(self
+            .units
+            .started_at()
+            .or_else(|| crate::graph::shared::held_unit_clock(StorageIdentity::of(self))))
     }
 
+    /// Closes the unit; the outermost commit of a unit that changed something counts, takes a
+    /// commit time and runs the commit hooks (a veto rolls it back).
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         self.commit_layer_unit(mark)
     }
 
     /// Undoes every write since `mark` and closes the unit; never fails (there is no backend).
-    /// `reason` is for commit hooks, which the layer does not have yet.
+    /// The outermost unit's rollback sends `after_rollback(reason)` to the hooks when it had
+    /// recorded anything.
     fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
-        let _ = reason;
-        self.rollback_layer_unit(mark);
+        self.rollback_layer_unit(mark, reason);
         Ok(())
+    }
+
+    /// The metadata the outermost commit reports (`TraversalGraph`'s precedence rules).
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        self.set_layer_unit_metadata(metadata);
+        Ok(())
+    }
+
+    /// Derives the unit's change set from the layer's undo log, then undoes it and closes the
+    /// unit without hooks.
+    fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
+        Ok(self.discard_layer_unit(mark))
+    }
+
+    /// Registers a hook (registration order; never removed): from now on every outermost
+    /// commit that changed something derives its change set and asks the hook.
+    fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
+        self.units.hooks.register(hook);
+        Ok(())
+    }
+
+    /// The layer's instance clock (commit times; never earlier than the base's last commit).
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        Ok(Some(self.units.hooks.clock()))
     }
 
     fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
@@ -885,7 +920,8 @@ impl LayeredGraph {
 
     /// Stores one property change a write rule returned. A delta vertex takes it as it is; for
     /// a base vertex a change that changes nothing (plan P6: an identical value by
-    /// `identity_eq`, a drop of an absent key) is skipped without an image, any other goes
+    /// `identity_eq`, a drop of an absent key) is skipped without an image (an identical value
+    /// is recorded in an open unit for the change set only), any other goes
     /// into its image (copied up on the first change; a return to clean checked when it had
     /// one).
     fn change_vertex_property(
@@ -913,6 +949,14 @@ impl LayeredGraph {
             return Ok(());
         }
         if change.is_noop(GraphStorage::vertex_properties(&*self, node)?) {
+            // Nothing stored; an identical value is still recorded for the change set (as
+            // `TraversalGraph` records it), a drop of an absent key is not (neither there).
+            if recording && let PropertyChange::Set(key, _) = change {
+                self.units.record(LayerUndo::UnchangedBaseVertexProperty {
+                    node: node.to_base(),
+                    key,
+                });
+            }
             return Ok(());
         }
         self.dirty_vertices.set(node.slot());
@@ -966,6 +1010,12 @@ impl LayeredGraph {
             return Ok(());
         }
         if change.is_noop(GraphStorage::edge_properties(&*self, edge)?) {
+            if recording && let PropertyChange::Set(key, _) = change {
+                self.units.record(LayerUndo::UnchangedBaseEdgeProperty {
+                    edge: edge.to_base(),
+                    key,
+                });
+            }
             return Ok(());
         }
         self.dirty_edges.set(edge.slot());

@@ -53,7 +53,14 @@
 //! an undo log of its own (`units`) with `TraversalGraph`'s semantics: a unit records the
 //! inverse of every write to the delta, nested units are savepoints (log positions), a rollback
 //! replays the log in reverse down to the mark, so a failing traversal leaves nothing; the
-//! auto-id sequences are never rolled back. Change capture and commit hooks: S1.9.
+//! auto-id sequences are never rolled back.
+//!
+//! Change capture (S1.9): `capabilities` also claims `change_capture`. Commit hooks, the
+//! instance commit clock, `discard_unit` (dry runs) and `set_unit_metadata` behave as on a
+//! `TraversalGraph`; the [`ChangeSet`](crate::graph::ChangeSet) of a unit is derived from the
+//! layer's undo log (`capture`) with the same mutations in the same order as a `TraversalGraph`
+//! holding the same data reports for the same writes (also a write of an identical value to a
+//! base element, which stores nothing but is recorded for the change set).
 //!
 //! Schema and catalog (S1.7): the layer copies the base's schema and catalog when it is created
 //! and from then on reads and writes only its copies; the base's are never read again nor
@@ -66,6 +73,7 @@
 //! and bases with unique indexes or vector rules (plan decision P5, [`LayeredGraph::over`]).
 //! The property index lookups and the execution policy are the base's.
 
+mod capture;
 mod delta;
 mod dirty;
 mod handle;
@@ -96,8 +104,8 @@ use units::UnitLog;
 /// drops what it added, and changes and drops base elements (a changed base element is copied
 /// into the layer). It keeps its own copies of the base's schema and catalog (saved queries,
 /// jobs; index, compression and model definitions are not supported on a layer yet). It is
-/// atomic (units with an undo log of its own: a traversal that fails leaves nothing), without
-/// change capture yet (no commit hooks, no dry runs).
+/// atomic (units with an undo log of its own: a traversal that fails leaves nothing) and
+/// captures changes (commit hooks, dry runs), as a `TraversalGraph` does.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -176,7 +184,7 @@ impl LayeredGraph {
             edge_sequence: base.edge_sequence,
             schema,
             catalog: base.definitions.clone(),
-            units: UnitLog::default(),
+            units: UnitLog::after(base.undo.last_committed_at),
             base,
         }
     }

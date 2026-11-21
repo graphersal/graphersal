@@ -229,3 +229,46 @@ fn atomic_items_on_a_layer_with_changed_base_elements() {
     extension::rollback_restores_definitions(&mut layer());
     extension::a_definition_list_is_stored_like_single_calls(&mut layer());
 }
+
+/// The `change_capture` items of the contract on a layer over modern whose base elements the
+/// layer already changed (as in `atomic_items_on_a_layer_with_changed_base_elements`): commit
+/// hooks, captured change sets, dry runs, metadata, the commit clock (task S1.9).
+/// `applied_change_set_reproduces_the_unit`, `applied_change_set_raises_the_id_sequences` and
+/// `change_set_builder_round_trip` need an empty storage (they count from zero or reuse
+/// modern's ids): they run in `layered_empty_base`.
+#[test]
+fn change_capture_items_on_a_layer_with_changed_base_elements() {
+    use graphersal::storage::LayeredGraph;
+    use graphersal_storage_tests::{extension, smoke};
+
+    let layer = || {
+        let mut base = TraversalGraph::new();
+        smoke::load_modern(&mut base);
+        let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        let vadas = layer.get_vertex_by_id("2").unwrap().unwrap();
+        layer
+            .set_vertex_property(marko, "age".into(), 30.into())
+            .unwrap();
+        let e = layer
+            .out_edges(vadas)
+            .unwrap()
+            .chain(layer.in_edges(vadas).unwrap())
+            .next()
+            .unwrap();
+        layer.drop_edge(e).unwrap();
+        layer
+            .insert_edge(None, None, vadas, marko, contract::props(&[]))
+            .unwrap();
+        contract::assert_consistent(&layer);
+        layer
+    };
+    assert!(layer().capabilities().unwrap().change_capture);
+    extension::capabilities_are_consistent(&mut layer());
+    extension::commit_hooks_follow_the_capability(&mut layer());
+    extension::definition_changes_are_captured(&mut layer());
+    extension::edge_label_change_rolls_back_and_is_captured(&mut layer());
+    extension::discard_unit_restores_state_keeps_sequences(&mut layer());
+    extension::transaction_with_metadata_reaches_hooks(&mut layer());
+    extension::commit_clock_is_shared_with_hooks(&mut layer());
+}
