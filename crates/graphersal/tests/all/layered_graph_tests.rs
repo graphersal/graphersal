@@ -249,7 +249,9 @@ fn capabilities_claim_only_what_holds_now() {
     let caps = layer.capabilities().unwrap();
     assert!(caps.is_consistent());
     assert!(caps.writable && caps.atomic && caps.change_capture);
-    assert!(!caps.immutable && !caps.durability && !caps.property_indexes);
+    // The layer defines indexes itself (S4.4).
+    assert!(caps.property_indexes);
+    assert!(!caps.immutable && !caps.durability);
     assert_eq!(
         caps.exact_property_index_lookups,
         GraphStorage::capabilities(&TraversalGraph::new())
@@ -3411,8 +3413,9 @@ fn open_mode_extension_then_writes_follow_the_layer_schema() {
 
 /// Plan decision P5: a base with vector rules cannot carry a layer yet; a base with a plain
 /// or a unique index (S4.3) or a compression rule can. On a layer, a schema with
-/// vector rules and the catalog kinds needing storage machinery are refused, naming the
-/// limitation, and change nothing.
+/// vector rules and the catalog kinds needing storage machinery (compression rules, models)
+/// are refused, naming the limitation, and change nothing; property index definitions are
+/// accepted (S4.4).
 #[test]
 fn p5_refusals_and_refused_catalog_kinds() {
     use graphersal::catalog::{
@@ -3479,25 +3482,9 @@ fn p5_refusals_and_refused_catalog_kinds() {
     assert_eq!(before, definitions_of(&*base));
     refusal(
         layer
-            .remove_definition(DefinitionKind::PROPERTY_INDEX, "person_age")
-            .unwrap_err(),
-        "property index definitions",
-    );
-    refusal(
-        layer
             .remove_definition(DefinitionKind::COMPRESSION, "names")
             .unwrap_err(),
         "compression rules",
-    );
-    refusal(
-        layer
-            .set_definition(Definition::property_index(
-                "person_email",
-                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "email")
-                    .with_unique(true),
-            ))
-            .unwrap_err(),
-        "property index definitions",
     );
     refusal(
         layer
@@ -3522,6 +3509,22 @@ fn p5_refusals_and_refused_catalog_kinds() {
         "compression rules",
     );
     assert_eq!(definitions_of(&layer), before);
+    // Property index definitions are accepted (S4.4): the layer drops an inherited index and
+    // defines a unique one, the base keeps its catalog.
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX, "person_age")
+            .unwrap()
+    );
+    layer
+        .set_definition(Definition::property_index(
+            "person_email",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "email").with_unique(true),
+        ))
+        .unwrap();
+    layer.check_layer_indexes().unwrap();
+    assert_eq!(definitions_of(&*base), before);
+    assert_ne!(definitions_of(&layer), before);
 
     // A schema with vector rules, directly and through the traversal source.
     let schema_before = layer.get_schema().unwrap();
@@ -4849,6 +4852,7 @@ const CAPTURE_KINDS: &[&str] = &[
     "label writes of added elements",
     "set the schema",
     "catalog writes",
+    "property index catalog writes",
     "several writes to one base vertex, then its drop",
     "a dropped base id reused, written, dropped again",
     "an added vertex dropped and its id reused",
@@ -5074,6 +5078,31 @@ fn apply_capture_kind<S: GraphStorage>(s: &mut S, kind: &str) {
                     Definition::query("not valid", QueryDefinition::new("fn x() {}")),
                 ])
                 .is_err()
+            );
+        }
+        "property index catalog writes" => {
+            use graphersal::catalog::{Definition, DefinitionKind, PropertyIndexDefinition};
+            use graphersal::storage::ElementKind;
+            s.set_definition(Definition::property_index(
+                "person_age",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+            ))
+            .unwrap();
+            s.set_definition(Definition::property_index(
+                "name",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "name"),
+            ))
+            .unwrap();
+            // Redefined as unique: the extended kind, the plain kind's definition removed.
+            s.set_definition(Definition::property_index(
+                "person_age",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age")
+                    .with_unique(true),
+            ))
+            .unwrap();
+            assert!(
+                s.remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "name")
+                    .unwrap()
             );
         }
         "several writes to one base vertex, then its drop" => {

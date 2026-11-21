@@ -350,6 +350,12 @@ impl Delta {
         &self.indexes
     }
 
+    /// The property-index overlays, to install or remove one (a catalog change of an index).
+    #[inline]
+    pub(crate) fn indexes_mut(&mut self) -> &mut LayerIndexes {
+        &mut self.indexes
+    }
+
     // --------------------------------------------------------------------------------------
     // Index overlay maintenance (module docs): the delta entries of a delta node (an added
     // vertex under bit 31 + its slot, a stub's image under its base vertex's slot) and of an
@@ -1922,8 +1928,9 @@ impl Delta {
     /// - `property_bytes`: the property maps of the added elements and of the vertex images
     ///   (in their stubs), the edge images (with their map's table entry), and the shape table
     ///   (`shape_bytes`);
-    /// - `property_index_bytes`: the layer-owned parts of the index overlays (masked and delta;
-    ///   the shared base parts are the base's, in its total).
+    /// - `property_index_bytes`: the layer-owned parts of the index overlays (masked, delta and
+    ///   the base part of every index the layer defines itself; the shared base parts are the
+    ///   base's, in its total).
     pub(crate) fn memory(&self) -> MemoryStats {
         use crate::value::compact_string_heap_bytes as string_heap;
         use crate::value::estimated_element_heap_bytes as map_heap;

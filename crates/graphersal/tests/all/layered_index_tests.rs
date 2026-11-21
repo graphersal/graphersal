@@ -672,8 +672,9 @@ fn a_one_percent_layer_owns_a_small_overlay() {
 // ---------------------------------------------------------------------------------------------
 
 /// A `TraversalGraph` with the layer's data (every vertex, then every edge, in the layer's scan
-/// order, ids, labels and properties as stored) and the base's index definitions: what the
-/// layer's lookups must answer like.
+/// order, ids, labels and properties as stored) and the index definitions of the layer's
+/// catalog (the base's, unless the layer defined, dropped or redefined one): what the layer's
+/// lookups must answer like.
 pub(crate) fn materialize(layer: &LayeredGraph) -> TraversalGraph {
     let mut graph = TraversalGraph::new();
     let mut vertices = HashMap::new();
@@ -702,7 +703,6 @@ pub(crate) fn materialize(layer: &LayeredGraph) -> TraversalGraph {
             .unwrap();
     }
     let definitions: Vec<Definition> = layer
-        .base()
         .definitions()
         .unwrap()
         .filter(|definition| definition.as_property_index().is_some())
@@ -1160,4 +1160,625 @@ fn a_touched_layer_keeps_its_index_pushdowns() {
         .to_string();
         assert_eq!(got, crate_plain, "{query}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Indexes the layer defines, drops and redefines (S4.4)
+// ---------------------------------------------------------------------------------------------
+
+/// The fixture's layer with a few percent touched: an image (marko's age), an added person
+/// named like a base one in another case, a dropped base person (vadas), an imaged edge.
+fn touched() -> LayeredGraph {
+    let mut layer = layer();
+    let marko = v(&layer, "1");
+    layer
+        .set_vertex_property(marko, "age".into(), 30.into())
+        .unwrap();
+    layer
+        .insert_vertex(
+            None,
+            vec!["person".into()],
+            props(&[("name", "Ada".into()), ("age", 31.into())]),
+        )
+        .unwrap();
+    layer.drop_vertex(v(&layer, "2")).unwrap();
+    layer
+        .set_edge_property(e(&layer, "2"), "weight".into(), 0.7.into())
+        .unwrap();
+    check(&layer);
+    layer
+}
+
+fn index(name: &str, definition: PropertyIndexDefinition) -> Definition {
+    Definition::property_index(name, definition)
+}
+
+/// The names of the indexes a storage serves, sorted.
+fn served<S: GraphStorage>(graph: &S) -> Vec<String> {
+    let mut names: Vec<String> = graph
+        .property_indexes()
+        .unwrap()
+        .into_iter()
+        .map(|info| info.name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// The base's catalog and indexes, to check they never change.
+fn base_state(layer: &LayeredGraph) -> (Vec<Definition>, Vec<PropertyIndexInfo>) {
+    let base = layer.base();
+    (
+        base.definitions().unwrap().cloned().collect(),
+        base.property_indexes().unwrap(),
+    )
+}
+
+/// A layer defines new indexes (per label and label-less, vertex and edge, a transform) over
+/// base + delta: lookups, counts and stats equal a `TraversalGraph` with the layer's data and
+/// catalog, before and after further writes; the owned base part counts in the layer's own
+/// index bytes (and the index's stats), never in the shared figure; the base is unchanged.
+#[test]
+fn a_layer_defines_indexes_over_base_and_delta() {
+    let mut layer = touched();
+    let base_before = base_state(&layer);
+    let bytes_before = overlay_bytes(&layer);
+    let shared_before = layer.memory_usage().unwrap().unwrap().shared_bytes;
+    layer
+        .set_definitions(vec![
+            index(
+                "person_name",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+            ),
+            index(
+                "any_age",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "age"),
+            ),
+            index(
+                "created_weight",
+                PropertyIndexDefinition::new(ElementKind::Edge, "created", "weight"),
+            ),
+            index(
+                "lang_lower",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "software", "lang")
+                    .with_transform(Some(PropertyIndexTransform::ToLower)),
+            ),
+        ])
+        .unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(served(&layer).len(), 12);
+    let usage = layer.memory_usage().unwrap().unwrap();
+    assert!(usage.property_index_bytes > bytes_before, "{usage:?}");
+    assert_eq!(usage.shared_bytes, shared_before);
+    let infos = layer.property_indexes().unwrap();
+    let owned = infos.iter().find(|i| i.name == "person_name").unwrap();
+    assert!(owned.stats.bytes > 0, "the owned base part is the layer's");
+    assert_eq!(owned.stats.entries, 4, "marko, josh, peter, Ada");
+    // Writes after the define keep the new overlays exact.
+    let ada = layer
+        .vertices_by_property_index(
+            Some("person"),
+            "name",
+            &PropertyIndexRange::equal("Ada".into()),
+        )
+        .unwrap()
+        .and_then(|mut found| found.next())
+        .expect("Ada through the layer's own index");
+    layer
+        .set_vertex_property(ada, "name".into(), "peter".into())
+        .unwrap();
+    layer
+        .set_vertex_property(v(&layer, "4"), "age".into(), 30.into())
+        .unwrap();
+    layer.remove_vertex_label(v(&layer, "6"), "person").unwrap();
+    layer
+        .set_edge_property(e(&layer, "1"), "weight".into(), 0.9.into())
+        .unwrap();
+    layer.drop_vertex(v(&layer, "3")).unwrap();
+    layer
+        .insert_vertex(
+            None,
+            vec!["software".into()],
+            props(&[("lang", "JAVA".into())]),
+        )
+        .unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(base_state(&layer), base_before);
+}
+
+/// Dropping an inherited index hides it for the layer only: the layer stops serving it (no
+/// lookup, no `.profile()` index, its catalog without it), the base and a second layer over it
+/// keep it; defining it again with the base's definition reads the base's part in place again
+/// (no owned bytes), redefining it otherwise builds an owned part.
+#[test]
+fn dropping_and_redefining_an_inherited_index() {
+    use graphersal::catalog::DefinitionKind;
+    let base = indexed_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let other = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let base_before = base_state(&layer);
+    let name_definition = layer
+        .definition(DefinitionKind::PROPERTY_INDEX_EXT, "name")
+        .unwrap()
+        .unwrap()
+        .clone();
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "name")
+            .unwrap()
+    );
+    same_as_materialized(&layer);
+    assert!(!served(&layer).contains(&"name".to_string()));
+    let range = PropertyIndexRange::equal("marko".into());
+    assert!(
+        layer
+            .vertices_by_property_index(None, "name", &range)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        other
+            .vertices_by_property_index(None, "name", &range)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(base_state(&layer), base_before);
+    assert_eq!(overlay_bytes(&layer), 0, "nothing of its own");
+
+    // The base's definition again: the shared part, still no bytes of its own.
+    layer.set_definition(name_definition).unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(overlay_bytes(&layer), 0);
+
+    // Redefined: `age` over every vertex, then back to the base's definition.
+    let age_definition = layer
+        .definition(DefinitionKind::PROPERTY_INDEX, "age")
+        .unwrap()
+        .unwrap()
+        .clone();
+    layer
+        .set_definition(index(
+            "age",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "age"),
+        ))
+        .unwrap();
+    same_as_materialized(&layer);
+    assert!(overlay_bytes(&layer) > 0, "an owned base part");
+    assert!(
+        layer
+            .definition(DefinitionKind::PROPERTY_INDEX, "age")
+            .unwrap()
+            .is_none(),
+        "the plain kind's definition is replaced by the extended kind's"
+    );
+    let found = layer
+        .vertices_by_property_index(None, "age", &PropertyIndexRange::equal(29.into()))
+        .unwrap()
+        .expect("served label-less");
+    assert_eq!(ids_of_vertices(&layer, found), ["1"]);
+    layer.set_definition(age_definition).unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(overlay_bytes(&layer), 0, "the shared part again");
+    assert_eq!(base_state(&layer), base_before);
+}
+
+/// A rolled-back unit restores the overlay set exactly (the served indexes with their stats,
+/// the catalog, the layer's bytes), after a define, a drop of an inherited index, a redefine
+/// and writes; a nested savepoint rolls back its part only.
+#[test]
+fn rollbacks_restore_the_overlay_set() {
+    use graphersal::catalog::DefinitionKind;
+    let mut layer = touched();
+    // The index figures but `bytes`: a postings run of a layer-owned part keeps its spare
+    // capacity after an undo (as before S4.4), the entries are exact.
+    let snapshot = |layer: &LayeredGraph| {
+        let mut infos: Vec<_> = layer
+            .property_indexes()
+            .unwrap()
+            .into_iter()
+            .map(|info| {
+                let stats = (
+                    info.stats.entries,
+                    info.stats.distinct_values,
+                    info.stats.skipped,
+                );
+                (
+                    info.name,
+                    info.label,
+                    info.key,
+                    info.transform,
+                    info.unique,
+                    stats,
+                )
+            })
+            .collect();
+        infos.sort_by(|a, b| a.0.cmp(&b.0));
+        let definitions: Vec<Definition> = layer.definitions().unwrap().cloned().collect();
+        (infos, definitions)
+    };
+    let before = snapshot(&layer);
+    let outer = layer.begin_unit().unwrap();
+    layer
+        .set_definition(index(
+            "person_name",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+        ))
+        .unwrap();
+    same_as_materialized(&layer);
+    let after_define = snapshot(&layer);
+    let inner = layer.begin_unit().unwrap();
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX, "age")
+            .unwrap()
+    );
+    layer
+        .set_definition(index(
+            "lang",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "lang"),
+        ))
+        .unwrap();
+    layer
+        .insert_vertex(
+            None,
+            vec!["person".into()],
+            props(&[("name", "marko".into()), ("lang", "x".into())]),
+        )
+        .unwrap();
+    layer
+        .set_vertex_property(v(&layer, "4"), "name".into(), "JOSH".into())
+        .unwrap();
+    same_as_materialized(&layer);
+    layer
+        .rollback_unit(inner, &RollbackReason::failed(&"inner"))
+        .unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(snapshot(&layer), after_define);
+    layer
+        .rollback_unit(outer, &RollbackReason::failed(&"outer"))
+        .unwrap();
+    same_as_materialized(&layer);
+    assert_eq!(snapshot(&layer), before);
+}
+
+/// The error a storage returns, as variant name and text.
+fn failure<T: std::fmt::Debug>(result: Result<T, GraphError>) -> (String, String) {
+    let err = result.unwrap_err();
+    let variant = format!("{err:?}");
+    let variant = variant
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    (variant, err.to_string())
+}
+
+/// A unique index the layer defines is build-checked over its merged view: it succeeds where a
+/// `TraversalGraph` with the layer's data succeeds (then both enforce it alike), and fails with
+/// the same error where it fails: a duplicate of a base value and a delta value; a duplicate
+/// freed by a layer drop does not count. Through the storage the index is kept disabled with
+/// the same report; through the front end the define is refused and leaves nothing.
+#[test]
+fn unique_defines_match_the_traversal_graph() {
+    let unique_name =
+        || PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name").with_unique(true);
+    // A base value and a delta value collide: marko (base) and an added marko.
+    let mut layer = touched();
+    layer
+        .insert_vertex(
+            Some("m2".into()),
+            vec!["person".into()],
+            props(&[("name", "marko".into())]),
+        )
+        .unwrap();
+    let mut plain = materialize(&layer);
+    let refused =
+        |result: Result<(), Box<graphersal::TraverserError>>| result.unwrap_err().to_string();
+    let on_layer =
+        refused(GraphTraversalSource::new(&mut layer).create_index("person_name", unique_name()));
+    let on_plain = refused(
+        plain
+            .traversal_mut()
+            .create_index("person_name", unique_name()),
+    );
+    assert_eq!(on_layer, on_plain);
+    assert!(on_layer.contains("marko"), "{on_layer}");
+    assert!(!served(&layer).contains(&"person_name".to_string()));
+    assert!(
+        layer
+            .unique_index_duplicates("person_name")
+            .unwrap()
+            .is_none()
+    );
+    same_as_materialized(&layer);
+    // Through the storage: stored, kept disabled, the same report.
+    layer
+        .set_definition(index("person_name", unique_name()))
+        .unwrap();
+    plain
+        .set_definition(index("person_name", unique_name()))
+        .unwrap();
+    let report = layer
+        .unique_index_duplicates("person_name")
+        .unwrap()
+        .unwrap();
+    let expected = plain
+        .unique_index_duplicates("person_name")
+        .unwrap()
+        .unwrap();
+    assert_eq!(format!("{report:?}"), format!("{expected:?}"));
+    assert_eq!(report.summary(), expected.summary());
+    assert!(!served(&layer).contains(&"person_name".to_string()));
+    check(&layer);
+
+    // The layer drops the base marko: the duplicate is freed, the define succeeds.
+    let mut layer = touched();
+    layer
+        .insert_vertex(
+            Some("m2".into()),
+            vec!["person".into()],
+            props(&[("name", "marko".into())]),
+        )
+        .unwrap();
+    layer.drop_vertex(v(&layer, "1")).unwrap();
+    let mut plain = materialize(&layer);
+    GraphTraversalSource::new(&mut layer)
+        .create_index("person_name", unique_name())
+        .unwrap();
+    plain
+        .traversal_mut()
+        .create_index("person_name", unique_name())
+        .unwrap();
+    same_as_materialized(&layer);
+    assert!(
+        layer
+            .unique_index_duplicates("person_name")
+            .unwrap()
+            .is_none()
+    );
+    // Enforced alike: a second josh (a base value), a second marko (a delta value), and a
+    // write moving the base value of an image.
+    let writes: [(&str, PropertyMap); 3] = [
+        ("josh", props(&[("name", "josh".into())])),
+        ("marko", props(&[("name", "marko".into())])),
+        ("Ada", props(&[("name", "Ada".into())])),
+    ];
+    for (what, map) in writes {
+        let got = failure(layer.insert_vertex(None, vec!["person".into()], map.clone()));
+        let want = failure(plain.insert_vertex(None, vec!["person".into()], map));
+        assert_eq!(got, want, "{what}");
+        assert_eq!(got.0, "UniqueViolation", "{what}");
+    }
+    let got = failure(layer.set_vertex_property(v(&layer, "4"), "name".into(), "peter".into()));
+    let want = failure(plain.set_vertex_property(
+        plain.get_vertex_by_id("4").unwrap().unwrap(),
+        "name".into(),
+        "peter".into(),
+    ));
+    assert_eq!(got, want);
+    // A value freed by a layer write is free again on both.
+    layer
+        .set_vertex_property(v(&layer, "6"), "name".into(), "pete".into())
+        .unwrap();
+    plain
+        .set_vertex_property(
+            plain.get_vertex_by_id("6").unwrap().unwrap(),
+            "name".into(),
+            "pete".into(),
+        )
+        .unwrap();
+    layer
+        .set_vertex_property(v(&layer, "4"), "name".into(), "peter".into())
+        .unwrap();
+    plain
+        .set_vertex_property(
+            plain.get_vertex_by_id("4").unwrap().unwrap(),
+            "name".into(),
+            "peter".into(),
+        )
+        .unwrap();
+    same_as_materialized(&layer);
+
+    // Dropping the layer's unique index stops its enforcement.
+    assert!(
+        GraphTraversalSource::new(&mut layer)
+            .drop_index("person_name")
+            .unwrap()
+    );
+    layer
+        .insert_vertex(
+            None,
+            vec!["person".into()],
+            props(&[("name", "josh".into())]),
+        )
+        .unwrap();
+    same_as_materialized(&layer);
+}
+
+/// A unique index the base keeps disabled (stored over repeated values) stays disabled with
+/// the base's report until the layer redefines it: once the layer removed the repeats, the
+/// redefine serves and enforces it; dropping it removes the report.
+#[test]
+fn a_disabled_base_index_redefined_by_the_layer() {
+    use graphersal::catalog::DefinitionKind;
+    let mut base = TraversalGraph::tinkerpop_modern();
+    let node = base.get_vertex_by_id("2").unwrap().unwrap();
+    base.set_vertex_property(node, "name".into(), "marko".into())
+        .unwrap();
+    let unique =
+        PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name").with_unique(true);
+    base.set_definition(index("person_name", unique.clone()))
+        .unwrap();
+    let report = base
+        .unique_index_duplicates("person_name")
+        .unwrap()
+        .unwrap();
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    assert_eq!(
+        format!(
+            "{:?}",
+            layer.unique_index_duplicates("person_name").unwrap()
+        ),
+        format!("{:?}", Some(report))
+    );
+    check(&layer);
+    // The layer frees the repeat; the index stays disabled until redefined.
+    layer
+        .set_vertex_property(v(&layer, "2"), "name".into(), "vadas".into())
+        .unwrap();
+    assert!(
+        layer
+            .unique_index_duplicates("person_name")
+            .unwrap()
+            .is_some()
+    );
+    check(&layer);
+    let mut plain = materialize(&layer);
+    // A redefine: drop then define again (an equal definition again is no change).
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "person_name")
+            .unwrap()
+    );
+    assert!(
+        layer
+            .unique_index_duplicates("person_name")
+            .unwrap()
+            .is_none()
+    );
+    layer
+        .set_definition(index("person_name", unique.clone()))
+        .unwrap();
+    assert!(
+        layer
+            .unique_index_duplicates("person_name")
+            .unwrap()
+            .is_none()
+    );
+    assert!(served(&layer).contains(&"person_name".to_string()));
+    check(&layer);
+    let info = layer.property_indexes().unwrap().remove(0);
+    for name in ["marko", "vadas", "josh", "absent"] {
+        let range = PropertyIndexRange::equal(name.into());
+        assert_eq!(lookup(&layer, &info, &range), lookup(&plain, &info, &range));
+    }
+    let map = props(&[("name", "vadas".into())]);
+    let got = failure(layer.insert_vertex(None, vec!["person".into()], map.clone()));
+    let want = failure(plain.insert_vertex(None, vec!["person".into()], map));
+    assert_eq!(got, want);
+    assert_eq!(got.0, "UniqueViolation");
+}
+
+/// The DSL creates and drops indexes on a layer (`create_index`, `drop_index`, `indexes`), and
+/// the plan follows: a dropped inherited index is no longer in `.profile()`, a created one is.
+#[cfg(feature = "script")]
+#[test]
+fn dsl_index_definitions_on_a_layer() {
+    use graphersal::storage::Graph;
+    let graph = Arc::new(Graph::new(touched()));
+    let run = |script: &str| {
+        crate::script_host::eval_value_with_limits(
+            Arc::clone(&graph),
+            script,
+            HashMap::new(),
+            &crate::script_host::ScriptLimits::default(),
+        )
+        .unwrap()
+    };
+    let profile = |query: &str| -> String {
+        let metrics = run(&format!("g.{query}.profile()"))
+            .try_cast::<graphersal::profile::TraversalMetrics>()
+            .expect("metrics");
+        metrics.metrics()[0].name().to_string()
+    };
+    let by_name = r#"v().has("name", "marko").count()"#;
+    assert!(profile(by_name).contains("[index: vertex name"));
+    assert_eq!(run(r#"g.drop_index("name")"#).to_string(), "true");
+    let plan = profile(by_name);
+    assert!(!plan.contains("[index:"), "{plan}");
+    check(&graph.read());
+    assert!(
+        graph
+            .read()
+            .base()
+            .property_indexes()
+            .unwrap()
+            .iter()
+            .any(|info| info.name == "name")
+    );
+    let _ = run(r#"g.create_index(#{label: "software", key: "name", unique: true})"#);
+    let plan = profile(r#"v().has_label("software").has("name", "lop")"#);
+    assert!(plan.contains("[index: vertex software.name"), "{plan}");
+    let err = crate::script_host::eval_value_with_limits(
+        Arc::clone(&graph),
+        r#"g.add_v("software").property("name", "lop").iterate()"#,
+        HashMap::new(),
+        &crate::script_host::ScriptLimits::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("software_name"), "{err}");
+    same_as_materialized(&graph.read());
+    let listed = run(r#"g.indexes().map(|i| i.name)"#).to_string();
+    assert!(
+        listed.contains("software_name") && !listed.contains("\"name\""),
+        "{listed}"
+    );
+}
+
+/// The owned base part of an index a layer defines costs what the same index costs in the base
+/// (D2): on an untouched layer the layer's own index bytes equal the bytes of that index built
+/// in a copy of the base, and the shared figure does not move; dropping it gives them back.
+#[test]
+fn a_layer_defined_index_owns_its_base_part() {
+    use graphersal::catalog::DefinitionKind;
+    let items = || {
+        let mut base = TraversalGraph::new();
+        for i in 0..20_000_i64 {
+            base.insert_vertex(
+                None,
+                vec!["item".into()],
+                props(&[
+                    ("code", (i % 5_000).into()),
+                    ("name", format!("n{i}").as_str().into()),
+                ]),
+            )
+            .unwrap();
+        }
+        base
+    };
+    let definition = index(
+        "item_code",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "item", "code"),
+    );
+    let mut copy = items();
+    copy.set_definition(definition.clone()).unwrap();
+    let in_base = copy.property_indexes().unwrap()[0].stats.bytes;
+    let mut layer = LayeredGraph::over(Arc::new(items())).unwrap();
+    let before = layer.memory_usage().unwrap().unwrap();
+    let started = std::time::Instant::now();
+    layer.set_definition(definition).unwrap();
+    let elapsed = started.elapsed();
+    let after = layer.memory_usage().unwrap().unwrap();
+    check(&layer);
+    let owned = after.property_index_bytes - before.property_index_bytes;
+    println!(
+        "define over 20 000 base vertices: {elapsed:?}; owned index bytes {owned} (the same \
+         index in the base: {in_base}); layer total {} -> {}; shared {}",
+        before.total_bytes(),
+        after.total_bytes(),
+        after.shared_bytes
+    );
+    assert_eq!(owned, in_base);
+    assert_eq!(layer.property_indexes().unwrap()[0].stats.bytes, in_base);
+    assert_eq!(after.shared_bytes, before.shared_bytes);
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX, "item_code")
+            .unwrap()
+    );
+    assert_eq!(
+        layer.memory_usage().unwrap().unwrap().property_index_bytes,
+        before.property_index_bytes
+    );
 }

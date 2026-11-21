@@ -67,12 +67,13 @@
 //! written, so a second layer over the same base keeps the base's. `set_schema` checks the
 //! layer's current state exactly as `TraversalGraph::set_schema` checks its own (the generic
 //! `scan_storage_change`, the same errors), then stores the schema. The catalog takes saved
-//! queries, jobs, host kinds and kinds this version does not know; the kinds that need index,
-//! compression or embedding machinery (property indexes, compression rules, models) are
-//! refused until the layer has index deltas (stage 4), and so are schemas with vector rules
-//! and bases with vector rules (plan decision P5, [`LayeredGraph::over`]). The base's property
-//! indexes serve the layer through overlays (`index`); its unique indexes are enforced over
-//! base + delta at every write (S4.3). The execution policy is the base's.
+//! queries, jobs, host kinds, kinds this version does not know and property indexes (S4.4:
+//! defined, dropped and redefined on the layer, served by overlays, module `index`); the kinds
+//! that need compression or embedding machinery (compression rules, models) are refused, and
+//! so are schemas with vector rules and bases with vector rules (plan decision P5,
+//! [`LayeredGraph::over`]). The base's property indexes serve the layer through overlays
+//! (`index`); its unique indexes are enforced over base + delta at every write (S4.3). The
+//! execution policy is the base's.
 //!
 //! Delta visibility (S2.1, `visibility`): `GraphStorage::vertex_layer` / `edge_layer` answer
 //! an element's origin (`Base` for an untouched base element after the read path's one
@@ -80,10 +81,11 @@
 //! `GraphStorage::layer_diff` the added, removed (with their base values) and modified
 //! elements, walking only the delta and the tombstone and image bits.
 //!
-//! Property-index overlays (S4.1, `index`): per index the base has installed, the layer keeps
+//! Property-index overlays (S4.1, `index`): per index the layer serves, the layer keeps
 //! the base entries of the base elements it removed or holds an image of (`masked`) and the
-//! entries of its added elements and images (`delta`), maintained by every write and undo; the
-//! base index itself is read in place, never copied. Lookups, counts and the index stats are
+//! entries of its added elements and images (`delta`), maintained by every write and undo; an
+//! index of the base is read in place, never copied, an index the layer defines itself (S4.4)
+//! has a base part of its own, built over the base once. Lookups, counts and the index stats are
 //! served from the overlays (S4.2): the base slice minus the excluded slots merged with the
 //! delta part, key then slot; an overlay holding nothing of its own reads the base slice alone.
 //!
@@ -130,29 +132,33 @@ use units::UnitLog;
 /// **Supported:** every read; new vertices and edges (also at base vertices); changes and
 /// drops of added and of base elements (a changed base element is copied into the layer, the
 /// base is never written); its own copies of the base's schema and catalog (saved queries,
-/// jobs, host kinds); units with an undo log of its own (a traversal that fails leaves
+/// jobs, host kinds, property indexes: defined, dropped and redefined on the layer only, a
+/// unique one checked over the layer's data); units with an undo log of its own (a traversal that fails leaves
 /// nothing); change capture (commit hooks, dry runs) with the change sets a `TraversalGraph`
 /// reports for the same writes; the process memory ceiling at commit.
 ///
-/// **Capabilities:** `writable`, `atomic`, `change_capture`, and
-/// `exact_property_index_lookups` as the base states it. Not `property_indexes` (creating an
-/// index is refused) nor `durability`.
+/// **Capabilities:** `writable`, `atomic`, `change_capture`, `property_indexes`, and
+/// `exact_property_index_lookups` as the base states it. Not `durability`.
 ///
 /// **Memory:** [`memory_usage`](crate::graph::GraphStorage::memory_usage) reports the layer's
-/// own footprint (its delta and one dirty bit per base slot) as the total and the shared base
+/// own footprint (its delta, its index overlays with the base part of every index it defines
+/// itself, and one dirty bit per base slot) as the total and the shared base
 /// as [`MemoryStats::shared_bytes`](crate::graph::MemoryStats::shared_bytes), outside the
 /// total. [`shrink_to_fit`](crate::graph::GraphStorage::shrink_to_fit) releases the delta's
 /// spare capacity.
 ///
 /// **Not supported yet** ([`GraphError::Unsupported`]):
 /// - persistence: a layer cannot be saved, opened from a Store or journaled;
-/// - a base with vector rules ([`Self::over`]); vector rules, property index, compression
-///   rule and embedding model definitions on the layer. The base's indexes serve the layer's
-///   data exactly (lookups, counts, stats), through overlays the layer keeps of them, and its
-///   unique indexes are enforced over base + delta: a write that would give a second element
-///   a unique key fails with the same [`GraphError::UniqueViolation`] a `TraversalGraph` with
+/// - a base with vector rules ([`Self::over`]); vector rules, compression rule and embedding
+///   model definitions on the layer. The base's indexes serve the layer's data exactly
+///   (lookups, counts, stats), through overlays the layer keeps of them, and its unique
+///   indexes are enforced over base + delta: a write that would give a second element a
+///   unique key fails with the same [`GraphError::UniqueViolation`] a `TraversalGraph` with
 ///   the layer's data returns (a value a base element dropped or changed is free again); a
-///   unique index the base keeps disabled (stored over repeated values) stays disabled.
+///   unique index the base keeps disabled (stored over repeated values) stays disabled until
+///   the layer redefines it. An index the layer defines (or redefines) costs one scan of the
+///   base's elements of its label and a copy of the index over them, counted in the layer's
+///   own footprint; a dropped index of the base is hidden for the layer only.
 ///
 /// Values the layer stores are uncompressed. After a drop followed by a create, or a drop or
 /// label removal followed by a label lookup, unordered traversals may list elements in

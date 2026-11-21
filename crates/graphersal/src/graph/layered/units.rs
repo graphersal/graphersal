@@ -666,6 +666,10 @@ impl LayeredGraph {
                     Some(old) => self.catalog.insert(*old),
                     None => self.catalog.remove(kind, &name),
                 };
+                // The overlay follows the catalog back (rebuilt from the data as it stood).
+                if kind.is_property_index() {
+                    self.layer_index_after_change(&name);
+                }
             }
         }
         Ok(())
