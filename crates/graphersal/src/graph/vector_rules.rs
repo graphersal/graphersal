@@ -35,6 +35,7 @@ use crate::graph::system_journal::catalogue;
 use crate::graph::system_journal::{Event, SystemJournal};
 use crate::graph::undo::UndoEntry;
 use crate::graph::{EdgeHandle, GraphStorage, TraversalGraph, VertexHandle};
+use crate::traversal::memory_budget::MemoryBudget;
 use crate::value::vector::embed::{EmbedContext, EmbedError, Embedder, HashNgram, checked_embed};
 use crate::value::{ElementProperty, VectorElement};
 
@@ -1145,11 +1146,11 @@ fn writer() -> Option<WriterContext> {
 // The rule pass
 // ---------------------------------------------------------------------------------------------
 
-/// An element the pass looks at.
+/// An element the pass looks at (the storage's vertex or edge handle).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Target {
-    Vertex(VertexHandle),
-    Edge(EdgeHandle),
+enum Target<V, E> {
+    Vertex(V),
+    Edge(E),
 }
 
 /// Which rule keys a touched element needs: all its rules, or those of these sources.
@@ -1159,8 +1160,8 @@ enum Touched {
 }
 
 /// One `to` to write or remove.
-struct Item {
-    target: Target,
+struct Item<V, E> {
+    target: Target<V, E>,
     rule: usize,
     text: Option<String>,
 }
@@ -1287,411 +1288,507 @@ impl TraversalGraph {
         self.rules_off == 0 && self.undo.is_recording() && !self.undo.loading
     }
 
-    /// The vertex handle of `id`.
-    fn handle_of_vertex(&self, id: &str) -> Option<VertexHandle> {
-        GraphStorage::get_vertex_by_id(self, id).ok().flatten()
-    }
-
-    fn handle_of_edge(&self, id: &str) -> Option<EdgeHandle> {
-        GraphStorage::get_edge_by_id(self, id).ok().flatten()
-    }
-
-    /// The labels of a live target (an unlabeled edge: none).
-    fn target_labels(&self, target: Target) -> Vec<CompactString> {
-        match target {
-            Target::Vertex(handle) => GraphStorage::vertex_labels(self, handle)
-                .map(<[CompactString]>::to_vec)
-                .unwrap_or_default(),
-            Target::Edge(handle) => GraphStorage::edge_label(self, handle)
-                .ok()
-                .flatten()
-                .map(|label| vec![CompactString::from(label)])
-                .unwrap_or_default(),
-        }
-    }
-
-    fn target_properties(&self, target: Target) -> Option<&crate::value::PropertyMap> {
-        match target {
-            Target::Vertex(handle) => GraphStorage::vertex_properties(self, handle).ok().flatten(),
-            Target::Edge(handle) => GraphStorage::edge_properties(self, handle).ok().flatten(),
-        }
-    }
-
-    /// The rule pass of the outermost unit (module docs). `journal`: a commit (a dry run
-    /// journals nothing). Returns the open fill whose end record the commit writes, if the unit
-    /// ran a first fill or a model replacement.
+    /// The rule pass of the outermost unit over this graph's undo log ([`run_rule_pass`]).
     // The failure carries the open fill to end it: a cold path (the unit rolls back).
     #[allow(clippy::result_large_err)]
     pub(crate) fn run_vector_rules(
         &mut self,
         journal: bool,
     ) -> Result<Option<OpenFill>, PassFailure> {
-        let Some(rules) = self.vector_rules.clone() else {
-            return Ok(None);
-        };
-        // 1. Full fills: rules added or changed by a schema change of the unit itself. Each
-        // `Schema` entry holds the schema before its change; the schema after it is the next
-        // entry's old one (or the current schema). A change written by an applied change set
-        // (an exempt range) is skipped: the change set carries its vectors.
-        let mut full: Vec<(usize, FillReason)> = Vec::new();
-        let exempt = self.undo.rules_exempt().to_vec();
+        run_rule_pass(self, journal)
+    }
+}
+
+/// One entry of a unit's log as the rule pass reads it ([`RuleLog::for_each_rule_entry`]).
+/// Elements are named by id: the pass resolves them when it runs, so an element dropped later
+/// in the unit is skipped.
+pub(crate) enum RuleEntry<'a> {
+    /// The schema was replaced; `before` is the schema before the change (the schema after it
+    /// is the next `Schema` entry's `before`, or the current schema). `exempt`: the change was
+    /// written by an applied change set (it carries its vectors), so it opens no fill; it still
+    /// bounds the change before it.
+    Schema {
+        before: &'a GraphSchema,
+        exempt: bool,
+    },
+    /// The top-level property `key` of the element `id` was written or removed.
+    Property {
+        kind: ElementKind,
+        id: &'a str,
+        key: &'a str,
+    },
+    /// The element `id` was inserted or its labels changed: every rule of its labels applies.
+    Element { kind: ElementKind, id: &'a str },
+}
+
+/// What the rule pass ([`run_rule_pass`]) needs from a storage beside the [`GraphStorage`]
+/// reads and writes: the compiled rules, the outermost unit's log, its metadata and budget, and
+/// the counter that turns the rules off while the pass writes. `TraversalGraph` implements it
+/// over its `UndoLog`; a layered graph over its own unit log.
+pub(crate) trait RuleLog: GraphStorage {
+    /// The compiled rules of the current schema (`None`: no rule, the pass does nothing).
+    fn rule_set(&self) -> Option<&Arc<VectorRules>>;
+
+    /// Calls `visit` for every entry of the outermost unit's log that matters to the pass,
+    /// oldest first: every schema change (with its `exempt` flag), and, outside the exempt
+    /// ranges, every top-level property write, element insert and label change. Drops and
+    /// catalog definitions are left out.
+    fn for_each_rule_entry<'a>(&'a self, visit: impl FnMut(RuleEntry<'a>));
+
+    /// The current schema (read only when the unit changed the schema).
+    fn current_schema(&self) -> GraphSchema;
+
+    /// The principal the outermost unit commits with (the fill's journal record).
+    fn unit_principal(&self) -> Option<&str>;
+
+    /// The memory budget of the outermost unit, checked after every embedded chunk.
+    fn unit_budget(&self) -> Option<MemoryBudget>;
+
+    /// The counter that turns the rules off (refusal of direct writes, the pass itself) while
+    /// it is above zero.
+    fn rules_off_mut(&mut self) -> &mut u32;
+}
+
+impl RuleLog for TraversalGraph {
+    #[inline]
+    fn rule_set(&self) -> Option<&Arc<VectorRules>> {
+        self.vector_rules.as_ref()
+    }
+
+    fn for_each_rule_entry<'a>(&'a self, mut visit: impl FnMut(RuleEntry<'a>)) {
+        let exempt = self.undo.rules_exempt();
         let in_exempt = |position: usize| exempt.iter().any(|(a, b)| (*a..*b).contains(&position));
-        let schemas: Vec<(usize, &GraphSchema)> = self
-            .undo
-            .entries()
-            .iter()
-            .enumerate()
-            .filter_map(|(position, entry)| match entry {
-                UndoEntry::Schema(old) => Some((position, &**old)),
-                _ => None,
-            })
-            .collect();
-        if !schemas.is_empty() {
-            let current = self.schema.read().clone();
-            for (at, (position, before)) in schemas.iter().enumerate() {
-                if in_exempt(*position) {
-                    continue;
-                }
-                let after = schemas.get(at + 1).map_or(&current, |(_, next)| *next);
-                let (Some(after_rules), old_rules) =
-                    (VectorRules::compile(after), VectorRules::compile(before))
-                else {
-                    continue;
-                };
-                for rule in after_rules.all() {
-                    let previous = old_rules
-                        .as_ref()
-                        .and_then(|o| o.all().iter().find(|p| p.same_target(rule)));
-                    let reason = match previous {
-                        Some(previous) if previous.equivalent(rule) => continue,
-                        Some(previous)
-                            if previous.from == rule.from
-                                && previous.model != rule.model
-                                && display_model(&previous.model) == display_model(&rule.model) =>
-                        {
-                            FillReason::ModelReplaced
-                        }
-                        Some(_) => FillReason::RuleChanged,
-                        None => FillReason::RuleAdded,
-                    };
-                    // Only a rule still in force at the end of the unit is filled.
-                    if let Some(index) = rules.all().iter().position(|r| r.equivalent(rule))
-                        && !full.iter().any(|(i, _)| *i == index)
-                    {
-                        full.push((index, reason));
-                    }
-                }
-            }
-        }
-        // 2. Touched elements.
-        let mut touched: HashMap<(ElementKind, CompactString), Touched> = HashMap::new();
-        let mut touch = |kind, id: &CompactString, key: Option<&CompactString>| {
-            let entry = touched
-                .entry((kind, id.clone()))
-                .or_insert_with(|| Touched::Sources(Vec::new()));
-            match (entry, key) {
-                (Touched::All, _) => {}
-                (entry @ Touched::Sources(_), None) => *entry = Touched::All,
-                (Touched::Sources(keys), Some(key)) => {
-                    if !keys.contains(key) {
-                        keys.push(key.clone());
-                    }
-                }
-            }
-        };
         for (position, entry) in self.undo.entries().iter().enumerate() {
-            if in_exempt(position) {
-                continue;
-            }
-            match entry {
-                UndoEntry::VertexProperty { id, key, .. } if rules.is_source(key) => {
-                    touch(ElementKind::Vertex, id, Some(key));
-                }
-                UndoEntry::EdgeProperty { id, key, .. } if rules.is_source(key) => {
-                    touch(ElementKind::Edge, id, Some(key));
-                }
+            let entry = match entry {
+                UndoEntry::Schema(old) => RuleEntry::Schema {
+                    before: old,
+                    exempt: in_exempt(position),
+                },
+                _ if in_exempt(position) => continue,
+                UndoEntry::VertexProperty { id, key, .. } => RuleEntry::Property {
+                    kind: ElementKind::Vertex,
+                    id,
+                    key,
+                },
+                UndoEntry::EdgeProperty { id, key, .. } => RuleEntry::Property {
+                    kind: ElementKind::Edge,
+                    id,
+                    key,
+                },
                 UndoEntry::AddedVertex { id } | UndoEntry::VertexLabels { id, .. } => {
-                    touch(ElementKind::Vertex, id, None);
+                    RuleEntry::Element {
+                        kind: ElementKind::Vertex,
+                        id,
+                    }
                 }
                 UndoEntry::AddedEdge { id } | UndoEntry::EdgeLabel { id, .. } => {
-                    touch(ElementKind::Edge, id, None);
+                    RuleEntry::Element {
+                        kind: ElementKind::Edge,
+                        id,
+                    }
                 }
-                UndoEntry::VertexProperty { .. }
-                | UndoEntry::EdgeProperty { .. }
-                | UndoEntry::DroppedVertex { .. }
+                UndoEntry::DroppedVertex { .. }
                 | UndoEntry::DroppedEdge(_)
-                | UndoEntry::Schema(_)
-                | UndoEntry::Definition { .. } => {}
+                | UndoEntry::Definition { .. } => continue,
+            };
+            visit(entry);
+        }
+    }
+
+    fn current_schema(&self) -> GraphSchema {
+        self.schema.read().clone()
+    }
+
+    fn unit_principal(&self) -> Option<&str> {
+        self.undo.metadata.principal()
+    }
+
+    fn unit_budget(&self) -> Option<MemoryBudget> {
+        self.undo.budget()
+    }
+
+    #[inline]
+    fn rules_off_mut(&mut self) -> &mut u32 {
+        &mut self.rules_off
+    }
+}
+
+/// The element handle of a target of the storage `S`.
+type TargetOf<S> = Target<<S as GraphStorage>::VertexId, <S as GraphStorage>::EdgeId>;
+
+/// The labels of a live target (an unlabeled edge: none).
+fn target_labels<S: GraphStorage>(graph: &S, target: TargetOf<S>) -> Vec<CompactString> {
+    match target {
+        Target::Vertex(handle) => graph
+            .vertex_labels(handle)
+            .map(<[CompactString]>::to_vec)
+            .unwrap_or_default(),
+        Target::Edge(handle) => graph
+            .edge_label(handle)
+            .ok()
+            .flatten()
+            .map(|label| vec![CompactString::from(label)])
+            .unwrap_or_default(),
+    }
+}
+
+fn target_properties<S: GraphStorage>(
+    graph: &S,
+    target: TargetOf<S>,
+) -> Option<&crate::value::PropertyMap> {
+    match target {
+        Target::Vertex(handle) => graph.vertex_properties(handle).ok().flatten(),
+        Target::Edge(handle) => graph.edge_properties(handle).ok().flatten(),
+    }
+}
+
+/// The rule pass of the outermost unit (module docs) over any storage with a [`RuleLog`].
+/// `journal`: a commit (a dry run journals nothing). Returns the open fill whose end record the
+/// commit writes, if the unit ran a first fill or a model replacement.
+// The failure carries the open fill to end it: a cold path (the unit rolls back).
+#[allow(clippy::result_large_err)]
+pub(crate) fn run_rule_pass<S: RuleLog>(
+    graph: &mut S,
+    journal: bool,
+) -> Result<Option<OpenFill>, PassFailure> {
+    let Some(rules) = graph.rule_set().cloned() else {
+        return Ok(None);
+    };
+    // 1. Full fills: rules added or changed by a schema change of the unit itself. Each
+    // `Schema` entry holds the schema before its change; the schema after it is the next
+    // entry's old one (or the current schema). A change written by an applied change set
+    // (an exempt range) is skipped: the change set carries its vectors.
+    let mut full: Vec<(usize, FillReason)> = Vec::new();
+    // 2. Touched elements: one walk of the log collects them and the schema changes of 1.
+    let mut schemas: Vec<(&GraphSchema, bool)> = Vec::new();
+    let mut touched: HashMap<(ElementKind, CompactString), Touched> = HashMap::new();
+    let mut touch = |kind, id: &str, key: Option<&str>| {
+        let entry = touched
+            .entry((kind, CompactString::from(id)))
+            .or_insert_with(|| Touched::Sources(Vec::new()));
+        match (entry, key) {
+            (Touched::All, _) => {}
+            (entry @ Touched::Sources(_), None) => *entry = Touched::All,
+            (Touched::Sources(keys), Some(key)) => {
+                if !keys.iter().any(|k| k.as_str() == key) {
+                    keys.push(CompactString::from(key));
+                }
             }
         }
-        if full.is_empty() && touched.is_empty() {
-            return Ok(None);
+    };
+    graph.for_each_rule_entry(|entry| match entry {
+        RuleEntry::Schema { before, exempt } => schemas.push((before, exempt)),
+        RuleEntry::Property { kind, id, key } => {
+            if rules.is_source(key) {
+                touch(kind, id, Some(key));
+            }
         }
-        // 3. Work items, once per element and rule.
-        let mut items: Vec<Item> = Vec::new();
-        let mut seen: FnvHashSet<(Target, usize)> = FnvHashSet::default();
-        let mut add = |this: &TraversalGraph, target: Target, rule: usize| -> Option<Item> {
+        RuleEntry::Element { kind, id } => touch(kind, id, None),
+    });
+    if !schemas.is_empty() {
+        let current = graph.current_schema();
+        for (at, (before, exempt)) in schemas.iter().enumerate() {
+            if *exempt {
+                continue;
+            }
+            let after = schemas.get(at + 1).map_or(&current, |(next, _)| *next);
+            let (Some(after_rules), old_rules) =
+                (VectorRules::compile(after), VectorRules::compile(before))
+            else {
+                continue;
+            };
+            for rule in after_rules.all() {
+                let previous = old_rules
+                    .as_ref()
+                    .and_then(|o| o.all().iter().find(|p| p.same_target(rule)));
+                let reason = match previous {
+                    Some(previous) if previous.equivalent(rule) => continue,
+                    Some(previous)
+                        if previous.from == rule.from
+                            && previous.model != rule.model
+                            && display_model(&previous.model) == display_model(&rule.model) =>
+                    {
+                        FillReason::ModelReplaced
+                    }
+                    Some(_) => FillReason::RuleChanged,
+                    None => FillReason::RuleAdded,
+                };
+                // Only a rule still in force at the end of the unit is filled.
+                if let Some(index) = rules.all().iter().position(|r| r.equivalent(rule))
+                    && !full.iter().any(|(i, _)| *i == index)
+                {
+                    full.push((index, reason));
+                }
+            }
+        }
+    }
+    if full.is_empty() && touched.is_empty() {
+        return Ok(None);
+    }
+    // 3. Work items, once per element and rule.
+    let mut items: Vec<Item<S::VertexId, S::EdgeId>> = Vec::new();
+    let mut seen: FnvHashSet<(TargetOf<S>, usize)> = FnvHashSet::default();
+    let mut add =
+        |this: &S, target: TargetOf<S>, rule: usize| -> Option<Item<S::VertexId, S::EdgeId>> {
             if !seen.insert((target, rule)) {
                 return None;
             }
-            let text = this
-                .target_properties(target)
+            let text = target_properties(this, target)
                 .and_then(|p| p.get(rules.all()[rule].from.as_str()))
                 .and_then(ElementProperty::text)
                 .filter(|t| !t.is_empty())
                 .map(|t| t.into_owned());
             Some(Item { target, rule, text })
         };
-        let full_count;
-        {
-            for &(rule_index, _) in &full {
-                let rule = &rules.all()[rule_index];
-                let targets: Vec<Target> = match rule.kind {
-                    ElementKind::Vertex => GraphStorage::vertices_by_label(self, &rule.label)
-                        .map_err(|e| (e, None))?
-                        .map(Target::Vertex)
-                        .collect(),
-                    ElementKind::Edge => GraphStorage::edges_by_label(self, &rule.label)
-                        .map_err(|e| (e, None))?
-                        .map(Target::Edge)
-                        .collect(),
-                };
-                for target in targets {
-                    let labels = self.target_labels(target);
-                    if rules.applicable(rule.kind, &labels).contains(&rule_index) {
-                        items.extend(add(self, target, rule_index));
-                    }
-                }
-            }
-            full_count = items.len();
-            for ((kind, id), keys) in &touched {
-                let target = match kind {
-                    ElementKind::Vertex => self.handle_of_vertex(id).map(Target::Vertex),
-                    ElementKind::Edge => self.handle_of_edge(id).map(Target::Edge),
-                };
-                let Some(target) = target else {
-                    continue;
-                };
-                let labels = self.target_labels(target);
-                for rule_index in rules.applicable(*kind, &labels) {
-                    let wanted = match keys {
-                        Touched::All => true,
-                        Touched::Sources(sources) => {
-                            sources.contains(&rules.all()[rule_index].from)
-                        }
-                    };
-                    if wanted {
-                        items.extend(add(self, target, rule_index));
-                    }
+    let full_count;
+    {
+        for &(rule_index, _) in &full {
+            let rule = &rules.all()[rule_index];
+            let targets: Vec<TargetOf<S>> = match rule.kind {
+                ElementKind::Vertex => graph
+                    .vertices_by_label(&rule.label)
+                    .map_err(|e| (e, None))?
+                    .map(Target::Vertex)
+                    .collect(),
+                ElementKind::Edge => graph
+                    .edges_by_label(&rule.label)
+                    .map_err(|e| (e, None))?
+                    .map(Target::Edge)
+                    .collect(),
+            };
+            for target in targets {
+                let labels = target_labels(&*graph, target);
+                if rules.applicable(rule.kind, &labels).contains(&rule_index) {
+                    items.extend(add(&*graph, target, rule_index));
                 }
             }
         }
-        if items.is_empty() {
-            return Ok(None);
-        }
-        // 4. The journal record and progress of a first fill or a replacement.
-        let context = (!full.is_empty()).then(writer).flatten();
-        let mut open = None;
-        if !full.is_empty() {
-            let texts = items.iter().filter(|i| i.text.is_some()).count() as u64;
-            let progress = context.as_ref().map(|c| Arc::clone(&c.progress));
-            if let Some(progress) = &progress {
-                progress.start(texts);
+        full_count = items.len();
+        for ((kind, id), keys) in &touched {
+            let target = match kind {
+                ElementKind::Vertex => graph
+                    .get_vertex_by_id(id)
+                    .ok()
+                    .flatten()
+                    .map(Target::Vertex),
+                ElementKind::Edge => graph.get_edge_by_id(id).ok().flatten().map(Target::Edge),
+            };
+            let Some(target) = target else {
+                continue;
+            };
+            let labels = target_labels(&*graph, target);
+            for rule_index in rules.applicable(*kind, &labels) {
+                let wanted = match keys {
+                    Touched::All => true,
+                    Touched::Sources(sources) => sources.contains(&rules.all()[rule_index].from),
+                };
+                if wanted {
+                    items.extend(add(&*graph, target, rule_index));
+                }
             }
-            let journal_handle = context
-                .as_ref()
-                .filter(|_| journal)
-                .map(WriterContext::journal);
-            let op = journal_handle.as_ref().map(|journal| {
-                let reason = full
-                    .iter()
-                    .map(|(_, r)| *r)
-                    .max_by_key(|r| match r {
-                        FillReason::RuleAdded => 0,
-                        FillReason::RuleChanged => 1,
-                        FillReason::ModelReplaced => 2,
-                    })
-                    .unwrap_or(FillReason::RuleAdded);
-                let listed = ElementProperty::Array(
-                    full.iter()
-                        .map(|(index, _)| {
-                            let rule = &rules.all()[*index];
-                            let mut map = crate::value::PropertyMap::default();
-                            map.insert("element", ElementProperty::from(rule.kind.as_str()));
-                            map.insert("label", ElementProperty::from(rule.label.as_str()));
-                            map.insert("from", ElementProperty::from(rule.from.as_str()));
-                            map.insert("to", ElementProperty::from(rule.to.as_str()));
-                            map.insert("model", ElementProperty::from(rule.model.as_str()));
-                            ElementProperty::Object(Box::new(map))
-                        })
-                        .collect(),
-                );
-                let estimate = full
-                    .iter()
+        }
+    }
+    if items.is_empty() {
+        return Ok(None);
+    }
+    // 4. The journal record and progress of a first fill or a replacement.
+    let context = (!full.is_empty()).then(writer).flatten();
+    let mut open = None;
+    if !full.is_empty() {
+        let texts = items.iter().filter(|i| i.text.is_some()).count() as u64;
+        let progress = context.as_ref().map(|c| Arc::clone(&c.progress));
+        if let Some(progress) = &progress {
+            progress.start(texts);
+        }
+        let journal_handle = context
+            .as_ref()
+            .filter(|_| journal)
+            .map(WriterContext::journal);
+        let op = journal_handle.as_ref().map(|journal| {
+            let reason = full
+                .iter()
+                .map(|(_, r)| *r)
+                .max_by_key(|r| match r {
+                    FillReason::RuleAdded => 0,
+                    FillReason::RuleChanged => 1,
+                    FillReason::ModelReplaced => 2,
+                })
+                .unwrap_or(FillReason::RuleAdded);
+            let listed = ElementProperty::Array(
+                full.iter()
                     .map(|(index, _)| {
                         let rule = &rules.all()[*index];
-                        texts_per_second(&rule.model)
-                            .filter(|tps| *tps > 0.0)
-                            .map(|tps| {
-                                let n = items[..full_count]
-                                    .iter()
-                                    .filter(|i| i.rule == *index && i.text.is_some())
-                                    .count();
-                                embedding_estimate_ms(n as u64, tps)
-                            })
+                        let mut map = crate::value::PropertyMap::default();
+                        map.insert("element", ElementProperty::from(rule.kind.as_str()));
+                        map.insert("label", ElementProperty::from(rule.label.as_str()));
+                        map.insert("from", ElementProperty::from(rule.from.as_str()));
+                        map.insert("to", ElementProperty::from(rule.to.as_str()));
+                        map.insert("model", ElementProperty::from(rule.model.as_str()));
+                        ElementProperty::Object(Box::new(map))
                     })
-                    .try_fold(0u64, |sum, ms| ms.map(|ms| sum + ms));
-                let mut event = Event::new(format!(
-                    "a vector fill started: {texts} elements to embed; the database is locked \
-                     until it ends"
-                ))
-                .field("reason", reason.as_str())
-                .field("rules", listed)
-                .count("elements", texts);
-                if let Some(estimate) = estimate {
-                    event = event.count("estimate_ms", estimate);
-                }
-                if let Some(principal) = self.undo.metadata.principal() {
-                    event = event.principal(principal);
-                }
-                journal.emit_op(&catalogue::VECTOR_FILL_STARTED, event)
-            });
-            open = Some(OpenFill {
-                journal: journal_handle,
-                progress,
-                op,
-                started: web_time::Instant::now(),
-                embedded: 0,
-                removed: 0,
-            });
-        }
-        match self.embed_items(&rules, items, open.as_mut()) {
-            Ok(()) => Ok(open),
-            // The caller rolls back and writes the failure record of the open fill.
-            Err(error) => Err((error, open)),
+                    .collect(),
+            );
+            let estimate = full
+                .iter()
+                .map(|(index, _)| {
+                    let rule = &rules.all()[*index];
+                    texts_per_second(&rule.model)
+                        .filter(|tps| *tps > 0.0)
+                        .map(|tps| {
+                            let n = items[..full_count]
+                                .iter()
+                                .filter(|i| i.rule == *index && i.text.is_some())
+                                .count();
+                            embedding_estimate_ms(n as u64, tps)
+                        })
+                })
+                .try_fold(0u64, |sum, ms| ms.map(|ms| sum + ms));
+            let mut event = Event::new(format!(
+                "a vector fill started: {texts} elements to embed; the database is locked \
+                 until it ends"
+            ))
+            .field("reason", reason.as_str())
+            .field("rules", listed)
+            .count("elements", texts);
+            if let Some(estimate) = estimate {
+                event = event.count("estimate_ms", estimate);
+            }
+            if let Some(principal) = graph.unit_principal() {
+                event = event.principal(principal);
+            }
+            journal.emit_op(&catalogue::VECTOR_FILL_STARTED, event)
+        });
+        open = Some(OpenFill {
+            journal: journal_handle,
+            progress,
+            op,
+            started: web_time::Instant::now(),
+            embedded: 0,
+            removed: 0,
+        });
+    }
+    match embed_items(graph, &rules, items, open.as_mut()) {
+        Ok(()) => Ok(open),
+        // The caller rolls back and writes the failure record of the open fill.
+        Err(error) => Err((error, open)),
+    }
+}
+
+/// Embeds the items in one batch per model (chunks of the embedder's `max_batch`) and
+/// writes or removes every `to`.
+fn embed_items<S: RuleLog>(
+    graph: &mut S,
+    rules: &VectorRules,
+    items: Vec<Item<S::VertexId, S::EdgeId>>,
+    mut open: Option<&mut OpenFill>,
+) -> Result<(), GraphError> {
+    let mut by_model: BTreeMap<CompactString, Vec<usize>> = BTreeMap::new();
+    let mut removals: Vec<usize> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match item.text {
+            Some(_) => by_model
+                .entry(rules.all()[item.rule].model.clone())
+                .or_default()
+                .push(index),
+            None => removals.push(index),
         }
     }
-
-    /// Embeds the items in one batch per model (chunks of the embedder's `max_batch`) and
-    /// writes or removes every `to`.
-    fn embed_items(
-        &mut self,
-        rules: &VectorRules,
-        items: Vec<Item>,
-        mut open: Option<&mut OpenFill>,
-    ) -> Result<(), GraphError> {
-        let mut by_model: BTreeMap<CompactString, Vec<usize>> = BTreeMap::new();
-        let mut removals: Vec<usize> = Vec::new();
-        for (index, item) in items.iter().enumerate() {
-            match item.text {
-                Some(_) => by_model
-                    .entry(rules.all()[item.rule].model.clone())
-                    .or_default()
-                    .push(index),
-                None => removals.push(index),
-            }
-        }
-        let ctx = EmbedContext::of_current_thread();
-        // The bytes of the vectors written so far (the memory estimate without a tracking
-        // allocator counts elements only).
-        let mut written: u64 = 0;
-        for (model, indexes) in by_model {
-            let first = &rules.all()[items[indexes[0]].rule];
-            let fail = |cause: EmbedError| GraphError::VectorRuleFailed {
-                label: first.label.to_string(),
-                key: first.to.to_string(),
-                model: model.to_string(),
-                cause: Box::new(cause),
-            };
-            let Some(embedder) = rule_embedder(&model) else {
-                return Err(fail(EmbedError::unavailable(format!(
-                    "the model {} is not served here (it is not a model of this store, or its \
-                     store is not open)",
-                    display_model(&model)
-                ))));
-            };
-            let batch = embedder.info().max_batch.max(1);
-            for chunk in indexes.chunks(batch) {
-                ctx.check().map_err(fail)?;
-                let mut pending: Vec<usize> = chunk.to_vec();
-                let vectors = loop {
-                    let texts: Vec<&str> = pending
-                        .iter()
-                        .filter_map(|&i| items[i].text.as_deref())
-                        .collect();
-                    if texts.is_empty() {
-                        break Vec::new();
-                    }
-                    match checked_embed(embedder.as_ref(), &texts, &ctx) {
-                        Ok(vectors) => break vectors,
-                        Err(EmbedError::NoFeatures { index }) if index < pending.len() => {
-                            removals.push(pending.remove(index));
-                        }
-                        Err(cause) => return Err(fail(cause)),
-                    }
-                };
-                for (&index, vector) in pending.iter().zip(vectors) {
-                    let item = &items[index];
-                    let rule = &rules.all()[item.rule];
-                    let vector = vector.quantize(rule.element).map_err(|err| {
-                        fail(EmbedError::failed(format!(
-                            "its vector does not fit {}: {err}",
-                            rule.element.name()
-                        )))
-                    })?;
-                    written = written.saturating_add(vector.heap_bytes());
-                    self.write_derived(
-                        item.target,
-                        &rule.to,
-                        Some(ElementProperty::Vector(vector)),
-                    )?;
-                }
-                if let Some(open) = open.as_deref_mut() {
-                    open.embedded += pending.len() as u64;
-                    if let Some(progress) = &open.progress {
-                        progress.add(pending.len() as u64);
-                    }
-                }
-                if let Some(budget) = self.undo.budget() {
-                    budget.unit_check_adding(&*self, FILL_OPERATION, written)?;
-                }
-            }
-        }
-        for index in removals {
-            let item = &items[index];
-            let to = &rules.all()[item.rule].to;
-            if self
-                .target_properties(item.target)
-                .is_some_and(|p| p.contains_key(to.as_str()))
-            {
-                self.write_derived(item.target, to, None)?;
-                if let Some(open) = open.as_deref_mut() {
-                    open.removed += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Writes (`Some`) or removes (`None`) a rule's `to` with the refusal off.
-    fn write_derived(
-        &mut self,
-        target: Target,
-        key: &CompactString,
-        value: Option<ElementProperty>,
-    ) -> Result<(), GraphError> {
-        self.rules_off += 1;
-        let written = match (target, value) {
-            (Target::Vertex(h), Some(v)) => {
-                GraphStorage::set_vertex_property(self, h, key.clone(), v)
-            }
-            (Target::Edge(h), Some(v)) => GraphStorage::set_edge_property(self, h, key.clone(), v),
-            (Target::Vertex(h), None) => GraphStorage::drop_vertex_property(self, key, h),
-            (Target::Edge(h), None) => GraphStorage::drop_edge_property(self, key, h),
+    let ctx = EmbedContext::of_current_thread();
+    // The bytes of the vectors written so far (the memory estimate without a tracking
+    // allocator counts elements only).
+    let mut written: u64 = 0;
+    for (model, indexes) in by_model {
+        let first = &rules.all()[items[indexes[0]].rule];
+        let fail = |cause: EmbedError| GraphError::VectorRuleFailed {
+            label: first.label.to_string(),
+            key: first.to.to_string(),
+            model: model.to_string(),
+            cause: Box::new(cause),
         };
-        self.rules_off -= 1;
-        written
+        let Some(embedder) = rule_embedder(&model) else {
+            return Err(fail(EmbedError::unavailable(format!(
+                "the model {} is not served here (it is not a model of this store, or its \
+                 store is not open)",
+                display_model(&model)
+            ))));
+        };
+        let batch = embedder.info().max_batch.max(1);
+        for chunk in indexes.chunks(batch) {
+            ctx.check().map_err(fail)?;
+            let mut pending: Vec<usize> = chunk.to_vec();
+            let vectors = loop {
+                let texts: Vec<&str> = pending
+                    .iter()
+                    .filter_map(|&i| items[i].text.as_deref())
+                    .collect();
+                if texts.is_empty() {
+                    break Vec::new();
+                }
+                match checked_embed(embedder.as_ref(), &texts, &ctx) {
+                    Ok(vectors) => break vectors,
+                    Err(EmbedError::NoFeatures { index }) if index < pending.len() => {
+                        removals.push(pending.remove(index));
+                    }
+                    Err(cause) => return Err(fail(cause)),
+                }
+            };
+            for (&index, vector) in pending.iter().zip(vectors) {
+                let item = &items[index];
+                let rule = &rules.all()[item.rule];
+                let vector = vector.quantize(rule.element).map_err(|err| {
+                    fail(EmbedError::failed(format!(
+                        "its vector does not fit {}: {err}",
+                        rule.element.name()
+                    )))
+                })?;
+                written = written.saturating_add(vector.heap_bytes());
+                write_derived(
+                    graph,
+                    item.target,
+                    &rule.to,
+                    Some(ElementProperty::Vector(vector)),
+                )?;
+            }
+            if let Some(open) = open.as_deref_mut() {
+                open.embedded += pending.len() as u64;
+                if let Some(progress) = &open.progress {
+                    progress.add(pending.len() as u64);
+                }
+            }
+            if let Some(budget) = graph.unit_budget() {
+                budget.unit_check_adding(&*graph, FILL_OPERATION, written)?;
+            }
+        }
     }
+    for index in removals {
+        let item = &items[index];
+        let to = &rules.all()[item.rule].to;
+        if target_properties(&*graph, item.target).is_some_and(|p| p.contains_key(to.as_str())) {
+            write_derived(graph, item.target, to, None)?;
+            if let Some(open) = open.as_deref_mut() {
+                open.removed += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes (`Some`) or removes (`None`) a rule's `to` with the refusal off.
+fn write_derived<S: RuleLog>(
+    graph: &mut S,
+    target: TargetOf<S>,
+    key: &CompactString,
+    value: Option<ElementProperty>,
+) -> Result<(), GraphError> {
+    *graph.rules_off_mut() += 1;
+    let written = match (target, value) {
+        (Target::Vertex(h), Some(v)) => graph.set_vertex_property(h, key.clone(), v),
+        (Target::Edge(h), Some(v)) => graph.set_edge_property(h, key.clone(), v),
+        (Target::Vertex(h), None) => graph.drop_vertex_property(key, h),
+        (Target::Edge(h), None) => graph.drop_edge_property(key, h),
+    };
+    *graph.rules_off_mut() -= 1;
+    written
 }
 
 #[cfg(test)]
@@ -1940,5 +2037,141 @@ mod tests {
                 .contains("(time depends on the model)")
         );
         assert!(fill_warning(&[]).is_none());
+    }
+
+    /// One entry of the fake log below, owned.
+    enum FakeEntry {
+        Schema(GraphSchema, bool),
+        Property(ElementKind, &'static str, &'static str),
+        Element(ElementKind, &'static str),
+    }
+
+    thread_local! {
+        /// The log the fake storage answers (leaked per test: a few entries).
+        static FAKE_LOG: std::cell::Cell<&'static [FakeEntry]> = const { std::cell::Cell::new(&[]) };
+    }
+
+    /// A storage whose rule log is not its undo log: the pass sees only the entries a test
+    /// hands it, so it runs through [`RuleLog`] alone (as on a layered graph).
+    impl RuleLog for Box<TraversalGraph> {
+        fn rule_set(&self) -> Option<&Arc<VectorRules>> {
+            self.vector_rules.as_ref()
+        }
+        fn for_each_rule_entry<'a>(&'a self, mut visit: impl FnMut(RuleEntry<'a>)) {
+            for entry in FAKE_LOG.with(std::cell::Cell::get) {
+                visit(match entry {
+                    FakeEntry::Schema(before, exempt) => RuleEntry::Schema {
+                        before,
+                        exempt: *exempt,
+                    },
+                    FakeEntry::Property(kind, id, key) => RuleEntry::Property {
+                        kind: *kind,
+                        id,
+                        key,
+                    },
+                    FakeEntry::Element(kind, id) => RuleEntry::Element { kind: *kind, id },
+                });
+            }
+        }
+        fn current_schema(&self) -> GraphSchema {
+            self.schema.read().clone()
+        }
+        fn unit_principal(&self) -> Option<&str> {
+            None
+        }
+        fn unit_budget(&self) -> Option<MemoryBudget> {
+            None
+        }
+        fn rules_off_mut(&mut self) -> &mut u32 {
+            &mut self.rules_off
+        }
+    }
+
+    /// The ruled graph with the docs `a`, `b` (text) and `c` (no text, a stale vector), written
+    /// outside a unit: no rule ran, the fake log decides what the pass does.
+    fn fake_graph() -> Box<TraversalGraph> {
+        let mut graph = Box::new(ruled());
+        for (id, text) in [
+            ("a", Some("alpha text")),
+            ("b", Some("beta text")),
+            ("c", None),
+        ] {
+            let mut map = crate::value::PropertyMap::default();
+            if let Some(text) = text {
+                map.insert("text", ElementProperty::from(text));
+            } else {
+                let stale = HashNgram::new()
+                    .embed(&["stale"], &EmbedContext::of_current_thread())
+                    .unwrap()
+                    .remove(0);
+                map.insert("emb", ElementProperty::Vector(stale));
+            }
+            GraphStorage::insert_vertex(
+                &mut *graph,
+                Some(CompactString::from(id)),
+                vec![CompactString::from("doc")],
+                map,
+            )
+            .unwrap();
+        }
+        graph
+    }
+
+    fn has_vector(graph: &TraversalGraph, id: &str) -> bool {
+        let node = GraphStorage::get_vertex_by_id(graph, id).unwrap().unwrap();
+        GraphStorage::vertex_properties(graph, node)
+            .unwrap()
+            .is_some_and(|p| matches!(p.get("emb"), Some(ElementProperty::Vector(_))))
+    }
+
+    fn run_fake(graph: &mut Box<TraversalGraph>, log: Vec<FakeEntry>) -> Option<OpenFill> {
+        FAKE_LOG.with(|cell| cell.set(Vec::leak(log)));
+        let probe = Probe::new(false);
+        let fill = with_test_models(vec![probe as Arc<dyn Embedder>], || {
+            run_rule_pass(graph, false).map_err(|(error, _)| error)
+        });
+        FAKE_LOG.with(|cell| cell.set(&[]));
+        assert_eq!(graph.rules_off, 0, "the pass turns the rules back on");
+        fill.unwrap()
+    }
+
+    #[test]
+    fn the_pass_reads_only_its_rule_log() {
+        // Touched elements: a source write and an insert are embedded; a write of another key,
+        // an unknown id and an untouched element are not; a text-less source removes `to`.
+        let mut graph = fake_graph();
+        let fill = run_fake(
+            &mut graph,
+            vec![
+                FakeEntry::Property(ElementKind::Vertex, "a", "text"),
+                FakeEntry::Property(ElementKind::Vertex, "b", "other"),
+                FakeEntry::Property(ElementKind::Vertex, "gone", "text"),
+                FakeEntry::Element(ElementKind::Vertex, "c"),
+            ],
+        );
+        assert!(fill.is_none(), "no schema change: no fill record");
+        assert!(has_vector(&graph, "a"));
+        assert!(!has_vector(&graph, "b"));
+        assert!(
+            !has_vector(&graph, "c"),
+            "a text-less source removes the stale vector"
+        );
+
+        // A schema change that added the rule fills every element of the label; the same
+        // change marked exempt (written by a change set) fills nothing.
+        let mut graph = fake_graph();
+        let exempt = run_fake(
+            &mut graph,
+            vec![FakeEntry::Schema(GraphSchema::default(), true)],
+        );
+        assert!(exempt.is_none());
+        assert!(!has_vector(&graph, "a") && !has_vector(&graph, "b"));
+        let fill = run_fake(
+            &mut graph,
+            vec![FakeEntry::Schema(GraphSchema::default(), false)],
+        );
+        let fill = fill.expect("a first fill opens its record");
+        assert_eq!((fill.embedded, fill.removed), (2, 1));
+        assert!(has_vector(&graph, "a") && has_vector(&graph, "b") && !has_vector(&graph, "c"));
     }
 }
