@@ -11,6 +11,7 @@
 //! | drop of a base element | [`LayerUndo::RemovedBaseVertex`] / [`LayerUndo::RemovedBaseEdge`]: clear the tombstone, put the image back |
 //! | property, path and label writes of an added element | the old value of the key (position included), the old label set or label |
 //! | property, path and label writes of a base element | the same, plus whether the element had an image before: an undo of the write that copied it up drops the image again; a return to clean in between is undone by copying it up again |
+//! | a property write of a base element that changes nothing (an identical value) | [`LayerUndo::UnchangedBaseVertexProperty`] / [`LayerUndo::UnchangedBaseEdgeProperty`]: nothing to undo; recorded only so the change set and the commit count match `TraversalGraph`'s, which records such a write |
 //! | `set_schema` | [`LayerUndo::Schema`]: the layer's old schema |
 //! | catalog writes | [`LayerUndo::Definition`]: the old definition of that kind and name, or "absent", one per definition |
 //!
@@ -30,16 +31,28 @@
 //!
 //! **Cost:** nothing outside a unit (one branch per write); inside a unit one `Vec` push per
 //! write plus the old value or the removed image, which the write already owns.
+//!
+//! **Change capture and commit hooks (S1.9)**, with `TraversalGraph`'s semantics
+//! (`graph/undo.rs`, `graph/capture.rs`): the log carries the layer's [`CommitHooks`] (with the
+//! instance [`CommitClock`](crate::graph::CommitClock)); every outermost commit that changed
+//! something takes a commit time from it (never earlier than the previous commit); while a hook
+//! is registered the commit derives the unit's [`ChangeSet`] from the log (`capture`) and asks
+//! every `before_commit`: a veto (or a panic there) rolls the unit back and sends
+//! `after_rollback`. A rollback of an outermost unit that recorded anything (also when a
+//! savepoint undid it since) sends `after_rollback(reason)`; a discarded unit (a dry run) sends
+//! nothing and returns its change set.
 
 use compact_str::CompactString;
 
 use super::LayeredGraph;
 use super::delta::{EdgeImage, OldProperty, RemovedEdge, RemovedVertex, VertexCopy};
 use crate::error::GraphError;
+use crate::graph::change::{ChangeSet, CommitMetadata, CommitStamp};
 use crate::graph::definition::{Definition, DefinitionKind};
+use crate::graph::hooks::{CommitHooks, RollbackReason};
 use crate::graph::schema::GraphSchema;
-use crate::graph::storage::{UnitMark, close_on_unwind};
-use crate::graph::undo::{mark_position, now_nanos};
+use crate::graph::storage::{UNWOUND, UnitMark, close_on_unwind};
+use crate::graph::undo::{HOOK_PANICKED, mark_position, now_nanos};
 use crate::graph::{EdgeHandle, UnitChanges, VertexHandle};
 
 /// A log grown beyond this many entries is freed, not kept, when its outermost unit ends (as
@@ -124,6 +137,19 @@ pub(crate) enum LayerUndo {
         position: Option<usize>,
         had_image: bool,
     },
+    /// A property write of a base vertex stored nothing: the value was identical
+    /// (`identity_eq`). Nothing to undo; the capture reports it as a `SetProperty` with equal
+    /// before and after values and it makes the commit count, as `TraversalGraph` records such
+    /// a write.
+    UnchangedBaseVertexProperty {
+        node: VertexHandle,
+        key: CompactString,
+    },
+    /// The edge counterpart of [`Self::UnchangedBaseVertexProperty`].
+    UnchangedBaseEdgeProperty {
+        edge: EdgeHandle,
+        key: CompactString,
+    },
     /// The layer's schema was replaced.
     Schema(Box<GraphSchema>),
     /// A definition of the layer's catalog was stored, replaced or removed; `old` is what was
@@ -141,6 +167,17 @@ pub(crate) enum LayerUndo {
 pub(crate) struct UnitLog {
     entries: Vec<LayerUndo>,
     depth: u32,
+    /// The commit hooks in registration order, with the instance clock commit times come from.
+    /// Change capture is on while at least one hook is registered.
+    pub(crate) hooks: CommitHooks,
+    /// The commit time of the last outermost unit that changed something, microseconds since
+    /// the Unix epoch: the next commit is never earlier. Starts at the base's last commit time.
+    last_committed_at: i64,
+    /// Whether the outermost open unit recorded anything, also when a savepoint rolled it back
+    /// since: its rollback is then reported to the hooks (an attempted change).
+    changed: bool,
+    /// The [`CommitMetadata`] the outermost open unit commits with; reset when it closes.
+    metadata: CommitMetadata,
     /// Whether `raise_id_sequences` really raised a sequence while the outermost unit was
     /// open: its commit then counts as a commit without entries (as in `TraversalGraph`).
     sequences_raised: bool,
@@ -164,15 +201,31 @@ impl UnitLog {
     pub(crate) fn record(&mut self, entry: LayerUndo) {
         if self.depth > 0 {
             self.entries.push(entry);
+            self.changed = true;
         }
     }
 
-    /// Notes that an auto-id sequence was really raised in the open unit.
+    /// Notes that an auto-id sequence was really raised in the open unit (an attempted change:
+    /// a rollback of the unit is reported to the hooks).
     #[inline]
     pub(crate) fn mark_sequences_raised(&mut self) {
         if self.depth > 0 {
             self.sequences_raised = true;
+            self.changed = true;
         }
+    }
+
+    /// A log whose commit times never go below `last_committed_at` (the base's last commit).
+    pub(crate) fn after(last_committed_at: i64) -> Self {
+        Self {
+            last_committed_at,
+            ..Self::default()
+        }
+    }
+
+    /// The recorded entries, oldest first.
+    pub(crate) fn entries(&self) -> &[LayerUndo] {
+        &self.entries
     }
 
     /// The commit sequence number of the last outermost unit that changed something.
@@ -186,16 +239,24 @@ impl UnitLog {
     }
 
     /// The time the next outermost unit would start with now: the system clock, never earlier
-    /// than the previous unit's start.
+    /// than the previous unit's start, the last commit's time or the instance clock's floor.
     pub(crate) fn next_started_at(&self) -> i128 {
-        now_nanos().max(self.last_started_at)
+        self.start_from(now_nanos())
     }
 
-    /// Opens a unit; the outermost one takes `clock` (raised to the previous unit's start) as
+    /// `clock` raised to the log's monotonic floor (as `TraversalGraph::unit_start_from`).
+    fn start_from(&self, clock: i128) -> i128 {
+        clock
+            .max(self.last_started_at)
+            .max(self.last_committed_at as i128 * 1000)
+            .max(self.hooks.clock_ref().floor() as i128 * 1000)
+    }
+
+    /// Opens a unit; the outermost one takes `clock` (raised to the log's monotonic floor) as
     /// its time. The mark is the log position.
     fn begin(&mut self, clock: i128) -> UnitMark {
         if self.depth == 0 {
-            let started_at = clock.max(self.last_started_at);
+            let started_at = self.start_from(clock);
             self.started_at = Some(started_at);
             self.last_started_at = started_at;
         }
@@ -207,7 +268,9 @@ impl UnitLog {
     fn close(&mut self) {
         self.depth = self.depth.saturating_sub(1);
         if self.depth == 0 {
+            self.changed = false;
             self.sequences_raised = false;
+            self.metadata = CommitMetadata::default();
             self.started_at = None;
             if self.entries.capacity() > KEEP_CAPACITY {
                 self.entries = Vec::new();
@@ -229,10 +292,15 @@ impl LayeredGraph {
         self.begin_layer_unit(now_nanos())
     }
 
-    /// Closes a unit and keeps its changes. The outermost commit of a unit that changed
-    /// something (or only raised an auto-id sequence) advances the commit sequence number
-    /// (checked: at `u64::MAX` the unit is rolled back and the commit fails with
-    /// [`GraphError::SequenceOverflow`]), as `TraversalGraph` does.
+    /// Closes a unit and keeps its changes, as `TraversalGraph::commit_undo_unit` does (without
+    /// the vector rules, refused on a layer, and without the memory budget check, task S1.11).
+    /// The outermost commit of a unit that changed something (or only raised an auto-id
+    /// sequence) advances the commit sequence number (checked: at `u64::MAX` the unit is rolled
+    /// back and the commit fails with [`GraphError::SequenceOverflow`]) and takes the commit
+    /// time from the instance clock. While hooks are registered it first derives the unit's
+    /// [`ChangeSet`] and runs every `before_commit`: a veto rolls the unit back, sends
+    /// `after_rollback` and comes back as [`GraphError::CommitRejected`]; a panic there rolls
+    /// back, sends `after_rollback` and continues. Otherwise every hook gets `after_commit`.
     pub(super) fn commit_layer_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         if self.units.depth != 1 || (self.units.entries.is_empty() && !self.units.sequences_raised)
         {
@@ -240,18 +308,125 @@ impl LayeredGraph {
             return Ok(());
         }
         let Some(commit_seq) = self.units.last_commit_seq.checked_add(1) else {
-            self.rollback_layer_unit(mark);
-            return Err(GraphError::SequenceOverflow {
+            let error = GraphError::SequenceOverflow {
                 sequence: crate::error::COMMIT_SEQUENCE,
-            });
+            };
+            self.rollback_layer_unit(mark, &RollbackReason::failed(&error));
+            return Err(error);
         };
-        self.units.last_commit_seq = commit_seq;
-        self.units.close();
-        Ok(())
+        let committed_at = self.units.hooks.commit_time(self.units.last_committed_at);
+        if !self.units.hooks.is_active() {
+            self.finish_layer_commit(commit_seq, committed_at);
+            return Ok(());
+        }
+        // Deriving the change set and asking the hooks may panic (a user hook's
+        // `before_commit`): the unit is rolled back first, as in `TraversalGraph`.
+        let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mutations = self.derive_layer_mutations(0);
+            if mutations.is_empty() && !self.units.sequences_raised {
+                // Unreachable in practice (every log entry is a change); nothing to report.
+                return None;
+            }
+            let metadata = std::mem::take(&mut self.units.metadata);
+            let stamp = CommitStamp {
+                commit_seq,
+                committed_at,
+                node_sequence: self.node_sequence,
+                edge_sequence: self.edge_sequence,
+            };
+            let change_set = ChangeSet::new(stamp, metadata, mutations);
+            let verdict = self.units.hooks.before_commit(&change_set);
+            Some((change_set, verdict))
+        }));
+        let (change_set, verdict) = match asked {
+            Ok(Some(asked)) => asked,
+            Ok(None) => {
+                self.finish_layer_commit(commit_seq, committed_at);
+                return Ok(());
+            }
+            Err(payload) => {
+                self.undo_layer_to(mark);
+                self.units.close();
+                let reason = RollbackReason::failed(&HOOK_PANICKED);
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.units.hooks.after_rollback(&reason);
+                }))
+                .is_err()
+                {
+                    tracing::error!("a commit hook panicked in after_rollback after a panic");
+                }
+                std::panic::resume_unwind(payload)
+            }
+        };
+        match verdict {
+            Ok(()) => {
+                self.finish_layer_commit(commit_seq, committed_at);
+                self.units.hooks.after_commit(&change_set);
+                Ok(())
+            }
+            Err(error) => {
+                self.undo_layer_to(mark);
+                self.units.close();
+                self.units
+                    .hooks
+                    .after_rollback(&RollbackReason::from_error(&error));
+                Err(error)
+            }
+        }
     }
 
-    /// Undoes every change since `mark`, newest first, and closes the unit.
-    pub(super) fn rollback_layer_unit(&mut self, mark: UnitMark) {
+    /// Makes the outermost unit final under `commit_seq` and `committed_at`.
+    fn finish_layer_commit(&mut self, commit_seq: u64, committed_at: i64) {
+        self.units.last_commit_seq = commit_seq;
+        self.units.last_committed_at = committed_at;
+        self.units.close();
+    }
+
+    /// Undoes every change since `mark`, newest first, and closes the unit. The rollback of an
+    /// outermost unit that recorded anything (also when a savepoint already undid it) sends
+    /// `after_rollback(reason)` to every hook.
+    pub(super) fn rollback_layer_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
+        let notify = self.units.depth == 1 && self.units.hooks.is_active() && self.units.changed;
+        self.undo_layer_to(mark);
+        self.units.close();
+        if notify {
+            self.units.hooks.after_rollback(reason);
+        }
+    }
+
+    /// Undoes every change since `mark` and closes the unit WITHOUT telling the hooks, after
+    /// deriving what the unit changed (`GraphStorage::discard_unit`, the end of a dry run):
+    /// never committed (`commit_seq` and commit time `0`, no metadata), the auto-id sequences
+    /// after the unit.
+    pub(super) fn discard_layer_unit(&mut self, mark: UnitMark) -> ChangeSet {
+        let mutations = self.derive_layer_mutations(mark_position(mark));
+        let stamp = CommitStamp {
+            commit_seq: 0,
+            committed_at: 0,
+            node_sequence: self.node_sequence,
+            edge_sequence: self.edge_sequence,
+        };
+        self.undo_layer_to(mark);
+        self.units.close();
+        ChangeSet::new(stamp, CommitMetadata::default(), mutations)
+    }
+
+    /// The metadata of the open unit's commit, as `TraversalGraph::set_undo_metadata`: with
+    /// only the outermost unit open it takes precedence over what nested units left; inside a
+    /// nested unit it adds only what is missing. Ignored without an open unit.
+    pub(super) fn set_layer_unit_metadata(&mut self, metadata: CommitMetadata) {
+        match self.units.depth {
+            0 => {}
+            1 => {
+                let nested = std::mem::replace(&mut self.units.metadata, metadata);
+                self.units.metadata.merge_missing(nested);
+            }
+            _ => self.units.metadata.merge_missing(metadata),
+        }
+    }
+
+    /// Undoes every change since `mark`, newest first; the unit stays open.
+    fn undo_layer_to(&mut self, mark: UnitMark) {
         let position = mark_position(mark);
         while self.units.entries.len() > position {
             let Some(entry) = self.units.entries.pop() else {
@@ -263,7 +438,6 @@ impl LayeredGraph {
                 tracing::error!(%error, "layer undo: an entry could not be undone");
             }
         }
-        self.units.close();
     }
 
     /// What the open unit `mark` holds that is still in effect.
@@ -289,7 +463,9 @@ impl LayeredGraph {
                 | LayerUndo::BaseVertexProperty { .. }
                 | LayerUndo::BaseEdgeProperty { .. }
                 | LayerUndo::BaseVertexLabels { .. }
-                | LayerUndo::BaseEdgeLabel { .. } => changes.data = true,
+                | LayerUndo::BaseEdgeLabel { .. }
+                | LayerUndo::UnchangedBaseVertexProperty { .. }
+                | LayerUndo::UnchangedBaseEdgeProperty { .. } => changes.data = true,
             }
             if changes.data && changes.schema && changes.definitions {
                 break;
@@ -309,14 +485,16 @@ impl LayeredGraph {
             return change(self);
         }
         let mark = self.begin_layer_unit_now();
-        let changed = close_on_unwind(self, change, |this| this.rollback_layer_unit(mark));
+        let changed = close_on_unwind(self, change, |this| {
+            this.rollback_layer_unit(mark, &RollbackReason::failed(&UNWOUND))
+        });
         match changed {
             Ok(value) => {
                 self.commit_layer_unit(mark)?;
                 Ok(value)
             }
             Err(err) => {
-                self.rollback_layer_unit(mark);
+                self.rollback_layer_unit(mark, &RollbackReason::failed(&err));
                 Err(err)
             }
         }
@@ -451,6 +629,9 @@ impl LayeredGraph {
                     self.delta.clear_edge_image(edge);
                 }
             }
+            // Nothing was stored: nothing to undo.
+            LayerUndo::UnchangedBaseVertexProperty { .. }
+            | LayerUndo::UnchangedBaseEdgeProperty { .. } => {}
             LayerUndo::Schema(old) => self.schema = *old,
             LayerUndo::Definition { kind, name, old } => {
                 match old {
