@@ -246,6 +246,18 @@ impl<N, E> Topology<N, E> {
         (self.nodes.capacity(), self.edges.capacity())
     }
 
+    /// Used vertex slots (live and vacant): every vertex slot index is below it.
+    #[inline]
+    pub(crate) fn node_slots(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Used edge slots (live and vacant): every edge slot index is below it.
+    #[inline]
+    pub(crate) fn edge_slots(&self) -> usize {
+        self.edges.len()
+    }
+
     /// Vacant vertex slots: removed vertices whose slots wait for reuse.
     pub(crate) fn vacant_nodes(&self) -> usize {
         self.nodes.len() - self.node_count

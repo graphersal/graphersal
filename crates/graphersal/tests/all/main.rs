@@ -137,6 +137,7 @@ mod job_definition_tests;
 mod job_run_tests;
 mod journal_panic_tests;
 mod jpath_tests;
+mod layered_graph_tests;
 mod lazy_materialization_tests;
 mod list_function_tests;
 mod logical_map_tests;

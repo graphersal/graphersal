@@ -301,4 +301,12 @@ mod tests {
         assert_eq!(size_of::<Traverser<G>>(), 80);
         assert!(size_of::<Traverser<G>>() <= size_of::<TraverserValue<G>>() + 16);
     }
+
+    /// Rule 20 for the layered storage: its tagged 8-byte handles keep the same size.
+    #[test]
+    fn layered_traverser_stays_80_bytes() {
+        type G = crate::graph::LayeredGraph;
+        assert_eq!(size_of::<Traverser<G>>(), 80);
+        assert!(size_of::<Traverser<G>>() <= size_of::<TraverserValue<G>>() + 16);
+    }
 }

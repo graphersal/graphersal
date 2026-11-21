@@ -37,6 +37,8 @@ pub(crate) mod index;
 /// Scheduled jobs: the scheduler a host ticks, cron schedules.
 pub mod jobs;
 pub(crate) mod labels;
+/// Layered graphs: a frozen shared base plus a per-layer delta.
+pub(crate) mod layered;
 /// A graph's own memory footprint (`memory_usage()`).
 pub mod memory;
 /// The memory report: where a graph's memory goes, per label and per property path.
@@ -86,6 +88,7 @@ pub use hooks::{
     CommitHook, CommitHooks, HookError, HookRefusal, JournalSlot, Mark, RollbackReason,
 };
 pub(crate) use index::GraphIndex;
+pub use layered::{LayeredEdge, LayeredGraph, LayeredVertex};
 pub use memory::{MemoryStats, ShrinkReport};
 pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]

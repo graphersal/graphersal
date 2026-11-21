@@ -25,6 +25,10 @@
 //! [`GraphStorage`]) is what a snapshot and a Store need from a storage: lineage id, commit
 //! position, a load sink, `clear`, the journal slot ([`JournalSlot`]) and `replay`.
 //!
+//! [`LayeredGraph`] (EXPERIMENTAL, in progress) is a storage of the crate built on this trait: a
+//! frozen [`TraversalGraph`] shared by many layers, each reading through it with its own handles
+//! ([`LayeredVertex`], [`LayeredEdge`]); today it reads only, its writes are `Unsupported`.
+//!
 //! # Example
 //!
 //! A storage that is always empty and refuses every write, with the optional methods overridden
@@ -221,9 +225,9 @@ pub use crate::graph::{
     AnyGraph, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks, CommitMetadata,
     Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy, Graph,
     GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError, IntoAnyGraph,
-    IsolationLevel, JournalSlot, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport,
-    StorageCapabilities, StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark,
-    VertexHandle, VertexState,
+    IsolationLevel, JournalSlot, LayeredEdge, LayeredGraph, LayeredVertex, Mark, MemoryStats,
+    Mutation, RollbackReason, ShrinkReport, StorageCapabilities, StorageIdentity, Transactional,
+    TraversalGraph, UnitChanges, UnitMark, VertexHandle, VertexState,
 };
 pub use crate::value::{ElementProperty, JsonPath, JsonPathSegment, PropertyMap};
 pub use compact_str::CompactString;
