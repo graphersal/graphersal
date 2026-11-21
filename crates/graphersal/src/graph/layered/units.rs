@@ -605,7 +605,7 @@ impl LayeredGraph {
                 } else {
                     // The write copied the vertex up and changed one property only: its labels
                     // are the base's, so dropping the image restores everything.
-                    self.delta.clear_vertex_image(node);
+                    self.delta.clear_vertex_image(&self.base, node);
                 }
             }
             LayerUndo::BaseEdgeProperty {
@@ -624,7 +624,7 @@ impl LayeredGraph {
                         map_was_none,
                     )?;
                 } else {
-                    self.delta.clear_edge_image(edge);
+                    self.delta.clear_edge_image(&self.base, edge);
                 }
             }
             LayerUndo::BaseVertexLabels {
@@ -637,7 +637,7 @@ impl LayeredGraph {
                 self.delta
                     .set_base_vertex_labels(&self.base, node, old, &mut self.statistics)?;
                 if !had_image {
-                    self.delta.clear_vertex_image(node);
+                    self.delta.clear_vertex_image(&self.base, node);
                 }
             }
             LayerUndo::BaseEdgeLabel {
@@ -654,7 +654,7 @@ impl LayeredGraph {
                     &mut self.statistics,
                 )?;
                 if !had_image {
-                    self.delta.clear_edge_image(edge);
+                    self.delta.clear_edge_image(&self.base, edge);
                 }
             }
             // Nothing was stored: nothing to undo.

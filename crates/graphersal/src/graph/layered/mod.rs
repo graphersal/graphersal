@@ -79,6 +79,12 @@
 //! `GraphStorage::layer_diff` the added, removed (with their base values) and modified
 //! elements, walking only the delta and the tombstone and image bits.
 //!
+//! Property-index overlays (S4.1, `index`): per index the base has installed, the layer keeps
+//! the base entries of the base elements it removed or holds an image of (`masked`) and the
+//! entries of its added elements and images (`delta`), maintained by every write and undo; the
+//! base index itself is read in place, never copied. Lookups still forward to the base while
+//! the kind is untouched and scan otherwise (serving them from the overlays is S4.2).
+//!
 //! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
 //! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
 //! ceiling checks the outermost unit at its commit on the layer's own footprint, as
@@ -88,6 +94,7 @@ mod capture;
 mod delta;
 mod dirty;
 mod handle;
+mod index;
 mod memory;
 mod route;
 mod storage;
@@ -227,7 +234,7 @@ impl LayeredGraph {
         Self {
             dirty_vertices: SlotBits::new(base.graph.node_slots()),
             dirty_edges: SlotBits::new(base.graph.edge_slots()),
-            delta: Delta::default(),
+            delta: Delta::over(&base),
             statistics: base.statistics.clone(),
             node_sequence: base.node_sequence,
             edge_sequence: base.edge_sequence,

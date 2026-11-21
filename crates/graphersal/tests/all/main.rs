@@ -140,6 +140,7 @@ mod jpath_tests;
 mod layer_diff_tests;
 mod layer_steps_tests;
 mod layered_graph_tests;
+mod layered_index_tests;
 mod layered_storage_tests;
 mod layered_visibility_tests;
 mod lazy_materialization_tests;
