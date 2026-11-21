@@ -538,6 +538,13 @@ impl GraphStorage for LayeredGraph {
         Ok(Some(self.layer_memory()))
     }
 
+    /// The structure of the memory report: the layer's own slots (added elements and stubs),
+    /// id and label indexes and shape table, with the totals of [`Self::memory_usage`] (the base
+    /// as `shared_bytes`) and the stubs and removed base elements (module `memory`).
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
+        Ok(Some(self.layer_structure()))
+    }
+
     /// The layer's own total, cached by its commit position and the delta's slot counts; an
     /// estimate while an open unit holds changes (as `TraversalGraph`).
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {

@@ -512,6 +512,7 @@ class Graph:
         max_rows: Optional[int] = None,
         max_labels: Optional[int] = None,
         limit: Optional[int] = None,
+        scope: Optional[str] = None,
         policy: Optional[AccessPolicy] = None,
     ) -> dict[str, Any]:
         """Where the graph's memory goes per label and top-level property (rows, labels,
@@ -519,7 +520,9 @@ class Graph:
         (``components``, ``attributed_bytes``, ``unattributed_bytes``); changes nothing. ``max_elements`` /
         ``sample_every`` sample; ``limit`` keeps the property rows and the label rows with the
         most bytes (default 500), ``max_rows`` / ``max_labels`` one list each; the rows left
-        out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...)."""
+        out are counted with their bytes (``rows_omitted``, ``labels_omitted``, ...).
+        ``scope`` is ``"all"`` (default) or ``"delta"``: a layered graph's own elements only,
+        its base as ``shared_bytes`` (the whole graph for any other graph)."""
     def layer_diff(
         self,
         *,

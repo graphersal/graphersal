@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use graphersal::prelude::*;
 use graphersal::schema::{PropertySchema, SchemaSummaryRequest};
 use graphersal::script::rhai;
-use graphersal::storage::MemoryReportRequest;
+use graphersal::storage::{MemoryReportRequest, MemoryReportScope};
 use serde_json::{Map, Value, json};
 
 use crate::display::{CompactGraph, Table};
@@ -443,18 +443,20 @@ pub fn schema_summary_request(spec: &Value) -> Result<SchemaSummaryRequest, Sess
 }
 
 /// The request of a memory report spec `{sample_every?, max_elements?, limit?, max_rows?,
-/// max_labels?, path_depth?}` (`null`: a full walk; `limit` keeps the property rows and the
-/// label rows with the most bytes, default [`MemoryReportRequest::DEFAULT_LIMIT`] (500),
-/// `max_rows`/`max_labels` set one list each; [`crate::Session::memory_report`]), or what is
-/// wrong with it.
+/// max_labels?, path_depth?, scope?}` (`null`: a full walk; `limit` keeps the property rows and
+/// the label rows with the most bytes, default [`MemoryReportRequest::DEFAULT_LIMIT`] (500),
+/// `max_rows`/`max_labels` set one list each; `scope` `"all"` (default) or `"delta"`, a layered
+/// graph's own elements only, the whole graph for any other storage;
+/// [`crate::Session::memory_report`]), or what is wrong with it.
 pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, SessionError> {
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "sample_every",
         "max_elements",
         "limit",
         "max_rows",
         "max_labels",
         "path_depth",
+        "scope",
     ];
     let mut request = MemoryReportRequest::new();
     let fields = match spec {
@@ -463,7 +465,7 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
         _ => {
             return Err(
                 "the memory report spec is a JSON object {sample_every?, max_elements?, \
-                 limit?, max_rows?, max_labels?, path_depth?}"
+                 limit?, max_rows?, max_labels?, path_depth?, scope?}"
                     .into(),
             );
         }
@@ -501,6 +503,15 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
     }
     if let Some(depth) = positive("path_depth")? {
         request = request.with_path_depth(u32::try_from(depth).unwrap_or(u32::MAX));
+    }
+    match fields.get("scope") {
+        None | Some(Value::Null) => {}
+        Some(value) => match value.as_str().and_then(MemoryReportScope::from_name) {
+            Some(scope) => request = request.with_scope(scope),
+            None => {
+                return Err(format!("scope must be \"all\" or \"delta\", not {value}").into());
+            }
+        },
     }
     request
         .validate()

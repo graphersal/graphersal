@@ -170,9 +170,27 @@ the layer over the ceiling is rolled back. Without a tracking allocator the esti
 the shared base, just as it leaves out the other graphs of the process. With the tracking
 allocator the live heap counts everything.
 
-`memory_report()` is not layer-aware yet: its per-label figures cover everything the layer
-shows (base and delta), and it has no structure section. A per-label breakdown of the delta
-alone, with the base as one line, is planned.
+`memory_report()` on a layer has a structure section (`GraphStorage::memory_structure`, built
+by `Delta::structure`): the totals of `memory_usage()`, the delta's slots (added elements and
+stubs), its id and label indexes and shape table, and `base_stubs`, `removed_base_vertices` and
+`removed_base_edges` (`StructureMemory::with_base_changes`). `MemoryReport::shared_bytes` is
+`totals.shared_bytes`, and the process components add the base as `graph` with the detail
+`shared base`. The rows depend on the scope:
+
+- `MemoryReportScope::All` (the default) walks every visible element, base elements included,
+  so a report on a layer equals one on the materialized graph row for row. Only `structure`
+  and `shared_bytes` tell that it is a layer.
+- `MemoryReportScope::Delta` (`MemoryReportRequest::with_scope`, DSL `#{scope: "delta"}`) skips
+  the elements whose `vertex_layer`/`edge_layer` is `Base`. That check is one bit test each, so
+  the walk is O(visible elements) in bit tests plus O(delta) in property reads. With an element
+  cap (`max_elements`), a first pass counts the layer's own elements to compute the sampling
+  step. The rows of a delta report add up to the layer's `memory_usage().property_bytes`
+  exactly, as a full report of a `TraversalGraph` does (tested on a 1 % layer). The scope
+  applies only when `capabilities().layered` is set. Every other storage owns all it shows, so
+  there `Delta` reports the whole graph.
+
+The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-owned parts
+(masked, delta, and an owned base part): `0` for a shared index the layer did not touch.
 
 ## Limitations
 

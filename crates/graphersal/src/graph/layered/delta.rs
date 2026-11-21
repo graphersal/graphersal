@@ -2029,4 +2029,41 @@ impl Delta {
             self.graph.edge_count() as u64,
         )
     }
+
+    /// The structure figures of the memory report (`LayeredGraph::memory_structure`) for the
+    /// layer's `totals`: the delta's slots (added elements and stubs; vacant and spare ones),
+    /// its id and label indexes, its shape table, the stubs and the removed base elements.
+    pub(crate) fn structure(
+        &self,
+        totals: crate::graph::MemoryStats,
+    ) -> crate::graph::StructureMemory {
+        use crate::graph::memory_report::SlotUsage;
+        let (node_cap, edge_cap) = self.graph.capacity();
+        let (nodes, edges) = (self.graph.node_count(), self.graph.edge_count());
+        let (vacant_nodes, vacant_edges) = (self.graph.vacant_nodes(), self.graph.vacant_edges());
+        let vertices = SlotUsage::new(
+            nodes as u64,
+            vacant_nodes as u64,
+            node_cap.saturating_sub(nodes + vacant_nodes) as u64,
+            GraphType::node_slot_bytes() as u64,
+        );
+        let edges = SlotUsage::new(
+            edges as u64,
+            vacant_edges as u64,
+            edge_cap.saturating_sub(edges + vacant_edges) as u64,
+            GraphType::edge_slot_bytes() as u64,
+        );
+        crate::graph::StructureMemory::new(totals)
+            .with_slots(vertices, edges)
+            .with_index_bytes(
+                self.index.id_index_heap_bytes(),
+                self.index.label_index_heap_bytes(),
+            )
+            .with_shape_table_shapes(self.shapes.len() as u64)
+            .with_base_changes(
+                self.stubs.len() as u64,
+                self.removed_vertex_count as u64,
+                self.removed_edge_count as u64,
+            )
+    }
 }

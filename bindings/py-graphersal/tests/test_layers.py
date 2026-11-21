@@ -71,3 +71,18 @@ def test_the_dsl_steps_and_the_dsl_diff_run_from_python():
     assert graph.layer_diff()["added"] == []
     with pytest.raises(graphersal.GraphersalError, match="layer"):
         graph.query('g.v().has_layer("new").count().next()')
+
+
+def test_the_memory_report_scope_delta_reports_a_plain_graph_whole():
+    graph = modern()
+    full = graph.memory_report()
+    delta = graph.memory_report(scope="delta")
+    # A plain graph owns all it shows: the delta scope reports every row, nothing is shared.
+    assert (full["scope"], delta["scope"]) == ("all", "delta")
+    assert delta["properties"] == full["properties"]
+    assert delta["property_bytes"] == full["property_bytes"]
+    assert delta["shared_bytes"] == 0 == full["shared_bytes"]
+    assert delta["structure"]["totals"]["shared_bytes"] == 0
+    assert graph.memory_report(scope="all")["scope"] == "all"
+    with pytest.raises(graphersal.GraphersalError, match="scope"):
+        graph.memory_report(scope="base")

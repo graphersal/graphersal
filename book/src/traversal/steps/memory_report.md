@@ -3,7 +3,7 @@
 
 `memory_report` · category: [Graph information and files](../../traversal/step_reference.md#graph-information-and-files)
 
-Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots, and where the whole process memory goes (components: the graph, embedding models, the script engine, stores, the host's parts); #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted).
+Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots, and where the whole process memory goes (components: the graph, embedding models, the script engine, stores, the host's parts); #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted), #{scope: "delta"} reports only a layered graph's own elements with its base as shared_bytes (a plain graph owns all it shows).
 
 ## Forms
 

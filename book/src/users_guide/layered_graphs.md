@@ -87,6 +87,32 @@ A `g.layer_diff()` in a script sees the script's own earlier writes. It reads th
 never every base element, so it is cheap on a large base with a small layer. It asks for
 `Read` on `Data` (see [Permissions](permissions.md)).
 
+## Memory: what a layer weighs
+
+`g.memory_usage()` on a layer reports the layer's own footprint as `total_bytes`. The base it
+shares with other layers is reported beside it as `shared_bytes` and is not part of the total.
+The [memory report](memory_and_profiling.md#the-memory-report) breaks the layer's own part down
+with the option `scope`:
+
+```rhai
+let r = g.memory_report(#{scope: "delta"});
+[r.labels.map(|l| [l.label, l.elements]), r.shared_bytes, r.structure.removed_base_edges]
+```
+
+With `#{scope: "delta"}` the rows cover only the elements the layer added or modified (their
+labels and properties, as for a plain graph), the `structure` is the layer's own (its slots,
+indexes and totals, `base_stubs`, `removed_base_vertices`, `removed_base_edges`), and the base
+is the one figure `shared_bytes`. A removed base element is only counted, since the layer holds
+nothing of it but a tombstone. The `indexes` rows show the index bytes the layer owns: nothing
+for an index it shares with the base, the whole index for one it created. Without the option
+(`#{scope: "all"}`) the report walks every element the layer shows, base elements included, so
+it has the same rows as a report on the graph the layer shows. On a plain graph
+`#{scope: "delta"}` reports the whole graph, since a plain graph owns everything it shows.
+
+On the generated `large` graph (222 210 elements) with 1 100 vertices modified and 500 added,
+the delta report read 1 600 elements and the full report 222 210 (debug build: 62 ms against
+769 ms). The layer's own total was 475 KB beside a shared base of 51 MB.
+
 ## Trying a layer from the command line
 
 `graphersal --layer` runs the session on an empty layer over the `--graph`: the loaded graph

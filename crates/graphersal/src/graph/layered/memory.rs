@@ -36,6 +36,13 @@ impl LayeredGraph {
         stats
     }
 
+    /// The structure of the layer's memory report (`GraphStorage::memory_structure`): the
+    /// totals of [`Self::layer_memory`] (its own, the base as `shared_bytes`), the delta's slots,
+    /// id and label indexes and shape table, the stubs and the removed base elements.
+    pub(super) fn layer_structure(&self) -> crate::graph::StructureMemory {
+        self.delta.structure(self.layer_memory())
+    }
+
     /// The layer's own total (`GraphStorage::memory_footprint_bytes`): the cached walk while
     /// the layer did not change since, an estimate (never a walk) while an open unit holds
     /// changes, else a walk.
