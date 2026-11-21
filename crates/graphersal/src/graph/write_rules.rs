@@ -775,13 +775,17 @@ mod tests {
             let (mut g, _, _) = graph(schema);
             let name = ("name", ElementProperty::from("ann"));
             let cases: Vec<(&str, Vec<&str>, PropertyMap)> = vec![
-                ("plain", vec!["person"], props(&[name.clone()])),
+                ("plain", vec!["person"], props(std::slice::from_ref(&name))),
                 (
                     "duplicates",
                     vec!["person", "person"],
-                    props(&[name.clone()]),
+                    props(std::slice::from_ref(&name)),
                 ),
-                ("bad label", vec!["person", "a::b"], props(&[name.clone()])),
+                (
+                    "bad label",
+                    vec!["person", "a::b"],
+                    props(std::slice::from_ref(&name)),
+                ),
                 (
                     "vertex value",
                     vec!["person"],
@@ -830,7 +834,11 @@ mod tests {
                     vec!["person"],
                     props(&[name.clone(), ("zzz", 1_i64.into())]),
                 ),
-                ("unknown label", vec!["robot"], props(&[name.clone()])),
+                (
+                    "unknown label",
+                    vec!["robot"],
+                    props(std::slice::from_ref(&name)),
+                ),
                 ("unlabeled", vec![], props(&[])),
                 (
                     "two labels",

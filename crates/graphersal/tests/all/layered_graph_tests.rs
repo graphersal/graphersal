@@ -20,6 +20,7 @@
 //! kind equals a `TraversalGraph`'s for the same writes on the same data (committed and as a
 //! dry run), change sets apply across both, vetoes and rollbacks reach the hooks with their
 //! reason, the commit clock, and Rhai differentials of dry runs and captured commits.
+#![allow(clippy::type_complexity)] // state tuples of the differential
 
 #[cfg(feature = "script")]
 use std::collections::HashMap;
@@ -1721,7 +1722,8 @@ fn stale_handles_of_dropped_base_elements_answer_like_a_traversal_graph() {
         s.drop_vertex(marko).unwrap();
         s.drop_edge(created).unwrap();
         let mut out = Vec::new();
-        for node in [marko] {
+        {
+            let node = marko;
             out.push(format!(
                 "{:?} {:?} {:?} {:?} {:?} {} {}",
                 s.contains_vertex(node),
