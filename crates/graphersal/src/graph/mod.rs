@@ -69,6 +69,7 @@ pub(crate) mod vector_rules;
 /// Workload statistics: time-bucketed series of what an instance did.
 pub mod workload;
 pub mod write_checks;
+pub(crate) mod write_rules;
 pub use any_graph::{AnyGraph, IntoAnyGraph};
 pub use authorization::{
     AccessPolicy, AccessRequest, AccessRequestBuf, Action, ActionKind, AllowAll, Authorizer,
