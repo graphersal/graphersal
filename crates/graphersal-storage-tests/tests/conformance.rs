@@ -378,3 +378,53 @@ fn layered_touched_layer_keeps_exact_property_index_lookups() {
         .unwrap();
     assert_exact_lookups(&layer, "after the rollback");
 }
+
+/// Unique property indexes on a layer (S4.3): the enforcement part of
+/// `extension::unique_property_index_refuses_repeated_keys` (the layer cannot define the index
+/// itself until S4.4, so the base defines it) in three setups: the data and the index in the
+/// base (also beside vacant base slots), the index in an empty base and the data in the
+/// layer's delta, and a touched layer (a base vertex dropped and its id and value reused by an
+/// added one, another copied up), each checked against the overlays and the contract.
+#[test]
+fn layered_layers_enforce_the_base_unique_index() {
+    use graphersal::storage::LayeredGraph;
+    use graphersal_storage_tests::extension::{
+        assert_unique_index_enforced, unique_email_index, unique_index_data, unique_index_fixture,
+    };
+    let finish = |mut layer: LayeredGraph, setup: &str| {
+        assert_unique_index_enforced(&mut layer);
+        contract::assert_consistent(&layer);
+        layer
+            .check_layer_indexes()
+            .unwrap_or_else(|problem| panic!("{setup}: {problem}"));
+    };
+    for (setup, base) in [
+        ("base", TraversalGraph::new()),
+        ("vacant base", vacant_base()),
+    ] {
+        let mut base = base;
+        unique_index_fixture(&mut base);
+        finish(LayeredGraph::over(Arc::new(base)).unwrap(), setup);
+    }
+
+    let mut base = TraversalGraph::new();
+    base.set_definition(unique_email_index()).unwrap();
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    unique_index_data(&mut layer);
+    finish(layer, "delta");
+
+    let mut base = TraversalGraph::new();
+    unique_index_fixture(&mut base);
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    let a = layer.get_vertex_by_id("uq_a").unwrap().unwrap();
+    layer.drop_vertex(a).unwrap();
+    contract::vertex(
+        &mut layer,
+        Some("uq_a"),
+        &["uq"],
+        contract::props(&[("email", "a@x".into())]),
+    );
+    let b = layer.get_vertex_by_id("uq_b").unwrap().unwrap();
+    layer.set_vertex_property(b, "x".into(), 1.into()).unwrap();
+    finish(layer, "touched");
+}

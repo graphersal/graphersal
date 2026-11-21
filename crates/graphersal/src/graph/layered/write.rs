@@ -2,7 +2,8 @@
 //! write rules (`graph/write_rules.rs`) and its auto-id sequences.
 //!
 //! Every write of the layer calls its write-rule function first (nothing is mutated before the
-//! rule passed), then, for a create, `check_*_id_free`, then stores what the rule returned in
+//! rule passed; the rule includes the unique property indexes, checked over the index
+//! overlays), then, for a create, `check_*_id_free`, then stores what the rule returned in
 //! the delta. The view answers with the layer's CURRENT state: base elements as the base holds
 //! them minus tombstones, images in place of the base state of modified ones, delta elements
 //! from the delta, ids
@@ -16,9 +17,9 @@ use super::LayeredGraph;
 use super::handle::{LayeredEdge, LayeredVertex};
 use crate::error::{EDGE_ID_SEQUENCE, GraphError, VERTEX_ID_SEQUENCE};
 use crate::graph::GraphStorage;
-use crate::graph::schema::GraphSchema;
+use crate::graph::schema::{ElementKind, GraphSchema};
 use crate::graph::write_rules::{EdgeView, WriteView};
-use crate::value::PropertyMap;
+use crate::value::{ElementProperty, PropertyMap};
 
 impl WriteView for LayeredGraph {
     type Vertex = LayeredVertex;
@@ -73,6 +74,39 @@ impl WriteView for LayeredGraph {
 
     fn contains_edge_id(&self, id: &str) -> bool {
         self.get_edge_by_id(id).is_ok_and(|found| found.is_some())
+    }
+
+    /// Over the index overlays (`index.rs`, [`LayeredGraph::layer_unique_check`]).
+    fn check_unique_vertex(
+        &self,
+        me: Option<LayeredVertex>,
+        labels: &[CompactString],
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError> {
+        self.layer_unique_check(
+            ElementKind::Vertex,
+            me.map(LayeredVertex::slot),
+            labels.iter().map(CompactString::as_str),
+            properties,
+            write,
+        )
+    }
+
+    fn check_unique_edge(
+        &self,
+        me: Option<LayeredEdge>,
+        label: Option<&str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError> {
+        self.layer_unique_check(
+            ElementKind::Edge,
+            me.map(LayeredEdge::slot),
+            label,
+            properties,
+            write,
+        )
     }
 }
 

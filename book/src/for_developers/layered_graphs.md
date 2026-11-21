@@ -146,14 +146,19 @@ alone, with the base as one line, is planned.
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused until index deltas** (stage 4), with `GraphError::Unsupported` ("... not supported
   on a layered graph yet"):
-  - a layer over a base with a unique property index;
   - a layer over a base whose schema has vector rules, and a schema with vector rules on a
     layer;
   - property index, compression rule and embedding model definitions in the layer's catalog,
     and compression estimates over element kinds the layer changed.
 
-  A base with plain indexes or compression rules is fine: the layer reads it. The layer
-  stores its own values uncompressed. `compression_stats` reports the base's figures.
+  A base with plain or unique indexes or compression rules is fine: the layer reads it. The
+  layer stores its own values uncompressed. `compression_stats` reports the base's figures.
+  The base's unique indexes are enforced over base + delta: every write `TraversalGraph`
+  checks (creates, property and path writes, a label added, an edge relabeled) is checked at
+  the same point of its write rule, against the base elements the layer neither dropped nor
+  copied up plus the layer's own elements, with the same `GraphError::UniqueViolation` (index,
+  value, the other element's id). A unique index the base keeps disabled is not enforced and
+  `unique_index_duplicates` forwards the base's report.
 - **Order.** Unordered traversals list the same elements as a `TraversalGraph` holding the
   same data, and in the same order for every write except these:
   - after a drop followed by a create, a `TraversalGraph` reuses the freed slot and the layer

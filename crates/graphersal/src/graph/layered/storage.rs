@@ -506,6 +506,9 @@ impl GraphStorage for LayeredGraph {
         Ok(self.layer_index_count(element, label, key, transform, range))
     }
 
+    /// The base's answer: an enforced unique index is enforced by the layer over base + delta
+    /// (`None`), a disabled one stays disabled with the base's report (the layer cannot define
+    /// or redefine an index yet).
     fn unique_index_duplicates(
         &self,
         name: &str,

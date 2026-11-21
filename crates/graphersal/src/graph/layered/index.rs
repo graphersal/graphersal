@@ -45,20 +45,32 @@
 //! slice of several keys is collected, sorted and deduplicated as there. An overlay holding
 //! nothing of its own (both layer-owned parts empty) is the base's slice, one branch. Counts
 //! are `base - masked + delta` from postings lengths, the stats combine the parts
-//! ([`IndexOverlay::stats`]). Unique checks are S4.3; layer-defined indexes ([`BasePart`]
-//! owned by the layer) S4.4.
+//! ([`IndexOverlay::stats`]).
+//!
+//! **Unique checks** (S4.3): a write the base's unique indexes cover is checked at the point
+//! `TraversalGraph` checks it (the write rules call `WriteView::check_unique_*`), with
+//! `PropertyIndexes::unique_conflict`'s order of indexes run over the layer-owned parts'
+//! lookups, and each key looked up in its overlay ([`IndexOverlay::other_holder`]): a holder
+//! in `delta` other than the written element, or a base holder that is neither the written
+//! element nor excluded. So a base element the layer dropped, or changed (its image holds its
+//! current values), frees its base values, and the error names the index, the value and the
+//! other element's id exactly as `TraversalGraph` does. A unique index stored in the base over
+//! repeated values is not installed there (neither served nor enforced), so it is not an
+//! overlay either: inherited as disabled, its report forwarded (`unique_index_duplicates`).
+//! Layer-defined indexes ([`BasePart`] owned by the layer) are S4.4.
 
 use super::LayeredGraph;
 use super::handle::{DELTA_BIT, LayeredEdge, LayeredVertex};
+use crate::error::GraphError;
 use crate::graph::postings::Iter;
 use crate::graph::property_index::{
     IndexKey, IndexState, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
-    PropertyIndexTransform, PropertyIndexes,
+    PropertyIndexTransform, PropertyIndexes, UniqueConflict,
 };
 use crate::graph::schema::ElementKind;
 use crate::graph::topology::{EdgeIndex, NodeIndex};
 use crate::graph::{GraphStorage, TraversalGraph};
-use crate::value::PropertyMap;
+use crate::value::{ElementProperty, PropertyMap};
 
 /// Where the base part of an overlay comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +120,13 @@ impl LayerIndexes {
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.bases.is_empty()
+    }
+
+    /// Whether an overlay of an enforced unique index exists (every write's unique check is
+    /// then more than one branch).
+    #[inline]
+    pub(crate) fn has_unique(&self) -> bool {
+        self.delta.has_unique()
     }
 
     /// The number of overlays.
@@ -259,6 +278,34 @@ impl<'a> IndexOverlay<'a> {
             masked.bytes.saturating_add(delta.bytes),
         )
         .with_skipped(combine(base.skipped, masked.skipped, delta.skipped))
+    }
+
+    /// The first visible element other than `me` (a layer slot) holding a key equal to `key`
+    /// (`IndexState::holder_entries`' equality), in key-then-slot order over the merged view,
+    /// the order `TraversalGraph`'s unique check searches a graph with the layer's data
+    /// (plan decision P4 aside): a base slot `excluded` names (removed, or imaged: its current
+    /// values are in `delta`) holds nothing, so a base element that dropped or changed the
+    /// value frees it. An enforced unique index has at most one other holder of a key except
+    /// for numbers (a `float64` equals each `int64` of its value), so the merge is a minimum of
+    /// the two parts' first holders.
+    pub(crate) fn other_holder(
+        &self,
+        key: &IndexKey,
+        me: Option<u32>,
+        excluded: impl Fn(u32) -> bool,
+    ) -> Option<u32> {
+        let in_base = self
+            .base
+            .holder_entries(key)
+            .find(|(_, slot)| Some(*slot) != me && !excluded(*slot));
+        let in_delta = self
+            .delta
+            .holder_entries(key)
+            .find(|(_, slot)| Some(*slot) != me);
+        match (in_base, in_delta) {
+            (Some(base), Some(delta)) => Some(base.min(delta).1),
+            (base, delta) => base.or(delta).map(|(_, slot)| slot),
+        }
     }
 
     /// The visible slots inside `range` (layer slots: a base or image slot with bit 31 clear,
@@ -507,6 +554,80 @@ impl LayeredGraph {
     ) -> Option<u64> {
         self.overlay_for(element, label, key, transform)?
             .count(range)
+    }
+}
+
+/// The unique property indexes of a layer's writes (S4.3), served from the overlays: the
+/// layer's side of `WriteView::check_unique_vertex` / `check_unique_edge`.
+impl LayeredGraph {
+    /// `Err` with the [`GraphError::UniqueViolation`] a `TraversalGraph` with the layer's data
+    /// returns for the same write (`PropertyIndexes::unique_conflict`'s arguments, `me` a
+    /// layer slot): the indexes are searched in its order by the lookups of the layer-owned
+    /// parts, each key over its overlay ([`IndexOverlay::other_holder`]: base elements not
+    /// excluded plus the delta's), and the other element's id is resolved through the layer.
+    /// One branch without an enforced unique index.
+    pub(crate) fn layer_unique_check<'l>(
+        &self,
+        element: ElementKind,
+        me: Option<u32>,
+        labels: impl IntoIterator<Item = &'l str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError> {
+        let overlays = self.delta.indexes();
+        if !overlays.has_unique() {
+            return Ok(());
+        }
+        let conflict = overlays.delta.unique_conflict_by(
+            element,
+            labels,
+            properties,
+            write,
+            |position, _, key| {
+                overlays
+                    .overlay(&self.base, position)?
+                    .other_holder(key, me, |slot| excluded(self, element, slot))
+            },
+        );
+        let Some(conflict) = conflict else {
+            return Ok(());
+        };
+        Err(self.layer_unique_violation(conflict))
+    }
+
+    /// The error of a unique `conflict` found over the overlays: the index's name, element and
+    /// key, the value written and the other element's id (a base slot's from the base: an
+    /// image keeps its element's id; an added element's from the delta).
+    #[cold]
+    fn layer_unique_violation(&self, conflict: UniqueConflict) -> GraphError {
+        let (position, slot, value) = conflict.into_parts();
+        let Some(overlay) = self.delta.indexes().overlay(&self.base, position) else {
+            return GraphError::invalid_element_state("a unique index moved during a write");
+        };
+        let index = overlay.base;
+        let element = index.element();
+        let existing = if slot & DELTA_BIT == 0 {
+            self.base.slot_id(element, slot)
+        } else {
+            let id = match element {
+                ElementKind::Vertex => self
+                    .delta
+                    .added_vertex_at(slot & !DELTA_BIT)
+                    .and_then(|node| GraphStorage::vertex_id(self, node).ok().flatten()),
+                ElementKind::Edge => self
+                    .delta
+                    .added_edge_at(slot & !DELTA_BIT)
+                    .and_then(|edge| GraphStorage::edge_id(self, edge).ok().flatten()),
+            };
+            id.map(str::to_string)
+        };
+        GraphError::unique_violation(
+            index.name(),
+            element,
+            index.key(),
+            &value,
+            existing.unwrap_or_default(),
+        )
     }
 }
 
