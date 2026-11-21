@@ -21,8 +21,8 @@
 //!   compression estimate over changed elements) and vector rules are refused on a layer with
 //!   `GraphError::Unsupported`; the script must fail on the layer with that refusal, and only
 //!   scripts that define or estimate one of them may;
-//! - a later task of the series, named: memory figures (S1.11: `memory_usage`,
-//!   `shrink_to_fit`), with the same state afterwards.
+//! - a later task of the series, named (none today: the memory figures of S1.11 compare
+//!   equal).
 //!
 //! Anything else is a bug.
 #![cfg(all(feature = "script", feature = "io"))]
@@ -93,14 +93,10 @@ fn is_p5_refusal(outcome: &Outcome) -> bool {
     })
 }
 
-/// A difference that a later task of the series removes, by name; `None` for any other.
+/// A difference that a later task of the series removes, by name; `None` for any other. None
+/// is left: the memory figures (S1.11) compare equal since the layer reports its own.
 fn later_task(script: &str, expected: &Outcome, actual: &Outcome) -> Option<&'static str> {
-    let _ = actual;
-    if (script.contains("memory_usage(") || script.contains("shrink_to_fit("))
-        && expected.state == actual.state
-    {
-        return Some("S1.11 (memory figures)");
-    }
+    let _ = (script, expected, actual);
     None
 }
 

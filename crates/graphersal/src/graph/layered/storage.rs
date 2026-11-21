@@ -537,6 +537,30 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::unique_index_duplicates(&*self.base, name)
     }
 
+    /// Releases the spare capacity of the layer's own structures (the delta: slots above the
+    /// last used one, indexes, maps, shapes no map uses any more); the base is never touched.
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        self.shrink_layer();
+        Ok(())
+    }
+
+    /// The layer's own footprint (its delta and dirty bitsets) as the total, with the shared
+    /// base's total as [`MemoryStats::shared_bytes`](crate::graph::MemoryStats::shared_bytes),
+    /// outside the total (design §7; module `memory`). Always `Some`.
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
+        Ok(Some(self.layer_memory()))
+    }
+
+    /// The layer's own total, cached by its commit position and the delta's slot counts; an
+    /// estimate while an open unit holds changes (as `TraversalGraph`).
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        Ok(Some(self.layer_footprint_bytes()))
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        Ok(self.layer_footprint_hint())
+    }
+
     /// The base's policy: a layer runs under the limits its base was built with.
     fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
         GraphStorage::execution_policy(&*self.base)

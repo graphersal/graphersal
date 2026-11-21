@@ -72,6 +72,17 @@ impl SlotBits {
         }
     }
 
+    /// The heap bytes of the words (`memory_usage()`): their allocated capacity.
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        self.words.capacity() as u64 * std::mem::size_of::<u64>() as u64
+    }
+
+    /// Releases the spare capacity of the words (the bits stay: a set covering every base slot
+    /// keeps covering it).
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.words.shrink_to_fit();
+    }
+
     /// The bit itself, without the [`Self::any`] shortcut.
     #[inline]
     fn word_contains(&self, slot: u32) -> bool {

@@ -52,8 +52,9 @@ use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::{CommitHooks, RollbackReason};
 use crate::graph::schema::GraphSchema;
 use crate::graph::storage::{UNWOUND, UnitMark, close_on_unwind};
-use crate::graph::undo::{HOOK_PANICKED, mark_position, now_nanos};
+use crate::graph::undo::{COMMIT_OPERATION, HOOK_PANICKED, mark_position, now_nanos};
 use crate::graph::{EdgeHandle, UnitChanges, VertexHandle};
+use crate::traversal::memory_budget::MemoryBudget;
 
 /// A log grown beyond this many entries is freed, not kept, when its outermost unit ends (as
 /// `TraversalGraph`'s).
@@ -187,6 +188,10 @@ pub(crate) struct UnitLog {
     started_at: Option<i128>,
     /// The start of the last outermost unit: the next one never starts earlier.
     last_started_at: i128,
+    /// The memory budget the outermost open unit is checked against at its commit (the
+    /// process ceiling, `MemoryBudget::unit_check`), started when it opened on the layer's own
+    /// footprint; `None` without a ceiling.
+    budget: Option<MemoryBudget>,
 }
 
 impl UnitLog {
@@ -277,6 +282,7 @@ impl UnitLog {
             self.sequences_raised = false;
             self.metadata = CommitMetadata::default();
             self.started_at = None;
+            self.budget = None;
             if self.entries.capacity() > KEEP_CAPACITY {
                 self.entries = Vec::new();
             } else {
@@ -289,6 +295,14 @@ impl UnitLog {
 impl LayeredGraph {
     /// Opens a unit (`GraphStorage::begin_unit`); the outermost one starts at `clock`.
     pub(super) fn begin_layer_unit(&mut self, clock: i128) -> UnitMark {
+        if self.units.depth == 0 {
+            // The outermost unit takes the starting point of the process memory ceiling, if
+            // there is one, on the layer's own footprint (no walk far below the ceiling,
+            // `MemoryBudget::start`), as `TraversalGraph::begin_undo_unit_at` does. The layer
+            // measures itself without failing.
+            self.units.budget = crate::traversal::memory_limit::effective_limit()
+                .and_then(|limit| MemoryBudget::new(limit).start(&*self).ok());
+        }
         self.units.begin(clock)
     }
 
@@ -298,8 +312,11 @@ impl LayeredGraph {
     }
 
     /// Closes a unit and keeps its changes, as `TraversalGraph::commit_undo_unit` does (without
-    /// the vector rules, refused on a layer, and without the memory budget check, task S1.11).
-    /// The outermost commit of a unit that changed something (or only raised an auto-id
+    /// the vector rules, refused on a layer). First, when the process has a memory ceiling, the
+    /// outermost unit is checked against it (`MemoryBudget::unit_check` on the layer's own
+    /// footprint): a unit that grew the memory in use over the budget is rolled back (the hooks
+    /// get `after_rollback`) and fails with [`GraphError::ResourceLimitExceeded`] (operation
+    /// `"commit"`). The outermost commit of a unit that changed something (or only raised an auto-id
     /// sequence) advances the commit sequence number (checked: at `u64::MAX` the unit is rolled
     /// back and the commit fails with [`GraphError::SequenceOverflow`]) and takes the commit
     /// time from the instance clock. While hooks are registered it first derives the unit's
@@ -311,6 +328,12 @@ impl LayeredGraph {
         {
             self.units.close();
             return Ok(());
+        }
+        if let Some(budget) = self.units.budget
+            && let Err(error) = budget.unit_check(&*self, COMMIT_OPERATION)
+        {
+            self.rollback_layer_unit(mark, &RollbackReason::failed(&error));
+            return Err(error);
         }
         let Some(commit_seq) = self.units.last_commit_seq.checked_add(1) else {
             let error = GraphError::SequenceOverflow {

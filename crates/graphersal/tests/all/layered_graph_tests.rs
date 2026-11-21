@@ -21,13 +21,16 @@
 //! dry run), change sets apply across both, vetoes and rollbacks reach the hooks with their
 //! reason, the commit clock, and Rhai differentials of dry runs and captured commits.
 
+#[cfg(feature = "script")]
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use graphersal::prelude::*;
+#[cfg(feature = "script")]
+use graphersal::storage::IntoAnyGraph;
 use graphersal::storage::{
-    Graph, GraphStatistics, GraphStorage, IntoAnyGraph, JsonPath, LayeredEdge, LayeredGraph,
-    LayeredVertex, RollbackReason,
+    Graph, GraphStatistics, GraphStorage, JsonPath, LayeredEdge, LayeredGraph, LayeredVertex,
+    RollbackReason,
 };
 
 fn modern_base() -> Arc<TraversalGraph> {
@@ -5695,4 +5698,122 @@ fn rhai_captured_commits_match_the_plain_graph() {
     }
     assert!(differences.is_empty(), "{}", differences.join("\n"));
     assert!(commits >= 60, "the hooks really saw commits: {commits}");
+}
+
+/// Adds `n` vertices labelled `tmp` with ids `<prefix><i>` to `g`.
+fn add_tmp_vertices(g: &mut LayeredGraph, prefix: &str, n: usize) -> Result<(), GraphError> {
+    for i in 0..n {
+        g.add_vertex(
+            Some(format!("{prefix}{i}").into()),
+            vec!["tmp".into()],
+            Default::default(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The memory figures of a layer (S1.11): its own footprint as the total, the shared base
+/// beside it; writes grow the layer, never the base's figure, and `shrink_to_fit` releases the
+/// delta's spare capacity, also through `Graph` and the DSL.
+#[test]
+fn a_layer_reports_its_own_footprint_and_the_shared_base() {
+    let base = modern_base();
+    let base_total = base.memory_usage().unwrap().unwrap().total_bytes();
+    let layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let untouched = layer.memory_usage().unwrap().unwrap();
+    assert_eq!(untouched.shared_bytes, base_total);
+    assert!(untouched.total_bytes() > 0 && untouched.total_bytes() < base_total);
+    let graph = Graph::new(layer);
+    for i in 0..1000i64 {
+        GraphTraversalSource::new(&mut *graph.write())
+            .add_v("p")
+            .property("i", i)
+            .iterate()
+            .unwrap();
+    }
+    let grown = graph.read().memory_usage().unwrap().unwrap();
+    assert_eq!(grown.shared_bytes, base_total, "the base is unchanged");
+    assert!(grown.total_bytes() > untouched.total_bytes() + 1000 * 64);
+    let report = graph.shrink_to_fit().unwrap();
+    assert!(report.released_bytes().unwrap() > 0);
+    assert_eq!(graph.shrink_to_fit().unwrap().released_bytes(), Some(0));
+    assert_eq!(graph.read().vertex_count().unwrap(), 1006);
+    assert_eq!(TraversalGraph::vertex_count(&base), 6);
+}
+
+/// The DSL's `g.memory_usage()` on a layer: the total is the layer's own, `shared_bytes` the
+/// base's.
+#[cfg(feature = "script")]
+#[test]
+fn the_dsl_memory_usage_of_a_layer_names_the_shared_base() {
+    let base = modern_base();
+    let base_total = base.memory_usage().unwrap().unwrap().total_bytes();
+    let graph = Arc::new(Graph::new(LayeredGraph::over(base).unwrap()));
+    let shared = render(
+        Arc::clone(&graph),
+        "let m = g.memory_usage(); [m.shared_bytes, m.total_bytes < m.shared_bytes]",
+    )
+    .unwrap();
+    assert_eq!(shared, format!("[{base_total}, true]"));
+}
+
+/// The memory budget at a layer's commit (S1.11), as `TraversalGraph`'s
+/// (`memory_budget_tests::a_transaction_over_the_budget_rolls_back_at_its_commit`): a unit that
+/// grows the layer over the ceiling rolls back with `ResourceLimitExceeded` naming `commit`; a
+/// smaller one commits; a unit that only removes commits over the ceiling. The ceiling is
+/// measured on the layer's OWN footprint: the shared base (larger than the ceiling here) does
+/// not count.
+#[test]
+fn a_layer_unit_over_the_memory_budget_rolls_back_at_its_commit() {
+    use graphersal::exec::memory_limit_scope;
+    let mut layer = modern_layer();
+    let stats = layer.memory_usage().unwrap().unwrap();
+    let limit = stats.total_bytes() + 1_000;
+    assert!(
+        stats.shared_bytes > limit,
+        "the base alone is over the ceiling"
+    );
+    memory_limit_scope(limit, || {
+        let err = layer
+            .transaction(|g| add_tmp_vertices(g, "tmp", 100))
+            .unwrap_err();
+        match &err {
+            GraphError::ResourceLimitExceeded {
+                operation,
+                max: Some(max),
+                observed: Some(observed),
+                ..
+            } => {
+                assert_eq!(*operation, "commit");
+                assert_eq!(*max, limit);
+                assert!(*observed > limit);
+            }
+            other => panic!("expected ResourceLimitExceeded, got {other:?}"),
+        }
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        assert_eq!(layer.last_commit_seq().unwrap(), 0);
+        // A savepoint is not checked on its own: the outermost commit decides.
+        assert!(
+            layer
+                .transaction(|g| g.transaction(|inner| add_tmp_vertices(inner, "tmp", 100)))
+                .is_err()
+        );
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        layer
+            .transaction(|g| add_tmp_vertices(g, "tmp", 3))
+            .unwrap();
+        assert_eq!(layer.vertex_count().unwrap(), 9);
+        assert_eq!(layer.last_commit_seq().unwrap(), 1);
+    });
+    // Over a ceiling the layer itself exceeds, removing still commits; adding does not.
+    memory_limit_scope(1, || {
+        assert!(
+            layer
+                .transaction(|g| add_tmp_vertices(g, "more", 1))
+                .is_err()
+        );
+        let marko = v(&layer, "1");
+        layer.transaction(|g| g.drop_vertex(marko)).unwrap();
+        assert_eq!(layer.vertex_count().unwrap(), 8);
+    });
 }
