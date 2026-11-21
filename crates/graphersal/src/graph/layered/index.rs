@@ -35,13 +35,26 @@
 //!
 //! The parts of all overlays are kept as two [`PropertyIndexes`] (masked, delta) with the base's
 //! positions and label lookups ([`PropertyIndexes::empty_like`]), so the maintenance is the
-//! base's own (`PropertyIndexes::slot_entries`, `IndexState::account`). Lookups and counts from
-//! the overlays, `property_indexes()` stats and the removal of the scan fallbacks are S4.2;
-//! unique checks S4.3; layer-defined indexes ([`BasePart`] owned by the layer) S4.4.
+//! base's own (`PropertyIndexes::slot_entries`, `IndexState::account`).
+//!
+//! **Reads** (S4.2): a lookup finds its overlay by the parts' lookups and merges, key by key
+//! and slot by slot, the base part's slice minus the excluded slots with the delta part's
+//! ([`IndexOverlay::slots`]), so it returns exactly what a `TraversalGraph` with the layer's
+//! data returns, in its order (an image at its base slot, an added element after every base
+//! slot: plan decision P4 covers a `TraversalGraph` that reused a freed slot); an `each`
+//! slice of several keys is collected, sorted and deduplicated as there. An overlay holding
+//! nothing of its own (both layer-owned parts empty) is the base's slice, one branch. Counts
+//! are `base - masked + delta` from postings lengths, the stats combine the parts
+//! ([`IndexOverlay::stats`]). Unique checks are S4.3; layer-defined indexes ([`BasePart`]
+//! owned by the layer) S4.4.
 
 use super::LayeredGraph;
-use super::handle::{LayeredEdge, LayeredVertex};
-use crate::graph::property_index::{IndexKey, IndexState, PropertyIndexes};
+use super::handle::{DELTA_BIT, LayeredEdge, LayeredVertex};
+use crate::graph::postings::Iter;
+use crate::graph::property_index::{
+    IndexKey, IndexState, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
+    PropertyIndexTransform, PropertyIndexes,
+};
 use crate::graph::schema::ElementKind;
 use crate::graph::topology::{EdgeIndex, NodeIndex};
 use crate::graph::{GraphStorage, TraversalGraph};
@@ -192,21 +205,308 @@ impl LayerIndexes {
     pub(crate) fn bytes(&self) -> u64 {
         self.masked.bytes() + self.delta.bytes()
     }
+
+    /// The position of the overlay of the index on `(element, label, key, transform)`
+    /// (`label` `None`: the label-less one), by the lookups the layer-owned parts keep.
+    #[inline]
+    pub(crate) fn find(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+    ) -> Option<usize> {
+        self.delta.find_position(element, label, key, transform)
+    }
+}
+
+impl<'a> IndexOverlay<'a> {
+    /// Whether the layer holds nothing of its own for this index: no base slot of it is
+    /// excluded (an excluded slot's base entries are in `masked`) and nothing is added to it.
+    /// The base part then answers alone, exactly as the base does.
+    #[inline]
+    pub(crate) fn is_clean(&self) -> bool {
+        self.masked.is_empty() && self.delta.is_empty()
+    }
+
+    /// The exact number of visible elements inside `range`: `base - masked + delta`, each
+    /// from postings lengths; `None` when a part cannot count its slice exactly (an `each`
+    /// slice of more than one key in that part, [`IndexState::count`]). With at most one key
+    /// per part no element is counted twice: an element's entries are all in the base part
+    /// (not excluded) or all in the delta part.
+    pub(crate) fn count(&self, range: &PropertyIndexRange) -> Option<u64> {
+        if self.is_clean() {
+            return self.base.count(range);
+        }
+        self.base
+            .count(range)?
+            .checked_sub(self.masked.count(range)?)?
+            .checked_add(self.delta.count(range)?)
+    }
+
+    /// The stats of the visible index: `entries` and `skipped` exactly `base - masked +
+    /// delta`; `distinct_values` the base's plus the delta's keys, an upper bound (a key whose
+    /// base holders are all excluded, or one in both parts, counts as it is: exact would walk
+    /// the layer's keys on every run, and the optimizer reads only estimates); `bytes` the
+    /// layer-owned parts only (masked and delta), since the shared base part is the base's
+    /// (`MemoryStats::shared_bytes`).
+    pub(crate) fn stats(&self) -> PropertyIndexStats {
+        let (base, masked, delta) = (self.base.stats(), self.masked.stats(), self.delta.stats());
+        let combine = |b: u64, m: u64, d: u64| b.saturating_sub(m).saturating_add(d);
+        PropertyIndexStats::new(
+            combine(base.entries, masked.entries, delta.entries),
+            base.distinct_values.saturating_add(delta.distinct_values),
+            masked.bytes.saturating_add(delta.bytes),
+        )
+        .with_skipped(combine(base.skipped, masked.skipped, delta.skipped))
+    }
+
+    /// The visible slots inside `range` (layer slots: a base or image slot with bit 31 clear,
+    /// an added element's with it set), in `TraversalGraph`'s order for the same data: by key
+    /// then slot, where the base part (minus the slots `excluded` names) and the delta part are
+    /// merged key by key and slot by slot ([`Merged`]); an `each` slice whose parts hold two
+    /// keys or more is collected, sorted by slot and deduplicated, as `IndexState::slice` does
+    /// for a multi-key slice (with at most one key in all, key-then-slot order is slot order,
+    /// so either way the order is the one a `TraversalGraph` gives). A clean overlay is the
+    /// base part's slice.
+    pub(crate) fn slots<X>(&self, range: &PropertyIndexRange, excluded: X) -> SlotsOf<'a>
+    where
+        X: Fn(u32) -> bool + 'a,
+    {
+        if self.is_clean() {
+            return self.base.slice(range);
+        }
+        let (Some(base), Some(delta)) = (
+            self.base.range_postings(range),
+            self.delta.range_postings(range),
+        ) else {
+            // The range holds nothing (it is the same for every part).
+            return Box::new(std::iter::empty());
+        };
+        if self.base.has_each() {
+            let keys = |state: &'a IndexState| {
+                state
+                    .range_postings(range)
+                    .map_or(0, |keys| keys.take(2).count())
+            };
+            if keys(self.base) + keys(self.delta) > 1 {
+                let mut slots: Vec<u32> = Merged::new(base, delta, excluded).collect();
+                slots.sort_unstable();
+                slots.dedup();
+                return Box::new(slots.into_iter());
+            }
+        }
+        Box::new(Merged::new(base, delta, excluded))
+    }
+}
+
+/// The slots of one lookup: one boxed iterator per call, its type decided once (no enum or
+/// `Option` chain in the loop).
+pub(crate) type SlotsOf<'a> = Box<dyn Iterator<Item = u32> + 'a>;
+
+/// The key-then-slot merge of an overlay's base part, minus the excluded base slots, and its
+/// delta part ([`IndexOverlay::slots`]). Within a key the two sorted postings are merged by
+/// slot: an image sits at its base slot among the base's, an added element (bit 31) after
+/// every base slot, which is where a `TraversalGraph` with the same data and no reused slot
+/// holds it (plan decision P4). An element is never in both parts, so nothing repeats.
+struct Merged<'a, B, D, X>
+where
+    B: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+    D: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+{
+    base: std::iter::Peekable<B>,
+    delta: std::iter::Peekable<D>,
+    /// The postings of the current key in each part (empty when the part lacks the key).
+    base_slots: Iter<'a>,
+    delta_slots: Iter<'a>,
+    /// The next slot of each current postings, read ahead for the merge.
+    next_base: Option<u32>,
+    next_delta: Option<u32>,
+    excluded: X,
+}
+
+impl<'a, B, D, X> Merged<'a, B, D, X>
+where
+    B: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+    D: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+    X: Fn(u32) -> bool,
+{
+    fn new(base: B, delta: D, excluded: X) -> Self {
+        Self {
+            base: base.peekable(),
+            delta: delta.peekable(),
+            base_slots: Iter::One(None),
+            delta_slots: Iter::One(None),
+            next_base: None,
+            next_delta: None,
+            excluded,
+        }
+    }
+
+    /// Moves to the next key of either part (the smaller; both when equal); `false` when
+    /// neither part has one.
+    fn next_key(&mut self) -> bool {
+        let order = match (self.base.peek(), self.delta.peek()) {
+            (None, None) => return false,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some((base, _)), Some((delta, _))) => base.cmp(delta),
+        };
+        if order.is_le()
+            && let Some((_, slots)) = self.base.next()
+        {
+            self.base_slots = slots;
+        }
+        if order.is_ge()
+            && let Some((_, slots)) = self.delta.next()
+        {
+            self.delta_slots = slots;
+        }
+        true
+    }
+}
+
+impl<'a, B, D, X> Iterator for Merged<'a, B, D, X>
+where
+    B: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+    D: Iterator<Item = (&'a IndexKey, Iter<'a>)>,
+    X: Fn(u32) -> bool,
+{
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        loop {
+            if self.next_base.is_none() {
+                let excluded = &self.excluded;
+                self.next_base = self.base_slots.find(|slot| !excluded(*slot));
+            }
+            if self.next_delta.is_none() {
+                self.next_delta = self.delta_slots.next();
+            }
+            match (self.next_base, self.next_delta) {
+                (Some(base), Some(delta)) if base < delta => return self.next_base.take(),
+                (_, Some(_)) => return self.next_delta.take(),
+                (Some(_), None) => return self.next_base.take(),
+                (None, None) => {
+                    if !self.next_key() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `true` iff the base slot `slot` of kind `element` is excluded from the base part of every
 /// overlay: dirty, and removed or imaged (the read path's bit tests, in its order).
 fn excluded(layer: &LayeredGraph, element: ElementKind, slot: u32) -> bool {
     match element {
-        ElementKind::Vertex => {
-            layer.dirty_vertices.contains(slot)
-                && (layer.delta.is_removed_vertex(slot)
-                    || layer.delta.imaged_vertices().contains(slot))
-        }
-        ElementKind::Edge => {
-            layer.dirty_edges.contains(slot)
-                && (layer.delta.is_removed_edge(slot) || layer.delta.is_imaged_edge(slot))
-        }
+        ElementKind::Vertex => excluded_vertex(layer, slot),
+        ElementKind::Edge => excluded_edge(layer, slot),
+    }
+}
+
+/// [`excluded`] for a base vertex slot.
+#[inline]
+fn excluded_vertex(layer: &LayeredGraph, slot: u32) -> bool {
+    layer.dirty_vertices.contains(slot)
+        && (layer.delta.is_removed_vertex(slot) || layer.delta.imaged_vertices().contains(slot))
+}
+
+/// [`excluded`] for a base edge slot.
+#[inline]
+fn excluded_edge(layer: &LayeredGraph, slot: u32) -> bool {
+    layer.dirty_edges.contains(slot)
+        && (layer.delta.is_removed_edge(slot) || layer.delta.is_imaged_edge(slot))
+}
+
+/// The lookups, counts and stats of a layer's property indexes, served from the overlays
+/// (S4.2): what `impl GraphStorage for LayeredGraph` answers.
+impl LayeredGraph {
+    /// The overlay of the index on `(element, label, key, transform)`; `None` without one.
+    #[inline]
+    fn overlay_for(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+    ) -> Option<IndexOverlay<'_>> {
+        let overlays = self.delta.indexes();
+        overlays.overlay(&self.base, overlays.find(element, label, key, transform)?)
+    }
+
+    /// Every index the layer serves, with the stats of its overlay
+    /// ([`IndexOverlay::stats`]), in the base's catalog order.
+    pub(crate) fn layer_index_infos(&self) -> Vec<PropertyIndexInfo> {
+        let overlays = self.delta.indexes();
+        (0..overlays.len())
+            .filter_map(|position| overlays.overlay(&self.base, position))
+            .map(|overlay| overlay.base.info(overlay.stats()))
+            .collect()
+    }
+
+    /// The vertices of the index on `(vertex, label, key, transform)` inside `range`
+    /// ([`IndexOverlay::slots`]): exactly the slice a `TraversalGraph` with the layer's data
+    /// returns, in its order (plan decision P4 aside); `None` without such an index.
+    pub(crate) fn layer_index_vertices<'a>(
+        &'a self,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>> {
+        let overlay = self.overlay_for(ElementKind::Vertex, label, key, transform)?;
+        let slots = overlay.slots(range, move |slot| excluded_vertex(self, slot));
+        // The generation is the slot's: exact maintenance names only live elements' slots.
+        Some(Box::new(slots.filter_map(move |slot| {
+            if slot & DELTA_BIT != 0 {
+                return self.delta.added_vertex_at(slot & !DELTA_BIT);
+            }
+            let index = NodeIndex::from_slot(slot);
+            let vertex = self.base.graph.node_weight(index)?;
+            Some(LayeredVertex::from_base(crate::graph::VertexHandle::new(
+                index, vertex.3,
+            )))
+        })))
+    }
+
+    /// The edge counterpart of [`Self::layer_index_vertices`].
+    pub(crate) fn layer_index_edges<'a>(
+        &'a self,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>> {
+        let overlay = self.overlay_for(ElementKind::Edge, label, key, transform)?;
+        let slots = overlay.slots(range, move |slot| excluded_edge(self, slot));
+        Some(Box::new(slots.filter_map(move |slot| {
+            if slot & DELTA_BIT != 0 {
+                return self.delta.added_edge_at(slot & !DELTA_BIT);
+            }
+            let index = EdgeIndex::from_slot(slot);
+            let edge = self.base.graph.edge_weight(index)?;
+            Some(LayeredEdge::from_base(crate::graph::EdgeHandle::new(
+                index, edge.3.own,
+            )))
+        })))
+    }
+
+    /// The exact number of visible elements of the index on `(element, label, key,
+    /// transform)` inside `range` ([`IndexOverlay::count`]); `None` without such an index or
+    /// when a part cannot count its slice exactly.
+    pub(crate) fn layer_index_count(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Option<u64> {
+        self.overlay_for(element, label, key, transform)?
+            .count(range)
     }
 }
 

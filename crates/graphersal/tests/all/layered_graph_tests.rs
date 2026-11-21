@@ -2675,9 +2675,10 @@ fn writes_on_coded_and_compressed_base_values() {
     assert!(edge_reads_the_base(&fresh, &base, "r"));
 }
 
-/// Plan S1.5 correction: a property index lookup never returns fewer elements than exist. While
-/// the layer has added, removed or changed an element of the kind asked about, the lookup and
-/// the count answer `None` (the caller scans); untouched, they are the base's.
+/// Plan S1.5 correction: a property index lookup never returns fewer elements than exist. Since
+/// S4.2 a lookup and a count on a layer that added, removed or changed an element of the kind
+/// asked about answer from the index overlays (the layer's own elements included); untouched,
+/// they are the base's.
 #[test]
 fn property_index_lookups_never_miss_layer_changes() {
     use graphersal::catalog::{Definition, PropertyIndexDefinition};
@@ -2742,8 +2743,8 @@ fn property_index_lookups_never_miss_layer_changes() {
     assert_eq!(lookup(&layer, "marko"), Some(1));
     assert_eq!(
         count(&layer, ElementKind::Edge, "created", "weight", 0.4.into()),
-        None,
-        "an added edge: the edge counts scan"
+        Some(2),
+        "an added edge: the edge counts come from the overlay"
     );
     layer
         .insert_vertex(
@@ -2752,10 +2753,10 @@ fn property_index_lookups_never_miss_layer_changes() {
             props(&[("name", "zed".into())]),
         )
         .unwrap();
-    assert_eq!(lookup(&layer, "zed"), None);
+    assert_eq!(lookup(&layer, "zed"), Some(1));
     assert_eq!(
         count(&layer, ElementKind::Vertex, "person", "name", "zed".into()),
-        None
+        Some(1)
     );
     // Through traversals, against a `TraversalGraph` with the same indexes and writes: an
     // added match, a renamed base vertex, a dropped one, a changed and a relabeled edge.

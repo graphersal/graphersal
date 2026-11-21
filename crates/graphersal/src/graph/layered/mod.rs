@@ -82,8 +82,9 @@
 //! Property-index overlays (S4.1, `index`): per index the base has installed, the layer keeps
 //! the base entries of the base elements it removed or holds an image of (`masked`) and the
 //! entries of its added elements and images (`delta`), maintained by every write and undo; the
-//! base index itself is read in place, never copied. Lookups still forward to the base while
-//! the kind is untouched and scan otherwise (serving them from the overlays is S4.2).
+//! base index itself is read in place, never copied. Lookups, counts and the index stats are
+//! served from the overlays (S4.2): the base slice minus the excluded slots merged with the
+//! delta part, key then slot; an overlay holding nothing of its own reads the base slice alone.
 //!
 //! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
 //! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
@@ -146,8 +147,8 @@ use units::UnitLog;
 /// - persistence: a layer cannot be saved, opened from a Store or journaled;
 /// - a base with a unique property index or vector rules ([`Self::over`]); vector rules,
 ///   property index, compression rule and embedding model definitions on the layer. The
-///   base's plain indexes serve lookups only while the layer has not touched that element
-///   kind; then the engine scans.
+///   base's plain indexes serve the layer's data exactly (lookups, counts, stats), through
+///   overlays the layer keeps of them.
 ///
 /// Values the layer stores are uncompressed. After a drop followed by a create, or a drop or
 /// label removal followed by a label lookup, unordered traversals may list elements in
@@ -601,7 +602,7 @@ mod tests {
 
     /// A vertex image lives in the vertex's (invisible) stub; an equal-value write makes no
     /// dirty bit; a return to clean drops the image but keeps the dirty bit and the stub, and
-    /// the kind counts as untouched again for the property-index lookups. A gained label is a
+    /// the kind counts as untouched again (for the compression estimate). A gained label is a
     /// stub membership in the delta's label bucket, a lost one a bit in its lost set.
     #[test]
     fn a_vertex_image_lives_in_its_stub_and_returns_to_clean() {
@@ -659,8 +660,8 @@ mod tests {
     }
 
     /// A rolled-back unit leaves the delta's own bookkeeping as before: no image, no
-    /// tombstone, no relabeled or gained edge, the kinds untouched again for the property-index
-    /// lookups; the dirty bits and the stubs the unit made may stay (invisible).
+    /// tombstone, no relabeled or gained edge, the kinds untouched again (for the compression
+    /// estimate); the dirty bits and the stubs the unit made may stay (invisible).
     #[test]
     fn a_rollback_restores_the_delta_bookkeeping() {
         use crate::graph::hooks::RollbackReason;

@@ -444,30 +444,24 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::estimate_compression(&*self.base, request)
     }
 
-    /// The base's indexes. A lookup forwards to the base only while the layer has not added,
-    /// removed or modified any element of the kind asked about; otherwise it answers `None`
-    /// and the caller scans, so a lookup never misses an element the layer added or changed,
-    /// nor returns one it removed or changed (index deltas: stage 4).
+    /// The indexes installed in the base, each served from the layer's overlay of it (module
+    /// `index`): `entries` and `skipped` are the layer's exactly, `distinct_values` an upper
+    /// bound (the base's keys plus the layer's own), `bytes` the layer-owned parts only (the
+    /// shared base part is in `MemoryStats::shared_bytes`).
     fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
-        GraphStorage::property_indexes(&*self.base)
+        Ok(self.layer_index_infos())
     }
 
+    /// From the overlay: the base's slice minus the slots the layer removed or holds an image
+    /// of, merged with the layer's own entries; exact as the base's (an overlay holding nothing
+    /// of its own is the base's slice, read in place).
     fn vertices_by_property_index<'a>(
         &'a self,
         label: Option<&'a str>,
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
-        if self.delta.vertices_touched() {
-            return Ok(None);
-        }
-        Ok(
-            GraphStorage::vertices_by_property_index(&*self.base, label, key, range)?.map(
-                |found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-                    Box::new(found.map(LayeredVertex::from_base))
-                },
-            ),
-        )
+        Ok(self.layer_index_vertices(label, key, None, range))
     }
 
     fn edges_by_property_index<'a>(
@@ -476,16 +470,7 @@ impl GraphStorage for LayeredGraph {
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
-        if self.delta.edges_touched() {
-            return Ok(None);
-        }
-        Ok(
-            GraphStorage::edges_by_property_index(&*self.base, label, key, range)?.map(
-                |found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-                    Box::new(found.map(LayeredEdge::from_base))
-                },
-            ),
-        )
+        Ok(self.layer_index_edges(label, key, None, range))
     }
 
     fn vertices_by_transformed_property_index<'a>(
@@ -495,19 +480,7 @@ impl GraphStorage for LayeredGraph {
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
-        if self.delta.vertices_touched() {
-            return Ok(None);
-        }
-        Ok(GraphStorage::vertices_by_transformed_property_index(
-            &*self.base,
-            label,
-            key,
-            transform,
-            range,
-        )?
-        .map(|found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-            Box::new(found.map(LayeredVertex::from_base))
-        }))
+        Ok(self.layer_index_vertices(label, key, Some(transform), range))
     }
 
     fn edges_by_transformed_property_index<'a>(
@@ -517,23 +490,11 @@ impl GraphStorage for LayeredGraph {
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
-        if self.delta.edges_touched() {
-            return Ok(None);
-        }
-        Ok(GraphStorage::edges_by_transformed_property_index(
-            &*self.base,
-            label,
-            key,
-            transform,
-            range,
-        )?
-        .map(|found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-            Box::new(found.map(LayeredEdge::from_base))
-        }))
+        Ok(self.layer_index_edges(label, key, Some(transform), range))
     }
 
-    /// The base's count while the kind is untouched (see [`Self::property_indexes`]), else
-    /// `None` (the caller counts).
+    /// From the overlay's postings lengths: `base - masked + delta` (`None` where a part's
+    /// `each` slice holds more than one key).
     fn count_by_property_index(
         &self,
         element: ElementKind,
@@ -542,14 +503,7 @@ impl GraphStorage for LayeredGraph {
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
-        let touched = match element {
-            ElementKind::Vertex => self.delta.vertices_touched(),
-            ElementKind::Edge => self.delta.edges_touched(),
-        };
-        if touched {
-            return Ok(None);
-        }
-        GraphStorage::count_by_property_index(&*self.base, element, label, key, transform, range)
+        Ok(self.layer_index_count(element, label, key, transform, range))
     }
 
     fn unique_index_duplicates(
@@ -589,8 +543,9 @@ impl GraphStorage for LayeredGraph {
     }
 
     /// `writable`, `atomic` (the layer's undo log, `units`) and `change_capture` (commit hooks
-    /// and dry runs, the change set derived from that log). The property index lookups are the
-    /// base's, so they are exact when the base's are.
+    /// and dry runs, the change set derived from that log). The property index lookups are
+    /// the overlays' (base slice minus the excluded slots plus the layer's entries, every
+    /// excluded slot answered by its current value), so they are exact when the base's are.
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         let base = GraphStorage::capabilities(&*self.base)?;
         Ok(StorageCapabilities::none()
