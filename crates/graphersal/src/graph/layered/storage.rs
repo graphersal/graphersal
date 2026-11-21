@@ -1,12 +1,14 @@
 //! `impl GraphStorage for LayeredGraph`: the reads answer from the base (an untouched element
 //! with one bit test, no lookup) merged with the delta; every write runs its write rule
 //! (`graph/write_rules.rs`) first and then stores in the delta. Drops of base elements leave a
-//! tombstone (S1.5); property and label writes to base elements are not implemented yet.
+//! tombstone (S1.5); property, path and label writes to base elements go into images (S1.6,
+//! `delta` module docs).
 
 use compact_str::CompactString;
 
+use super::LayeredGraph;
+use super::delta::{PropertyChange, VertexView};
 use super::handle::{LayeredEdge, LayeredVertex};
-use super::{LayeredGraph, delta::VertexView};
 use crate::error::GraphError;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::schema::defaults::CreateContext;
@@ -19,22 +21,6 @@ use crate::graph::{
     PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates, VertexHandle,
 };
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
-
-/// The operation a property or label write to a base element names until the layer can change
-/// base elements (task S1.6).
-const BASE_WRITES: &str = "writes to base elements of a layered graph yet";
-
-/// `Ok` for a write to an element of the delta, [`GraphError::Unsupported`] for one to a base
-/// element. Called after the write rule passed and found something to change, so a stale
-/// handle, an invalid value or a no-op answers exactly as in `TraversalGraph`.
-#[inline]
-fn delta_only(is_delta: bool) -> Result<(), GraphError> {
-    if is_delta {
-        Ok(())
-    } else {
-        Err(GraphError::unsupported(BASE_WRITES))
-    }
-}
 
 /// The labels of a vertex view (empty for none).
 #[inline]
@@ -239,36 +225,56 @@ impl GraphStorage for LayeredGraph {
         )
     }
 
-    /// The base's label index (no scan), without removed base vertices, then the layer's.
+    /// The base's label index (no scan), without removed base vertices and those whose image
+    /// lost `label` (one bit test per dirty member, the lost set fetched once per call), in
+    /// the base bucket's order; then the delta's bucket: the added vertices and the base
+    /// vertices that gained `label`, in the order of the writes.
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = LayeredVertex> + 'a>, GraphError> {
+        let clean = !self.dirty_vertices.any();
+        let lost = self.delta.lost_vertex_label(label);
         Ok(Box::new(
             self.base
                 .index
                 .get_nodes_by_label(label)
                 .into_iter()
                 .flatten()
-                .filter(self.base_vertex_filter())
+                .filter(move |node| {
+                    let slot = node.index().slot();
+                    clean
+                        || !self.dirty_vertices.contains(slot)
+                        || (!self.delta.is_removed_vertex(slot)
+                            && lost.is_none_or(|lost| !lost.contains(slot)))
+                })
                 .map(LayeredVertex::from_base)
                 .chain(self.delta.vertices_by_label(label)),
         ))
     }
 
-    /// The edge counterpart of [`Self::vertices_by_label`].
+    /// The base's label index without removed and relabeled base edges, then the base edges
+    /// relabeled to `label` (in the order they gained it), then the added edges.
     fn edges_by_label<'a>(
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = LayeredEdge> + 'a>, GraphError> {
+        let clean = !self.dirty_edges.any();
+        let relabeled = self.delta.relabeled_edges();
         Ok(Box::new(
             self.base
                 .index
                 .get_edges_by_label(label)
                 .into_iter()
                 .flatten()
-                .filter(self.base_edge_filter())
+                .filter(move |edge| {
+                    let slot = edge.index().slot();
+                    clean
+                        || !self.dirty_edges.contains(slot)
+                        || (!self.delta.is_removed_edge(slot) && !relabeled.contains(slot))
+                })
                 .map(LayeredEdge::from_base)
+                .chain(self.delta.gained_edges(label))
                 .chain(self.delta.edges_by_label(label)),
         ))
     }
@@ -318,9 +324,10 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::estimate_compression(&*self.base, request)
     }
 
-    /// The base's indexes. The lookups below drop the base elements the layer removed (the
-    /// dirty-bit filter of the scans). Elements the layer ADDED are not in them yet (index
-    /// deltas: stage 4).
+    /// The base's indexes. A lookup forwards to the base only while the layer has not added,
+    /// removed or modified any element of the kind asked about; otherwise it answers `None`
+    /// and the caller scans, so a lookup never misses an element the layer added or changed,
+    /// nor returns one it removed or changed (index deltas: stage 4).
     fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
         GraphStorage::property_indexes(&*self.base)
     }
@@ -331,14 +338,13 @@ impl GraphStorage for LayeredGraph {
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
+        if self.delta.vertices_touched() {
+            return Ok(None);
+        }
         Ok(
             GraphStorage::vertices_by_property_index(&*self.base, label, key, range)?.map(
                 |found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-                    Box::new(
-                        found
-                            .filter(self.base_vertex_filter())
-                            .map(LayeredVertex::from_base),
-                    )
+                    Box::new(found.map(LayeredVertex::from_base))
                 },
             ),
         )
@@ -350,14 +356,13 @@ impl GraphStorage for LayeredGraph {
         key: &'a str,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
+        if self.delta.edges_touched() {
+            return Ok(None);
+        }
         Ok(
             GraphStorage::edges_by_property_index(&*self.base, label, key, range)?.map(
                 |found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-                    Box::new(
-                        found
-                            .filter(self.base_edge_filter())
-                            .map(LayeredEdge::from_base),
-                    )
+                    Box::new(found.map(LayeredEdge::from_base))
                 },
             ),
         )
@@ -370,6 +375,9 @@ impl GraphStorage for LayeredGraph {
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
+        if self.delta.vertices_touched() {
+            return Ok(None);
+        }
         Ok(GraphStorage::vertices_by_transformed_property_index(
             &*self.base,
             label,
@@ -378,11 +386,7 @@ impl GraphStorage for LayeredGraph {
             range,
         )?
         .map(|found| -> Box<dyn Iterator<Item = LayeredVertex> + 'a> {
-            Box::new(
-                found
-                    .filter(self.base_vertex_filter())
-                    .map(LayeredVertex::from_base),
-            )
+            Box::new(found.map(LayeredVertex::from_base))
         }))
     }
 
@@ -393,6 +397,9 @@ impl GraphStorage for LayeredGraph {
         transform: &PropertyIndexTransform,
         range: &PropertyIndexRange,
     ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
+        if self.delta.edges_touched() {
+            return Ok(None);
+        }
         Ok(GraphStorage::edges_by_transformed_property_index(
             &*self.base,
             label,
@@ -401,14 +408,12 @@ impl GraphStorage for LayeredGraph {
             range,
         )?
         .map(|found| -> Box<dyn Iterator<Item = LayeredEdge> + 'a> {
-            Box::new(
-                found
-                    .filter(self.base_edge_filter())
-                    .map(LayeredEdge::from_base),
-            )
+            Box::new(found.map(LayeredEdge::from_base))
         }))
     }
 
+    /// The base's count while the kind is untouched (see [`Self::property_indexes`]), else
+    /// `None` (the caller counts).
     fn count_by_property_index(
         &self,
         element: ElementKind,
@@ -417,13 +422,11 @@ impl GraphStorage for LayeredGraph {
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
     ) -> Result<Option<u64>, GraphError> {
-        // The base's count includes the base elements the layer removed: unknown once any
-        // element of that kind is dirty (the caller counts the filtered candidates instead).
-        let dirty = match element {
-            ElementKind::Vertex => self.dirty_vertices.any(),
-            ElementKind::Edge => self.dirty_edges.any(),
+        let touched = match element {
+            ElementKind::Vertex => self.delta.vertices_touched(),
+            ElementKind::Edge => self.delta.edges_touched(),
         };
-        if dirty {
+        if touched {
             return Ok(None);
         }
         GraphStorage::count_by_property_index(&*self.base, element, label, key, transform, range)
@@ -503,6 +506,8 @@ impl GraphStorage for LayeredGraph {
         self.store_edge(id, label, from, to, properties)
     }
 
+    /// The rule first; a base vertex gets the new labels in its image (copied up on the first
+    /// change).
     fn add_vertex_label(
         &mut self,
         node: LayeredVertex,
@@ -511,9 +516,7 @@ impl GraphStorage for LayeredGraph {
         let Some(new_labels) = write_rules::add_vertex_label(&*self, node, &label)? else {
             return Ok(false);
         };
-        delta_only(node.is_delta())?;
-        self.delta
-            .set_vertex_labels(node, new_labels, &mut self.statistics);
+        self.store_vertex_labels(node, new_labels)?;
         Ok(true)
     }
 
@@ -525,9 +528,7 @@ impl GraphStorage for LayeredGraph {
         let Some(new_labels) = write_rules::remove_vertex_label(&*self, node, label)? else {
             return Ok(false);
         };
-        delta_only(node.is_delta())?;
-        self.delta
-            .set_vertex_labels(node, new_labels, &mut self.statistics);
+        self.store_vertex_labels(node, new_labels)?;
         Ok(true)
     }
 
@@ -539,8 +540,18 @@ impl GraphStorage for LayeredGraph {
         if !write_rules::set_edge_label(&*self, edge, &label)? {
             return Ok(false);
         }
-        delta_only(edge.is_delta())?;
-        self.delta.set_edge_label(edge, label, &mut self.statistics);
+        if edge.is_delta() {
+            self.delta.set_edge_label(edge, label, &mut self.statistics);
+        } else {
+            self.dirty_edges.set(edge.slot());
+            let base = edge.to_base();
+            if self
+                .delta
+                .set_base_edge_label(&self.base, base, label, &mut self.statistics)?
+            {
+                self.delta.settle_base_edge(&self.base, base);
+            }
+        }
         Ok(true)
     }
 
@@ -551,9 +562,7 @@ impl GraphStorage for LayeredGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         let value = write_rules::set_vertex_property(&*self, node, &key, value)?;
-        delta_only(node.is_delta())?;
-        self.delta.set_vertex_property(node, key, value);
-        Ok(())
+        self.change_vertex_property(node, PropertyChange::Set(key, value))
     }
 
     fn set_edge_property(
@@ -563,9 +572,7 @@ impl GraphStorage for LayeredGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         let value = write_rules::set_edge_property(&*self, edge, &key, value)?;
-        delta_only(edge.is_delta())?;
-        self.delta.set_edge_property(edge, key, value);
-        Ok(())
+        self.change_edge_property(edge, PropertyChange::Set(key, value))
     }
 
     /// `TraversalGraph`'s path write (the leaf coerced, the whole resulting property checked),
@@ -577,9 +584,7 @@ impl GraphStorage for LayeredGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         let (key, value) = write_rules::set_vertex_property_path(&*self, node, path, value)?;
-        delta_only(node.is_delta())?;
-        self.delta.set_vertex_property(node, key, value);
-        Ok(())
+        self.change_vertex_property(node, PropertyChange::Set(key, value))
     }
 
     fn set_edge_property_path(
@@ -589,9 +594,7 @@ impl GraphStorage for LayeredGraph {
         value: ElementProperty,
     ) -> Result<(), GraphError> {
         let (key, value) = write_rules::set_edge_property_path(&*self, edge, path, value)?;
-        delta_only(edge.is_delta())?;
-        self.delta.set_edge_property(edge, key, value);
-        Ok(())
+        self.change_edge_property(edge, PropertyChange::Set(key, value))
     }
 
     fn remove_vertex_property_path(
@@ -600,17 +603,12 @@ impl GraphStorage for LayeredGraph {
         path: &JsonPath,
     ) -> Result<(), GraphError> {
         match write_rules::remove_vertex_property_path(&*self, node, path)? {
-            PathRemoval::Nothing => {}
-            PathRemoval::Drop(key) => {
-                delta_only(node.is_delta())?;
-                self.delta.drop_vertex_property(node, &key);
-            }
+            PathRemoval::Nothing => Ok(()),
+            PathRemoval::Drop(key) => self.change_vertex_property(node, PropertyChange::Drop(key)),
             PathRemoval::Store(key, value) => {
-                delta_only(node.is_delta())?;
-                self.delta.set_vertex_property(node, key, value);
+                self.change_vertex_property(node, PropertyChange::Set(key, value))
             }
         }
-        Ok(())
     }
 
     fn remove_edge_property_path(
@@ -619,17 +617,12 @@ impl GraphStorage for LayeredGraph {
         path: &JsonPath,
     ) -> Result<(), GraphError> {
         match write_rules::remove_edge_property_path(&*self, edge, path)? {
-            PathRemoval::Nothing => {}
-            PathRemoval::Drop(key) => {
-                delta_only(edge.is_delta())?;
-                self.delta.drop_edge_property(edge, &key);
-            }
+            PathRemoval::Nothing => Ok(()),
+            PathRemoval::Drop(key) => self.change_edge_property(edge, PropertyChange::Drop(key)),
             PathRemoval::Store(key, value) => {
-                delta_only(edge.is_delta())?;
-                self.delta.set_edge_property(edge, key, value);
+                self.change_edge_property(edge, PropertyChange::Set(key, value))
             }
         }
-        Ok(())
     }
 
     /// A stale handle is a no-op (idempotent drop), as in `TraversalGraph`. A base vertex is
@@ -650,9 +643,7 @@ impl GraphStorage for LayeredGraph {
         if !write_rules::drop_vertex_property(&*self, node, prop)? {
             return Ok(());
         }
-        delta_only(node.is_delta())?;
-        self.delta.drop_vertex_property(node, prop);
-        Ok(())
+        self.change_vertex_property(node, PropertyChange::Drop(prop.into()))
     }
 
     /// A stale handle is a no-op; a base edge is tombstoned (`drop_base_edge`).
@@ -672,9 +663,7 @@ impl GraphStorage for LayeredGraph {
         if !write_rules::drop_edge_property(&*self, edge, prop)? {
             return Ok(());
         }
-        delta_only(edge.is_delta())?;
-        self.delta.drop_edge_property(edge, prop);
-        Ok(())
+        self.change_edge_property(edge, PropertyChange::Drop(prop.into()))
     }
 
     /// Raises the layer's own sequences (`max`, never lowered); the base's stay as they are.
@@ -690,6 +679,88 @@ impl GraphStorage for LayeredGraph {
 }
 
 impl LayeredGraph {
+    /// Stores the label list a label rule returned (a change: the rule answered `Some`): in the
+    /// delta vertex, or in the image of the base vertex (copied up on its first change; a
+    /// return to clean checked when it had one). The dirty bit is set before the copy-up.
+    fn store_vertex_labels(
+        &mut self,
+        node: LayeredVertex,
+        new_labels: Vec<CompactString>,
+    ) -> Result<(), GraphError> {
+        if node.is_delta() {
+            self.delta
+                .set_vertex_labels(node, new_labels, &mut self.statistics);
+            return Ok(());
+        }
+        self.dirty_vertices.set(node.slot());
+        let base = node.to_base();
+        if self
+            .delta
+            .set_base_vertex_labels(&self.base, base, new_labels, &mut self.statistics)?
+        {
+            self.delta.settle_base_vertex(&self.base, base);
+        }
+        Ok(())
+    }
+
+    /// Stores one property change a write rule returned. A delta vertex takes it as it is; for
+    /// a base vertex a change that changes nothing (plan P6: an identical value by
+    /// `identity_eq`, a drop of an absent key) is skipped without an image, any other goes
+    /// into its image (copied up on the first change; a return to clean checked when it had
+    /// one).
+    fn change_vertex_property(
+        &mut self,
+        node: LayeredVertex,
+        change: PropertyChange,
+    ) -> Result<(), GraphError> {
+        if node.is_delta() {
+            match change {
+                PropertyChange::Set(key, value) => self.delta.set_vertex_property(node, key, value),
+                PropertyChange::Drop(key) => self.delta.drop_vertex_property(node, &key),
+            }
+            return Ok(());
+        }
+        if change.is_noop(GraphStorage::vertex_properties(&*self, node)?) {
+            return Ok(());
+        }
+        self.dirty_vertices.set(node.slot());
+        let base = node.to_base();
+        if self
+            .delta
+            .change_base_vertex_property(&self.base, base, change)?
+        {
+            self.delta.settle_base_vertex(&self.base, base);
+        }
+        Ok(())
+    }
+
+    /// The edge counterpart of [`Self::change_vertex_property`].
+    fn change_edge_property(
+        &mut self,
+        edge: LayeredEdge,
+        change: PropertyChange,
+    ) -> Result<(), GraphError> {
+        if edge.is_delta() {
+            match change {
+                PropertyChange::Set(key, value) => self.delta.set_edge_property(edge, key, value),
+                PropertyChange::Drop(key) => self.delta.drop_edge_property(edge, &key),
+            }
+            return Ok(());
+        }
+        if change.is_noop(GraphStorage::edge_properties(&*self, edge)?) {
+            return Ok(());
+        }
+        self.dirty_edges.set(edge.slot());
+        let base = edge.to_base();
+        if self
+            .delta
+            .change_base_edge_property(&self.base, base, change)?
+        {
+            self.delta.settle_base_edge(&self.base, base);
+        }
+        Ok(())
+    }
+
     /// Drops the live base vertex `node` as `TraversalGraph::remove_vertex_raw` drops one: its
     /// incident edges first, each once (a self-loop from the outgoing list only), in the order
     /// of its lists (added edges at its stub, newest first, then its base edges), then the

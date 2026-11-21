@@ -1,6 +1,6 @@
 //! The delta of a [`LayeredGraph`](super::LayeredGraph): what the layer stores beside the base.
 //!
-//! Design `ai/roadmap/layered-graph.md` §3. Today it holds the elements the layer ADDS, in a
+//! Design `ai/roadmap/layered-graph.md` §3. It holds the elements the layer ADDS, in a
 //! slot store of their own built from `TraversalGraph`'s parts (plan P2: the delta is not a
 //! small `TraversalGraph`): a [`GraphType`] topology (stable slots, LIFO free lists, linked
 //! adjacency), the slot [`Generations`], an own [`Labels`] table and [`ShapeTable`], and a
@@ -16,7 +16,8 @@
 //! topology, which carries the delta part of its adjacency lists. The map base slot -> stub
 //! (`stubs`) is consulted only behind the base vertex's dirty bit, so a clean vertex never
 //! touches a hash map (plan P8). A stub is invisible: it is not in [`Delta::vertices`], the
-//! counts, the statistics, the id index or the label indexes, and no layer handle names it
+//! counts, the statistics or the id index, it is in a label bucket only for a label its base
+//! vertex gained (images, below), and no layer handle names it
 //! (`stub_bases` turns a stub endpoint back into the base vertex's handle; [`Delta::vertex`]
 //! and the adjacency of a delta handle refuse a stub slot). A stub stays when its last edge is
 //! dropped (it is empty then, and still invisible); its base vertex stays dirty.
@@ -37,8 +38,46 @@
 //! the slot is freed, its generation bumped, `stubs` and `stub_bases` cleared together, so
 //! [`Delta::stub_index`] never hands out the stub of a removed vertex.
 //!
-//! The images of modified base elements are task S1.6; until then a live dirty base element
-//! answers with the base's own state.
+//! # Images: modified base elements (S1.6)
+//!
+//! The first write that changes a base vertex or edge copies it up whole: its labels and its
+//! property map with LOGICAL values (a base map may be coded or hold compressed or deduplicated
+//! strings; the image holds the plain values the base's readers return, so a read answers
+//! identically). Later writes change the image. The image is found only behind the element's
+//! dirty bit, and then only when its bit in `imaged_vertices` / `imaged_edges` is set, so a
+//! dirty element without an image (a stub, a lost base edge) pays a bit test, not a lookup:
+//!
+//! - **A vertex image lives in the vertex's stub** (S1.4): the stub's label set and property map
+//!   ARE the image (empty, `LabelSetId::EMPTY`, while there is none). One hash lookup
+//!   (`stubs`), the same one the vertex's added edges need.
+//! - **An edge image** is an entry of `edge_images`, keyed by base slot.
+//!
+//! [`Delta::base_vertex`] / [`Delta::base_edge`] check the tombstone first, then the image, and
+//! otherwise answer with the base's own state.
+//!
+//! **Return to clean:** when a write leaves an image identical to the base element (labels in
+//! order, and every property, in order, by `value/identity.rs` `identity_eq`), the image is
+//! dropped and the element reads the base again. The check runs only after a write to an
+//! element that already HAD an image (a fresh copy-up differs from the base by construction:
+//! the write that made it changed something), and costs one pass over the labels and the map.
+//! The dirty bit stays set (plan invariant S1.5): the element may still have a stub or lost
+//! edges, and a set bit alone never means "changed".
+//!
+//! **Label lookups of modified base elements**, kept as a function of the current state (so a
+//! return to clean needs no extra step):
+//! - a base vertex that LOST a base label has its bit set in `lost_vertex_labels[label]`: a
+//!   by-label scan of the base bucket fetches that set once per scan and tests one bit per
+//!   dirty member (never a hash lookup per element); members keep the base bucket's order;
+//! - a base vertex that GAINED a label its base element lacks is a member of the delta's label
+//!   bucket through its STUB handle, in the order of the writes, interleaved with the added
+//!   vertices exactly as a `TraversalGraph` appends both ([`Delta::vertices_by_label`] turns
+//!   the stub back into the base handle);
+//! - a base edge whose label differs from its base label has its bit set in `relabeled_edges`
+//!   (skipped in its base bucket) and is listed in `gained_edge_labels[label]`, which a
+//!   by-label scan lists after the base bucket and before the added edges. A `TraversalGraph`
+//!   appends a relabeled edge to the bucket, interleaved with new edges of that label: the
+//!   layer lists the same members, in another order only when a bucket holds both relabeled
+//!   base edges and added edges.
 //!
 //! The delta stores what the write rules (`graph/write_rules.rs`) returned: no check runs here.
 //! Values are stored uncompressed (plan P5).
@@ -56,7 +95,8 @@ use crate::graph::topology::{Direction, NodeIndex};
 use crate::graph::{
     EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, TraversalGraph, VertexHandle,
 };
-use crate::value::{ElementProperty, PropertyMap};
+use crate::value::identity::identity_eq;
+use crate::value::{ElementProperty, PropertyMap, logical_element};
 
 /// The state of one vertex as a read sees it: what a delta vertex or the image of a modified
 /// base vertex supplies (an untouched base vertex is read from the base directly).
@@ -77,7 +117,7 @@ pub(crate) struct EdgeView<'a> {
     pub(crate) endpoints: (LayeredVertex, LayeredVertex),
 }
 
-/// The layer's own data: today the added elements.
+/// The layer's own data: added elements, stubs, tombstones and images (module docs).
 #[derive(Debug)]
 pub(crate) struct Delta {
     /// The added vertices and edges, in the delta's own slot space (bit 31 clear here).
@@ -106,6 +146,85 @@ pub(crate) struct Delta {
     removed_vertex_count: usize,
     /// The number of set bits in `removed_edges`.
     removed_edge_count: usize,
+    /// Base vertex slots whose stub holds an image (module docs), read behind the dirty bit.
+    pub(super) imaged_vertices: SlotBits,
+    /// Base edge slots with an entry in `edge_images`.
+    imaged_edges: SlotBits,
+    /// The number of set bits in `imaged_vertices`.
+    vertex_image_count: usize,
+    /// The images of modified base edges, by base slot.
+    edge_images: hashbrown::HashMap<u32, EdgeImage, FnvBuildHasher>,
+    /// Per base label: the base vertex slots whose image lacks it (module docs).
+    lost_vertex_labels: hashbrown::HashMap<CompactString, SlotBits, FnvBuildHasher>,
+    /// Base edge slots whose image's label differs from the base edge's.
+    relabeled_edges: SlotBits,
+    /// Per label: the base edges relabeled to it, in the order they gained it (a removal moves
+    /// the last one into its place, as a label bucket does).
+    gained_edge_labels: hashbrown::HashMap<CompactString, Vec<EdgeHandle>, FnvBuildHasher>,
+}
+
+/// The copied-up state of a modified base edge: what a write may change (its endpoints and id
+/// never change).
+#[derive(Debug)]
+struct EdgeImage {
+    /// `None` for an unlabeled edge.
+    label: Option<CompactString>,
+    /// As the base stores it: `None` when the base edge has no map and no write gave it one.
+    properties: Option<PropertyMap>,
+}
+
+/// One property change of a base element, as the write rules returned it.
+pub(crate) enum PropertyChange {
+    /// Set `key` to the value.
+    Set(CompactString, ElementProperty),
+    /// Remove `key`.
+    Drop(CompactString),
+}
+
+impl PropertyChange {
+    /// `true` when applying the change to `current` (the element's map as the layer reads it)
+    /// would change nothing: the key holds an identical value (`identity_eq`, so `1` and `1.0`
+    /// differ) or, for a drop, is absent. Such a write creates no image (plan P6).
+    pub(crate) fn is_noop(&self, current: Option<&PropertyMap>) -> bool {
+        match self {
+            PropertyChange::Set(key, value) => current
+                .and_then(|map| map.get(key))
+                .is_some_and(|old| identity_eq(old, value)),
+            PropertyChange::Drop(key) => current.is_none_or(|map| map.get(key).is_none()),
+        }
+    }
+
+    /// Applies the change to an image map, the value made logical first.
+    fn apply(self, shapes: &mut ShapeTable, map: &mut PropertyMap) {
+        match self {
+            PropertyChange::Set(key, value) => {
+                shapes.insert_full(map, key, logical(value));
+            }
+            PropertyChange::Drop(key) => {
+                shapes.shift_remove_full(map, &key);
+            }
+        }
+    }
+}
+
+/// `value` with every storage-only string (compressed, deduplicated) made plain: what the
+/// delta stores (plan P5).
+#[inline]
+fn logical(value: ElementProperty) -> ElementProperty {
+    if value.holds_compressed() {
+        value.into_logical()
+    } else {
+        value
+    }
+}
+
+/// Whether two property maps are identical: the same keys in the same order, each value
+/// `identity_eq` (the return-to-clean test, module docs).
+fn maps_identical(a: &PropertyMap, b: &PropertyMap) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|((ka, va), (kb, vb))| ka == kb && identity_eq(va, vb))
 }
 
 impl Default for Delta {
@@ -123,6 +242,13 @@ impl Default for Delta {
             removed_edges: SlotBits::default(),
             removed_vertex_count: 0,
             removed_edge_count: 0,
+            imaged_vertices: SlotBits::default(),
+            imaged_edges: SlotBits::default(),
+            vertex_image_count: 0,
+            edge_images: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
+            lost_vertex_labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
+            relabeled_edges: SlotBits::default(),
+            gained_edge_labels: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
         }
     }
 }
@@ -179,7 +305,8 @@ impl Delta {
             .map(|edge| LayeredEdge::from_delta(EdgeHandle::new(edge.id(), edge.weight().3.own)))
     }
 
-    /// The added vertices carrying `label`, in the label bucket's order.
+    /// The added vertices carrying `label` and the base vertices that gained it (members
+    /// through their stub, turned back into the base handle), in the label bucket's order.
     #[inline]
     pub(crate) fn vertices_by_label<'a>(
         &'a self,
@@ -189,7 +316,10 @@ impl Delta {
             .get_nodes_by_label(label)
             .into_iter()
             .flatten()
-            .map(LayeredVertex::from_delta)
+            .map(|member| match self.stub_base(member.index()) {
+                Some(base) => LayeredVertex::from_base(base),
+                None => LayeredVertex::from_delta(member),
+            })
     }
 
     /// The added edges labelled `label`.
@@ -297,20 +427,44 @@ impl Delta {
         })
     }
 
+    /// `true` iff the layer removed the base vertex in `slot` (its tombstone): one bit test.
+    /// The liveness of a dirty base vertex whose handle is current (from the base's own scans
+    /// and indexes).
+    #[inline]
+    pub(crate) fn is_removed_vertex(&self, slot: u32) -> bool {
+        self.removed_vertices.contains(slot)
+    }
+
+    /// The edge counterpart of [`Self::is_removed_vertex`].
+    #[inline]
+    pub(crate) fn is_removed_edge(&self, slot: u32) -> bool {
+        self.removed_edges.contains(slot)
+    }
+
     /// A dirty base vertex as the layer sees it: `None` when the layer removed it (its
-    /// tombstone, checked first) or `node` is stale, else its state. No images yet (S1.6): a
-    /// live dirty base vertex has a stub or lost a base edge, which changes its adjacency, not
-    /// the vertex, so it answers with the base's own id, labels and properties.
+    /// tombstone, checked first) or `node` is stale, else its image when it has one (module
+    /// docs), else the base's own state (a stub or a lost base edge changes its adjacency, not
+    /// the vertex). The id is always the base's.
     #[inline]
     pub(crate) fn base_vertex<'a>(
         &'a self,
         base: &'a TraversalGraph,
         node: VertexHandle,
     ) -> Option<VertexView<'a>> {
-        if self.removed_vertices.contains(node.index().slot()) {
+        let slot = node.index().slot();
+        if self.removed_vertices.contains(slot) {
             return None;
         }
         let vertex = base.vertex_weight(node)?;
+        if self.imaged_vertices.contains(slot)
+            && let Some(stub) = self.graph.node_weight(self.stub_index(node))
+        {
+            return Some(VertexView {
+                id: &vertex.0,
+                labels: self.labels.set(stub.1),
+                properties: &stub.2,
+            });
+        }
         Some(VertexView {
             id: &vertex.0,
             labels: base.labels.set(vertex.1),
@@ -319,25 +473,86 @@ impl Delta {
     }
 
     /// A dirty base edge as the layer sees it: `None` when the layer removed it (checked
-    /// first) or `edge` is stale, else the base's own state (no images yet, S1.6). A live base
-    /// edge never has a removed endpoint: removing a base vertex removes its edges first.
+    /// first) or `edge` is stale, else its image's label and properties when it has one, else
+    /// the base's own state. A live base edge never has a removed endpoint: removing a base
+    /// vertex removes its edges first.
     #[inline]
     pub(crate) fn base_edge<'a>(
         &'a self,
         base: &'a TraversalGraph,
         edge: EdgeHandle,
     ) -> Option<EdgeView<'a>> {
-        if self.removed_edges.contains(edge.index().slot()) {
+        let slot = edge.index().slot();
+        if self.removed_edges.contains(slot) {
             return None;
         }
         let weight = base.edge_weight(edge)?;
         let (from, to) = GraphStorage::edge_endpoints(base, edge).ok().flatten()?;
+        let endpoints = (LayeredVertex::from_base(from), LayeredVertex::from_base(to));
+        if self.imaged_edges.contains(slot)
+            && let Some(image) = self.edge_images.get(&slot)
+        {
+            return Some(EdgeView {
+                id: &weight.0,
+                label: image.label.as_slice(),
+                properties: image.properties.as_ref(),
+                endpoints,
+            });
+        }
         Some(EdgeView {
             id: &weight.0,
             label: base.labels.name_slice(weight.1),
             properties: weight.2.as_ref(),
-            endpoints: (LayeredVertex::from_base(from), LayeredVertex::from_base(to)),
+            endpoints,
         })
+    }
+
+    /// The base vertex slots that lost the base label `label` (their image lacks it): fetched
+    /// once per by-label scan, then one bit test per dirty member.
+    #[inline]
+    pub(crate) fn lost_vertex_label(&self, label: &str) -> Option<&SlotBits> {
+        if self.lost_vertex_labels.is_empty() {
+            return None;
+        }
+        self.lost_vertex_labels.get(label)
+    }
+
+    /// The base edge slots whose label is no longer their base label.
+    #[inline]
+    pub(crate) fn relabeled_edges(&self) -> &SlotBits {
+        &self.relabeled_edges
+    }
+
+    /// The base edges relabeled to `label`, in the order they gained it.
+    #[inline]
+    pub(crate) fn gained_edges<'a>(
+        &'a self,
+        label: &str,
+    ) -> impl Iterator<Item = LayeredEdge> + 'a {
+        let gained = if self.gained_edge_labels.is_empty() {
+            None
+        } else {
+            self.gained_edge_labels.get(label)
+        };
+        gained
+            .into_iter()
+            .flatten()
+            .map(|edge| LayeredEdge::from_base(*edge))
+    }
+
+    /// `true` while the layer has added, removed or modified (imaged) any vertex: a property
+    /// index of the base may then miss or wrongly hold vertices (index deltas: stage 4).
+    #[inline]
+    pub(crate) fn vertices_touched(&self) -> bool {
+        self.graph.node_count() > self.stubs.len()
+            || self.removed_vertex_count > 0
+            || self.vertex_image_count > 0
+    }
+
+    /// The edge counterpart of [`Self::vertices_touched`].
+    #[inline]
+    pub(crate) fn edges_touched(&self) -> bool {
+        self.graph.edge_count() > 0 || self.removed_edge_count > 0 || !self.edge_images.is_empty()
     }
 
     // --------------------------------------------------------------------------------------
@@ -525,15 +740,34 @@ impl Delta {
         let Some(weight) = base.edge_weight(edge) else {
             return;
         };
-        statistics.edge_removed(base.labels.name(weight.1).map(|l| l.as_str()));
+        // The label it has now: its image's, when a write changed it.
+        let image = if self.imaged_edges.contains(slot) {
+            self.imaged_edges.clear(slot);
+            self.edge_images.remove(&slot)
+        } else {
+            None
+        };
+        match image {
+            Some(image) => {
+                statistics.edge_removed(image.label.as_deref());
+                if self.relabeled_edges.contains(slot) {
+                    self.relabeled_edges.clear(slot);
+                    if let Some(label) = &image.label {
+                        self.remove_gained_edge(label, edge);
+                    }
+                }
+            }
+            None => statistics.edge_removed(base.labels.name(weight.1).map(|l| l.as_str())),
+        }
         self.removed_edges.set_growing(slot);
         self.removed_edge_count += 1;
     }
 
     /// Tombstones the live base vertex `node` and removes its stub, if it has one (the caller
-    /// removed every incident edge first, base and added, and sets the vertex's dirty bit);
-    /// counts it out of the statistics as `TraversalGraph`'s raw remove does. Nothing for a
-    /// vertex already removed or stale.
+    /// removed every incident edge first, base and added, and sets the vertex's dirty bit),
+    /// with its image and the label memberships the image had; counts it out of the
+    /// statistics, with the labels it has now, as `TraversalGraph`'s raw remove does. Nothing
+    /// for a vertex already removed or stale.
     pub(crate) fn remove_base_vertex(
         &mut self,
         base: &TraversalGraph,
@@ -547,10 +781,31 @@ impl Delta {
         let Some(vertex) = base.vertex_weight(node) else {
             return;
         };
-        statistics.vertex_removed(base.labels.set(vertex.1));
+        let base_labels = base.labels.set(vertex.1);
+        let stub = self.stub_index(node);
+        let imaged = self.imaged_vertices.contains(slot);
+        match self.graph.node_weight(stub) {
+            Some(weight) if imaged => {
+                let current = self.labels.set(weight.1).to_vec();
+                let member = VertexHandle::new(stub, weight.3);
+                statistics.vertex_removed(&current);
+                for label in &current {
+                    if !base_labels.contains(label) {
+                        self.index.remove_node_label(label, member);
+                    }
+                }
+                for label in base_labels.iter().filter(|l| !current.contains(l)) {
+                    if let Some(lost) = self.lost_vertex_labels.get_mut(label.as_str()) {
+                        lost.clear(slot);
+                    }
+                }
+                self.imaged_vertices.clear(slot);
+                self.vertex_image_count -= 1;
+            }
+            _ => statistics.vertex_removed(base_labels),
+        }
         self.removed_vertices.set_growing(slot);
         self.removed_vertex_count += 1;
-        let stub = self.stub_index(node);
         if stub != NodeIndex::end() {
             // Empty by now; `remove_node` would unlink a leftover edge without its index
             // entries, so the caller's order (edges first) is what keeps the indexes exact.
@@ -560,6 +815,246 @@ impl Delta {
             if let Some(entry) = self.stub_bases.get_mut(stub.index()) {
                 *entry = None;
             }
+        }
+    }
+
+    // --------------------------------------------------------------------------------------
+    // Images of base elements (module docs): the caller ran the write rule, found that the
+    // write changes something (`PropertyChange::is_noop`, a label rule's `Some`) and set the
+    // element's dirty bit; each writer copies the element up first when it has no image and
+    // returns whether it HAD one (then the caller asks `settle_*` for a return to clean).
+    // --------------------------------------------------------------------------------------
+
+    /// The stub of the live base vertex `node` holding its image, copied up now when it has
+    /// none (labels and logical property values), and whether the image existed before.
+    fn vertex_image(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+    ) -> Result<(NodeIndex, bool), GraphError> {
+        let slot = node.index().slot();
+        let stub = self.stub_for(node)?;
+        if self.imaged_vertices.contains(slot) {
+            return Ok((stub, true));
+        }
+        let Some(vertex) = base.vertex_weight(node) else {
+            return Err(GraphError::vertex_removed());
+        };
+        let label_set = self.labels.intern_set(base.labels.set(vertex.1));
+        let mut properties = logical_element(&vertex.2);
+        self.shapes.adopt(&mut properties);
+        if let Some(weight) = self.graph.node_weight_mut(stub) {
+            weight.1 = label_set;
+            weight.2 = properties;
+        }
+        self.imaged_vertices.set_growing(slot);
+        self.vertex_image_count += 1;
+        Ok((stub, false))
+    }
+
+    /// Applies one property change to the image of the live base vertex `node`.
+    pub(crate) fn change_base_vertex_property(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+        change: PropertyChange,
+    ) -> Result<bool, GraphError> {
+        let (stub, existed) = self.vertex_image(base, node)?;
+        if let Some(weight) = self.graph.node_weight_mut(stub) {
+            change.apply(&mut self.shapes, &mut weight.2);
+        }
+        Ok(existed)
+    }
+
+    /// Gives the image of the live base vertex `node` the label list `new_labels` (from the
+    /// write rules) and keeps the label lookups (module docs) and the statistics in step.
+    pub(crate) fn set_base_vertex_labels(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+        new_labels: Vec<CompactString>,
+        statistics: &mut GraphStatistics,
+    ) -> Result<bool, GraphError> {
+        let (stub, existed) = self.vertex_image(base, node)?;
+        let Some(vertex) = base.vertex_weight(node) else {
+            return Err(GraphError::vertex_removed());
+        };
+        let base_labels = base.labels.set(vertex.1);
+        let slot = node.index().slot();
+        let new_set = self.labels.intern_set(&new_labels);
+        let Some(weight) = self.graph.node_weight_mut(stub) else {
+            return Err(GraphError::vertex_removed());
+        };
+        let member = VertexHandle::new(stub, weight.3);
+        let old = self
+            .labels
+            .set(std::mem::replace(&mut weight.1, new_set))
+            .to_vec();
+        statistics.vertex_relabeled(&old, &new_labels);
+        for label in old.iter().filter(|l| !new_labels.contains(l)) {
+            if base_labels.contains(label) {
+                self.lost_vertex_labels
+                    .entry(label.clone())
+                    .or_default()
+                    .set_growing(slot);
+            } else {
+                self.index.remove_node_label(label, member);
+            }
+        }
+        for label in new_labels.into_iter().filter(|l| !old.contains(l)) {
+            if base_labels.contains(&label) {
+                if let Some(lost) = self.lost_vertex_labels.get_mut(label.as_str()) {
+                    lost.clear(slot);
+                }
+            } else {
+                self.index.insert_node_label(label, member);
+            }
+        }
+        Ok(existed)
+    }
+
+    /// Drops the image of the base vertex `node` when it is identical to the base vertex again
+    /// (return to clean, module docs). Its label memberships need no change: with the base's
+    /// labels it lost and gained none. The dirty bit stays.
+    pub(crate) fn settle_base_vertex(&mut self, base: &TraversalGraph, node: VertexHandle) {
+        let slot = node.index().slot();
+        if !self.imaged_vertices.contains(slot) {
+            return;
+        }
+        let (Some(vertex), stub) = (base.vertex_weight(node), self.stub_index(node)) else {
+            return;
+        };
+        let Some(image) = self.graph.node_weight(stub) else {
+            return;
+        };
+        if self.labels.set(image.1) != base.labels.set(vertex.1)
+            || !maps_identical(&image.2, &vertex.2)
+        {
+            return;
+        }
+        if let Some(image) = self.graph.node_weight_mut(stub) {
+            image.1 = LabelSetId::EMPTY;
+            image.2 = PropertyMap::default();
+        }
+        self.imaged_vertices.clear(slot);
+        self.vertex_image_count -= 1;
+    }
+
+    /// Copies the live base edge `edge` up when it has no image yet (label and logical
+    /// property values); `true` when it had one.
+    fn edge_image(&mut self, base: &TraversalGraph, edge: EdgeHandle) -> Result<bool, GraphError> {
+        let slot = edge.index().slot();
+        if self.imaged_edges.contains(slot) {
+            return Ok(true);
+        }
+        let Some(weight) = base.edge_weight(edge) else {
+            return Err(GraphError::edge_removed());
+        };
+        let mut properties = weight.2.as_ref().map(logical_element);
+        self.shapes.adopt_optional(&mut properties);
+        self.edge_images.insert(
+            slot,
+            EdgeImage {
+                label: base.labels.name(weight.1).cloned(),
+                properties,
+            },
+        );
+        self.imaged_edges.set_growing(slot);
+        Ok(false)
+    }
+
+    /// Applies one property change to the image of the live base edge `edge` (a set gives an
+    /// edge without a map one, as `TraversalGraph` does).
+    pub(crate) fn change_base_edge_property(
+        &mut self,
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        change: PropertyChange,
+    ) -> Result<bool, GraphError> {
+        let existed = self.edge_image(base, edge)?;
+        if let Some(image) = self.edge_images.get_mut(&edge.index().slot()) {
+            match change {
+                PropertyChange::Set(..) => {
+                    let map = image.properties.get_or_insert_with(PropertyMap::default);
+                    change.apply(&mut self.shapes, map);
+                }
+                PropertyChange::Drop(_) => {
+                    if let Some(map) = image.properties.as_mut() {
+                        change.apply(&mut self.shapes, map);
+                    }
+                }
+            }
+        }
+        Ok(existed)
+    }
+
+    /// Relabels the image of the live base edge `edge` (the write rules passed and the label
+    /// differs), keeping the label lookups (module docs) and the statistics in step.
+    pub(crate) fn set_base_edge_label(
+        &mut self,
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        label: CompactString,
+        statistics: &mut GraphStatistics,
+    ) -> Result<bool, GraphError> {
+        let existed = self.edge_image(base, edge)?;
+        let slot = edge.index().slot();
+        let base_label = base
+            .edge_weight(edge)
+            .and_then(|weight| base.labels.name(weight.1))
+            .cloned();
+        let Some(image) = self.edge_images.get_mut(&slot) else {
+            return Err(GraphError::edge_removed());
+        };
+        let old = std::mem::replace(&mut image.label, Some(label.clone()));
+        statistics.edge_relabeled(old.as_deref(), Some(label.as_str()));
+        if old != base_label
+            && let Some(old) = &old
+        {
+            self.remove_gained_edge(old, edge);
+        }
+        if Some(&label) == base_label.as_ref() {
+            self.relabeled_edges.clear(slot);
+        } else {
+            self.relabeled_edges.set_growing(slot);
+            self.gained_edge_labels.entry(label).or_default().push(edge);
+        }
+        Ok(existed)
+    }
+
+    /// Removes `edge` from the base edges relabeled to `label` (the last one takes its place).
+    fn remove_gained_edge(&mut self, label: &str, edge: EdgeHandle) {
+        let Some(members) = self.gained_edge_labels.get_mut(label) else {
+            return;
+        };
+        if let Some(position) = members.iter().position(|member| *member == edge) {
+            members.swap_remove(position);
+        }
+        if members.is_empty() {
+            self.gained_edge_labels.remove(label);
+        }
+    }
+
+    /// The edge counterpart of [`Self::settle_base_vertex`]: the label and the map identical
+    /// to the base edge's (a map the base edge lacks counts as different from an empty one, as
+    /// the two read differently through `edge_properties`).
+    pub(crate) fn settle_base_edge(&mut self, base: &TraversalGraph, edge: EdgeHandle) {
+        let slot = edge.index().slot();
+        if !self.imaged_edges.contains(slot) {
+            return;
+        }
+        let (Some(weight), Some(image)) = (base.edge_weight(edge), self.edge_images.get(&slot))
+        else {
+            return;
+        };
+        let same_properties = match (&image.properties, &weight.2) {
+            (None, None) => true,
+            (Some(image), Some(base)) => maps_identical(image, base),
+            _ => false,
+        };
+        if same_properties && image.label.as_ref() == base.labels.name(weight.1) {
+            self.edge_images.remove(&slot);
+            self.imaged_edges.clear(slot);
         }
     }
 

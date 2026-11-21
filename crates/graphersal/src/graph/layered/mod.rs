@@ -43,8 +43,10 @@
 //! `TraversalGraph`. Base vertices and edges can be dropped (S1.5): a tombstone in the delta
 //! behind the element's dirty bit; dropping a base vertex drops its base edges (each dirtying
 //! both endpoints) and the added edges at its stub, and the stub with them. A dropped base id
-//! is free again for a new element. Every other write to a base element (properties, labels)
-//! returns [`GraphError::Unsupported`] (S1.6). The layer keeps its own copy of the base's
+//! is free again for a new element. Property, label and path writes to a base element (S1.6)
+//! copy it up into an image in the delta on the first write that changes something (a write
+//! of an identical value changes nothing and copies nothing); an image identical to the base
+//! element again is dropped. The layer keeps its own copy of the base's
 //! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
 //! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
 //! wrote before the failure (units and rollback: S1.8). The schema, the catalog, the property
@@ -73,8 +75,8 @@ use handle::MAX_BASE_SLOTS;
 /// by the layer is read straight from the base, with one bit test and no lookup.
 ///
 /// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices), changes or
-/// drops what it added and drops base elements; a property or label write to a base element
-/// fails with [`GraphError::Unsupported`]. It has no units yet (`atomic` is not claimed): a traversal that
+/// drops what it added, and changes and drops base elements (a changed base element is copied
+/// into the layer). It has no units yet (`atomic` is not claimed): a traversal that
 /// fails keeps what it wrote before the failure.
 ///
 /// ```
@@ -143,19 +145,20 @@ impl LayeredGraph {
         }
     }
 
-    /// `true` iff the base vertex `node` is visible in the layer: untouched (one bit test), or
-    /// dirty and not removed.
+    /// `true` iff the base vertex `node`, a CURRENT handle (from the base's own scans, indexes
+    /// and adjacency), is visible in the layer: untouched (one bit test), or dirty and not
+    /// removed (one more bit test; never the image lookup).
     #[inline]
     fn base_vertex_live(&self, node: VertexHandle) -> bool {
-        !self.dirty_vertices.contains(node.index().slot())
-            || self.delta.base_vertex(&self.base, node).is_some()
+        let slot = node.index().slot();
+        !self.dirty_vertices.contains(slot) || !self.delta.is_removed_vertex(slot)
     }
 
     /// The edge counterpart of [`Self::base_vertex_live`].
     #[inline]
     fn base_edge_live(&self, edge: EdgeHandle) -> bool {
-        !self.dirty_edges.contains(edge.index().slot())
-            || self.delta.base_edge(&self.base, edge).is_some()
+        let slot = edge.index().slot();
+        !self.dirty_edges.contains(slot) || !self.delta.is_removed_edge(slot)
     }
 
     /// The filter of a scan over base vertices: [`Self::base_vertex_live`], with "no bit set at
@@ -390,6 +393,65 @@ mod tests {
         assert!(layer.contains_vertex(new).unwrap());
         assert_eq!(layer.vertices().unwrap().count(), 6);
         assert_eq!(layer.out_edges(new).unwrap().count(), 0);
+    }
+
+    /// A vertex image lives in the vertex's (invisible) stub; an equal-value write makes no
+    /// dirty bit; a return to clean drops the image but keeps the dirty bit and the stub, and
+    /// the kind counts as untouched again for the property-index lookups. A gained label is a
+    /// stub membership in the delta's label bucket, a lost one a bit in its lost set.
+    #[test]
+    fn a_vertex_image_lives_in_its_stub_and_returns_to_clean() {
+        let mut layer = LayeredGraph::over(Arc::new(TraversalGraph::tinkerpop_modern())).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        layer
+            .set_vertex_property(marko, "age".into(), 29.into())
+            .unwrap();
+        assert!(
+            !layer.dirty_vertices.any(),
+            "an equal value dirties nothing"
+        );
+        layer
+            .set_vertex_property(marko, "age".into(), 30.into())
+            .unwrap();
+        assert!(layer.dirty_vertices.contains(marko.slot()));
+        assert!(layer.delta.imaged_vertices.contains(marko.slot()));
+        assert_ne!(layer.delta.stub_index(marko.to_base()), NodeIndex::end());
+        assert!(layer.delta.vertices_touched());
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        assert_eq!(layer.vertices().unwrap().count(), 6);
+        layer.add_vertex_label(marko, "x".into()).unwrap();
+        layer.remove_vertex_label(marko, "person").unwrap();
+        assert_eq!(
+            layer.delta.vertices_by_label("x").collect::<Vec<_>>(),
+            [marko],
+            "the stub's membership names the base vertex"
+        );
+        assert!(
+            layer
+                .delta
+                .lost_vertex_label("person")
+                .is_some_and(|lost| lost.contains(marko.slot()))
+        );
+        layer.add_vertex_label(marko, "person".into()).unwrap();
+        layer.remove_vertex_label(marko, "x").unwrap();
+        layer
+            .set_vertex_property(marko, "age".into(), 29.into())
+            .unwrap();
+        assert!(!layer.delta.imaged_vertices.contains(marko.slot()));
+        assert!(layer.dirty_vertices.contains(marko.slot()), "kept");
+        assert!(!layer.delta.vertices_touched());
+        assert_eq!(layer.delta.vertices_by_label("x").count(), 0);
+        assert!(
+            !layer
+                .delta
+                .lost_vertex_label("person")
+                .is_some_and(|lost| lost.contains(marko.slot()))
+        );
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        assert_eq!(
+            layer.statistics,
+            GraphStatistics::from_storage(&layer).unwrap()
+        );
     }
 
     #[test]
