@@ -4,8 +4,9 @@
 //! API, the typed traversal API, the Rhai DSL and GQL. The write path of new elements (S1.3):
 //! vertices and edges between them are stored in the layer and read exactly as in a
 //! `TraversalGraph` that received the base's data plus the same writes (ids, auto ids,
-//! statistics, scans, label lookups, adjacency); writes to base elements and edges touching base
-//! vertices are refused and change nothing.
+//! statistics, scans, label lookups, adjacency); writes to base elements are refused and change
+//! nothing. New edges touching base vertices (S1.4): every combination of base and added
+//! endpoints, self-loops, drops, the closed-schema topology, and a Rhai differential.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -204,17 +205,6 @@ fn every_write_is_refused_and_changes_nothing() {
             "{result:?}"
         );
     };
-    unsupported(
-        layer
-            .insert_edge(
-                None,
-                Some("knows".into()),
-                marko,
-                marko,
-                PropertyMap::default(),
-            )
-            .map(drop),
-    );
     unsupported(layer.add_vertex_label(marko, "x".into()).map(drop));
     unsupported(layer.remove_vertex_label(marko, "person").map(drop));
     unsupported(layer.set_edge_label(knows, "x".into()).map(drop));
@@ -793,49 +783,6 @@ fn auto_ids_skip_ids_the_base_holds() {
     assert_eq!(layer.edge_id(e).unwrap(), Some("3"));
 }
 
-#[test]
-fn edges_touching_base_vertices_are_refused_for_now() {
-    let mut layer = modern_layer();
-    let marko = v(&layer, "1");
-    let new = layer
-        .insert_vertex(None, vec!["person".into()], PropertyMap::default())
-        .unwrap();
-    let before = state(&layer);
-    for (from, to) in [(new, marko), (marko, new), (marko, marko)] {
-        let err = layer
-            .insert_edge(None, Some("knows".into()), from, to, PropertyMap::default())
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("edges touching base vertices of a layered graph"),
-            "{err}"
-        );
-        assert!(
-            layer
-                .add_edge(None, Some("knows".into()), from, to, PropertyMap::default())
-                .is_err()
-        );
-    }
-    assert_eq!(state(&layer), before);
-    // A stale endpoint fails as in a `TraversalGraph`, before the refusal.
-    layer.drop_vertex(new).unwrap();
-    let err = layer
-        .insert_edge(None, None, new, marko, PropertyMap::default())
-        .unwrap_err();
-    let mut reference = TraversalGraph::tinkerpop_modern();
-    let gone = reference
-        .insert_vertex(None, vec![], PropertyMap::default())
-        .unwrap();
-    reference.drop_vertex(gone).unwrap();
-    let marko_ref = GraphStorage::get_vertex_by_id(&reference, "1")
-        .unwrap()
-        .unwrap();
-    let expected = reference
-        .insert_edge(None, None, gone, marko_ref, PropertyMap::default())
-        .unwrap_err();
-    assert_eq!(format!("{err:?}"), format!("{expected:?}"));
-}
-
 /// Changes and drops of added elements, step by step on a layer and on a `TraversalGraph`.
 #[test]
 fn added_elements_change_and_drop_like_a_traversal_graph() {
@@ -1127,4 +1074,426 @@ fn rhai_create_scripts_on_an_empty_base_match_an_empty_graph() {
         }
     }
     assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+// ------------------------------------------------------------------------------------------
+// New edges touching base vertices (S1.4)
+// ------------------------------------------------------------------------------------------
+
+/// The vertex with `id` on any storage.
+fn vertex_of<S: GraphStorage>(s: &S, id: &str) -> S::VertexId {
+    s.get_vertex_by_id(id).unwrap().unwrap()
+}
+
+/// The edge ids of `edges` on any storage.
+fn edge_ids<S: GraphStorage>(s: &S, edges: &[S::EdgeId]) -> Vec<String> {
+    edges
+        .iter()
+        .map(|e| s.edge_id(*e).unwrap().unwrap().to_string())
+        .collect()
+}
+
+/// New edges with every combination of base and added endpoints, on any storage holding
+/// modern: added -> base, base -> added, base -> base (a base label and a new one), self-loops
+/// at a base and at an added vertex, added -> added; explicit, numeric and auto ids; `insert_*`
+/// and `add_*`.
+fn create_cross_edges<S: GraphStorage>(s: &mut S) -> Vec<S::EdgeId> {
+    let (marko, vadas, lop, josh) = (
+        vertex_of(s, "1"),
+        vertex_of(s, "2"),
+        vertex_of(s, "3"),
+        vertex_of(s, "4"),
+    );
+    let n1 = s
+        .insert_vertex(
+            Some("n1".into()),
+            vec!["person".into()],
+            props(&[("name", "n1".into())]),
+        )
+        .unwrap();
+    let n2 = s
+        .add_vertex(
+            None,
+            vec!["software".into()],
+            props(&[("name", "n2".into())]),
+        )
+        .unwrap();
+    let none = PropertyMap::default;
+    vec![
+        s.insert_edge(
+            None,
+            Some("knows".into()),
+            n1,
+            marko,
+            props(&[("w", 1.into())]),
+        )
+        .unwrap(),
+        s.insert_edge(Some("x1".into()), Some("knows".into()), marko, n1, none())
+            .unwrap(),
+        s.add_edge(None, Some("created".into()), josh, lop, none())
+            .unwrap(),
+        s.insert_edge(None, Some("likes".into()), marko, vadas, none())
+            .unwrap(),
+        s.insert_edge(None, Some("self".into()), vadas, vadas, none())
+            .unwrap(),
+        s.insert_edge(None, Some("self".into()), n2, n2, none())
+            .unwrap(),
+        s.insert_edge(None, None, n1, n2, none()).unwrap(),
+        s.insert_edge(Some("100".into()), Some("created".into()), n1, lop, none())
+            .unwrap(),
+        s.add_edge(None, Some("created".into()), marko, n2, none())
+            .unwrap(),
+    ]
+}
+
+#[test]
+fn edges_touching_base_vertices_read_like_a_traversal_graph() {
+    let base = modern_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let on_layer = create_cross_edges(&mut layer);
+    let on_reference = create_cross_edges(&mut reference);
+    assert_eq!(
+        edge_ids(&layer, &on_layer),
+        edge_ids(&reference, &on_reference)
+    );
+    assert_eq!(
+        edge_ids(&layer, &on_layer),
+        ["6", "x1", "7", "8", "9", "10", "11", "100", "101"]
+    );
+    // Scans, lookups, both adjacency lists of every vertex (in order), endpoints, labels and
+    // the kept statistics against a recount: all as in the `TraversalGraph`.
+    assert_eq!(state(&layer), state(&reference));
+    // The stubs of the base vertices are not vertices.
+    assert_eq!(layer.vertex_count().unwrap(), 8);
+    assert_eq!(layer.vertices().unwrap().count(), 8);
+    assert_eq!(layer.edge_count().unwrap(), 15);
+    assert_eq!(layer.statistics().unwrap().unwrap().vertex_count(), 8);
+    assert_eq!(layer.vertices_by_label("person").unwrap().count(), 5);
+    // A new edge's base endpoint is the base vertex's own handle.
+    let (marko, vadas, n1) = (v(&layer, "1"), v(&layer, "2"), v(&layer, "n1"));
+    assert_eq!(
+        layer.edge_endpoints(on_layer[0]).unwrap(),
+        Some((n1, marko))
+    );
+    assert_eq!(
+        layer.edge_endpoints(on_layer[4]).unwrap(),
+        Some((vadas, vadas))
+    );
+    assert!(!format!("{marko:?}").starts_with("v[+"), "{marko:?}");
+    // Adjacency: the new edges first (newest first), then the base's.
+    let out: Vec<&str> = layer
+        .out_edges(marko)
+        .unwrap()
+        .map(|e| layer.edge_id(e).unwrap().unwrap())
+        .collect();
+    assert_eq!(out, ["101", "8", "x1", "2", "1", "0"]);
+    // A base self-loop is in both lists, once each.
+    assert_eq!(layer.out_edges(vadas).unwrap().count(), 1);
+    assert_eq!(layer.in_edges(vadas).unwrap().count(), 3);
+    // A base vertex with new edges still reads as the base holds it.
+    for id in ["1", "2", "3", "4"] {
+        let on_base = GraphStorage::get_vertex_by_id(&*base, id).unwrap().unwrap();
+        let node = v(&layer, id);
+        assert!(layer.contains_vertex(node).unwrap());
+        assert_eq!(layer.vertex_id(node).unwrap(), Some(id));
+        assert_eq!(
+            layer.vertex_labels(node).unwrap(),
+            GraphStorage::vertex_labels(&*base, on_base).unwrap()
+        );
+        assert_eq!(
+            layer.vertex_label(node).unwrap(),
+            GraphStorage::vertex_label(&*base, on_base).unwrap()
+        );
+        assert_eq!(
+            layer.vertex_properties(node).unwrap(),
+            GraphStorage::vertex_properties(&*base, on_base).unwrap()
+        );
+    }
+    // The base is unchanged; a second layer over it sees none of the new edges.
+    assert_eq!(TraversalGraph::edge_count(&base), 6);
+    let other = LayeredGraph::over(base).unwrap();
+    assert_eq!(other.out_edges(v(&other, "1")).unwrap().count(), 3);
+    assert_eq!(other.edge_count().unwrap(), 6);
+}
+
+#[test]
+fn drops_of_new_edges_at_base_vertices_match_a_traversal_graph() {
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<State> {
+        let mut states = Vec::new();
+        let edges = create_cross_edges(s);
+        // Added -> base, base -> base and a base self-loop; a second drop is a no-op.
+        for e in [edges[0], edges[3], edges[4]] {
+            s.drop_edge(e).unwrap();
+            s.drop_edge(e).unwrap();
+            assert!(!s.contains_edge(e).unwrap());
+            assert_eq!(s.edge_endpoints(e).unwrap(), None);
+        }
+        states.push(state(s));
+        // An added vertex takes its edges to and from base vertices with it.
+        s.drop_vertex(vertex_of(s, "n1")).unwrap();
+        for e in [edges[1], edges[6], edges[7]] {
+            assert!(!s.contains_edge(e).unwrap());
+        }
+        states.push(state(s));
+        // New edges at the same base vertices again (vadas has none left), reusing slots; the
+        // stale handles never reach the new occupants.
+        let (marko, vadas) = (vertex_of(s, "1"), vertex_of(s, "2"));
+        let n3 = s
+            .insert_vertex(None, vec!["person".into()], PropertyMap::default())
+            .unwrap();
+        s.insert_edge(
+            None,
+            Some("self".into()),
+            vadas,
+            vadas,
+            PropertyMap::default(),
+        )
+        .unwrap();
+        s.insert_edge(
+            None,
+            Some("knows".into()),
+            vadas,
+            n3,
+            PropertyMap::default(),
+        )
+        .unwrap();
+        s.insert_edge(
+            None,
+            Some("knows".into()),
+            n3,
+            marko,
+            PropertyMap::default(),
+        )
+        .unwrap();
+        for e in [edges[0], edges[1], edges[3], edges[4]] {
+            assert!(!s.contains_edge(e).unwrap());
+            assert_eq!(s.edge_id(e).unwrap(), None);
+        }
+        states.push(state(s));
+        // Everything new dropped: the base vertices read exactly as in the base again.
+        let new_edges: Vec<S::EdgeId> = s
+            .edges()
+            .unwrap()
+            .filter(|e| !["0", "1", "2", "3", "4", "5"].contains(&s.edge_id(*e).unwrap().unwrap()))
+            .collect();
+        for e in new_edges {
+            s.drop_edge(e).unwrap();
+        }
+        s.drop_vertex(n3).unwrap();
+        states.push(state(s));
+        states
+    }
+    let mut layer = modern_layer();
+    let on_layer = run(&mut layer);
+    let on_reference = run(&mut TraversalGraph::tinkerpop_modern());
+    assert_eq!(on_layer, on_reference);
+    // The last state is the base's own adjacency again (the empty stubs stay, invisible).
+    let base = TraversalGraph::tinkerpop_modern();
+    let last = on_layer.last().unwrap();
+    let base_state = state(&base);
+    let adjacency = |s: &State| -> Vec<(String, Vec<String>, Vec<String>)> {
+        s.vertices
+            .iter()
+            .filter(|v| ["1", "2", "3", "4", "5", "6"].contains(&v.0.as_str()))
+            .map(|v| (v.0.clone(), v.3.clone(), v.4.clone()))
+            .collect()
+    };
+    assert_eq!(adjacency(last), adjacency(&base_state));
+    assert_eq!(layer.vertex_count().unwrap(), 7, "n2 stays");
+    assert_eq!(layer.vertices().unwrap().count(), 7);
+}
+
+/// Closed-mode topology through new edges at base vertices: the same outcomes as a
+/// `TraversalGraph` with the same schema and data, for edge creates with base endpoints and for
+/// label changes of an added vertex whose incident edges lead to base vertices.
+#[test]
+fn closed_schema_topology_covers_edges_at_base_vertices() {
+    const SCHEMA: &str = r#"{
+      "mode": "closed",
+      "vertices": {
+        "person": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+        "software": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}}
+      },
+      "edges": {
+        "knows": {"connections": [{"from": "person", "to": "person"}]},
+        "created": {"connections": [{"from": "person", "to": "software"}]}
+      }
+    }"#;
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        graph
+            .set_schema(GraphSchema::from_json(SCHEMA).unwrap())
+            .unwrap();
+        graph
+            .insert_vertex(
+                Some("1".into()),
+                vec!["person".into()],
+                props(&[("name", "marko".into())]),
+            )
+            .unwrap();
+        graph
+            .insert_vertex(
+                Some("3".into()),
+                vec!["software".into()],
+                props(&[("name", "lop".into())]),
+            )
+            .unwrap();
+        graph
+    }
+    fn run<S: GraphStorage>(s: &mut S) -> (Vec<String>, State) {
+        let mut outcomes = Vec::new();
+        let mut record = |r: Result<String, GraphError>| {
+            outcomes.push(match r {
+                Ok(v) => v,
+                Err(e) => format!("{e:?}"),
+            })
+        };
+        let (marko, lop) = (vertex_of(s, "1"), vertex_of(s, "3"));
+        let p = s
+            .insert_vertex(None, vec!["person".into()], props(&[("name", "p".into())]))
+            .unwrap();
+        let w = s
+            .insert_vertex(
+                None,
+                vec!["software".into()],
+                props(&[("name", "w".into())]),
+            )
+            .unwrap();
+        let none = PropertyMap::default;
+        for (label, from, to) in [
+            ("knows", marko, p),
+            ("knows", p, marko),
+            ("created", marko, w),
+            ("created", p, lop),
+            ("knows", marko, lop),
+            ("knows", w, marko),
+            ("created", lop, p),
+            ("created", marko, marko),
+        ] {
+            record(
+                s.insert_edge(None, Some(label.into()), from, to, none())
+                    .map(|_| "ok".into()),
+            );
+        }
+        // `p` is linked to marko by `knows` both ways: it cannot stop being a person.
+        record(
+            s.add_vertex_label(p, "software".into())
+                .map(|b| b.to_string()),
+        );
+        record(s.remove_vertex_label(p, "person").map(|b| b.to_string()));
+        // `w` is the target of `created` from marko: it cannot become a person only.
+        record(
+            s.add_vertex_label(w, "person".into())
+                .map(|b| b.to_string()),
+        );
+        record(s.remove_vertex_label(w, "software").map(|b| b.to_string()));
+        (outcomes, state(s))
+    }
+    let on_layer = run(&mut LayeredGraph::over(Arc::new(graph())).unwrap());
+    let on_reference = run(&mut graph());
+    assert_eq!(on_layer, on_reference);
+    let outcomes = &on_layer.0;
+    assert_eq!(&outcomes[..4], ["ok", "ok", "ok", "ok"], "{outcomes:?}");
+    assert!(
+        outcomes[4..8].iter().all(|o| o != "ok"),
+        "violations: {outcomes:?}"
+    );
+    assert!(
+        outcomes[8..]
+            .iter()
+            .any(|o| o.contains("Topology") || o.contains("topology")),
+        "a label change must hit the incident topology: {outcomes:?}"
+    );
+}
+
+/// Scripts that add edges touching base vertices and then traverse: the same result and the same
+/// graph state (with every vertex's adjacency in order) on the plain graph and on the layer.
+#[cfg(feature = "script")]
+const RHAI_CROSS_EDGES: &[&str] = &[
+    r#"g.V("1").addE("knows").to(__.V("3")).iterate(); g.V("1").out("knows").values("name").toList()"#,
+    r#"let a = g.addV("person").property("name", "ann").id().next(); g.V("4").addE("knows").to(__.V(a)).iterate(); [g.V("4").out().values("name").toList(), g.V(a).in().values("name").toList(), g.V(a).both().count().next()]"#,
+    r#"let a = g.addV("person").property("name", "ann").id().next(); g.V(a).addE("created").to(__.V("5")).iterate(); [g.V("5").in("created").values("name").toList(), g.V("5").inE().count().next()]"#,
+    r#"g.V("2").addE("self").to(__.V("2")).iterate(); [g.V("2").out("self").id().toList(), g.V("2").both().count().next(), g.V("2").bothE().id().toList()]"#,
+    r#"g.V("6").addE("knows").to(__.V("1")).iterate(); g.V("6").out().out().path().by("name").toList()"#,
+    r#"g.V("1").addE("likes").to(__.V("2")).iterate(); g.V("3").addE("likes").to(__.V("2")).iterate(); g.V().out("likes").groupCount().by("name").next()"#,
+    r#"g.V("1").addE("x").to(__.V("1")).iterate(); [g.E().count().next(), g.V().count().next(), g.V().bothE().count().next(), g.E().hasLabel("x").count().next()]"#,
+    r#"g.V("1").addE("x").to(__.V("2")).iterate(); g.E().hasLabel("x").drop().iterate(); [g.V("1").outE().id().toList(), g.E().count().next()]"#,
+    r#"let a = g.addV("t").id().next(); g.V(a).addE("x").to(__.V("1")).iterate(); g.V("2").addE("y").to(__.V(a)).iterate(); g.V(a).drop().iterate(); [g.V("1").inE().count().next(), g.V("2").outE().count().next(), g.E().count().next(), g.V().count().next()]"#,
+    r#"g.V("4").addE("k").to(__.V("1")).iterate(); [g.V("4").bothE().id().toList(), g.V("1").both().id().toList()]"#,
+    r#"g.mergeE(#{"T.label": "knows", "Direction.OUT": "1", "Direction.IN": "6"}).iterate(); g.V("1").out("knows").id().toList()"#,
+    r#"g.V("1").as("a").V("3").addE("liked_by").to("a").iterate(); g.V("1").in("liked_by").values("name").toList()"#,
+    r#"g.V("5").addE("next").to(__.V("1")).iterate(); g.V("1").repeat(__.out()).times(3).path().by("name").toList()"#,
+    r#"g.V().hasLabel("person").addE("member").to(__.V("3")).iterate(); [g.V("3").in("member").values("name").order().toList(), g.V().group().by(T.label).by(__.bothE().count()).next()]"#,
+    r#"g.V("1").addE("x").to(__.V("2")).property("w", 1).iterate(); g.V("1").outE("x").inV().values("name").toList()"#,
+];
+
+#[cfg(feature = "script")]
+const CROSS_STATE_SCRIPT: &str = r#"[
+    g.V().elementMap().toList(),
+    g.E().elementMap().toList(),
+    g.V().project("v", "out", "in").by(T.id).by(__.outE().id().fold()).by(__.inE().id().fold()).toList(),
+    g.statistics()
+]"#;
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_cross_edge_scripts_match_the_plain_graph() {
+    let mut differences = Vec::new();
+    for script in RHAI_CROSS_EDGES {
+        let plain = plain_graph();
+        let layered = layered_graph();
+        let expected = render(Arc::clone(&plain), script);
+        let actual = render(Arc::clone(&layered), script);
+        assert!(expected.is_ok(), "{script}: {expected:?}");
+        let expected_state = render(plain, CROSS_STATE_SCRIPT);
+        let actual_state = render(layered, CROSS_STATE_SCRIPT);
+        if expected != actual || expected_state != actual_state {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}\n  state TraversalGraph: {expected_state:?}\n  state LayeredGraph:   {actual_state:?}"
+            ));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+/// A stale endpoint fails as in a `TraversalGraph`, and a failed edge create leaves no trace
+/// (no stub, no dirty base vertex: its lists read exactly as before).
+#[test]
+fn failed_edge_creates_at_base_vertices_leave_no_trace() {
+    let mut layer = modern_layer();
+    let marko = v(&layer, "1");
+    let new = layer
+        .insert_vertex(None, vec!["person".into()], PropertyMap::default())
+        .unwrap();
+    layer.drop_vertex(new).unwrap();
+    let before = state(&layer);
+    let err = layer
+        .insert_edge(None, None, new, marko, PropertyMap::default())
+        .unwrap_err();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let gone = reference
+        .insert_vertex(None, vec![], PropertyMap::default())
+        .unwrap();
+    reference.drop_vertex(gone).unwrap();
+    let marko_ref = vertex_of(&reference, "1");
+    let expected = reference
+        .insert_edge(None, None, gone, marko_ref, PropertyMap::default())
+        .unwrap_err();
+    assert_eq!(format!("{err:?}"), format!("{expected:?}"));
+    // A taken edge id: refused after the rule, before any stub is made.
+    let err = layer
+        .insert_edge(Some("1".into()), None, marko, marko, PropertyMap::default())
+        .unwrap_err();
+    let expected = reference
+        .insert_edge(
+            Some("1".into()),
+            None,
+            marko_ref,
+            marko_ref,
+            PropertyMap::default(),
+        )
+        .unwrap_err();
+    assert_eq!(format!("{err:?}"), format!("{expected:?}"));
+    assert_eq!(state(&layer), before);
 }

@@ -1,7 +1,7 @@
 //! `impl GraphStorage for LayeredGraph`: the reads answer from the base (an untouched element
 //! with one bit test, no lookup) merged with the delta; every write runs its write rule
-//! (`graph/write_rules.rs`) first and then stores in the delta. Writes to base elements and
-//! edges touching base vertices are not implemented yet.
+//! (`graph/write_rules.rs`) first and then stores in the delta. Writes to base elements are
+//! not implemented yet.
 
 use compact_str::CompactString;
 
@@ -11,20 +11,18 @@ use crate::error::GraphError;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
+use crate::graph::topology::Direction;
 use crate::graph::write_rules::{self, PathRemoval};
 use crate::graph::{
     CompressionEstimate, CompressionEstimateRequest, CompressionStats, ExecutionPolicy,
     GraphNodeType, GraphStatistics, GraphStorage, PropertyIndexInfo, PropertyIndexRange,
-    PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates,
+    PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates, VertexHandle,
 };
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
 
 /// The operation a write to a base element names until the layer can change base elements
 /// (tasks S1.5, S1.6).
 const BASE_WRITES: &str = "writes to base elements of a layered graph yet";
-
-/// The operation an edge touching a base vertex names until task S1.4.
-const CROSS_EDGES: &str = "edges touching base vertices of a layered graph yet";
 
 /// `Ok` for a write to an element of the delta, [`GraphError::Unsupported`] for one to a base
 /// element. Called after the write rule passed and found something to change, so a stale
@@ -102,29 +100,38 @@ impl GraphStorage for LayeredGraph {
         Ok(self.delta.edge_by_id(id))
     }
 
-    /// The base's list (a delta vertex has none there: its slot is out of the base's range),
-    /// without removed base edges (tested only for a dirty vertex), then the edges the layer
-    /// added at `node`.
+    /// The edges the layer added at `node` (an added vertex's own list, a dirty base vertex's
+    /// stub), newest first, then the base's list (a delta vertex has none there: its slot is
+    /// out of the base's range) without removed base edges (tested only for a dirty vertex).
+    /// The same order as a `TraversalGraph` holding the same writes: it puts a new edge at the
+    /// front of the lists. A self-loop is in both lists.
     #[inline]
     fn out_edges(
         &self,
         node: LayeredVertex,
     ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
-        Ok(GraphStorage::out_edges(&*self.base, node.to_base())?
+        let base = GraphStorage::out_edges(&*self.base, node.to_base())?
             .filter(self.base_adjacency_filter(node))
-            .map(LayeredEdge::from_base)
-            .chain(self.delta.out_edges(node)))
+            .map(LayeredEdge::from_base);
+        Ok(self
+            .delta
+            .edges_at(self.delta_adjacency_index(node), Direction::Outgoing)
+            .chain(base))
     }
 
+    /// See [`Self::out_edges`].
     #[inline]
     fn in_edges(
         &self,
         node: LayeredVertex,
     ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
-        Ok(GraphStorage::in_edges(&*self.base, node.to_base())?
+        let base = GraphStorage::in_edges(&*self.base, node.to_base())?
             .filter(self.base_adjacency_filter(node))
-            .map(LayeredEdge::from_base)
-            .chain(self.delta.in_edges(node)))
+            .map(LayeredEdge::from_base);
+        Ok(self
+            .delta
+            .edges_at(self.delta_adjacency_index(node), Direction::Incoming)
+            .chain(base))
     }
 
     #[inline]
@@ -441,8 +448,8 @@ impl GraphStorage for LayeredGraph {
         self.store_vertex(id, labels, properties)
     }
 
-    /// The write rules of `insert_edge`; an edge between two added vertices is stored in the
-    /// delta, one touching a base vertex is [`GraphError::Unsupported`] (task S1.4).
+    /// The write rules of `insert_edge`, then the id, then the edge is stored in the delta
+    /// whatever its endpoints (a base endpoint through its stub).
     fn insert_edge(
         &mut self,
         id: Option<CompactString>,
@@ -664,8 +671,9 @@ impl LayeredGraph {
             .insert_vertex(id, labels, properties, &mut self.statistics)
     }
 
-    /// Stores an edge the write rules accepted (both endpoints live): an edge between two
-    /// added vertices goes to the delta once its id is checked.
+    /// Stores an edge the write rules accepted (both endpoints live) once its id is checked:
+    /// in the delta topology, a base endpoint through its stub (created on first use, after
+    /// the id check, so a failed write leaves no stub and no dirty bit).
     fn store_edge(
         &mut self,
         id: Option<CompactString>,
@@ -674,11 +682,23 @@ impl LayeredGraph {
         to: LayeredVertex,
         properties: PropertyMap,
     ) -> Result<LayeredEdge, GraphError> {
-        if !(from.is_delta() && to.is_delta()) {
-            return Err(GraphError::unsupported(CROSS_EDGES));
-        }
         let id = self.edge_id_for(id)?;
+        let from = self.edge_endpoint(from)?;
+        let to = self.edge_endpoint(to)?;
         self.delta
             .insert_edge(id, label, properties, from, to, &mut self.statistics)
+    }
+
+    /// The delta node slot (with the endpoint handle's generation) a new edge at the live
+    /// vertex `node` is linked to: the added vertex itself, or the stub of a base vertex,
+    /// created when missing, with the vertex's dirty bit set (which also sets `any`).
+    fn edge_endpoint(&mut self, node: LayeredVertex) -> Result<VertexHandle, GraphError> {
+        if node.is_delta() {
+            return Ok(node.to_delta());
+        }
+        let base = node.to_base();
+        let stub = self.delta.stub_for(base)?;
+        self.dirty_vertices.set(node.slot());
+        Ok(VertexHandle::new(stub, base.generation()))
     }
 }

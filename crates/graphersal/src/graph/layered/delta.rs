@@ -8,22 +8,39 @@
 //! delta element is the delta-local handle with bit 31 of its slot set
 //! ([`LayeredVertex::from_delta`]).
 //!
-//! The tombstones of removed base elements, the images of modified base elements and the extra
-//! adjacency of base vertices are later tasks (S1.4-S1.6); until then [`Delta::base_vertex`] and
-//! [`Delta::base_edge`] answer "removed" and no write sets a dirty bit.
+//! # Stubs: new edges at base vertices (S1.4)
+//!
+//! Every edge the layer adds lives in the delta topology, whatever its endpoints (delta-delta,
+//! delta-base, base-delta, base-base, a self-loop at a base vertex): one edge slot space. A base
+//! vertex that gets its first new incident edge gets a hidden **stub** node in the delta
+//! topology, which carries the delta part of its adjacency lists. The map base slot -> stub
+//! (`stubs`) is consulted only behind the base vertex's dirty bit, so a clean vertex never
+//! touches a hash map (plan P8). A stub is invisible: it is not in [`Delta::vertices`], the
+//! counts, the statistics, the id index or the label indexes, and no layer handle names it
+//! (`stub_bases` turns a stub endpoint back into the base vertex's handle; [`Delta::vertex`]
+//! and the adjacency of a delta handle refuse a stub slot). A stub stays when its last edge is
+//! dropped (it is empty then, and still invisible); its base vertex stays dirty.
+//!
+//! The tombstones of removed base elements and the images of modified base elements are later
+//! tasks (S1.5, S1.6); until then [`Delta::base_vertex`] answers with the base's own state (a
+//! base vertex is dirty only for its stub) and [`Delta::base_edge`] answers "removed" (no base
+//! edge is dirty yet).
 //!
 //! The delta stores what the write rules (`graph/write_rules.rs`) returned: no check runs here.
 //! Values are stored uncompressed (plan P5).
 
 use compact_str::CompactString;
+use fnv::FnvBuildHasher;
 
 use super::handle::{LayeredEdge, LayeredVertex, MAX_BASE_SLOTS};
 use crate::error::GraphError;
 use crate::graph::handle::{EdgeGenerations, FIRST_GENERATION, Generations};
-use crate::graph::labels::Labels;
+use crate::graph::labels::{LabelSetId, Labels};
 use crate::graph::shape::ShapeTable;
 use crate::graph::topology::{Direction, NodeIndex};
-use crate::graph::{EdgeHandle, GraphIndex, GraphStatistics, GraphType, VertexHandle};
+use crate::graph::{
+    EdgeHandle, GraphIndex, GraphStatistics, GraphType, TraversalGraph, VertexHandle,
+};
 use crate::value::{ElementProperty, PropertyMap};
 
 /// The state of one vertex as a read sees it: what a delta vertex or the image of a modified
@@ -60,6 +77,11 @@ pub(crate) struct Delta {
     labels: Labels,
     /// The interned key lists of the delta's property maps.
     shapes: ShapeTable,
+    /// Base vertex slot -> its stub in `graph` (module docs). Asked only for a dirty base vertex.
+    stubs: hashbrown::HashMap<u32, NodeIndex, FnvBuildHasher>,
+    /// Per delta node slot: `Some(base handle)` when the slot holds the stub of that base
+    /// vertex, `None` (or beyond the end) for an added vertex or a vacant slot.
+    stub_bases: Vec<Option<VertexHandle>>,
 }
 
 impl Default for Delta {
@@ -71,6 +93,8 @@ impl Default for Delta {
             edge_generations: Generations::default(),
             labels: Labels::default(),
             shapes: ShapeTable::new(),
+            stubs: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
+            stub_bases: Vec::new(),
         }
     }
 }
@@ -81,10 +105,27 @@ fn delta_slots_exhausted() -> GraphError {
 }
 
 impl Delta {
-    /// Vertices the delta adds to the base count (added minus removed base vertices).
+    /// Vertices the delta adds to the base count (added minus removed base vertices; stubs are
+    /// not vertices).
     #[inline]
     pub(crate) fn vertex_count_change(&self) -> isize {
-        self.graph.node_count() as isize
+        (self.graph.node_count() - self.stubs.len()) as isize
+    }
+
+    /// The base vertex whose stub sits in delta node slot `index`, `None` for any other slot.
+    #[inline]
+    fn stub_base(&self, index: NodeIndex) -> Option<VertexHandle> {
+        self.stub_bases.get(index.index()).copied().flatten()
+    }
+
+    /// The layer handle of the endpoint in delta node slot `index`: the base vertex's own
+    /// handle for a stub, else the delta handle with `generation`.
+    #[inline]
+    fn endpoint(&self, index: NodeIndex, generation: std::num::NonZeroU32) -> LayeredVertex {
+        match self.stub_base(index) {
+            Some(base) => LayeredVertex::from_base(base),
+            None => LayeredVertex::from_delta(VertexHandle::new(index, generation)),
+        }
     }
 
     /// Edges the delta adds to the base count (added minus removed base edges).
@@ -93,11 +134,12 @@ impl Delta {
         self.graph.edge_count() as isize
     }
 
-    /// The vertices the layer added, in slot order.
+    /// The vertices the layer added, in slot order (stubs skipped).
     #[inline]
     pub(crate) fn vertices(&self) -> impl Iterator<Item = LayeredVertex> + '_ {
         self.graph
             .node_references()
+            .filter(|(index, _)| self.stub_base(*index).is_none())
             .map(|(index, vertex)| LayeredVertex::from_delta(VertexHandle::new(index, vertex.3)))
     }
 
@@ -151,38 +193,45 @@ impl Delta {
             .map(LayeredEdge::from_delta)
     }
 
-    /// The delta-local slot of a live added vertex, [`NodeIndex::end`] (never occupied, so it
-    /// lists nothing) for a base handle or a stale one.
+    /// The delta node slot of a live added vertex (`node.is_delta()`), [`NodeIndex::end`]
+    /// (never occupied, so it lists nothing) for a stale handle or one naming a stub.
     #[inline]
-    fn adjacency_index(&self, node: LayeredVertex) -> NodeIndex {
-        if !node.is_delta() {
-            return NodeIndex::end();
-        }
+    pub(crate) fn delta_index(&self, node: LayeredVertex) -> NodeIndex {
         let local = node.to_delta();
         match self.graph.node_weight(local.index()) {
-            Some(vertex) if vertex.3 == local.generation() => local.index(),
+            Some(vertex)
+                if vertex.3 == local.generation() && self.stub_base(local.index()).is_none() =>
+            {
+                local.index()
+            }
             _ => NodeIndex::end(),
         }
     }
 
-    /// The added edges leaving `node` (a delta vertex; a base vertex has none yet), newest
-    /// first.
+    /// The stub of the base vertex `node` (the caller asks only for a dirty one: a hash lookup),
+    /// [`NodeIndex::end`] when it has none or `node` is stale (another generation).
     #[inline]
-    pub(crate) fn out_edges(&self, node: LayeredVertex) -> impl Iterator<Item = LayeredEdge> + '_ {
+    pub(crate) fn stub_index(&self, node: VertexHandle) -> NodeIndex {
+        match self.stubs.get(&node.index().slot()) {
+            Some(&index) if self.stub_base(index) == Some(node) => index,
+            _ => NodeIndex::end(),
+        }
+    }
+
+    /// The added edges in list `direction` of delta node slot `index` (an added vertex or a
+    /// stub, from [`Self::delta_index`] / [`Self::stub_index`]), newest first.
+    #[inline]
+    pub(crate) fn edges_at(
+        &self,
+        index: NodeIndex,
+        direction: Direction,
+    ) -> impl Iterator<Item = LayeredEdge> + '_ {
         self.graph
-            .edges_directed(self.adjacency_index(node), Direction::Outgoing)
+            .edges_directed(index, direction)
             .map(|e| LayeredEdge::from_delta(EdgeHandle::new(e.id(), e.weight().3.own)))
     }
 
-    /// The added edges arriving at `node`; see [`Self::out_edges`].
-    #[inline]
-    pub(crate) fn in_edges(&self, node: LayeredVertex) -> impl Iterator<Item = LayeredEdge> + '_ {
-        self.graph
-            .edges_directed(self.adjacency_index(node), Direction::Incoming)
-            .map(|e| LayeredEdge::from_delta(EdgeHandle::new(e.id(), e.weight().3.own)))
-    }
-
-    /// A delta vertex (`node.is_delta()`), `None` when stale.
+    /// A delta vertex (`node.is_delta()`), `None` when stale or naming a stub.
     #[inline]
     pub(crate) fn vertex(&self, node: LayeredVertex) -> Option<VertexView<'_>> {
         let local = node.to_delta();
@@ -190,6 +239,9 @@ impl Delta {
             .graph
             .node_weight(local.index())
             .filter(|vertex| vertex.3 == local.generation())?;
+        if self.stub_base(local.index()).is_some() {
+            return None;
+        }
         Some(VertexView {
             id: &vertex.0,
             labels: self.labels.set(vertex.1),
@@ -211,18 +263,28 @@ impl Delta {
             label: self.labels.name_slice(weight.1),
             properties: weight.2.as_ref(),
             endpoints: (
-                LayeredVertex::from_delta(VertexHandle::new(source, weight.3.source)),
-                LayeredVertex::from_delta(VertexHandle::new(target, weight.3.target)),
+                self.endpoint(source, weight.3.source),
+                self.endpoint(target, weight.3.target),
             ),
         })
     }
 
-    /// A dirty base vertex as the layer sees it: `None` when the layer removed it, else its
-    /// image. No write sets a dirty bit yet, so nothing reaches this.
+    /// A dirty base vertex as the layer sees it: `None` when the layer removed it (or `node` is
+    /// stale), else its state. No tombstones or images yet (S1.5, S1.6): a base vertex is dirty
+    /// only because it has a stub, which changes its adjacency, not the vertex, so it answers
+    /// with the base's own id, labels and properties.
     #[inline]
-    pub(crate) fn base_vertex(&self, node: VertexHandle) -> Option<VertexView<'_>> {
-        let _ = node;
-        None
+    pub(crate) fn base_vertex<'a>(
+        &'a self,
+        base: &'a TraversalGraph,
+        node: VertexHandle,
+    ) -> Option<VertexView<'a>> {
+        let vertex = base.vertex_weight(node)?;
+        Some(VertexView {
+            id: &vertex.0,
+            labels: base.labels.set(vertex.1),
+            properties: &vertex.2,
+        })
     }
 
     /// A dirty base edge as the layer sees it; see [`Self::base_vertex`].
@@ -268,21 +330,49 @@ impl Delta {
         Ok(LayeredVertex::from_delta(handle))
     }
 
-    /// Stores a new edge between two live delta vertices and indexes it. The id must be free in
-    /// the whole layer.
+    /// The stub of the live base vertex `node`, created (empty, invisible) when it has none.
+    /// The caller sets the vertex's dirty bit.
+    pub(crate) fn stub_for(&mut self, node: VertexHandle) -> Result<NodeIndex, GraphError> {
+        if let Some(&index) = self.stubs.get(&node.index().slot()) {
+            return Ok(index);
+        }
+        if self.graph.vacant_nodes() == 0 && self.graph.node_slots() >= MAX_BASE_SLOTS {
+            return Err(delta_slots_exhausted());
+        }
+        let index = self.graph.add_node((
+            CompactString::default(),
+            LabelSetId::EMPTY,
+            PropertyMap::default(),
+            FIRST_GENERATION,
+        ));
+        let generation = self.node_generations.current(index.index());
+        if let Some(stub) = self.graph.node_weight_mut(index) {
+            stub.3 = generation;
+        }
+        if self.stub_bases.len() <= index.index() {
+            self.stub_bases.resize(index.index() + 1, None);
+        }
+        self.stub_bases[index.index()] = Some(node);
+        self.stubs.insert(node.index().slot(), index);
+        Ok(index)
+    }
+
+    /// Stores a new edge and indexes it. `from` and `to` are delta node slots with the
+    /// generation the endpoint's handle carries: a live added vertex ([`Self::delta_index`])
+    /// or the stub of a live base vertex ([`Self::stub_for`]) with the base vertex's generation.
+    /// The id must be free in the whole layer.
     pub(crate) fn insert_edge(
         &mut self,
         id: CompactString,
         label: Option<CompactString>,
         properties: PropertyMap,
-        from: LayeredVertex,
-        to: LayeredVertex,
+        from: VertexHandle,
+        to: VertexHandle,
         statistics: &mut GraphStatistics,
     ) -> Result<LayeredEdge, GraphError> {
         if self.graph.vacant_edges() == 0 && self.graph.edge_slots() >= MAX_BASE_SLOTS {
             return Err(delta_slots_exhausted());
         }
-        let (from, to) = (from.to_delta(), to.to_delta());
         let mut properties = Some(properties);
         self.shapes.adopt_optional(&mut properties);
         let label_id = self.labels.intern_name(label.as_deref());
@@ -335,10 +425,11 @@ impl Delta {
         self.edge_generations.bump(local.index().index());
     }
 
-    /// Removes a live delta vertex, its incident (delta) edges and every index entry, and
-    /// retires the slot generations; nothing for a stale handle.
+    /// Removes a live delta vertex, its incident edges (also those to base vertices: they leave
+    /// the stubs' lists, the stubs stay) and every index entry, and retires the slot
+    /// generations; nothing for a stale handle.
     pub(crate) fn remove_vertex(&mut self, node: LayeredVertex, statistics: &mut GraphStatistics) {
-        let index = self.adjacency_index(node);
+        let index = self.delta_index(node);
         if index == NodeIndex::end() {
             return;
         }
