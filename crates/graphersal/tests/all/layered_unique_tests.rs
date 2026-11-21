@@ -859,3 +859,193 @@ fn dsl_conflicts_read_like_the_traversal_graph() {
         assert_eq!(snapshot(&*layer.read()), before, "{script}");
     }
 }
+
+/// A base whose uniquely indexed values are stored compressed (an lz4 rule on `doc.body`) and
+/// coded (a `dedup` rule on `doc.kind`), each key under a unique index (S4.3 note): the layer
+/// compares the logical keys, so every write conflicts, or not, exactly as on a `TraversalGraph`
+/// built the same way (same data, rules and indexes) given the same writes: same outcome
+/// (variant and text, the other element's id resolved), same logical data after each.
+#[test]
+fn compressed_and_coded_values_compare_by_their_logical_key() {
+    use graphersal::catalog::{Codec, CompressionDefinition};
+    fn long(seed: usize) -> ElementProperty {
+        (0..120)
+            .map(|i| format!("word{} ", (seed * 7 + i) % 13))
+            .collect::<String>()
+            .into()
+    }
+    fn graph() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        for (id, kind, body) in [
+            ("d1", Some("alpha"), Some(1)),
+            ("d2", Some("beta"), Some(2)),
+            ("d3", None, None),
+        ] {
+            let mut map = PropertyMap::default();
+            if let Some(kind) = kind {
+                map.insert("kind", kind.into());
+            }
+            if let Some(seed) = body {
+                map.insert("body", long(seed));
+            }
+            graph
+                .insert_vertex(Some(id.into()), vec!["doc".into()], map)
+                .unwrap();
+        }
+        graph
+            .insert_vertex(
+                Some("n1".into()),
+                vec!["note".into()],
+                props(&[("kind", "alpha".into()), ("body", long(2))]),
+            )
+            .unwrap();
+        let mut g = graph.traversal_mut();
+        g.define_compression(
+            "kind",
+            CompressionDefinition::new(ElementKind::Vertex, "doc", "kind")
+                .unwrap()
+                .with_codec(Codec::Dedup),
+        )
+        .unwrap();
+        g.define_compression(
+            "body",
+            CompressionDefinition::new(ElementKind::Vertex, "doc", "body")
+                .unwrap()
+                .with_dictionary(false),
+        )
+        .unwrap();
+        drop(g);
+        for (name, key) in [("doc_kind", "kind"), ("doc_body", "body")] {
+            graph
+                .set_definition(Definition::property_index(
+                    name,
+                    PropertyIndexDefinition::new(ElementKind::Vertex, "doc", key).with_unique(true),
+                ))
+                .unwrap();
+        }
+        graph.check_property_indexes().unwrap();
+        graph
+    }
+    /// Every vertex (id, labels, logical properties), sorted.
+    fn logical<S: GraphStorage>(storage: &S) -> Vec<String> {
+        let mut rows: Vec<String> = storage
+            .vertices()
+            .unwrap()
+            .map(|node| {
+                let mut properties: Vec<String> = storage
+                    .vertex_properties(node)
+                    .unwrap()
+                    .map(|map| {
+                        map.iter()
+                            .map(|(k, v)| format!("{k}={:?}", v.to_logical()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                properties.sort();
+                format!(
+                    "{} {:?} {properties:?}",
+                    storage.vertex_id(node).unwrap().unwrap(),
+                    storage.vertex_labels(node).unwrap()
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+    let base = Arc::new(graph());
+    let stored = |id: &str| {
+        let node = base.get_vertex_by_id(id).unwrap().unwrap();
+        base.vertex_properties(node).unwrap().unwrap().clone()
+    };
+    assert!(
+        matches!(
+            stored("d1").get("body"),
+            Some(ElementProperty::Compressed(_))
+        ),
+        "the base stores the body compressed"
+    );
+    assert!(base.is_dedup_coded(ElementKind::Vertex, "d1", "kind"));
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).expect("accepted");
+    let mut reference = graph();
+    let cases: Vec<(&str, Expect, Write)> = vec![
+        (
+            "a compressed base value taken",
+            Expect::Unique("doc_body", "d1"),
+            Write::SetVP("d3", "body", long(1)),
+        ),
+        (
+            "a coded base value taken",
+            Expect::Unique("doc_kind", "d1"),
+            Write::SetVP("d3", "kind", "alpha".into()),
+        ),
+        (
+            "an added element with a compressed base value",
+            Expect::Unique("doc_body", "d2"),
+            Write::InsertV(Some("d4"), vec!["doc"], props(&[("body", long(2))])),
+        ),
+        (
+            "the same value written again on its holder",
+            Expect::Ok,
+            Write::SetVP("d1", "body", long(1)),
+        ),
+        (
+            "a value only another label holds",
+            Expect::Ok,
+            Write::SetVP("d3", "body", long(5)),
+        ),
+        (
+            "the holder changes its value",
+            Expect::Ok,
+            Write::SetVP("d1", "body", long(9)),
+        ),
+        (
+            "the freed compressed value",
+            Expect::Ok,
+            Write::InsertV(Some("d5"), vec!["doc"], props(&[("body", long(1))])),
+        ),
+        (
+            "the new value of the base holder, now a layer image",
+            Expect::Unique("doc_body", "d1"),
+            Write::SetVP("d3", "body", long(9)),
+        ),
+        (
+            "a label added over a coded base value",
+            Expect::Unique("doc_kind", "d1"),
+            Write::AddLabel("n1", "doc"),
+        ),
+        ("the coded holder dropped", Expect::Ok, Write::DropV("d1")),
+        (
+            "its coded value free again",
+            Expect::Ok,
+            Write::SetVP("d3", "kind", "alpha".into()),
+        ),
+        (
+            "an added element taking a coded value of the layer",
+            Expect::Unique("doc_kind", "d3"),
+            Write::InsertV(Some("d6"), vec!["doc"], props(&[("kind", "alpha".into())])),
+        ),
+        (
+            "the coded base value still held",
+            Expect::Unique("doc_kind", "d2"),
+            Write::SetVP("d5", "kind", "beta".into()),
+        ),
+    ];
+    for (what, expect, write) in cases {
+        let on_layer = outcome(apply(&mut layer, &write));
+        let on_reference = outcome(apply(&mut reference, &write));
+        assert_eq!(on_layer, on_reference, "{what}");
+        match (expect, &on_layer) {
+            (Expect::Ok, Ok(())) => {}
+            (Expect::Unique(index, existing), Err((_, text))) => {
+                assert!(text.contains("unique index"), "{what}: {text}");
+                assert!(text.contains(index), "{what}: {text}");
+                assert!(text.contains(existing), "{what}: {text}");
+            }
+            (expect, got) => panic!("{what}: expected {expect:?}, got {got:?}"),
+        }
+        check(&layer);
+        assert_eq!(logical(&layer), logical(&reference), "{what}");
+    }
+    reference.check_property_indexes().unwrap();
+    layer.base().check_property_indexes().unwrap();
+}
