@@ -7052,7 +7052,7 @@ fn the_repl_runs_on_the_layer() {
 
 /// Invalid combinations exit 2 with a diagnostic naming the flags: `--layer` keeps its writes
 /// in memory, so it cannot create a store, and it is the writable part, so `--read-only`
-/// contradicts it. A base the layer cannot carry yet (vector rules) is refused as well.
+/// contradicts it. A base with vector rules is carried (S4.5b).
 #[test]
 fn layer_refuses_what_it_cannot_serve() {
     let dir = temp_path("layer_refusals");
@@ -7095,13 +7095,18 @@ fn layer_refuses_what_it_cannot_serve() {
     )
     .unwrap();
     let res = run(
-        &["--layer", "--schema", schema.to_str().unwrap(), "-e", "1"],
+        &[
+            "--layer",
+            "--schema",
+            schema.to_str().unwrap(),
+            "-e",
+            r#"g.v().has("name","marko").values("emb").count().next()"#,
+        ],
         "",
     );
-    assert_eq!(res.code, 2, "{}", res.stderr);
-    assert!(res.stderr.contains("vector rules"), "{}", res.stderr);
-    assert!(res.stderr.contains("run without --layer"), "{}", res.stderr);
-    assert!(res.stdout.is_empty(), "{}", res.stdout);
+    // Since S4.5b a layer carries a base with vector rules.
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), "1", "{}", res.stdout);
 
     // The args file knows the switch.
     let args = dir.join("args.json");
