@@ -56,29 +56,54 @@
 //! current values), frees its base values, and the error names the index, the value and the
 //! other element's id exactly as `TraversalGraph` does. A unique index stored in the base over
 //! repeated values is not installed there (neither served nor enforced), so it is not an
-//! overlay either: inherited as disabled, its report forwarded (`unique_index_duplicates`).
-//! Layer-defined indexes ([`BasePart`] owned by the layer) are S4.4.
+//! overlay either: inherited as disabled, with the base's report (`unique_index_duplicates`).
+//!
+//! **Indexes the layer defines** (S4.4): the layer's catalog takes property index definitions
+//! as `TraversalGraph`'s does (validated, the other index kind's definition of the name
+//! replaced, `check_conflict` against the layer's catalog), and every catalog change of an
+//! index, also its undo, rebuilds that overlay from the catalog and the data
+//! ([`LayeredGraph::layer_index_after_change`], `TraversalGraph::property_index_after_change`'s
+//! counterpart): an index whose definition is the base's, installed there, keeps the shared
+//! base part ([`BasePart::Shared`]); any other gets a base part of its own
+//! ([`BasePart::Owned`], built by `TraversalGraph::build_index` over EVERY base element, as the
+//! base would build it, so the masked and delta parts are maintained exactly as for a shared
+//! part: one full scan of the base's elements of the label, its bytes in the layer's own
+//! footprint). A unique one is first build-checked over the merged view (the layer's elements):
+//! repeated values keep it disabled, with the layer's own report, as `TraversalGraph` does. A
+//! dropped index (also an inherited one) loses its overlay: lookups, plans and unique checks
+//! stop using it, the base keeps its own. Positions follow `PropertyIndexes::install` (replaced
+//! in place, appended, removed), the same change applied to the base parts, so `bases`,
+//! `masked` and `delta` stay aligned.
 
 use super::LayeredGraph;
 use super::handle::{DELTA_BIT, LayeredEdge, LayeredVertex};
 use crate::error::GraphError;
+use crate::graph::definition::DefinitionKind;
 use crate::graph::postings::Iter;
 use crate::graph::property_index::{
-    IndexKey, IndexState, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
-    PropertyIndexTransform, PropertyIndexes, UniqueConflict,
+    IndexKey, IndexState, Installed, PropertyIndexDefinition, PropertyIndexInfo,
+    PropertyIndexRange, PropertyIndexStats, PropertyIndexTransform, PropertyIndexes,
+    UniqueConflict, UniqueIndexDuplicates, duplicates_report_by,
 };
 use crate::graph::schema::ElementKind;
 use crate::graph::topology::{EdgeIndex, NodeIndex};
 use crate::graph::{GraphStorage, TraversalGraph};
 use crate::value::{ElementProperty, PropertyMap};
+use compact_str::CompactString;
 
 /// Where the base part of an overlay comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum BasePart {
     /// The base's installed index at this position (`TraversalGraph::property_indexes`): the
     /// layer serves an index inherited from the base's catalog, read in place.
     Shared(usize),
+    /// An index the layer defines (or redefines) itself: its entries over every base element,
+    /// built by `TraversalGraph::build_index` over the base, owned (and counted) by the layer.
+    Owned(Box<IndexState>),
 }
+
+/// The parts of one overlay built by [`LayeredGraph::build_overlay`]: base, masked, delta.
+type BuiltOverlay = (BasePart, IndexState, IndexState);
 
 /// The index overlays of a layer (module docs): one per index it serves, at the same position
 /// in `bases`, `masked` and `delta`.
@@ -90,13 +115,19 @@ pub(crate) struct LayerIndexes {
     masked: PropertyIndexes,
     /// The entries of the added elements and the images, by layer slot, one state per overlay.
     delta: PropertyIndexes,
+    /// The unique indexes of the layer's catalog kept disabled (their data held repeated
+    /// values: no overlay, not served, not enforced), with their reports, by name: the base's
+    /// at creation, then the layer's own builds.
+    disabled: Vec<(CompactString, UniqueIndexDuplicates)>,
 }
 
 /// One overlay as a reader sees it: its three parts (module docs).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IndexOverlay<'a> {
-    /// The base part (read in place).
+    /// The base part (read in place, shared or owned).
     pub(crate) base: &'a IndexState,
+    /// Whether the base part is the layer's own ([`BasePart::Owned`]).
+    pub(crate) owned: bool,
     /// The base entries of the excluded base slots.
     pub(crate) masked: &'a IndexState,
     /// The entries of the added elements and the images, by layer slot.
@@ -113,6 +144,55 @@ impl LayerIndexes {
             bases: (0..installed.len()).map(BasePart::Shared).collect(),
             masked: installed.empty_like(),
             delta: installed.empty_like(),
+            disabled: installed.disabled().to_vec(),
+        }
+    }
+
+    /// The report of the unique index `name` kept disabled by the layer; `None` when it is
+    /// not disabled.
+    pub(crate) fn disabled_report(&self, name: &str) -> Option<UniqueIndexDuplicates> {
+        self.disabled
+            .iter()
+            .find(|(disabled, _)| disabled == name)
+            .map(|(_, report)| report.clone())
+    }
+
+    /// The base part of the overlay at `position`.
+    fn base_part(&self, position: usize) -> Option<&BasePart> {
+        self.bases.get(position)
+    }
+
+    /// Installs the overlay of the index `name` (`None`: removes it) with
+    /// `PropertyIndexes::install`'s position rule, applied alike to the three parts; `disabled`
+    /// is the index's report when it is kept disabled (then `built` is `None`).
+    fn install(
+        &mut self,
+        name: &str,
+        built: Option<BuiltOverlay>,
+        disabled: Option<UniqueIndexDuplicates>,
+    ) {
+        self.disabled.retain(|(held, _)| held != name);
+        if let Some(report) = disabled {
+            self.disabled.push((CompactString::from(name), report));
+        }
+        let (base, masked, delta) = match built {
+            Some((base, masked, delta)) => (Some(base), Some(masked), Some(delta)),
+            None => (None, None, None),
+        };
+        self.masked.install(name, masked);
+        match (self.delta.install(name, delta), base) {
+            (Installed::Replaced(position), Some(base)) => {
+                if let Some(slot) = self.bases.get_mut(position) {
+                    *slot = base;
+                }
+            }
+            (Installed::Removed(position), _) => {
+                if position < self.bases.len() {
+                    self.bases.remove(position);
+                }
+            }
+            (Installed::Appended, Some(base)) => self.bases.push(base),
+            _ => {}
         }
     }
 
@@ -140,11 +220,13 @@ impl LayerIndexes {
         base: &'a TraversalGraph,
         position: usize,
     ) -> Option<IndexOverlay<'a>> {
-        let base_part = match self.bases.get(position)? {
-            BasePart::Shared(at) => base.property_indexes.state(*at)?,
+        let (base_part, owned) = match self.bases.get(position)? {
+            BasePart::Shared(at) => (base.property_indexes.state(*at)?, false),
+            BasePart::Owned(state) => (&**state, true),
         };
         Some(IndexOverlay {
             base: base_part,
+            owned,
             masked: self.masked.state(position)?,
             delta: self.delta.state(position)?,
         })
@@ -219,10 +301,19 @@ impl LayerIndexes {
         }
     }
 
-    /// The heap bytes of the layer-owned parts (masked and delta): the overlays' share of the
-    /// layer's own footprint. The shared base parts belong to the base's.
+    /// The heap bytes of the layer-owned parts (masked, delta and the base parts of the
+    /// indexes the layer defines): the overlays' share of the layer's own footprint. The
+    /// shared base parts belong to the base's.
     pub(crate) fn bytes(&self) -> u64 {
-        self.masked.bytes() + self.delta.bytes()
+        let owned: u64 = self
+            .bases
+            .iter()
+            .map(|base| match base {
+                BasePart::Shared(_) => 0,
+                BasePart::Owned(state) => state.stats().bytes,
+            })
+            .sum();
+        self.masked.bytes() + self.delta.bytes() + owned
     }
 
     /// The position of the overlay of the index on `(element, label, key, transform)`
@@ -267,15 +358,19 @@ impl<'a> IndexOverlay<'a> {
     /// delta`; `distinct_values` the base's plus the delta's keys, an upper bound (a key whose
     /// base holders are all excluded, or one in both parts, counts as it is: exact would walk
     /// the layer's keys on every run, and the optimizer reads only estimates); `bytes` the
-    /// layer-owned parts only (masked and delta), since the shared base part is the base's
-    /// (`MemoryStats::shared_bytes`).
+    /// layer-owned parts only (masked and delta, plus an owned base part), since a shared base
+    /// part is the base's (`MemoryStats::shared_bytes`).
     pub(crate) fn stats(&self) -> PropertyIndexStats {
         let (base, masked, delta) = (self.base.stats(), self.masked.stats(), self.delta.stats());
         let combine = |b: u64, m: u64, d: u64| b.saturating_sub(m).saturating_add(d);
+        let owned = if self.owned { base.bytes } else { 0 };
         PropertyIndexStats::new(
             combine(base.entries, masked.entries, delta.entries),
             base.distinct_values.saturating_add(delta.distinct_values),
-            masked.bytes.saturating_add(delta.bytes),
+            masked
+                .bytes
+                .saturating_add(delta.bytes)
+                .saturating_add(owned),
         )
         .with_skipped(combine(base.skipped, masked.skipped, delta.skipped))
     }
@@ -506,17 +601,36 @@ impl LayeredGraph {
     ) -> Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>> {
         let overlay = self.overlay_for(ElementKind::Vertex, label, key, transform)?;
         let slots = overlay.slots(range, move |slot| excluded_vertex(self, slot));
-        // The generation is the slot's: exact maintenance names only live elements' slots.
-        Some(Box::new(slots.filter_map(move |slot| {
-            if slot & DELTA_BIT != 0 {
-                return self.delta.added_vertex_at(slot & !DELTA_BIT);
-            }
-            let index = NodeIndex::from_slot(slot);
-            let vertex = self.base.graph.node_weight(index)?;
-            Some(LayeredVertex::from_base(crate::graph::VertexHandle::new(
-                index, vertex.3,
-            )))
-        })))
+        Some(Box::new(
+            slots.filter_map(move |slot| self.slot_vertex(slot)),
+        ))
+    }
+
+    /// The live vertex at layer `slot` (an added vertex's with bit 31 set, else a base slot);
+    /// the generation is the slot's: exact maintenance names only live elements' slots.
+    #[inline]
+    fn slot_vertex(&self, slot: u32) -> Option<LayeredVertex> {
+        if slot & DELTA_BIT != 0 {
+            return self.delta.added_vertex_at(slot & !DELTA_BIT);
+        }
+        let index = NodeIndex::from_slot(slot);
+        let vertex = self.base.graph.node_weight(index)?;
+        Some(LayeredVertex::from_base(crate::graph::VertexHandle::new(
+            index, vertex.3,
+        )))
+    }
+
+    /// The edge counterpart of [`Self::slot_vertex`].
+    #[inline]
+    fn slot_edge(&self, slot: u32) -> Option<LayeredEdge> {
+        if slot & DELTA_BIT != 0 {
+            return self.delta.added_edge_at(slot & !DELTA_BIT);
+        }
+        let index = EdgeIndex::from_slot(slot);
+        let edge = self.base.graph.edge_weight(index)?;
+        Some(LayeredEdge::from_base(crate::graph::EdgeHandle::new(
+            index, edge.3.own,
+        )))
     }
 
     /// The edge counterpart of [`Self::layer_index_vertices`].
@@ -529,16 +643,7 @@ impl LayeredGraph {
     ) -> Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>> {
         let overlay = self.overlay_for(ElementKind::Edge, label, key, transform)?;
         let slots = overlay.slots(range, move |slot| excluded_edge(self, slot));
-        Some(Box::new(slots.filter_map(move |slot| {
-            if slot & DELTA_BIT != 0 {
-                return self.delta.added_edge_at(slot & !DELTA_BIT);
-            }
-            let index = EdgeIndex::from_slot(slot);
-            let edge = self.base.graph.edge_weight(index)?;
-            Some(LayeredEdge::from_base(crate::graph::EdgeHandle::new(
-                index, edge.3.own,
-            )))
-        })))
+        Some(Box::new(slots.filter_map(move |slot| self.slot_edge(slot))))
     }
 
     /// The exact number of visible elements of the index on `(element, label, key,
@@ -631,6 +736,149 @@ impl LayeredGraph {
     }
 }
 
+/// The indexes a layer defines, drops and redefines (S4.4, module docs): the catalog side of
+/// the overlays.
+impl LayeredGraph {
+    /// The definition of the property index `name` in the layer's catalog (either index kind:
+    /// one namespace), with its kind.
+    fn layer_index_definition(&self, name: &str) -> Option<&crate::graph::definition::Definition> {
+        self.catalog
+            .get(DefinitionKind::PROPERTY_INDEX, name)
+            .or_else(|| self.catalog.get(DefinitionKind::PROPERTY_INDEX_EXT, name))
+    }
+
+    /// After a catalog change of kind property index (a define, a drop, either one undone):
+    /// rebuilds the overlay of the index `name` from the layer's catalog and data, or removes
+    /// it when the catalog no longer serves it; a unique index over repeated values is kept
+    /// disabled with the layer's report. `TraversalGraph::property_index_after_change`'s
+    /// counterpart, with its position rule.
+    pub(crate) fn layer_index_after_change(&mut self, name: &str) {
+        // An index of a type this version does not know is kept in the catalog, never built.
+        let definition = self.layer_index_definition(name).and_then(|definition| {
+            let index = definition.as_property_index()?;
+            index
+                .is_served_type()
+                .then(|| (definition.clone(), index.clone()))
+        });
+        let (built, disabled) = match definition {
+            Some((definition, index)) => match self.build_overlay(name, &definition, &index) {
+                Ok(built) => (Some(built), None),
+                Err(report) => (None, Some(report)),
+            },
+            None => (None, None),
+        };
+        self.delta.indexes_mut().install(name, built, disabled);
+    }
+
+    /// The three parts of the overlay of the index `name` (`definition` as the layer's catalog
+    /// holds it, `index` its body); a unique one whose merged view holds repeated values gives
+    /// the report instead (`TraversalGraph::build_checked`'s counterpart over the layer's
+    /// elements).
+    fn build_overlay(
+        &self,
+        name: &str,
+        definition: &crate::graph::definition::Definition,
+        index: &PropertyIndexDefinition,
+    ) -> Result<BuiltOverlay, UniqueIndexDuplicates> {
+        let template = IndexState::of_definition(name, index);
+        if index.is_unique() {
+            let visible = self.visible_state(&template);
+            let groups = visible.duplicate_groups();
+            if !groups.is_empty() {
+                tracing::warn!(
+                    index = name,
+                    repeated = groups.len(),
+                    "a unique property index is not served: its data holds repeated values"
+                );
+                let element = index.element();
+                let key = index.key();
+                return Err(duplicates_report_by(
+                    &visible,
+                    &groups,
+                    |slot| self.layer_slot_id(element, slot),
+                    |slot| self.layer_slot_value(element, slot, key),
+                ));
+            }
+        }
+        // The base's own index of this definition, installed there, is read in place.
+        let shared = self
+            .base
+            .definitions
+            .get(definition.kind(), name)
+            .filter(|base_definition| *base_definition == definition)
+            .and_then(|_| self.base.property_indexes.position_of(name));
+        let base = match shared {
+            Some(position) => BasePart::Shared(position),
+            None => BasePart::Owned(Box::new(self.base.build_index(name, index))),
+        };
+        let (masked, delta) = self.rebuild_parts(&template);
+        Ok((base, masked, delta))
+    }
+
+    /// The id of the live element of kind `element` at layer `slot`.
+    fn layer_slot_id(&self, element: ElementKind, slot: u32) -> Option<String> {
+        match element {
+            ElementKind::Vertex => GraphStorage::vertex_id(self, self.slot_vertex(slot)?)
+                .ok()
+                .flatten()
+                .map(str::to_string),
+            ElementKind::Edge => GraphStorage::edge_id(self, self.slot_edge(slot)?)
+                .ok()
+                .flatten()
+                .map(str::to_string),
+        }
+    }
+
+    /// The logical value at top-level `key` of the live element of kind `element` at layer
+    /// `slot`, as the layer reads it.
+    fn layer_slot_value(
+        &self,
+        element: ElementKind,
+        slot: u32,
+        key: &str,
+    ) -> Option<ElementProperty> {
+        let map = match element {
+            ElementKind::Vertex => GraphStorage::vertex_properties(self, self.slot_vertex(slot)?),
+            ElementKind::Edge => GraphStorage::edge_properties(self, self.slot_edge(slot)?),
+        };
+        map.ok()??.get(key).map(ElementProperty::to_logical)
+    }
+
+    /// The index of `template`'s definition over every element the layer lists through its
+    /// read API, keyed by layer slot: what a `TraversalGraph` with the layer's data holds (the
+    /// merged view a unique define is checked over, and what `check_layer_indexes` compares
+    /// the visible entries with).
+    fn visible_state(&self, template: &IndexState) -> IndexState {
+        let mut state = template.empty_like();
+        let key = template.key();
+        match template.element() {
+            ElementKind::Vertex => {
+                for node in GraphStorage::vertices(self).into_iter().flatten() {
+                    let labels = GraphStorage::vertex_labels(self, node).unwrap_or(&[]);
+                    if in_index(template, labels.iter().map(|l| l.as_str()))
+                        && let Ok(Some(map)) = GraphStorage::vertex_properties(self, node)
+                        && let Some(value) = map.get(key)
+                    {
+                        state.account(true, value, node.slot());
+                    }
+                }
+            }
+            ElementKind::Edge => {
+                for edge in GraphStorage::edges(self).into_iter().flatten() {
+                    let label = GraphStorage::edge_label(self, edge).ok().flatten();
+                    if in_index(template, label.into_iter())
+                        && let Ok(Some(map)) = GraphStorage::edge_properties(self, edge)
+                        && let Some(value) = map.get(key)
+                    {
+                        state.account(true, value, edge.slot());
+                    }
+                }
+            }
+        }
+        state
+    }
+}
+
 /// Every `(key, slot)` entry of `state`, in key-then-slot order.
 fn pairs(state: &IndexState) -> Vec<(IndexKey, u32)> {
     state
@@ -646,6 +894,16 @@ fn in_index<'l>(state: &IndexState, mut labels: impl Iterator<Item = &'l str>) -
         None => true,
         Some(label) => labels.any(|held| held == label),
     }
+}
+
+/// Whether `state` has `template`'s definition (name, element, label, key, transform, unique).
+fn same_definition(state: &IndexState, template: &IndexState) -> bool {
+    state.name() == template.name()
+        && state.element() == template.element()
+        && state.label() == template.label()
+        && state.key() == template.key()
+        && state.transform() == template.transform()
+        && state.is_unique() == template.is_unique()
 }
 
 /// Compares one maintained part with its rebuild: the same entries, lengths, skipped counts,
@@ -682,8 +940,12 @@ impl LayeredGraph {
     /// every visible element of each overlay's kind); the counterpart of
     /// [`TraversalGraph::check_property_indexes`].
     ///
-    /// Checked per overlay:
-    /// - its definition is the base index's at the same position;
+    /// Checked:
+    /// - one overlay per index the layer's catalog serves and does not keep disabled, and no
+    ///   other;
+    /// - per overlay, every part's definition is the catalog's; a shared base part is the base's
+    ///   installed index of the same catalog definition, an owned one equals a build over the
+    ///   base (`TraversalGraph::build_index`);
     /// - `masked` equals the base entries of the excluded base slots (removed or imaged),
     ///   rebuilt from the base's data;
     /// - `delta` equals the entries of the added elements and the images under their layer
@@ -695,35 +957,68 @@ impl LayeredGraph {
     #[doc(hidden)]
     pub fn check_layer_indexes(&self) -> Result<(), String> {
         let overlays = self.delta.indexes();
-        let installed = &self.base.property_indexes;
-        if overlays.len() != installed.len() {
+        let mut served: Vec<&str> = self
+            .catalog
+            .iter()
+            .filter(|definition| {
+                definition
+                    .as_property_index()
+                    .is_some_and(PropertyIndexDefinition::is_served_type)
+                    && overlays.disabled_report(definition.name()).is_none()
+            })
+            .map(|definition| definition.name())
+            .collect();
+        served.sort_unstable();
+        let mut kept: Vec<&str> = (0..overlays.len())
+            .filter_map(|position| overlays.delta.state(position).map(IndexState::name))
+            .collect();
+        kept.sort_unstable();
+        if served != kept {
             return Err(format!(
-                "{} overlays kept, the base has {} indexes installed",
-                overlays.len(),
-                installed.len()
+                "overlays kept for {kept:?}, the layer's catalog serves {served:?}"
             ));
         }
         for position in 0..overlays.len() {
             let Some(overlay) = overlays.overlay(&self.base, position) else {
                 return Err(format!("overlay {position}: a part is missing"));
             };
-            let Some(base_state) = installed.state(position) else {
-                return Err(format!("overlay {position}: no base index at its position"));
+            let name = overlay.delta.name();
+            let Some(definition) = self.layer_index_definition(name) else {
+                return Err(format!("index '{name}': not in the layer's catalog"));
             };
-            let name = base_state.name();
-            for (part, state) in [("masked", overlay.masked), ("delta", overlay.delta)] {
-                if state.name() != name
-                    || state.element() != base_state.element()
-                    || state.label() != base_state.label()
-                    || state.key() != base_state.key()
-                    || state.transform() != base_state.transform()
-                {
+            let Some(index) = definition.as_property_index() else {
+                return Err(format!("index '{name}': not a property index definition"));
+            };
+            let template = IndexState::of_definition(name, index);
+            for (part, state) in [
+                ("base", overlay.base),
+                ("masked", overlay.masked),
+                ("delta", overlay.delta),
+            ] {
+                if !same_definition(state, &template) {
                     return Err(format!(
-                        "index '{name}': the {part} part's definition differs"
+                        "index '{name}': the {part} part's definition differs from the catalog's"
                     ));
                 }
             }
-            let (fresh_masked, fresh_delta) = self.rebuild_parts(base_state);
+            match overlays.base_part(position) {
+                Some(BasePart::Shared(at)) => {
+                    let base_definition = self.base.definitions.get(definition.kind(), name);
+                    if base_definition != Some(definition)
+                        || self.base.property_indexes.position_of(name) != Some(*at)
+                    {
+                        return Err(format!(
+                            "index '{name}': a shared base part, but the layer's definition is                              not the base's installed one"
+                        ));
+                    }
+                }
+                Some(BasePart::Owned(state)) => {
+                    let fresh = self.base.build_index(name, index);
+                    same_part(name, "owned base", state, &fresh)?;
+                }
+                None => return Err(format!("overlay {position}: no base part")),
+            }
+            let (fresh_masked, fresh_delta) = self.rebuild_parts(&template);
             same_part(name, "masked", overlay.masked, &fresh_masked)?;
             same_part(name, "delta", overlay.delta, &fresh_delta)?;
             self.check_visible(name, overlay)?;
@@ -812,32 +1107,7 @@ impl LayeredGraph {
     /// index over every element the layer lists, and the counts `base - masked + delta`.
     fn check_visible(&self, name: &str, overlay: IndexOverlay<'_>) -> Result<(), String> {
         let element = overlay.base.element();
-        let mut expected = overlay.base.empty_like();
-        let key = overlay.base.key();
-        match element {
-            ElementKind::Vertex => {
-                for node in GraphStorage::vertices(self).map_err(|err| err.to_string())? {
-                    let labels = GraphStorage::vertex_labels(self, node).unwrap_or(&[]);
-                    if in_index(overlay.base, labels.iter().map(|l| l.as_str()))
-                        && let Ok(Some(map)) = GraphStorage::vertex_properties(self, node)
-                        && let Some(value) = map.get(key)
-                    {
-                        expected.account(true, value, node.slot());
-                    }
-                }
-            }
-            ElementKind::Edge => {
-                for edge in GraphStorage::edges(self).map_err(|err| err.to_string())? {
-                    let label = GraphStorage::edge_label(self, edge).ok().flatten();
-                    if in_index(overlay.base, label.into_iter())
-                        && let Ok(Some(map)) = GraphStorage::edge_properties(self, edge)
-                        && let Some(value) = map.get(key)
-                    {
-                        expected.account(true, value, edge.slot());
-                    }
-                }
-            }
-        }
+        let expected = self.visible_state(overlay.base);
         let mut visible: Vec<(IndexKey, u32)> = pairs(overlay.base)
             .into_iter()
             .filter(|(_, slot)| !excluded(self, element, *slot))

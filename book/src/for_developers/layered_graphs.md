@@ -99,7 +99,7 @@ assert!(stats.total_bytes() < stats.shared_bytes);
 | `writable` | yes |
 | `atomic` (units, rollback, savepoints) | yes |
 | `change_capture` (commit hooks, dry runs) | yes |
-| `property_indexes` (creating indexes) | no, until index deltas (stage 4) |
+| `property_indexes` (creating indexes) | yes: the layer defines, drops and redefines indexes in its own catalog (see below) |
 | `exact_property_index_lookups` | as the base. The base's indexes answer only while the layer has not touched that element kind; after that the engine scans |
 | `durability` | no |
 | `isolation`, `concurrent_writers` | as `TraversalGraph`: none; `Graph<LayeredGraph>` serializes writers |
@@ -144,12 +144,11 @@ alone, with the base as one line, is planned.
   finds no journal.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
-- **Refused until index deltas** (stage 4), with `GraphError::Unsupported` ("... not supported
-  on a layered graph yet"):
+- **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):
   - a layer over a base whose schema has vector rules, and a schema with vector rules on a
     layer;
-  - property index, compression rule and embedding model definitions in the layer's catalog,
-    and compression estimates over element kinds the layer changed.
+  - compression rule and embedding model definitions in the layer's catalog, and compression
+    estimates over element kinds the layer changed.
 
   A base with plain or unique indexes or compression rules is fine: the layer reads it. The
   layer stores its own values uncompressed. `compression_stats` reports the base's figures.
@@ -158,7 +157,21 @@ alone, with the base as one line, is planned.
   the same point of its write rule, against the base elements the layer neither dropped nor
   copied up plus the layer's own elements, with the same `GraphError::UniqueViolation` (index,
   value, the other element's id). A unique index the base keeps disabled is not enforced and
-  `unique_index_duplicates` forwards the base's report.
+  `unique_index_duplicates` answers the base's report until the layer drops or redefines it.
+- **Indexes the layer defines.** The layer's catalog takes property index definitions as a
+  `TraversalGraph`'s does (same validation, the other index kind's definition of the name
+  replaced, the same conflict errors), each define and drop recorded in the layer's undo log
+  and change set. A definition equal to the base's (an inherited index, or one dropped and
+  defined again) reads the base's index in place. Any other builds a base part of its own
+  over **every** base element of its label (a full scan, its bytes in the layer's
+  `property_index_bytes`, never in `shared_bytes`), so an index on a large base label costs
+  that label's index once per layer. A unique define is checked over the layer's data (the
+  base elements the layer neither dropped nor copied up plus its own): repeated values keep
+  it disabled with the layer's own report, and the front ends refuse it with the same
+  `DefinitionError::UniqueIndexDuplicates` as on a `TraversalGraph`. Dropping an index (also
+  one of the base) removes it for the layer: lookups, plans and unique checks stop using it,
+  the base keeps its own. A rollback rebuilds the overlay from the catalog and data as they
+  were.
 - **Order.** Unordered traversals list the same elements as a `TraversalGraph` holding the
   same data, and in the same order for every write except these:
   - after a drop followed by a create, a `TraversalGraph` reuses the freed slot and the layer

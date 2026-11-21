@@ -1428,13 +1428,13 @@ impl Definition {
 /// label-less and a per-label index on one key). An index of the same name in either index
 /// kind is the one it replaces.
 pub(crate) fn check_conflict(
-    graph: &TraversalGraph,
+    catalog: &crate::graph::definition::Catalog,
     definition: &Definition,
 ) -> Result<(), GraphError> {
     let Some(index) = definition.as_property_index() else {
         return Ok(());
     };
-    for other in graph.definitions.iter() {
+    for other in catalog.iter() {
         if !other.kind().is_property_index() || other.name() == definition.name() {
             continue;
         }
@@ -2031,6 +2031,20 @@ impl IndexState {
         }
     }
 
+    /// The empty state of the index `name` defined by `definition` (what
+    /// [`TraversalGraph::build_index`] fills): what a layered graph starts the parts of an
+    /// index it defines itself from.
+    pub(crate) fn of_definition(name: &str, definition: &PropertyIndexDefinition) -> IndexState {
+        IndexState::new(
+            name,
+            definition.element(),
+            definition.label(),
+            definition.key(),
+            definition.transform().cloned(),
+            definition.is_unique(),
+        )
+    }
+
     /// A state with the same definition (name, element, label, key, transform, unique) and no
     /// entries: what an index overlay of a layered graph starts its own parts from.
     pub(crate) fn empty_like(&self) -> IndexState {
@@ -2067,6 +2081,11 @@ impl IndexState {
     /// Its transform.
     pub(crate) fn transform(&self) -> Option<&PropertyIndexTransform> {
         self.transform.as_ref()
+    }
+
+    /// Whether it is a unique index.
+    pub(crate) fn is_unique(&self) -> bool {
+        self.unique
     }
 
     /// The number of (key, slot) entries.
@@ -2291,7 +2310,7 @@ impl IndexState {
     /// The groups of slots holding an equal non-null key (by [`Self::other_holder`]'s
     /// equality), each with two or more slots, in key order: what keeps a unique index from
     /// being built.
-    fn duplicate_groups(&self) -> Vec<Vec<u32>> {
+    pub(crate) fn duplicate_groups(&self) -> Vec<Vec<u32>> {
         let mut groups = Vec::new();
         let mut keys = self.entries.iter().peekable();
         while let Some((key, postings)) = keys.next() {
@@ -2428,6 +2447,19 @@ pub(crate) struct PropertyIndexes {
     disabled: Vec<(CompactString, UniqueIndexDuplicates)>,
 }
 
+/// Where [`PropertyIndexes::install`] changed the installed indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Installed {
+    /// The index at this position was replaced in place.
+    Replaced(usize),
+    /// The index at this position was removed (the ones after it moved down by one).
+    Removed(usize),
+    /// The index was appended (its position is the old length).
+    Appended,
+    /// Nothing changed (no index of that name, none to install).
+    Nothing,
+}
+
 /// An element other than the one written already holds the key a unique index would get:
 /// the index (its position), the other element's slot and the value written.
 pub(crate) struct UniqueConflict {
@@ -2529,6 +2561,8 @@ impl PropertyIndexes {
         }
     }
 
+    /// Rebuilds the label lookups and the unique count from the states (after a state was
+    /// added, replaced or removed, which moves the positions after it).
     fn reindex_lookup(&mut self) {
         self.vertex.clear();
         self.edge.clear();
@@ -2698,6 +2732,42 @@ impl PropertyIndexes {
         self.indexes.get(position)
     }
 
+    /// The position of the installed index named `name`.
+    pub(crate) fn position_of(&self, name: &str) -> Option<usize> {
+        self.indexes.iter().position(|index| index.name == name)
+    }
+
+    /// Installs `state` as the index `name` (replacing the one of that name in place, else
+    /// appended) or, with `None`, removes the index of that name, then rebuilds the lookups:
+    /// what [`TraversalGraph::property_index_after_change`] does with a build. Answers where
+    /// the change happened, so a caller keeping parts aligned with these positions (a layered
+    /// graph's overlays) can apply the same change to them.
+    pub(crate) fn install(&mut self, name: &str, state: Option<IndexState>) -> Installed {
+        let installed = match (self.position_of(name), state) {
+            (Some(position), Some(state)) => {
+                self.indexes[position] = state;
+                Installed::Replaced(position)
+            }
+            (Some(position), None) => {
+                self.indexes.remove(position);
+                Installed::Removed(position)
+            }
+            (None, Some(state)) => {
+                self.indexes.push(state);
+                Installed::Appended
+            }
+            (None, None) => return Installed::Nothing,
+        };
+        self.reindex_lookup();
+        installed
+    }
+
+    /// The unique indexes kept disabled (not installed: their data held repeated values),
+    /// with their reports, by name.
+    pub(crate) fn disabled(&self) -> &[(CompactString, UniqueIndexDuplicates)] {
+        &self.disabled
+    }
+
     /// The same indexes at the same positions with the same lookups, every one empty
     /// ([`IndexState::empty_like`]); no disabled unique index (they hold nothing). What a
     /// layered graph keeps its overlay parts in.
@@ -2717,6 +2787,36 @@ impl PropertyIndexes {
     pub(crate) fn bytes(&self) -> u64 {
         self.indexes.iter().map(|index| index.stats().bytes).sum()
     }
+}
+
+/// The report of the duplicate `groups` of `state` (`IndexState::duplicate_groups`): the first
+/// values with their counts and example ids, each slot resolved by `id_of` (its element's id)
+/// and `value_of` (its logical value at the index's key). Shared by `TraversalGraph` and a
+/// layered graph, which resolves its own slots.
+pub(crate) fn duplicates_report_by(
+    state: &IndexState,
+    groups: &[Vec<u32>],
+    id_of: impl Fn(u32) -> Option<String>,
+    value_of: impl Fn(u32) -> Option<ElementProperty>,
+) -> UniqueIndexDuplicates {
+    let values = groups
+        .iter()
+        .take(UniqueIndexDuplicates::MAX_VALUES)
+        .map(|slots| {
+            let examples: Vec<String> = slots
+                .iter()
+                .take(UniqueIndexDuplicates::MAX_EXAMPLES)
+                .filter_map(|slot| id_of(*slot))
+                .collect();
+            let value = slots
+                .first()
+                .and_then(|slot| value_of(*slot))
+                .map(|value| keyed_value(state.transform.as_ref(), &value))
+                .unwrap_or(ElementProperty::Null);
+            DuplicateValue::new(&value, slots.len() as u64, examples)
+        })
+        .collect();
+    UniqueIndexDuplicates::new(values, groups.len() as u64)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2781,16 +2881,14 @@ impl TraversalGraph {
         );
     }
 
-    /// Builds the state of one index from the data.
-    fn build_index(&self, name: &str, definition: &PropertyIndexDefinition) -> IndexState {
-        let mut state = IndexState::new(
-            name,
-            definition.element(),
-            definition.label(),
-            definition.key(),
-            definition.transform().cloned(),
-            definition.is_unique(),
-        );
+    /// Builds the state of one index from the data (a layered graph builds the base part of
+    /// an index it defines itself with it, over its base).
+    pub(crate) fn build_index(
+        &self,
+        name: &str,
+        definition: &PropertyIndexDefinition,
+    ) -> IndexState {
+        let mut state = IndexState::of_definition(name, definition);
         let Some(label) = definition.label() else {
             // Label-less: every element of the kind, unlabeled ones included.
             match definition.element() {
@@ -2874,24 +2972,12 @@ impl TraversalGraph {
     /// The report of the duplicate `groups` of `state`: the first values with their counts
     /// and example ids.
     fn duplicates_report(&self, state: &IndexState, groups: &[Vec<u32>]) -> UniqueIndexDuplicates {
-        let values = groups
-            .iter()
-            .take(UniqueIndexDuplicates::MAX_VALUES)
-            .map(|slots| {
-                let examples: Vec<String> = slots
-                    .iter()
-                    .take(UniqueIndexDuplicates::MAX_EXAMPLES)
-                    .filter_map(|slot| self.slot_id(state.element, *slot))
-                    .collect();
-                let value = slots
-                    .first()
-                    .and_then(|slot| self.slot_value(state.element, *slot, &state.key))
-                    .map(|value| keyed_value(state.transform.as_ref(), &value))
-                    .unwrap_or(ElementProperty::Null);
-                DuplicateValue::new(&value, slots.len() as u64, examples)
-            })
-            .collect();
-        UniqueIndexDuplicates::new(values, groups.len() as u64)
+        duplicates_report_by(
+            state,
+            groups,
+            |slot| self.slot_id(state.element, slot),
+            |slot| self.slot_value(state.element, slot, &state.key),
+        )
     }
 
     /// The id of the live element of kind `element` at `slot`.
@@ -2944,8 +3030,8 @@ impl TraversalGraph {
     /// The installed index named `name` (a layered graph reads it in place as the shared base
     /// part of its overlay); `None` when no such index is installed (absent, of a type this
     /// version does not serve, or a disabled unique one).
-    // Read by the layer's unique checks and layer-defined indexes (S4.3, S4.4); unit-tested
-    // here.
+    // Unit-tested here; the layer finds the base's indexes by position
+    // (`PropertyIndexes::position_of`, `BasePart::Shared`), so no crate code calls it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn index_state(&self, name: &str) -> Option<&IndexState> {
         self.property_indexes
@@ -2994,16 +3080,7 @@ impl TraversalGraph {
             }
             None => None,
         };
-        let indexes = &mut self.property_indexes.indexes;
-        match (indexes.iter().position(|index| index.name == name), built) {
-            (Some(position), Some(state)) => indexes[position] = state,
-            (Some(position), None) => {
-                indexes.remove(position);
-            }
-            (None, Some(state)) => indexes.push(state),
-            (None, None) => return,
-        }
-        self.property_indexes.reindex_lookup();
+        self.property_indexes.install(name, built);
     }
 
     /// Rebuilds every index from the catalog and the data (a load: read-only opens, backups and

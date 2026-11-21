@@ -4253,3 +4253,44 @@ fn creating_and_dropping_a_per_label_unique_index_asks_for_the_extended_kind() {
     let _ = run(&graph, r#"g.drop_index("person_name")"#, AllowAll).unwrap();
     assert!(graph.read().property_indexes().unwrap().is_empty());
 }
+
+/// On a layered graph (S4.4) creating and dropping an index asks exactly what it asks on a
+/// plain graph: a read-only host is refused with the same request and nothing changes, an
+/// allowing one creates it on the layer only.
+#[test]
+fn creating_and_dropping_an_index_on_a_layer_asks_the_same() {
+    use graphersal::storage::LayeredGraph;
+    let base = Arc::new(TraversalGraph::tinkerpop_modern());
+    let layer = Arc::new(graphersal::storage::Graph::new(
+        LayeredGraph::over(Arc::clone(&base)).unwrap(),
+    ));
+    let run_on_layer = |script: &str, authorizer: Arc<dyn Authorizer>| {
+        script::eval_value_with_limits(
+            layer.clone(),
+            script,
+            Default::default(),
+            &ScriptLimits::default(),
+            authorizer,
+        )
+        .map_err(|err| err.to_string())
+    };
+    let create = r#"g.create_index(#{label: "person", key: "age"})"#;
+    assert_denied(
+        run_on_layer(create, Arc::new(AccessPolicy::read_only())),
+        "create_index",
+        r#"Create Definition(property_index "person_age")"#,
+    );
+    assert!(layer.read().property_indexes().unwrap().is_empty());
+    let _ = run_on_layer(create, Arc::new(AllowAll)).unwrap();
+    assert_eq!(layer.read().property_indexes().unwrap().len(), 1);
+    assert!(base.property_indexes().unwrap().is_empty());
+    assert_denied(
+        run_on_layer(
+            r#"g.drop_index("person_age")"#,
+            Arc::new(AccessPolicy::read_only()),
+        ),
+        "drop_index",
+        r#"Delete Definition(property_index "person_age")"#,
+    );
+    assert_eq!(layer.read().property_indexes().unwrap().len(), 1);
+}

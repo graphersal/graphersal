@@ -17,8 +17,8 @@
 //! - order only (plan decision P4 and the order classes of S1.5/S1.6): a script that drops
 //!   elements or labels (or relabels an edge) and differs only in the order the layer lists
 //!   elements afterwards; checked by re-rendering both graphs with every list sorted;
-//! - refusals of plan decision P5 (until stage 4): property indexes, compression rules (and a
-//!   compression estimate over changed elements) and vector rules are refused on a layer with
+//! - refusals of plan decision P5: compression rules (and a compression estimate over changed
+//!   elements) and vector rules are refused on a layer with
 //!   `GraphError::Unsupported`; the script must fail on the layer with that refusal, and only
 //!   scripts that define or estimate one of them may;
 //! - origin queries in the `Delta` setup (S2.3): a script asking for layer origins
@@ -296,10 +296,10 @@ fn reorders(script: &str) -> bool {
     .any(|needle| script.contains(needle))
 }
 
-/// Whether `script` defines or estimates what plan decision P5 refuses on a layer until stage 4.
+/// Whether `script` defines or estimates what plan decision P5 refuses on a layer (property
+/// indexes are accepted since S4.4: a refused `create_index` is a difference).
 fn defines_p5_kind(script: &str) -> bool {
     [
-        "create_index(",
         "define_compression(",
         "define_compressions(",
         "estimate_compression(",
@@ -755,6 +755,53 @@ const INDEX_SCRIPTS: &[&str] = &[
     r#"g.indexes().map(|i| [i.name, i.entries, i.skipped])"#,
     r#"g.V("1").property("name", "Mx").iterate(); g.indexes()"#,
 ];
+
+/// Curated index definitions (S4.4): create (per label, label-less, a transform, unique),
+/// drop (also of an inherited index), redefine (the other index kind), a unique define refused
+/// over repeated values formed by a base and a delta value, accepted once the layer dropped
+/// one of them, its enforcement; each with lookups and the index list after it.
+const INDEX_DEFINITION_SCRIPTS: &[&str] = &[
+    r#"g.create_index(#{label: "person", key: "name"}); [g.indexes().map(|i| [i.name, i.entries, i.skipped]), g.V().hasLabel("person").has("name", "josh").id().toList()]"#,
+    r#"g.create_index(#{key: "lang", transform: "to_lower"}); g.addV("software").property("lang", "JAVA").iterate(); [g.V().has("lang", __.to_lower().is(P.eq("java"))).id().toList(), g.V().has("lang", __.to_lower().is(P.eq("java"))).count().next()]"#,
+    r#"g.create_index(#{label: "created", key: "weight", element: "edge"}); g.E("1").property("weight", 0.9).iterate(); [g.E().hasLabel("created").has("weight", P.gte(0.4)).id().toList(), g.indexes().map(|i| [i.name, i.entries])]"#,
+    r#"let dropped = g.drop_index("age"); [dropped, g.indexes().map(|i| i.name), g.V().hasLabel("person").has("age", 29).values("name").toList()]"#,
+    r#"g.drop_index("name"); g.V("1").property("name", "Marko").iterate(); [g.V().has("name", "Marko").id().toList(), g.V().has("name", "marko").count().next(), g.indexes().map(|i| i.name)]"#,
+    r#"g.create_index(#{key: "age", name: "age"}); [g.indexes().map(|i| [i.name, i.label, i.entries]), g.V().has("age", 32).id().toList(), g.V().has("age", P.lt(30)).count().next()]"#,
+    r#"g.create_index(#{label: "person", key: "name", unique: true}); g.addV("person").property("name", "josh").iterate()"#,
+    r#"g.addV("person").property("name", "marko").iterate(); g.create_index(#{label: "person", key: "name", unique: true})"#,
+    r#"g.V("1").drop().iterate(); g.addV("person").property("name", "marko").iterate(); g.create_index(#{label: "person", key: "name", unique: true}); [g.indexes().map(|i| [i.name, i.unique, i.entries]), g.V().hasLabel("person").has("name", "marko").count().next()]"#,
+    r#"g.create_index(#{label: "person", key: "name", unique: true}); g.V("4").property("name", "peter").iterate()"#,
+    r#"g.create_index(#{label: "person", key: "name", unique: true}); g.drop_index("person_name"); g.addV("person").property("name", "josh").iterate(); g.V().hasLabel("person").has("name", "josh").count().next()"#,
+    r#"g.create_index(#{label: "person", key: "age"}); g.drop_index("person_age"); g.create_index(#{label: "person", key: "age", name: "person_age"}); g.V().hasLabel("person").property("age", 40).iterate(); g.V().hasLabel("person").has("age", 40).count().next()"#,
+];
+
+#[test]
+fn curated_index_definitions_give_the_same_result_on_a_layer() {
+    for fixture in [
+        Fixture {
+            check_indexes: true,
+            ..MODERN
+        },
+        INDEXED,
+    ] {
+        let mut differences = Differences {
+            fixture,
+            ..Differences::default()
+        };
+        for script in INDEX_DEFINITION_SCRIPTS {
+            differences.compare("INDEX_DEFINITION_SCRIPTS", script);
+        }
+        assert!(
+            differences.p5_refusals.is_empty(),
+            "{:?}",
+            differences.p5_refusals
+        );
+        differences.check(
+            "index definitions",
+            INDEX_DEFINITION_SCRIPTS.len() * 3 * fixture.setups.len(),
+        );
+    }
+}
 
 #[test]
 fn every_documented_example_gives_the_same_result_on_an_indexed_layer() {

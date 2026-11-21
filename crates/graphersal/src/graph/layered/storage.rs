@@ -33,9 +33,6 @@ use crate::value::{ElementProperty, JsonPath, PropertyMap};
 const VECTOR_RULES: &str =
     "vector rules (properties derived by an embedder) on a layered graph yet";
 
-/// The `operation` of the refusal of a property index definition on a layer.
-const PROPERTY_INDEXES: &str = "property index definitions on a layered graph yet";
-
 /// The `operation` of the refusal of a compression rule on a layer.
 const COMPRESSION_RULES: &str = "compression rules on a layered graph yet";
 
@@ -47,13 +44,12 @@ const MODELS: &str = "embedding model definitions on a layered graph yet";
 
 /// Whether the layer's catalog can take (or remove) a definition of `kind`: saved queries,
 /// jobs, host kinds and kinds this version does not know (kept opaque, as `TraversalGraph`
-/// keeps them) need no storage machinery. Property indexes and compression rules need index
-/// and value machinery over base + delta, models belong to the vector rules: refused until
-/// the layer has index deltas (stage 4), with an error naming the limitation.
+/// keeps them) need no storage machinery, property indexes are served by the layer's
+/// overlays (module `index`, S4.4). Compression rules need value machinery over base + delta
+/// (the layer stores its values plain), models belong to the vector rules: refused, with an
+/// error naming the limitation.
 fn check_layer_kind(kind: DefinitionKind) -> Result<(), GraphError> {
-    if kind.is_property_index() {
-        Err(GraphError::unsupported(PROPERTY_INDEXES))
-    } else if kind == DefinitionKind::COMPRESSION {
+    if kind == DefinitionKind::COMPRESSION {
         Err(GraphError::unsupported(COMPRESSION_RULES))
     } else if kind == DefinitionKind::MODEL {
         Err(GraphError::unsupported(MODELS))
@@ -386,21 +382,33 @@ impl GraphStorage for LayeredGraph {
         self.set_definitions(vec![definition])
     }
 
-    /// Stores each definition in turn as `TraversalGraph` does (validated, an equal one again
-    /// is no change, at most `MAX_DEFINITIONS`), in the layer's catalog only, each recorded:
-    /// a refused definition returns its error with the ones before it stored, and the unit
-    /// rolls them back (outside a unit the list is a unit of its own, so it leaves nothing). A
+    /// Stores each definition in turn as `TraversalGraph` does (validated, an index replacing
+    /// the other index kind's definition of its name, checked against the catalog, an equal
+    /// one again is no change, at most `MAX_DEFINITIONS`), in the layer's catalog only, each
+    /// recorded: a refused definition returns its error with the ones before it stored, and
+    /// the unit rolls them back (outside a unit the list is a unit of its own, so it leaves
+    /// nothing). Each property index named is built once, after the list (module `index`). A
     /// kind that needs storage machinery is refused (`check_layer_kind`).
     fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
         self.in_own_unit(|this| {
+            let mut indexes: Vec<CompactString> = Vec::new();
+            let mut outcome = Ok(());
             for definition in definitions {
-                this.store_definition(definition)?;
+                if let Err(err) = this.store_definition(definition, &mut indexes) {
+                    outcome = Err(err);
+                    break;
+                }
             }
-            Ok(())
+            // Also after a refusal: the overlays follow the catalog until the unit rolls back.
+            for name in indexes {
+                this.layer_index_after_change(&name);
+            }
+            outcome
         })
     }
 
-    /// Removes the definition from the layer's catalog (the base keeps its own); a kind that
+    /// Removes the definition from the layer's catalog (the base keeps its own; a property
+    /// index loses its overlay, so the layer stops serving and enforcing it); a kind that
     /// needs storage machinery is refused (`check_layer_kind`), also when the layer holds no
     /// definition of that name. Recorded; outside a unit a unit of its own.
     fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
@@ -506,14 +514,15 @@ impl GraphStorage for LayeredGraph {
         Ok(self.layer_index_count(element, label, key, transform, range))
     }
 
-    /// The base's answer: an enforced unique index is enforced by the layer over base + delta
-    /// (`None`), a disabled one stays disabled with the base's report (the layer cannot define
-    /// or redefine an index yet).
+    /// The layer's answer: an enforced unique index is enforced by the layer over base + delta
+    /// (`None`); one the base keeps disabled stays disabled with the base's report until the
+    /// layer drops or redefines it; one the layer defines over repeated values (of its merged
+    /// view) is disabled with the layer's own report.
     fn unique_index_duplicates(
         &self,
         name: &str,
     ) -> Result<Option<UniqueIndexDuplicates>, GraphError> {
-        GraphStorage::unique_index_duplicates(&*self.base, name)
+        Ok(self.delta.indexes().disabled_report(name))
     }
 
     /// Releases the spare capacity of the layer's own structures (the delta: slots above the
@@ -545,8 +554,9 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::execution_policy(&*self.base)
     }
 
-    /// `writable`, `atomic` (the layer's undo log, `units`) and `change_capture` (commit hooks
-    /// and dry runs, the change set derived from that log). The property index lookups are
+    /// `writable`, `atomic` (the layer's undo log, `units`), `change_capture` (commit hooks
+    /// and dry runs, the change set derived from that log) and `property_indexes` (the layer
+    /// defines, drops and redefines indexes, module `index`). The property index lookups are
     /// the overlays' (base slice minus the excluded slots plus the layer's entries, every
     /// excluded slot answered by its current value), so they are exact when the base's are.
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
@@ -555,6 +565,7 @@ impl GraphStorage for LayeredGraph {
             .with_writable(true)
             .with_atomic(true)
             .with_change_capture(true)
+            .with_property_indexes(true)
             .with_exact_property_index_lookups(base.exact_property_index_lookups))
     }
 
@@ -1149,12 +1160,37 @@ impl LayeredGraph {
         self.delta.edge(edge).map(|view| view.id.into())
     }
 
-    /// Stores one definition as `TraversalGraph::set_definitions_recorded` does (validated, an
-    /// equal one again is no change, a new one only while the catalog has room) and records
-    /// what was there before.
-    fn store_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
+    /// Stores one definition as `TraversalGraph::set_definitions_recorded` does, in its order
+    /// (validated; an index replaces the other index kind's definition of its name, recorded;
+    /// `check_conflict` against the catalog; an equal one again is no change; a new one only
+    /// while the catalog has room) and records what was there before. The name of a property
+    /// index changed (also by that replacement) goes into `indexes`, once: the caller builds it.
+    fn store_definition(
+        &mut self,
+        definition: Definition,
+        indexes: &mut Vec<CompactString>,
+    ) -> Result<(), GraphError> {
         check_layer_kind(definition.kind())?;
         definition.validate()?;
+        if definition.kind().is_property_index() {
+            let sibling = if definition.kind() == DefinitionKind::PROPERTY_INDEX {
+                DefinitionKind::PROPERTY_INDEX_EXT
+            } else {
+                DefinitionKind::PROPERTY_INDEX
+            };
+            if let Some(old) = self.catalog.remove(sibling, definition.name()) {
+                let name = CompactString::from(definition.name());
+                self.units.record(LayerUndo::Definition {
+                    kind: sibling,
+                    name: name.clone(),
+                    old: Some(Box::new(old)),
+                });
+                if !indexes.contains(&name) {
+                    indexes.push(name);
+                }
+            }
+        }
+        crate::graph::property_index::check_conflict(&self.catalog, &definition)?;
         let current = self.catalog.get(definition.kind(), definition.name());
         if current == Some(&definition) {
             return Ok(());
@@ -1168,6 +1204,9 @@ impl LayeredGraph {
         let kind = definition.kind();
         let name = CompactString::from(definition.name());
         let old = self.catalog.insert(definition);
+        if kind.is_property_index() && !indexes.contains(&name) {
+            indexes.push(name.clone());
+        }
         self.units.record(LayerUndo::Definition {
             kind,
             name,
@@ -1182,6 +1221,9 @@ impl LayeredGraph {
         let Some(old) = self.catalog.remove(kind, name) else {
             return Ok(false);
         };
+        if kind.is_property_index() {
+            self.layer_index_after_change(name);
+        }
         self.units.record(LayerUndo::Definition {
             kind,
             name: CompactString::from(name),

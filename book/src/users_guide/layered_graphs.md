@@ -190,14 +190,18 @@ code written for layers already run.
   yet"):
   - a base whose schema has [vector rules](vector_rules.md), and a schema with vector rules
     on a layer;
-  - property index, compression rule and embedding model definitions created on a layer.
+  - compression rule and embedding model definitions created on a layer.
 - **Property indexes:** a layer serves the base's indexes for its own data, also after it
   changed elements: lookups and counts answer from the index, as on a plain graph. The
   base's unique indexes hold for the layer: a write that would give a second element a unique
   value fails with the same error a plain graph with the layer's data gives, and a value that
   an element of the base held before the layer dropped or changed it is free again. A unique
   index the base keeps disabled (it was stored over repeated values) stays disabled on the
-  layer. Creating or dropping an index on a layer is refused for now (above).
+  layer. A layer can create, drop and redefine indexes (`g.create_index(...)`,
+  `g.drop_index(...)`) for itself: the base and the other layers keep theirs. A unique index
+  is checked against the layer's data, as on a plain graph. Creating an index on a layer
+  reads every element of its label in the base once and keeps its own copy of the index, which
+  counts in the layer's `g.memory_usage()`.
 - **Order:** unordered results list the same elements as a plain graph with the same data,
   in the same order, except after some removals (details on the
   [developer page](../for_developers/layered_graphs.md#limitations)). Use `order()` when the
