@@ -72,11 +72,17 @@
 //! refused until the layer has index deltas (stage 4), and so are schemas with vector rules
 //! and bases with unique indexes or vector rules (plan decision P5, [`LayeredGraph::over`]).
 //! The property index lookups and the execution policy are the base's.
+//!
+//! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
+//! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
+//! ceiling checks the outermost unit at its commit on the layer's own footprint, as
+//! `TraversalGraph` does on its own.
 
 mod capture;
 mod delta;
 mod dirty;
 mod handle;
+mod memory;
 mod storage;
 mod units;
 mod write;
@@ -98,14 +104,38 @@ use units::UnitLog;
 /// A [`GraphStorage`](crate::graph::GraphStorage) made of a frozen base graph shared by any
 /// number of layers and a layer of its own: added elements, removed and modified base
 /// elements. Handles ([`LayeredVertex`], [`LayeredEdge`]) are 8 bytes; a base element untouched
-/// by the layer is read straight from the base, with one bit test and no lookup.
+/// by the layer is read straight from the base, with one bit test and no lookup. Book page
+/// "Layered Graphs".
 ///
-/// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices), changes or
-/// drops what it added, and changes and drops base elements (a changed base element is copied
-/// into the layer). It keeps its own copies of the base's schema and catalog (saved queries,
-/// jobs; index, compression and model definitions are not supported on a layer yet). It is
-/// atomic (units with an undo log of its own: a traversal that fails leaves nothing) and
-/// captures changes (commit hooks, dry runs), as a `TraversalGraph` does.
+/// **EXPERIMENTAL**, like [`GraphStorage`](crate::graph::GraphStorage).
+///
+/// **Supported:** every read; new vertices and edges (also at base vertices); changes and
+/// drops of added and of base elements (a changed base element is copied into the layer, the
+/// base is never written); its own copies of the base's schema and catalog (saved queries,
+/// jobs, host kinds); units with an undo log of its own (a traversal that fails leaves
+/// nothing); change capture (commit hooks, dry runs) with the change sets a `TraversalGraph`
+/// reports for the same writes; the process memory ceiling at commit.
+///
+/// **Capabilities:** `writable`, `atomic`, `change_capture`, and
+/// `exact_property_index_lookups` as the base states it. Not `property_indexes` (creating an
+/// index is refused) nor `durability`.
+///
+/// **Memory:** [`memory_usage`](crate::graph::GraphStorage::memory_usage) reports the layer's
+/// own footprint (its delta and one dirty bit per base slot) as the total and the shared base
+/// as [`MemoryStats::shared_bytes`](crate::graph::MemoryStats::shared_bytes), outside the
+/// total. [`shrink_to_fit`](crate::graph::GraphStorage::shrink_to_fit) releases the delta's
+/// spare capacity.
+///
+/// **Not supported yet** ([`GraphError::Unsupported`]):
+/// - persistence: a layer cannot be saved, opened from a Store or journaled;
+/// - a base with a unique property index or vector rules ([`Self::over`]); vector rules,
+///   property index, compression rule and embedding model definitions on the layer. The
+///   base's plain indexes serve lookups only while the layer has not touched that element
+///   kind; then the engine scans.
+///
+/// Values the layer stores are uncompressed. After a drop followed by a create, or a drop or
+/// label removal followed by a label lookup, unordered traversals may list elements in
+/// another order than a `TraversalGraph` with the same data.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -151,6 +181,9 @@ pub struct LayeredGraph {
     catalog: Catalog,
     /// The undo log of the open units (`units`): what makes a unit of the layer atomic.
     units: UnitLog,
+    /// The cached walk of the layer's own footprint (`memory`): what the memory budget starts
+    /// from without walking the delta on every run.
+    footprint: crate::graph::memory::FootprintCache,
 }
 
 impl LayeredGraph {
@@ -185,6 +218,7 @@ impl LayeredGraph {
             schema,
             catalog: base.definitions.clone(),
             units: UnitLog::after(base.undo.last_committed_at),
+            footprint: crate::graph::memory::FootprintCache::default(),
             base,
         }
     }

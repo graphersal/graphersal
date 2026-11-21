@@ -68,6 +68,7 @@
   - [FAQ and Troubleshooting](persistence/faq.md)
 - [Custom Storages](for_developers/custom_storage.md)
   - [Storage Conformance](for_developers/storage_conformance.md)
+  - [Layered Graphs](for_developers/layered_graphs.md)
 
 # GQL
 

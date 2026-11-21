@@ -337,8 +337,9 @@ impl ScriptGraphTraversalSource {
     /// `deduped_values`, `deduped_plain_bytes` and `dedup_table_bytes` (part of
     /// `property_bytes`), the property indexes' `property_index_bytes` and the shared property
     /// key lists' `shape_bytes` (part of `property_bytes`), and beside the total the graph's
-    /// workload statistics' `workload_bytes` and its loaded embedding models' `model_bytes` (not
-    /// part of `total_bytes`), when the backing storage supports
+    /// workload statistics' `workload_bytes`, its loaded embedding models' `model_bytes` and the
+    /// memory it shares with other storages, `shared_bytes` (a layered graph's base; not part of
+    /// `total_bytes`, which for a layer is its own delta), when the backing storage supports
     /// introspection (`graphersal::TraversalGraph` always does), or `()` (Rhai unit) otherwise. This is a plain method call, not a traversal step — it is not
     /// chained with `.to_list()`/`.next()`. Asks for `Read` on `Data`.
     pub fn memory_usage(&mut self) -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
@@ -378,6 +379,7 @@ impl ScriptGraphTraversalSource {
         let int = |n: u64| Dynamic::from_int(i64::try_from(n).unwrap_or(i64::MAX));
         map.insert("workload_bytes".into(), int(stats.workload_bytes));
         map.insert("model_bytes".into(), int(stats.model_bytes));
+        map.insert("shared_bytes".into(), int(stats.shared_bytes));
         map.insert("compressed_values".into(), int(stats.compressed_values));
         map.insert(
             "compressed_plain_bytes".into(),

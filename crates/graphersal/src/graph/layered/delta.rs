@@ -94,7 +94,8 @@ use crate::graph::shape::ShapeTable;
 use crate::graph::topology::{Direction, NodeIndex};
 use crate::graph::undo::restore_stored_property;
 use crate::graph::{
-    EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, TraversalGraph, VertexHandle,
+    EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, MemoryStats, TraversalGraph,
+    VertexHandle,
 };
 use crate::value::identity::identity_eq;
 use crate::value::{ElementProperty, PropertyMap, logical_element};
@@ -1551,5 +1552,115 @@ impl Delta {
                 restore_stored_property(&mut self.shapes, map, key, old);
             }
         }
+    }
+
+    /// What the delta holds in memory, sorted into [`MemoryStats`]' buckets
+    /// (`LayeredGraph::memory_usage`, the same arithmetic as `TraversalGraph`'s
+    /// `graph::memory::compute`):
+    /// - `structure_bytes`: the delta topology's slots (capacity, so vacant and spare slots
+    ///   count; stubs are slots too), the added elements' ids, the label table, the slot
+    ///   generations, the stub maps (`stubs`, `stub_bases`) and the bitsets read behind the
+    ///   dirty bits (tombstones, imaged and relabeled slots);
+    /// - `index_bytes`: the delta's id and label indexes plus the label structures of modified
+    ///   base elements (`lost_vertex_labels`, `gained_edge_labels`);
+    /// - `property_bytes`: the property maps of the added elements and of the vertex images
+    ///   (in their stubs), the edge images (with their map's table entry), and the shape table
+    ///   (`shape_bytes`).
+    pub(crate) fn memory(&self) -> MemoryStats {
+        use crate::value::compact_string_heap_bytes as string_heap;
+        use crate::value::estimated_element_heap_bytes as map_heap;
+        use crate::value::property_map::hash_table_heap_bytes as table;
+        use std::mem::size_of;
+
+        let (node_cap, edge_cap) = self.graph.capacity();
+        let mut structure_bytes = node_cap as u64 * GraphType::node_slot_bytes() as u64
+            + edge_cap as u64 * GraphType::edge_slot_bytes() as u64
+            + self.labels.heap_bytes()
+            + self.node_generations.heap_bytes()
+            + self.edge_generations.heap_bytes()
+            + table(self.stubs.capacity(), size_of::<(u32, NodeIndex)>())
+            + self.stub_bases.capacity() as u64 * size_of::<Option<VertexHandle>>() as u64
+            + self.removed_vertices.heap_bytes()
+            + self.removed_edges.heap_bytes()
+            + self.imaged_vertices.heap_bytes()
+            + self.imaged_edges.heap_bytes()
+            + self.relabeled_edges.heap_bytes();
+        let mut property_bytes = 0u64;
+        for (id, _, properties, _) in self.graph.node_weights() {
+            structure_bytes += string_heap(id);
+            property_bytes += map_heap(properties);
+        }
+        for (id, _, properties, _) in self.graph.edge_weights() {
+            structure_bytes += string_heap(id);
+            property_bytes += properties.as_ref().map_or(0, map_heap);
+        }
+        property_bytes += table(self.edge_images.capacity(), size_of::<(u32, EdgeImage)>());
+        for image in self.edge_images.values() {
+            property_bytes += image.label.as_ref().map_or(0, string_heap);
+            property_bytes += image.properties.as_ref().map_or(0, map_heap);
+        }
+        let shape_bytes = self.shapes.heap_bytes();
+        property_bytes += shape_bytes;
+
+        let mut index_bytes = self.index.estimated_heap_bytes()
+            + table(
+                self.lost_vertex_labels.capacity(),
+                size_of::<(CompactString, SlotBits)>(),
+            )
+            + table(
+                self.gained_edge_labels.capacity(),
+                size_of::<(CompactString, Vec<EdgeHandle>)>(),
+            );
+        for (label, slots) in &self.lost_vertex_labels {
+            index_bytes += string_heap(label) + slots.heap_bytes();
+        }
+        for (label, edges) in &self.gained_edge_labels {
+            index_bytes +=
+                string_heap(label) + edges.capacity() as u64 * size_of::<EdgeHandle>() as u64;
+        }
+        MemoryStats {
+            structure_bytes,
+            index_bytes,
+            property_bytes,
+            shape_bytes,
+            ..MemoryStats::default()
+        }
+    }
+
+    /// Releases the spare capacity of the delta (`LayeredGraph::shrink_to_fit`): the slot
+    /// vectors above the last used slot (vacant slots stay, handles are stable), the indexes,
+    /// the generation arrays, the shared key lists no map uses any more, and the stub, image
+    /// and label maps and bitsets. Changes nothing a read sees.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.graph.shrink_to_fit();
+        self.index.shrink_to_fit();
+        self.shapes.shrink_to_fit();
+        self.node_generations.shrink_to_fit();
+        self.edge_generations.shrink_to_fit();
+        self.stubs.shrink_to_fit();
+        self.stub_bases.shrink_to_fit();
+        self.removed_vertices.shrink_to_fit();
+        self.removed_edges.shrink_to_fit();
+        self.imaged_vertices.shrink_to_fit();
+        self.imaged_edges.shrink_to_fit();
+        self.relabeled_edges.shrink_to_fit();
+        self.edge_images.shrink_to_fit();
+        self.lost_vertex_labels.shrink_to_fit();
+        for slots in self.lost_vertex_labels.values_mut() {
+            slots.shrink_to_fit();
+        }
+        self.gained_edge_labels.shrink_to_fit();
+        for edges in self.gained_edge_labels.values_mut() {
+            edges.shrink_to_fit();
+        }
+    }
+
+    /// The delta topology's vertex and edge counts (added elements and stubs): what the
+    /// layer's own footprint grows with (`LayeredGraph`'s footprint cache key).
+    pub(crate) fn slot_counts(&self) -> (u64, u64) {
+        (
+            self.graph.node_count() as u64,
+            self.graph.edge_count() as u64,
+        )
     }
 }

@@ -341,11 +341,12 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
 /// `g.memory_usage()` as data: `{structure_bytes, index_bytes, property_bytes, total_bytes,
 /// total_mb, compressed_values, compressed_plain_bytes, compressed_stored_bytes,
 /// compression_dictionary_bytes, property_index_bytes, deduped_values, deduped_plain_bytes,
-/// dedup_table_bytes, shape_bytes, workload_bytes, model_bytes}`, or `null`. `shape_bytes` and
+/// dedup_table_bytes, shape_bytes, workload_bytes, model_bytes, shared_bytes}`, or `null`. `shape_bytes` and
 /// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
 /// `workload_bytes` (the graph's workload statistics, held beside the storage) and `model_bytes`
 /// (its loaded embedding models) are not part of the total either and are `0` from a storage
-/// alone ([`crate::storage::SessionGraph::memory_view`] fills them in).
+/// alone ([`crate::storage::SessionGraph::memory_view`] fills them in). `shared_bytes` is what
+/// the storage shares with others (a layered graph's base), outside the total too.
 pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
     Ok(memory_stats_view(g.memory_usage()?))
 }
@@ -370,6 +371,7 @@ pub fn memory_stats_view(stats: Option<graphersal::storage::MemoryStats>) -> Val
             "shape_bytes": stats.shape_bytes,
             "workload_bytes": stats.workload_bytes,
             "model_bytes": stats.model_bytes,
+            "shared_bytes": stats.shared_bytes,
         }),
         None => Value::Null,
     }
