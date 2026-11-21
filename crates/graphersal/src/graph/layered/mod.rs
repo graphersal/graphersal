@@ -83,6 +83,7 @@ mod delta;
 mod dirty;
 mod handle;
 mod memory;
+mod route;
 mod storage;
 mod units;
 mod write;
@@ -94,11 +95,12 @@ pub use handle::{LayeredEdge, LayeredVertex};
 use crate::error::GraphError;
 use crate::graph::definition::Catalog;
 use crate::graph::schema::GraphSchema;
-use crate::graph::topology::NodeIndex;
+use crate::graph::topology::{Direction, NodeIndex};
 use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
 use dirty::SlotBits;
 use handle::MAX_BASE_SLOTS;
+use route::DeltaThenBase;
 use units::UnitLog;
 
 /// A [`GraphStorage`](crate::graph::GraphStorage) made of a frozen base graph shared by any
@@ -155,6 +157,12 @@ use units::UnitLog;
 /// assert_eq!(TraversalGraph::vertex_count(&base), 6);
 /// ```
 pub struct LayeredGraph {
+    // PERFORMANCE (S1.12): every field stored inline must be free of interior mutability (no
+    // `Mutex`, `Cell`, atomics, `OnceLock` inline; behind a `Box` or `Arc` is fine). Then
+    // `&LayeredGraph` is a read-only, non-aliased reference to the compiler, which keeps the
+    // base pointer and the dirty-bit gates in registers across a whole scan instead of
+    // reloading them per item (a lost `noalias` cost the clean read path 10-25 %). That is why
+    // `units` and `footprint` are boxed.
     /// The frozen base, shared with every other layer over it.
     base: Arc<TraversalGraph>,
     /// One bit per base vertex slot: set when the delta holds the vertex's state.
@@ -179,11 +187,12 @@ pub struct LayeredGraph {
     /// changed only by the layer's catalog writes (the kinds without storage machinery, see
     /// `storage::check_layer_kind`).
     catalog: Catalog,
-    /// The undo log of the open units (`units`): what makes a unit of the layer atomic.
-    units: UnitLog,
+    /// The undo log of the open units (`units`): what makes a unit of the layer atomic. Boxed,
+    /// like `footprint`: see the note on the struct.
+    units: Box<UnitLog>,
     /// The cached walk of the layer's own footprint (`memory`): what the memory budget starts
     /// from without walking the delta on every run.
-    footprint: crate::graph::memory::FootprintCache,
+    footprint: Box<crate::graph::memory::FootprintCache>,
 }
 
 impl LayeredGraph {
@@ -217,8 +226,8 @@ impl LayeredGraph {
             edge_sequence: base.edge_sequence,
             schema,
             catalog: base.definitions.clone(),
-            units: UnitLog::after(base.undo.last_committed_at),
-            footprint: crate::graph::memory::FootprintCache::default(),
+            units: Box::new(UnitLog::after(base.undo.last_committed_at)),
+            footprint: Box::default(),
             base,
         }
     }
@@ -239,31 +248,66 @@ impl LayeredGraph {
         !self.dirty_edges.contains(slot) || !self.delta.is_removed_edge(slot)
     }
 
-    /// The filter of a scan over base vertices: [`Self::base_vertex_live`], with "no bit set at
-    /// all" captured once by value, so a clean layer pays one predictable branch per item and
-    /// no memory load.
-    #[inline]
-    fn base_vertex_filter(&self) -> impl Fn(&VertexHandle) -> bool + '_ {
-        let clean = !self.dirty_vertices.any();
-        move |node| clean || self.base_vertex_live(*node)
+    /// The filter of a scan over base vertices: a removed base vertex is the only one a scan
+    /// hides, so `removed` ([`Delta::removed_vertices`], fetched once per scan) is all it
+    /// needs: `None` (nothing removed, a loop-invariant value) passes every item without a
+    /// memory load, `Some` costs one tombstone bit per item, never the dirty bits.
+    #[inline(always)]
+    fn live_base_vertices(removed: Option<&SlotBits>) -> impl Fn(&VertexHandle) -> bool + '_ {
+        move |node| removed.is_none_or(|removed| !removed.word_contains(node.index().slot()))
     }
 
-    /// The edge counterpart of [`Self::base_vertex_filter`].
-    #[inline]
-    fn base_edge_filter(&self) -> impl Fn(&EdgeHandle) -> bool + '_ {
-        let clean = !self.dirty_edges.any();
-        move |edge| clean || self.base_edge_live(*edge)
+    /// The edge counterpart of [`Self::live_base_vertices`] ([`Delta::removed_edges`]): also the
+    /// filter of the base adjacency lists of a dirty vertex.
+    #[inline(always)]
+    fn live_base_edges(removed: Option<&SlotBits>) -> impl Fn(&EdgeHandle) -> bool + '_ {
+        move |edge| removed.is_none_or(|removed| !removed.word_contains(edge.index().slot()))
     }
 
-    /// The filter of the base adjacency lists of `node`, decided once per vertex: a clean base
-    /// vertex's base lists are exact, so its edges pass without a test. **Invariant the write
-    /// path keeps:** removing (or otherwise dirtying) a base edge sets the dirty bit of both of
-    /// its endpoints, so only the lists of a dirty vertex can hold a removed base edge. (A delta
-    /// vertex has no base list: its slot is beyond the base's.)
-    #[inline]
-    fn base_adjacency_filter(&self, node: LayeredVertex) -> impl Fn(&EdgeHandle) -> bool + '_ {
-        let exact = !self.dirty_vertices.contains(node.slot());
-        move |edge| exact || self.base_edge_live(*edge)
+    /// `true` iff the base adjacency lists of `node` are exact AND the delta adds nothing to
+    /// them: `node` is a base vertex whose dirty bit is clear (one tag test, one bit test). The
+    /// write path keeps the invariant behind it: removing (or otherwise dirtying) a base edge
+    /// sets the dirty bit of both of its endpoints, and a new edge at a base vertex goes to its
+    /// stub and sets its bit. So an adjacency read of such a vertex returns the base's own
+    /// list as it is ([`DeltaThenBase`] without a delta part, a filter capturing `None`).
+    #[inline(always)]
+    fn base_adjacency_exact(&self, node: LayeredVertex) -> bool {
+        self.is_clean_base_vertex(node)
+    }
+
+    /// One adjacency list of `node` (`out_edges` / `in_edges`): the delta's part (the added
+    /// vertex's own list or the stub of a dirty base vertex, newest first; absent for a clean
+    /// base vertex), then the base's list (none for a delta vertex: its slot is beyond the
+    /// base's) without removed base edges. Decided once per call; for a clean base vertex the
+    /// filter captures `None` (the base lists of a clean vertex are exact, invariant kept by
+    /// the write path, see [`Self::base_adjacency_exact`]).
+    #[inline(always)]
+    fn adjacency(
+        &self,
+        node: LayeredVertex,
+        direction: Direction,
+    ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
+        let exact = self.base_adjacency_exact(node);
+        let index = self
+            .base
+            .resolve_vertex(node.to_base())
+            .unwrap_or_else(NodeIndex::end);
+        let base = self
+            .base
+            .graph
+            .edges_directed(index, direction)
+            .map(|e| EdgeHandle::new(e.id(), e.weight().3.own))
+            .filter(Self::live_base_edges(if exact {
+                None
+            } else {
+                self.delta.removed_edges()
+            }))
+            .map(LayeredEdge::from_base);
+        let delta = (!exact).then(|| {
+            self.delta
+                .edges_at(self.delta_adjacency_index(node), direction)
+        });
+        Ok(DeltaThenBase::new(delta, base))
     }
 
     /// The delta node slot holding the delta part of `node`'s adjacency: the added vertex
@@ -281,38 +325,83 @@ impl LayeredGraph {
         }
     }
 
+    /// `true` iff `node` is a base vertex whose dirty bit is clear: its reads go to the base.
+    /// While no base vertex is dirty this is ONE compare (the slot below
+    /// [`SlotBits::clean_below`], which also rules out a delta slot); else the tag test and
+    /// the bit itself.
+    #[inline(always)]
+    fn is_clean_base_vertex(&self, node: LayeredVertex) -> bool {
+        let slot = node.slot();
+        slot < self.dirty_vertices.clean_below()
+            || (!node.is_delta() && !self.dirty_vertices.word_contains(slot))
+    }
+
+    /// The edge counterpart of [`Self::is_clean_base_vertex`].
+    #[inline(always)]
+    fn is_clean_base_edge(&self, edge: LayeredEdge) -> bool {
+        let slot = edge.slot();
+        slot < self.dirty_edges.clean_below()
+            || (!edge.is_delta() && !self.dirty_edges.word_contains(slot))
+    }
+
     /// Runs one vertex read: `base` for an untouched base vertex (the hot path: a tag test and
-    /// one bit test), `view` with what the delta holds for a delta vertex or a dirty base vertex.
-    #[inline]
+    /// one bit test, inlined), `view` with what the delta holds for a delta vertex or a dirty
+    /// base vertex (out of line, [`Self::vertex_read_delta`], so the delta's code never
+    /// enlarges a hot loop over clean elements and the read stays small enough to inline).
+    #[inline(always)]
     fn vertex_read<'a, T>(
         &'a self,
         node: LayeredVertex,
         base: impl FnOnce(&'a TraversalGraph, VertexHandle) -> T,
         view: impl FnOnce(Option<VertexView<'a>>) -> T,
     ) -> T {
+        if self.is_clean_base_vertex(node) {
+            base(&self.base, node.to_base())
+        } else {
+            self.vertex_read_delta(node, view)
+        }
+    }
+
+    /// The delta half of [`Self::vertex_read`].
+    #[inline(never)]
+    fn vertex_read_delta<'a, T>(
+        &'a self,
+        node: LayeredVertex,
+        view: impl FnOnce(Option<VertexView<'a>>) -> T,
+    ) -> T {
         if node.is_delta() {
             view(self.delta.vertex(node))
-        } else if self.dirty_vertices.contains(node.slot()) {
-            view(self.delta.base_vertex(&self.base, node.to_base()))
         } else {
-            base(&self.base, node.to_base())
+            view(self.delta.base_vertex(&self.base, node.to_base()))
         }
     }
 
     /// The edge counterpart of [`Self::vertex_read`].
-    #[inline]
+    #[inline(always)]
     fn edge_read<'a, T>(
         &'a self,
         edge: LayeredEdge,
         base: impl FnOnce(&'a TraversalGraph, EdgeHandle) -> T,
         view: impl FnOnce(Option<EdgeView<'a>>) -> T,
     ) -> T {
+        if self.is_clean_base_edge(edge) {
+            base(&self.base, edge.to_base())
+        } else {
+            self.edge_read_delta(edge, view)
+        }
+    }
+
+    /// The delta half of [`Self::edge_read`].
+    #[inline(never)]
+    fn edge_read_delta<'a, T>(
+        &'a self,
+        edge: LayeredEdge,
+        view: impl FnOnce(Option<EdgeView<'a>>) -> T,
+    ) -> T {
         if edge.is_delta() {
             view(self.delta.edge(edge))
-        } else if self.dirty_edges.contains(edge.slot()) {
-            view(self.delta.base_edge(&self.base, edge.to_base()))
         } else {
-            base(&self.base, edge.to_base())
+            view(self.delta.base_edge(&self.base, edge.to_base()))
         }
     }
 }

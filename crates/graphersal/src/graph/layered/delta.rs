@@ -603,6 +603,39 @@ impl Delta {
             .map(|edge| LayeredEdge::from_base(*edge))
     }
 
+    /// `true` while the layer holds an added vertex (stubs are not vertices).
+    #[inline]
+    pub(crate) fn has_added_vertices(&self) -> bool {
+        self.graph.node_count() > self.stubs.len()
+    }
+
+    /// `true` while the layer holds an added edge.
+    #[inline]
+    pub(crate) fn has_added_edges(&self) -> bool {
+        self.graph.edge_count() > 0
+    }
+
+    /// The tombstones of removed base vertices when there is at least one, else `None`: a scan
+    /// fetches this once and tests one bit per base vertex only when it is `Some`. A removed
+    /// base vertex is dirty too, so this alone decides the liveness of a current base handle.
+    #[inline]
+    pub(crate) fn removed_vertices(&self) -> Option<&SlotBits> {
+        (self.removed_vertex_count > 0).then_some(&self.removed_vertices)
+    }
+
+    /// The edge counterpart of [`Self::removed_vertices`].
+    #[inline]
+    pub(crate) fn removed_edges(&self) -> Option<&SlotBits> {
+        (self.removed_edge_count > 0).then_some(&self.removed_edges)
+    }
+
+    /// `true` once any base edge was relabeled (stays `true` after it returns to its base
+    /// label: a conservative answer, it only sends a by-label scan down the filtered path).
+    #[inline]
+    pub(crate) fn may_have_relabeled_edges(&self) -> bool {
+        self.relabeled_edges.any()
+    }
+
     /// `true` while the layer has added, removed or modified (imaged) any vertex: a property
     /// index of the base may then miss or wrongly hold vertices (index deltas: stage 4).
     #[inline]
