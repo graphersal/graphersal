@@ -18,6 +18,8 @@ conformance!(boxed_traversal_graph, base = Box::new(TraversalGraph::new()) => ba
 conformance!(arc_traversal_graph, base = Arc::new(TraversalGraph::new()) => base);
 conformance!(forwarding, base = Forwarding::default() => base);
 conformance!(forwarding_by_mut_ref, base = Forwarding::default() => &mut base);
+// A layer over an empty base: every element the items create lives in the layer's delta.
+conformance!(layered_empty_base, base = graphersal::storage::LayeredGraph::default() => base);
 
 /// Populates `storage` and checks that the blanket read-only view `&S` reads it and refuses
 /// every write, claims no capability and refuses commit hooks.
@@ -62,9 +64,9 @@ fn shared_reference_of_a_foreign_storage_is_read_only() {
 }
 
 /// The read-only items on an untouched `LayeredGraph` over the modern graph (the write items of
-/// `conformance!` all start from an empty storage and write, so the layer runs them once it can
-/// write): the invariant checker, the traversal smoke against the reference, and the refusal of
-/// every write.
+/// `conformance!` all start from an empty storage, see `layered_empty_base` above): the
+/// invariant checker, the traversal smoke against the reference, and the refusal of every write
+/// to a base element (tasks S1.4-S1.6 implement them).
 #[test]
 fn untouched_layer_passes_the_read_only_items() {
     use graphersal::storage::LayeredGraph;
@@ -82,7 +84,33 @@ fn untouched_layer_passes_the_read_only_items() {
     );
     let a = layer.get_vertex_by_id("1").unwrap().unwrap();
     let e = layer.out_edges(a).unwrap().next().unwrap();
-    contract::read_only_rejects_writes(&mut layer, a, e);
+    let unsupported = |result: Result<(), graphersal::error::GraphError>| {
+        assert!(
+            matches!(
+                result,
+                Err(graphersal::error::GraphError::Unsupported { .. })
+            ),
+            "{result:?}"
+        );
+    };
+    unsupported(layer.add_vertex_label(a, "x".into()).map(drop));
+    unsupported(
+        layer
+            .insert_edge(
+                None,
+                None,
+                a,
+                a,
+                graphersal::prelude::PropertyMap::default(),
+            )
+            .map(drop),
+    );
+    unsupported(layer.set_vertex_property(a, "k".into(), 1.into()));
+    unsupported(layer.set_edge_property(e, "k".into(), 1.into()));
+    unsupported(layer.drop_vertex(a));
+    unsupported(layer.drop_edge(e));
+    contract::assert_consistent(&layer);
+    assert_eq!(layer.vertex_count().unwrap(), 6);
     graphersal_storage_tests::extension::capabilities_are_consistent(&mut layer);
     graphersal_storage_tests::extension::commit_hooks_follow_the_capability(&mut layer);
 }

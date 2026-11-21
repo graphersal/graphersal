@@ -26,24 +26,34 @@
 //!
 //! # State of the implementation
 //!
-//! Reads are complete: every read method of `GraphStorage` answers from the base, with the
-//! dirty-bit check where a changed element will need it (scans, lookups, adjacency, element
-//! reads). Writes are not implemented yet: every mutating method returns
-//! [`GraphError::Unsupported`], and `GraphStorage::capabilities` claims neither `writable`
-//! nor `atomic`. The schema, the catalog, the statistics, the property indexes and the execution
-//! policy are the base's.
+//! Reads are complete: every read method of `GraphStorage` answers from the base merged with
+//! the delta (scans and label lookups list the base first, then the added elements; id lookups
+//! ask the base, then the delta's id index), with the dirty-bit check where a changed base
+//! element will need it.
+//!
+//! Writes (S1.3): new vertices, and new edges between two new vertices, are stored in the delta
+//! (`delta`), each write running its `graph/write_rules.rs` function first, then the id check
+//! (`write`); ids are unique across base and delta and the auto-id sequences continue the
+//! base's. The added elements can be changed and dropped as in a `TraversalGraph`. An edge
+//! touching a base vertex and every write to a base element return
+//! [`GraphError::Unsupported`] (S1.4-S1.6). The layer keeps its own copy of the base's
+//! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
+//! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
+//! wrote before the failure (units and rollback: S1.8). The schema, the catalog, the property
+//! indexes and the execution policy are the base's.
 
 mod delta;
 mod dirty;
 mod handle;
 mod storage;
+mod write;
 
 use std::sync::Arc;
 
 pub use handle::{LayeredEdge, LayeredVertex};
 
 use crate::error::GraphError;
-use crate::graph::{EdgeHandle, TraversalGraph, VertexHandle};
+use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
 use dirty::SlotBits;
 use handle::MAX_BASE_SLOTS;
@@ -53,8 +63,10 @@ use handle::MAX_BASE_SLOTS;
 /// elements. Handles ([`LayeredVertex`], [`LayeredEdge`]) are 8 bytes; a base element untouched
 /// by the layer is read straight from the base, with one bit test and no lookup.
 ///
-/// **EXPERIMENTAL.** Today it is a read-only view of its base with its own handle types: reads
-/// answer exactly what the base answers, writes fail with [`GraphError::Unsupported`].
+/// **EXPERIMENTAL.** Today it adds new vertices and edges between them and changes or drops
+/// what it added; an edge touching a base vertex and any write to a base element fail with
+/// [`GraphError::Unsupported`]. It has no units yet (`atomic` is not claimed): a traversal that
+/// fails keeps what it wrote before the failure.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -66,6 +78,12 @@ use handle::MAX_BASE_SLOTS;
 /// let g = GraphTraversalSource::new(&layer);
 /// let names = g.v(None).has_label("person").values("name").to_list().unwrap();
 /// assert_eq!(names.len(), 4);
+///
+/// // New elements live in the layer; the shared base is unchanged.
+/// let mut layer = layer;
+/// GraphTraversalSource::new(&mut layer).add_v("person").property("name", "ada").iterate().unwrap();
+/// assert_eq!(GraphTraversalSource::new(&layer).v(None).count().next().unwrap(), Some(7_i64.into()));
+/// assert_eq!(TraversalGraph::vertex_count(&base), 6);
 /// ```
 pub struct LayeredGraph {
     /// The frozen base, shared with every other layer over it.
@@ -76,6 +94,14 @@ pub struct LayeredGraph {
     dirty_edges: SlotBits,
     /// What the layer stores beside the base.
     delta: Delta,
+    /// The statistics of the layer as a whole: the base's, cloned when the layer is created,
+    /// then updated by every write exactly as `TraversalGraph`'s raw helpers update its own.
+    statistics: GraphStatistics,
+    /// The last vertex auto id handed out (or raised to): starts at the base's sequence, so an
+    /// auto id never names a base vertex nor an id the base handed out before.
+    node_sequence: u64,
+    /// The edge counterpart of `node_sequence`.
+    edge_sequence: u64,
 }
 
 impl LayeredGraph {
@@ -100,8 +126,11 @@ impl LayeredGraph {
         Self {
             dirty_vertices: SlotBits::new(base.graph.node_slots()),
             dirty_edges: SlotBits::new(base.graph.edge_slots()),
-            base,
             delta: Delta::default(),
+            statistics: base.statistics.clone(),
+            node_sequence: base.node_sequence,
+            edge_sequence: base.edge_sequence,
+            base,
         }
     }
 

@@ -28,9 +28,6 @@
 //! Id uniqueness has the two check functions [`check_vertex_id_free`] and
 //! [`check_edge_id_free`]; the auto-id sequences are the caller's (S1.3).
 
-// The layered graph's write path (S1.3+) is the first caller outside the tests.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::ops::Deref;
 
 use compact_str::CompactString;
