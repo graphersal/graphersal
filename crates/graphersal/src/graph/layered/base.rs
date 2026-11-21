@@ -230,6 +230,12 @@ impl LayerBase {
         self.attach_models(Graph::new_persistent(layer))
     }
 
+    /// The base's embedding models (a layer store's views serve them).
+    #[cfg(feature = "persist")]
+    pub(crate) fn models(&self) -> Option<Arc<ModelRegistry>> {
+        self.inner.models.clone()
+    }
+
     fn attach_models(&self, graph: Graph<LayeredGraph>) -> Graph<LayeredGraph> {
         if let Some(models) = &self.inner.models {
             // A fresh graph has no registry yet, so the attach cannot be refused.

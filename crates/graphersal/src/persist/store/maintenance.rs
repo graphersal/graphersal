@@ -148,7 +148,8 @@ pub struct BackupReport {
     pub bytes: u64,
     /// Damage of redundant metadata in the store that did not stop the backup (one `GRAPH`
     /// copy, one copy of a manifest's fixed part, the derived `marks` file; format spec 13.2):
-    /// the backup is intact, plan a repair of the store.
+    /// the backup is intact, plan a repair of the store. A backup of a layer store says here
+    /// that it is useless without its base ([`Self::layer_base`]).
     pub warnings: Vec<String>,
     /// Whether the backup was written from the graph in memory
     /// ([`Store::backup_from_memory`](super::Store::backup_from_memory)).
@@ -167,6 +168,33 @@ pub struct BackupReport {
     /// damaged in the store, or unreadable from memory's store directory), relative names;
     /// the copy's catalog still references them.
     pub blobs_not_carried: Vec<String>,
+    /// The base of the backed-up layer store (format spec 7.5; `None`: a plain store). The
+    /// backup holds only the layer's changes to that base, never the base itself: it is
+    /// useless without that very base (the same lineage, commit and commit time), which
+    /// [`Self::warnings`] says too. Keep the base, or export a standalone copy of the layer
+    /// ([`Store::export_materialized`](super::Store::export_materialized)).
+    pub layer_base: Option<crate::graph::BaseRef>,
+}
+
+impl BackupReport {
+    /// Records that the backup is of a layer store over `base` (format spec 7.5): sets
+    /// [`Self::layer_base`] and adds the warning that the backup is useless without that base.
+    pub(super) fn of_layer(&mut self, base: Option<crate::graph::BaseRef>) {
+        let Some(base) = base else {
+            return;
+        };
+        self.layer_base = Some(base);
+        self.warnings.push(layer_backup_warning(&base));
+    }
+}
+
+/// The warning of a backup of a layer store over `base` (format spec 7.5).
+pub(crate) fn layer_backup_warning(base: &crate::graph::BaseRef) -> String {
+    format!(
+        "this is a backup of a layer store: it holds only the layer's changes to the base \
+         {base}, not the base itself, so it is useless without that very base; keep the base \
+         (or export a standalone copy of the layer: Store::export_materialized)"
+    )
 }
 
 fn relative(dir: &DirPath, path: &DirPath) -> String {
@@ -821,7 +849,13 @@ fn check_model_tar(reader: impl std::io::Read, identity: &str) -> Result<(), Str
 }
 
 /// The blob part of [`verify`].
-fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport) {
+/// `layer_store`: a referenced blob the store lacks is the base's (format spec 7.5), a note.
+fn verify_blobs(
+    dir: &DirPath,
+    chain: &[(u128, u64)],
+    layer_store: bool,
+    report: &mut VerifyReport,
+) {
     use super::blobs::{self, BlobError};
     let listing = match blobs::list_blobs(dir) {
         Ok(listing) => listing,
@@ -880,6 +914,13 @@ fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport)
                 blob.hash_algo().code()
             ));
         }
+        if layer_store && !present.contains(key) {
+            report.notes.push(format!(
+                "{name}: a blob of the base (a layer store keeps none: the model definitions of \
+                 its catalog are the base's), not checked here"
+            ));
+            continue;
+        }
         report.blobs_checked += 1;
         let result = if present.contains(key) {
             blobs::check_blob(dir, blob, true)
@@ -911,13 +952,45 @@ fn verify_blobs(dir: &DirPath, chain: &[(u128, u64)], report: &mut VerifyReport)
     }
 }
 
+/// Which stores a verification accepts and how it reads their snapshots.
+#[derive(Clone, Copy)]
+pub(super) enum VerifyAs<'a> {
+    /// A plain store only; every snapshot decoded into a graph.
+    Plain,
+    /// A plain store, or a layer store (format spec 7.5) without its base: a layer snapshot
+    /// is checked without being loaded (every checksum, its layer file decoded against the
+    /// manifest row), which a base would need.
+    Either,
+    /// A layer store over this base: every snapshot loaded over it.
+    Layer(&'a crate::graph::LayerBase),
+}
+
 pub(super) fn verify(
     dir: &DirPath,
     durable: Option<DurablePosition>,
 ) -> Result<VerifyReport, PersistError> {
-    // A newer (or older) format is refused, never listed as damage (format spec 15).
-    super::files::refuse_other_version(dir)?;
+    verify_as(dir, durable, VerifyAs::Plain)
+}
+
+/// [`verify`] of the stores `kind` names.
+pub(super) fn verify_as(
+    dir: &DirPath,
+    durable: Option<DurablePosition>,
+    kind: VerifyAs<'_>,
+) -> Result<VerifyReport, PersistError> {
+    // A newer (or older) format is refused, never listed as damage (format spec 15); so is a
+    // store of the other kind, or a layer store over another base (format spec 7.5).
+    let store_kind = match kind {
+        VerifyAs::Plain => super::files::StoreKind::Plain,
+        VerifyAs::Either => super::files::StoreKind::Either,
+        VerifyAs::Layer(base) => match base.base_ref() {
+            Some(base) => super::files::StoreKind::Layer(*base),
+            None => super::files::StoreKind::Plain,
+        },
+    };
+    super::files::refuse_other_version_as(dir, store_kind)?;
     let mut report = VerifyReport::default();
+    let mut unloaded_layers = 0usize;
     fn problem(report: &mut VerifyReport, path: &str, offset: Option<u64>, reason: String) {
         report.problems.push(VerifyProblem {
             path: path.to_string(),
@@ -993,22 +1066,35 @@ pub(super) fn verify(
                 ),
             }
         }
-        let loaded = DirSnapshotReader::open(path).and_then(|reader| read_snapshot(reader, &read));
+        let loaded = match kind {
+            VerifyAs::Layer(base) => load_layer_snapshot(path, &read, base),
+            VerifyAs::Plain | VerifyAs::Either => DirSnapshotReader::open(path)
+                .and_then(|reader| read_snapshot(reader, &read))
+                .map(|graph| (graph.last_commit_seq(), graph.graph_id())),
+        };
+        // A layer snapshot without its base (format spec 7.5): checked, not loaded.
+        let loaded = match (kind, loaded) {
+            (VerifyAs::Either, Err(PersistError::SnapshotKindMismatch { .. })) => {
+                unloaded_layers += 1;
+                check_layer_snapshot(path, read.max_value_depth())
+            }
+            (_, loaded) => loaded,
+        };
         match loaded {
             // Content of a newer version behind valid checksums (format spec 16): not damage.
             Err(err @ PersistError::UnsupportedContent { .. }) => {
                 report.notes.push(format!("{rel}: {err}"));
             }
-            Ok(graph) => {
-                if graph.last_commit_seq() != *seq {
+            Ok((commit_seq, graph_id)) => {
+                if commit_seq != *seq {
                     problem(
                         &mut report,
                         &rel,
                         None,
-                        format!("its manifest says commit {}", graph.last_commit_seq()),
+                        format!("its manifest says commit {commit_seq}"),
                     );
                 }
-                if !chain.on_chain(graph.graph_id()) {
+                if !chain.on_chain(graph_id) {
                     problem(
                         &mut report,
                         &rel,
@@ -1021,6 +1107,13 @@ pub(super) fn verify(
         }
     }
 
+    if unloaded_layers > 0 {
+        report.notes.push(format!(
+            "a layer store: its {unloaded_layers} layer snapshot(s) were checked without its \
+             base (every checksum, the layer file decoded), not loaded over it; verify it \
+             with its base (Store::verify_layer_dir) to load them"
+        ));
+    }
     // The embedding models (format spec 4.5): every file against its manifest's SHA-256.
     for (path, reason) in super::models::stray_entries(dir) {
         problem(&mut report, &path, None, reason);
@@ -1038,12 +1131,19 @@ pub(super) fn verify(
         }
     }
 
+    // A layer store (format spec 7.5) keeps no model: the model definitions of its catalog
+    // are the base's, and so are their blobs.
+    let layer_store = matches!(kind, VerifyAs::Layer(_))
+        || unloaded_layers > 0
+        || matches!(super::layer_base_in(dir), Ok(Some(_)));
     // The blobs (format spec 4.6, 12.9): every referenced blob read whole; strays are problems,
     // unreferenced blob files notes.
-    verify_blobs(dir, &chain.chain(), &mut report);
+    verify_blobs(dir, &chain.chain(), layer_store, &mut report);
     // The models of the latest state (format spec 4.5): each blob a model tar of the model its
     // definition names.
-    verify_models(dir, &mut report);
+    if !layer_store {
+        verify_models(dir, &mut report);
+    }
 
     // The system journal (format spec 4.7): notes, never damage.
     report.journal_notes = super::system_journal::verify_notes(dir);
@@ -1698,6 +1798,58 @@ fn full_report(plan: &BackupPlan) -> BackupReport {
     }
 }
 
+/// A snapshot directory of a layer store loaded over `base` (format spec 7.5): its commit
+/// position and lineage id.
+fn load_layer_snapshot(
+    path: &DirPath,
+    read: &ReadOptions,
+    base: &crate::graph::LayerBase,
+) -> Result<(u64, u128), PersistError> {
+    let layer = crate::graph::LayeredGraph::over_base(base)?;
+    let reader = DirSnapshotReader::open(path)?;
+    let layer = super::super::snapshot::read_snapshot_into(reader, read, layer)?;
+    Ok((
+        crate::graph::GraphStorage::last_commit_seq(&layer)?,
+        layer.graph_id(),
+    ))
+}
+
+/// A layer snapshot directory checked without its base (format spec 7.5): every checksum
+/// ([`verify_snapshot_dir`]) and its layer file decoded, naming the base its manifest row
+/// names. Its commit position and lineage id come from the manifest.
+fn check_layer_snapshot(path: &DirPath, max_depth: usize) -> Result<(u64, u128), PersistError> {
+    verify_snapshot_dir(path)?;
+    let (_, manifest) = read_manifest(path)?;
+    let file = super::super::layer::LAYER_FILE;
+    let location = format!("{}/{file}", path.display());
+    let Some(row_base) = super::super::layer::layer_row(&manifest.segments)? else {
+        return Err(PersistError::corrupt(
+            path.display(),
+            0,
+            "a layer snapshot without its layer row",
+        ));
+    };
+    let entry = manifest
+        .segments
+        .iter()
+        .find(|entry| entry.kind == super::super::layer::KIND_LAYER)
+        .ok_or_else(|| PersistError::corrupt(&location, 0, "the layer file is not listed"))?;
+    let file_path = segment_path(path, &entry.path)
+        .ok_or_else(|| PersistError::corrupt(&location, 0, "unsafe segment path"))?;
+    let bytes = read_bounded(&file_path, entry.byte_len)
+        .map_err(|err| PersistError::io("reading a layer file", err))?;
+    let decoded =
+        super::super::layer::decode(&bytes, max_depth).map_err(|err| err.at(&location, 0))?;
+    if decoded.base != row_base {
+        return Err(PersistError::corrupt(
+            &location,
+            0,
+            "the layer file names another base than its manifest row",
+        ));
+    }
+    Ok((manifest.fixed.commit_seq, manifest.fixed.graph_id))
+}
+
 /// Copies exactly `len` bytes of `source` to `out`.
 pub(super) fn copy_exact(
     source: &DirPath,
@@ -1827,7 +1979,8 @@ pub(super) fn backup_to_zip<W>(
 where
     W: Read + Write + std::io::Seek + Send,
 {
-    super::files::refuse_other_version(dir)?;
+    // A layer store too (format spec 7.5): its files hold the layer only.
+    super::files::refuse_other_version_as(dir, super::files::StoreKind::Either)?;
     let _pin = BackupPin::shared(dir)?;
     let with_models = models == super::ModelCopy::Include;
     let plan = checked_plan(dir, durable, "the ZIP archive", with_models)?;

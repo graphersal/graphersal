@@ -228,11 +228,35 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
   base (`StoreInfo::layer_base`; `graphersal store info` prints it). A checkpoint encodes the
   loaded layer (a merge checkpoint works on whole graphs), so its snapshot stays the size of
   the delta. The embedding models are the base's: the store keeps none, and its graph serves
-  the `LayerBase`'s registry. Not supported for layer stores yet (refused with
-  `StoreFailure::LayerStore`): forks, attic forks, repair, convert, backups (also from memory),
-  restore, export, upgrade, verification, rollback and attic restore, read-only views,
-  closed-store checkpoints and commits, and creating one from a `.gsnap`; a damaged layer store
-  refuses the open with the damage (no maintenance mode).
+  the `LayerBase`'s registry.
+
+  The base a layer store was built over is a **creation parameter**
+  ([Creation Parameters](../persistence/creation_parameters.md)): every copy carries it. The
+  copies and checks of the files work as for a plain store and need no base: backups (full,
+  incremental, ZIP, from memory), `restore_backup`/`restore_zip`, `export_packed` (a layer
+  `.gsnap`, read with `read_layer_snapshot` over the base), `verify_dir` (every checksum, the
+  layer files decoded, the snapshots not loaded; a note says so) and `damage_report_dir`. What
+  loads the layer takes the base: `verify` of the open store and `Store::verify_layer_dir`,
+  `Store::open_layer_read_only` and `read_only_at` of the open store (views over the base,
+  serving its models), `Store::open_layer_backup`, `Store::checkpoint_layer_dir` (always an
+  encoded layer snapshot, never a merge); another base is `LayerBaseMismatch`, a plain store
+  `SnapshotKindMismatch`, and their plain forms (`open_read_only`, `open_backup`,
+  `checkpoint_dir`) refuse a layer store with `StoreFailure::LayerStore`. A restored backup is a
+  layer store over the same base: it opens with `open_layer` over that base only. A backup of
+  a layer store holds no base, so it is **useless without it**: `BackupReport::layer_base`
+  names the base and `BackupReport::warnings` says so (the CLI prints it). The portable form
+  is the **materialized export**: `Store::export_materialized(writer, models)` (or
+  `WriteOptions::with_materialize(true)` with any snapshot writer) writes the whole graph the
+  layer shows as a plain snapshot of file format version 4, which `read_snapshot`, a plain
+  Store and older releases read without the base; its size follows the whole graph. A layer
+  store's catalog names the base's models; their blobs are the base's, so verification notes
+  them instead of reporting them missing, a layer `.gsnap` carries none, and a materialized
+  export carries them from the base's registry.
+
+  Not supported for layer stores yet (refused with `StoreFailure::LayerStore`): forks, attic
+  forks and attic restore, repair, convert, upgrade, rollback, closed-store commits, and
+  creating one from a `.gsnap`; a damaged layer store refuses the open with the damage (no
+  maintenance mode).
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):

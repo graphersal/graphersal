@@ -141,7 +141,15 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
     ) -> Result<Self, crate::error::GraphError> {
         // A layer: its own elements (counted first, so the index is sized and checked before
         // it is allocated, like a whole graph's).
-        let counts = match graph.layer_parts()? {
+        // A materialized layer is written as the whole graph it shows (format version 4).
+        let layer_parts = || {
+            if options.materialize {
+                Ok(None)
+            } else {
+                graph.layer_parts()
+            }
+        };
+        let counts = match layer_parts()? {
             Some(parts) => (parts.vertices.count(), parts.edges.count()),
             None => (graph.vertex_count()?, graph.edge_count()?),
         };
@@ -159,7 +167,7 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
         // Sized up front: the index is allocated once, at its final size.
         let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(vertex_count);
         let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(edge_count);
-        let layer = match graph.layer_parts()? {
+        let layer = match layer_parts()? {
             Some(parts) => {
                 for vertex in parts.vertices {
                     if let Some(id) = graph.vertex_id(vertex)? {

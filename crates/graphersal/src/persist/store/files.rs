@@ -670,7 +670,13 @@ pub(crate) enum StoreKind {
     /// [`PersistError::LayerBaseMismatch`], a whole-graph manifest
     /// [`PersistError::SnapshotKindMismatch`] (a plain store opened as a layer).
     Layer(crate::graph::BaseRef),
-    /// Either (listings and the store info, which read files only).
+    /// A plain store or a layer store over one base, whichever it is (operations that copy or
+    /// check the files and need no base: backups, restores, verification, the damage report,
+    /// the export of a stored snapshot). A layer store holding manifests over two bases, or a
+    /// store mixing layer and whole-graph manifests, is refused as [`StoreKind::Layer`]
+    /// refuses it.
+    Either,
+    /// Any (listings and the store info, which read files only).
     Any,
 }
 
@@ -706,6 +712,10 @@ pub(crate) fn layer_store_refused(
 fn check_kind(root: &DirPath, kind: StoreKind, seen: &KindSeen) -> Result<(), PersistError> {
     match kind {
         StoreKind::Any => Ok(()),
+        StoreKind::Either => match &seen.layer {
+            Some((base, _)) => check_kind(root, StoreKind::Layer(*base), seen),
+            None => Ok(()),
+        },
         StoreKind::Plain => match &seen.layer {
             Some((base, _)) => Err(layer_store_refused(root, base, "work on the store")),
             None => Ok(()),

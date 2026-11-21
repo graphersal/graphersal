@@ -246,8 +246,12 @@ code written for layers already run.
 - **Rust only.** From Rust a layer can be saved as a layer snapshot (above) or kept in a
   layer Store, which journals every commit and opens again only over the same base
   (`graphersal store info` shows a layer store's base). The CLI's `--layer`, the dev server
-  and Python keep it in memory for now. Copies of a layer store (fork, backup, export) are not
-  supported yet.
+  and Python keep it in memory for now. A layer store is backed up, restored, verified and
+  exported like any store; every copy holds the layer only, so **a backup of a layer store is
+  useless without its base** (the backup's report and `graphersal store backup` say so): keep
+  the base, or export a standalone copy of the whole graph the layer shows
+  (`Store::export_materialized`, a plain `.gsnap` that any Graphersal reads). Forks, repair,
+  rollback and conversion of a layer store are not supported yet.
 - **One level.** The base is a plain graph; there is no layer over a layer. The base is frozen
   for good: when the product graph changes, project layers are rebuilt over the new base.
 - **Refused for now**, with an error naming the feature ("... not supported on a layered graph

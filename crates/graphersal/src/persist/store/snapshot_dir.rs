@@ -405,7 +405,8 @@ pub(crate) fn read_manifest(snapshot: &DirPath) -> Result<(Vec<u8>, Manifest), P
 }
 
 /// The listing fields of a snapshot: only the 4096-byte fixed part of its manifest is read
-/// (the tail copy when the head is damaged). `meta` is not part of it (empty).
+/// (the tail copy when the head is damaged), and for a layer snapshot its segment table, which
+/// names the base ([`SnapshotInfo::layer_base`]). `meta` is not part of it (empty).
 pub(crate) fn read_listing(snapshot: &DirPath) -> Result<SnapshotInfo, PersistError> {
     let location = format!("{}/{MANIFEST_FILE}", snapshot.display());
     let file = snapshot.join(MANIFEST_FILE);
@@ -428,7 +429,17 @@ pub(crate) fn read_listing(snapshot: &DirPath) -> Result<SnapshotInfo, PersistEr
                 .map_err(|_| PersistError::corrupt(&location, 0, head_err))?
         }
     };
-    Ok(SnapshotInfo::from_fixed(&fixed))
+    let mut info = SnapshotInfo::from_fixed(&fixed);
+    // A layer snapshot (format spec 7.5, file format version 5) names its base in its layer
+    // row: the manifest is read whole for it (a damaged one is left to what loads it).
+    if fixed.version.0 == crate::persist::codec::LAYER_FORMAT_VERSION
+        && let Ok((_, manifest)) = read_manifest(snapshot)
+    {
+        info.layer_base = crate::persist::layer::layer_row(&manifest.segments)
+            .ok()
+            .flatten();
+    }
+    Ok(info)
 }
 
 /// The length and CRC of a stream, read through a bounded buffer up to `max + 1` bytes (a

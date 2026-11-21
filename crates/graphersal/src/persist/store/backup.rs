@@ -85,8 +85,9 @@ pub(super) fn backup_into(
     mode: BackupMode,
 ) -> Result<BackupReport, PersistError> {
     // The source and an existing backup are both version-checked before anything is read or
-    // written (format spec 15).
-    files::refuse_other_version(dir)?;
+    // written (format spec 15). A layer store is backed up like a plain one (format spec 7.5):
+    // its files hold the layer only, and its base is named, never copied.
+    files::refuse_other_version_as(dir, files::StoreKind::Either)?;
     if !files::has_entries(target) {
         return super::maintenance::backup_to_dir(dir, durable, target);
     }
@@ -103,7 +104,7 @@ pub(super) fn backup_into(
             target.display()
         )));
     }
-    files::refuse_other_version(target)?;
+    files::refuse_other_version_as(target, files::StoreKind::Either)?;
     let mut report = increment(dir, durable, target)?;
     // The models follow the store's (format spec 4.5): each one added or removed whole, after
     // the increment (they are no part of its INTENT; an interrupted sync is completed by the
@@ -1099,7 +1100,8 @@ pub(super) fn undo_increment(target: &DirPath, intent: &Intent) -> Result<(), Pe
 /// Clears the backup marker of the backup in `dir` IN PLACE: it becomes the live store with
 /// the same lineage (an interrupted increment is rolled back first).
 pub(super) fn restore(dir: &DirPath) -> Result<BackupMarker, PersistError> {
-    files::refuse_other_version(dir)?;
+    // A backup of a layer store too: it stays a layer store over the same base.
+    files::refuse_other_version_as(dir, files::StoreKind::Either)?;
     let _lock = DirLock::exclusive(dir)?;
     let mut file = read_graph_file(dir)?.file;
     if file.backup.is_none() {
@@ -1121,7 +1123,7 @@ pub(super) fn prune(
     dir: &DirPath,
     up_to: u64,
 ) -> Result<super::maintenance::PruneReport, PersistError> {
-    files::refuse_other_version(dir)?;
+    files::refuse_other_version_as(dir, files::StoreKind::Either)?;
     let _lock = DirLock::exclusive(dir)?;
     if read_graph_file(dir)?.file.backup.is_none() {
         return Err(not_a_backup(dir, "prune the backup"));
@@ -1145,6 +1147,6 @@ fn not_a_backup(dir: &DirPath, operation: &'static str) -> PersistError {
 
 /// The marker of the backup in `dir` (`None`: a store, not a backup).
 pub(super) fn marker_of(dir: &DirPath) -> Result<Option<BackupMarker>, PersistError> {
-    files::refuse_other_version(dir)?;
+    files::refuse_other_version_as(dir, files::StoreKind::Either)?;
     Ok(read_graph_file(dir)?.file.backup)
 }
