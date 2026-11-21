@@ -2315,3 +2315,164 @@ mod mutations {
             });
     }
 }
+
+/// The read overhead of a `LayeredGraph` over an untouched base against the plain base:
+/// the same graph, the same reads, once on the `TraversalGraph` and once through the layer.
+/// Run only this group with `cargo bench ... -- layered_read`.
+mod layered_read {
+    use std::sync::{Arc, OnceLock};
+
+    use graphersal::prelude::*;
+    use graphersal::storage::LayeredGraph;
+
+    /// Vertices of the graph.
+    const N: usize = 100_000;
+    /// Out-edges per vertex.
+    const DEGREE: usize = 4;
+    /// Start vertices of the 2-hop expansion through the storage API.
+    const STARTS: usize = 20_000;
+
+    /// `N` vertices `item` (keys `name`, `n`, `k`) with `DEGREE` out-edges `next` each, to
+    /// pseudo-random targets.
+    fn base() -> &'static Arc<TraversalGraph> {
+        static BASE: OnceLock<Arc<TraversalGraph>> = OnceLock::new();
+        BASE.get_or_init(|| {
+            let mut graph = TraversalGraph::new();
+            let handles: Vec<_> = (0..N)
+                .map(|i| {
+                    let id = format!("v{i}");
+                    let props = PropertyMap::from([
+                        ("name", ElementProperty::from(id.as_str())),
+                        ("n", ElementProperty::from(i as i64)),
+                        ("k", ElementProperty::from(i as i64 % 7)),
+                    ]);
+                    graph
+                        .insert_vertex(Some(id.as_str().into()), vec!["item".into()], props)
+                        .unwrap()
+                })
+                .collect();
+            for (i, &from) in handles.iter().enumerate() {
+                for k in 0..DEGREE {
+                    let to = handles[(i * 7919 + k * 104_729 + 1) % N];
+                    graph
+                        .insert_edge(None, Some("next".into()), from, to, PropertyMap::default())
+                        .unwrap();
+                }
+            }
+            graph.shrink_to_fit();
+            Arc::new(graph)
+        })
+    }
+
+    fn layer() -> &'static LayeredGraph {
+        static LAYER: OnceLock<LayeredGraph> = OnceLock::new();
+        LAYER.get_or_init(|| LayeredGraph::over(Arc::clone(base())).unwrap())
+    }
+
+    /// Every vertex, reading its property `n`.
+    fn scan<S: GraphStorage>(storage: &S) -> i64 {
+        let mut sum = 0;
+        for node in storage.vertices().unwrap() {
+            if let Some(ElementProperty::Number(n)) = storage
+                .vertex_properties(node)
+                .unwrap()
+                .and_then(|props| props.get("n"))
+            {
+                sum += n.as_i64().unwrap_or(0);
+            }
+        }
+        sum
+    }
+
+    /// Two hops out of the first `STARTS` vertices, through the endpoints of each edge.
+    fn two_hop<S: GraphStorage>(storage: &S) -> usize {
+        let mut reached = 0;
+        for node in storage.vertices().unwrap().take(STARTS) {
+            for edge in storage.out_edges(node).unwrap() {
+                let (_, next) = storage.edge_endpoints(edge).unwrap().unwrap();
+                reached += storage.out_edges(next).unwrap().count();
+            }
+        }
+        reached
+    }
+
+    #[divan::bench(sample_count = 50)]
+    fn scan_property_plain(bencher: divan::Bencher) {
+        let base = &**base();
+        bencher.bench(|| scan(divan::black_box(base)));
+    }
+
+    #[divan::bench(sample_count = 50)]
+    fn scan_property_layered(bencher: divan::Bencher) {
+        let layer = layer();
+        bencher.bench(|| scan(divan::black_box(layer)));
+    }
+
+    #[divan::bench(sample_count = 50)]
+    fn two_hop_plain(bencher: divan::Bencher) {
+        let base = &**base();
+        bencher.bench(|| two_hop(divan::black_box(base)));
+    }
+
+    #[divan::bench(sample_count = 50)]
+    fn two_hop_layered(bencher: divan::Bencher) {
+        let layer = layer();
+        bencher.bench(|| two_hop(divan::black_box(layer)));
+    }
+
+    #[divan::bench(sample_count = 30)]
+    fn traversal_scan_plain(bencher: divan::Bencher) {
+        let base = &**base();
+        bencher.bench(|| {
+            GraphTraversalSource::new(base)
+                .v(None)
+                .values("n")
+                .sum()
+                .next()
+                .unwrap()
+        });
+    }
+
+    #[divan::bench(sample_count = 30)]
+    fn traversal_scan_layered(bencher: divan::Bencher) {
+        let layer = layer();
+        bencher.bench(|| {
+            GraphTraversalSource::new(layer)
+                .v(None)
+                .values("n")
+                .sum()
+                .next()
+                .unwrap()
+        });
+    }
+
+    #[divan::bench(sample_count = 30)]
+    fn traversal_two_hop_plain(bencher: divan::Bencher) {
+        let base = &**base();
+        bencher.bench(|| {
+            GraphTraversalSource::new(base)
+                .v(None)
+                .out(None)
+                .out(None)
+                .values("k")
+                .sum()
+                .next()
+                .unwrap()
+        });
+    }
+
+    #[divan::bench(sample_count = 30)]
+    fn traversal_two_hop_layered(bencher: divan::Bencher) {
+        let layer = layer();
+        bencher.bench(|| {
+            GraphTraversalSource::new(layer)
+                .v(None)
+                .out(None)
+                .out(None)
+                .values("k")
+                .sum()
+                .next()
+                .unwrap()
+        });
+    }
+}
