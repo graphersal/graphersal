@@ -6847,3 +6847,271 @@ fn skip_on_ci(what: &str) -> bool {
     }
     on_ci
 }
+
+/// The files of a directory tree with their bytes, sorted: what a run must leave unchanged.
+fn tree_bytes(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `--layer`: the session runs on an empty layer over the loaded graph; writes go to the layer,
+/// `layer()`, `has_layer()` and `g.layer_diff()` show them, and stdout carries only the results.
+#[test]
+fn layer_runs_the_session_on_a_layer_over_the_graph() {
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "--layer",
+            "-e",
+            r#"g.add_v("person").property("name", "ada").iterate()"#,
+            "-e",
+            r#"g.v().has("name", "marko").property("age", 30).iterate()"#,
+            "-e",
+            "g.v(6).drop().iterate()",
+            "-e",
+            r#"g.v().has_layer("added", "modified").values("name").order().to_list()"#,
+            "-e",
+            r#"g.v(1).out_e().layer().to_list()"#,
+            "-e",
+            "let d = g.layer_diff(#{kinds: \"vertex\"}); [d.added.len(), d.removed[0].id, \
+             d.modified[0].properties.age.base, d.modified[0].properties.age.layer, d.truncated]",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert!(res.stderr.is_empty(), "stderr: {}", res.stderr);
+    let lines: Vec<&str> = res.stdout.lines().map(str::trim).collect();
+    assert_eq!(
+        lines,
+        [
+            "\"ada\"",
+            "\"marko\"",
+            "\"base\"",
+            "\"base\"",
+            "\"base\"",
+            "1",
+            "\"6\"",
+            "29",
+            "30",
+            "false"
+        ],
+        "{}",
+        res.stdout
+    );
+
+    // Without --layer the same graph has no layer: everything is "base", the diff empty.
+    let res = run(
+        &[
+            "--graph",
+            "modern",
+            "-e",
+            r#"g.add_v("person").iterate()"#,
+            "-e",
+            "[g.v().layer().dedup().to_list(), g.layer_diff().added.len()]",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert_eq!(res.stdout.trim(), "[\"base\"]\n0");
+}
+
+/// `--layer` over a Store: the store is the frozen base, opened read-only without its lock; the
+/// layer's writes never reach it, and a layer can run while another process holds the store.
+#[test]
+fn a_layer_over_a_store_never_writes_the_store() {
+    let dir = temp_path("layer_store");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = dir.to_str().unwrap().to_string();
+    let res = run(
+        &[
+            "--graph",
+            &store,
+            "--create-store",
+            "-e",
+            r#"g.add_v("person").property("name", "ann").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let before = tree_bytes(&dir);
+    let res = run(
+        &[
+            "--graph",
+            &store,
+            "--layer",
+            "-e",
+            r#"g.add_v("person").property("name", "bob").iterate()"#,
+            "-e",
+            r#"g.v().has("name", "ann").property("name", "anna").iterate()"#,
+            "-e",
+            r#"g.v().order().by("name").project("name", "layer").by("name").by(__.layer()).to_list()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let lines: Vec<&str> = res.stdout.lines().map(str::trim).collect();
+    assert_eq!(
+        lines,
+        [
+            r#"#{"layer": "modified", "name": "anna"}"#,
+            r#"#{"layer": "added", "name": "bob"}"#
+        ],
+        "{}",
+        res.stdout
+    );
+    assert_eq!(tree_bytes(&dir), before, "the layer wrote into the store");
+    let res = run(
+        &["--graph", &store, "-e", r#"g.v().values("name").to_list()"#],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), r#""ann""#);
+
+    // A store that does not exist names --layer, not --read-only.
+    let missing = temp_path("layer_no_store");
+    let res = run(
+        &["--graph", missing.to_str().unwrap(), "--layer", "-e", "1"],
+        "",
+    );
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("--layer opens an existing store"),
+        "{}",
+        res.stderr
+    );
+    assert!(!missing.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--layer` over a GraphSON file and a packed snapshot: the file is the base, and nothing is
+/// written back to it.
+#[test]
+fn a_layer_over_a_graph_file_leaves_the_file_alone() {
+    let dir = temp_path("layer_files");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("modern.json");
+    let gsnap = dir.join("modern.gsnap");
+    let res = run(
+        &[
+            "-e",
+            &format!(r#"g.export_graphson("{}")"#, script_path(&json)),
+            "-e",
+            &format!(r#"g.export_snapshot("{}")"#, script_path(&gsnap)),
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let before = tree_bytes(&dir);
+    for file in [&json, &gsnap] {
+        let res = run(
+            &[
+                "--graph",
+                file.to_str().unwrap(),
+                "--layer",
+                "-e",
+                r#"g.e().has_label("knows").drop().iterate()"#,
+                "-e",
+                "let d = g.layer_diff(); [d.removed.len(), d.removed[0].kind, \
+                 g.e().has_layer(\"base\").count().next()]",
+            ],
+            "",
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert_eq!(res.stdout.trim(), "2\n\"edge\"\n4", "{file:?}");
+    }
+    assert_eq!(tree_bytes(&dir), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The REPL runs on the layer too: a write of one line shows in the diff of the next.
+#[test]
+fn the_repl_runs_on_the_layer() {
+    let res = run(
+        &["--layer", "--repl"],
+        "g.add_v(\"city\").property(\"name\", \"paris\").iterate();\n\
+         g.layer_diff().added[0].labels;\n",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains(r#""city""#), "{}", res.stdout);
+}
+
+/// Invalid combinations exit 2 with a diagnostic naming the flags: `--layer` keeps its writes
+/// in memory, so it cannot create a store, and it is the writable part, so `--read-only`
+/// contradicts it. A base the layer cannot carry yet (vector rules) is refused as well.
+#[test]
+fn layer_refuses_what_it_cannot_serve() {
+    let dir = temp_path("layer_refusals");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("store");
+    let res = run(
+        &[
+            "--graph",
+            store.to_str().unwrap(),
+            "--create-store",
+            "--layer",
+            "-e",
+            "1",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("--layer and --create-store"),
+        "{}",
+        res.stderr
+    );
+    assert!(!store.exists());
+    let res = run(&["--layer", "--read-only", "-e", "1"], "");
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("--layer and --read-only"),
+        "{}",
+        res.stderr
+    );
+    assert!(res.stdout.is_empty(), "{}", res.stdout);
+
+    let schema = dir.join("vectors.json");
+    std::fs::write(
+        &schema,
+        r#"{"mode": "open", "vertices": {"person": {"schema": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "name"}}}}}}"#,
+    )
+    .unwrap();
+    let res = run(
+        &["--layer", "--schema", schema.to_str().unwrap(), "-e", "1"],
+        "",
+    );
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(res.stderr.contains("vector rules"), "{}", res.stderr);
+    assert!(res.stderr.contains("run without --layer"), "{}", res.stderr);
+    assert!(res.stdout.is_empty(), "{}", res.stdout);
+
+    // The args file knows the switch.
+    let args = dir.join("args.json");
+    std::fs::write(
+        &args,
+        r#"{"layer": true, "eval": ["g.add_v(\"x\").layer().next()"]}"#,
+    )
+    .unwrap();
+    let res = run(&["--args-file", args.to_str().unwrap()], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim().trim_matches('"'), "added");
+    let _ = std::fs::remove_dir_all(&dir);
+}

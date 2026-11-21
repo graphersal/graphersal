@@ -66,6 +66,7 @@
   - [The Store in the Playground](persistence/playground_store.md)
   - [Python](persistence/python.md)
   - [FAQ and Troubleshooting](persistence/faq.md)
+- [Layers](users_guide/layered_graphs.md)
 - [Custom Storages](for_developers/custom_storage.md)
   - [Storage Conformance](for_developers/storage_conformance.md)
   - [Layered Graphs](for_developers/layered_graphs.md)
