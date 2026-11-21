@@ -8,7 +8,11 @@
 //!
 //! 1. A case out of scope (`scope.rs`: `@ignore`, deliberate deviations; ids only) is never handed to [`run`]: the runner classifies it `excluded` without running it.
 //! 2. On a worker thread, a **fresh empty graph** per case, on the storage selected by
-//!    `GRAPHERSAL_TEST_STORAGE` (`storage.rs`): `TraversalGraph`, or `Forwarding` over one.
+//!    `GRAPHERSAL_TEST_STORAGE` (`storage.rs`): `TraversalGraph`, `Forwarding` over one, a
+//!    `LayeredGraph` over a base that received the graph setup (`layered`: the leading
+//!    `Given ...` / `having executed` steps run on a `TraversalGraph` that then becomes the
+//!    frozen base, every later step runs on the layer), or a `LayeredGraph` over an empty base
+//!    that receives every step (`layered-delta`).
 //!    `Given an empty graph` and `Given any graph` both start from it; `Given the <name> graph`
 //!    runs `graphs/<name>/<name>.cypher` through `gql()` (design T7, its trailing `;` dropped).
 //! 3. The steps in order: every `having executed` query through `gql()`; parameters through
@@ -329,86 +333,136 @@ fn guarded(job: &Job) -> RawOutcome {
 // ---------------------------------------------------------------------------------------------
 
 fn execute(case: &Case, storage: TestStorage) -> RawOutcome {
+    let mut run = Run::default();
     match storage {
-        TestStorage::TraversalGraph => execute_on(TraversalGraph::default(), case),
-        TestStorage::Forwarding => execute_on(
-            crate::forwarding::Forwarding::new(TraversalGraph::default()),
-            case,
+        TestStorage::TraversalGraph => run.steps(&mut TraversalGraph::default(), &case.steps),
+        TestStorage::Forwarding => run.steps(
+            &mut crate::forwarding::Forwarding::new(TraversalGraph::default()),
+            &case.steps,
+        ),
+        // The graph setup (the named graph, `having executed`) goes into the base, every later
+        // step runs on a layer over it.
+        TestStorage::Layered => {
+            let setup = case
+                .steps
+                .iter()
+                .take_while(|step| {
+                    matches!(
+                        step.step,
+                        Step::EmptyGraph
+                            | Step::AnyGraph
+                            | Step::NamedGraph(_)
+                            | Step::HavingExecuted(_)
+                    )
+                })
+                .count();
+            let mut base = TraversalGraph::default();
+            run.steps(&mut base, &case.steps[..setup]).and_then(|()| {
+                let mut layer = super::storage::layer_over(base);
+                run.steps(&mut layer, &case.steps[setup..])
+            })
+        }
+        // A layer over an empty base: the setup writes go into its delta.
+        TestStorage::LayeredDelta => run.steps(
+            &mut graphersal::storage::LayeredGraph::default(),
+            &case.steps,
         ),
     }
-}
-
-fn execute_on<S: GraphStorage>(mut graph: S, case: &Case) -> RawOutcome {
-    let mut params: Vec<(String, ElementProperty)> = Vec::new();
-    let mut main: Option<MainRun> = None;
-    for step in &case.steps {
-        match &step.step {
-            Step::EmptyGraph | Step::AnyGraph => {}
-            Step::NamedGraph(name) => {
-                let file = graphs_root().join(name).join(format!("{name}.cypher"));
-                let text = match std::fs::read_to_string(&file) {
-                    Ok(text) => text,
-                    Err(e) => return RawOutcome::Setup(format!("named graph {name}: {e}")),
-                };
-                let query = text.trim_end().trim_end_matches(';');
-                if let QueryOutcome::Error(e) = run_query(&mut graph, query, &[]) {
-                    return RawOutcome::Setup(format!("named graph {name}: {}", e.message));
-                }
-            }
-            Step::HavingExecuted(query) => {
-                if let QueryOutcome::Error(e) = run_query(&mut graph, query, &[]) {
-                    return RawOutcome::Setup(format!("having executed: {}", e.message));
-                }
-            }
-            Step::Parameters(table) => {
-                for (name, raw) in table {
-                    match super::values::parse_value(raw)
-                        .and_then(|v| super::values::to_element_property(&v))
-                    {
-                        Ok(value) => params.push((name.clone(), value)),
-                        Err(e) => return RawOutcome::Setup(format!("parameter {name}: {e}")),
-                    }
-                }
-            }
-            // A test procedure is a saved GQL query of the catalog (`procedure.rs`), registered
-            // before the query under test runs.
-            Step::Procedure { signature, table } => {
-                let registered = super::procedure::definition(signature, table).and_then(|d| {
-                    GraphTraversalSource::new(&mut graph)
-                        .set_definition(d)
-                        .map_err(|e| e.to_string())
-                });
-                if let Err(e) = registered {
-                    return RawOutcome::Setup(format!("procedure {signature}: {e}"));
-                }
-            }
-            Step::ExecutingQuery(query) => {
-                let before = state::snapshot(&graph);
-                let outcome = run_query(&mut graph, query, &params);
-                let after = state::snapshot(&graph);
-                main = Some(MainRun {
-                    outcome,
-                    side_effects: state::diff(&before, &after),
-                    controls: Vec::new(),
-                });
-            }
-            Step::ExecutingControlQuery(query) => {
-                let outcome = run_query(&mut graph, query, &params);
-                if let Some(main) = main.as_mut() {
-                    main.controls.push(outcome);
-                }
-            }
-            Step::Result { .. }
-            | Step::ResultEmpty
-            | Step::Error { .. }
-            | Step::NoSideEffects
-            | Step::SideEffects(_) => {}
-        }
-    }
-    match main {
+    .err()
+    .unwrap_or_else(|| match run.main {
         Some(main) => RawOutcome::Ran(main),
         // The parser's validation guarantees exactly one query; reaching this is a harness bug.
         None => RawOutcome::Panic("harness: the case has no query".to_string()),
+    })
+}
+
+/// The state of a case run across its steps (which may run on two graphs, `layered`).
+#[derive(Default)]
+struct Run {
+    params: Vec<(String, ElementProperty)>,
+    main: Option<MainRun>,
+}
+
+impl Run {
+    /// Runs `steps` in order on `graph`; `Err` is the finished outcome of a failed setup step.
+    fn steps<S: GraphStorage>(
+        &mut self,
+        graph: &mut S,
+        steps: &[super::gherkin::StepAt],
+    ) -> Result<(), RawOutcome> {
+        let Self { params, main } = self;
+        for step in steps {
+            match &step.step {
+                Step::EmptyGraph | Step::AnyGraph => {}
+                Step::NamedGraph(name) => {
+                    let file = graphs_root().join(name).join(format!("{name}.cypher"));
+                    let text = match std::fs::read_to_string(&file) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            return Err(RawOutcome::Setup(format!("named graph {name}: {e}")));
+                        }
+                    };
+                    let query = text.trim_end().trim_end_matches(';');
+                    if let QueryOutcome::Error(e) = run_query(graph, query, &[]) {
+                        return Err(RawOutcome::Setup(format!(
+                            "named graph {name}: {}",
+                            e.message
+                        )));
+                    }
+                }
+                Step::HavingExecuted(query) => {
+                    if let QueryOutcome::Error(e) = run_query(graph, query, &[]) {
+                        return Err(RawOutcome::Setup(format!("having executed: {}", e.message)));
+                    }
+                }
+                Step::Parameters(table) => {
+                    for (name, raw) in table {
+                        match super::values::parse_value(raw)
+                            .and_then(|v| super::values::to_element_property(&v))
+                        {
+                            Ok(value) => params.push((name.clone(), value)),
+                            Err(e) => {
+                                return Err(RawOutcome::Setup(format!("parameter {name}: {e}")));
+                            }
+                        }
+                    }
+                }
+                // A test procedure is a saved GQL query of the catalog (`procedure.rs`), registered
+                // before the query under test runs.
+                Step::Procedure { signature, table } => {
+                    let registered = super::procedure::definition(signature, table).and_then(|d| {
+                        GraphTraversalSource::new(&mut *graph)
+                            .set_definition(d)
+                            .map_err(|e| e.to_string())
+                    });
+                    if let Err(e) = registered {
+                        return Err(RawOutcome::Setup(format!("procedure {signature}: {e}")));
+                    }
+                }
+                Step::ExecutingQuery(query) => {
+                    let before = state::snapshot(&*graph);
+                    let outcome = run_query(graph, query, params);
+                    let after = state::snapshot(&*graph);
+                    *main = Some(MainRun {
+                        outcome,
+                        side_effects: state::diff(&before, &after),
+                        controls: Vec::new(),
+                    });
+                }
+                Step::ExecutingControlQuery(query) => {
+                    let outcome = run_query(graph, query, params);
+                    if let Some(main) = main.as_mut() {
+                        main.controls.push(outcome);
+                    }
+                }
+                Step::Result { .. }
+                | Step::ResultEmpty
+                | Step::Error { .. }
+                | Step::NoSideEffects
+                | Step::SideEffects(_) => {}
+            }
+        }
+        Ok(())
     }
 }
 

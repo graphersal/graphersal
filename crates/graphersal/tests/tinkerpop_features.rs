@@ -296,7 +296,8 @@ fn baseline_path() -> PathBuf {
 
 /// Path of the Markdown report: `$CARGO_TARGET_DIR/tinkerpop-report.md` (relative values resolve
 /// against the workspace root), else `<workspace root>/target/tinkerpop-report.md`; on the
-/// forwarding storage (`GRAPHERSAL_TEST_STORAGE=forwarding`) `tinkerpop-report-forwarding.md`.
+/// forwarding storage (`GRAPHERSAL_TEST_STORAGE=forwarding`) `tinkerpop-report-forwarding.md`, and
+/// `tinkerpop-report-<name>.md` on every other lane (`layered`, `layered-delta`).
 fn report_path() -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let workspace = workspace.canonicalize().unwrap_or(workspace);
@@ -304,10 +305,7 @@ fn report_path() -> PathBuf {
         Some(dir) => workspace.join(dir),
         None => workspace.join("target"),
     };
-    target.join(match harness::storage::current() {
-        TestStorage::TraversalGraph => "tinkerpop-report.md",
-        TestStorage::Forwarding => "tinkerpop-report-forwarding.md",
-    })
+    target.join(harness::storage::current().report_file("tinkerpop"))
 }
 
 /// Whether `TINKERPOP_UPDATE_BASELINE` asks for a rewrite (set, non-empty, not `0`).
@@ -344,11 +342,12 @@ fn tinkerpop_conformance() {
 
     let storage = harness::storage::current();
     assert!(
-        !(storage == TestStorage::Forwarding && update_requested()),
-        "{}=1 is refused with {}=forwarding: the default run (on TraversalGraph) owns the \
+        !(storage != TestStorage::TraversalGraph && update_requested()),
+        "{}=1 is refused with {}={}: the default run (on TraversalGraph) owns the \
          baseline and the compliance page; unset {} to regenerate them",
         baseline::UPDATE_ENV,
         harness::storage::STORAGE_ENV,
+        storage.name(),
         harness::storage::STORAGE_ENV
     );
     if storage != TestStorage::TraversalGraph {
