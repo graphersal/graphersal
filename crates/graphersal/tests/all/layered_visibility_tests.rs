@@ -46,7 +46,9 @@ fn modified_ids(diff: &LayerDiff) -> Vec<&str> {
     ids(diff.modified.iter().map(|e| &e.id))
 }
 
-fn origins(layer: &LayeredGraph) -> (Vec<(String, LayerOrigin)>, Vec<(String, LayerOrigin)>) {
+type Origins = Vec<(String, LayerOrigin)>;
+
+fn origins(layer: &LayeredGraph) -> (Origins, Origins) {
     let vertices = layer
         .vertices()
         .unwrap()

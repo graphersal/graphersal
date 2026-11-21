@@ -161,7 +161,9 @@ mod tests {
         assert_eq!(both.collect::<Vec<_>>(), [1, 2, 7, 8]);
         let base_only = BaseThenDelta::new(1..3u32, None::<std::ops::Range<u32>>);
         assert_eq!(base_only.size_hint(), (2, Some(2)));
-        assert_eq!(base_only.fold(0, |acc, x| acc + x), 3);
+        #[allow(clippy::unnecessary_fold)] // tests the custom `fold`
+        let total = base_only.fold(0, |acc, x| acc + x);
+        assert_eq!(total, 3);
         let mut both = BaseThenDelta::new(1..2u32, Some(5..6u32));
         assert_eq!(
             (both.next(), both.next(), both.next(), both.next()),
