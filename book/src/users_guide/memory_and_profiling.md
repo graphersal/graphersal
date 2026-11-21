@@ -261,8 +261,9 @@ reports in about 0.15 s (release) with the default limit; only the rows kept are
 Elsewhere: Rust `g.memory_report(&MemoryReportRequest::new())` (a `MemoryReport` with typed
 rows, `Display` as a terminal summary, `to_property()`/`to_json()` as this map; a
 `CancelToken` stops it; `MemoryReportRequest::DEFAULT_LIMIT` is 500, `with_limit(usize::MAX)`
-keeps every row); the REPL's `/memory [max_elements]` prints the summary (the 20 largest labels
-and properties, then how many more there are); the dev server `POST /api/memory/report` (the
+keeps every row); the REPL's `/memory [delta] [max_elements]` prints the summary (the 20 largest labels
+and properties, then how many more there are; `delta`: the scope `"delta"`, a layer's own
+elements only); the dev server `POST /api/memory/report` (the
 playground's Optimize -> Memory, at most 500 rows per list with a "N more not shown" line) and
 the MCP tool `memory_report` (at most 50 property and label rows unless `limit` or
 `max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=.., limit=..,

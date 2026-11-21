@@ -402,13 +402,18 @@ fn find_fault<'g, S: GraphStorage + 'g>(
 /// of every label (`labels`, the source's folded labels) in every range of the access, each
 /// once; for a label-less access the vertices of the label-less index, kept only when they carry
 /// one of `labels` (if any). `None` when the storage serves no index the access names (the
-/// source scans instead).
+/// source scans instead). `declined` is set when a lookup answered `None` (or the access cannot
+/// be read without labels) and the candidates come from a scan, for `.profile()`
+/// ([`IndexDeclined`]).
+///
+/// [`IndexDeclined`]: crate::traversal::step::IndexDeclined
 ///
 /// [`IndexAccess`]: crate::traversal::step::IndexAccess
 fn index_vertices<S: GraphStorage>(
     storage: &S,
     labels: Option<&[String]>,
     access: &crate::traversal::step::IndexAccess,
+    declined: &mut bool,
 ) -> Result<Option<Vec<S::VertexId>>, crate::error::GraphError> {
     let lookup = |label, range| vertex_lookup(storage, label, access, range);
     let mut seen: std::collections::HashSet<S::VertexId> = std::collections::HashSet::new();
@@ -417,6 +422,7 @@ fn index_vertices<S: GraphStorage>(
         let dedup = access.ranges.len() > 1;
         for range in &access.ranges {
             let Some(found) = lookup(None, range)? else {
+                *declined = true;
                 return scan_answered_vertices(storage, labels, access);
             };
             for node in found {
@@ -435,12 +441,14 @@ fn index_vertices<S: GraphStorage>(
         return Ok(Some(out));
     }
     let Some(labels) = labels else {
+        *declined = true;
         return scan_answered_vertices(storage, None, access);
     };
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
             let Some(found) = lookup(Some(label.as_str()), range)? else {
+                *declined = true;
                 return scan_answered_vertices(storage, Some(labels), access);
             };
             for node in found {
@@ -489,6 +497,7 @@ fn index_edges<S: GraphStorage>(
     storage: &S,
     labels: Option<&[String]>,
     access: &crate::traversal::step::IndexAccess,
+    declined: &mut bool,
 ) -> Result<Option<Vec<S::EdgeId>>, crate::error::GraphError> {
     let lookup = |label, range| edge_lookup(storage, label, access, range);
     let mut seen: std::collections::HashSet<S::EdgeId> = std::collections::HashSet::new();
@@ -497,6 +506,7 @@ fn index_edges<S: GraphStorage>(
         let dedup = access.ranges.len() > 1;
         for range in &access.ranges {
             let Some(found) = lookup(None, range)? else {
+                *declined = true;
                 return scan_answered_edges(storage, labels, access);
             };
             for edge in found {
@@ -516,12 +526,14 @@ fn index_edges<S: GraphStorage>(
         return Ok(Some(out));
     }
     let Some(labels) = labels else {
+        *declined = true;
         return scan_answered_edges(storage, None, access);
     };
     let dedup = labels.len() > 1 || access.ranges.len() > 1;
     for label in labels {
         for range in &access.ranges {
             let Some(found) = lookup(Some(label.as_str()), range)? else {
+                *declined = true;
                 return scan_answered_edges(storage, Some(labels), access);
             };
             for edge in found {
@@ -661,12 +673,13 @@ fn count_filtered_vertices<S: GraphStorage>(
     labels: Option<&[String]>,
     access: Option<&crate::traversal::step::IndexAccess>,
     filters: &[crate::traversal::step::PropertyFilter],
+    declined: &mut bool,
 ) -> Result<usize, crate::error::GraphError> {
     let matches = |node: S::VertexId| {
         crate::traversal::step::PropertyFilter::all_vertex(filters, storage, node)
     };
     if let Some(access) = access
-        && let Some(candidates) = index_vertices(storage, labels, access)?
+        && let Some(candidates) = index_vertices(storage, labels, access, declined)?
     {
         // The candidates satisfy the condition the access answers (if any).
         let remaining = access.remaining_filters(filters);
@@ -707,11 +720,12 @@ fn count_filtered_edges<S: GraphStorage>(
     labels: Option<&[String]>,
     access: Option<&crate::traversal::step::IndexAccess>,
     filters: &[crate::traversal::step::PropertyFilter],
+    declined: &mut bool,
 ) -> Result<usize, crate::error::GraphError> {
     let matches =
         |edge: S::EdgeId| crate::traversal::step::PropertyFilter::all_edge(filters, storage, edge);
     if let Some(access) = access
-        && let Some(candidates) = index_edges(storage, labels, access)?
+        && let Some(candidates) = index_edges(storage, labels, access, declined)?
     {
         let remaining = access.remaining_filters(filters);
         let mut count = 0;
@@ -3621,6 +3635,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         let property_filters = step.property_filters();
         let count_only = step.is_count_only();
         let group_count_by_label = step.is_group_count_by_label();
+        // What the storage declined of the planned index access (`.profile()` shows it),
+        // recorded once per execution of this step.
+        let mut declined = crate::traversal::step::IndexDeclined::default();
         // A fused `count()`/`groupCount()` counts one pass over the graph. Mid-
         // traversal every incoming traverser makes its own pass (`union(__.V().count())`
         // counts incoming x elements), so the counts are scaled by the incoming bulk
@@ -3751,17 +3768,21 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                             || plan_frame(steps, level, logical_step_idx),
                         )? {
                             Some(count) => count,
-                            None => count_filtered_vertices(
-                                &*context.storage,
-                                init_labels,
-                                access,
-                                property_filters,
-                            )
-                            .with_step_frame(
-                                || step.get_name(),
-                                step_at,
-                                || plan_frame(steps, level, logical_step_idx),
-                            )?,
+                            None => {
+                                declined.count = access.is_some();
+                                count_filtered_vertices(
+                                    &*context.storage,
+                                    init_labels,
+                                    access,
+                                    property_filters,
+                                    &mut declined.lookup,
+                                )
+                                .with_step_frame(
+                                    || step.get_name(),
+                                    step_at,
+                                    || plan_frame(steps, level, logical_step_idx),
+                                )?
+                            }
                         }
                     } else if let Some(ids) = init_ids {
                         let mut cnt = 0;
@@ -3858,12 +3879,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = source.len();
                 } else if let Some(candidates) = match step.index_access() {
-                    Some(access) => index_vertices(&*context.storage, init_labels, access)
-                        .with_step_frame(
-                            || step.get_name(),
-                            step_at,
-                            || plan_frame(steps, level, logical_step_idx),
-                        )?,
+                    Some(access) => {
+                        index_vertices(&*context.storage, init_labels, access, &mut declined.lookup)
+                            .with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?
+                    }
                     None => None,
                 } {
                     // A property index serves a condition (book page "Property
@@ -4065,17 +4088,21 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                             || plan_frame(steps, level, logical_step_idx),
                         )? {
                             Some(count) => count,
-                            None => count_filtered_edges(
-                                &*context.storage,
-                                init_labels,
-                                access,
-                                property_filters,
-                            )
-                            .with_step_frame(
-                                || step.get_name(),
-                                step_at,
-                                || plan_frame(steps, level, logical_step_idx),
-                            )?,
+                            None => {
+                                declined.count = access.is_some();
+                                count_filtered_edges(
+                                    &*context.storage,
+                                    init_labels,
+                                    access,
+                                    property_filters,
+                                    &mut declined.lookup,
+                                )
+                                .with_step_frame(
+                                    || step.get_name(),
+                                    step_at,
+                                    || plan_frame(steps, level, logical_step_idx),
+                                )?
+                            }
                         }
                     } else if let Some(ids) = init_ids {
                         let mut cnt = 0;
@@ -4162,12 +4189,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     }
                     count_out = source.len();
                 } else if let Some(candidates) = match step.index_access() {
-                    Some(access) => index_edges(&*context.storage, init_labels, access)
-                        .with_step_frame(
-                            || step.get_name(),
-                            step_at,
-                            || plan_frame(steps, level, logical_step_idx),
-                        )?,
+                    Some(access) => {
+                        index_edges(&*context.storage, init_labels, access, &mut declined.lookup)
+                            .with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?
+                    }
                     None => None,
                 } {
                     // A property index serves a condition (see the vertex case).
@@ -4290,6 +4319,17 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 }
             }
             count_out = source.len();
+        }
+        if declined != crate::traversal::step::IndexDeclined::default()
+            && let Some(access) = step.index_access()
+        {
+            let element = match init_result.0 {
+                GraphNodeType::Vertex => "vertex",
+                GraphNodeType::Edge => "edge",
+            };
+            context.profile.rename_current(|name| {
+                access.declined_name(name, element, init_labels, count_only, declined)
+            });
         }
         if is_count_next_step && !count_only && !group_count_by_label {
             let materialized = bulk::total_bulk(context, source, "count")?;

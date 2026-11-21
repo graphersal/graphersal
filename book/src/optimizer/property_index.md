@@ -97,6 +97,17 @@ into the start step, which the storage then answers from the index
 `[count from index]`. Should the storage not serve the index after all, the start step scans and
 checks the answered condition itself, as the index keys it.
 
+`.profile()` shows what happened at run time, not only what was planned: when the storage
+declines a lookup (it lists the index but answers no candidates for it), the marker reads
+`, declined, scanned` inside the brackets, and when it does not count a countable slice from the
+index, `[count from index declined]` (the candidates were counted instead):
+
+```text
+v(labels: ["person"]).has("name", "marko").count() [index: vertex person.name, exact, declined, scanned] [count from index declined]
+```
+
+The fact is recorded once per execution of the start step, never per element.
+
 ## Why
 
 The start step then reads only the elements whose value lies in the slices of the index, instead

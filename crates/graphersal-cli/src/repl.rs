@@ -118,10 +118,11 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "memory",
-        "[max_elements]",
+        "[delta] [max_elements]",
         "the process memory bar against its ceiling (memory.limit), then where the graph's \
          memory goes per label and property (g.memory_report(): the 500 largest rows per list, \
-         the rest counted); with a number: sampled",
+         the rest counted); with delta: only a layer's own elements (the base counted as \
+         shared); with a number: sampled",
     ),
     (
         "schema",
@@ -137,7 +138,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("exit", "", "close the graph and leave the shell"),
 ];
 
-/// The answer of `/memory [max_elements]`: the process memory bar
+/// The answer of `/memory [delta] [max_elements]`: the process memory bar
 /// ([`graphersal_session::process::MemoryBar::text`], 80 columns: the process against its
 /// ceiling, the graph's segments and the process's components: models loaded in the process, a
 /// store, the engine), a blank line,
@@ -162,15 +163,28 @@ fn memory_answer(graph: &dyn graphersal_session::storage::SessionGraph, args: &s
     }
 }
 
-/// The text of `/memory [max_elements]`'s report: the memory report of `graph`, sampled when a
-/// number is given.
+/// The text of `/memory [delta] [max_elements]`'s report: the memory report of `graph`, of a
+/// scope when one is named (`all`, `delta`: `MemoryReportScope::from_name`), sampled when a
+/// number is given; the arguments in any order, each at most once.
 fn memory_report(graph: &dyn graphersal_session::storage::SessionGraph, args: &str) -> String {
+    const USAGE: &str = "Usage: /memory [delta] [max_elements] (delta: only a layer's own \
+                         elements; a positive number samples)";
     let mut request = graphersal::storage::MemoryReportRequest::new();
-    let args = args.trim();
-    if !args.is_empty() {
-        match args.parse::<u64>() {
-            Ok(n) if n > 0 => request = request.with_max_elements(n),
-            _ => return "Usage: /memory [max_elements] (a positive number samples)".to_string(),
+    let (mut scoped, mut sampled) = (false, false);
+    for arg in args.split_whitespace() {
+        if let Some(scope) = graphersal::storage::MemoryReportScope::from_name(arg)
+            && !scoped
+        {
+            request = request.with_scope(scope);
+            scoped = true;
+            continue;
+        }
+        match arg.parse::<u64>() {
+            Ok(n) if n > 0 && !sampled => {
+                request = request.with_max_elements(n);
+                sampled = true;
+            }
+            _ => return USAGE.to_string(),
         }
     }
     match graphersal::storage::AnyGraph::memory_report(graph, &request) {
@@ -1251,6 +1265,37 @@ mod tests {
         assert!(sampled.contains("Sampled:"), "{sampled}");
         assert!(memory_report(&graph, "lots").starts_with("Usage: /memory"));
         assert!(memory_report(&graph, "0").starts_with("Usage: /memory"));
+    }
+
+    #[test]
+    fn memory_takes_a_scope_in_any_order_with_a_sample() {
+        let base = std::sync::Arc::new(graphersal::TraversalGraph::tinkerpop_modern());
+        let mut layer = graphersal::storage::LayeredGraph::over(base).unwrap();
+        // More own elements than the sample of 3, so the sample shows.
+        for i in 0..10 {
+            graphersal::prelude::GraphTraversalSource::new(&mut layer)
+                .add_v(vec!["person"])
+                .property("name", format!("new{i}"))
+                .iterate()
+                .unwrap();
+        }
+        let graph = graphersal::storage::Graph::new(layer);
+        let delta = memory_report(&graph, "delta");
+        assert!(delta.contains("Scope: delta"), "{delta}");
+        assert!(!memory_report(&graph, "").contains("Scope: delta"));
+        assert!(!memory_report(&graph, "all").contains("Scope: delta"));
+        for args in ["delta 3", " 3  delta "] {
+            let text = memory_report(&graph, args);
+            assert!(text.contains("Scope: delta"), "{text}");
+            assert!(text.contains("Sampled:"), "{text}");
+        }
+        for args in ["delta delta", "3 3", "delta lots", "Delta"] {
+            assert!(
+                memory_report(&graph, args).starts_with("Usage: /memory [delta]"),
+                "{args}"
+            );
+        }
+        assert!(memory_answer(&graph, "delta").contains("Scope: delta"));
     }
 
     #[test]
