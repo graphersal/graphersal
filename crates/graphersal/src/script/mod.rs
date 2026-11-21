@@ -27,6 +27,7 @@
 //   `compressions`, `drop_compression`, `recompress`).
 // - `property_index.rs`: property indexes (`create_index`, `indexes`, `drop_index`).
 // - `memory_report.rs`: `memory_report` (the per-label, per-property memory report).
+// - `layer_diff.rs`: `layer_diff` (what a layered graph changed against its base).
 // - `dynamic.rs`: `Dynamic` conversions and the shared argument diagnostics.
 // - `render.rs`: `render_value`/`try_render_value`/`debug_value`, display limits, `RenderedText`.
 // - `execution.rs`, `limits.rs`: `ScriptExecution`/metrics, `ScriptLimits`.
@@ -61,6 +62,7 @@ mod eval;
 mod execution;
 mod fake;
 mod jobs;
+mod layer_diff;
 mod limits;
 mod memory_report;
 mod mutating;

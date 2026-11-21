@@ -3186,6 +3186,16 @@ impl DiagnosticError for ScriptError {
                  A list of labels is not accepted."
                     .to_string(),
             ),
+            ScriptError::ArgumentMismatch { step_name, .. } if step_name == "layer_diff" => Some(
+                "layer_diff() takes no argument or one options map with the keys kinds, labels \
+                 and limit: kinds is \"vertex\", \"edge\" or a list of them (default both), \
+                 labels a label or a list of labels, limit a positive integer (the number of \
+                 entries across added, removed and modified; truncated says whether it cut any), \
+                 for example g.layer_diff(#{kinds: \"vertex\", labels: [\"person\"], limit: 10}). \
+                 On a graph without layers the diff is empty; layer() and has_layer(\"added\", \
+                 \"modified\") show the origin of the elements a traversal reaches."
+                    .to_string(),
+            ),
             ScriptError::ArgumentMismatch { step_name, .. } if step_name == "gql" => Some(
                 "gql() takes the query as a string and, optionally, the values of its \
                  $parameters as a map from name to value, for example \

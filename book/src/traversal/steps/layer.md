@@ -14,5 +14,5 @@ layer()
 ## Example
 
 ```rhai,graph=modern
-g.v().group_count().by(__.layer()).next().values()   // [6]
+g.v(1).out_e().layer().to_list()   // ["base", "base", "base"]
 ```

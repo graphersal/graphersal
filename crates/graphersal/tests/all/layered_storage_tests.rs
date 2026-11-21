@@ -11,7 +11,7 @@
 //!   (`test_storage::copy_into_delta`), so every element the script touches is a delta element.
 //!
 //! The rendered result, the change set of a dry run, the state afterwards (data, schema,
-//! catalog, statistics) and the commit position must be equal. Two classes of difference are
+//! catalog, statistics) and the commit position must be equal. These classes of difference are
 //! accepted, each counted and listed by the test that meets it (`--nocapture` prints them):
 //!
 //! - order only (plan decision P4 and the order classes of S1.5/S1.6): a script that drops
@@ -21,6 +21,10 @@
 //!   compression estimate over changed elements) and vector rules are refused on a layer with
 //!   `GraphError::Unsupported`; the script must fail on the layer with that refusal, and only
 //!   scripts that define or estimate one of them may;
+//! - origin queries in the `Delta` setup (S2.3): a script asking for layer origins
+//!   (`layer(`, `has_layer(`, `layer_diff(`) may give another result there, since every element
+//!   of that setup is an added one; the change set, the state afterwards and the commit position
+//!   must still be equal;
 //! - a later task of the series, named (none today: the memory figures of S1.11 compare
 //!   equal).
 //!
@@ -93,6 +97,12 @@ fn is_p5_refusal(outcome: &Outcome) -> bool {
     })
 }
 
+/// Whether `script` asks for layer origins (`layer()`, `has_layer()`, `layer_diff()`), whose
+/// answers differ by design in the `Delta` setup, where every element is an added one.
+fn asks_origins(script: &str) -> bool {
+    script.contains("layer(") || script.contains("layer_diff(")
+}
+
 /// A difference that a later task of the series removes, by name; `None` for any other. None
 /// is left: the memory figures (S1.11) compare equal since the layer reports its own.
 fn later_task(script: &str, expected: &Outcome, actual: &Outcome) -> Option<&'static str> {
@@ -147,6 +157,7 @@ struct Differences {
     compared: usize,
     order_only: Vec<String>,
     p5_refusals: Vec<String>,
+    origin_queries: Vec<String>,
     later_tasks: Vec<String>,
     unexplained: Vec<String>,
 }
@@ -187,6 +198,15 @@ impl Differences {
             self.p5_refusals.push(difference.describe());
             return;
         }
+        if difference.setup == Setup::Delta
+            && asks_origins(script)
+            && expected.changes == actual.changes
+            && expected.state == actual.state
+            && expected.last_commit_seq == actual.last_commit_seq
+        {
+            self.origin_queries.push(difference.describe());
+            return;
+        }
         if let Some(task) = later_task(script, expected, actual) {
             self.later_tasks
                 .push(format!("({task}) {}", difference.describe()));
@@ -222,14 +242,15 @@ impl Differences {
         );
         println!(
             "{what}: {} runs compared; order-only differences (P4): {}; P5 refusals: {}; \
-             left to later tasks: {}",
+             origin queries in the Delta setup: {}; left to later tasks: {}",
             self.compared,
             self.order_only.len(),
             self.p5_refusals.len(),
+            self.origin_queries.len(),
             self.later_tasks.len()
         );
-        let lines = self.order_only.iter();
-        for line in lines.chain(&self.p5_refusals).chain(&self.later_tasks) {
+        let lines = self.order_only.iter().chain(&self.p5_refusals);
+        for line in lines.chain(&self.origin_queries).chain(&self.later_tasks) {
             // The script and the class; the outcomes only for order-only differences.
             println!("{}", line.lines().next().unwrap_or_default());
         }

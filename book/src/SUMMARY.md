@@ -262,6 +262,7 @@
   - [label](traversal/steps/label.md)
   - [labels](traversal/steps/labels.md)
   - [layer](traversal/steps/layer.md)
+  - [layer_diff](traversal/steps/layer_diff.md)
   - [length](traversal/steps/length.md)
   - [limit](traversal/steps/limit.md)
   - [local](traversal/steps/local.md)

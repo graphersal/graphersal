@@ -2453,6 +2453,41 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         Ok(report)
     }
 
+    /// What a layered storage changed against its frozen base
+    /// ([`GraphStorage::layer_diff`]): the added, removed and modified vertices and edges, with
+    /// base and layer values side by side; filtered by element kind and label and cut at a
+    /// limit ([`LayerDiffRequest`](crate::graph::LayerDiffRequest)). Empty for a storage
+    /// without layers, so a query asking for it stays portable. A plain method call, not a
+    /// step, like [`Self::memory_report`]; the DSL's `g.layer_diff()` answers
+    /// [`LayerDiff::to_property`](crate::graph::LayerDiff::to_property).
+    ///
+    /// Asks an attached authorizer for `Read` on `Data`; fails with the storage's error when it
+    /// cannot read its delta.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::LayerDiffRequest;
+    ///
+    /// let graph = TraversalGraph::tinkerpop_modern();
+    /// let diff = graph.traversal().layer_diff(&LayerDiffRequest::new()).unwrap();
+    /// assert!(diff.is_empty() && !diff.truncated);
+    /// ```
+    pub fn layer_diff(
+        &self,
+        request: &crate::graph::LayerDiffRequest,
+    ) -> TraverserResult<crate::graph::LayerDiff> {
+        if let Some(restrictions) = &self.restrictions {
+            restrictions.authorize(
+                "layer_diff",
+                &crate::graph::AccessRequest::new(
+                    crate::graph::Action::Read,
+                    crate::graph::Resource::data(None, None),
+                ),
+            )?;
+        }
+        Ok(self.storage.layer_diff(request)?)
+    }
+
     /// The element counts the underlying storage keeps up to date, or `None` if the backing
     /// [`GraphStorage`] keeps none (the trait default); the storage's error when it cannot read
     /// them now. A thin pass-through to

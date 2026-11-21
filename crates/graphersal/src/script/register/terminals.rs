@@ -37,6 +37,9 @@ pub(super) fn register(registry: &mut Registry) {
             &["memory_report"],
             ScriptGraphTraversalSource::memory_report_with,
         )
+        // Delta visibility of a layered graph: a Graphersal extension, snake_case only.
+        .register_fn_as(&["layer_diff"], ScriptGraphTraversalSource::layer_diff)
+        .register_fn_as(&["layer_diff"], ScriptGraphTraversalSource::layer_diff_with)
         // One word, so one spelling serves both conventions.
         .register_fn("statistics", ScriptGraphTraversalSource::statistics)
         .register_fn("embedders", ScriptGraphTraversalSource::embedders)

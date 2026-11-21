@@ -300,6 +300,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "statistics",
             "memory_usage",
             "memory_report",
+            "layer_diff",
             "shrink_to_fit",
             "mark",
             "import_graphml",

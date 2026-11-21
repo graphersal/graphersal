@@ -306,6 +306,127 @@ impl LayerDiff {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The diff as a value: the one form the query languages answer (`g.layer_diff()`) and
+    /// every front end shows, rendered like any other map (`value/physical.rs`).
+    ///
+    /// ```text
+    /// #{added: [entry..], removed: [entry..], modified: [change..], truncated: bool}
+    /// entry  = #{kind, id, labels: [..], properties: #{..}, out, in}
+    /// change = #{kind, id, base_labels: [..], labels: [..], out, in,
+    ///            properties: #{name: #{base: value, layer: value}}}
+    /// ```
+    ///
+    /// `kind` is `"vertex"` or `"edge"`; `out`/`in` (the endpoint vertex ids) only for an edge;
+    /// an edge's `labels` is a list of its one label (empty for an unlabeled edge), as a
+    /// vertex's. In a change, a property the base lacks has no `base` key and a property the
+    /// layer removed no `layer` key: a stored value may itself be `null`, so `null` cannot
+    /// stand for "absent".
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::LayerDiff;
+    ///
+    /// let value = LayerDiff::default().to_property();
+    /// let ElementProperty::Object(map) = value else { unreachable!() };
+    /// let keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+    /// assert_eq!(keys, ["added", "removed", "modified", "truncated"]);
+    /// ```
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert(
+            "added",
+            ElementProperty::Array(self.added.iter().map(LayerDiffEntry::to_property).collect()),
+        );
+        map.insert(
+            "removed",
+            ElementProperty::Array(
+                self.removed
+                    .iter()
+                    .map(LayerDiffEntry::to_property)
+                    .collect(),
+            ),
+        );
+        map.insert(
+            "modified",
+            ElementProperty::Array(
+                self.modified
+                    .iter()
+                    .map(LayerDiffChange::to_property)
+                    .collect(),
+            ),
+        );
+        map.insert("truncated", ElementProperty::from(self.truncated));
+        ElementProperty::Object(Box::new(map))
+    }
+
+    /// The diff as compact JSON text: [`Self::to_property`] written by the physical codec
+    /// (keys in the order listed there).
+    pub fn to_json(&self) -> String {
+        crate::value::physical::to_json_text(&self.to_property()).unwrap_or_default()
+    }
+}
+
+/// A list of labels as a value.
+fn label_list(labels: &[CompactString]) -> ElementProperty {
+    ElementProperty::Array(
+        labels
+            .iter()
+            .map(|label| ElementProperty::from(label.as_str()))
+            .collect(),
+    )
+}
+
+/// `out`/`in` of an edge's entry or change.
+fn insert_endpoints(map: &mut PropertyMap, endpoints: &Option<(CompactString, CompactString)>) {
+    if let Some((out, into)) = endpoints {
+        map.insert("out", ElementProperty::from(out.as_str()));
+        map.insert("in", ElementProperty::from(into.as_str()));
+    }
+}
+
+impl LayerDiffEntry {
+    /// The entry as a value (see [`LayerDiff::to_property`]).
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert("kind", ElementProperty::from(self.kind.as_str()));
+        map.insert("id", ElementProperty::from(self.id.as_str()));
+        map.insert("labels", label_list(&self.labels));
+        map.insert(
+            "properties",
+            ElementProperty::Object(Box::new(self.properties.clone())),
+        );
+        insert_endpoints(&mut map, &self.endpoints);
+        ElementProperty::Object(Box::new(map))
+    }
+}
+
+impl LayerDiffChange {
+    /// The change as a value (see [`LayerDiff::to_property`]).
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert("kind", ElementProperty::from(self.kind.as_str()));
+        map.insert("id", ElementProperty::from(self.id.as_str()));
+        map.insert("base_labels", label_list(&self.base_labels));
+        map.insert("labels", label_list(&self.labels));
+        insert_endpoints(&mut map, &self.endpoints);
+        let mut properties = PropertyMap::default();
+        for change in &self.properties {
+            let mut sides = PropertyMap::default();
+            if let Some(base) = &change.base {
+                sides.insert("base", base.clone());
+            }
+            if let Some(layer) = &change.layer {
+                sides.insert("layer", layer.clone());
+            }
+            properties.insert(
+                change.name.clone(),
+                ElementProperty::Object(Box::new(sides)),
+            );
+        }
+        map.insert("properties", ElementProperty::Object(Box::new(properties)));
+        ElementProperty::Object(Box::new(map))
+    }
 }
 
 #[cfg(test)]

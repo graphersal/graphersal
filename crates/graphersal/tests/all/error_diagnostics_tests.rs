@@ -12889,3 +12889,41 @@ fn unknown_layer_origin_help_in_the_dsl() {
     let fixed = eval_value(graph, r#"g.v().has_layer("added").count().next()"#).unwrap();
     assert_eq!(fixed.to_string(), "0");
 }
+
+/// `g.layer_diff(..)` with an unknown key or a bad value names the valid keys and values, and
+/// its help gives a runnable options map; the fix runs.
+#[cfg(feature = "script")]
+#[test]
+fn layer_diff_options_help_names_the_keys_and_values() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    for (script, actual) in [
+        (r#"g.layer_diff(#{kind: "vertex"})"#, "the key 'kind'"),
+        (r#"g.layer_diff(#{kinds: "node"})"#, "\"node\""),
+        (r#"g.layer_diff(#{kinds: []})"#, "an empty list"),
+        (r#"g.layer_diff(#{labels: 3})"#, "3"),
+        (r#"g.layer_diff(#{labels: ["a", 1]})"#, "the item 1"),
+        (r#"g.layer_diff(#{limit: 0})"#, "0"),
+        (r#"g.layer_diff(#{limit: "ten"})"#, "ten"),
+        (r#"g.layer_diff(5)"#, "int"),
+    ] {
+        let err = eval_value(graph.clone(), script).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("layer_diff"), "{script}: {text}");
+        assert!(text.contains(actual), "{script}: {text}");
+        assert!(
+            text.contains("g.layer_diff(#{kinds: \"vertex\", labels: [\"person\"], limit: 10})"),
+            "{script}: {text}"
+        );
+        for key in ["kinds", "labels", "limit"] {
+            assert!(text.contains(key), "{script}: {text}");
+        }
+    }
+    let fixed = eval_value(
+        graph,
+        r#"g.layer_diff(#{kinds: "vertex", labels: ["person"], limit: 10}).truncated"#,
+    )
+    .unwrap();
+    assert_eq!(fixed.to_string(), "false");
+}
