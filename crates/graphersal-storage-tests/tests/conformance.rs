@@ -189,3 +189,43 @@ fn layer_with_dropped_base_elements_is_consistent() {
     assert_eq!(layer.vertex_count().unwrap(), 6);
     assert_eq!(layer.edge_count().unwrap(), edges - 1 - incident);
 }
+
+/// The `atomic` items of the contract on a layer over modern whose base elements the layer
+/// already changed (a base vertex written, a base edge dropped, an added edge at a base
+/// vertex): a rollback restores the base elements' layer state too, and the layer's
+/// bookkeeping stays consistent (task S1.8).
+#[test]
+fn atomic_items_on_a_layer_with_changed_base_elements() {
+    use graphersal::storage::LayeredGraph;
+    use graphersal_storage_tests::{extension, smoke};
+
+    let layer = || {
+        let mut base = TraversalGraph::new();
+        smoke::load_modern(&mut base);
+        let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        let vadas = layer.get_vertex_by_id("2").unwrap().unwrap();
+        layer
+            .set_vertex_property(marko, "age".into(), 30.into())
+            .unwrap();
+        let e = layer
+            .out_edges(vadas)
+            .unwrap()
+            .chain(layer.in_edges(vadas).unwrap())
+            .next()
+            .unwrap();
+        layer.drop_edge(e).unwrap();
+        layer
+            .insert_edge(None, None, vadas, marko, contract::props(&[]))
+            .unwrap();
+        contract::assert_consistent(&layer);
+        layer
+    };
+    extension::rollback_restores_everything(&mut layer());
+    extension::savepoint_rollback_keeps_the_outer_unit(&mut layer());
+    extension::unit_changes_never_claims_an_undone_change(&mut layer());
+    extension::edge_label_change_rolls_back_and_is_captured(&mut layer());
+    extension::transactional_panic_rolls_back(&mut layer());
+    extension::rollback_restores_definitions(&mut layer());
+    extension::a_definition_list_is_stored_like_single_calls(&mut layer());
+}
