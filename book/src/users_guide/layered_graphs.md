@@ -114,7 +114,8 @@ graphersal --graph modern --layer \
 - The base can be any `--graph` source: a sample graph, a GraphSON or GraphML file, a packed
   snapshot (`.gsnap`), or a Store. A Store is opened read-only, without its lock, and nothing
   is written into it, so a layer can run over a store another process has open. `--schema`
-  applies to the base as without `--layer`.
+  applies to the base as without `--layer`. The embedding models of a Store or `.gsnap` base
+  serve the layer: `embed()`, text `nearest` and vector rules on the layer use them.
 - The REPL (`graphersal --layer`) and the dev server (`graphersal --graph <src> --layer
   --server`) run on the layer too. The server's start banner has a `layer` row; the playground
   pages and the server's MCP endpoint query the layer. "Save to file" is refused: it would
@@ -156,6 +157,31 @@ assert_eq!(read.vertex_layer(marko).unwrap(), Some(LayerOrigin::Modified));
 assert_eq!(TraversalGraph::vertex_count(&base), 6);
 ```
 
+A layer built with `LayeredGraph::over` gets the base graph alone. The embedding models of a
+database live beside the graph, in its `Graph`; `LayerBase` keeps them together with the frozen
+graph and a display name, and `LayerBase::new_layer()` makes a `Graph<LayeredGraph>` that serves
+them. A clone of a `LayerBase` is cheap: every layer made from it shares one base and one set of
+models.
+
+```rust
+use graphersal::prelude::*;
+use graphersal::storage::LayerBase;
+
+// A Store's graph (`Store::open_read_only(..)?.into_graph()`) or a `.gsnap` read
+// (`graphersal::persist::read_snapshot_file`) brings its models along the same way.
+let base = LayerBase::from_graph(Graph::new(TraversalGraph::tinkerpop_modern()))
+    .unwrap()
+    .with_name("product");
+let project_a = base.new_layer().unwrap();
+let project_b = base.new_layer().unwrap();
+GraphTraversalSource::new(&mut *project_a.write()).add_v("repo").iterate().unwrap();
+assert_eq!(project_a.read().vertex_count().unwrap(), 7);
+assert_eq!(project_b.read().vertex_count().unwrap(), 6);
+```
+
+`LayerBase::base_ref()` will name the base's identity (graph, commit) once layers can be saved;
+it is `None` for now.
+
 `LayerDiff::to_property()` is the map of the table above with its keys in that order, and
 `LayerDiff::to_json()` its JSON text. A storage that has no layers answers `LayerOrigin::Base`
 and an empty diff from the trait's defaults.
@@ -195,9 +221,13 @@ code written for layers already run.
   layer's data; a write that leaves the text as it was copies nothing into the layer. A rule
   the layer adds or changes on a label the base holds fills every element of that label, so
   it copies each of them into the layer: the preview (`validate_schema`, `diff_schema`) names
-  how many (`base_copies`, and a sentence in the warning text). Only the built-in
-  `hash-ngram/1` model embeds on a layer for now: a layer does not serve the models of a Store
-  yet, so a write that needs one fails ("the model ... is not served here") and leaves nothing.
+  how many (`base_copies`, and a sentence in the warning text). A layer uses the
+  [embedding models](../persistence/store_models.md) of its base: over a Store or a `.gsnap`
+  that holds models (`--layer`, or `LayerBase` in Rust), rules, `embed()` and text `nearest`
+  on the layer run with them as on the base. A layer cannot import or define models of its
+  own. A layer built over a bare graph without its models (`LayeredGraph::over` in Rust)
+  serves only the built-in `hash-ngram/1`: a write that needs another model fails ("the model
+  ... is not served here") and leaves nothing, as on a plain graph without that model.
 - **Property indexes:** a layer serves the base's indexes for its own data, also after it
   changed elements: lookups and counts answer from the index, as on a plain graph. The
   base's unique indexes hold for the layer: a write that would give a second element a unique

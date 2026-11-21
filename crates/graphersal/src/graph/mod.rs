@@ -94,7 +94,7 @@ pub(crate) use index::GraphIndex;
 pub use layer_diff::{
     LayerDiff, LayerDiffChange, LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange,
 };
-pub use layered::{LayeredEdge, LayeredGraph, LayeredVertex};
+pub use layered::{BaseRef, LayerBase, LayeredEdge, LayeredGraph, LayeredVertex};
 pub use memory::{MemoryStats, ShrinkReport};
 pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
