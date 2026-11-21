@@ -19,10 +19,12 @@
 //!   `Traverser<LayeredGraph>` stays 80 bytes (rule 20).
 //! - **Dirty bits:** one bit per base vertex slot and one per base edge slot, allocated when the
 //!   layer is created, all clear. A clear bit means "read the base"; never a hash lookup for an
-//!   untouched element. A set bit means the delta holds the element's state (removed, or a
-//!   copied-up image). Adjacency is decided per vertex: a removed base edge dirties both of its
-//!   endpoints, so the base lists of a clean vertex are read without a per-edge test.
-//! - **Delta:** added elements, tombstones, images, extra adjacency of base vertices (`delta`).
+//!   untouched element. A set bit means "consult the delta": a base vertex may have a stub with
+//!   new incident edges, be removed or have a copied-up image; the delta answers which. Adjacency
+//!   is decided per vertex: a removed base edge dirties both of its endpoints, so the base lists
+//!   of a clean vertex are read without a per-edge test.
+//! - **Delta:** added elements, tombstones, images, the stubs of base vertices that carry the
+//!   new edges touching them (`delta`).
 //!
 //! # State of the implementation
 //!
@@ -31,12 +33,15 @@
 //! ask the base, then the delta's id index), with the dirty-bit check where a changed base
 //! element will need it.
 //!
-//! Writes (S1.3): new vertices, and new edges between two new vertices, are stored in the delta
-//! (`delta`), each write running its `graph/write_rules.rs` function first, then the id check
-//! (`write`); ids are unique across base and delta and the auto-id sequences continue the
-//! base's. The added elements can be changed and dropped as in a `TraversalGraph`. An edge
-//! touching a base vertex and every write to a base element return
-//! [`GraphError::Unsupported`] (S1.4-S1.6). The layer keeps its own copy of the base's
+//! Writes (S1.3, S1.4): new vertices and new edges, with any endpoints (added or base vertices),
+//! are stored in the delta (`delta`), each write running its `graph/write_rules.rs` function
+//! first, then the id check (`write`); ids are unique across base and delta and the auto-id
+//! sequences continue the base's. A new edge at a base vertex goes to that vertex's stub and
+//! sets its dirty bit. Adjacency lists the delta's edges first (newest first), then the base's,
+//! which is the order a `TraversalGraph` holding the same writes lists them in (it puts a new
+//! edge at the front). The added elements can be changed and dropped as in a
+//! `TraversalGraph`. Every write to a base element returns [`GraphError::Unsupported`]
+//! (S1.5, S1.6). The layer keeps its own copy of the base's
 //! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
 //! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
 //! wrote before the failure (units and rollback: S1.8). The schema, the catalog, the property
@@ -53,6 +58,7 @@ use std::sync::Arc;
 pub use handle::{LayeredEdge, LayeredVertex};
 
 use crate::error::GraphError;
+use crate::graph::topology::NodeIndex;
 use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
 use dirty::SlotBits;
@@ -63,8 +69,8 @@ use handle::MAX_BASE_SLOTS;
 /// elements. Handles ([`LayeredVertex`], [`LayeredEdge`]) are 8 bytes; a base element untouched
 /// by the layer is read straight from the base, with one bit test and no lookup.
 ///
-/// **EXPERIMENTAL.** Today it adds new vertices and edges between them and changes or drops
-/// what it added; an edge touching a base vertex and any write to a base element fail with
+/// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices) and changes
+/// or drops what it added; any write to a base element fails with
 /// [`GraphError::Unsupported`]. It has no units yet (`atomic` is not claimed): a traversal that
 /// fails keeps what it wrote before the failure.
 ///
@@ -138,7 +144,8 @@ impl LayeredGraph {
     /// dirty and not removed.
     #[inline]
     fn base_vertex_live(&self, node: VertexHandle) -> bool {
-        !self.dirty_vertices.contains(node.index().slot()) || self.delta.base_vertex(node).is_some()
+        !self.dirty_vertices.contains(node.index().slot())
+            || self.delta.base_vertex(&self.base, node).is_some()
     }
 
     /// The edge counterpart of [`Self::base_vertex_live`].
@@ -174,6 +181,21 @@ impl LayeredGraph {
         move |edge| exact || self.base_edge_live(*edge)
     }
 
+    /// The delta node slot holding the delta part of `node`'s adjacency: the added vertex
+    /// itself, the stub of a dirty base vertex (one hash lookup, only behind the bit), and
+    /// [`NodeIndex::end`] (lists nothing) for a clean base vertex, a vertex without a stub or a
+    /// stale handle.
+    #[inline]
+    fn delta_adjacency_index(&self, node: LayeredVertex) -> NodeIndex {
+        if node.is_delta() {
+            self.delta.delta_index(node)
+        } else if self.dirty_vertices.contains(node.slot()) {
+            self.delta.stub_index(node.to_base())
+        } else {
+            NodeIndex::end()
+        }
+    }
+
     /// Runs one vertex read: `base` for an untouched base vertex (the hot path: a tag test and
     /// one bit test), `view` with what the delta holds for a delta vertex or a dirty base vertex.
     #[inline]
@@ -186,7 +208,7 @@ impl LayeredGraph {
         if node.is_delta() {
             view(self.delta.vertex(node))
         } else if self.dirty_vertices.contains(node.slot()) {
-            view(self.delta.base_vertex(node.to_base()))
+            view(self.delta.base_vertex(&self.base, node.to_base()))
         } else {
             base(&self.base, node.to_base())
         }
@@ -282,6 +304,41 @@ mod tests {
         assert_eq!(layer.vertex_id(live).unwrap(), Some("b"));
         assert_eq!(layer.out_edges(live).unwrap().count(), 1);
         assert_eq!(layer.in_edges(live).unwrap().count(), 1);
+    }
+
+    /// A stub (delta slot 0 here) is never a vertex: a handle forged to name it reads as
+    /// removed, lists nothing and is refused as an edge endpoint; the base vertex it serves is
+    /// dirty and still reads as the base holds it.
+    #[test]
+    fn a_stub_is_invisible_even_to_a_forged_handle() {
+        let mut layer = LayeredGraph::over(Arc::new(TraversalGraph::tinkerpop_modern())).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        layer
+            .insert_edge(
+                None,
+                Some("self".into()),
+                marko,
+                marko,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        assert!(layer.dirty_vertices.contains(marko.slot()));
+        assert!(!layer.dirty_edges.any());
+        let stub = LayeredVertex::delta_for_test(0);
+        assert!(!layer.contains_vertex(stub).unwrap());
+        assert_eq!(layer.vertex_id(stub).unwrap(), None);
+        assert_eq!(layer.out_edges(stub).unwrap().count(), 0);
+        assert_eq!(layer.in_edges(stub).unwrap().count(), 0);
+        assert!(
+            layer
+                .insert_edge(None, None, stub, marko, PropertyMap::default())
+                .is_err()
+        );
+        assert_eq!(layer.vertex_count().unwrap(), 6);
+        assert_eq!(layer.vertices().unwrap().count(), 6);
+        assert_eq!(layer.vertex_id(marko).unwrap(), Some("1"));
+        assert_eq!(layer.out_edges(marko).unwrap().count(), 4);
+        assert_eq!(layer.in_edges(marko).unwrap().count(), 1);
     }
 
     #[test]
