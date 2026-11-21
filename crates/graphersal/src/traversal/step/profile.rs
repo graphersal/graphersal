@@ -275,6 +275,29 @@ impl ProfileContext {
         }
     }
 
+    /// Renames the node of the innermost executing step to what `rename` answers for its
+    /// current name (`None` keeps it): a run-time fact the plan's rendering could not know (a
+    /// storage that declined an index lookup). Does nothing when no step executes, which is
+    /// always the case without profiling, so callers need no `is_profile` gate; `rename` runs
+    /// only while profiling.
+    pub(crate) fn rename_current(&mut self, rename: impl FnOnce(&str) -> Option<String>) {
+        let Some((&current, parents)) = self.scope_stack.split_last() else {
+            return;
+        };
+        let mut list = &mut self.nodes;
+        for &index in parents {
+            match list.get_mut(index) {
+                Some(node) => list = &mut node.nested,
+                None => return,
+            }
+        }
+        if let Some(node) = list.get_mut(current)
+            && let Some(name) = rename(&node.name)
+        {
+            node.name = name;
+        }
+    }
+
     /// Merges the loop statistics of one `repeat()` execution into the node of the step being
     /// executed. `outputs` is the number of traversers this execution produced; the average
     /// loop count is weighted by it across calls.

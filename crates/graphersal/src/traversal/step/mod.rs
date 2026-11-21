@@ -1486,6 +1486,21 @@ pub(crate) struct IndexAccess {
     pub(crate) countable: bool,
 }
 
+/// What the storage declined at run time of what an [`IndexAccess`] planned, recorded once per
+/// execution of the source step and shown only by `.profile()` ([`IndexAccess::declined_name`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IndexDeclined {
+    /// A lookup answered `None`: the source scanned its labels' elements (every element without
+    /// labels) instead of reading the index.
+    pub(crate) lookup: bool,
+    /// The fused `count()` was not answered from the postings
+    /// ([`GraphStorage::count_by_property_index`] answered `None`): the source counted its
+    /// candidates.
+    ///
+    /// [`GraphStorage::count_by_property_index`]: crate::graph::GraphStorage::count_by_property_index
+    pub(crate) count: bool,
+}
+
 /// Which condition an exact [`IndexAccess`] answers.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Answered {
@@ -1502,17 +1517,31 @@ impl IndexAccess {
     /// with a transform names it (`[index: vertex person.name to_lower]`); a label-less one is
     /// `[index: vertex name, any label]` (design D17), also when a labelled source reads it.
     /// An answered condition (no re-check) adds `, exact` inside the brackets; `count` (a fused
-    /// `count()` answered from the postings) appends `[count from index]`.
-    pub(crate) fn render(&self, element: &str, labels: Option<&[String]>, count: bool) -> String {
+    /// `count()` answered from the postings) appends `[count from index]`. `declined` states
+    /// what the storage declined at run time (`.profile()` only, [`Self::declined_name`]): a
+    /// declined lookup adds `, declined, scanned` inside the brackets, a declined count turns
+    /// the suffix into `[count from index declined]`.
+    pub(crate) fn render(
+        &self,
+        element: &str,
+        labels: Option<&[String]>,
+        count: bool,
+        declined: IndexDeclined,
+    ) -> String {
         let suffix = match &self.transform {
             Some(transform) => format!(" {transform}"),
             None => String::new(),
         };
-        let counted = if count { " [count from index]" } else { "" };
-        let exact = if self.answered.is_some() {
-            ", exact"
-        } else {
-            ""
+        let counted = match (count, declined.count) {
+            (false, _) => "",
+            (true, false) => " [count from index]",
+            (true, true) => " [count from index declined]",
+        };
+        let exact = match (self.answered.is_some(), declined.lookup) {
+            (false, false) => "",
+            (true, false) => ", exact",
+            (false, true) => ", declined, scanned",
+            (true, true) => ", exact, declined, scanned",
         };
         if self.label_less {
             return format!(
@@ -1526,6 +1555,30 @@ impl IndexAccess {
             .map(|label| format!("{element} {label}.{}{suffix}", self.key))
             .collect();
         format!(" [index: {}{exact}]{counted}", names.join(", "))
+    }
+
+    /// The profile name of a source step whose storage declined (`declined`) what this access
+    /// planned: `name` (the plan's rendering, which ends with [`Self::render`] of nothing
+    /// declined) with that suffix rendered again with `declined`. `None` when nothing was
+    /// declined or `name` does not end with the access's rendering (a source that shows no
+    /// access).
+    pub(crate) fn declined_name(
+        &self,
+        name: &str,
+        element: &str,
+        labels: Option<&[String]>,
+        count: bool,
+        declined: IndexDeclined,
+    ) -> Option<String> {
+        if !declined.lookup && !declined.count {
+            return None;
+        }
+        let planned = self.render(element, labels, count, IndexDeclined::default());
+        let head = name.strip_suffix(planned.as_str())?;
+        Some(format!(
+            "{head}{}",
+            self.render(element, labels, count, declined)
+        ))
     }
 
     /// The folded conditions the source checks on the index's candidates: `filters` without
