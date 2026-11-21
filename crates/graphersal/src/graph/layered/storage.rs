@@ -9,6 +9,7 @@ use compact_str::CompactString;
 use super::LayeredGraph;
 use super::delta::{PropertyChange, VertexView};
 use super::handle::{LayeredEdge, LayeredVertex};
+use super::route::BaseThenDelta;
 use super::units::LayerUndo;
 use crate::error::{DefinitionError, GraphError, SchemaError};
 use crate::graph::change::{ChangeSet, CommitMetadata};
@@ -88,20 +89,29 @@ impl GraphStorage for LayeredGraph {
             .saturating_add_signed(self.delta.edge_count_change()))
     }
 
-    #[inline]
+    /// The base's scan without the removed base vertices, then the added vertices. Decided
+    /// once per call (`route.rs`): with nothing removed the filter passes every item without a
+    /// memory load, with nothing added the delta part is absent.
+    #[inline(always)]
     fn vertices(&self) -> Result<impl Iterator<Item = LayeredVertex> + '_, GraphError> {
-        Ok(GraphStorage::vertices(&*self.base)?
-            .filter(self.base_vertex_filter())
-            .map(LayeredVertex::from_base)
-            .chain(self.delta.vertices()))
+        let base = GraphStorage::vertices(&*self.base)?
+            .filter(Self::live_base_vertices(self.delta.removed_vertices()))
+            .map(LayeredVertex::from_base);
+        let delta = self
+            .delta
+            .has_added_vertices()
+            .then(|| self.delta.vertices());
+        Ok(BaseThenDelta::new(base, delta))
     }
 
-    #[inline]
+    /// See [`Self::vertices`].
+    #[inline(always)]
     fn edges(&self) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
-        Ok(GraphStorage::edges(&*self.base)?
-            .filter(self.base_edge_filter())
-            .map(LayeredEdge::from_base)
-            .chain(self.delta.edges()))
+        let base = GraphStorage::edges(&*self.base)?
+            .filter(Self::live_base_edges(self.delta.removed_edges()))
+            .map(LayeredEdge::from_base);
+        let delta = self.delta.has_added_edges().then(|| self.delta.edges());
+        Ok(BaseThenDelta::new(base, delta))
     }
 
     #[inline]
@@ -128,61 +138,51 @@ impl GraphStorage for LayeredGraph {
     /// stub), newest first, then the base's list (a delta vertex has none there: its slot is
     /// out of the base's range) without removed base edges (tested only for a dirty vertex).
     /// The same order as a `TraversalGraph` holding the same writes: it puts a new edge at the
-    /// front of the lists. A self-loop is in both lists.
-    #[inline]
+    /// front of the lists. A self-loop is in both lists. Decided once per call (`route.rs`): a
+    /// clean base vertex gets the base's list with no delta part and a filter that passes
+    /// every edge without a memory load.
+    #[inline(always)]
     fn out_edges(
         &self,
         node: LayeredVertex,
     ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
-        let base = GraphStorage::out_edges(&*self.base, node.to_base())?
-            .filter(self.base_adjacency_filter(node))
-            .map(LayeredEdge::from_base);
-        Ok(self
-            .delta
-            .edges_at(self.delta_adjacency_index(node), Direction::Outgoing)
-            .chain(base))
+        self.adjacency(node, Direction::Outgoing)
     }
 
     /// See [`Self::out_edges`].
-    #[inline]
+    #[inline(always)]
     fn in_edges(
         &self,
         node: LayeredVertex,
     ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
-        let base = GraphStorage::in_edges(&*self.base, node.to_base())?
-            .filter(self.base_adjacency_filter(node))
-            .map(LayeredEdge::from_base);
-        Ok(self
-            .delta
-            .edges_at(self.delta_adjacency_index(node), Direction::Incoming)
-            .chain(base))
+        self.adjacency(node, Direction::Incoming)
     }
 
-    #[inline]
+    #[inline(always)]
     fn vertex_id(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
         self.vertex_read(node, GraphStorage::vertex_id, |view| Ok(view.map(|v| v.id)))
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_id(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
         self.edge_read(edge, GraphStorage::edge_id, |view| Ok(view.map(|e| e.id)))
     }
 
-    #[inline]
+    #[inline(always)]
     fn vertex_label(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
         self.vertex_read(node, GraphStorage::vertex_label, |view| {
             Ok(view_labels(view).first().map(|l| l.as_str()))
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_label(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
         self.edge_read(edge, GraphStorage::edge_label, |view| {
             Ok(view.and_then(|e| e.label.first()).map(|l| l.as_str()))
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn vertex_labels(&self, node: LayeredVertex) -> Result<&[CompactString], GraphError> {
         self.vertex_read(
             node,
@@ -191,7 +191,7 @@ impl GraphStorage for LayeredGraph {
         )
     }
 
-    #[inline]
+    #[inline(always)]
     fn vertex_has_label(&self, node: LayeredVertex, label: &str) -> Result<bool, GraphError> {
         Ok(self
             .vertex_labels(node)?
@@ -199,21 +199,21 @@ impl GraphStorage for LayeredGraph {
             .any(|l| l.as_str() == label))
     }
 
-    #[inline]
+    #[inline(always)]
     fn vertex_properties(&self, node: LayeredVertex) -> Result<Option<&PropertyMap>, GraphError> {
         self.vertex_read(node, GraphStorage::vertex_properties, |view| {
             Ok(view.map(|v| v.properties))
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_properties(&self, edge: LayeredEdge) -> Result<Option<&PropertyMap>, GraphError> {
         self.edge_read(edge, GraphStorage::edge_properties, |view| {
             Ok(view.and_then(|e| e.properties))
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_endpoints(
         &self,
         edge: LayeredEdge,
@@ -229,69 +229,97 @@ impl GraphStorage for LayeredGraph {
         )
     }
 
-    #[inline]
+    #[inline(always)]
     fn contains_vertex(&self, node: LayeredVertex) -> Result<bool, GraphError> {
         self.vertex_read(node, GraphStorage::contains_vertex, |view| {
             Ok(view.is_some())
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn contains_edge(&self, edge: LayeredEdge) -> Result<bool, GraphError> {
         self.edge_read(edge, GraphStorage::contains_edge, |view| Ok(view.is_some()))
     }
 
     /// The base's label index (no scan), without removed base vertices and those whose image
-    /// lost `label` (one bit test per dirty member, the lost set fetched once per call), in
-    /// the base bucket's order; then the delta's bucket: the added vertices and the base
-    /// vertices that gained `label`, in the order of the writes.
+    /// lost `label` (one bit test per member, the sets fetched once per call), in the base
+    /// bucket's order; then the delta's bucket: the added vertices and the base vertices that
+    /// gained `label`, in the order of the writes. Decided once per call: with nothing to hide
+    /// and an empty delta bucket, the base's own bucket.
     fn vertices_by_label<'a>(
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = LayeredVertex> + 'a>, GraphError> {
-        let clean = !self.dirty_vertices.any();
+        let removed = self.delta.removed_vertices();
         let lost = self.delta.lost_vertex_label(label);
+        let delta = self.delta.vertices_by_label(label);
+        let base = self.base.index.get_nodes_by_label(label);
+        if removed.is_none() && lost.is_none() {
+            // No `Flatten` over the `Option`: it costs a branch per item.
+            return Ok(match base {
+                Some(nodes) if delta.size_hint().1 == Some(0) => {
+                    Box::new(nodes.map(LayeredVertex::from_base))
+                }
+                Some(nodes) => Box::new(BaseThenDelta::new(
+                    nodes.map(LayeredVertex::from_base),
+                    Some(delta),
+                )),
+                None => Box::new(delta),
+            });
+        }
         Ok(Box::new(
-            self.base
-                .index
-                .get_nodes_by_label(label)
-                .into_iter()
+            base.into_iter()
                 .flatten()
                 .filter(move |node| {
                     let slot = node.index().slot();
-                    clean
-                        || !self.dirty_vertices.contains(slot)
-                        || (!self.delta.is_removed_vertex(slot)
-                            && lost.is_none_or(|lost| !lost.contains(slot)))
+                    removed.is_none_or(|removed| !removed.word_contains(slot))
+                        && lost.is_none_or(|lost| !lost.contains(slot))
                 })
                 .map(LayeredVertex::from_base)
-                .chain(self.delta.vertices_by_label(label)),
+                .chain(delta),
         ))
     }
 
     /// The base's label index without removed and relabeled base edges, then the base edges
-    /// relabeled to `label` (in the order they gained it), then the added edges.
+    /// relabeled to `label` (in the order they gained it), then the added edges. Decided once
+    /// per call: with nothing to hide or add, the base's own bucket.
     fn edges_by_label<'a>(
         &'a self,
         label: &'a str,
     ) -> Result<Box<dyn Iterator<Item = LayeredEdge> + 'a>, GraphError> {
-        let clean = !self.dirty_edges.any();
-        let relabeled = self.delta.relabeled_edges();
+        let removed = self.delta.removed_edges();
+        let relabeled = self
+            .delta
+            .may_have_relabeled_edges()
+            .then(|| self.delta.relabeled_edges());
+        let delta = self
+            .delta
+            .gained_edges(label)
+            .chain(self.delta.edges_by_label(label));
+        let base = self.base.index.get_edges_by_label(label);
+        if removed.is_none() && relabeled.is_none() {
+            // No `Flatten` over the `Option`: it costs a branch per item.
+            return Ok(match base {
+                Some(edges) if delta.size_hint().1 == Some(0) => {
+                    Box::new(edges.map(LayeredEdge::from_base))
+                }
+                Some(edges) => Box::new(BaseThenDelta::new(
+                    edges.map(LayeredEdge::from_base),
+                    Some(delta),
+                )),
+                None => Box::new(delta),
+            });
+        }
         Ok(Box::new(
-            self.base
-                .index
-                .get_edges_by_label(label)
-                .into_iter()
+            base.into_iter()
                 .flatten()
                 .filter(move |edge| {
                     let slot = edge.index().slot();
-                    clean
-                        || !self.dirty_edges.contains(slot)
-                        || (!self.delta.is_removed_edge(slot) && !relabeled.contains(slot))
+                    removed.is_none_or(|removed| !removed.word_contains(slot))
+                        && relabeled.is_none_or(|relabeled| !relabeled.contains(slot))
                 })
                 .map(LayeredEdge::from_base)
-                .chain(self.delta.gained_edges(label))
-                .chain(self.delta.edges_by_label(label)),
+                .chain(delta),
         ))
     }
 
@@ -1190,7 +1218,7 @@ impl LayeredGraph {
 
     /// Drops the live base edge `edge`: its tombstone, and the dirty bits of the edge and of
     /// both endpoints (one for a self-loop), so the base adjacency lists of each endpoint are
-    /// filtered (invariant of `base_adjacency_filter`).
+    /// filtered (invariant of `base_adjacency_exact`).
     fn drop_base_edge(&mut self, edge: LayeredEdge) {
         let base = edge.to_base();
         if let Ok(Some((from, to))) = GraphStorage::edge_endpoints(&*self.base, base) {

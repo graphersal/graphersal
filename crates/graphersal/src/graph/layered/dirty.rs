@@ -7,13 +7,23 @@
 //! means the element changed: the delta answers that. Allocated for every base slot when the
 //! layer is created, all clear.
 
+use super::handle::DELTA_BIT;
+
 /// One bit per base slot of one element kind.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SlotBits {
     words: Vec<u64>,
-    /// `true` once any bit was set: while `false` a read skips the word load entirely (a scan
-    /// captures it once, by value, so a clean layer pays one predictable branch per item).
-    any: bool,
+    /// [`DELTA_BIT`] while no bit was ever set, 0 once one was: every base slot is below it
+    /// exactly while the set is untouched, so "a base slot of an untouched set" is ONE compare
+    /// ([`Self::clean_below`]), and while it is [`DELTA_BIT`] a read skips the word load.
+    clean_below: u32,
+}
+
+impl Default for SlotBits {
+    /// No slot, no bit set.
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl SlotBits {
@@ -21,21 +31,29 @@ impl SlotBits {
     pub(crate) fn new(slots: usize) -> Self {
         Self {
             words: vec![0; slots.div_ceil(64)],
-            any: false,
+            clean_below: DELTA_BIT,
         }
     }
 
     /// `true` once any bit was set.
     #[inline]
     pub(crate) fn any(&self) -> bool {
-        self.any
+        self.clean_below == 0
+    }
+
+    /// [`DELTA_BIT`] while no bit was ever set, else 0: `slot < clean_below()` holds exactly for
+    /// a base slot (bit 31 clear) of a set without any bit, the one-compare fast path of the
+    /// layer's reads.
+    #[inline(always)]
+    pub(crate) fn clean_below(&self) -> u32 {
+        self.clean_below
     }
 
     /// `true` iff the bit of base slot `slot` is set. A slot beyond the allocated bits (a delta
     /// slot, or a forged handle) reads as clear: the caller routes delta slots before asking.
     #[inline]
     pub(crate) fn contains(&self, slot: u32) -> bool {
-        self.any && self.word_contains(slot)
+        self.any() && self.word_contains(slot)
     }
 
     /// Sets the bit of base slot `slot` and [`Self::any`] with it (the one way to set a bit, so
@@ -45,7 +63,7 @@ impl SlotBits {
     pub(crate) fn set(&mut self, slot: u32) {
         if let Some(word) = self.words.get_mut((slot >> 6) as usize) {
             *word |= 1 << (slot & 63);
-            self.any = true;
+            self.clean_below = 0;
         }
     }
 
@@ -83,9 +101,10 @@ impl SlotBits {
         self.words.shrink_to_fit();
     }
 
-    /// The bit itself, without the [`Self::any`] shortcut.
-    #[inline]
-    fn word_contains(&self, slot: u32) -> bool {
+    /// The bit itself, without the [`Self::any`] shortcut (a slot beyond the words, a delta
+    /// slot among them, reads as clear).
+    #[inline(always)]
+    pub(crate) fn word_contains(&self, slot: u32) -> bool {
         match self.words.get((slot >> 6) as usize) {
             Some(word) => (word >> (slot & 63)) & 1 != 0,
             None => false,

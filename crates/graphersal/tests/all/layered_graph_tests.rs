@@ -5819,3 +5819,131 @@ fn a_layer_unit_over_the_memory_budget_rolls_back_at_its_commit() {
         assert_eq!(layer.vertex_count().unwrap(), 8);
     });
 }
+
+// ------------------------------------------------------------------------------------------
+// Read routing (S1.12): every read decides once per call whether the delta takes part
+// ------------------------------------------------------------------------------------------
+
+/// `ids`, sorted (for reads after drops, whose bucket order may differ, P4).
+fn sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids
+}
+
+/// What a scan, a by-label lookup and the adjacency of every vertex answer, as ids: the
+/// fast path (nothing removed, nothing added) and every merged shape must agree with a
+/// `TraversalGraph` holding the same writes.
+fn reads<S: GraphStorage>(s: &S, ordered: bool) -> Vec<(String, Vec<String>)> {
+    let vid = |n: S::VertexId| s.vertex_id(n).unwrap().unwrap().to_string();
+    let eid = |e: S::EdgeId| s.edge_id(e).unwrap().unwrap().to_string();
+    let order = |ids: Vec<String>| if ordered { ids } else { sorted(ids) };
+    let mut out = vec![
+        (
+            "vertices".to_string(),
+            order(s.vertices().unwrap().map(vid).collect()),
+        ),
+        (
+            "edges".to_string(),
+            order(s.edges().unwrap().map(eid).collect()),
+        ),
+        (
+            "vertex count".to_string(),
+            vec![s.vertices().unwrap().count().to_string()],
+        ),
+        (
+            "edge count".to_string(),
+            vec![s.edges().unwrap().count().to_string()],
+        ),
+    ];
+    for label in [
+        "person", "software", "robot", "knows", "created", "likes", "builds",
+    ] {
+        let vs = s.vertices_by_label(label).unwrap().map(vid).collect();
+        let es = s.edges_by_label(label).unwrap().map(eid).collect();
+        out.push((format!("vertices {label}"), order(vs)));
+        out.push((format!("edges {label}"), order(es)));
+    }
+    let nodes: Vec<S::VertexId> = s.vertices().unwrap().collect();
+    for node in nodes {
+        let outs: Vec<String> = s.out_edges(node).unwrap().map(eid).collect();
+        let ins: Vec<String> = s.in_edges(node).unwrap().map(eid).collect();
+        assert_eq!(s.out_edges(node).unwrap().count(), outs.len());
+        assert_eq!(s.in_edges(node).unwrap().fold(0, |n, _| n + 1), ins.len());
+        out.push((format!("out {}", vid(node)), order(outs)));
+        out.push((format!("in {}", vid(node)), order(ins)));
+    }
+    out
+}
+
+#[test]
+fn every_read_route_answers_like_a_traversal_graph() {
+    let mut layer = modern_layer();
+    let mut plain = TraversalGraph::tinkerpop_modern();
+    // Untouched: the base's own iterators.
+    assert_eq!(reads(&layer, true), reads(&plain, true));
+
+    // A label only the delta has (no base bucket), an added vertex and an added edge between
+    // two added vertices: base parts unfiltered, delta parts present.
+    fn add_robots<S: GraphStorage>(s: &mut S) {
+        let r1 = s
+            .insert_vertex(
+                Some("r1".into()),
+                vec!["robot".into()],
+                PropertyMap::default(),
+            )
+            .unwrap();
+        let r2 = s
+            .insert_vertex(
+                Some("r2".into()),
+                vec!["robot".into()],
+                PropertyMap::default(),
+            )
+            .unwrap();
+        s.insert_edge(
+            Some("rr".into()),
+            Some("builds".into()),
+            r1,
+            r2,
+            PropertyMap::default(),
+        )
+        .unwrap();
+    }
+    add_robots(&mut layer);
+    add_robots(&mut plain);
+    assert_eq!(reads(&layer, true), reads(&plain, true));
+
+    // A cross edge (dirty base vertices: merged adjacency) and an image of a base vertex
+    // and of a base edge (dirty, nothing removed).
+    fn touch_base<S: GraphStorage>(s: &mut S) {
+        let marko = s.get_vertex_by_id("1").unwrap().unwrap();
+        let r1 = s.get_vertex_by_id("r1").unwrap().unwrap();
+        s.insert_edge(
+            Some("mr".into()),
+            Some("builds".into()),
+            marko,
+            r1,
+            PropertyMap::default(),
+        )
+        .unwrap();
+        let josh = s.get_vertex_by_id("4").unwrap().unwrap();
+        s.set_vertex_property(josh, "age".into(), ElementProperty::from(33_i64))
+            .unwrap();
+        let e0 = s.get_edge_by_id("0").unwrap().unwrap();
+        s.set_edge_property(e0, "weight".into(), ElementProperty::from(0.5))
+            .unwrap();
+    }
+    touch_base(&mut layer);
+    touch_base(&mut plain);
+    assert_eq!(reads(&layer, true), reads(&plain, true));
+
+    // Removed base elements: the tombstone filters (bucket order may differ after drops, P4).
+    fn drop_some<S: GraphStorage>(s: &mut S) {
+        let e1 = s.get_edge_by_id("1").unwrap().unwrap();
+        s.drop_edge(e1).unwrap();
+        let peter = s.get_vertex_by_id("6").unwrap().unwrap();
+        s.drop_vertex(peter).unwrap();
+    }
+    drop_some(&mut layer);
+    drop_some(&mut plain);
+    assert_eq!(reads(&layer, false), reads(&plain, false));
+}
