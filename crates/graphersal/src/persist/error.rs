@@ -527,6 +527,12 @@ pub enum StoreFailure {
     /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
     /// failure of an automatic checkpoint is kept as it was raised.
     AutoCheckpointFailed,
+    /// The store is a LAYER store (format spec 7.5: it holds only a layer's changes to a frozen
+    /// base) and the operation does not work on one: it opens only with
+    /// [`Store::open_layer`](super::Store::open_layer) and its base, and copies (fork, attic
+    /// fork, repair, convert, backups, restore, export, upgrade), verification, rollback,
+    /// maintenance mode and closed-store commits are not supported for layer stores yet.
+    LayerStore,
 }
 
 impl StoreFailure {
@@ -568,6 +574,7 @@ impl StoreFailure {
             StoreFailure::ModelRevisionExists => "model_revision_exists",
             StoreFailure::UpgradeModelDamaged => "upgrade_model_damaged",
             StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
+            StoreFailure::LayerStore => "layer_store",
         }
     }
 
@@ -920,6 +927,15 @@ impl StoreFailure {
                     "write a checkpoint by hand",
                     "graphersal store checkpoint <dir>",
                 )],
+            ),
+            StoreFailure::LayerStore => help_text(
+                "This store holds only a layer's changes to a frozen base, by element id: it \
+                 is read only over that very base. Open the base (the Store or .gsnap the \
+                 layer was built on, at that commit) and the layer store with \
+                 Store::open_layer(dir, &base, options); the error names the base. Copies \
+                 (fork, backup, repair, convert, export, upgrade), verification, rollback and \
+                 closed-store commits do not work on layer stores yet.",
+                &[("show the store and its base", "graphersal store info <dir>")],
             ),
         }
     }
@@ -1562,6 +1578,21 @@ mod tests {
             StoreFailure::AutoCheckpointFailed.name(),
             "auto_checkpoint_failed"
         );
+    }
+
+    /// A layer store (format spec 7.5) refused by an operation that does not work on one: the
+    /// help says how to open it and what is not supported yet, in the note layout.
+    #[test]
+    fn a_layer_store_refusal_says_how_to_open_it() {
+        let help = help_of(StoreFailure::LayerStore);
+        assert!(
+            help.contains("Store::open_layer(dir, &base, options)"),
+            "{help}"
+        );
+        assert!(help.contains("do not work on layer stores yet"), "{help}");
+        assert!(help.contains("graphersal store info <dir>"), "{help}");
+        assert_note_layout(&help);
+        assert_eq!(StoreFailure::LayerStore.name(), "layer_store");
     }
 
     /// The causes that need a fault inside the process (the others are triggered through the

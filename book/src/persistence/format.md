@@ -2029,9 +2029,13 @@ many small appends).
 - A file with a newer version than the reader knows MUST be refused (unsupported version),
   never guessed at. A reader of file format version 4 MUST accept versions 1 to 4 in every
   file header (manifest 6.1, segment 7.1, packed snapshot 8, WAL segment 9.1), and version 5
-  in the packed header, manifest and layer file of a layer snapshot (7.5). A store holding a
-  layer snapshot is not specified yet: a reader without layer stores refuses its version 5
-  manifest as newer.
+  in the packed header, manifest and layer file of a layer snapshot (7.5). A store whose
+  snapshots are layer snapshots is a **layer store** (nothing else marks it: its manifests
+  tell): it is opened only as a layer over the base its layer rows name. A version-5 manifest
+  is read as a layer manifest only with its kind-128 row (else it is newer); a layer store
+  opened as a whole graph, a whole-graph store opened as a layer, and a layer manifest over
+  another base are refusals before anything is written, never damage. A reader without layer
+  stores refuses the version-5 manifest as newer.
 - **A version from the future is not damage, and a store holding one MUST NOT be worked on.**
   A file whose magic matches and whose header checksum is valid (the `GRAPH` fixed part, 5.1; a
   manifest fixed-part copy, 6.1; a segment or WAL segment header, 7.1, 9.1) but whose version

@@ -85,10 +85,6 @@ pub use snapshot::{
     read_snapshot_info, read_snapshot_into, write_graph_snapshot, write_snapshot,
 };
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
-// A journal header written by hand: a test attaching a journal to another storage than
-// `TraversalGraph` (the layered graph's, until the layer Store attaches its own).
-#[cfg(test)]
-pub(crate) use wal::WalHeader;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::read_snapshot_file;

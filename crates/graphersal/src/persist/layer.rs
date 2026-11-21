@@ -417,16 +417,17 @@ mod tests {
             read_snapshot(packed.as_slice(), &ReadOptions::new()),
             Err(PersistError::SnapshotKindMismatch { .. })
         ));
-        // A whole-graph Store of it: its manifest's layer version is newer for this build's
-        // Store (no layer Store yet), never damage.
+        // A whole-graph Store of it: refused as a layer (S3.3: a layer store from a `.gsnap` is
+        // not supported yet), never damage, nothing left behind.
+        let target = crate::persist::MemDir::new();
         assert!(matches!(
-            Store::create_from_packed(
-                crate::persist::MemDir::new(),
-                packed.as_slice(),
-                StoreOptions::new()
-            ),
-            Err(PersistError::UnsupportedVersion { found: 5, .. })
+            Store::create_from_packed(&target, packed.as_slice(), StoreOptions::new()),
+            Err(PersistError::Store {
+                cause: crate::persist::StoreFailure::LayerStore,
+                ..
+            })
         ));
+        assert!(target.file_names().is_empty());
         // A reader for which the row is an unknown critical kind: read-only, nothing written.
         let unknown = with_layer_kind(&packed, 200);
         let store = Store::create_from_packed(

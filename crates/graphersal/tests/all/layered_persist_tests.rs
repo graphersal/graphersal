@@ -51,7 +51,7 @@ fn query(name: &str) -> Definition {
 
 /// The base: persons p1-p3 (indexed `age`), docs d1-d2 (vector rule), software s1; `knows`
 /// edges k1-k3 (indexed `weight`), `created` c1, `cites` w1-w2; saved queries q1 and q2.
-fn base() -> Arc<TraversalGraph> {
+pub(crate) fn base() -> Arc<TraversalGraph> {
     let mut base = TraversalGraph::new();
     base.set_schema(GraphSchema::from_json(RULES).unwrap())
         .unwrap();
@@ -109,7 +109,7 @@ fn e<S: GraphStorage>(s: &S, id: &str) -> S::EdgeId {
 }
 
 /// Runs `writes` as one unit of the layer.
-fn unit(
+pub(crate) fn unit(
     layer: &mut LayeredGraph,
     writes: impl FnOnce(&mut LayeredGraph) -> Result<(), GraphError>,
 ) {
@@ -119,7 +119,7 @@ fn unit(
 }
 
 /// The units of the history, in order; each one exercises a delta kind (its comment).
-fn history() -> Vec<Box<dyn Fn(&mut LayeredGraph) -> Result<(), GraphError>>> {
+pub(crate) fn history() -> Vec<Box<dyn Fn(&mut LayeredGraph) -> Result<(), GraphError>>> {
     vec![
         // Added vertices (an auto id, explicit ids, a doc whose `emb` the rule derives), an
         // added edge, cross edges (added -> base, base -> added, a base self-loop, base -> base).
@@ -284,7 +284,7 @@ impl Keeper {
 /// IN ORDER, endpoints, origin and adjacency; the label buckets; the diff; the statistics; the
 /// index infos; the schema; the catalog; the commit sequence number and the id sequences (the
 /// commit time is compared where it must be equal).
-fn state(layer: &LayeredGraph) -> Vec<String> {
+pub(crate) fn state(layer: &LayeredGraph) -> Vec<String> {
     let mut rows = Vec::new();
     let vid = |node| layer.vertex_id(node).unwrap().unwrap().to_string();
     let eid = |edge| layer.edge_id(edge).unwrap().unwrap().to_string();
@@ -339,7 +339,20 @@ fn state(layer: &LayeredGraph) -> Vec<String> {
         sorted(diff.modified.iter().map(|x| debug(x)).collect()),
         diff.truncated
     ));
-    rows.push(format!("statistics {:?}", layer.statistics().unwrap()));
+    // The label counts in label order: their maps keep the order the labels came in, which a
+    // load and a recovery change (plan P4); the counts must agree.
+    let statistics = layer
+        .statistics()
+        .unwrap()
+        .expect("a layer keeps statistics");
+    rows.push(format!(
+        "statistics {} {} {:?} {:?} {:?}",
+        statistics.vertex_count(),
+        statistics.edge_count(),
+        statistics.vertex_label_counts(),
+        statistics.primary_vertex_label_counts(),
+        statistics.edge_label_counts()
+    ));
     let mut indexes: Vec<String> = layer
         .property_indexes()
         .unwrap()
@@ -370,7 +383,7 @@ fn state(layer: &LayeredGraph) -> Vec<String> {
 
 /// Asserts two [`state`]s are equal, naming only the rows that differ.
 #[track_caller]
-fn assert_same(left: &LayeredGraph, right: &LayeredGraph, what: &str) {
+pub(crate) fn assert_same(left: &LayeredGraph, right: &LayeredGraph, what: &str) {
     let (left, right) = (state(left), state(right));
     if left != right {
         let only = |a: &[String], b: &[String]| -> Vec<String> {
@@ -385,7 +398,7 @@ fn assert_same(left: &LayeredGraph, right: &LayeredGraph, what: &str) {
 }
 
 #[track_caller]
-fn check(layer: &LayeredGraph) {
+pub(crate) fn check(layer: &LayeredGraph) {
     if let Err(problem) = layer.check_layer_indexes() {
         panic!("{problem}");
     }

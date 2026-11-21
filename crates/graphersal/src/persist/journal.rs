@@ -345,9 +345,30 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
 
     /// Writes the journal header (the graph's lineage id and the next commit sequence number)
     /// and registers the journal on `graph`. Fails when `graph` already has a journal or a unit
-    /// is open, or when the header cannot be written. Returns the [`DurableEnd`].
-    pub fn attach(mut self, graph: &mut TraversalGraph) -> Result<DurableEnd, PersistError> {
-        let first_commit_seq = Self::check_attach(graph)?;
+    /// is open, or when the header cannot be written. Returns the [`DurableEnd`]. Any other
+    /// storage: [`Self::attach_storage`].
+    pub fn attach(self, graph: &mut TraversalGraph) -> Result<DurableEnd, PersistError> {
+        self.attach_storage(graph)
+    }
+
+    /// [`Self::attach`] for any [`PersistentStorage`] (a `LayeredGraph`, a host's storage;
+    /// EXPERIMENTAL like the trait): the journal goes into the storage's journal slot
+    /// ([`PersistentStorage::attach_journal`]). A [`TraversalGraph`] is checked before the
+    /// header is written; another storage refuses a second journal or an open unit in
+    /// `attach_journal`, after the header was written.
+    pub fn attach_storage<S: PersistentStorage>(
+        mut self,
+        graph: &mut S,
+    ) -> Result<DurableEnd, PersistError> {
+        let first_commit_seq =
+            match (&*graph as &dyn std::any::Any).downcast_ref::<TraversalGraph>() {
+                Some(graph) => Self::check_attach(graph)?,
+                None => graph.last_commit_seq()?.checked_add(1).ok_or(
+                    crate::error::GraphError::SequenceOverflow {
+                        sequence: crate::error::COMMIT_SEQUENCE,
+                    },
+                )?,
+            };
         let header = WalHeader {
             graph_id: graph.graph_id(),
             first_commit_seq,
@@ -399,13 +420,13 @@ impl<W: Write + Send + Sync + 'static> Journal<W> {
         )?)
     }
 
-    fn register(
+    fn register<S: PersistentStorage>(
         mut self,
-        graph: &mut TraversalGraph,
+        graph: &mut S,
         segment: u64,
         offset: u64,
     ) -> Result<DurableEnd, PersistError> {
-        let durable = self.prime(graph.last_commit_seq(), segment, offset);
+        let durable = self.prime(graph.last_commit_seq()?, segment, offset);
         graph.attach_journal(JournalSlot::new(Box::new(self)))?;
         Ok(durable)
     }

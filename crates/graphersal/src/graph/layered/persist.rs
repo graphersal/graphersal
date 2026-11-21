@@ -454,31 +454,20 @@ impl LayeredGraph {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use super::*;
     use crate::graph::TraversalGraph;
     use crate::persist::{Durability, Journal, JournalRecord, SharedBuffer, read_journal};
 
-    /// A real journal in the layer's journal slot (what a layer Store will attach, S3.3):
+    /// A real journal in the layer's journal slot (`Journal::attach_storage`):
     /// every commit of the layer is written as a WAL record; read back and replayed into a
     /// fresh layer over the same base, it gives the same layer. A second journal is refused.
     #[test]
     fn a_journal_in_the_slot_records_what_a_replay_restores() {
         let base = Arc::new(TraversalGraph::tinkerpop_modern());
         let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
-        let mut buffer = SharedBuffer::new();
-        let header = crate::persist::WalHeader {
-            graph_id: layer.graph_id(),
-            first_commit_seq: 1,
-            created_at: 0,
-        }
-        .encode();
-        buffer.write_all(&header).unwrap();
-        let (journal, _) =
-            Journal::new(buffer.clone(), Durability::Os).continuing(0, 0, header.len() as u64);
-        layer
-            .attach_journal(JournalSlot::new(Box::new(journal)))
+        let buffer = SharedBuffer::new();
+        Journal::new(buffer.clone(), Durability::Os)
+            .attach_storage(&mut layer)
             .unwrap();
         let (second, _) = Journal::new(SharedBuffer::new(), Durability::Os).continuing(0, 0, 0);
         assert!(

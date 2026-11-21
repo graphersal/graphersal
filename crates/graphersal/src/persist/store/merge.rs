@@ -133,6 +133,9 @@ pub(super) enum Merged {
     TooLarge { wal_bytes: u64 },
     /// The store has no snapshot to merge into.
     NoBase,
+    /// The newest snapshot is a layer snapshot (format spec 7.5): a merge works on whole
+    /// graphs, so the caller encodes the loaded layer instead. Nothing was written.
+    Layer,
 }
 
 /// The base snapshot: its directory, manifest and schema.
@@ -310,6 +313,9 @@ pub(super) fn merge_checkpoint(request: &MergeRequest<'_>) -> Result<Merged, Per
         return Ok(Merged::TooLarge { wal_bytes });
     }
     let base = Base::open(base_seq, base_path)?;
+    if super::super::layer::layer_row(&base.manifest.segments)?.is_some() {
+        return Ok(Merged::Layer);
+    }
     if let Some(reason) = base.manifest.critical_segment_reason() {
         return Err(PersistError::ReadOnly {
             path: dir.display(),
