@@ -69,9 +69,9 @@
 //! `scan_storage_change`, the same errors), then stores the schema. The catalog takes saved
 //! queries, jobs, host kinds, kinds this version does not know and property indexes (S4.4:
 //! defined, dropped and redefined on the layer, served by overlays, module `index`); the kinds
-//! that need compression or embedding machinery (compression rules, models) are refused, and
-//! so are schemas with vector rules and bases with vector rules (plan decision P5,
-//! [`LayeredGraph::over`]). The base's property indexes serve the layer through overlays
+//! that need compression or embedding machinery (compression rules, models) are refused. Vector
+//! rules (S4.5b, module `rules`) in the base's schema or the layer's own run on the layer's
+//! units with `TraversalGraph`'s rule pass. The base's property indexes serve the layer through overlays
 //! (`index`); its unique indexes are enforced over base + delta at every write (S4.3). The
 //! execution policy is the base's.
 //!
@@ -101,6 +101,7 @@ mod handle;
 mod index;
 mod memory;
 mod route;
+mod rules;
 mod storage;
 mod units;
 mod visibility;
@@ -114,6 +115,7 @@ use crate::error::GraphError;
 use crate::graph::definition::Catalog;
 use crate::graph::schema::GraphSchema;
 use crate::graph::topology::{Direction, NodeIndex};
+use crate::graph::vector_rules::VectorRules;
 use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
 use dirty::SlotBits;
@@ -147,10 +149,20 @@ use units::UnitLog;
 /// total. [`shrink_to_fit`](crate::graph::GraphStorage::shrink_to_fit) releases the delta's
 /// spare capacity.
 ///
+/// **Vector rules:** a base whose schema has vector rules is accepted and costs nothing at
+/// creation (the base's vectors are read in place); the layer's own `set_schema` may add,
+/// change or remove rules. The layer runs `TraversalGraph`'s rule pass on its own units, so its
+/// derived vectors, refusals of direct writes ([`GraphError::DerivedProperty`]), rollbacks and
+/// change sets equal those of a `TraversalGraph` holding the layer's data; a vector recomputed
+/// to the value a base element already holds copies nothing up. A rule the layer adds or
+/// changes on a base label fills every element of the label, copying each one it writes into
+/// the layer; the fill preview counts them
+/// ([`PlannedFill::base_copies`](crate::schema::PlannedFill::base_copies)). Only the built-in
+/// `hash-ngram/1` embeds for now: the layer does not serve the base's catalog models yet.
+///
 /// **Not supported yet** ([`GraphError::Unsupported`]):
 /// - persistence: a layer cannot be saved, opened from a Store or journaled;
-/// - a base with vector rules ([`Self::over`]); vector rules, compression rule and embedding
-///   model definitions on the layer. The base's indexes serve the layer's data exactly
+/// - compression rule and embedding model definitions on the layer. The base's indexes serve the layer's data exactly
 ///   (lookups, counts, stats), through overlays the layer keeps of them, and its unique
 ///   indexes are enforced over base + delta: a write that would give a second element a
 ///   unique key fails with the same [`GraphError::UniqueViolation`] a `TraversalGraph` with
@@ -212,6 +224,13 @@ pub struct LayeredGraph {
     /// changed only by the layer's catalog writes (the kinds without storage machinery, see
     /// `storage::check_layer_kind`).
     catalog: Catalog,
+    /// The vector rules compiled from the layer's schema (module `rules`): refreshed on every
+    /// schema write of the layer and its undo; `None` without a rule (one branch per write and
+    /// commit). An `Arc` behind a plain field: no interior mutability (see the note).
+    vector_rules: Option<Arc<VectorRules>>,
+    /// Above zero while the vector rules are off: inside `apply_change_set` (the change set
+    /// carries its vectors) and while the rule pass writes. Mutated through `&mut self` only.
+    rules_off: u32,
     /// The undo log of the open units (`units`): what makes a unit of the layer atomic. Boxed,
     /// like `footprint`: see the note on the struct.
     units: Box<UnitLog>,
@@ -226,10 +245,10 @@ impl LayeredGraph {
     /// # Errors
     ///
     /// [`GraphError::Unsupported`] when `base` cannot carry a layer: it has 2^31 or more vertex
-    /// or edge slots (live or vacant), which the layer's handles cannot address; or, not
-    /// supported on a layered graph yet, its schema has vector rules (properties an embedder
-    /// derives from another property). A base with unique property indexes is accepted: the
-    /// layer enforces them over base + delta.
+    /// or edge slots (live or vacant), which the layer's handles cannot address. A base with
+    /// unique property indexes is accepted (the layer enforces them over base + delta), and so
+    /// is a base with vector rules (the layer keeps the derived vectors in step; nothing is
+    /// embedded here).
     pub fn over(base: Arc<TraversalGraph>) -> Result<Self, GraphError> {
         check_base(&base)?;
         Ok(Self::new_unchecked(base))
@@ -243,6 +262,8 @@ impl LayeredGraph {
     /// The layer over a base [`check_base`] accepted.
     fn new_unchecked(base: Arc<TraversalGraph>) -> Self {
         let schema = base.schema.read().clone();
+        // The base's vectors are values of its maps, read in place: nothing is embedded here.
+        let vector_rules = VectorRules::compile(&schema);
         Self {
             dirty_vertices: SlotBits::new(base.graph.node_slots()),
             dirty_edges: SlotBits::new(base.graph.edge_slots()),
@@ -252,6 +273,8 @@ impl LayeredGraph {
             edge_sequence: base.edge_sequence,
             schema,
             catalog: base.definitions.clone(),
+            vector_rules,
+            rules_off: 0,
             units: Box::new(UnitLog::after(base.undo.last_committed_at)),
             footprint: Box::default(),
             base,
@@ -432,23 +455,14 @@ impl LayeredGraph {
     }
 }
 
-/// The `operation` of the refusal of a base whose schema has vector rules (P5).
-const VECTOR_RULES_BASE: &str = "a layer over a base whose schema has vector rules \
-     (properties derived by an embedder): not supported on a layered graph yet";
-
 /// The one place that decides whether a base can carry a layer: `Err` names what the layer
-/// cannot handle. Today:
-/// - a slot count the handles cannot address;
-/// - (P5, until index deltas) vector rules in the schema: the rule pass needs units and change
-///   capture, and the layer cannot keep the derived vectors of base elements in step.
+/// cannot handle. Today a slot count the handles cannot address. (A base with vector rules is
+/// accepted since S4.5b: the layer runs the rule pass on its own units, module `rules`.)
 fn check_base(base: &TraversalGraph) -> Result<(), GraphError> {
     if base.graph.node_slots() >= MAX_BASE_SLOTS || base.graph.edge_slots() >= MAX_BASE_SLOTS {
         return Err(GraphError::unsupported(
             "a layer over a base with 2^31 or more vertex or edge slots",
         ));
-    }
-    if crate::graph::vector_rules::has_rules(&base.schema.read()) {
-        return Err(GraphError::unsupported(VECTOR_RULES_BASE));
     }
     Ok(())
 }

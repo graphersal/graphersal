@@ -640,6 +640,7 @@ pub struct PlannedFill {
     estimate_ms: Option<u64>,
     approximate: bool,
     direct_writes: Vec<String>,
+    base_copies: u64,
 }
 
 impl PlannedFill {
@@ -715,6 +716,16 @@ impl PlannedFill {
         self.approximate
     }
 
+    /// On a layered storage ([`StorageCapabilities::layered`](crate::storage::StorageCapabilities::layered)),
+    /// how many of the elements the fill writes (a vector or a removal) are base elements the
+    /// layer does not hold yet: the fill copies each of them into the layer. At most that many:
+    /// a vector equal to the one the base element already holds stores nothing. In an
+    /// approximate preview, the label's base elements the layer does not hold yet (texts not
+    /// read). `0` on any other storage.
+    pub fn base_copies(&self) -> u64 {
+        self.base_copies
+    }
+
     /// The saved queries whose body writes [`Self::to`] directly (a literal
     /// `.property("emb", ..)`) on this label: once the rule exists such a write is refused, so
     /// the write has to go (feature `script`; a saved query is never rewritten).
@@ -739,8 +750,8 @@ impl PlannedFill {
     }
 
     /// The fill as data: `{element, label, from, to, model, reason, elements, removals,
-    /// scan_elements, scan_ms, estimate_ms, approximate, needs_confirmation, direct_writes}`
-    /// (`estimate_ms` `null` when unknown).
+    /// scan_elements, scan_ms, estimate_ms, approximate, needs_confirmation, direct_writes,
+    /// base_copies}` (`estimate_ms` `null` when unknown).
     pub fn to_value(&self) -> ElementProperty {
         let mut map = crate::value::PropertyMap::default();
         map.insert("element", ElementProperty::from(self.element.as_str()));
@@ -771,6 +782,7 @@ impl PlannedFill {
                     .collect(),
             ),
         );
+        map.insert("base_copies", count(self.base_copies));
         ElementProperty::Object(Box::new(map))
     }
 }
@@ -829,6 +841,23 @@ pub fn fill_warning(fills: &[PlannedFill]) -> Option<String> {
     } else {
         "time depends on the model".to_string()
     };
+    // On a layer: the base elements the fill copies into the layer.
+    let copies: u64 = fills.iter().map(|f| f.base_copies).sum();
+    let copied = if copies > 0 {
+        format!(
+            "\nThis is a layer: the fill copies {}{} base {} into it (the layer keeps its own \
+             copy of each).",
+            if fills.iter().any(|f| f.approximate) {
+                "up to "
+            } else {
+                ""
+            },
+            thousands(copies),
+            if copies == 1 { "element" } else { "elements" },
+        )
+    } else {
+        String::new()
+    };
     // The saved queries a new rule breaks: they write its property directly.
     let mut writers = String::new();
     for fill in fills.iter().filter(|f| !f.direct_writes.is_empty()) {
@@ -841,9 +870,9 @@ pub fn fill_warning(fills: &[PlannedFill]) -> Option<String> {
         ));
     }
     Some(format!(
-        "Applying this schema fills vectors: {} ({estimate}).\nThe whole database is LOCKED \
-         while this runs: every write and every read waits until it ends.\nRun it at a quiet \
-         time. If it fails, nothing is written.{writers}",
+        "Applying this schema fills vectors: {} ({estimate}).{copied}\nThe whole database is \
+         LOCKED while this runs: every write and every read waits until it ends.\nRun it at a \
+         quiet time. If it fails, nothing is written.{writers}",
         parts.join("; ")
     ))
 }
@@ -922,6 +951,7 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
         Some(before) => compile_resolved(storage, before)?,
         None => None,
     };
+    let layered = storage.capabilities()?.layered;
     let mut fills = Vec::new();
     for rule in new.all() {
         let previous = old
@@ -932,8 +962,8 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
             Some(_) => FillReason::RuleChanged,
             None => FillReason::RuleAdded,
         };
-        let (elements, removals) = if exact {
-            count_texts(storage, &new, rule)?
+        let (elements, removals, base_copies) = if exact {
+            count_texts(storage, &new, rule, layered)?
         } else {
             let statistics = storage.statistics()?;
             let elements = match (statistics, rule.kind) {
@@ -941,7 +971,12 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
                 (Some(s), ElementKind::Edge) => s.edge_label_count(&rule.label) as u64,
                 (None, _) => 0,
             };
-            (elements, 0)
+            let base_copies = if layered {
+                count_base_elements(storage, rule)?
+            } else {
+                0
+            };
+            (elements, 0, base_copies)
         };
         let estimate_ms = texts_per_second(&rule.model)
             .filter(|tps| *tps > 0.0)
@@ -970,6 +1005,7 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
             estimate_ms,
             approximate: !exact,
             direct_writes: Vec::new(),
+            base_copies,
         });
     }
     // The check's time by elements: each fill its label's share, the first one the rest.
@@ -990,20 +1026,23 @@ pub(crate) fn plan_fills<S: GraphStorage + ?Sized>(
 }
 
 /// The elements of `rule`'s label the rule applies to (first declaring label) with a text in
-/// `from`, and those without a text that hold `to`.
+/// `from`, those without a text that hold `to`, and (`layered`) how many of both are base
+/// elements the layer does not hold yet ([`PlannedFill::base_copies`]).
 fn count_texts<S: GraphStorage + ?Sized>(
     storage: &S,
     rules: &VectorRules,
     rule: &Rule,
-) -> Result<(u64, u64), GraphError> {
-    let (mut texts, mut removals) = (0u64, 0u64);
+    layered: bool,
+) -> Result<(u64, u64, u64), GraphError> {
+    let (mut texts, mut removals, mut copies) = (0u64, 0u64, 0u64);
+    // `true` when the fill writes the element (a vector or a removal).
     let mut tally = |labels: &[CompactString], properties: Option<&crate::value::PropertyMap>| {
         if !rules
             .applicable(rule.kind, labels)
             .iter()
             .any(|&p| rules.all()[p] == *rule)
         {
-            return;
+            return false;
         }
         let text = properties
             .and_then(|p| p.get(rule.from.as_str()))
@@ -1011,25 +1050,67 @@ fn count_texts<S: GraphStorage + ?Sized>(
             .is_some_and(|t| !t.is_empty());
         if text {
             texts += 1;
+            true
         } else if properties.is_some_and(|p| p.contains_key(rule.to.as_str())) {
             removals += 1;
+            true
+        } else {
+            false
         }
     };
     match rule.kind {
         ElementKind::Vertex => {
             for handle in storage.vertices_by_label(&rule.label)? {
                 let labels = storage.vertex_labels(handle)?;
-                tally(labels, storage.vertex_properties(handle)?);
+                if tally(labels, storage.vertex_properties(handle)?)
+                    && layered
+                    && storage.vertex_layer(handle)? == Some(crate::graph::LayerOrigin::Base)
+                {
+                    copies += 1;
+                }
             }
         }
         ElementKind::Edge => {
             let labels = [rule.label.clone()];
             for handle in storage.edges_by_label(&rule.label)? {
-                tally(&labels, storage.edge_properties(handle)?);
+                if tally(&labels, storage.edge_properties(handle)?)
+                    && layered
+                    && storage.edge_layer(handle)? == Some(crate::graph::LayerOrigin::Base)
+                {
+                    copies += 1;
+                }
             }
         }
     }
-    Ok((texts, removals))
+    Ok((texts, removals, copies))
+}
+
+/// The elements of `rule`'s label that are base elements the layer does not hold yet (the
+/// approximate preview's [`PlannedFill::base_copies`]: one origin test per element, no text
+/// read).
+fn count_base_elements<S: GraphStorage + ?Sized>(
+    storage: &S,
+    rule: &Rule,
+) -> Result<u64, GraphError> {
+    let base = Some(crate::graph::LayerOrigin::Base);
+    let mut copies = 0u64;
+    match rule.kind {
+        ElementKind::Vertex => {
+            for handle in storage.vertices_by_label(&rule.label)? {
+                if storage.vertex_layer(handle)? == base {
+                    copies += 1;
+                }
+            }
+        }
+        ElementKind::Edge => {
+            for handle in storage.edges_by_label(&rule.label)? {
+                if storage.edge_layer(handle)? == base {
+                    copies += 1;
+                }
+            }
+        }
+    }
+    Ok(copies)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1284,7 +1365,7 @@ impl TraversalGraph {
     /// Whether the rules act now: inside a live unit, not in `apply_change_set` nor in the rule
     /// pass itself.
     #[inline]
-    fn rules_live(&self) -> bool {
+    pub(crate) fn rules_live(&self) -> bool {
         self.rules_off == 0 && self.undo.is_recording() && !self.undo.loading
     }
 
@@ -2003,6 +2084,7 @@ mod tests {
             estimate_ms,
             approximate: false,
             direct_writes: Vec::new(),
+            base_copies: 0,
         }
     }
 

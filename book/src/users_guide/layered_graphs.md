@@ -187,10 +187,17 @@ code written for layers already run.
 - **One level.** The base is a plain graph; there is no layer over a layer. The base is frozen
   for good: when the product graph changes, project layers are rebuilt over the new base.
 - **Refused for now**, with an error naming the feature ("... not supported on a layered graph
-  yet"):
-  - a base whose schema has [vector rules](vector_rules.md), and a schema with vector rules
-    on a layer;
-  - compression rule and embedding model definitions created on a layer.
+  yet"): compression rule and embedding model definitions created on a layer.
+- **Vector rules:** a layer over a base with [vector rules](vector_rules.md) keeps the derived
+  vectors in step as a plain graph does. Creating the layer embeds nothing: the base's
+  vectors are read as they are. A write on the layer to a rule's source embeds the element in
+  the same unit, with the same vectors, errors and change sets as a plain graph with the
+  layer's data; a write that leaves the text as it was copies nothing into the layer. A rule
+  the layer adds or changes on a label the base holds fills every element of that label, so
+  it copies each of them into the layer: the preview (`validate_schema`, `diff_schema`) names
+  how many (`base_copies`, and a sentence in the warning text). Only the built-in
+  `hash-ngram/1` model embeds on a layer for now: a layer does not serve the models of a Store
+  yet, so a write that needs one fails ("the model ... is not served here") and leaves nothing.
 - **Property indexes:** a layer serves the base's indexes for its own data, also after it
   changed elements: lookups and counts answer from the index, as on a plain graph. The
   base's unique indexes hold for the layer: a write that would give a second element a unique

@@ -100,6 +100,7 @@ assert!(stats.total_bytes() < stats.shared_bytes);
 | `atomic` (units, rollback, savepoints) | yes |
 | `change_capture` (commit hooks, dry runs) | yes |
 | `property_indexes` (creating indexes) | yes: the layer defines, drops and redefines indexes in its own catalog (see below) |
+| `layered` | yes (a `TraversalGraph` and other storages: no) |
 | `exact_property_index_lookups` | as the base. The base's indexes answer only while the layer has not touched that element kind; after that the engine scans |
 | `durability` | no |
 | `isolation`, `concurrent_writers` | as `TraversalGraph`: none; `Graph<LayeredGraph>` serializes writers |
@@ -145,10 +146,25 @@ alone, with the base as one line, is planned.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):
-  - a layer over a base whose schema has vector rules, and a schema with vector rules on a
-    layer;
-  - compression rule and embedding model definitions in the layer's catalog, and compression
-    estimates over element kinds the layer changed.
+  compression rule and embedding model definitions in the layer's catalog, and compression
+  estimates over element kinds the layer changed.
+- **Vector rules** run on the layer's own units with `TraversalGraph`'s rule pass (the same
+  code, generic over the `RuleLog` trait, `graph/vector_rules.rs`): the layer compiles the
+  rules of its own schema (when it is created, at every schema write and its undo), refuses
+  a direct write of a rule's `to` inside a live unit through the shared write rules (the same
+  `GraphError::DerivedProperty` at the same point), runs the pass at the outermost commit
+  before the memory check and in the discard of a dry run, and keeps `apply_change_set` exempt.
+  The derived vectors, errors, rollbacks, journal records and change sets equal a
+  `TraversalGraph`'s with the layer's data. A base with rules costs nothing at creation; a
+  vector recomputed to the value a base element holds stores nothing (the equal-value skip),
+  so only an element whose sources changed is copied up, except by the first fill of a rule
+  the layer adds or changes on a base label, which copies every element of the label it
+  writes. `PlannedFill::base_copies` counts them (exact in `validate_schema`, the label's
+  untouched base elements in `diff_schema`), from the new capability
+  `StorageCapabilities::layered` and the element origins. Models: only `hash-ngram/1` embeds
+  until the layer carries the base's model registry (`LayerBase`, planned); a rule on a
+  catalog model of the base passes the schema check (the catalog is copied) and its pass
+  fails with `GraphError::VectorRuleFailed` ("not served here"), rolling the unit back.
 
   A base with plain or unique indexes or compression rules is fine: the layer reads it. The
   layer stores its own values uncompressed. `compression_stats` reports the base's figures.

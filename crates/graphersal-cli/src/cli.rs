@@ -964,7 +964,7 @@ impl GraphSpec {
     /// loaded as [`Self::load_with_schema`] loads it, a Store read-only without its lock
     /// (nothing in it is written; a layer is in memory only), and the session runs on a
     /// [`LayeredGraph`] over it: writes go to the layer, the base never changes. A base the
-    /// layer cannot carry yet (vector rules, unique property indexes) is an invalid invocation.
+    /// layer cannot carry (`LayeredGraph::over` refuses it) is an invalid invocation.
     pub fn open_layer(&self, schema: Option<&SchemaSource>) -> Result<Opened, StartError> {
         let base = match self {
             GraphSpec::Store(path) => {

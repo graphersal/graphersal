@@ -192,6 +192,11 @@ pub(crate) struct UnitLog {
     /// process ceiling, `MemoryBudget::unit_check`), started when it opened on the layer's own
     /// footprint; `None` without a ceiling.
     budget: Option<MemoryBudget>,
+    /// The log ranges (`start..end` positions) an `apply_change_set` inside the outermost unit
+    /// wrote: the vector-rule pass skips them (a change set carries its vectors), as
+    /// `TraversalGraph`'s `UndoLog::rules_exempt`. Reset when the outermost unit closes; a
+    /// rollback cuts them back.
+    rules_exempt: Vec<(usize, usize)>,
 }
 
 impl UnitLog {
@@ -231,6 +236,29 @@ impl UnitLog {
     /// The recorded entries, oldest first.
     pub(crate) fn entries(&self) -> &[LayerUndo] {
         &self.entries
+    }
+
+    /// The ranges of the log the rule pass skips (see `rules_exempt`).
+    pub(crate) fn rules_exempt(&self) -> &[(usize, usize)] {
+        &self.rules_exempt
+    }
+
+    /// Marks the entries from `start` to the end of the log as written by a change set (the
+    /// rule pass skips them); only inside an open unit.
+    pub(crate) fn exempt_from(&mut self, start: usize) {
+        if self.depth > 0 && start < self.entries.len() {
+            self.rules_exempt.push((start, self.entries.len()));
+        }
+    }
+
+    /// The metadata the outermost open unit commits with.
+    pub(crate) fn metadata(&self) -> &CommitMetadata {
+        &self.metadata
+    }
+
+    /// The memory budget of the outermost open unit.
+    pub(crate) fn budget(&self) -> Option<MemoryBudget> {
+        self.budget
     }
 
     /// The commit sequence number of the last outermost unit that changed something.
@@ -283,6 +311,7 @@ impl UnitLog {
             self.metadata = CommitMetadata::default();
             self.started_at = None;
             self.budget = None;
+            self.rules_exempt.clear();
             if self.entries.capacity() > KEEP_CAPACITY {
                 self.entries = Vec::new();
             } else {
@@ -311,8 +340,10 @@ impl LayeredGraph {
         self.begin_layer_unit(now_nanos())
     }
 
-    /// Closes a unit and keeps its changes, as `TraversalGraph::commit_undo_unit` does (without
-    /// the vector rules, refused on a layer). First, when the process has a memory ceiling, the
+    /// Closes a unit and keeps its changes, as `TraversalGraph::commit_undo_unit` does. First the
+    /// vector-rule pass of the outermost unit (module `rules`) writes the derived vectors as
+    /// ordinary writes of the unit; a failure rolls the whole unit back (the hooks get
+    /// `after_rollback`). Then, when the process has a memory ceiling, the
     /// outermost unit is checked against it (`MemoryBudget::unit_check` on the layer's own
     /// footprint): a unit that grew the memory in use over the budget is rolled back (the hooks
     /// get `after_rollback`) and fails with [`GraphError::ResourceLimitExceeded`] (operation
@@ -329,6 +360,34 @@ impl LayeredGraph {
             self.units.close();
             return Ok(());
         }
+        // The vector rules: the derived writes of the unit, before the memory check and the
+        // commit number, so they are ordinary writes of the unit (as `TraversalGraph`).
+        let fill = if self.vector_rules.is_some() && self.rules_off == 0 {
+            match crate::graph::vector_rules::run_rule_pass(self, true) {
+                Ok(fill) => fill,
+                Err((error, fill)) => {
+                    self.rollback_layer_unit(mark, &RollbackReason::failed(&error));
+                    if let Some(fill) = fill {
+                        fill.finish(Err(&error));
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let committed = self.commit_layer_checked(mark);
+        if let Some(fill) = fill {
+            match &committed {
+                Ok(()) => fill.finish(Ok(self.units.last_commit_seq)),
+                Err(error) => fill.finish(Err(error)),
+            }
+        }
+        committed
+    }
+
+    /// [`Self::commit_layer_unit`] after the rule pass: the memory check, the number, the hooks.
+    fn commit_layer_checked(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         if let Some(budget) = self.units.budget
             && let Err(error) = budget.unit_check(&*self, COMMIT_OPERATION)
         {
@@ -425,8 +484,22 @@ impl LayeredGraph {
     /// Undoes every change since `mark` and closes the unit WITHOUT telling the hooks, after
     /// deriving what the unit changed (`GraphStorage::discard_unit`, the end of a dry run):
     /// never committed (`commit_seq` and commit time `0`, no metadata), the auto-id sequences
-    /// after the unit.
-    pub(super) fn discard_layer_unit(&mut self, mark: UnitMark) -> ChangeSet {
+    /// after the unit. A dry run shows the vectors its writes would get (the rule pass runs,
+    /// journals nothing; a failure discards the unit and is the dry run's error), as
+    /// `TraversalGraph::discard_undo_unit_with_changes`.
+    pub(super) fn discard_layer_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
+        if self.units.depth == 1
+            && self.vector_rules.is_some()
+            && self.rules_off == 0
+            && let Err((error, fill)) = crate::graph::vector_rules::run_rule_pass(self, false)
+        {
+            if let Some(fill) = fill {
+                fill.finish(Err(&error));
+            }
+            self.undo_layer_to(mark);
+            self.units.close();
+            return Err(error);
+        }
         let mutations = self.derive_layer_mutations(mark_position(mark));
         let stamp = CommitStamp {
             commit_seq: 0,
@@ -436,7 +509,7 @@ impl LayeredGraph {
         };
         self.undo_layer_to(mark);
         self.units.close();
-        ChangeSet::new(stamp, CommitMetadata::default(), mutations)
+        Ok(ChangeSet::new(stamp, CommitMetadata::default(), mutations))
     }
 
     /// The metadata of the open unit's commit, as `TraversalGraph::set_undo_metadata`: with
@@ -456,6 +529,10 @@ impl LayeredGraph {
     /// Undoes every change since `mark`, newest first; the unit stays open.
     fn undo_layer_to(&mut self, mark: UnitMark) {
         let position = mark_position(mark);
+        self.units.rules_exempt.retain_mut(|(start, end)| {
+            *end = (*end).min(position);
+            *start < *end
+        });
         while self.units.entries.len() > position {
             let Some(entry) = self.units.entries.pop() else {
                 break;
@@ -660,7 +737,10 @@ impl LayeredGraph {
             // Nothing was stored: nothing to undo.
             LayerUndo::UnchangedBaseVertexProperty { .. }
             | LayerUndo::UnchangedBaseEdgeProperty { .. } => {}
-            LayerUndo::Schema(old) => self.schema = *old,
+            LayerUndo::Schema(old) => {
+                self.schema = *old;
+                self.refresh_vector_rules();
+            }
             LayerUndo::Definition { kind, name, old } => {
                 match old {
                     Some(old) => self.catalog.insert(*old),

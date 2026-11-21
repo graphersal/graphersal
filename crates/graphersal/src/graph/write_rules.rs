@@ -15,14 +15,16 @@
 //!
 //! # Not covered here (the caller's part)
 //!
-//! Two checks of `TraversalGraph`'s write methods are tied to state a read view does not carry,
-//! and are left out on purpose. A layered graph refuses a base that needs them until stage 4
-//! (plan P5), so the delta never meets them:
+//! One check of `TraversalGraph`'s write methods is tied to state a read view does not carry,
+//! and is left out on purpose: the compression rules, `compression_prepare_*` /
+//! `compression_normalize_*`, after the schema validation (delta values are stored
+//! uncompressed; a layered graph refuses compression rules of its own).
 //!
-//! - the vector (derived) rules, `check_derived_*`: in `TraversalGraph` right after the
-//!   property-value check of every property write;
-//! - the compression rules, `compression_prepare_*` / `compression_normalize_*`: after the
-//!   schema validation (delta values are stored uncompressed).
+//! The vector (derived) rules are checked through the view ([`WriteView::derived_rules`]) at
+//! the point `TraversalGraph` runs `check_derived_*`: right after the property-value check of
+//! every property write (after the element lookup, which changes nothing: the refusal needs a
+//! live element), and for a create right after `check_properties`. The same
+//! [`GraphError::DerivedProperty`] in the same precedence.
 //!
 //! Unique property indexes are checked through the view ([`WriteView::check_unique_vertex`],
 //! [`WriteView::check_unique_edge`]) at the point `TraversalGraph` checks them: after the
@@ -38,6 +40,7 @@ use compact_str::CompactString;
 use crate::error::{GraphError, SchemaError};
 use crate::graph::schema::defaults::{CreateContext, fill_defaults};
 use crate::graph::schema::{ElementKind, GraphSchema, SchemaMode, SchemaValidator};
+use crate::graph::vector_rules::VectorRules;
 use crate::graph::write_checks::{
     check_label, check_properties, check_property_value, normalize_vertex_labels,
     path_property_name, remove_path, single_segment_name, write_path,
@@ -99,6 +102,45 @@ pub(crate) trait WriteView {
         properties: Option<&PropertyMap>,
         write: Option<(&str, &ElementProperty)>,
     ) -> Result<(), GraphError>;
+
+    /// The compiled vector rules while they refuse a direct write of a derived property:
+    /// inside a live unit with the rules on (not in `apply_change_set`, not in the rule pass
+    /// itself), as `TraversalGraph::rules_live` decides. `None` otherwise, or without rules.
+    fn derived_rules(&self) -> Option<&VectorRules>;
+}
+
+/// The refusal of a direct write or removal of `key` of a live element of `kind` with `labels`
+/// ([`GraphError::DerivedProperty`]), as `TraversalGraph::check_derived_vertex` /
+/// `check_derived_edge`.
+#[inline]
+fn check_derived<V: WriteView>(
+    view: &V,
+    kind: ElementKind,
+    labels: &[CompactString],
+    key: &str,
+) -> Result<(), GraphError> {
+    match view.derived_rules() {
+        Some(rules) if rules.is_target(key) => rules.refuse(kind, labels, key),
+        _ => Ok(()),
+    }
+}
+
+/// The refusal for every key of a created element's map, as
+/// `TraversalGraph::check_derived_map`.
+#[inline]
+fn check_derived_map<V: WriteView>(
+    view: &V,
+    kind: ElementKind,
+    labels: &[CompactString],
+    properties: &PropertyMap,
+) -> Result<(), GraphError> {
+    match view.derived_rules() {
+        Some(rules) => properties
+            .keys()
+            .filter(|key| rules.is_target(key))
+            .try_for_each(|key| rules.refuse(kind, labels, key)),
+        None => Ok(()),
+    }
 }
 
 /// One live edge as the write rules see it.
@@ -145,7 +187,7 @@ pub(crate) fn insert_vertex<V: WriteView>(
 ) -> Result<(Vec<CompactString>, PropertyMap), GraphError> {
     let labels = normalize_vertex_labels(labels)?;
     check_properties(&properties)?;
-    // (vector rules: `check_derived_map`, see the module docs)
+    check_derived_map(view, ElementKind::Vertex, &labels, &properties)?;
     SchemaValidator::validate_vertex(&view.schema(), &labels, &mut properties)?;
     // (compression, see the module docs)
     view.check_unique_vertex(None, &labels, Some(&properties), None)?;
@@ -186,7 +228,11 @@ pub(crate) fn insert_edge<V: WriteView>(
         return Err(GraphError::vertex_removed());
     };
     check_properties(&properties)?;
-    // (vector rules: `check_derived_map`)
+    if view.derived_rules().is_some() {
+        // The label as the slice the rules take (only with rules: no allocation otherwise).
+        let labels: Vec<CompactString> = label.map(CompactString::from).into_iter().collect();
+        check_derived_map(view, ElementKind::Edge, &labels, &properties)?;
+    }
     SchemaValidator::validate_edge(
         &view.schema(),
         label,
@@ -385,10 +431,10 @@ pub(crate) fn set_vertex_property<V: WriteView>(
     value: ElementProperty,
 ) -> Result<ElementProperty, GraphError> {
     check_property_value(key, &value)?;
-    // (vector rules: `check_derived_vertex`)
     let Some((labels, _)) = view.vertex(vertex) else {
         return Err(GraphError::vertex_removed());
     };
+    check_derived(view, ElementKind::Vertex, labels, key)?;
     let value =
         SchemaValidator::validate_element_property(&view.schema(), "vertex", labels, key, value)?;
     // (compression)
@@ -404,10 +450,10 @@ pub(crate) fn set_edge_property<V: WriteView>(
     value: ElementProperty,
 ) -> Result<ElementProperty, GraphError> {
     check_property_value(key, &value)?;
-    // (vector rules: `check_derived_edge`)
     let Some(current) = view.edge(edge) else {
         return Err(GraphError::edge_removed());
     };
+    check_derived(view, ElementKind::Edge, current.label, key)?;
     let value = SchemaValidator::validate_element_property(
         &view.schema(),
         "edge",
@@ -440,10 +486,10 @@ pub(crate) fn set_vertex_property_path<V: WriteView>(
 ) -> Result<(CompactString, ElementProperty), GraphError> {
     let name = path_property_name(path)?;
     check_property_value(name, &value)?;
-    // (vector rules: `check_derived_vertex`)
     let Some((labels, properties)) = view.vertex(vertex) else {
         return Err(GraphError::vertex_removed());
     };
+    check_derived(view, ElementKind::Vertex, labels, name)?;
     let schema = view.schema();
     let value = SchemaValidator::coerce_path_leaf(&schema, "vertex", labels, path, value)?;
     let (key, resulting) = write_path(properties.get(name.as_str()), path, value)?;
@@ -463,10 +509,10 @@ pub(crate) fn set_edge_property_path<V: WriteView>(
 ) -> Result<(CompactString, ElementProperty), GraphError> {
     let name = path_property_name(path)?;
     check_property_value(name, &value)?;
-    // (vector rules: `check_derived_edge`)
     let Some(current) = view.edge(edge) else {
         return Err(GraphError::edge_removed());
     };
+    check_derived(view, ElementKind::Edge, current.label, name)?;
     let schema = view.schema();
     let value = SchemaValidator::coerce_path_leaf(&schema, "edge", current.label, path, value)?;
     let existing = current
@@ -500,10 +546,12 @@ pub(crate) fn remove_vertex_property_path<V: WriteView>(
             PathRemoval::Nothing
         });
     }
-    // (vector rules: `check_derived_vertex` on the first segment)
     let Some((labels, properties)) = view.vertex(vertex) else {
         return Err(GraphError::vertex_removed());
     };
+    if let Some(JsonPathSegment::Key(name)) = path.segments().first() {
+        check_derived(view, ElementKind::Vertex, labels, name)?;
+    }
     let existing = match path.segments().first() {
         Some(JsonPathSegment::Key(name)) => properties.get(name.as_str()),
         _ => None,
@@ -536,10 +584,12 @@ pub(crate) fn remove_edge_property_path<V: WriteView>(
             PathRemoval::Nothing
         });
     }
-    // (vector rules: `check_derived_edge` on the first segment)
     let Some(current) = view.edge(edge) else {
         return Err(GraphError::edge_removed());
     };
+    if let Some(JsonPathSegment::Key(name)) = path.segments().first() {
+        check_derived(view, ElementKind::Edge, current.label, name)?;
+    }
     let existing = match (path.segments().first(), current.properties) {
         (Some(JsonPathSegment::Key(name)), Some(properties)) => properties.get(name.as_str()),
         _ => None,
@@ -567,10 +617,10 @@ pub(crate) fn drop_vertex_property<V: WriteView>(
     vertex: V::Vertex,
     key: &str,
 ) -> Result<bool, GraphError> {
-    // (vector rules: `check_derived_vertex`)
     let Some((labels, properties)) = view.vertex(vertex) else {
         return Err(GraphError::vertex_removed());
     };
+    check_derived(view, ElementKind::Vertex, labels, key)?;
     if !properties.contains_key(key) {
         return Ok(false);
     }
@@ -584,10 +634,10 @@ pub(crate) fn drop_edge_property<V: WriteView>(
     edge: V::Edge,
     key: &str,
 ) -> Result<bool, GraphError> {
-    // (vector rules: `check_derived_edge`)
     let Some(current) = view.edge(edge) else {
         return Err(GraphError::edge_removed());
     };
+    check_derived(view, ElementKind::Edge, current.label, key)?;
     if !current
         .properties
         .is_some_and(|properties| properties.contains_key(key))
@@ -701,6 +751,10 @@ impl WriteView for TraversalGraph {
             Some(conflict) => Err(self.unique_violation(conflict)),
             None => Ok(()),
         }
+    }
+
+    fn derived_rules(&self) -> Option<&VectorRules> {
+        self.vector_rules.as_deref().filter(|_| self.rules_live())
     }
 }
 
@@ -1691,5 +1745,105 @@ mod tests {
             set_vp(&mut g, &m("set, freed name"), vadas, "name", "marko".into());
             assert!(g.check_property_indexes().is_ok(), "{}", m("indexes"));
         }
+    }
+
+    /// The vector rules (`check_derived_*`): inside a live unit a direct write or removal of a
+    /// rule's `to` gives the write's [`GraphError::DerivedProperty`] in the same precedence
+    /// (after the value check and the element lookup, before the schema), for every write
+    /// kind; outside a unit (rules not live) nothing is refused.
+    #[test]
+    fn derived_property_refusals_match_the_traversal_graph() {
+        use crate::graph::hooks::RollbackReason;
+        const RULES: &str = r#"{"vertices": {"person": {"schema": {"type": "object",
+          "properties": {"name": {"type": "string"}, "emb": {"type": "array",
+          "format": "vector", "embedder": "hash-ngram/1", "from": "name"}}}}},
+          "edges": {"knows": {"schema": {"type": "object", "properties": {
+          "note": {"type": "string"}, "nemb": {"type": "array", "format": "vector",
+          "embedder": "hash-ngram/1", "from": "note"}}}}}}"#;
+        let (mut g, peter, e12) = graph(None);
+        GraphStorage::set_schema(&mut g, GraphSchema::from_json(RULES).unwrap()).unwrap();
+        let (marko, lop) = (v(&g, "1"), v(&g, "3"));
+        let e7 = GraphStorage::out_edges(&g, marko)
+            .unwrap()
+            .find(|&edge| GraphStorage::edge_label(&g, edge).unwrap() == Some("knows"))
+            .unwrap();
+        let mark = GraphStorage::begin_unit(&mut g).unwrap();
+        let x = || ElementProperty::from("x");
+        let mut refused = 0;
+        let mut count = |r: &Result<(), GraphError>| {
+            if matches!(r, Err(GraphError::DerivedProperty { .. })) {
+                refused += 1;
+            }
+        };
+        // Plain writes and drops.
+        for (what, node, key, value) in [
+            ("set emb", marko, "emb", x()),
+            ("set emb on a software", lop, "emb", x()),
+            ("set emb, stale", peter, "emb", x()),
+            ("bad value first", marko, "emb", ElementProperty::Null),
+        ] {
+            let rule = set_vertex_property(&g, node, key, value.clone()).map(|_| ());
+            let write = GraphStorage::set_vertex_property(&mut g, node, key.into(), value);
+            count(&rule);
+            agree(what, rule, write);
+        }
+        let rule = drop_vertex_property(&g, marko, "emb").map(|_| ());
+        let write = GraphStorage::drop_vertex_property(&mut g, "emb", marko);
+        count(&rule);
+        agree("drop absent emb", rule, write);
+        let rule = set_edge_property(&g, e7, "nemb", x()).map(|_| ());
+        let write = GraphStorage::set_edge_property(&mut g, e7, "nemb".into(), x());
+        count(&rule);
+        agree("edge set", rule, write);
+        let rule = set_edge_property(&g, e12, "nemb", x()).map(|_| ());
+        let write = GraphStorage::set_edge_property(&mut g, e12, "nemb".into(), x());
+        agree("edge set, stale", rule, write);
+        let rule = drop_edge_property(&g, e7, "nemb").map(|_| ());
+        let write = GraphStorage::drop_edge_property(&mut g, "nemb", e7);
+        count(&rule);
+        agree("edge drop", rule, write);
+        // Path writes and removals (the first segment).
+        let at = path("emb[0]");
+        let rule = set_vertex_property_path(&g, marko, &at, 1_i64.into()).map(|_| ());
+        let write = GraphStorage::set_vertex_property_path(&mut g, marko, &at, 1_i64.into());
+        count(&rule);
+        agree("path", rule, write);
+        let rule = remove_vertex_property_path(&g, marko, &at).map(|_| ());
+        let write = GraphStorage::remove_vertex_property_path(&mut g, marko, &at);
+        count(&rule);
+        agree("path removal", rule, write);
+        let at = path("nemb[0]");
+        let rule = set_edge_property_path(&g, e7, &at, 1_i64.into()).map(|_| ());
+        let write = GraphStorage::set_edge_property_path(&mut g, e7, &at, 1_i64.into());
+        count(&rule);
+        agree("edge path", rule, write);
+        let rule = remove_edge_property_path(&g, e7, &at).map(|_| ());
+        let write = GraphStorage::remove_edge_property_path(&mut g, e7, &at);
+        count(&rule);
+        agree("edge path removal", rule, write);
+        // Creates.
+        let map = props(&[("name", "ann".into()), ("emb", x())]);
+        let rule = insert_vertex(&g, vec!["person".into()], map.clone()).map(|_| ());
+        let write =
+            GraphStorage::insert_vertex(&mut g, None, vec!["person".into()], map).map(|_| ());
+        count(&rule);
+        agree("insert", rule, write);
+        let map = props(&[("nemb", x())]);
+        let rule = insert_edge(&g, Some("knows"), marko, lop, map.clone()).map(|_| ());
+        let write = GraphStorage::insert_edge(&mut g, None, Some("knows".into()), marko, lop, map)
+            .map(|_| ());
+        count(&rule);
+        agree("edge insert", rule, write);
+        let map = props(&[("nemb", x())]);
+        let rule = insert_edge(&g, Some("created"), marko, lop, map.clone()).map(|_| ());
+        let write =
+            GraphStorage::insert_edge(&mut g, None, Some("created".into()), marko, lop, map)
+                .map(|_| ());
+        agree("edge insert, other label", rule, write);
+        assert_eq!(refused, 11, "refusals");
+        GraphStorage::rollback_unit(&mut g, mark, &RollbackReason::failed(&"test")).unwrap();
+        // Outside a unit the rules are not live.
+        assert!(g.derived_rules().is_none());
+        assert!(set_vertex_property(&g, marko, "emb", x()).is_ok());
     }
 }

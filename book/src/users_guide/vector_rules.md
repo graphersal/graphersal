@@ -111,7 +111,9 @@ same lock, `scan_elements` / `scan_ms`; the embedding part is three times what t
 measured speed gives, because that speed is measured on short sentences and real texts are
 longer) and the saved queries whose body writes the rule's
 property directly (`direct_writes`: such a write is refused once the rule exists; remove it,
-the queries are never rewritten); `fill_warning` is the ONE text every front end shows:
+the queries are never rewritten); on a [layer](layered_graphs.md), `base_copies` counts the
+base elements the fill copies into the layer (a line of the warning names it; `0` on any other
+graph); `fill_warning` is the ONE text every front end shows:
 
 ```text
 Applying this schema fills vectors: 1,204,331 elements of doc.emb from doc.text with the model

@@ -18,6 +18,7 @@ use super::handle::{LayeredEdge, LayeredVertex};
 use crate::error::{EDGE_ID_SEQUENCE, GraphError, VERTEX_ID_SEQUENCE};
 use crate::graph::GraphStorage;
 use crate::graph::schema::{ElementKind, GraphSchema};
+use crate::graph::vector_rules::VectorRules;
 use crate::graph::write_rules::{EdgeView, WriteView};
 use crate::value::{ElementProperty, PropertyMap};
 
@@ -107,6 +108,12 @@ impl WriteView for LayeredGraph {
             properties,
             write,
         )
+    }
+
+    /// The layer's compiled vector rules inside a live unit with the rules on (module `rules`).
+    #[inline]
+    fn derived_rules(&self) -> Option<&VectorRules> {
+        self.live_vector_rules()
     }
 }
 
