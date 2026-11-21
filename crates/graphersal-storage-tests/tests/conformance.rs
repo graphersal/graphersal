@@ -65,8 +65,8 @@ fn shared_reference_of_a_foreign_storage_is_read_only() {
 
 /// The read-only items on an untouched `LayeredGraph` over the modern graph (the write items of
 /// `conformance!` all start from an empty storage, see `layered_empty_base` above): the
-/// invariant checker, the traversal smoke against the reference, and the refusal of the writes
-/// the layer does not implement yet (the schema: task S1.7).
+/// invariant checker, the traversal smoke against the reference, and a schema stored in the
+/// layer (its own copy since task S1.7) leaving the data as it was.
 #[test]
 fn untouched_layer_passes_the_read_only_items() {
     use graphersal::storage::LayeredGraph;
@@ -84,16 +84,9 @@ fn untouched_layer_passes_the_read_only_items() {
     );
     let a = layer.get_vertex_by_id("1").unwrap().unwrap();
     let e = layer.out_edges(a).unwrap().next().unwrap();
-    let unsupported = |result: Result<(), graphersal::error::GraphError>| {
-        assert!(
-            matches!(
-                result,
-                Err(graphersal::error::GraphError::Unsupported { .. })
-            ),
-            "{result:?}"
-        );
-    };
-    unsupported(layer.set_schema(graphersal::schema::GraphSchema::new()));
+    layer
+        .set_schema(graphersal::schema::GraphSchema::new())
+        .unwrap();
     assert!(layer.contains_edge(e).unwrap());
     contract::assert_consistent(&layer);
     assert_eq!(layer.vertex_count().unwrap(), 6);

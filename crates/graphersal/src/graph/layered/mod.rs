@@ -49,8 +49,18 @@
 //! element again is dropped. The layer keeps its own copy of the base's
 //! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
 //! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
-//! wrote before the failure (units and rollback: S1.8). The schema, the catalog, the property
-//! indexes and the execution policy are the base's.
+//! wrote before the failure (units and rollback: S1.8).
+//!
+//! Schema and catalog (S1.7): the layer copies the base's schema and catalog when it is created
+//! and from then on reads and writes only its copies; the base's are never read again nor
+//! written, so a second layer over the same base keeps the base's. `set_schema` checks the
+//! layer's current state exactly as `TraversalGraph::set_schema` checks its own (the generic
+//! `scan_storage_change`, the same errors), then stores the schema. The catalog takes saved
+//! queries, jobs, host kinds and kinds this version does not know; the kinds that need index,
+//! compression or embedding machinery (property indexes, compression rules, models) are
+//! refused until the layer has index deltas (stage 4), and so are schemas with vector rules
+//! and bases with unique indexes or vector rules (plan decision P5, [`LayeredGraph::over`]).
+//! The property index lookups and the execution policy are the base's.
 
 mod delta;
 mod dirty;
@@ -63,6 +73,8 @@ use std::sync::Arc;
 pub use handle::{LayeredEdge, LayeredVertex};
 
 use crate::error::GraphError;
+use crate::graph::definition::Catalog;
+use crate::graph::schema::GraphSchema;
 use crate::graph::topology::NodeIndex;
 use crate::graph::{EdgeHandle, GraphStatistics, TraversalGraph, VertexHandle};
 use delta::{Delta, EdgeView, VertexView};
@@ -76,8 +88,10 @@ use handle::MAX_BASE_SLOTS;
 ///
 /// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices), changes or
 /// drops what it added, and changes and drops base elements (a changed base element is copied
-/// into the layer). It has no units yet (`atomic` is not claimed): a traversal that
-/// fails keeps what it wrote before the failure.
+/// into the layer). It keeps its own copies of the base's schema and catalog (saved queries,
+/// jobs; index, compression and model definitions are not supported on a layer yet). It has
+/// no units yet (`atomic` is not claimed): a traversal that fails keeps what it wrote before
+/// the failure.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -113,6 +127,14 @@ pub struct LayeredGraph {
     node_sequence: u64,
     /// The edge counterpart of `node_sequence`.
     edge_sequence: u64,
+    /// The layer's own schema: the base's, copied when the layer is created, then changed only
+    /// by the layer's `set_schema`. Every read and write rule of the layer uses it; the base's
+    /// schema is never read again nor written.
+    schema: GraphSchema,
+    /// The layer's own catalog: the base's definitions, copied when the layer is created, then
+    /// changed only by the layer's catalog writes (the kinds without storage machinery, see
+    /// `storage::check_layer_kind`).
+    catalog: Catalog,
 }
 
 impl LayeredGraph {
@@ -121,7 +143,9 @@ impl LayeredGraph {
     /// # Errors
     ///
     /// [`GraphError::Unsupported`] when `base` cannot carry a layer: it has 2^31 or more vertex
-    /// or edge slots (live or vacant), which the layer's handles cannot address.
+    /// or edge slots (live or vacant), which the layer's handles cannot address; or, not
+    /// supported on a layered graph yet, it has a unique property index or its schema has
+    /// vector rules (properties an embedder derives from another property).
     pub fn over(base: Arc<TraversalGraph>) -> Result<Self, GraphError> {
         check_base(&base)?;
         Ok(Self::new_unchecked(base))
@@ -134,6 +158,7 @@ impl LayeredGraph {
 
     /// The layer over a base [`check_base`] accepted.
     fn new_unchecked(base: Arc<TraversalGraph>) -> Self {
+        let schema = base.schema.read().clone();
         Self {
             dirty_vertices: SlotBits::new(base.graph.node_slots()),
             dirty_edges: SlotBits::new(base.graph.edge_slots()),
@@ -141,6 +166,8 @@ impl LayeredGraph {
             statistics: base.statistics.clone(),
             node_sequence: base.node_sequence,
             edge_sequence: base.edge_sequence,
+            schema,
+            catalog: base.definitions.clone(),
             base,
         }
     }
@@ -239,13 +266,36 @@ impl LayeredGraph {
     }
 }
 
+/// The `operation` of the refusal of a base with a unique property index (plan decision P5).
+const UNIQUE_INDEX_BASE: &str =
+    "a layer over a base with unique property indexes: not supported on a layered graph yet";
+
+/// The `operation` of the refusal of a base whose schema has vector rules (P5).
+const VECTOR_RULES_BASE: &str = "a layer over a base whose schema has vector rules \
+     (properties derived by an embedder): not supported on a layered graph yet";
+
 /// The one place that decides whether a base can carry a layer: `Err` names what the layer
-/// cannot handle. Today: a slot count the handles cannot address.
+/// cannot handle. Today:
+/// - a slot count the handles cannot address;
+/// - (P5, until index deltas) a unique property index: the layer cannot check uniqueness
+///   across base and delta;
+/// - (P5, until index deltas) vector rules in the schema: the rule pass needs units and change
+///   capture, and the layer cannot keep the derived vectors of base elements in step.
 fn check_base(base: &TraversalGraph) -> Result<(), GraphError> {
     if base.graph.node_slots() >= MAX_BASE_SLOTS || base.graph.edge_slots() >= MAX_BASE_SLOTS {
         return Err(GraphError::unsupported(
             "a layer over a base with 2^31 or more vertex or edge slots",
         ));
+    }
+    if base.definitions.iter().any(|definition| {
+        definition
+            .as_property_index()
+            .is_some_and(|index| index.is_unique())
+    }) {
+        return Err(GraphError::unsupported(UNIQUE_INDEX_BASE));
+    }
+    if crate::graph::vector_rules::has_rules(&base.schema.read()) {
+        return Err(GraphError::unsupported(VECTOR_RULES_BASE));
     }
     Ok(())
 }

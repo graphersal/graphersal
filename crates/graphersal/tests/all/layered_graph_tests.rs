@@ -10,7 +10,10 @@
 //! Rhai differential (plan decision P4 for drop-then-add order). Writes to base elements
 //! (S1.6): property, path and label writes copy the element up into an image; equal-value writes
 //! make none, an image equal to the base again is dropped; schema errors, coded and compressed
-//! bases, label lookups, property-index lookups and a Rhai differential.
+//! bases, label lookups, property-index lookups and a Rhai differential. The layer's own
+//! schema and catalog (S1.7): copies independent of the base, `set_schema` with the errors of a
+//! `TraversalGraph`, open-mode extension, saved queries, refused kinds, the refusals of a base
+//! (plan decision P5) and a Rhai differential.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,6 +204,8 @@ fn a_default_layer_is_over_an_empty_base() {
 
 #[test]
 fn every_write_is_refused_and_changes_nothing() {
+    use graphersal::catalog::{CompressionDefinition, Definition, DefinitionKind};
+    use graphersal::storage::ElementKind;
     let mut layer = modern_layer();
     let marko = v(&layer, "1");
     let unsupported = |result: Result<(), GraphError>| {
@@ -209,7 +214,17 @@ fn every_write_is_refused_and_changes_nothing() {
             "{result:?}"
         );
     };
-    unsupported(layer.set_schema(graphersal::schema::GraphSchema::new()));
+    // The catalog kinds that need storage machinery (stage 4).
+    unsupported(layer.set_definition(Definition::compression(
+        "n",
+        CompressionDefinition::new(ElementKind::Vertex, "person", "name").unwrap(),
+    )));
+    unsupported(
+        layer
+            .remove_definition(DefinitionKind::MODEL, "m")
+            .map(|_| ()),
+    );
+    assert_eq!(layer.definitions().unwrap().count(), 0);
     assert_eq!(layer.vertex_count().unwrap(), 6);
     assert_eq!(layer.edge_count().unwrap(), 6);
     assert_eq!(
@@ -321,9 +336,15 @@ fn rhai_reads_match_the_plain_graph() {
 #[cfg(feature = "script")]
 #[test]
 fn rhai_writes_fail_on_the_layer() {
-    let actual = render(layered_graph(), r#"g.set_schema(g.infer_schema())"#);
+    let actual = render(
+        layered_graph(),
+        r#"g.define_compression(#{name: "n", label: "person", path: "name"})"#,
+    );
     let err = actual.unwrap_err();
-    assert!(err.contains("does not support"), "{err}");
+    assert!(
+        err.contains("does not support compression rules on a layered graph yet"),
+        "{err}"
+    );
 }
 
 /// Documented examples that read what the layer does not report yet: `g.mark` needs a journal
@@ -2922,4 +2943,682 @@ fn rhai_base_write_scripts_match_the_plain_graph() {
         order_only.len(),
         order_only.join("\n")
     );
+}
+
+// ------------------------------------------------------------------------------------------
+// The layer's own schema and catalog (S1.7)
+// ------------------------------------------------------------------------------------------
+
+/// The product schema of the design (mode `open`): `person` and `software` declared.
+const PRODUCT_SCHEMA: &str = r#"{
+  "mode": "open",
+  "vertices": {
+    "person": {"schema": {"type": "object", "properties": {
+      "name": {"type": "string"}, "age": {"type": "integer"}}}},
+    "software": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}}
+  }
+}"#;
+
+/// A project's extension of [`PRODUCT_SCHEMA`]: a new label with a default, a date and a
+/// number, a new person property with a default and one with a date, an edge label with a
+/// number.
+const PROJECT_SCHEMA: &str = r#"{
+  "mode": "open",
+  "vertices": {
+    "person": {"schema": {"type": "object", "properties": {
+      "name": {"type": "string"}, "age": {"type": "integer"},
+      "team": {"type": "string", "default": "core"},
+      "since": {"type": "string", "format": "date"}}}},
+    "software": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
+    "project": {"schema": {"type": "object", "properties": {
+      "name": {"type": "string"},
+      "status": {"type": "string", "default": "active"},
+      "started": {"type": "string", "format": "date"},
+      "budget": {"type": "number"}}, "required": ["name"]}}
+  },
+  "edges": {
+    "works_on": {"schema": {"type": "object", "properties": {"weight": {"type": "number"}}}}
+  }
+}"#;
+
+/// Modern with [`PRODUCT_SCHEMA`] and the saved query `people`: the product a layer extends.
+fn product_base() -> TraversalGraph {
+    let mut base = TraversalGraph::tinkerpop_modern();
+    base.set_schema(GraphSchema::from_json(PRODUCT_SCHEMA).unwrap())
+        .unwrap();
+    base.traversal_mut()
+        .define_query(
+            "people",
+            graphersal::catalog::QueryDefinition::new(
+                r#"fn people() { g.v().has_label("person") }"#,
+            ),
+        )
+        .unwrap();
+    base
+}
+
+fn definitions_of<S: GraphStorage>(s: &S) -> Vec<graphersal::catalog::Definition> {
+    s.definitions().unwrap().cloned().collect()
+}
+
+/// The layer starts with copies of the base's schema and catalog; changing them changes only
+/// the layer: the base keeps its own, and a second layer over the same base sees the base's.
+#[test]
+fn the_layer_schema_and_catalog_are_its_own_copies() {
+    use graphersal::catalog::{Definition, DefinitionKind, QueryDefinition};
+    let base = Arc::new(product_base());
+    let base_schema = GraphStorage::get_schema(&*base).unwrap();
+    let base_catalog = definitions_of(&*base);
+    assert!(base_schema.is_some());
+    assert_eq!(base_catalog.len(), 1);
+
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    assert_eq!(layer.get_schema().unwrap(), base_schema);
+    assert_eq!(definitions_of(&layer), base_catalog);
+
+    let project = GraphSchema::from_json(PROJECT_SCHEMA).unwrap();
+    layer.set_schema(project.clone()).unwrap();
+    let mut reference = product_base();
+    reference.set_schema(project).unwrap();
+    assert_eq!(
+        layer.get_schema().unwrap(),
+        GraphStorage::get_schema(&reference).unwrap()
+    );
+    assert!(
+        layer
+            .declared_property_schema(
+                graphersal::storage::GraphNodeType::Vertex,
+                &["project".into()],
+                "budget"
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        GraphStorage::declared_property_schema(
+            &*base,
+            graphersal::storage::GraphNodeType::Vertex,
+            &["project".into()],
+            "budget"
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    layer
+        .set_definition(Definition::query(
+            "mine",
+            QueryDefinition::new("fn mine() { g.v() }"),
+        ))
+        .unwrap();
+    assert!(
+        layer
+            .remove_definition(DefinitionKind::QUERY, "people")
+            .unwrap()
+    );
+    assert!(
+        !layer
+            .remove_definition(DefinitionKind::QUERY, "people")
+            .unwrap()
+    );
+    let names: Vec<String> = definitions_of(&layer)
+        .iter()
+        .map(|d| d.name().to_string())
+        .collect();
+    assert_eq!(names, ["mine"]);
+    assert!(
+        layer
+            .definition(DefinitionKind::QUERY, "mine")
+            .unwrap()
+            .is_some()
+    );
+
+    // The base and a second layer still have the product's schema and catalog.
+    assert_eq!(GraphStorage::get_schema(&*base).unwrap(), base_schema);
+    assert_eq!(definitions_of(&*base), base_catalog);
+    let second = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    assert_eq!(second.get_schema().unwrap(), base_schema);
+    assert_eq!(definitions_of(&second), base_catalog);
+
+    // Removing the schema (the empty schema) removes only the layer's.
+    layer.set_schema(GraphSchema::new()).unwrap();
+    assert_eq!(layer.get_schema().unwrap(), None);
+    assert_eq!(GraphStorage::get_schema(&*base).unwrap(), base_schema);
+}
+
+/// The layer's catalog behaves as a `TraversalGraph`'s for the kinds it takes: an equal
+/// definition again is no change, a malformed one is refused with the same error, a list with
+/// a refused definition stores none of them (a `TraversalGraph` makes the list one unit).
+#[test]
+fn catalog_writes_match_a_traversal_graph() {
+    use graphersal::catalog::{Definition, DefinitionFlags, DefinitionKind, QueryDefinition};
+    fn run<S: GraphStorage>(s: &mut S) -> (Vec<String>, Vec<Definition>) {
+        let mut outcomes = Vec::new();
+        let mut record = |r: Result<String, GraphError>| {
+            outcomes.push(match r {
+                Ok(v) => v,
+                Err(e) => format!("{e:?}"),
+            })
+        };
+        let q = Definition::query("q", QueryDefinition::new("fn q() { g.v() }"));
+        record(s.set_definition(q.clone()).map(|_| "ok".into()));
+        record(s.set_definition(q).map(|_| "ok".into()));
+        record(
+            s.set_definition(Definition::query(
+                "bad name!",
+                QueryDefinition::new("fn x() { 1 }"),
+            ))
+            .map(|_| "ok".into()),
+        );
+        record(
+            s.set_definitions(vec![
+                Definition::query("a", QueryDefinition::new("fn a() { 1 }")),
+                Definition::query("", QueryDefinition::new("fn b() { 1 }")),
+                Definition::query("c", QueryDefinition::new("fn c() { 1 }")),
+            ])
+            .map(|_| "ok".into()),
+        );
+        let host = DefinitionKind::host(200).unwrap();
+        record(
+            s.set_definition(Definition::opaque(
+                host,
+                DefinitionFlags::NONE,
+                "h",
+                vec![1, 2, 3],
+            ))
+            .map(|_| "ok".into()),
+        );
+        record(
+            s.remove_definition(DefinitionKind::QUERY, "q")
+                .map(|b| b.to_string()),
+        );
+        record(
+            s.remove_definitions(&[(DefinitionKind::QUERY, "a"), (host, "h"), (host, "none")])
+                .map(|n| n.to_string()),
+        );
+        (outcomes, s.definitions().unwrap().cloned().collect())
+    }
+    let on_layer = run(&mut modern_layer());
+    let on_reference = run(&mut TraversalGraph::tinkerpop_modern());
+    assert_eq!(on_layer, on_reference);
+    assert!(
+        on_layer.0.iter().any(|o| o.contains("Definition")),
+        "{:?}",
+        on_layer.0
+    );
+}
+
+/// `set_schema` checks the layer's current state (base elements, images of changed ones,
+/// added elements) and fails exactly as a `TraversalGraph` with the same data and the same
+/// schema: open and closed mode, violations in the base only, in the delta only, in images,
+/// a mode change (full scan) and a declaration change (changed labels only), mode `none`.
+#[test]
+fn set_schema_errors_match_a_traversal_graph() {
+    const AGE_REQUIRED: &str = r#"{"mode": "open", "vertices": {"person": {"schema":
+        {"type": "object", "properties": {"age": {"type": "integer"}}, "required": ["age"]}}}}"#;
+    const EMAIL_REQUIRED: &str = r#"{"mode": "open", "vertices": {"person": {"schema":
+        {"type": "object", "required": ["email"]}}}}"#;
+    const EMAIL_REQUIRED_NONE: &str = r#"{"mode": "none", "vertices": {"person": {"schema":
+        {"type": "object", "required": ["email"]}}}}"#;
+    const CLOSED: &str = r#"{"mode": "closed",
+      "vertices": {
+        "person": {"schema": {"type": "object", "additionalProperties": true}},
+        "software": {"schema": {"type": "object", "additionalProperties": true}}},
+      "edges": {
+        "knows": {"schema": {"type": "object", "additionalProperties": true},
+          "connections": [{"from": "person", "to": "person"}]},
+        "created": {"schema": {"type": "object", "additionalProperties": true},
+          "connections": [{"from": "person", "to": "software"}]}}}"#;
+    const CLOSED_WITHOUT_CREATED: &str = r#"{"mode": "closed",
+      "vertices": {
+        "person": {"schema": {"type": "object", "additionalProperties": true}},
+        "software": {"schema": {"type": "object", "additionalProperties": true}},
+        "robot": {"schema": {"type": "object", "additionalProperties": true}}},
+      "edges": {
+        "knows": {"schema": {"type": "object", "additionalProperties": true},
+          "connections": [{"from": "person", "to": "person"}]},
+        "uses": {"connections": [{"from": "*", "to": "*"}]}}}"#;
+    fn run<S: GraphStorage>(s: &mut S) -> (Vec<String>, Option<GraphSchema>, State) {
+        let mut outcomes = Vec::new();
+        let mut set = |s: &mut S, json: &str| {
+            outcomes.push(match s.set_schema(GraphSchema::from_json(json).unwrap()) {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("{e:?}"),
+            });
+        };
+        let ann = s
+            .insert_vertex(
+                Some("ann".into()),
+                vec!["person".into()],
+                props(&[("name", "ann".into())]),
+            )
+            .unwrap();
+        let marko = vertex_of(s, "1");
+        s.set_vertex_property(marko, "age".into(), "old".into())
+            .unwrap();
+        // Delta (ann without age) and image (marko's age a string).
+        set(s, AGE_REQUIRED);
+        // Base and delta (no person has an email).
+        set(s, EMAIL_REQUIRED);
+        set(s, EMAIL_REQUIRED_NONE);
+        // A mode change from `none`: everything is checked; the base satisfies CLOSED.
+        set(s, CLOSED);
+        set(s, r#"{"mode": "none"}"#);
+        let robot = s
+            .insert_vertex(
+                Some("r".into()),
+                vec!["robot".into()],
+                PropertyMap::default(),
+            )
+            .unwrap();
+        let lop = vertex_of(s, "3");
+        let uses = s
+            .insert_edge(
+                Some("u".into()),
+                Some("uses".into()),
+                ann,
+                lop,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        // A closed schema refusing the delta only (robot, uses).
+        set(s, CLOSED);
+        // A closed schema refusing the base only (created) after the delta was allowed.
+        set(s, CLOSED_WITHOUT_CREATED);
+        s.drop_edge(uses).unwrap();
+        s.drop_vertex(robot).unwrap();
+        set(s, CLOSED);
+        // A declaration change in the same mode: only person is checked again.
+        set(
+            s,
+            &CLOSED.replace(
+                r#""person": {"schema": {"type": "object", "additionalProperties": true}}"#,
+                r#""person": {"schema": {"type": "object", "additionalProperties": true, "required": ["name"]}}"#,
+            ),
+        );
+        // Writes now follow the layer's closed schema.
+        outcomes.push(
+            match s.insert_vertex(None, vec!["robot".into()], PropertyMap::default()) {
+                Ok(_) => "ok".into(),
+                Err(e) => format!("{e:?}"),
+            },
+        );
+        outcomes.push(match s.drop_vertex_property("name", ann) {
+            Ok(()) => "ok".into(),
+            Err(e) => format!("{e:?}"),
+        });
+        (outcomes, s.get_schema().unwrap(), state(s))
+    }
+    let on_layer = run(&mut modern_layer());
+    let on_reference = run(&mut TraversalGraph::tinkerpop_modern());
+    assert_eq!(on_layer, on_reference);
+    let outcomes = &on_layer.0;
+    let refused = outcomes
+        .iter()
+        .filter(|o| o.contains("ExistingDataViolatesSchema"))
+        .count();
+    assert_eq!(refused, 4, "{outcomes:#?}");
+    assert_eq!(
+        outcomes.iter().filter(|o| *o == "ok").count(),
+        5,
+        "{outcomes:#?}"
+    );
+}
+
+/// The product schema in mode `open`, extended by the project on the layer: creates get the
+/// layer's defaults, writes (also to base elements) the layer's coercion and validation,
+/// exactly as on a `TraversalGraph` that got the same schema; the base keeps the product's.
+#[test]
+fn open_mode_extension_then_writes_follow_the_layer_schema() {
+    fn run<S: GraphStorage>(s: &mut S) -> (Vec<String>, State) {
+        let mut outcomes = Vec::new();
+        let mut record = |r: Result<String, GraphError>| {
+            outcomes.push(match r {
+                Ok(v) => v,
+                Err(e) => format!("{e:?}"),
+            })
+        };
+        // Under the product schema the project label is free: no default, no coercion.
+        let early = s
+            .add_vertex(
+                Some("early".into()),
+                vec!["project".into()],
+                props(&[("started", "2024-01-01".into())]),
+            )
+            .unwrap();
+        s.drop_vertex(early).unwrap();
+        s.set_schema(GraphSchema::from_json(PROJECT_SCHEMA).unwrap())
+            .unwrap();
+        let p1 = s
+            .add_vertex(
+                Some("p1".into()),
+                vec!["project".into()],
+                props(&[("name", "p1".into()), ("started", "2024-03-02".into())]),
+            )
+            .unwrap();
+        record(
+            s.add_vertex(
+                None,
+                vec!["person".into()],
+                props(&[("name", "zoe".into())]),
+            )
+            .map(|_| "ok".into()),
+        );
+        record(
+            s.add_vertex(
+                None,
+                vec!["project".into()],
+                props(&[("name", "p2".into()), ("budget", "lots".into())]),
+            )
+            .map(|_| "ok".into()),
+        );
+        record(
+            s.add_vertex(None, vec!["project".into()], PropertyMap::default())
+                .map(|_| "ok".into()),
+        );
+        record(
+            s.set_vertex_property(p1, "budget".into(), 10.into())
+                .map(|_| "ok".into()),
+        );
+        let marko = vertex_of(s, "1");
+        record(
+            s.set_vertex_property(marko, "since".into(), "2020-01-01".into())
+                .map(|_| "ok".into()),
+        );
+        record(
+            s.set_vertex_property(marko, "since".into(), "yesterday".into())
+                .map(|_| "ok".into()),
+        );
+        record(
+            s.add_edge(
+                None,
+                Some("works_on".into()),
+                marko,
+                p1,
+                props(&[("weight", 1.into())]),
+            )
+            .map(|_| "ok".into()),
+        );
+        record(
+            s.add_edge(
+                None,
+                Some("works_on".into()),
+                marko,
+                p1,
+                props(&[("weight", "heavy".into())]),
+            )
+            .map(|_| "ok".into()),
+        );
+        (outcomes, state(s))
+    }
+    let base = Arc::new(product_base());
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let on_layer = run(&mut layer);
+    let on_reference = run(&mut product_base());
+    assert_eq!(on_layer, on_reference);
+    assert_eq!(
+        on_layer.0.iter().filter(|o| *o == "ok").count(),
+        4,
+        "{:?}",
+        on_layer.0
+    );
+    // Defaults and coercion as stored in the layer.
+    let p1 = v(&layer, "p1");
+    let p1 = layer.vertex_properties(p1).unwrap().unwrap();
+    assert_eq!(p1.get("status"), Some(&"active".into()));
+    assert!(
+        !matches!(p1.get("started"), Some(ElementProperty::String(_))),
+        "{:?}",
+        p1.get("started")
+    );
+    assert!(
+        p1.get("budget") == Some(&ElementProperty::from(10.0_f64)),
+        "{:?}",
+        p1.get("budget")
+    );
+    let marko = layer.vertex_properties(v(&layer, "1")).unwrap().unwrap();
+    assert!(
+        !matches!(marko.get("since"), Some(ElementProperty::String(_))),
+        "{:?}",
+        marko.get("since")
+    );
+    // The base is untouched: its schema, and marko without `since`.
+    assert_eq!(
+        GraphStorage::get_schema(&*base).unwrap(),
+        GraphStorage::get_schema(&product_base()).unwrap()
+    );
+    let base_marko = base.get_vertex_by_id("1").unwrap().unwrap();
+    assert!(
+        GraphStorage::vertex_properties(&*base, base_marko)
+            .unwrap()
+            .unwrap()
+            .get("since")
+            .is_none()
+    );
+}
+
+/// Plan decision P5: a base with a unique property index or with vector rules cannot carry a
+/// layer yet; a base with a plain index or a compression rule can. On a layer, a schema with
+/// vector rules and the catalog kinds needing storage machinery are refused, naming the
+/// limitation, and change nothing.
+#[test]
+fn p5_refusals_and_refused_catalog_kinds() {
+    use graphersal::catalog::{
+        CompressionDefinition, Definition, DefinitionKind, PropertyIndexDefinition,
+    };
+    use graphersal::storage::ElementKind;
+    const RULE_SCHEMA: &str = r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+        "text": {"type": "string"},
+        "emb": {"type": "array", "format": "vector", "embedder": "hash-ngram/1", "from": "text"}}}}}}"#;
+    let refusal = |err: GraphError, needle: &str| {
+        assert!(matches!(err, GraphError::Unsupported { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(
+            text.contains(needle) && text.contains("on a layered graph yet"),
+            "{text}"
+        );
+        println!("{text}");
+    };
+
+    // A unique index in the base.
+    let mut base = TraversalGraph::tinkerpop_modern();
+    base.traversal_mut()
+        .create_index(
+            "person_name",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name").with_unique(true),
+        )
+        .unwrap();
+    refusal(
+        LayeredGraph::over(Arc::new(base)).unwrap_err(),
+        "unique property indexes",
+    );
+
+    // Vector rules in the base's schema.
+    let mut base = TraversalGraph::new();
+    base.traversal_mut()
+        .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
+        .unwrap();
+    refusal(
+        LayeredGraph::over(Arc::new(base)).unwrap_err(),
+        "vector rules",
+    );
+
+    // A plain index and a compression rule are fine; the layer cannot change them.
+    let mut base = TraversalGraph::tinkerpop_modern();
+    base.traversal_mut()
+        .create_index(
+            "person_age",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+        )
+        .unwrap();
+    base.traversal_mut()
+        .define_compression(
+            "names",
+            CompressionDefinition::new(ElementKind::Vertex, "person", "name").unwrap(),
+        )
+        .unwrap();
+    let base = Arc::new(base);
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let before = definitions_of(&layer);
+    assert_eq!(before, definitions_of(&*base));
+    refusal(
+        layer
+            .remove_definition(DefinitionKind::PROPERTY_INDEX, "person_age")
+            .unwrap_err(),
+        "property index definitions",
+    );
+    refusal(
+        layer
+            .remove_definition(DefinitionKind::COMPRESSION, "names")
+            .unwrap_err(),
+        "compression rules",
+    );
+    refusal(
+        layer
+            .set_definition(Definition::property_index(
+                "person_email",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "email")
+                    .with_unique(true),
+            ))
+            .unwrap_err(),
+        "property index definitions",
+    );
+    refusal(
+        layer
+            .remove_definition(DefinitionKind::MODEL, "any")
+            .unwrap_err(),
+        "embedding model definitions",
+    );
+    // A list with a refused definition stores none of them.
+    refusal(
+        layer
+            .set_definitions(vec![
+                Definition::query(
+                    "first",
+                    graphersal::catalog::QueryDefinition::new("fn first() { 1 }"),
+                ),
+                Definition::compression(
+                    "ages",
+                    CompressionDefinition::new(ElementKind::Vertex, "person", "lang").unwrap(),
+                ),
+            ])
+            .unwrap_err(),
+        "compression rules",
+    );
+    assert_eq!(definitions_of(&layer), before);
+
+    // A schema with vector rules, directly and through the traversal source.
+    let schema_before = layer.get_schema().unwrap();
+    refusal(
+        layer
+            .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
+            .unwrap_err(),
+        "vector rules",
+    );
+    let through_source = GraphTraversalSource::new(&mut layer)
+        .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
+        .unwrap_err();
+    assert!(
+        through_source.to_string().contains("vector rules"),
+        "{through_source}"
+    );
+    println!("{through_source}");
+    assert_eq!(layer.get_schema().unwrap(), schema_before);
+    // A plain vector property (no rule) is an ordinary declaration.
+    layer
+        .set_schema(
+            GraphSchema::from_json(
+                r#"{"vertices": {"doc": {"schema": {"type": "object", "properties": {
+                    "emb": {"type": "array", "format": "vector", "dimension": 3}}}}}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+/// Saved queries in Rhai: the base's are callable on the layer, the layer's own run there and
+/// stay out of the base and other layers.
+#[cfg(feature = "script")]
+#[test]
+fn rhai_saved_queries_of_base_and_layer_run_on_the_layer() {
+    let base = Arc::new(product_base());
+    let layered = Arc::new(Graph::new(LayeredGraph::over(Arc::clone(&base)).unwrap()));
+    assert_eq!(
+        render(Arc::clone(&layered), r#"g.query("people").count().next()"#),
+        Ok("4".to_string())
+    );
+    assert_eq!(
+        render(
+            Arc::clone(&layered),
+            r#"g.define_query(#{name: "older", params: #{min: #{schema: #{type: "integer"}, default: 30}}, body: "fn older(min) { g.v().has(\"age\", P.gt(min)) }"}); g.addV("person").property("name", "old").property("age", 99).iterate(); g.query("older", #{min: 31}).values("name").order().toList()"#
+        ),
+        Ok(r#"["josh", "old", "peter"]"#.to_string())
+    );
+    assert!(
+        GraphStorage::definition(&*base, graphersal::catalog::DefinitionKind::QUERY, "older")
+            .unwrap()
+            .is_none()
+    );
+    let second = Arc::new(Graph::new(LayeredGraph::over(base).unwrap()));
+    assert!(render(second, r#"g.query("older").count().next()"#).is_err());
+}
+
+/// Schema and catalog scripts: each on a fresh plain graph and a fresh layer over the same
+/// product base; the result and the state (data, schema, saved queries, jobs) must match.
+#[cfg(feature = "script")]
+const RHAI_SCHEMA_SCRIPTS: &[&str] = &[
+    r#"g.set_schema(g.infer_schema()); g.get_schema()"#,
+    r#"g.set_schema(#{mode: "closed", vertices: #{person: #{schema: #{type: "object"}}}})"#,
+    r#"g.set_schema(#{mode: "closed", vertices: #{person: #{schema: #{type: "object", additionalProperties: true}}, software: #{schema: #{type: "object", additionalProperties: true}}}, edges: #{knows: #{connections: [#{from: "person", to: "person"}]}, created: #{connections: [#{from: "person", to: "software"}]}}}); g.addV("robot").iterate()"#,
+    r#"g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", required: ["email"]}}}})"#,
+    r#"g.addV("person").property("name", "ann").iterate(); g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", properties: #{age: #{type: "integer"}}, required: ["age"]}}}})"#,
+    r#"g.V("1").property("age", "old").iterate(); g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", properties: #{age: #{type: "integer"}}}}}})"#,
+    r#"g.patch_schema(#{vertices: #{project: #{schema: #{type: "object", properties: #{status: #{type: "string", default: "active"}, started: #{type: "string", format: "date"}}}}}}); g.addV("project").property("started", "2024-03-02").iterate(); g.V().hasLabel("project").valueMap().next()"#,
+    r#"g.patch_schema(#{vertices: #{person: #{schema: #{properties: #{team: #{type: "string", default: "core"}}}}}}); g.addV("person").property("name", "zoe").iterate(); g.V().has("name", "zoe").values("team").next()"#,
+    r#"g.patch_schema(#{mode: "closed"})"#,
+    r#"g.set_schema(#{}); g.get_schema()"#,
+    r#"g.query("people").values("name").order().toList()"#,
+    r#"g.define_query(#{name: "n", body: "fn n() { g.v().count() }"}); g.query("n").next()"#,
+    r#"g.drop_query("people")"#,
+    r#"g.define_query(#{name: "n", folder: "a/b", body: "fn n() { 1 }"}); g.move_query("n", "archive"); g.get_query("n")["folder"]"#,
+    r#"g.define_job(#{name: "nightly", schedule: "0 3 * * *", action: "checkpoint"}); g.jobs().map(|j| j.name)"#,
+    r#"g.define_job(#{name: "nightly", schedule: "0 3 * * *", action: "checkpoint"}); g.drop_job("nightly")"#,
+    r#"g.define_query(#{name: "add", body: "fn add() { g.add_v(\"person\").property(\"name\", \"q\") }"}); g.query("add").iterate(); g.V().has("name", "q").count().next()"#,
+];
+
+#[cfg(feature = "script")]
+const SCHEMA_STATE_SCRIPT: &str = r#"[
+    g.V().elementMap().toList(),
+    g.E().elementMap().toList(),
+    g.statistics(),
+    g.get_schema(),
+    g.queries().map(|q| [q.name, q.folder]),
+    g.jobs().map(|j| j.name)
+]"#;
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_schema_and_catalog_scripts_match_the_plain_graph() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in RHAI_SCHEMA_SCRIPTS {
+        let plain = Arc::new(Graph::new(product_base()));
+        let layered = Arc::new(Graph::new(
+            LayeredGraph::over(Arc::new(product_base())).unwrap(),
+        ));
+        let expected = render(Arc::clone(&plain), script);
+        let actual = render(Arc::clone(&layered), script);
+        failing += usize::from(expected.is_err());
+        let expected_state = render(plain, SCHEMA_STATE_SCRIPT);
+        let actual_state = render(layered, SCHEMA_STATE_SCRIPT);
+        assert!(expected_state.is_ok(), "{script}: {expected_state:?}");
+        if expected != actual || expected_state != actual_state {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}\n  state TraversalGraph: {expected_state:?}\n  state LayeredGraph:   {actual_state:?}"
+            ));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    // The refusals compared above are real refusals, not a script typo on both sides.
+    assert!(failing >= 4, "{failing}");
 }
