@@ -7219,3 +7219,26 @@ fn layer_refuses_what_it_cannot_serve() {
     assert_eq!(res.stdout.trim().trim_matches('"'), "added");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `store info` on a layer store (layered-graph plan S3.3: made through the library until the
+/// CLI creates one) says it is a layer and names its base.
+#[test]
+fn store_info_names_the_base_of_a_layer_store() {
+    use graphersal::persist::{Store, StoreOptions};
+    use graphersal::prelude::TraversalGraph;
+    use graphersal::storage::{LayerBase, LayeredGraph};
+
+    let dir = temp_path("layer-store-info");
+    let _ = std::fs::remove_dir_all(&dir);
+    let base = LayerBase::new(std::sync::Arc::new(TraversalGraph::tinkerpop_modern()));
+    Store::<LayeredGraph>::create_layer(&dir, &base, StoreOptions::new())
+        .unwrap()
+        .close()
+        .unwrap();
+    let d = dir.to_str().unwrap();
+    let res = run(&["store", "info", d], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let expected = format!("layer       over the base {}", base.base_ref().unwrap());
+    assert!(res.stdout.contains(&expected), "{}", res.stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}

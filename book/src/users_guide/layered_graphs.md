@@ -13,8 +13,9 @@ costs about what the project adds or changes, not a copy of the product. Several
 share one base in the same process.
 
 > **EXPERIMENTAL in 0.6.x.** From Rust a layer can be saved as a layer snapshot and read back
-> over its base; there is no layer Store yet, and the CLI, the dev server and Python keep
-> layers in memory only (see [Limitations](#limitations)). How the storage works inside, its capabilities and memory
+> over its base, or kept in a layer Store (`Store::create_layer` / `Store::open_layer`); the
+> CLI, the dev server and Python keep layers in memory only for now (see
+> [Limitations](#limitations)). How the storage works inside, its capabilities and memory
 > figures are on the developer page [Layered Graphs](../for_developers/layered_graphs.md).
 
 ## Where an element comes from
@@ -242,9 +243,11 @@ code written for layers already run.
 
 ## Limitations
 
-- **Snapshots only.** A layer can be saved as a layer snapshot from Rust (above), but not
-  opened as a Store or journaled into one yet; the CLI's `--layer`, the dev server and Python
-  keep it in memory. A layer Store is planned.
+- **Rust only.** From Rust a layer can be saved as a layer snapshot (above) or kept in a
+  layer Store, which journals every commit and opens again only over the same base
+  (`graphersal store info` shows a layer store's base). The CLI's `--layer`, the dev server
+  and Python keep it in memory for now. Copies of a layer store (fork, backup, export) are not
+  supported yet.
 - **One level.** The base is a plain graph; there is no layer over a layer. The base is frozen
   for good: when the product graph changes, project layers are rebuilt over the new base.
 - **Refused for now**, with an error naming the feature ("... not supported on a layered graph

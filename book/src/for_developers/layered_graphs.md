@@ -7,8 +7,8 @@ traversal API, the Rhai DSL, GQL, saved queries and the session all run on it th
 run on a `TraversalGraph`. The base never changes: each layer stores only its own difference.
 
 > **EXPERIMENTAL in 0.6.x**, like the `GraphStorage` trait. A layer can be saved as a layer
-> snapshot; a layer Store and a few catalog kinds are not supported yet (see
-> [Limitations](#limitations)).
+> snapshot or kept in a layer Store; copies of a layer Store and a few catalog kinds are not
+> supported yet (see [Limitations](#limitations)).
 
 What a layer is for and how queries see it (`layer()`, `has_layer()`, `g.layer_diff()`, the
 CLI's `--layer`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This
@@ -196,7 +196,7 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
 
 ## Limitations
 
-- **Layer snapshots, no layer Store yet.** A layer implements `PersistentStorage` (load
+- **Layer snapshots and layer Stores.** A layer implements `PersistentStorage` (load
   sink, replay of journaled change sets, `clear`, the journal slot, its own lineage id and
   auto-id sequences). `persist::write_snapshot` (or `write_graph_snapshot` of a
   `Graph<LayeredGraph>`) writes a **layer snapshot**: only the elements the layer added, as
@@ -212,8 +212,27 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
   or load it over its own base). The base's own snapshot or Store keeps its identity, so a
   base saved and loaded again carries its layers. A layer snapshot's header, manifest and
   layer file are of file format version 5 (plain snapshots stay at 4), so Graphersal 0.6.x
-  and older refuse it as written by a newer version. A layer Store (`Store` with WAL and
-  checkpoints over a layer) is not there yet.
+  and older refuse it as written by a newer version.
+
+  A **layer Store** keeps one layer durable and recoverable on every backend (directory,
+  single file, memory): `Store::<LayeredGraph>::create_layer(dir, &base, options)` (or
+  `create_layer_with` for a layer built in memory) and `Store::open_layer(dir, &base,
+  options)`. Its snapshots are layer snapshots, its WAL holds the layer's commits; an open
+  loads the newest layer snapshot over the base and replays the WAL, as for any store. The
+  store records only the base's identity (`BaseRef`), not where the base lives: the base may be
+  a Store opened read-only, a `.gsnap` or a graph in memory, as long as it is the same graph at
+  the same commit. Another base is refused with `PersistError::LayerBaseMismatch` naming both;
+  `Store::open` of a layer store is refused with `StoreFailure::LayerStore` (it needs its
+  base), `open_layer` of a plain store with `PersistError::SnapshotKindMismatch`; all of them
+  before the lock and before any file changes, never damage. `Store::info`/`inspect` name the
+  base (`StoreInfo::layer_base`; `graphersal store info` prints it). A checkpoint encodes the
+  loaded layer (a merge checkpoint works on whole graphs), so its snapshot stays the size of
+  the delta. The embedding models are the base's: the store keeps none, and its graph serves
+  the `LayerBase`'s registry. Not supported for layer stores yet (refused with
+  `StoreFailure::LayerStore`): forks, attic forks, repair, convert, backups (also from memory),
+  restore, export, upgrade, verification, rollback and attic restore, read-only views,
+  closed-store checkpoints and commits, and creating one from a `.gsnap`; a damaged layer store
+  refuses the open with the damage (no maintenance mode).
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):

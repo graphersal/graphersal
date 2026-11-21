@@ -647,8 +647,93 @@ pub(crate) fn newer_store(dir: &DirPath, found: u32) -> PersistError {
 /// header), is left to the operation, which reports it as before (damage reporting and
 /// maintenance mode are unchanged).
 pub(crate) fn refuse_other_version(dir: &DirPath) -> Result<(), PersistError> {
-    refuse_newer_version(dir)?;
+    refuse_other_version_as(dir, StoreKind::Plain)
+}
+
+/// [`refuse_other_version`] for an operation that works on stores of `kind` (a layer store:
+/// format spec 7.5, [`StoreKind`]).
+pub(crate) fn refuse_other_version_as(dir: &DirPath, kind: StoreKind) -> Result<(), PersistError> {
+    refuse_newer_version_as(dir, kind)?;
     decode_graph_copies(dir).map(|_| ())
+}
+
+/// Which stores an operation works on. A LAYER store (format spec 7.5) holds only a layer's
+/// changes to a frozen base: every snapshot of it is a layer snapshot (manifest of file format
+/// version 5 with a layer row naming the base). It is told apart by its manifests, which the
+/// version guard reads anyway: no file says "layer" on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreKind {
+    /// A plain store only: a layer manifest anywhere in the tree refuses the operation
+    /// ([`StoreFailure::LayerStore`]); before S3.3 such a manifest was refused as newer.
+    Plain,
+    /// A layer store over this base only: a layer manifest over another base is
+    /// [`PersistError::LayerBaseMismatch`], a whole-graph manifest
+    /// [`PersistError::SnapshotKindMismatch`] (a plain store opened as a layer).
+    Layer(crate::graph::BaseRef),
+    /// Either (listings and the store info, which read files only).
+    Any,
+}
+
+/// What the version walk saw of the store's kind: the first layer manifest (its base and path)
+/// and the first whole-graph manifest.
+#[derive(Default)]
+struct KindSeen {
+    layer: Option<(crate::graph::BaseRef, String)>,
+    other_base: Option<(crate::graph::BaseRef, String)>,
+    plain: Option<String>,
+}
+
+/// The refusal of an operation that does not work on a layer store yet (`base`: the base its
+/// manifests name; `operation`: what was refused).
+pub(crate) fn layer_store_refused(
+    dir: &DirPath,
+    base: &crate::graph::BaseRef,
+    operation: &'static str,
+) -> PersistError {
+    PersistError::store(
+        operation,
+        StoreFailure::LayerStore,
+        format!(
+            "the store {} is a layer store over the base {base}: it holds only a layer's \
+             changes to that base, so it opens only with Store::open_layer and that base; \
+             this operation is not supported for layer stores yet",
+            dir.display()
+        ),
+    )
+}
+
+/// Checks what the walk saw against the `kind` the operation works on.
+fn check_kind(root: &DirPath, kind: StoreKind, seen: &KindSeen) -> Result<(), PersistError> {
+    match kind {
+        StoreKind::Any => Ok(()),
+        StoreKind::Plain => match &seen.layer {
+            Some((base, _)) => Err(layer_store_refused(root, base, "work on the store")),
+            None => Ok(()),
+        },
+        StoreKind::Layer(given) => {
+            if let Some((expected, _)) = seen
+                .layer
+                .iter()
+                .chain(seen.other_base.iter())
+                .find(|(base, _)| *base != given)
+            {
+                return Err(PersistError::LayerBaseMismatch {
+                    expected: *expected,
+                    given,
+                });
+            }
+            if let Some(path) = &seen.plain {
+                return Err(PersistError::SnapshotKindMismatch {
+                    reason: format!(
+                        "the store {} holds the whole-graph snapshot {path}: it is not a layer \
+                         store; open it with Store::open",
+                        root.display()
+                    ),
+                });
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The forward part of the version guard (format spec 15), also run by the upgrade converter,
@@ -664,6 +749,13 @@ pub(crate) fn refuse_other_version(dir: &DirPath) -> Result<(), PersistError> {
 /// never damage, never repaired or upgraded. Reads only headers (64 bytes per segment, a
 /// manifest's fixed part).
 pub(crate) fn refuse_newer_version(dir: &DirPath) -> Result<(), PersistError> {
+    refuse_newer_version_as(dir, StoreKind::Plain)
+}
+
+/// [`refuse_newer_version`] for an operation that works on stores of `kind`: a layer manifest
+/// (file format version 5 with a layer row, format spec 7.5) is no newer file, and is checked
+/// against `kind` after the walk ([`StoreKind`]); a newer file anywhere is refused first.
+pub(crate) fn refuse_newer_version_as(dir: &DirPath, kind: StoreKind) -> Result<(), PersistError> {
     refuse_newer_container(dir)?;
     let mut newer = None;
     for name in [GRAPH_FILE, GRAPH_COPY] {
@@ -690,7 +782,9 @@ pub(crate) fn refuse_newer_version(dir: &DirPath) -> Result<(), PersistError> {
             ));
         }
     }
-    refuse_newer_files(dir, dir, 0)
+    let mut seen = KindSeen::default();
+    refuse_newer_files(dir, dir, 0, &mut seen)?;
+    check_kind(dir, kind, &seen)
 }
 
 /// Step 1 of [`refuse_newer_version`]: the single-file container's preamble.
@@ -712,7 +806,12 @@ pub(crate) fn refuse_newer_container(dir: &DirPath) -> Result<(), PersistError> 
 
 /// Step 3 of [`refuse_newer_version`]: every file below `at` (depth-bounded: a store's tree
 /// is at most `attic/<entry>/snapshots/<seq>/<file>` deep).
-fn refuse_newer_files(root: &DirPath, at: &DirPath, depth: usize) -> Result<(), PersistError> {
+fn refuse_newer_files(
+    root: &DirPath,
+    at: &DirPath,
+    depth: usize,
+    seen: &mut KindSeen,
+) -> Result<(), PersistError> {
     if depth > 6 {
         return Ok(());
     }
@@ -732,10 +831,21 @@ fn refuse_newer_files(root: &DirPath, at: &DirPath, depth: usize) -> Result<(), 
             continue;
         }
         match kind {
-            EntryKind::Dir => refuse_newer_files(root, &path, depth + 1)?,
-            EntryKind::File => match newer_file_version(&path) {
-                Ok(None) => {}
-                Ok(Some((what, found))) => {
+            EntryKind::Dir => refuse_newer_files(root, &path, depth + 1, seen)?,
+            EntryKind::File => match file_version(&path) {
+                Ok(FileVersion::Other) => {}
+                Ok(FileVersion::PlainManifest) => {
+                    seen.plain.get_or_insert_with(|| path.relative_to(root));
+                }
+                Ok(FileVersion::LayerManifest(base)) => match &seen.layer {
+                    None => seen.layer = Some((base, path.relative_to(root))),
+                    Some((first, _)) if *first != base => {
+                        seen.other_base
+                            .get_or_insert_with(|| (base, path.relative_to(root)));
+                    }
+                    Some(_) => {}
+                },
+                Ok(FileVersion::Newer(what, found)) => {
                     return Err(PersistError::UnsupportedVersion {
                         location: format!(
                             "{what} {} of the store {} (file format version)",
@@ -754,19 +864,32 @@ fn refuse_newer_files(root: &DirPath, at: &DirPath, depth: usize) -> Result<(), 
     Ok(())
 }
 
-/// The kind and file format version of a manifest, snapshot segment or WAL segment whose
-/// header is intact but NEWER than this build reads; `Ok(None)` for everything else (another
-/// file, a current or older version, a damaged or short header: damage is the operation's
-/// business); `Err` for a header that could not be read.
-fn newer_file_version(path: &DirPath) -> std::io::Result<Option<(&'static str, u32)>> {
-    use super::super::codec::FORMAT_VERSION;
+/// What the version walk makes of one file ([`file_version`]).
+enum FileVersion {
+    /// Another file, a segment of a version this build reads, or a header that is damaged or
+    /// short (damage is the operation's business).
+    Other,
+    /// An intact manifest of a whole-graph snapshot this build reads.
+    PlainManifest,
+    /// An intact manifest of a layer snapshot (file format version 5 with a layer row naming
+    /// this base, format spec 7.5).
+    LayerManifest(crate::graph::BaseRef),
+    /// An intact header of a NEWER file format version than this build reads: the kind of
+    /// file and the version.
+    Newer(&'static str, u32),
+}
+
+/// What a manifest, snapshot segment or WAL segment is to the version walk ([`FileVersion`]);
+/// `Err` for a header that could not be read.
+fn file_version(path: &DirPath) -> std::io::Result<FileVersion> {
+    use super::super::codec::{FORMAT_VERSION, LAYER_FORMAT_VERSION};
     use super::super::manifest::{FIXED_BYTES, MANIFEST_MAGIC, ManifestFixed};
     use super::super::segment::SEGMENT_MAGIC;
     use super::super::wal::WAL_MAGIC;
     const HEADER: usize = 64;
     let len = path.len()?;
     if len < HEADER as u64 {
-        return Ok(None);
+        return Ok(FileVersion::Other);
     }
     let head = path.read_range(0, HEADER)?;
     let magic = &head[..8];
@@ -782,33 +905,62 @@ fn newer_file_version(path: &DirPath) -> std::io::Result<Option<(&'static str, u
         } else {
             "snapshot segment"
         };
-        return Ok(
-            (crc(&head[..60]) == stored && version > FORMAT_VERSION).then_some((what, version))
-        );
+        return Ok(if crc(&head[..60]) == stored && version > FORMAT_VERSION {
+            FileVersion::Newer(what, version)
+        } else {
+            FileVersion::Other
+        });
     }
     if magic == MANIFEST_MAGIC && len >= FIXED_BYTES as u64 {
         // The head copy of the fixed part, else the tail copy (format spec 6.1).
-        // `Ok(Ok(()))`: an intact copy this build reads; `Ok(Err(version))`: not intact, or
-        // intact and newer (`Some`).
-        let copy = |at: u64| -> std::io::Result<Result<(), Option<u32>>> {
+        // `Ok(version)`: an intact copy; `Err(Some(version))`: not intact, but its version word
+        // is newer; `Err(None)`: not intact.
+        let copy = |at: u64| -> std::io::Result<Result<u32, Option<u32>>> {
             let bytes = path.read_range(at, FIXED_BYTES)?;
-            // A layer snapshot's manifest (version 5, format spec 7.5, 15) is newer here too:
-            // this build has no layer Store yet (S3.3 accepts it in a layer store).
-            match ManifestFixed::decode(&bytes) {
-                Ok(fixed) if fixed.version.0 > FORMAT_VERSION => Ok(Err(Some(fixed.version.0))),
-                Ok(_) => Ok(Ok(())),
-                Err(err) => Ok(Err(err.newer_version)),
-            }
+            Ok(match ManifestFixed::decode(&bytes) {
+                Ok(fixed) => Ok(fixed.version.0),
+                Err(err) => Err(err.newer_version),
+            })
         };
-        let found = match copy(0)? {
-            Ok(()) => None,
-            Err(Some(found)) => Some(found),
-            Err(None) => copy(len - FIXED_BYTES as u64)?.err().flatten(),
+        let version = match copy(0)? {
+            Ok(version) => version,
+            Err(Some(found)) => return Ok(FileVersion::Newer("manifest", found)),
+            Err(None) => match copy(len - FIXED_BYTES as u64)? {
+                Ok(version) => version,
+                Err(Some(found)) => return Ok(FileVersion::Newer("manifest", found)),
+                Err(None) => return Ok(FileVersion::Other),
+            },
         };
-        return Ok(found.map(|found| ("manifest", found)));
+        if version != LAYER_FORMAT_VERSION {
+            return Ok(if version > FORMAT_VERSION {
+                FileVersion::Newer("manifest", version)
+            } else {
+                FileVersion::PlainManifest
+            });
+        }
+        // Version 5 is a layer snapshot's manifest only with a layer row (format spec 7.5,
+        // 15): the whole manifest is read to see it (layer stores only; a plain store never
+        // has a version-5 manifest). Without the row it is a newer manifest; one that does not
+        // decode is left to the operation.
+        let bytes = read_bounded(path, MAX_LAYER_MANIFEST_BYTES)?;
+        return Ok(match super::super::manifest::Manifest::decode(&bytes) {
+            Ok(manifest) => match super::super::layer::layer_row(&manifest.segments) {
+                Ok(Some(base)) => FileVersion::LayerManifest(base),
+                Ok(None) => FileVersion::Newer("manifest", version),
+                Err(_) => FileVersion::Other,
+            },
+            Err(err) => match err.newer_version {
+                Some(found) => FileVersion::Newer("manifest", found),
+                None => FileVersion::Other,
+            },
+        });
     }
-    Ok(None)
+    Ok(FileVersion::Other)
 }
+
+/// The largest version-5 manifest the version walk reads whole (a layer manifest is small: its
+/// chunk index covers the layer's own elements only).
+const MAX_LAYER_MANIFEST_BYTES: u64 = 256 << 20;
 
 /// Writes `GRAPH.copy` and then `GRAPH` (each atomically: a temporary file, fsync, rename),
 /// then syncs the directory.

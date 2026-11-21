@@ -220,7 +220,17 @@ impl LayerBase {
     /// `layer` (a layer over this base) shared as a [`Graph`] that serves the base's embedding
     /// models, as [`Self::new_layer`] makes it (a layer snapshot load uses it too).
     pub(crate) fn share(&self, layer: LayeredGraph) -> Graph<LayeredGraph> {
-        let graph = Graph::new(layer);
+        self.attach_models(Graph::new(layer))
+    }
+
+    /// [`Self::share`] as a persistent graph ([`Graph::new_persistent`]: it keeps the
+    /// snapshot writer), the live graph of a layer store.
+    #[cfg(feature = "persist")]
+    pub(crate) fn share_persistent(&self, layer: LayeredGraph) -> Graph<LayeredGraph> {
+        self.attach_models(Graph::new_persistent(layer))
+    }
+
+    fn attach_models(&self, graph: Graph<LayeredGraph>) -> Graph<LayeredGraph> {
         if let Some(models) = &self.inner.models {
             // A fresh graph has no registry yet, so the attach cannot be refused.
             graph.attach_model_registry(Arc::clone(models));

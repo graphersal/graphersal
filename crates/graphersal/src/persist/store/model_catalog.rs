@@ -1906,6 +1906,16 @@ pub(crate) struct ModelsAtOpen {
 }
 
 impl ModelsAtOpen {
+    /// Nothing found, nothing to attach (a layer store: its models are the base's).
+    pub(crate) fn none() -> Self {
+        Self {
+            registry: None,
+            source: None,
+            read_only: None,
+            events: Vec::new(),
+        }
+    }
+
     /// Attaches the registry to `graph` (and its commit hook when `writable`) and writes the
     /// deferred journal records into `journal`.
     pub(crate) fn finish(

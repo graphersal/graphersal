@@ -144,6 +144,7 @@ mod layered_index_tests;
 mod layered_memory_report_tests;
 mod layered_persist_tests;
 mod layered_storage_tests;
+mod layered_store_tests;
 mod layered_unique_tests;
 mod layered_vector_tests;
 mod layered_visibility_tests;

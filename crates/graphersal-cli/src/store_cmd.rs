@@ -205,6 +205,7 @@ pub fn command_help(command: &str) -> Option<String> {
              marks, WAL size and attic, the embedding models it keeps (identity, size, licence,\n\
              whether the schema uses them; models the schema names but the store lacks), and\n\
              the parameters fixed when it was created (chunk size, damage policy, backend).\n\
+             A layer store (only a layer's changes to a frozen base) names its base.\n\
              Works while a server has the store open.",
             false,
         ),
@@ -1198,6 +1199,11 @@ pub fn run(args: &[String]) -> i32 {
             match Store::inspect(&positional[0]) {
                 Ok(info) => {
                     outln!("store       {}", info.location);
+                    if let Some(base) = &info.layer_base {
+                        // A layer store (format spec 7.5): only a layer's changes to its base.
+                        outln!("layer       over the base {base}");
+                        outln!("            # it opens only over that base (Store::open_layer)");
+                    }
                     outln!("format      version {}", info.format_version);
                     outln!("graph id    {}", uuid_text(info.graph_id));
                     for entry in info.lineage.iter().skip(1) {
