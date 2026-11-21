@@ -35,8 +35,8 @@
 //! [`LayerDiffRequest`]; entries [`LayerDiffEntry`], [`LayerDiffChange`],
 //! [`LayerPropertyChange`]); every other storage answers `Base` and an empty diff. A
 //! [`LayerBase`] is the shareable base itself: the frozen graph with its database's embedding
-//! models, a display name and its identity ([`BaseRef`], not filled yet);
-//! [`LayerBase::new_layer`] makes a `Graph<LayeredGraph>` that serves those models.
+//! models, a display name and its identity ([`BaseRef`]: lineage id, commit sequence number
+//! and commit time); [`LayerBase::new_layer`] makes a `Graph<LayeredGraph>` that serves those models.
 //!
 //! # Example
 //!

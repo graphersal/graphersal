@@ -7,6 +7,11 @@
 //! images of vertices and edges (label changes included), tombstones with cascade, a base
 //! element changed back to clean, a layer-defined index, vector-rule-derived values
 //! (`hash-ngram/1`), a schema change, a removed base definition, a reused base id.
+//!
+//! Module `snapshot` (S3.2): layer snapshots (the delta-only encoder, the layer file of format
+//! spec 7.5 kind 128, the loader over the base) round-trip in the three conformance setups
+//! with the `reload` oracle, in every codec; kinds and bases must agree; the size follows the
+//! delta.
 #![cfg(feature = "persist")]
 
 use std::sync::{Arc, Mutex};
@@ -793,4 +798,398 @@ fn unique_indexes_load_as_the_live_layer_serves_them() {
         .rollback_unit(mark, &RollbackReason::failed(&err))
         .unwrap();
     assert!(matches!(err, GraphError::UniqueViolation { .. }), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Layer snapshots (S3.2): the delta-only encoder, the layer file (format spec 7.5, segment kind
+// 128) and the loader over the base.
+// ---------------------------------------------------------------------------------------------
+
+mod snapshot {
+    use super::*;
+    use graphersal::persist::{
+        self, Codec, ModelCopy, PersistError, ReadOptions, WriteOptions, read_layer_snapshot,
+        read_snapshot, read_snapshot_info, read_snapshot_into, write_graph_snapshot,
+        write_snapshot,
+    };
+    use graphersal::storage::{BaseRef, LayerBase};
+
+    /// `layer` written as a snapshot with `options`.
+    fn write(layer: &LayeredGraph, options: &WriteOptions) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_snapshot(layer, &mut bytes, options).unwrap();
+        bytes
+    }
+
+    /// `bytes` read into a fresh layer over `base`.
+    fn read(bytes: &[u8], base: &Arc<TraversalGraph>) -> Result<LayeredGraph, PersistError> {
+        read_snapshot_into(
+            bytes,
+            &ReadOptions::new(),
+            LayeredGraph::over(Arc::clone(base)).unwrap(),
+        )
+    }
+
+    /// A layer over an EMPTY base: everything it holds is its own (elements, an index, a saved
+    /// query, a schema with a vector rule).
+    fn everything_in_the_delta() -> LayeredGraph {
+        let mut layer = LayeredGraph::over(Arc::new(TraversalGraph::new())).unwrap();
+        unit(&mut layer, |l| {
+            l.set_schema(GraphSchema::from_json(RULES).unwrap())?;
+            l.set_definition(Definition::property_index(
+                "age",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+            ))?;
+            l.set_definition(query("q9"))
+        });
+        unit(&mut layer, |l| {
+            let a = l.insert_vertex(
+                Some("a".into()),
+                vec!["person".into()],
+                props(&[("name", "ann".into()), ("age", 30.into())]),
+            )?;
+            let b = l.insert_vertex(None, vec!["person".into(), "admin".into()], props(&[]))?;
+            l.insert_vertex(
+                Some("d".into()),
+                vec!["doc".into()],
+                props(&[("text", "layered graphs".into())]),
+            )?;
+            l.insert_edge(
+                Some("ab".into()),
+                Some("knows".into()),
+                a,
+                b,
+                props(&[("weight", 0.5.into())]),
+            )?;
+            l.insert_edge(None, None, b, b, props(&[]))?;
+            Ok(())
+        });
+        layer
+    }
+
+    /// The three setups of the conformance suite: everything in the delta (an empty base), a
+    /// touched layer (the whole history: every delta kind), an untouched layer.
+    fn setups() -> Vec<(&'static str, LayeredGraph)> {
+        vec![
+            ("everything in the delta", everything_in_the_delta()),
+            ("touched", live().0),
+            ("untouched", LayeredGraph::over(base()).unwrap()),
+        ]
+    }
+
+    /// Asserts `loaded` is `live` as the S3.1 oracle (`reload`) and the comparison see it.
+    #[track_caller]
+    fn assert_loaded(loaded: &LayeredGraph, live: &LayeredGraph, what: &str) {
+        check(loaded);
+        assert_same(loaded, live, what);
+        assert_same(loaded, &reload(live), &format!("{what} (oracle)"));
+        assert_eq!(loaded.graph_id(), live.graph_id(), "{what}");
+        assert_eq!(
+            PersistentStorage::last_committed_at(loaded),
+            PersistentStorage::last_committed_at(live),
+            "{what}"
+        );
+        assert_eq!(loaded.id_sequences(), live.id_sequences(), "{what}");
+        assert_eq!(
+            loaded.statistics().unwrap(),
+            live.statistics().unwrap(),
+            "{what}"
+        );
+        assert_eq!(
+            loaded.layer_parts().unwrap().unwrap().patch,
+            live.layer_parts().unwrap().unwrap().patch,
+            "{what}"
+        );
+    }
+
+    /// A layer snapshot read over the same base gives the live layer in every setup, and
+    /// names its base.
+    #[test]
+    fn a_layer_snapshot_round_trips_in_every_setup() {
+        for (what, layer) in setups() {
+            let bytes = write(&layer, &WriteOptions::new());
+            let info = read_snapshot_info(bytes.as_slice()).unwrap();
+            assert_eq!(info.layer_base, Some(layer.base_ref()), "{what}");
+            assert_eq!(
+                info.vertex_count as usize,
+                layer.layer_parts().unwrap().unwrap().vertices.count(),
+                "{what}: the snapshot counts the layer's own vertices"
+            );
+            let loaded = read(&bytes, layer.base()).unwrap();
+            assert_loaded(&loaded, &layer, what);
+            // Written again from the loaded layer: the same bytes but the creation time.
+            let again = read(&write(&loaded, &WriteOptions::new()), layer.base()).unwrap();
+            assert_loaded(&again, &layer, &format!("{what}, twice"));
+        }
+    }
+
+    /// Small chunks and segments, each codec: the layer's elements span several chunks and
+    /// segments and still load after the layer file.
+    #[test]
+    fn every_codec_and_chunk_size_round_trips() {
+        #[allow(unused_mut)]
+        let mut codecs = vec![Codec::None, Codec::Lz4];
+        #[cfg(feature = "persist-zstd")]
+        codecs.push(Codec::Zstd);
+        let (layer, _) = live();
+        for codec in codecs {
+            for (chunk, segment) in [(64, 1 << 10), (1 << 20, 256 << 20)] {
+                let options = WriteOptions::new()
+                    .with_codec(codec)
+                    .with_chunk_bytes(chunk)
+                    .with_segment_bytes(segment);
+                let bytes = write(&layer, &options);
+                let loaded = read(&bytes, layer.base()).unwrap();
+                assert_loaded(&loaded, &layer, &format!("{codec:?}, chunk {chunk}"));
+            }
+        }
+    }
+
+    /// A layer snapshot is no whole graph and a whole-graph snapshot is no layer: each is
+    /// refused by the other reader before anything is loaded.
+    #[test]
+    fn the_snapshot_kinds_must_agree() {
+        let (layer, _) = live();
+        let bytes = write(&layer, &WriteOptions::new());
+        let refused = |result: Result<TraversalGraph, PersistError>| match result {
+            Err(err @ PersistError::SnapshotKindMismatch { .. }) => err.to_string(),
+            other => panic!("expected a kind mismatch, got {:?}", other.map(|_| ())),
+        };
+        let text = refused(read_snapshot(bytes.as_slice(), &ReadOptions::new()));
+        assert!(text.contains("is a layer over base graph"), "{text}");
+        assert!(text.contains(&layer.base_ref().to_string()), "{text}");
+        refused(TraversalGraph::read_snapshot(bytes.as_slice()));
+
+        let mut whole = Vec::new();
+        layer.base().write_snapshot(&mut whole).unwrap();
+        assert_eq!(
+            read_snapshot_info(whole.as_slice()).unwrap().layer_base,
+            None
+        );
+        match read(&whole, layer.base()) {
+            Err(err @ PersistError::SnapshotKindMismatch { .. }) => {
+                assert!(
+                    err.to_string().contains("is a whole graph, not a layer"),
+                    "{err}"
+                );
+                assert!(err.help().unwrap().contains("read_layer_snapshot"));
+            }
+            other => panic!("expected a kind mismatch, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The base is checked from the manifest: another lineage, a later commit of the same
+    /// lineage are refused naming both bases; the same base reloaded from its own snapshot
+    /// (same lineage, commit and commit time) is accepted.
+    #[test]
+    fn a_layer_loads_only_over_its_own_base() {
+        let (layer, _) = live();
+        let bytes = write(&layer, &WriteOptions::new());
+        let expected = layer.base_ref();
+
+        // Another graph of the same content.
+        let other = base();
+        let err = read(&bytes, &other).unwrap_err();
+        let given = BaseRef::of(&other);
+        assert_ne!(given.graph_id(), expected.graph_id());
+        match &err {
+            PersistError::LayerBaseMismatch {
+                expected: e,
+                given: g,
+                ..
+            } => assert_eq!((*e, *g), (expected, given)),
+            other => panic!("expected a base mismatch, got {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "This layer was built over base {expected}, the given base is {given}; rebuild \
+                 the layer over the given base, or load it over the base it was built on"
+            )
+        );
+        assert!(err.to_string().contains("at commit"), "{err}");
+        assert!(
+            err.help().unwrap().contains(&expected.to_string()),
+            "{:?}",
+            err.help()
+        );
+
+        // The base saved and reloaded: the same identity, the layer loads.
+        let mut saved = Vec::new();
+        layer.base().write_snapshot(&mut saved).unwrap();
+        let reloaded = Arc::new(TraversalGraph::read_snapshot(saved.as_slice()).unwrap());
+        assert_eq!(BaseRef::of(&reloaded), expected);
+        let loaded = read(&bytes, &reloaded).unwrap();
+        check(&loaded);
+        assert_eq!(state(&loaded), state(&layer));
+
+        // One more commit on the base: refused.
+        let mut moved = TraversalGraph::read_snapshot(saved.as_slice()).unwrap();
+        moved.traversal_mut().add_v("person").iterate().unwrap();
+        let moved = Arc::new(moved);
+        assert_eq!(BaseRef::of(&moved).graph_id(), expected.graph_id());
+        assert_eq!(BaseRef::of(&moved).commit_seq(), expected.commit_seq() + 1);
+        assert!(matches!(
+            read(&bytes, &moved),
+            Err(PersistError::LayerBaseMismatch { .. })
+        ));
+    }
+
+    /// A layer that holds something does not take a snapshot (as a non-empty graph does not).
+    #[test]
+    fn a_layer_with_changes_refuses_a_load() {
+        let (layer, _) = live();
+        let bytes = write(&layer, &WriteOptions::new());
+        let mut busy = LayeredGraph::over(Arc::clone(layer.base())).unwrap();
+        unit(&mut busy, |l| l.drop_vertex(v(l, "p1")));
+        match read_snapshot_into(bytes.as_slice(), &ReadOptions::new(), busy) {
+            Err(PersistError::Graph(GraphError::Unsupported { .. })) => {}
+            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// A damaged byte of the layer file (the last section) is damage, never a partial load.
+    #[test]
+    fn a_damaged_layer_file_is_corrupt() {
+        let (layer, _) = live();
+        let mut bytes = write(&layer, &WriteOptions::new());
+        let at = bytes.len() - 8;
+        bytes[at] ^= 0x40;
+        assert!(matches!(
+            read(&bytes, layer.base()),
+            Err(PersistError::Corrupt { .. })
+        ));
+    }
+
+    /// The shared form: `read_layer_snapshot` over a `LayerBase` gives a `Graph` of a layer over
+    /// the same shared base graph; the `Graph` write names the base in its info.
+    #[test]
+    fn read_layer_snapshot_shares_the_base() {
+        let base = LayerBase::new(base());
+        let layer = base.new_layer().unwrap();
+        unit(&mut layer.write(), |l| {
+            l.insert_vertex(Some("z".into()), vec!["person".into()], props(&[]))?;
+            Ok(())
+        });
+        let mut bytes = Vec::new();
+        let info =
+            write_graph_snapshot(&layer, &mut bytes, &WriteOptions::new(), ModelCopy::Include)
+                .unwrap();
+        assert_eq!(info.layer_base, Some(*base.base_ref().unwrap()));
+        let loaded = read_layer_snapshot(bytes.as_slice(), &ReadOptions::new(), &base).unwrap();
+        assert_eq!(state(&loaded.read()), state(&layer.read()));
+        assert!(Arc::ptr_eq(loaded.read().base(), base.graph()));
+    }
+
+    /// A `.gsnap` file: written to disk, read back over the base through any `Read`; the
+    /// whole-graph file reader refuses it.
+    #[test]
+    fn a_layer_gsnap_file_round_trips() {
+        let temp = crate::model_fixture::Temp::new("layer-gsnap");
+        let path = temp.join("layer.gsnap");
+        let (layer, _) = live();
+        let file = std::fs::File::create(&path).unwrap();
+        write_snapshot(&layer, std::io::BufWriter::new(file), &WriteOptions::new()).unwrap();
+        let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        let loaded = read_snapshot_into(
+            file,
+            &ReadOptions::new(),
+            LayeredGraph::over(Arc::clone(layer.base())).unwrap(),
+        )
+        .unwrap();
+        assert_loaded(&loaded, &layer, "gsnap");
+        assert!(matches!(
+            persist::read_snapshot_file(&path, &ReadOptions::new()),
+            Err(PersistError::SnapshotKindMismatch { .. })
+        ));
+    }
+
+    /// A layer snapshot's size follows the delta, not the base: a layer touching about 1 % of
+    /// a 20,000-vertex base writes a small fraction of the base's snapshot.
+    #[test]
+    fn a_layer_snapshot_is_the_size_of_its_delta() {
+        const N: usize = 20_000;
+        let mut big = TraversalGraph::new();
+        let mark = big.begin_unit().unwrap();
+        let mut previous = None;
+        for i in 0..N {
+            let node = big
+                .insert_vertex(
+                    Some(format!("v{i}").into()),
+                    vec!["item".into()],
+                    props(&[
+                        ("name", format!("item number {i}").into()),
+                        ("rank", (i as i64).into()),
+                    ]),
+                )
+                .unwrap();
+            if let Some(previous) = previous {
+                big.insert_edge(
+                    Some(format!("e{i}").into()),
+                    Some("next".into()),
+                    previous,
+                    node,
+                    props(&[("w", (i as f64).into())]),
+                )
+                .unwrap();
+            }
+            previous = Some(node);
+        }
+        big.commit_unit(mark).unwrap();
+        let big = Arc::new(big);
+        let mut layer = LayeredGraph::over(Arc::clone(&big)).unwrap();
+        unit(&mut layer, |l| {
+            // 1 %: 100 added vertices with edges, 50 images, 50 removals.
+            for i in 0..100 {
+                let added = l.insert_vertex(
+                    Some(format!("n{i}").into()),
+                    vec!["item".into()],
+                    props(&[("name", format!("new item {i}").into())]),
+                )?;
+                let target = v(l, &format!("v{}", i * 7));
+                l.insert_edge(None, Some("next".into()), added, target, props(&[]))?;
+            }
+            for i in 0..50 {
+                let node = v(l, &format!("v{}", 1000 + i));
+                l.set_vertex_property(node, "rank".into(), (-1i64).into())?;
+                let gone = v(l, &format!("v{}", 5000 + i * 3));
+                l.drop_vertex(gone)?;
+            }
+            Ok(())
+        });
+        let mut whole = Vec::new();
+        big.write_snapshot(&mut whole).unwrap();
+        let delta = write(&layer, &WriteOptions::new());
+        eprintln!(
+            "layer snapshot {} bytes, base snapshot {} bytes ({:.2} %)",
+            delta.len(),
+            whole.len(),
+            delta.len() as f64 * 100.0 / whole.len() as f64
+        );
+        assert!(
+            delta.len() * 20 < whole.len(),
+            "the layer snapshot ({} bytes) is not a small fraction of the base's ({} bytes)",
+            delta.len(),
+            whole.len()
+        );
+        let loaded = read(&delta, &big).unwrap();
+        assert_eq!(loaded.vertex_count().unwrap(), N + 100 - 50);
+        assert_eq!(state_counts(&loaded), state_counts(&layer));
+    }
+
+    /// The counts and the statistics (the full `state` of a 20,000-vertex layer is too long
+    /// to compare row by row in a test).
+    fn state_counts(layer: &LayeredGraph) -> String {
+        format!(
+            "{} {} {:?} {:?}",
+            layer.vertex_count().unwrap(),
+            layer.edge_count().unwrap(),
+            layer.statistics().unwrap(),
+            layer
+                .layer_diff(&LayerDiffRequest::new())
+                .unwrap()
+                .added
+                .len()
+        )
+    }
 }

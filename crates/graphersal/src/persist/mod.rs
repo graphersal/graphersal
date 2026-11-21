@@ -8,7 +8,9 @@
 //!   [`TraversalGraph::write_snapshot`](crate::graph::TraversalGraph::write_snapshot) and
 //!   [`read_snapshot`] / [`TraversalGraph::read_snapshot`](crate::graph::TraversalGraph::read_snapshot).
 //!   Both work for any [`PersistentStorage`](crate::storage::PersistentStorage):
-//!   [`write_snapshot`] takes `&S`, [`read_snapshot_into`] loads into an empty `S`.
+//!   [`write_snapshot`] takes `&S`, [`read_snapshot_into`] loads into an empty `S`. A
+//!   [`LayeredGraph`](crate::storage::LayeredGraph) writes a layer snapshot (its delta and the
+//!   base it was built over), read back over that base with [`read_layer_snapshot`].
 //!   Values are written losslessly (every logical type, NaN payloads, property order,
 //!   multi-label vertices, unlabeled elements); loading does not validate against the schema
 //!   (the data was valid when it was committed), every byte is protected by CRC-32C.
@@ -50,6 +52,7 @@ mod dir;
 mod encoder;
 mod error;
 mod journal;
+pub(crate) mod layer;
 pub(crate) mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 mod model_cache;
@@ -78,8 +81,8 @@ pub use segment::{DEFAULT_CHUNK_BYTES, DEFAULT_SEGMENT_BYTES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use single_file::{SINGLE_FILE_EXTENSION, SingleFileDir};
 pub use snapshot::{
-    ReadOptions, SnapshotInfo, WriteOptions, read_snapshot, read_snapshot_info, read_snapshot_into,
-    write_graph_snapshot, write_snapshot,
+    ReadOptions, SnapshotInfo, WriteOptions, read_layer_snapshot, read_snapshot,
+    read_snapshot_info, read_snapshot_into, write_graph_snapshot, write_snapshot,
 };
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 // A journal header written by hand: a test attaching a journal to another storage than

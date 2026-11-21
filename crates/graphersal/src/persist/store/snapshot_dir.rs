@@ -228,6 +228,18 @@ pub(crate) fn write_graph_snapshot<S: PersistentStorage + ?Sized>(
         })?;
         property_counts[slot] = totals.property_count;
     }
+    // A layer's changes to its base: the layer file (format spec 7.5, kind 128) after the
+    // element segments, as in its packed form.
+    if let Some((base, patch)) = encoder.layer() {
+        let file = crate::persist::layer::encode(base, patch)?;
+        write_file(&tmp.join(crate::persist::layer::LAYER_FILE), |out| {
+            out.put(&file)
+        })?;
+        index.push((
+            crate::persist::layer::row(base, patch.len(), &file),
+            Vec::new(),
+        ));
+    }
     let schema = encoder.schema()?;
     let (_, manifest, _) =
         encoder.manifest(&index, property_counts[0], property_counts[1], &schema)?;

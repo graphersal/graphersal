@@ -213,9 +213,10 @@ pub(crate) fn is_element_kind(kind: u8) -> bool {
 }
 
 /// Whether a segment kind this version does not know is critical (format spec 7.5: kinds
-/// 128-255; a store whose snapshot has one opens read-only).
+/// 128-255; a store whose snapshot has one opens read-only). The layer file (kind 128,
+/// `persist::layer`) is critical too, but known: a snapshot with it loads only into a layer.
 pub(crate) fn is_critical_segment_kind(kind: u8) -> bool {
-    !is_element_kind(kind) && kind >= 128
+    !is_element_kind(kind) && kind >= 128 && kind != super::layer::KIND_LAYER
 }
 
 impl Manifest {

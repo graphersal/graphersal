@@ -1,7 +1,7 @@
 //! [`LayerBase`]: the frozen base a layer is built over, with what the bare
 //! `Arc<TraversalGraph>` lacks: the embedding models of the base's database (the registry a
 //! `Graph<TraversalGraph>` holds beside its storage), a display name, and the base's identity
-//! ([`BaseRef`], not filled yet).
+//! ([`BaseRef`]: lineage id, commit sequence number and commit time, read from the frozen graph).
 
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ const DEFAULT_NAME: &str = "base";
 /// ```
 /// use std::sync::Arc;
 /// use graphersal::prelude::*;
-/// use graphersal::storage::LayerBase;
+/// use graphersal::storage::{BaseRef, LayerBase};
 ///
 /// let base = LayerBase::from_graph(Graph::new(TraversalGraph::tinkerpop_modern()))
 ///     .unwrap()
@@ -40,7 +40,8 @@ const DEFAULT_NAME: &str = "base";
 /// assert_eq!(first.read().vertex_count().unwrap(), 7);
 /// assert_eq!(second.read().vertex_count().unwrap(), 6);
 /// assert_eq!(base.name(), "modern");
-/// assert!(base.base_ref().is_none());
+/// let identity = base.base_ref().unwrap();
+/// assert_eq!(*identity, BaseRef::of(base.graph()));
 /// ```
 #[derive(Clone)]
 #[non_exhaustive]
@@ -57,15 +58,82 @@ struct BaseInner {
     base_ref: Option<BaseRef>,
 }
 
-/// The identity of a layer's base: which graph, at which commit. A placeholder for now:
-/// [`LayerBase::base_ref`] answers `None` in this version; a later one fills it from the
-/// base's Store or snapshot file (graph lineage id, commit sequence and commit time), so a saved
-/// layer can check it is opened over the base it was built on.
+/// The identity of a layer's base: which graph, at which commit. Read from the frozen base
+/// graph itself ([`Self::of`]): its lineage id (`PersistentStorage::graph_id`, what a snapshot
+/// or Store of the base records), its commit sequence number and the time of that commit. A
+/// layer snapshot records the identity of the base it was built over, and a load over another
+/// base is refused (`PersistError::LayerBaseMismatch`, feature `persist`). The time tells two branches apart that reached the same commit sequence number
+/// after an in-place rollback.
 ///
 /// **EXPERIMENTAL**, like [`LayeredGraph`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// ```
+/// use graphersal::prelude::*;
+/// use graphersal::storage::BaseRef;
+///
+/// let base = TraversalGraph::tinkerpop_modern();
+/// let identity = BaseRef::of(&base);
+/// assert_eq!(identity, BaseRef::of(&base));
+/// assert_eq!(identity.commit_seq(), base.last_commit_seq());
+/// assert_eq!(BaseRef::new(7, 3, 1_000).graph_id(), 7);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub struct BaseRef {}
+pub struct BaseRef {
+    graph_id: u128,
+    commit_seq: u64,
+    committed_at: i64,
+}
+
+impl BaseRef {
+    /// The identity of the base graph of lineage `graph_id` at commit `commit_seq`, committed at
+    /// `committed_at` (microseconds since the Unix epoch, UTC).
+    pub fn new(graph_id: u128, commit_seq: u64, committed_at: i64) -> Self {
+        Self {
+            graph_id,
+            commit_seq,
+            committed_at,
+        }
+    }
+
+    /// The identity of `graph` as it is now: its lineage id (created on first use, as a
+    /// snapshot write creates it), its last commit sequence number and that commit's time.
+    pub fn of(graph: &TraversalGraph) -> Self {
+        Self::new(
+            *graph.graph_id.get_or_init(crate::value::uuid::new_v7),
+            graph.undo.last_commit_seq,
+            graph.undo.last_committed_at,
+        )
+    }
+
+    /// The base's lineage id (`PersistentStorage::graph_id`).
+    pub fn graph_id(&self) -> u128 {
+        self.graph_id
+    }
+
+    /// The base's last commit sequence number.
+    pub fn commit_seq(&self) -> u64 {
+        self.commit_seq
+    }
+
+    /// The time of the base's last commit (microseconds since the Unix epoch, UTC).
+    pub fn committed_at(&self) -> i64 {
+        self.committed_at
+    }
+}
+
+/// `graph <lineage id> at commit <seq> (commit time <micros>)`.
+impl std::fmt::Display for BaseRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "graph {} at commit {} (commit time {})",
+            crate::value::uuid::format_canonical(self.graph_id),
+            self.commit_seq,
+            self.committed_at
+        )
+    }
+}
 
 impl std::fmt::Debug for LayerBase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,12 +166,13 @@ impl LayerBase {
     }
 
     fn of(graph: Arc<TraversalGraph>, models: Option<Arc<ModelRegistry>>) -> Self {
+        let base_ref = Some(BaseRef::of(&graph));
         Self {
             inner: Arc::new(BaseInner {
                 graph,
                 models,
                 name: DEFAULT_NAME.to_owned(),
-                base_ref: None,
+                base_ref,
             }),
         }
     }
@@ -125,7 +194,8 @@ impl LayerBase {
         &self.inner.graph
     }
 
-    /// The base's identity ([`BaseRef`]): `None` in this version.
+    /// The base's identity ([`BaseRef::of`] the frozen graph, read when the base was made):
+    /// always `Some` in this version (`None` is kept for a base without an identity).
     pub fn base_ref(&self) -> Option<&BaseRef> {
         self.inner.base_ref.as_ref()
     }
@@ -144,12 +214,18 @@ impl LayerBase {
     /// As [`LayeredGraph::over`]: [`GraphError::Unsupported`] when the base cannot carry a
     /// layer.
     pub fn new_layer(&self) -> Result<Graph<LayeredGraph>, GraphError> {
-        let graph = Graph::new(LayeredGraph::over_base(self)?);
+        Ok(self.share(LayeredGraph::over_base(self)?))
+    }
+
+    /// `layer` (a layer over this base) shared as a [`Graph`] that serves the base's embedding
+    /// models, as [`Self::new_layer`] makes it (a layer snapshot load uses it too).
+    pub(crate) fn share(&self, layer: LayeredGraph) -> Graph<LayeredGraph> {
+        let graph = Graph::new(layer);
         if let Some(models) = &self.inner.models {
             // A fresh graph has no registry yet, so the attach cannot be refused.
             graph.attach_model_registry(Arc::clone(models));
         }
-        Ok(graph)
+        graph
     }
 }
 
@@ -163,6 +239,12 @@ impl LayeredGraph {
     /// As [`LayeredGraph::over`].
     pub fn over_base(base: &LayerBase) -> Result<Self, GraphError> {
         Self::over(Arc::clone(base.graph()))
+    }
+
+    /// The identity of the layer's base ([`BaseRef::of`] the shared base graph): what a layer
+    /// snapshot records and checks at load.
+    pub fn base_ref(&self) -> BaseRef {
+        BaseRef::of(&self.base)
     }
 }
 
@@ -198,7 +280,7 @@ mod tests {
         assert!(!base.serves_models());
         assert!(base.new_layer().unwrap().model_registry().is_none());
         assert_eq!(base.name(), "base");
-        assert_eq!(base.base_ref(), None);
+        assert_eq!(base.base_ref(), Some(&BaseRef::of(base.graph())));
     }
 
     #[test]
@@ -208,5 +290,21 @@ mod tests {
         assert_eq!((base.name(), renamed.name()), ("first", "second"));
         assert!(Arc::ptr_eq(base.graph(), renamed.graph()));
         assert!(format!("{renamed:?}").contains("second"));
+    }
+
+    /// A layer read from its snapshot over a base serves the base's registry, as a new layer
+    /// does.
+    #[cfg(feature = "persist")]
+    #[test]
+    fn a_layer_read_from_a_snapshot_serves_the_bases_registry() {
+        use crate::persist::{ReadOptions, WriteOptions, read_layer_snapshot, write_snapshot};
+        let (graph, registry) = graph_with_models();
+        let base = LayerBase::from_graph(graph).unwrap();
+        let layer = base.new_layer().unwrap();
+        let mut bytes = Vec::new();
+        write_snapshot(&*layer.read(), &mut bytes, &WriteOptions::new()).unwrap();
+        let loaded = read_layer_snapshot(bytes.as_slice(), &ReadOptions::new(), &base).unwrap();
+        assert!(Arc::ptr_eq(&loaded.model_registry().unwrap(), &registry));
+        assert_eq!(loaded.read().base_ref(), *base.base_ref().unwrap());
     }
 }

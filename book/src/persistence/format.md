@@ -953,6 +953,62 @@ kind checks the file's SHA-256, length and CRC-32C against the table (foreign in
 into `blobs/` of the store a packed snapshot is imported into and does not keep the row in the
 stored manifest; a reader without a store skips it like every ignorable file.
 
+**128**, the layer file of a **layer snapshot** (critical). A layer is a graph stored as its
+changes to a frozen base graph (book page *Layered Graphs*); its snapshot holds only those
+changes and loads only over that base. Such a snapshot is an ordinary snapshot whose vertex and
+edge segments hold only the elements the layer **added** (also edges at base vertices, which
+name their endpoints by id like every edge, 7.3), whose manifest holds the layer's own schema,
+whole catalog, lineage id, position, commit time and auto-id sequences (6), and whose segment
+table has exactly one row of kind 128 after the edge rows: `path` `layer.bin`, `first id` the
+base's lineage id as canonical UUID text, `last id` `<commit_seq>@<committed at>` of the base
+(both decimal, the commit time as in 2), `element count` the number of entries below. The
+manifest's vertex, edge and property counts (6.1) are those of the layer's own elements, its
+memory estimate is the layer's own footprint (the base is shared, not counted). The file:
+
+```text
+layer file = magic "GRSLLAYR" | format version u32 | base graph_id (16) | base commit_seq u64
+             | base committed at i64 | entry count u64 | entry*
+entry      = 1 | id string                                   removed base edge
+           | 2 | id string                                   removed base vertex (and its base edges)
+           | 3 | id string | uvar n | label string * n | property map    base vertex image
+           | 4 | id string | label opt_string | 0 | 1 property map         base edge image
+           | 5 | kind u8 | name string                        removed base definition
+```
+
+- The **base reference** (`graph_id`, `commit_seq`, committed at) is the identity of the base
+  the layer was built over: its lineage id (5.4, 6.1) and the position and commit time of its
+  state. It is written twice, in the file's header and in the row's ids, and both MUST agree.
+  A reader MUST refuse to load the snapshot over a base of another identity, before it reads
+  any segment (the row is in the manifest). The commit time tells two branches apart that
+  reached the same `commit_seq` after an in-place rollback (12.5); a store id is not part of
+  it, so a packed export of the same base state is the same base.
+- **Entries** name base elements by **id**, never by position: ids are stable across loads of
+  the same base state, slots are not. An image is the element's whole state in the layer: the
+  vertex's labels in order (the first is primary) and its property map; the edge's label
+  (`opt_string`, none = unlabeled) and, after a marker byte, `0` for "no property map" or `1`
+  and its property map. Property maps are those of 3 with **inline** keys (as in a WAL record,
+  9.3), values the tagged values of 3. A removed definition names a definition of the base's
+  catalog (6.3) the layer removed (the layer's catalog starts as a copy of the base's). Other
+  entry types are invalid in this version; the file's own format version guards them like a
+  record type (15).
+- Entry order: removed base edges, removed base vertices, vertex images, edge images, removed
+  definitions. Removing an element twice (an edge taken by a removed vertex) changes nothing;
+  an image of a missing or removed base element is invalid.
+- **Load order.** A reader builds a fresh layer over the base, applies the schema and the
+  catalog (6), then EVERY entry, then the layer's vertex and edge segments (an added element
+  may reuse the id of a base element the layer removed), then rebuilds what it derives. In a
+  stream the layer file follows the element segments (8), so a reader holds the checked
+  segment bytes until it has read the layer file: memory in proportion to the layer's
+  snapshot, never to the base.
+- A reader that knows the kind MUST refuse to load a layer snapshot as a whole graph and a
+  whole-graph snapshot (no kind-128 row) into a layer. A layer writes no embedding model and
+  carries no blob (4.5, 4.6): its catalog's model definitions are copies of the base's, whose
+  blobs stay with the base.
+- *Informative:* a reader older than this kind (Graphersal 0.6.x and before) treats the row as
+  an unknown critical file: a store holding the snapshot opens read-only for it (16 rule 3), but
+  a packed snapshot loaded without a store shows only the layer's added elements, as if they
+  were the whole graph.
+
 ## 8. The packed snapshot
 
 A packed snapshot (`.gsnap`) is a whole snapshot in one stream:
@@ -969,7 +1025,7 @@ trailer = CRC-32C u32 of every byte before it, from the magic on
 | 2 | `schema.json` |
 | 3 | a vertex segment (7) |
 | 4 | an edge segment |
-| 5 | a named extra file: `name string` followed by the file's bytes; the file of a segment-table row of another kind (7.5), `name` = the row's path |
+| 5 | a named extra file: `name string` followed by the file's bytes; the file of a segment-table row of another kind (7.5), `name` = the row's path (a blob, a model file, the layer file of a layer snapshot) |
 | 0, 6..255 | invalid |
 
 A packed snapshot exported from a store carries the store's embedding models (4.5) unless the
@@ -1338,6 +1394,8 @@ the newest), then replay its replay set (9.7) along the lineage chain (5.4) up t
 - A snapshot load does **not** validate the data against the stored schema: the data was valid
   when it was committed, and integrity comes from the checksums. It restores the catalog of
   definitions from the manifest (6.3).
+- A layer snapshot (7.5, kind 128) loads only into a fresh layer over the base it names, in the
+  order of 7.5: schema, catalog, the layer file's entries, then the layer's own segments.
 - WAL replay applies mutations without running commit hooks or schema validation; op 10 stores
   or removes a definition.
 - A read-write open whose loaded state holds a critical definition of a kind the reader does not
@@ -2079,7 +2137,8 @@ file format version 3 (Graphersal 0.3.x); its version 2 files stay, the files wr
 3 (a new WAL segment, new snapshots), and from then on 0.2.x refuses the store as newer (15).
 - New definition kinds (6.3), new payload keys of a known kind, new segment kinds (7.5) and
   named extra files (8) do **not** change the version: the rules of 16 tell every reader how to
-  treat what it does not know.
+  treat what it does not know. The layer file (7.5, kind 128) came this way, within file format
+  version 4.
 
 ## 16. Extensibility
 
