@@ -210,7 +210,9 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
   layer snapshot, a layer refuses a whole-graph snapshot: `PersistError::SnapshotKindMismatch`)
   and so must the base (`PersistError::LayerBaseMismatch` names both bases: rebuild the layer
   or load it over its own base). The base's own snapshot or Store keeps its identity, so a
-  base saved and loaded again carries its layers. A layer Store (`Store` with WAL and
+  base saved and loaded again carries its layers. A layer snapshot's header, manifest and
+  layer file are of file format version 5 (plain snapshots stay at 4), so Graphersal 0.6.x
+  and older refuse it as written by a newer version. A layer Store (`Store` with WAL and
   checkpoints over a layer) is not there yet.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.

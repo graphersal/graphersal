@@ -529,7 +529,12 @@ pub(crate) fn write_packed_carrying<S: PersistentStorage + ?Sized, W: Write>(
     };
     let mut head = Vec::with_capacity(16);
     head.extend_from_slice(PACKED_MAGIC);
-    head.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    let version = if layer_file.is_some() {
+        super::codec::LAYER_FORMAT_VERSION
+    } else {
+        FORMAT_VERSION
+    };
+    head.extend_from_slice(&version.to_le_bytes());
     head.extend_from_slice(&(2 + plans.len() as u32 + extra_sections).to_le_bytes());
     out.put(&head)?;
     out.section(SECTION_MANIFEST, &manifest)?;
@@ -743,6 +748,31 @@ impl<R: Read> CrcReader<R> {
     }
 }
 
+/// The packed header's version `version` against its manifest: the layer version
+/// (`LAYER_FORMAT_VERSION`, format spec 7.5, 15) exactly when the snapshot is a layer snapshot.
+/// A layer version without a layer file is a newer version's snapshot; a layer snapshot under
+/// an older version word is damage (no writer makes one).
+fn check_packed_version(version: u32, manifest: &Manifest) -> Result<(), PersistError> {
+    let layer = manifest.version_word() == super::codec::LAYER_FORMAT_VERSION;
+    match (version == super::codec::LAYER_FORMAT_VERSION, layer) {
+        (true, false) => Err(PersistError::UnsupportedVersion {
+            location: PACKED.into(),
+            found: version,
+            supported: FORMAT_VERSION,
+        }),
+        (false, true) => Err(PersistError::corrupt(
+            PACKED,
+            8,
+            format!(
+                "a layer snapshot under the version word {version} (a layer snapshot is of \
+                 version {})",
+                super::codec::LAYER_FORMAT_VERSION
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Reads the packed header and the manifest section.
 fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), PersistError> {
     let magic = source.fixed::<8>("header")?;
@@ -754,7 +784,7 @@ fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), Pers
         ));
     }
     let version = u32::from_le_bytes(source.fixed::<4>("header")?);
-    if !super::codec::readable_version(version) {
+    if !super::codec::readable_layer_version(version) {
         return Err(PersistError::UnsupportedVersion {
             location: PACKED.into(),
             found: version,
@@ -764,6 +794,7 @@ fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), Pers
     let sections = u32::from_le_bytes(source.fixed::<4>("header")?);
     let (start, bytes) = source.section(SECTION_MANIFEST, MAX_META_SECTION_BYTES, "manifest")?;
     let manifest = Manifest::decode(&bytes).map_err(|err| err.at("manifest", 0))?;
+    check_packed_version(version, &manifest)?;
     let _ = start;
     if manifest.fixed.segment_count as u64 + 2 != u64::from(sections) {
         return Err(PersistError::corrupt(
@@ -811,7 +842,7 @@ impl<R: Read> PackedReader<R> {
             ));
         }
         let version = u32::from_le_bytes(source.fixed::<4>("header")?);
-        if !super::codec::readable_version(version) {
+        if !super::codec::readable_layer_version(version) {
             return Err(PersistError::UnsupportedVersion {
                 location: PACKED.into(),
                 found: version,
@@ -822,6 +853,7 @@ impl<R: Read> PackedReader<R> {
         let (_, manifest_bytes) =
             source.section(SECTION_MANIFEST, MAX_META_SECTION_BYTES, "manifest")?;
         let manifest = Manifest::decode(&manifest_bytes).map_err(|err| err.at("manifest", 0))?;
+        check_packed_version(version, &manifest)?;
         if manifest.fixed.segment_count as u64 + 2 != u64::from(sections) {
             return Err(PersistError::corrupt(
                 PACKED,

@@ -17,8 +17,16 @@ use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime
 use crate::value::vector::MAX_VECTOR_DIMENSION;
 use crate::value::{BlobRef, ElementProperty, PropertyMap, Vector, VectorElement};
 
-/// The file format version every file of this build writes (format spec 15).
+/// The file format version every file of this build writes (format spec 15), except the
+/// files of a layer snapshot ([`LAYER_FORMAT_VERSION`]).
 pub(crate) const FORMAT_VERSION: u32 = 4;
+
+/// The file format version of a LAYER snapshot's packed header, manifest and layer file
+/// (format spec 7.5 kind 128, 15): version 4 plus the layer file. Releases up to 0.6 read only
+/// up to version 4, so they refuse a layer snapshot as written by a newer version instead of
+/// taking the layer's own elements for a whole graph. This build accepts it only where a layer
+/// snapshot has it ([`readable_layer_version`]); in any other file it is newer.
+pub(crate) const LAYER_FORMAT_VERSION: u32 = 5;
 
 /// The oldest file format version this build reads: version 1 (Graphersal 0.1.x) differs from
 /// version 2 only by the temporal value tags it does not have, version 2 (0.2.x) from version 3
@@ -48,6 +56,14 @@ const NANOS_PER_SECOND: i128 = 1_000_000_000;
 #[inline]
 pub(crate) fn readable_version(version: u32) -> bool {
     (MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&version)
+}
+
+/// Whether this build reads a packed header or manifest of format `version`: every
+/// [`readable_version`], and [`LAYER_FORMAT_VERSION`], which the caller then requires to come
+/// with a layer file (a snapshot without one is of a newer version).
+#[inline]
+pub(crate) fn readable_layer_version(version: u32) -> bool {
+    readable_version(version) || version == LAYER_FORMAT_VERSION
 }
 
 /// The file format version a decoded file was written with; the current one by default (what

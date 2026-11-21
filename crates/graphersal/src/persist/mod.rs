@@ -111,7 +111,11 @@ pub const SNAPSHOT_EXTENSION: &str = "gsnap";
 /// The version of the file formats this build writes: packed snapshots, snapshot manifests and
 /// segments, WAL segments (format spec 15). This build also reads version 1 (Graphersal 0.1.x),
 /// which differs only by the temporal value tags it does not have, so a `.gsnap` written by
-/// 0.1.x loads here; a file of this version is not readable by a build of version 1.
+/// 0.1.x loads here; a file of this version is not readable by a build of version 1. The one
+/// exception: the packed header, manifest and layer file of a LAYER snapshot (a
+/// `LayeredGraph`'s, [`read_layer_snapshot`]) are written in version 5, so a build that reads
+/// only up to version 4 refuses it as newer instead of loading the layer's own elements as a
+/// whole graph (format spec 7.5, 15).
 pub const FORMAT_VERSION: u32 = codec::FORMAT_VERSION;
 
 /// The version of the Store format this build writes and reads: the version word of a store's

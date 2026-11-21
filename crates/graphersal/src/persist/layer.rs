@@ -17,7 +17,7 @@
 use compact_str::CompactString;
 
 use super::codec::{
-    self, DecodeError, DecodeResult, FORMAT_VERSION, InlineKeys, Reader, put_opt_str,
+    self, DecodeError, DecodeResult, InlineKeys, LAYER_FORMAT_VERSION, Reader, put_opt_str,
     put_properties, put_str, put_u8, put_u32, put_u64, put_uvar,
 };
 use super::error::PersistError;
@@ -52,7 +52,7 @@ pub(crate) const LAYER_LOCATION: &str = "layer file";
 pub(crate) fn encode(base: &BaseRef, patch: &[BasePatch]) -> Result<Vec<u8>, PersistError> {
     let mut out = Vec::with_capacity(HEADER_BYTES + patch.len() * 16);
     out.extend_from_slice(LAYER_MAGIC);
-    put_u32(&mut out, FORMAT_VERSION);
+    put_u32(&mut out, LAYER_FORMAT_VERSION);
     out.extend_from_slice(&base.graph_id().to_be_bytes());
     put_u64(&mut out, base.commit_seq());
     out.extend_from_slice(&base.committed_at().to_le_bytes());
@@ -180,7 +180,16 @@ pub(crate) fn decode(bytes: &[u8], max_depth: usize) -> DecodeResult<LayerFile> 
         return Err(DecodeError::new(0, "not a layer file (bad magic)"));
     }
     let version = r.u32()?;
-    DecodeError::check_version(8, "layer file", version)?;
+    // Written only in the layer version (format spec 7.5, 15).
+    if version > LAYER_FORMAT_VERSION {
+        return Err(DecodeError::newer(8, "layer file", version));
+    }
+    if version != LAYER_FORMAT_VERSION {
+        return Err(DecodeError::new(
+            8,
+            format!("layer file format version {version}"),
+        ));
+    }
     let mut r = r.with_version(version);
     let base = BaseRef::new(r.u128_be()?, r.u64()?, r.i64()?);
     let count_at = r.offset();
@@ -292,7 +301,7 @@ mod tests {
         trailing.push(0);
         assert!(decode(&trailing, 64).is_err());
         let mut newer = bytes.clone();
-        newer[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        newer[8..12].copy_from_slice(&(LAYER_FORMAT_VERSION + 1).to_le_bytes());
         let err = decode(&newer, 64).unwrap_err();
         assert!(err.at(LAYER_LOCATION, 0).to_string().contains("newer"));
         let mut bad_type = bytes;
@@ -355,7 +364,7 @@ mod tests {
             }
         }
         let mut out = PACKED_MAGIC.to_vec();
-        out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&codec::FORMAT_VERSION.to_le_bytes());
         out.extend_from_slice(&(2 + manifest.segments.len() as u32).to_le_bytes());
         let mut section = |kind: u8, bytes: &[u8]| {
             out.push(kind);
@@ -408,13 +417,15 @@ mod tests {
             read_snapshot(packed.as_slice(), &ReadOptions::new()),
             Err(PersistError::SnapshotKindMismatch { .. })
         ));
+        // A whole-graph Store of it: its manifest's layer version is newer for this build's
+        // Store (no layer Store yet), never damage.
         assert!(matches!(
             Store::create_from_packed(
                 crate::persist::MemDir::new(),
                 packed.as_slice(),
                 StoreOptions::new()
             ),
-            Err(PersistError::SnapshotKindMismatch { .. })
+            Err(PersistError::UnsupportedVersion { found: 5, .. })
         ));
         // A reader for which the row is an unknown critical kind: read-only, nothing written.
         let unknown = with_layer_kind(&packed, 200);
@@ -429,6 +440,66 @@ mod tests {
         assert!(matches!(
             store.checkpoint(None),
             Err(PersistError::ReadOnly { .. })
+        ));
+    }
+
+    /// The version gate of releases up to 0.6 (they read file format versions 1 to 4: the
+    /// packed header, every manifest of a store's header walk, `check_version`) refuses a layer
+    /// snapshot as written by a newer version, in its packed form and as a snapshot directory;
+    /// a whole-graph snapshot keeps version 4 and passes that gate.
+    #[test]
+    fn releases_up_to_0_6_refuse_a_layer_snapshot_as_newer() {
+        use super::super::manifest::{FIXED_BYTES, Manifest};
+        use super::super::snapshot::PackedReader;
+        /// The gate of a 0.6 reader: versions 1..=4, a newer one refused, never damage.
+        fn old_gate(what: &str, version: u32) -> Result<(), PersistError> {
+            let old_max = 4;
+            if version > old_max {
+                return Err(PersistError::UnsupportedVersion {
+                    location: what.into(),
+                    found: version,
+                    supported: old_max,
+                });
+            }
+            Ok(())
+        }
+        let version_at =
+            |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let (base, layer) = layer_snapshot();
+        // The packed form: the header's version word.
+        assert_eq!(version_at(&layer, 8), LAYER_FORMAT_VERSION);
+        assert!(matches!(
+            old_gate("packed snapshot", version_at(&layer, 8)),
+            Err(PersistError::UnsupportedVersion { found: 5, .. })
+        ));
+        // The snapshot directory form: its manifest (what a store's header walk reads first).
+        let reader = PackedReader::open(layer.as_slice()).unwrap();
+        let manifest = reader.manifest_bytes.clone();
+        assert_eq!(version_at(&manifest, 8), LAYER_FORMAT_VERSION);
+        assert_eq!(version_at(&manifest, manifest.len() - FIXED_BYTES + 8), 5);
+        assert!(old_gate("manifest", version_at(&manifest, 8)).is_err());
+        let mut decoded = Manifest::decode(&manifest).unwrap();
+        assert_eq!(decoded.encode(), manifest, "re-encoded in the same version");
+        // The element segments stay version 4 (nothing in them changed).
+        let mut segment = Vec::new();
+        let mut reader = reader;
+        reader.copy_segment(&mut segment).unwrap();
+        assert_eq!(version_at(&segment, 8), codec::FORMAT_VERSION);
+        // A whole graph: version 4 everywhere, through the old gate.
+        let mut whole = Vec::new();
+        base.write_snapshot(&mut whole).unwrap();
+        assert_eq!(version_at(&whole, 8), codec::FORMAT_VERSION);
+        assert!(old_gate("packed snapshot", version_at(&whole, 8)).is_ok());
+        // This build: the layer version without a layer file is a newer version's snapshot.
+        let plain = with_layer_kind(&layer, 200);
+        let mut forged = plain.clone();
+        forged[8..12].copy_from_slice(&LAYER_FORMAT_VERSION.to_le_bytes());
+        let trailer_at = forged.len() - 4;
+        let trailer = codec::crc(&forged[..trailer_at]);
+        forged[trailer_at..].copy_from_slice(&trailer.to_le_bytes());
+        assert!(matches!(
+            crate::persist::read_snapshot(forged.as_slice(), &Default::default()),
+            Err(PersistError::UnsupportedVersion { found: 5, .. })
         ));
     }
 }
