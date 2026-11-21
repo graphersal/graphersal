@@ -55,6 +55,13 @@ impl fmt::Display for MemoryReport {
             None => write!(f, "no structure reported by the storage")?,
         }
         write!(f, ", properties {}", human(self.property_bytes()))?;
+        if self.shared_bytes > 0 {
+            write!(
+                f,
+                ", shared base {} (not counted)",
+                human(self.shared_bytes)
+            )?;
+        }
         if let Some(live) = self.tracked_live_bytes {
             write!(f, ", process heap {}", human(live))?;
         }
@@ -65,6 +72,12 @@ impl fmt::Display for MemoryReport {
                 "Sampled: {} of about {} elements read (every {}th per label), figures \
                  extrapolated",
                 self.visited_elements, elements, self.sample_every
+            )?;
+        }
+        if self.scope == super::MemoryReportScope::Delta {
+            writeln!(
+                f,
+                "Scope: delta (only the elements the storage holds of its own)"
             )?;
         }
         writeln!(f, "Took {:.1} ms", self.elapsed_micros as f64 / 1000.0)?;
@@ -253,6 +266,17 @@ impl fmt::Display for MemoryReport {
                 human(totals.dedup_table_bytes),
                 human(totals.compression_dictionary_bytes)
             )?;
+            if structure.base_stubs + structure.removed_base_vertices + structure.removed_base_edges
+                > 0
+            {
+                writeln!(
+                    f,
+                    "  base: {} stubs, {} vertices and {} edges removed",
+                    structure.base_stubs,
+                    structure.removed_base_vertices,
+                    structure.removed_base_edges
+                )?;
+            }
         }
         Ok(())
     }

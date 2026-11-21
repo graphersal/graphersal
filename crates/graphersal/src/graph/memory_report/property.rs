@@ -190,6 +190,7 @@ fn totals(stats: &MemoryStats) -> ElementProperty {
     map.insert("dedup_table_bytes", int(stats.dedup_table_bytes));
     map.insert("shape_bytes", int(stats.shape_bytes));
     map.insert("total_bytes", int(stats.total_bytes()));
+    map.insert("shared_bytes", int(stats.shared_bytes));
     object(map)
 }
 
@@ -210,6 +211,12 @@ fn structure(structure: &StructureMemory) -> ElementProperty {
     map.insert("id_index_bytes", int(structure.id_index_bytes));
     map.insert("label_index_bytes", int(structure.label_index_bytes));
     map.insert("shape_table_shapes", int(structure.shape_table_shapes));
+    map.insert("base_stubs", int(structure.base_stubs));
+    map.insert(
+        "removed_base_vertices",
+        int(structure.removed_base_vertices),
+    );
+    map.insert("removed_base_edges", int(structure.removed_base_edges));
     object(map)
 }
 
@@ -230,7 +237,11 @@ impl MemoryReport {
     /// `rows_omitted_bytes`, `labels`, `labels_omitted`, `labels_omitted_elements`,
     /// `labels_omitted_bytes`, `labels_omitted_property_bytes`, `shapes`,
     /// `indexes`, `compression_rules`, `structure` (`null` when the storage does not report
-    /// one), `property_bytes`, `estimated_total_bytes`, `tracked_live_bytes`, `components`
+    /// one; its `totals` carry `shared_bytes`, and `base_stubs`, `removed_base_vertices` and
+    /// `removed_base_edges` are a layer's, else `0`), `property_bytes`,
+    /// `estimated_total_bytes`, `shared_bytes` ([`MemoryReport::shared_bytes`]: a layer's
+    /// base, outside the estimated total), `scope` (`"all"` or `"delta"`),
+    /// `tracked_live_bytes`, `components`
     /// (`[{name, detail, bytes, exact}]`, [`MemoryReport::components`]), `attributed_bytes`,
     /// `unattributed_bytes`, `sampled`, `sample_every`, `visited_elements`, `path_depth`,
     /// `commit_seq` and `elapsed_ms`. A property row names its `element`, `label` and `path`
@@ -288,6 +299,8 @@ impl MemoryReport {
             "estimated_total_bytes",
             optional(self.estimated_total_bytes()),
         );
+        map.insert("shared_bytes", int(self.shared_bytes));
+        map.insert("scope", text(self.scope.as_str()));
         map.insert("tracked_live_bytes", optional(self.tracked_live_bytes));
         map.insert("components", list(&self.components, component));
         map.insert("attributed_bytes", int(self.attributed_bytes()));

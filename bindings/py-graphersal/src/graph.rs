@@ -1507,8 +1507,10 @@ impl Graph {
     /// heap. ``max_elements``/``sample_every`` sample a large graph (figures extrapolated per
     /// label); ``limit`` keeps the property rows and the label rows with the most bytes (default
     /// 500), ``max_rows``/``max_labels`` one list each; the rows left out are counted with their
-    /// bytes (``rows_omitted``, ``rows_omitted_bytes``, ``labels_omitted``, ...).
-    #[pyo3(signature = (*, sample_every=None, max_elements=None, max_rows=None, max_labels=None, limit=None, policy=None))]
+    /// bytes (``rows_omitted``, ``rows_omitted_bytes``, ``labels_omitted``, ...). ``scope`` is
+    /// ``"all"`` (the default: every element the graph shows) or ``"delta"`` (a layered graph's
+    /// own elements only, its base as ``shared_bytes``; the whole graph for any other graph).
+    #[pyo3(signature = (*, sample_every=None, max_elements=None, max_rows=None, max_labels=None, limit=None, scope=None, policy=None))]
     #[allow(clippy::too_many_arguments)]
     fn memory_report(
         &self,
@@ -1518,6 +1520,7 @@ impl Graph {
         max_rows: Option<i64>,
         max_labels: Option<i64>,
         limit: Option<i64>,
+        scope: Option<String>,
         policy: Option<PyRef<'_, AccessPolicy>>,
     ) -> PyResult<Py<PyAny>> {
         let params = PyDict::new(py);
@@ -1534,6 +1537,10 @@ impl Graph {
                 params.set_item(name.as_str(), value)?;
                 fields.push(format!("{key}: {name}"));
             }
+        }
+        if let Some(scope) = scope {
+            params.set_item("mr_scope", scope)?;
+            fields.push("scope: mr_scope".to_string());
         }
         let script = format!("g.memory_report(#{{{}}})", fields.join(", "));
         self.run(py, &script, Some(&params), false, policy.as_deref())

@@ -2732,6 +2732,30 @@ mod tests {
         }
     }
 
+    /// The `scope` key passes through: a plain graph owns all it shows, so `"delta"` reports
+    /// the same rows as `"all"`, with nothing shared; any other value is refused.
+    #[test]
+    fn the_memory_report_passes_the_scope_through() {
+        let s = modern();
+        let all = s.memory_report(&json!({"scope": "all"}));
+        let delta = s.memory_report(&json!({"scope": "delta"}));
+        assert_eq!(delta["ok"], true, "{delta}");
+        assert_eq!(all["report"]["scope"], "all");
+        assert_eq!(delta["report"]["scope"], "delta");
+        assert_eq!(delta["report"]["properties"], all["report"]["properties"]);
+        assert_eq!(delta["report"]["shared_bytes"], 0);
+        assert_eq!(s.memory_report(&Value::Null)["report"]["scope"], "all");
+        for spec in [json!({"scope": "base"}), json!({"scope": 1})] {
+            let answer = s.memory_report(&spec);
+            assert_eq!(answer["ok"], false);
+            let error = answer["error"].as_str().unwrap();
+            assert!(
+                error.contains(r#"scope must be "all" or "delta""#),
+                "{spec}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn the_memory_report_of_many_labels_is_bounded_and_counts_the_rest() {
         if crate::skip_on_ci("timing") {

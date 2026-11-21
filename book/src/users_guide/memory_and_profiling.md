@@ -209,10 +209,14 @@ The answer is a map:
 - `structure`: what only the storage knows: `vertex_slots`/`edge_slots` (`live`, `tombstoned`:
   vacant slots of removed elements below the highest live one, `spare`: allocated above it,
   `slot_bytes`), `id_index_bytes`, `label_index_bytes`, `shape_table_shapes` and the `totals` of
-  `memory_usage()`. `null` for a storage that does not report one; everything else is computed
-  for any storage.
+  `memory_usage()` (with its `shared_bytes`). A layered graph adds `base_stubs` (base vertices
+  holding a slot of the layer: an image or edges of the layer), `removed_base_vertices` and
+  `removed_base_edges`; these are `0` for any other graph. `null` for a storage that does not
+  report one; everything else is computed for any storage.
 - `property_bytes` (equal to `memory_usage().property_bytes` for a full report),
-  `estimated_total_bytes`, `tracked_live_bytes` (the process heap where a tracking allocator is
+  `estimated_total_bytes`, `shared_bytes` (the memory shared with other graphs, outside the
+  estimated total: a layered graph's base, `0` otherwise), `scope` (`"all"` or `"delta"`, see
+  below), `tracked_live_bytes` (the process heap where a tracking allocator is
   installed: the CLI, the dev server, the playground, Python; read when the report starts),
   `components`, `attributed_bytes` and `unattributed_bytes` (see
   [Where the process memory goes](#where-the-process-memory-goes)), `sampled`, `sample_every`,
@@ -235,6 +239,20 @@ false`. A graph with very many labels reads about one element per label.
 g.memory_report(#{sample_every: 2, max_rows: 3, max_labels: 2}).sampled   // true
 ```
 
+`#{scope: "delta"}` reports only what the graph holds of its own. On a
+[layered graph](layered_graphs.md) the walk then reads only the added and modified elements
+(the layer's delta), the `structure` is the layer's own, and the shared base is the single
+figure `shared_bytes`, so a layer does not "weigh" the base it shares with other layers. The
+default `#{scope: "all"}` walks every element the graph shows, so a report on a layer has the
+same rows as a report on the graph it shows. A plain graph owns everything it shows: there
+`"delta"` reports the whole graph, exactly as `"all"`, and does not fail, so a query asking for
+the delta works on any graph.
+
+```rhai,graph=modern,script
+let r = g.memory_report(#{scope: "delta"});
+[r.scope, r.shared_bytes, r.properties.len()]   // ["delta", 0, 6]
+```
+
 The walk runs under a read lock: writers wait while it runs. A full report of about 1 million
 elements took about 0.9 s in a release build, a sample of 20 000 elements about 50 ms. The
 generated `large` graph (111 111 vertices, each with its own label: 333 330 property rows)
@@ -247,7 +265,9 @@ keeps every row); the REPL's `/memory [max_elements]` prints the summary (the 20
 and properties, then how many more there are); the dev server `POST /api/memory/report` (the
 playground's Optimize -> Memory, at most 500 rows per list with a "N more not shown" line) and
 the MCP tool `memory_report` (at most 50 property and label rows unless `limit` or
-`max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=.., limit=..)`.
+`max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=.., limit=..,
+scope=..)`. Rust takes the scope as `MemoryReportRequest::with_scope(MemoryReportScope::Delta)`;
+the session, the dev server and the MCP tool take the key `scope`.
 
 ```rust
 use graphersal::prelude::*;
@@ -264,7 +284,9 @@ println!("{report}");
 ```
 
 A storage of your own gets every part except `structure` without any work; it fills that one by
-overriding `GraphStorage::memory_structure` (default `None`).
+overriding `GraphStorage::memory_structure` (default `None`). The delta scope reads the
+storage's `capabilities().layered` and `vertex_layer`/`edge_layer`; a storage without layers
+needs nothing for it.
 
 ### Where the process memory goes
 

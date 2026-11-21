@@ -214,9 +214,9 @@ pub use crate::graph::compression::CompressionStats;
 pub use crate::graph::compression_estimate::{CompressionEstimate, CompressionEstimateRequest};
 pub use crate::graph::memory_report::{
     DegreeStats, LabelMemory, MemoryComponent, MemoryComponents, MemoryReport,
-    MemoryReportProgress, MemoryReportRequest, MemorySource, PropertyMemory, PropertyTarget,
-    RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket, SlotUsage, StringMemory,
-    StructureMemory, ValueTypeCount, VectorMemory, register_memory_source,
+    MemoryReportProgress, MemoryReportRequest, MemoryReportScope, MemorySource, PropertyMemory,
+    PropertyTarget, RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket,
+    SlotUsage, StringMemory, StructureMemory, ValueTypeCount, VectorMemory, register_memory_source,
 };
 pub use crate::graph::property_index::{
     DuplicateValue, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
