@@ -24,9 +24,9 @@ impl WriteView for LayeredGraph {
     type Vertex = LayeredVertex;
     type Edge = LayeredEdge;
 
-    /// The base's schema until the layer has its own (S1.7).
+    /// The layer's own schema.
     fn schema(&self) -> impl Deref<Target = GraphSchema> + '_ {
-        self.base.schema.read()
+        &self.schema
     }
 
     fn vertex(&self, vertex: LayeredVertex) -> Option<(&[CompactString], &PropertyMap)> {

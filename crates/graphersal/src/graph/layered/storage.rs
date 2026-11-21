@@ -2,15 +2,15 @@
 //! with one bit test, no lookup) merged with the delta; every write runs its write rule
 //! (`graph/write_rules.rs`) first and then stores in the delta. Drops of base elements leave a
 //! tombstone (S1.5); property, path and label writes to base elements go into images (S1.6,
-//! `delta` module docs).
+//! `delta` module docs). The schema and the catalog are the layer's own copies (S1.7).
 
 use compact_str::CompactString;
 
 use super::LayeredGraph;
 use super::delta::{PropertyChange, VertexView};
 use super::handle::{LayeredEdge, LayeredVertex};
-use crate::error::GraphError;
-use crate::graph::definition::{Definition, DefinitionKind};
+use crate::error::{DefinitionError, GraphError, SchemaError};
+use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
 use crate::graph::topology::Direction;
@@ -21,6 +21,36 @@ use crate::graph::{
     PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates, VertexHandle,
 };
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
+
+/// The `operation` of the refusal of a schema with vector rules on a layer.
+const VECTOR_RULES: &str =
+    "vector rules (properties derived by an embedder) on a layered graph yet";
+
+/// The `operation` of the refusal of a property index definition on a layer.
+const PROPERTY_INDEXES: &str = "property index definitions on a layered graph yet";
+
+/// The `operation` of the refusal of a compression rule on a layer.
+const COMPRESSION_RULES: &str = "compression rules on a layered graph yet";
+
+/// The `operation` of the refusal of an embedding model definition on a layer.
+const MODELS: &str = "embedding model definitions on a layered graph yet";
+
+/// Whether the layer's catalog can take (or remove) a definition of `kind`: saved queries,
+/// jobs, host kinds and kinds this version does not know (kept opaque, as `TraversalGraph`
+/// keeps them) need no storage machinery. Property indexes and compression rules need index
+/// and value machinery over base + delta, models belong to the vector rules: refused until
+/// the layer has index deltas (stage 4), with an error naming the limitation.
+fn check_layer_kind(kind: DefinitionKind) -> Result<(), GraphError> {
+    if kind.is_property_index() {
+        Err(GraphError::unsupported(PROPERTY_INDEXES))
+    } else if kind == DefinitionKind::COMPRESSION {
+        Err(GraphError::unsupported(COMPRESSION_RULES))
+    } else if kind == DefinitionKind::MODEL {
+        Err(GraphError::unsupported(MODELS))
+    } else {
+        Ok(())
+    }
+}
 
 /// The labels of a vertex view (empty for none).
 #[inline]
@@ -285,9 +315,9 @@ impl GraphStorage for LayeredGraph {
         Ok(Some(&self.statistics))
     }
 
-    /// The base's schema.
+    /// The layer's own schema (the base's copied at creation, then the layer's `set_schema`).
     fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
-        GraphStorage::get_schema(&*self.base)
+        Ok((!self.schema.is_empty()).then(|| self.schema.clone()))
     }
 
     fn declared_property_schema(
@@ -296,12 +326,36 @@ impl GraphStorage for LayeredGraph {
         labels: &[CompactString],
         key: &str,
     ) -> Result<Option<PropertySchema>, GraphError> {
-        GraphStorage::declared_property_schema(&*self.base, kind, labels, key)
+        Ok(self.schema.declared_property(kind, labels, key).cloned())
     }
 
-    /// The base's catalog.
+    /// Checks the layer's current state (base elements as the layer shows them, images, added
+    /// elements) against `schema` exactly as `TraversalGraph` checks its own (only the labels
+    /// whose declaration changed while the mode stays `Open`/`Closed`), the same errors, then
+    /// stores it in the layer; the base's schema is never written. A schema with vector rules
+    /// is refused (not supported on a layered graph yet).
+    fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
+        if crate::graph::vector_rules::has_rules(&schema) {
+            return Err(GraphError::unsupported(VECTOR_RULES));
+        }
+        // As `TraversalGraph::set_schema_recorded`: a vector property may name its model by
+        // repository; the schema stores the identity of the catalog's current revision.
+        let schema = crate::graph::model_definition::resolve_model_names(&self.catalog, schema);
+        let report =
+            crate::graph::schema::apply::scan_storage_change(&*self, Some(&self.schema), &schema)?;
+        if !report.is_empty() {
+            return Err(SchemaError::ExistingDataViolatesSchema {
+                report: Box::new(report),
+            }
+            .into());
+        }
+        self.schema = schema;
+        Ok(())
+    }
+
+    /// The layer's own catalog (the base's copied at creation, then the layer's writes).
     fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
-        GraphStorage::definitions(&*self.base)
+        Ok(self.catalog.iter())
     }
 
     fn definition(
@@ -309,7 +363,47 @@ impl GraphStorage for LayeredGraph {
         kind: DefinitionKind,
         name: &str,
     ) -> Result<Option<&Definition>, GraphError> {
-        GraphStorage::definition(&*self.base, kind, name)
+        Ok(self.catalog.get(kind, name))
+    }
+
+    fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
+        self.set_definitions(vec![definition])
+    }
+
+    /// Stores each definition in turn as `TraversalGraph` does (validated, an equal one again
+    /// is no change, at most `MAX_DEFINITIONS`), in the layer's catalog only, all or nothing:
+    /// a refused definition leaves the catalog as it was, as on a `TraversalGraph`, which makes
+    /// the list one unit of its own. A kind that needs storage machinery is refused
+    /// (`check_layer_kind`).
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        // The catalog is small (at most `MAX_DEFINITIONS`) and written rarely: the changes go
+        // into a copy that replaces the catalog once every definition passed.
+        let mut catalog = self.catalog.clone();
+        for definition in definitions {
+            check_layer_kind(definition.kind())?;
+            definition.validate()?;
+            let current = catalog.get(definition.kind(), definition.name());
+            if current == Some(&definition) {
+                continue;
+            }
+            if current.is_none() && catalog.len() >= MAX_DEFINITIONS {
+                return Err(DefinitionError::TooManyDefinitions {
+                    limit: MAX_DEFINITIONS,
+                }
+                .into());
+            }
+            catalog.insert(definition);
+        }
+        self.catalog = catalog;
+        Ok(())
+    }
+
+    /// Removes the definition from the layer's catalog (the base keeps its own); a kind that
+    /// needs storage machinery is refused (`check_layer_kind`), also when the layer holds no
+    /// definition of that name.
+    fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
+        check_layer_kind(kind)?;
+        Ok(self.catalog.remove(kind, name).is_some())
     }
 
     /// The base's figures: the layer stores no values of its own yet.
