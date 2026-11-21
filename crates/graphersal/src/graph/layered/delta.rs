@@ -262,7 +262,7 @@ impl PropertyChange {
 /// `value` with every storage-only string (compressed, deduplicated) made plain: what the
 /// delta stores (plan P5).
 #[inline]
-fn logical(value: ElementProperty) -> ElementProperty {
+pub(super) fn logical(value: ElementProperty) -> ElementProperty {
     if value.holds_compressed() {
         value.into_logical()
     } else {
@@ -578,6 +578,25 @@ impl Delta {
             return None;
         }
         self.lost_vertex_labels.get(label)
+    }
+
+    /// The base vertex slots with an image (modified base vertices; the layer diff walks them).
+    #[inline]
+    pub(crate) fn imaged_vertices(&self) -> &SlotBits {
+        &self.imaged_vertices
+    }
+
+    /// The base edge slots with an image (modified base edges).
+    #[inline]
+    pub(crate) fn imaged_edges(&self) -> &SlotBits {
+        &self.imaged_edges
+    }
+
+    /// `true` iff the base edge in `slot` has an image: one bit test (read behind the dirty
+    /// bit).
+    #[inline]
+    pub(crate) fn is_imaged_edge(&self, slot: u32) -> bool {
+        self.imaged_edges.contains(slot)
     }
 
     /// The base edge slots whose label is no longer their base label.

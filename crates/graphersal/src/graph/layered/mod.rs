@@ -73,6 +73,12 @@
 //! and bases with unique indexes or vector rules (plan decision P5, [`LayeredGraph::over`]).
 //! The property index lookups and the execution policy are the base's.
 //!
+//! Delta visibility (S2.1, `visibility`): `GraphStorage::vertex_layer` / `edge_layer` answer
+//! an element's origin (`Base` for an untouched base element after the read path's one
+//! compare, `Added`, `Modified` while a base element has an image) and
+//! `GraphStorage::layer_diff` the added, removed (with their base values) and modified
+//! elements, walking only the delta and the tombstone and image bits.
+//!
 //! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
 //! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
 //! ceiling checks the outermost unit at its commit on the layer's own footprint, as
@@ -86,6 +92,7 @@ mod memory;
 mod route;
 mod storage;
 mod units;
+mod visibility;
 mod write;
 
 use std::sync::Arc;

@@ -16,6 +16,7 @@ use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
 use crate::graph::hooks::{CommitHook, Mark, RollbackReason};
+use crate::graph::layer_diff::{LayerDiff, LayerDiffRequest, LayerOrigin};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
 use crate::graph::storage::{StorageIdentity, UnitMark};
@@ -321,6 +322,21 @@ impl GraphStorage for LayeredGraph {
                 .map(LayeredEdge::from_base)
                 .chain(delta),
         ))
+    }
+
+    /// The origin of `node` (`visibility`): one compare for an untouched base vertex.
+    #[inline]
+    fn vertex_layer(&self, node: LayeredVertex) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.vertex_origin(node))
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: LayeredEdge) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.edge_origin(edge))
+    }
+
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        self.diff(request)
     }
 
     /// The layer's own statistics: the base's at creation, kept exact by every write.

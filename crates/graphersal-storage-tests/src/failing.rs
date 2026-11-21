@@ -9,7 +9,7 @@
 //! that poisons the graph), the execution policy, the schema,
 //! the element scans, the property reads of single elements (also only those after the first
 //! `n`, [`Faults::fail_element_reads_after`], counted in [`Faults::element_reads`]), the ids and
-//! labels of single elements, the adjacency of a vertex and the unit clock.
+//! labels of single elements, the adjacency of a vertex, the unit clock and the layer reads.
 //! The switches are shared ([`Failing::faults`]), so a test can turn a fault on while the storage
 //! sits inside a `Graph`. The [`failing`](self) contract functions use it.
 //!
@@ -25,9 +25,9 @@ use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ElementKind,
     ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
-    JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
-    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UniqueIndexDuplicates,
-    UnitChanges, UnitMark,
+    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, Mark, MemoryStats, PropertyIndexInfo,
+    PropertyIndexRange, PropertyIndexTransform, PropertyMap, PropertySchema, RollbackReason,
+    StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
 };
 
 /// The fault switches of a [`Failing`] storage: while a switch is on, the methods of its group
@@ -61,6 +61,8 @@ pub struct Faults {
     /// The ids and labels of single elements: `vertex_id`, `edge_id`, `vertex_label`,
     /// `edge_label`.
     pub element_identity: AtomicBool,
+    /// The layer reads: `vertex_layer`, `edge_layer`, `layer_diff`.
+    pub layer: AtomicBool,
     /// How many property reads of single elements (`vertex_properties`, `edge_properties`) the
     /// storage answered or refused so far; a test may reset it.
     pub element_reads: AtomicUsize,
@@ -540,6 +542,24 @@ impl GraphStorage for Failing {
 
     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
         GraphStorage::memory_usage(&self.inner)
+    }
+
+    fn vertex_layer(&self, node: ForwardVertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.faults
+            .check(&self.faults.layer, "read the layer origin of a vertex")?;
+        GraphStorage::vertex_layer(&self.inner, node)
+    }
+
+    fn edge_layer(&self, edge: ForwardEdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.faults
+            .check(&self.faults.layer, "read the layer origin of an edge")?;
+        GraphStorage::edge_layer(&self.inner, edge)
+    }
+
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        self.faults
+            .check(&self.faults.layer, "read the layer diff")?;
+        GraphStorage::layer_diff(&self.inner, request)
     }
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
