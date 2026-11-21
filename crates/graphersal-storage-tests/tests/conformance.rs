@@ -96,8 +96,6 @@ fn untouched_layer_passes_the_read_only_items() {
     unsupported(layer.add_vertex_label(a, "x".into()).map(drop));
     unsupported(layer.set_vertex_property(a, "k".into(), 1.into()));
     unsupported(layer.set_edge_property(e, "k".into(), 1.into()));
-    unsupported(layer.drop_vertex(a));
-    unsupported(layer.drop_edge(e));
     contract::assert_consistent(&layer);
     assert_eq!(layer.vertex_count().unwrap(), 6);
     graphersal_storage_tests::extension::capabilities_are_consistent(&mut layer);
@@ -129,4 +127,38 @@ fn layer_with_edges_at_base_vertices_is_consistent() {
     contract::assert_consistent(&layer);
     assert_eq!(layer.vertex_count().unwrap(), 7);
     assert_eq!(layer.edge_count().unwrap(), 11);
+}
+
+/// The same layer after drops of base elements (a base edge, a base vertex with base edges,
+/// added edges at its stub and a self-loop) stays consistent: no removed element is listed,
+/// adjacency and endpoints agree.
+#[test]
+fn layer_with_dropped_base_elements_is_consistent() {
+    use graphersal::prelude::PropertyMap;
+    use graphersal::storage::LayeredGraph;
+    use graphersal_storage_tests::smoke;
+
+    let mut base = TraversalGraph::new();
+    smoke::load_modern(&mut base);
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    let a = layer.get_vertex_by_id("1").unwrap().unwrap();
+    let b = layer.get_vertex_by_id("2").unwrap().unwrap();
+    let n = layer
+        .insert_vertex(None, vec!["person".into()], PropertyMap::default())
+        .unwrap();
+    for (from, to) in [(a, b), (a, a), (n, a), (b, n)] {
+        layer
+            .insert_edge(None, Some("x".into()), from, to, PropertyMap::default())
+            .unwrap();
+    }
+    let edges = layer.edge_count().unwrap();
+    let c = layer.get_vertex_by_id("4").unwrap().unwrap();
+    let e = layer.out_edges(c).unwrap().next().unwrap();
+    layer.drop_edge(e).unwrap();
+    contract::assert_consistent(&layer);
+    let incident = layer.out_edges(a).unwrap().count() + layer.in_edges(a).unwrap().count() - 1;
+    layer.drop_vertex(a).unwrap();
+    contract::assert_consistent(&layer);
+    assert_eq!(layer.vertex_count().unwrap(), 6);
+    assert_eq!(layer.edge_count().unwrap(), edges - 1 - incident);
 }

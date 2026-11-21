@@ -21,10 +21,24 @@
 //! and the adjacency of a delta handle refuse a stub slot). A stub stays when its last edge is
 //! dropped (it is empty then, and still invisible); its base vertex stays dirty.
 //!
-//! The tombstones of removed base elements and the images of modified base elements are later
-//! tasks (S1.5, S1.6); until then [`Delta::base_vertex`] answers with the base's own state (a
-//! base vertex is dirty only for its stub) and [`Delta::base_edge`] answers "removed" (no base
-//! edge is dirty yet).
+//! # Tombstones: removed base elements (S1.5)
+//!
+//! A removed base vertex or edge is a set bit in `removed_vertices` / `removed_edges`, bitsets
+//! over base slots that start empty and grow on demand (a layer that never removes a base
+//! element allocates nothing for them). They are read only behind the element's dirty bit
+//! ([`Delta::base_vertex`], [`Delta::base_edge`]), so a clean element never looks at them, and a
+//! dirty one pays a bit test, never a hash lookup (plan P8). A bitset beats a hash set here:
+//! one bit per base slot up to the highest removed one, an O(1) test without hashing, and the
+//! base never reuses a slot, so a bit never has to be told apart from a later occupant. The
+//! base slot is never reused (the base is frozen), so a tombstone stays valid for every handle
+//! of that slot: a stale handle of a removed base element never aliases anything.
+//!
+//! Removing a base vertex removes its stub too (after the caller removed every incident edge):
+//! the slot is freed, its generation bumped, `stubs` and `stub_bases` cleared together, so
+//! [`Delta::stub_index`] never hands out the stub of a removed vertex.
+//!
+//! The images of modified base elements are task S1.6; until then a live dirty base element
+//! answers with the base's own state.
 //!
 //! The delta stores what the write rules (`graph/write_rules.rs`) returned: no check runs here.
 //! Values are stored uncompressed (plan P5).
@@ -32,6 +46,7 @@
 use compact_str::CompactString;
 use fnv::FnvBuildHasher;
 
+use super::dirty::SlotBits;
 use super::handle::{LayeredEdge, LayeredVertex, MAX_BASE_SLOTS};
 use crate::error::GraphError;
 use crate::graph::handle::{EdgeGenerations, FIRST_GENERATION, Generations};
@@ -39,7 +54,7 @@ use crate::graph::labels::{LabelSetId, Labels};
 use crate::graph::shape::ShapeTable;
 use crate::graph::topology::{Direction, NodeIndex};
 use crate::graph::{
-    EdgeHandle, GraphIndex, GraphStatistics, GraphType, TraversalGraph, VertexHandle,
+    EdgeHandle, GraphIndex, GraphStatistics, GraphStorage, GraphType, TraversalGraph, VertexHandle,
 };
 use crate::value::{ElementProperty, PropertyMap};
 
@@ -82,6 +97,15 @@ pub(crate) struct Delta {
     /// Per delta node slot: `Some(base handle)` when the slot holds the stub of that base
     /// vertex, `None` (or beyond the end) for an added vertex or a vacant slot.
     stub_bases: Vec<Option<VertexHandle>>,
+    /// The tombstones of removed base vertices, by base slot (module docs). Read only behind
+    /// the vertex's dirty bit.
+    removed_vertices: SlotBits,
+    /// The tombstones of removed base edges, by base slot.
+    removed_edges: SlotBits,
+    /// The number of set bits in `removed_vertices` (the base vertices the layer removed).
+    removed_vertex_count: usize,
+    /// The number of set bits in `removed_edges`.
+    removed_edge_count: usize,
 }
 
 impl Default for Delta {
@@ -95,6 +119,10 @@ impl Default for Delta {
             shapes: ShapeTable::new(),
             stubs: hashbrown::HashMap::with_hasher(FnvBuildHasher::default()),
             stub_bases: Vec::new(),
+            removed_vertices: SlotBits::default(),
+            removed_edges: SlotBits::default(),
+            removed_vertex_count: 0,
+            removed_edge_count: 0,
         }
     }
 }
@@ -109,7 +137,7 @@ impl Delta {
     /// not vertices).
     #[inline]
     pub(crate) fn vertex_count_change(&self) -> isize {
-        (self.graph.node_count() - self.stubs.len()) as isize
+        (self.graph.node_count() - self.stubs.len()) as isize - self.removed_vertex_count as isize
     }
 
     /// The base vertex whose stub sits in delta node slot `index`, `None` for any other slot.
@@ -131,7 +159,7 @@ impl Delta {
     /// Edges the delta adds to the base count (added minus removed base edges).
     #[inline]
     pub(crate) fn edge_count_change(&self) -> isize {
-        self.graph.edge_count() as isize
+        self.graph.edge_count() as isize - self.removed_edge_count as isize
     }
 
     /// The vertices the layer added, in slot order (stubs skipped).
@@ -269,16 +297,19 @@ impl Delta {
         })
     }
 
-    /// A dirty base vertex as the layer sees it: `None` when the layer removed it (or `node` is
-    /// stale), else its state. No tombstones or images yet (S1.5, S1.6): a base vertex is dirty
-    /// only because it has a stub, which changes its adjacency, not the vertex, so it answers
-    /// with the base's own id, labels and properties.
+    /// A dirty base vertex as the layer sees it: `None` when the layer removed it (its
+    /// tombstone, checked first) or `node` is stale, else its state. No images yet (S1.6): a
+    /// live dirty base vertex has a stub or lost a base edge, which changes its adjacency, not
+    /// the vertex, so it answers with the base's own id, labels and properties.
     #[inline]
     pub(crate) fn base_vertex<'a>(
         &'a self,
         base: &'a TraversalGraph,
         node: VertexHandle,
     ) -> Option<VertexView<'a>> {
+        if self.removed_vertices.contains(node.index().slot()) {
+            return None;
+        }
         let vertex = base.vertex_weight(node)?;
         Some(VertexView {
             id: &vertex.0,
@@ -287,11 +318,26 @@ impl Delta {
         })
     }
 
-    /// A dirty base edge as the layer sees it; see [`Self::base_vertex`].
+    /// A dirty base edge as the layer sees it: `None` when the layer removed it (checked
+    /// first) or `edge` is stale, else the base's own state (no images yet, S1.6). A live base
+    /// edge never has a removed endpoint: removing a base vertex removes its edges first.
     #[inline]
-    pub(crate) fn base_edge(&self, edge: EdgeHandle) -> Option<EdgeView<'_>> {
-        let _ = edge;
-        None
+    pub(crate) fn base_edge<'a>(
+        &'a self,
+        base: &'a TraversalGraph,
+        edge: EdgeHandle,
+    ) -> Option<EdgeView<'a>> {
+        if self.removed_edges.contains(edge.index().slot()) {
+            return None;
+        }
+        let weight = base.edge_weight(edge)?;
+        let (from, to) = GraphStorage::edge_endpoints(base, edge).ok().flatten()?;
+        Some(EdgeView {
+            id: &weight.0,
+            label: base.labels.name_slice(weight.1),
+            properties: weight.2.as_ref(),
+            endpoints: (LayeredVertex::from_base(from), LayeredVertex::from_base(to)),
+        })
     }
 
     // --------------------------------------------------------------------------------------
@@ -460,6 +506,61 @@ impl Delta {
             self.index.remove_node_label(label, local);
         }
         self.node_generations.bump(index.index());
+    }
+
+    /// Tombstones the live base edge `edge` (the caller checked it through the write rules and
+    /// sets the dirty bits of the edge and of both endpoints) and counts it out of the
+    /// statistics as `TraversalGraph`'s raw remove does. Nothing for an edge already removed or
+    /// stale.
+    pub(crate) fn remove_base_edge(
+        &mut self,
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        statistics: &mut GraphStatistics,
+    ) {
+        let slot = edge.index().slot();
+        if self.removed_edges.contains(slot) {
+            return;
+        }
+        let Some(weight) = base.edge_weight(edge) else {
+            return;
+        };
+        statistics.edge_removed(base.labels.name(weight.1).map(|l| l.as_str()));
+        self.removed_edges.set_growing(slot);
+        self.removed_edge_count += 1;
+    }
+
+    /// Tombstones the live base vertex `node` and removes its stub, if it has one (the caller
+    /// removed every incident edge first, base and added, and sets the vertex's dirty bit);
+    /// counts it out of the statistics as `TraversalGraph`'s raw remove does. Nothing for a
+    /// vertex already removed or stale.
+    pub(crate) fn remove_base_vertex(
+        &mut self,
+        base: &TraversalGraph,
+        node: VertexHandle,
+        statistics: &mut GraphStatistics,
+    ) {
+        let slot = node.index().slot();
+        if self.removed_vertices.contains(slot) {
+            return;
+        }
+        let Some(vertex) = base.vertex_weight(node) else {
+            return;
+        };
+        statistics.vertex_removed(base.labels.set(vertex.1));
+        self.removed_vertices.set_growing(slot);
+        self.removed_vertex_count += 1;
+        let stub = self.stub_index(node);
+        if stub != NodeIndex::end() {
+            // Empty by now; `remove_node` would unlink a leftover edge without its index
+            // entries, so the caller's order (edges first) is what keeps the indexes exact.
+            self.graph.remove_node(stub);
+            self.node_generations.bump(stub.index());
+            self.stubs.remove(&slot);
+            if let Some(entry) = self.stub_bases.get_mut(stub.index()) {
+                *entry = None;
+            }
+        }
     }
 
     /// Replaces the label set of a live delta vertex with `new_labels` (from the write rules).

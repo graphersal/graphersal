@@ -49,6 +49,18 @@ impl SlotBits {
         }
     }
 
+    /// [`Self::set`] for a set that starts empty and grows on demand (the tombstones: a layer
+    /// that never removes a base element allocates nothing for them). `slot` must be a base
+    /// slot (below 2^31): the words grow to cover it.
+    #[inline]
+    pub(crate) fn set_growing(&mut self, slot: u32) {
+        let word = (slot >> 6) as usize;
+        if self.words.len() <= word {
+            self.words.resize(word + 1, 0);
+        }
+        self.set(slot);
+    }
+
     /// The bit itself, without the [`Self::any`] shortcut.
     #[inline]
     fn word_contains(&self, slot: u32) -> bool {
@@ -82,5 +94,18 @@ mod tests {
         let mut empty = SlotBits::default();
         empty.set(0);
         assert!(!empty.any(), "a slot beyond the bits is ignored");
+    }
+
+    #[test]
+    fn set_growing_covers_the_slot() {
+        let mut bits = SlotBits::default();
+        assert!(!bits.contains(200));
+        bits.set_growing(200);
+        assert!(bits.any() && bits.contains(200));
+        assert_eq!(bits.words.len(), 4);
+        assert!((0..200).all(|slot| !bits.contains(slot)));
+        bits.set_growing(3);
+        assert!(bits.contains(3) && bits.contains(200));
+        assert_eq!(bits.words.len(), 4, "no growth for a covered slot");
     }
 }

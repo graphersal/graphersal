@@ -6,7 +6,9 @@
 //! `TraversalGraph` that received the base's data plus the same writes (ids, auto ids,
 //! statistics, scans, label lookups, adjacency); writes to base elements are refused and change
 //! nothing. New edges touching base vertices (S1.4): every combination of base and added
-//! endpoints, self-loops, drops, the closed-schema topology, and a Rhai differential.
+//! endpoints, self-loops, drops, the closed-schema topology, and a Rhai differential. Drops of
+//! base elements (S1.5): cascades, filtered reads, id reuse, stale handles, statistics and a
+//! Rhai differential (plan decision P4 for drop-then-add order).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -212,8 +214,6 @@ fn every_write_is_refused_and_changes_nothing() {
     unsupported(layer.set_edge_property(knows, "weight".into(), 1.into()));
     unsupported(layer.drop_vertex_property("age", marko));
     unsupported(layer.drop_edge_property("weight", knows));
-    unsupported(layer.drop_edge(knows));
-    unsupported(layer.drop_vertex(marko));
     unsupported(layer.set_schema(graphersal::schema::GraphSchema::new()));
     assert_eq!(layer.vertex_count().unwrap(), 6);
     assert_eq!(layer.edge_count().unwrap(), 6);
@@ -1496,4 +1496,503 @@ fn failed_edge_creates_at_base_vertices_leave_no_trace() {
         .unwrap_err();
     assert_eq!(format!("{err:?}"), format!("{expected:?}"));
     assert_eq!(state(&layer), before);
+}
+
+// ------------------------------------------------------------------------------------------
+// Drops of base elements: tombstones (S1.5)
+// ------------------------------------------------------------------------------------------
+
+/// `state` with its scans sorted by id (adjacency lists keep their order): the comparison of
+/// plan decision P4 for a storage that dropped elements and then added new ones, where a
+/// `TraversalGraph` reuses the freed slots (LIFO) and a layer appends.
+fn sorted_state<S: GraphStorage>(s: &S) -> State {
+    let mut state = state(s).with_sorted_buckets();
+    state.vertices.sort_by(|a, b| a.0.cmp(&b.0));
+    state.edges.sort_by(|a, b| a.0.cmp(&b.0));
+    state
+}
+
+impl State {
+    /// The state with every label bucket sorted: a `TraversalGraph` reorders a bucket when it
+    /// removes a member (see `label_lookups_after_a_drop_differ_only_in_order`).
+    fn with_sorted_buckets(mut self) -> Self {
+        for (_, vs, es) in &mut self.by_label {
+            vs.sort();
+            es.sort();
+        }
+        self
+    }
+}
+
+/// The edge with `id` on any storage.
+fn edge_of<S: GraphStorage>(s: &S, id: &str) -> S::EdgeId {
+    s.get_edge_by_id(id).unwrap().unwrap()
+}
+
+/// Drops of base elements over modern with new edges at base vertices, the state after each
+/// step: a base edge; a base vertex with base edges in both directions, added edges at its stub
+/// (in and out) and an added self-loop; a base vertex with a base self-loop the layer added
+/// edges to; an idempotent second drop of each.
+fn drop_base_elements<S: GraphStorage>(s: &mut S) -> Vec<State> {
+    let mut states = Vec::new();
+    create_cross_edges(s);
+    let josh_lop = edge_of(s, "3");
+    s.drop_edge(josh_lop).unwrap();
+    s.drop_edge(josh_lop).unwrap();
+    states.push(state(s).with_sorted_buckets());
+    let marko = vertex_of(s, "1");
+    let self_loop = s
+        .insert_edge(
+            None,
+            Some("self".into()),
+            marko,
+            marko,
+            PropertyMap::default(),
+        )
+        .unwrap();
+    s.drop_vertex(marko).unwrap();
+    s.drop_vertex(marko).unwrap();
+    assert!(!s.contains_edge(self_loop).unwrap());
+    states.push(state(s).with_sorted_buckets());
+    let vadas = vertex_of(s, "2");
+    s.drop_vertex(vadas).unwrap();
+    states.push(state(s).with_sorted_buckets());
+    // Every other element of the base, then what is left.
+    for id in ["3", "4", "5", "6"] {
+        let node = vertex_of(s, id);
+        s.drop_vertex(node).unwrap();
+    }
+    states.push(state(s).with_sorted_buckets());
+    states
+}
+
+#[test]
+fn drops_of_base_elements_read_like_a_traversal_graph() {
+    let base = modern_base();
+    let mut layer = LayeredGraph::over(Arc::clone(&base)).unwrap();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let on_layer = drop_base_elements(&mut layer);
+    let on_reference = drop_base_elements(&mut reference);
+    assert_eq!(on_layer.len(), on_reference.len());
+    for (step, (a, b)) in on_layer.iter().zip(&on_reference).enumerate() {
+        assert_eq!(a, b, "step {step}");
+    }
+    // Only the two added vertices survive, with the one added edge between them.
+    assert_eq!(on_layer[3].counts, (2, 2));
+    // The base is unchanged; another layer over it sees everything.
+    assert_eq!(TraversalGraph::vertex_count(&base), 6);
+    let other = LayeredGraph::over(base).unwrap();
+    assert_eq!(other.vertex_count().unwrap(), 6);
+    assert_eq!(other.out_edges(v(&other, "1")).unwrap().count(), 3);
+}
+
+/// A base with a self-loop and edges in both directions: dropping the looped vertex drops the
+/// loop once and the other vertex keeps clean reads of what is left.
+#[test]
+fn drop_of_a_base_vertex_with_a_base_self_loop() {
+    fn base() -> TraversalGraph {
+        let mut g = TraversalGraph::new();
+        let a = g
+            .insert_vertex(Some("a".into()), vec!["n".into()], PropertyMap::default())
+            .unwrap();
+        let b = g
+            .insert_vertex(Some("b".into()), vec!["n".into()], PropertyMap::default())
+            .unwrap();
+        let c = g
+            .insert_vertex(Some("c".into()), vec!["m".into()], PropertyMap::default())
+            .unwrap();
+        for (id, from, to) in [("aa", a, a), ("ab", a, b), ("ba", b, a), ("bc", b, c)] {
+            g.insert_edge(
+                Some(id.into()),
+                Some("e".into()),
+                from,
+                to,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        }
+        g
+    }
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<State> {
+        let mut states = Vec::new();
+        let a = vertex_of(s, "a");
+        s.drop_vertex(a).unwrap();
+        states.push(state(s).with_sorted_buckets());
+        // A base edge between two live vertices; the self-loop of a base edge drop.
+        let c = vertex_of(s, "c");
+        s.insert_edge(
+            Some("cc".into()),
+            Some("e".into()),
+            c,
+            c,
+            PropertyMap::default(),
+        )
+        .unwrap();
+        let bc = edge_of(s, "bc");
+        s.drop_edge(bc).unwrap();
+        states.push(state(s).with_sorted_buckets());
+        states
+    }
+    let mut layer = LayeredGraph::over(Arc::new(base())).unwrap();
+    let mut reference = base();
+    assert_eq!(run(&mut layer), run(&mut reference));
+    assert_eq!(layer.vertex_count().unwrap(), 2);
+    assert_eq!(layer.edge_count().unwrap(), 1);
+}
+
+/// A dropped base id is not found, and is free for a new element of the layer, which is found
+/// by it; a stale handle of the dropped element never reaches the new one. Order is compared
+/// per P4 (sorted scans): the `TraversalGraph` reuses the freed slots.
+#[test]
+fn a_dropped_base_id_can_be_reused() {
+    fn run<S: GraphStorage>(s: &mut S) -> (State, S::VertexId, S::EdgeId) {
+        let marko = vertex_of(s, "1");
+        let knows = edge_of(s, "0");
+        s.drop_edge(knows).unwrap();
+        assert_eq!(s.get_edge_by_id("0").unwrap(), None);
+        s.drop_vertex(marko).unwrap();
+        assert_eq!(s.get_vertex_by_id("1").unwrap(), None);
+        for id in ["0", "1", "2"] {
+            assert_eq!(s.get_edge_by_id(id).unwrap(), None, "{id}");
+        }
+        let new = s
+            .insert_vertex(
+                Some("1".into()),
+                vec!["person".into()],
+                props(&[("name", "new".into())]),
+            )
+            .unwrap();
+        let vadas = vertex_of(s, "2");
+        let edge = s
+            .insert_edge(
+                Some("0".into()),
+                Some("knows".into()),
+                new,
+                vadas,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        assert_eq!(s.get_vertex_by_id("1").unwrap(), Some(new));
+        assert_eq!(s.get_edge_by_id("0").unwrap(), Some(edge));
+        assert_ne!(new, marko);
+        assert!(!s.contains_vertex(marko).unwrap());
+        assert!(!s.contains_edge(knows).unwrap());
+        assert_eq!(s.vertex_id(marko).unwrap(), None);
+        assert_eq!(s.edge_id(knows).unwrap(), None);
+        // A taken id is still refused: the new vertex holds it now.
+        assert!(
+            s.insert_vertex(Some("1".into()), vec![], PropertyMap::default())
+                .is_err()
+        );
+        // Auto ids continue the sequence as in a `TraversalGraph`.
+        s.insert_vertex(None, vec!["person".into()], PropertyMap::default())
+            .unwrap();
+        s.insert_edge(None, None, new, new, PropertyMap::default())
+            .unwrap();
+        (sorted_state(s), marko, knows)
+    }
+    let mut layer = modern_layer();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let (on_layer, ..) = run(&mut layer);
+    let (on_reference, ..) = run(&mut reference);
+    assert_eq!(on_layer, on_reference);
+}
+
+/// A handle of a dropped base element reads like a removed element of a `TraversalGraph`
+/// (nothing, no lists, no endpoints) and every write on it fails with the same error, the
+/// write rule deciding first; a second drop is a no-op.
+#[test]
+fn stale_handles_of_dropped_base_elements_answer_like_a_traversal_graph() {
+    fn outcomes<S: GraphStorage>(s: &mut S) -> Vec<String> {
+        let marko = vertex_of(s, "1");
+        let josh = vertex_of(s, "4");
+        let knows = edge_of(s, "0");
+        let created = edge_of(s, "3");
+        s.drop_vertex(marko).unwrap();
+        s.drop_edge(created).unwrap();
+        let mut out = Vec::new();
+        for node in [marko] {
+            out.push(format!(
+                "{:?} {:?} {:?} {:?} {:?} {} {}",
+                s.contains_vertex(node),
+                s.vertex_id(node),
+                s.vertex_label(node),
+                s.vertex_labels(node),
+                s.vertex_properties(node),
+                s.out_edges(node).unwrap().count(),
+                s.in_edges(node).unwrap().count(),
+            ));
+            out.push(format!("{:?}", s.add_vertex_label(node, "x".into())));
+            out.push(format!("{:?}", s.remove_vertex_label(node, "person")));
+            out.push(format!(
+                "{:?}",
+                s.set_vertex_property(node, "age".into(), 1.into())
+            ));
+            out.push(format!("{:?}", s.drop_vertex_property("age", node)));
+            out.push(format!(
+                "{:?}",
+                s.insert_edge(None, Some("x".into()), node, josh, PropertyMap::default())
+            ));
+            out.push(format!(
+                "{:?}",
+                s.insert_edge(None, Some("x".into()), josh, node, PropertyMap::default())
+            ));
+            out.push(format!("{:?}", s.drop_vertex(node)));
+        }
+        for edge in [knows, created] {
+            out.push(format!(
+                "{:?} {:?} {:?} {:?}",
+                s.contains_edge(edge),
+                s.edge_id(edge),
+                s.edge_label(edge),
+                s.edge_properties(edge),
+            ));
+            out.push(format!("{}", s.edge_endpoints(edge).unwrap().is_none()));
+            out.push(format!("{:?}", s.set_edge_label(edge, "x".into())));
+            out.push(format!(
+                "{:?}",
+                s.set_edge_property(edge, "weight".into(), 1.into())
+            ));
+            out.push(format!("{:?}", s.drop_edge_property("weight", edge)));
+            out.push(format!("{:?}", s.drop_edge(edge)));
+        }
+        out
+    }
+    let mut layer = modern_layer();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    let on_layer = outcomes(&mut layer);
+    let on_reference = outcomes(&mut reference);
+    assert_eq!(on_layer, on_reference);
+    assert!(
+        on_layer.iter().any(|o| o.contains("Removed")),
+        "{on_layer:?}"
+    );
+    // The failed writes changed nothing: both hold the same state.
+    assert_eq!(
+        state(&layer).with_sorted_buckets(),
+        state(&reference).with_sorted_buckets()
+    );
+    assert_eq!(layer.get_vertex_by_id("1").unwrap(), None);
+    assert_eq!(layer.get_edge_by_id("3").unwrap(), None);
+}
+
+/// Live base vertices keep reading as the base holds them after a neighbour or an incident
+/// edge was dropped; only their lists lose the removed edges. Label lookups, counts and the
+/// typed traversal API agree.
+#[test]
+fn reads_around_dropped_base_elements() {
+    fn run<S: GraphStorage>(s: &mut S) -> Vec<Vec<String>> {
+        let josh_lop = edge_of(s, "3");
+        s.drop_edge(josh_lop).unwrap();
+        let vadas = vertex_of(s, "2");
+        s.drop_vertex(vadas).unwrap();
+        let eids = |edges: Vec<S::EdgeId>| -> Vec<String> {
+            edges
+                .into_iter()
+                .map(|e| s.edge_id(e).unwrap().unwrap().to_string())
+                .collect()
+        };
+        let mut lists = Vec::new();
+        for id in ["1", "3", "4", "5", "6"] {
+            let node = vertex_of(s, id);
+            lists.push(eids(s.out_edges(node).unwrap().collect()));
+            lists.push(eids(s.in_edges(node).unwrap().collect()));
+        }
+        lists
+    }
+    let mut layer = modern_layer();
+    let mut reference = TraversalGraph::tinkerpop_modern();
+    assert_eq!(run(&mut layer), run(&mut reference));
+    let josh = v(&layer, "4");
+    assert_eq!(layer.vertex_count().unwrap(), 5);
+    assert_eq!(layer.edge_count().unwrap(), 4);
+    let mut people: Vec<&str> = layer
+        .vertices_by_label("person")
+        .unwrap()
+        .map(|n| layer.vertex_id(n).unwrap().unwrap())
+        .collect();
+    people.sort();
+    assert_eq!(people, ["1", "4", "6"]);
+    assert_eq!(layer.edges_by_label("knows").unwrap().count(), 1);
+    assert_eq!(layer.edges_by_label("created").unwrap().count(), 3);
+    assert_eq!(
+        layer.vertex_properties(josh).unwrap().unwrap().get("name"),
+        Some(&"josh".into())
+    );
+    let stats = layer.statistics().unwrap().unwrap();
+    assert_eq!(stats.vertex_label_count("person"), 3);
+    assert_eq!(stats.edge_label_count("knows"), 1);
+    assert_eq!(stats, &GraphStatistics::from_storage(&layer).unwrap());
+    assert_eq!(
+        state(&layer).with_sorted_buckets(),
+        state(&reference).with_sorted_buckets()
+    );
+    assert_eq!(
+        GraphTraversalSource::new(&layer)
+            .v(None)
+            .values("name")
+            .to_list()
+            .unwrap(),
+        GraphTraversalSource::new(&reference)
+            .v(None)
+            .values("name")
+            .to_list()
+            .unwrap()
+    );
+}
+
+/// The one order difference of a drop without a later add (plan decision P4): a
+/// `TraversalGraph` removes a member from a label bucket by moving the bucket's last member
+/// into its place, the layer keeps the shared base bucket's order and skips the removed one.
+/// The same members either way.
+#[test]
+fn label_lookups_after_a_drop_differ_only_in_order() {
+    fn people<S: GraphStorage>(s: &mut S) -> Vec<String> {
+        let marko = vertex_of(s, "1");
+        s.drop_vertex(marko).unwrap();
+        s.vertices_by_label("person")
+            .unwrap()
+            .map(|n| s.vertex_id(n).unwrap().unwrap().to_string())
+            .collect()
+    }
+    let on_layer = people(&mut modern_layer());
+    let on_reference = people(&mut TraversalGraph::tinkerpop_modern());
+    assert_eq!(on_layer, ["2", "4", "6"]);
+    assert_eq!(on_reference, ["6", "2", "4"]);
+}
+
+/// Scripts that drop base elements and then traverse, count, group: the same result and the
+/// same graph state on the plain graph and on the layer. Exact, order included.
+#[cfg(feature = "script")]
+const RHAI_DROPS: &[&str] = &[
+    r#"g.V("1").drop().iterate(); [g.V().count().next(), g.E().count().next(), g.V().values("name").toList()]"#,
+    r#"g.E("0").drop().iterate(); g.V("1").out().values("name").toList()"#,
+    r#"g.V().hasLabel("software").drop().iterate(); g.V().groupCount().by(T.label).next()"#,
+    r#"g.V("4").drop().iterate(); [g.V("1").out("knows").values("name").toList(), g.V("5").in().count().next(), g.E().groupCount().by(T.label).next()]"#,
+    r#"g.E().hasLabel("created").drop().iterate(); [g.V().out().path().by("name").toList(), g.statistics()]"#,
+    r#"g.V("1").addE("self").to(__.V("1")).iterate(); g.V("1").drop().iterate(); [g.E().count().next(), g.V().bothE().count().next()]"#,
+    r#"let a = g.addV("t").id().next(); g.V(a).addE("x").to(__.V("1")).iterate(); g.V("2").addE("y").to(__.V("1")).iterate(); g.V("1").drop().iterate(); [g.V(a).outE().count().next(), g.V("2").outE().count().next(), g.E().count().next(), g.V().count().next()]"#,
+    r#"g.V("1").drop().iterate(); [g.V("1").count().next(), g.E("0").count().next(), g.V().hasId("1").count().next()]"#,
+    r#"g.V("1").drop().iterate(); g.V("1").drop().iterate(); g.E("5").drop().iterate(); g.E("5").drop().iterate(); [g.V().count().next(), g.E().count().next()]"#,
+    r#"g.V().drop().iterate(); [g.V().count().next(), g.E().count().next(), g.statistics()]"#,
+    r#"g.V("3").bothE().drop().iterate(); g.V().group().by(T.label).by(__.bothE().count()).next()"#,
+    r#"g.V().has("age", gt(30)).drop().iterate(); g.V().values("name").toList()"#,
+    r#"g.V("2").drop().iterate(); [g.V("1").out("knows").values("name").toList(), g.V("1").outE().id().toList()]"#,
+    r#"g.V("1").outE("knows").drop().iterate(); g.V().groupCount().by(__.bothE().count()).next()"#,
+    r#"g.V("4").outE().drop().iterate(); g.V("1").repeat(__.out()).emit().path().by("name").toList()"#,
+    r#"g.V("6").drop().iterate(); g.V().hasLabel("person").order().by("age").values("name").toList()"#,
+    r#"g.V("1").addE("k").to(__.V("6")).iterate(); g.E("1").drop().iterate(); [g.V("1").outE().id().toList(), g.V("6").inE().count().next()]"#,
+    r#"g.V().hasLabel("person").outE("created").drop().iterate(); [g.V("3").in().count().next(), g.E().label().dedup().toList()]"#,
+];
+
+/// Scripts that drop base elements and then add new ones. Plan decision P4: compared exactly
+/// first; where only the order of the state differs (the `TraversalGraph` reuses freed slots,
+/// the layer appends) the state is compared sorted by id. Each script's own result is
+/// order-independent.
+#[cfg(feature = "script")]
+const RHAI_DROP_THEN_ADD: &[&str] = &[
+    r#"g.V("1").drop().iterate(); g.addV("person").property(T.id, "1").property("name", "new").iterate(); [g.V("1").values("name").next(), g.V("1").outE().count().next(), g.V().count().next()]"#,
+    r#"g.E("0").drop().iterate(); g.V("1").addE("knows").property(T.id, "0").to(__.V("2")).iterate(); [g.E("0").inV().values("name").next(), g.V("1").outE().id().toList()]"#,
+    r#"g.V("6").drop().iterate(); g.addV("person").property("name", "z").iterate(); g.V().hasLabel("person").values("name").order().toList()"#,
+    r#"g.V("1").outE("knows").drop().iterate(); g.V("1").as("a").V("2").addE("back").to("a").iterate(); g.V("1").bothE().label().order().toList()"#,
+    r#"g.V().drop().iterate(); g.addV("a").property(T.id, "1").as("x").addV("b").property(T.id, "2").addE("e").to("x").iterate(); [g.V().id().order().toList(), g.E().count().next(), g.statistics()]"#,
+    r#"g.V("3").drop().iterate(); g.addV("software").property("name", "lop2").as("s").V("4").addE("created").to("s").iterate(); g.V("4").out("created").values("name").order().toList()"#,
+];
+
+/// Scripts that drop base elements and then read by label, each with its sorted form. The
+/// label lookup lists the same members in another order (`TraversalGraph` moves a bucket's last
+/// member into a removed one's place, the layer keeps the base bucket's order: plan decision
+/// P4, see `label_lookups_after_a_drop_differ_only_in_order`): the sorted forms and the state
+/// match exactly.
+#[cfg(feature = "script")]
+const RHAI_DROP_LABEL_ORDER: &[(&str, &str)] = &[
+    (
+        r#"g.V("1").drop().iterate(); g.V().hasLabel("person").values("name").toList()"#,
+        r#"g.V("1").drop().iterate(); g.V().hasLabel("person").values("name").order().toList()"#,
+    ),
+    (
+        r#"g.E("0").drop().iterate(); g.E().hasLabel("knows", "created").id().toList()"#,
+        r#"g.E("0").drop().iterate(); g.E().hasLabel("knows", "created").id().order().toList()"#,
+    ),
+    (
+        r#"g.V("3").drop().iterate(); g.V().hasLabel("software").in("created").values("name").toList()"#,
+        r#"g.V("3").drop().iterate(); g.V().hasLabel("software").in("created").values("name").order().toList()"#,
+    ),
+];
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_label_lookups_after_drops_match_up_to_order() {
+    let mut differences = Vec::new();
+    let mut order_only = Vec::new();
+    for (script, sorted) in RHAI_DROP_LABEL_ORDER {
+        let plain = plain_graph();
+        let layered = layered_graph();
+        let expected = render(Arc::clone(&plain), sorted);
+        let actual = render(Arc::clone(&layered), sorted);
+        assert!(expected.is_ok(), "{sorted}: {expected:?}");
+        let expected_state = render(Arc::clone(&plain), CROSS_STATE_SCRIPT);
+        let actual_state = render(Arc::clone(&layered), CROSS_STATE_SCRIPT);
+        if expected != actual || expected_state != actual_state {
+            differences.push(format!(
+                "`{sorted}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}"
+            ));
+        }
+        if render(plain_graph(), script) != render(layered_graph(), script) {
+            order_only.push(*script);
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    println!(
+        "order-only differences of label lookups (P4): {}\n{}",
+        order_only.len(),
+        order_only.join("\n")
+    );
+}
+
+#[cfg(feature = "script")]
+const SORTED_STATE_SCRIPT: &str = r#"[
+    g.V().order().by(T.id).elementMap().toList(),
+    g.E().order().by(T.id).elementMap().toList(),
+    g.V().order().by(T.id).project("v", "out", "in").by(T.id).by(__.outE().id().fold()).by(__.inE().id().fold()).toList(),
+    g.statistics()
+]"#;
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_drop_scripts_match_the_plain_graph() {
+    let mut differences = Vec::new();
+    let mut order_only = Vec::new();
+    for (script, may_reorder) in RHAI_DROPS
+        .iter()
+        .map(|s| (s, false))
+        .chain(RHAI_DROP_THEN_ADD.iter().map(|s| (s, true)))
+    {
+        let plain = plain_graph();
+        let layered = layered_graph();
+        let expected = render(Arc::clone(&plain), script);
+        let actual = render(Arc::clone(&layered), script);
+        assert!(expected.is_ok(), "{script}: {expected:?}");
+        let expected_state = render(Arc::clone(&plain), CROSS_STATE_SCRIPT);
+        let actual_state = render(Arc::clone(&layered), CROSS_STATE_SCRIPT);
+        if expected == actual && expected_state == actual_state {
+            continue;
+        }
+        if may_reorder
+            && expected == actual
+            && render(plain, SORTED_STATE_SCRIPT) == render(layered, SORTED_STATE_SCRIPT)
+        {
+            order_only.push(*script);
+            continue;
+        }
+        differences.push(format!(
+            "`{script}`\n  TraversalGraph: {expected:?}\n  LayeredGraph:   {actual:?}\n  state TraversalGraph: {expected_state:?}\n  state LayeredGraph:   {actual_state:?}"
+        ));
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    println!(
+        "order-only differences (P4): {}\n{}",
+        order_only.len(),
+        order_only.join("\n")
+    );
 }

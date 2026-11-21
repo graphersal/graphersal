@@ -40,8 +40,11 @@
 //! sets its dirty bit. Adjacency lists the delta's edges first (newest first), then the base's,
 //! which is the order a `TraversalGraph` holding the same writes lists them in (it puts a new
 //! edge at the front). The added elements can be changed and dropped as in a
-//! `TraversalGraph`. Every write to a base element returns [`GraphError::Unsupported`]
-//! (S1.5, S1.6). The layer keeps its own copy of the base's
+//! `TraversalGraph`. Base vertices and edges can be dropped (S1.5): a tombstone in the delta
+//! behind the element's dirty bit; dropping a base vertex drops its base edges (each dirtying
+//! both endpoints) and the added edges at its stub, and the stub with them. A dropped base id
+//! is free again for a new element. Every other write to a base element (properties, labels)
+//! returns [`GraphError::Unsupported`] (S1.6). The layer keeps its own copy of the base's
 //! statistics, updated per write. `GraphStorage::capabilities` claims `writable`, not
 //! `atomic`: the unit methods are the trait's no-ops, so a failed traversal keeps what it
 //! wrote before the failure (units and rollback: S1.8). The schema, the catalog, the property
@@ -69,9 +72,9 @@ use handle::MAX_BASE_SLOTS;
 /// elements. Handles ([`LayeredVertex`], [`LayeredEdge`]) are 8 bytes; a base element untouched
 /// by the layer is read straight from the base, with one bit test and no lookup.
 ///
-/// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices) and changes
-/// or drops what it added; any write to a base element fails with
-/// [`GraphError::Unsupported`]. It has no units yet (`atomic` is not claimed): a traversal that
+/// **EXPERIMENTAL.** Today it adds new vertices and edges (also at base vertices), changes or
+/// drops what it added and drops base elements; a property or label write to a base element
+/// fails with [`GraphError::Unsupported`]. It has no units yet (`atomic` is not claimed): a traversal that
 /// fails keeps what it wrote before the failure.
 ///
 /// ```
@@ -151,7 +154,8 @@ impl LayeredGraph {
     /// The edge counterpart of [`Self::base_vertex_live`].
     #[inline]
     fn base_edge_live(&self, edge: EdgeHandle) -> bool {
-        !self.dirty_edges.contains(edge.index().slot()) || self.delta.base_edge(edge).is_some()
+        !self.dirty_edges.contains(edge.index().slot())
+            || self.delta.base_edge(&self.base, edge).is_some()
     }
 
     /// The filter of a scan over base vertices: [`Self::base_vertex_live`], with "no bit set at
@@ -225,7 +229,7 @@ impl LayeredGraph {
         if edge.is_delta() {
             view(self.delta.edge(edge))
         } else if self.dirty_edges.contains(edge.slot()) {
-            view(self.delta.base_edge(edge.to_base()))
+            view(self.delta.base_edge(&self.base, edge.to_base()))
         } else {
             base(&self.base, edge.to_base())
         }
@@ -339,6 +343,53 @@ mod tests {
         assert_eq!(layer.vertex_id(marko).unwrap(), Some("1"));
         assert_eq!(layer.out_edges(marko).unwrap().count(), 4);
         assert_eq!(layer.in_edges(marko).unwrap().count(), 1);
+    }
+
+    /// Dropping a base vertex with added edges at its stub removes the stub with them (slot
+    /// freed, generation bumped, both maps cleared), tombstones the vertex and its base edges
+    /// and dirties the other endpoints of those edges; a new added vertex reusing the stub's
+    /// slot is an ordinary vertex.
+    #[test]
+    fn a_dropped_base_vertex_takes_its_stub_along() {
+        let mut layer = LayeredGraph::over(Arc::new(TraversalGraph::tinkerpop_modern())).unwrap();
+        let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+        let peter = layer.get_vertex_by_id("6").unwrap().unwrap();
+        layer
+            .insert_edge(None, None, peter, marko, PropertyMap::default())
+            .unwrap();
+        assert_ne!(layer.delta.stub_index(marko.to_base()), NodeIndex::end());
+        layer.drop_vertex(marko).unwrap();
+        assert_eq!(layer.delta.stub_index(marko.to_base()), NodeIndex::end());
+        assert_ne!(
+            layer.delta.stub_index(peter.to_base()),
+            NodeIndex::end(),
+            "peter keeps his stub"
+        );
+        assert!(layer.dirty_vertices.contains(marko.slot()));
+        assert!(
+            layer
+                .delta
+                .base_vertex(&layer.base, marko.to_base())
+                .is_none()
+        );
+        // marko's base edges reached vadas (2), josh (4) and lop (3): all dirty now.
+        for id in ["2", "3", "4"] {
+            let node = layer.get_vertex_by_id(id).unwrap().unwrap();
+            assert!(layer.dirty_vertices.contains(node.slot()), "{id}");
+        }
+        let ripple = layer.get_vertex_by_id("5").unwrap().unwrap();
+        assert!(
+            !layer.dirty_vertices.contains(ripple.slot()),
+            "ripple untouched"
+        );
+        assert_eq!(layer.vertex_count().unwrap(), 5);
+        assert_eq!(layer.edge_count().unwrap(), 3);
+        let new = layer
+            .insert_vertex(None, vec!["n".into()], PropertyMap::default())
+            .unwrap();
+        assert!(layer.contains_vertex(new).unwrap());
+        assert_eq!(layer.vertices().unwrap().count(), 6);
+        assert_eq!(layer.out_edges(new).unwrap().count(), 0);
     }
 
     #[test]
