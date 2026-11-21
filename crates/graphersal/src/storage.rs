@@ -27,7 +27,11 @@
 //!
 //! [`LayeredGraph`] (EXPERIMENTAL, in progress) is a storage of the crate built on this trait: a
 //! frozen [`TraversalGraph`] shared by many layers, each reading through it with its own handles
-//! ([`LayeredVertex`], [`LayeredEdge`]); today it reads only, its writes are `Unsupported`.
+//! ([`LayeredVertex`], [`LayeredEdge`]) and storing only what it changes. Delta visibility:
+//! [`GraphStorage::vertex_layer`] / [`GraphStorage::edge_layer`] answer an element's
+//! [`LayerOrigin`] and [`GraphStorage::layer_diff`] a [`LayerDiff`] (request
+//! [`LayerDiffRequest`]; entries [`LayerDiffEntry`], [`LayerDiffChange`],
+//! [`LayerPropertyChange`]); every other storage answers `Base` and an empty diff.
 //!
 //! # Example
 //!
@@ -225,7 +229,8 @@ pub use crate::graph::{
     AnyGraph, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks, CommitMetadata,
     Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy, Graph,
     GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError, IntoAnyGraph,
-    IsolationLevel, JournalSlot, LayeredEdge, LayeredGraph, LayeredVertex, Mark, MemoryStats,
+    IsolationLevel, JournalSlot, LayerDiff, LayerDiffChange, LayerDiffEntry, LayerDiffRequest,
+    LayerOrigin, LayerPropertyChange, LayeredEdge, LayeredGraph, LayeredVertex, Mark, MemoryStats,
     Mutation, RollbackReason, ShrinkReport, StorageCapabilities, StorageIdentity, Transactional,
     TraversalGraph, UnitChanges, UnitMark, VertexHandle, VertexState,
 };

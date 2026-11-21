@@ -139,6 +139,7 @@ mod journal_panic_tests;
 mod jpath_tests;
 mod layered_graph_tests;
 mod layered_storage_tests;
+mod layered_visibility_tests;
 mod lazy_materialization_tests;
 mod list_function_tests;
 mod logical_map_tests;

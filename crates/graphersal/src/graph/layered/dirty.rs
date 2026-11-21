@@ -101,6 +101,15 @@ impl SlotBits {
         self.words.shrink_to_fit();
     }
 
+    /// The set bits in slot order, a word at a time (a word without a set bit costs one test):
+    /// what the layer diff walks instead of every base element.
+    pub(crate) fn ones(&self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, &word)| {
+            let first = (index as u32) << 6;
+            Ones(word).map(move |bit| first + bit)
+        })
+    }
+
     /// The bit itself, without the [`Self::any`] shortcut (a slot beyond the words, a delta
     /// slot among them, reads as clear).
     #[inline(always)]
@@ -109,6 +118,23 @@ impl SlotBits {
             Some(word) => (word >> (slot & 63)) & 1 != 0,
             None => false,
         }
+    }
+}
+
+/// The set bits of one word, lowest first.
+struct Ones(u64);
+
+impl Iterator for Ones {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros();
+        self.0 &= self.0 - 1;
+        Some(bit)
     }
 }
 
@@ -160,5 +186,17 @@ mod tests {
         assert!(!bits.contains(70) && bits.contains(71));
         bits.clear(71);
         assert!(!bits.contains(71) && bits.any(), "any stays set");
+    }
+
+    #[test]
+    fn ones_lists_the_set_bits_in_order() {
+        let mut bits = SlotBits::new(200);
+        assert_eq!(bits.ones().count(), 0);
+        for slot in [199, 0, 63, 64, 130] {
+            bits.set(slot);
+        }
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [0, 63, 64, 130, 199]);
+        bits.clear(64);
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [0, 63, 130, 199]);
     }
 }

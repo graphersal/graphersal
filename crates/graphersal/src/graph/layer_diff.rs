@@ -1,0 +1,338 @@
+//! Delta visibility of a layered storage: where an element comes from ([`LayerOrigin`]) and what
+//! a layer changed against its base ([`LayerDiff`]), the answers of
+//! [`GraphStorage::vertex_layer`] / [`GraphStorage::edge_layer`] and
+//! [`GraphStorage::layer_diff`].
+//!
+//! A storage without layers keeps the trait defaults: every element is
+//! [`LayerOrigin::Base`] and the diff is empty, so a query asking for them stays portable.
+//! [`LayeredGraph`](crate::graph::LayeredGraph) answers from its delta.
+//!
+//! [`GraphStorage::vertex_layer`]: crate::graph::GraphStorage::vertex_layer
+//! [`GraphStorage::edge_layer`]: crate::graph::GraphStorage::edge_layer
+//! [`GraphStorage::layer_diff`]: crate::graph::GraphStorage::layer_diff
+
+use compact_str::CompactString;
+
+use crate::graph::schema::ElementKind;
+use crate::value::{ElementProperty, PropertyMap};
+
+/// Where an element of a layered storage comes from, as the layer sees it.
+///
+/// - [`Base`](Self::Base): the base element, unchanged by the layer (also every element of a
+///   storage without layers). A base vertex that only gained or lost incident edges is `Base`:
+///   the edges are reported on their own.
+/// - [`Added`](Self::Added): created in the layer.
+/// - [`Modified`](Self::Modified): a base element whose own labels or properties the layer
+///   changed. A write of the base's value changes nothing, so an element changed back to its
+///   base state is `Base` again.
+///
+/// Removed base elements cannot be read, so they have no origin: they appear only in
+/// [`LayerDiff::removed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum LayerOrigin {
+    /// The base's element, unchanged by the layer.
+    Base,
+    /// An element the layer created.
+    Added,
+    /// A base element whose labels or properties the layer changed.
+    Modified,
+}
+
+impl LayerOrigin {
+    /// The name the query languages print: `"base"`, `"added"` or `"modified"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Added => "added",
+            Self::Modified => "modified",
+        }
+    }
+
+    /// The origin named `name` ([`Self::as_str`]), `None` for any other text.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "base" => Some(Self::Base),
+            "added" => Some(Self::Added),
+            "modified" => Some(Self::Modified),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LayerOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What [`GraphStorage::layer_diff`](crate::graph::GraphStorage::layer_diff) reports: the
+/// element kinds, a label filter and a limit. The default reports everything.
+///
+/// ```
+/// use graphersal::storage::{ElementKind, LayerDiffRequest};
+///
+/// let request = LayerDiffRequest::new().kind(ElementKind::Vertex).labels(["person"]).limit(10);
+/// assert_eq!(request.kind, Some(ElementKind::Vertex));
+/// assert_eq!(request.limit, Some(10));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LayerDiffRequest {
+    /// Only this element kind; `None` (the default): vertices and edges.
+    pub kind: Option<ElementKind>,
+    /// Only elements carrying one of these labels; `None` (the default): every element. A
+    /// vertex matches with any label of its label set; an edge with its label (an unlabeled
+    /// edge matches no filter). A modified or removed element matches with its base labels or
+    /// with its labels in the layer.
+    pub labels: Option<Vec<CompactString>>,
+    /// At most this many entries in the whole diff (added, removed and modified together);
+    /// `None` (the default): no limit. [`LayerDiff::truncated`] says whether it cut entries.
+    pub limit: Option<usize>,
+}
+
+impl LayerDiffRequest {
+    /// Everything: both kinds, every label, no limit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Only elements of `kind`.
+    pub fn kind(mut self, kind: ElementKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Only elements carrying one of `labels` (see [`Self::labels`](Self#structfield.labels)).
+    pub fn labels<L: Into<CompactString>>(mut self, labels: impl IntoIterator<Item = L>) -> Self {
+        let mut set: Vec<CompactString> = Vec::new();
+        for label in labels {
+            let label = label.into();
+            if !set.contains(&label) {
+                set.push(label);
+            }
+        }
+        self.labels = Some(set);
+        self
+    }
+
+    /// At most `limit` entries in the whole diff.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// `true` when the request reports elements of `kind`.
+    pub fn wants_kind(&self, kind: ElementKind) -> bool {
+        self.kind.is_none_or(|wanted| wanted == kind)
+    }
+
+    /// `true` when an element with `labels` passes the label filter.
+    pub fn matches_labels(&self, labels: &[CompactString]) -> bool {
+        match &self.labels {
+            None => true,
+            Some(wanted) => labels.iter().any(|label| wanted.contains(label)),
+        }
+    }
+}
+
+/// One added or removed element of a [`LayerDiff`]: named by its user-visible id (a removed
+/// element has no live handle), with its labels and properties (the layer's for an added
+/// element, the base's for a removed one; values as a read returns them).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LayerDiffEntry {
+    /// Vertex or edge.
+    pub kind: ElementKind,
+    /// The element's id.
+    pub id: CompactString,
+    /// A vertex's label set (primary first); an edge's label (none for an unlabeled edge).
+    pub labels: Vec<CompactString>,
+    /// An edge's (out vertex id, in vertex id); `None` for a vertex.
+    pub endpoints: Option<(CompactString, CompactString)>,
+    /// The element's properties (empty for an edge without a map).
+    pub properties: PropertyMap,
+}
+
+impl LayerDiffEntry {
+    /// The entry of a vertex.
+    pub fn vertex(
+        id: impl Into<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Self {
+        Self {
+            kind: ElementKind::Vertex,
+            id: id.into(),
+            labels,
+            endpoints: None,
+            properties,
+        }
+    }
+
+    /// The entry of an edge from `out` to `into` (vertex ids).
+    pub fn edge(
+        id: impl Into<CompactString>,
+        label: Option<CompactString>,
+        out: impl Into<CompactString>,
+        into: impl Into<CompactString>,
+        properties: PropertyMap,
+    ) -> Self {
+        Self {
+            kind: ElementKind::Edge,
+            id: id.into(),
+            labels: label.into_iter().collect(),
+            endpoints: Some((out.into(), into.into())),
+            properties,
+        }
+    }
+}
+
+/// One property of a modified element that differs between the base and the layer.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LayerPropertyChange {
+    /// The property name.
+    pub name: CompactString,
+    /// The base's value; `None` when the base element lacks the property.
+    pub base: Option<ElementProperty>,
+    /// The layer's value; `None` when the layer removed the property.
+    pub layer: Option<ElementProperty>,
+}
+
+impl LayerPropertyChange {
+    /// The change of `name` from `base` to `layer`.
+    pub fn new(
+        name: impl Into<CompactString>,
+        base: Option<ElementProperty>,
+        layer: Option<ElementProperty>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            base,
+            layer,
+        }
+    }
+}
+
+/// One modified element of a [`LayerDiff`]: a base element whose own labels or properties the
+/// layer changed ([`LayerOrigin::Modified`]).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LayerDiffChange {
+    /// Vertex or edge.
+    pub kind: ElementKind,
+    /// The element's id (ids never change).
+    pub id: CompactString,
+    /// The base's labels (as [`LayerDiffEntry::labels`]).
+    pub base_labels: Vec<CompactString>,
+    /// The layer's labels: equal to `base_labels` when only properties changed.
+    pub labels: Vec<CompactString>,
+    /// An edge's (out vertex id, in vertex id); `None` for a vertex.
+    pub endpoints: Option<(CompactString, CompactString)>,
+    /// The properties that differ, in the layer's property order, then the ones the layer
+    /// removed in the base's order. Empty when only the labels, or only the order of the
+    /// properties, changed.
+    pub properties: Vec<LayerPropertyChange>,
+}
+
+impl LayerDiffChange {
+    /// The change of a vertex.
+    pub fn vertex(
+        id: impl Into<CompactString>,
+        base_labels: Vec<CompactString>,
+        labels: Vec<CompactString>,
+        properties: Vec<LayerPropertyChange>,
+    ) -> Self {
+        Self {
+            kind: ElementKind::Vertex,
+            id: id.into(),
+            base_labels,
+            labels,
+            endpoints: None,
+            properties,
+        }
+    }
+
+    /// The change of an edge from `out` to `into` (vertex ids).
+    pub fn edge(
+        id: impl Into<CompactString>,
+        base_label: Option<CompactString>,
+        label: Option<CompactString>,
+        out: impl Into<CompactString>,
+        into: impl Into<CompactString>,
+        properties: Vec<LayerPropertyChange>,
+    ) -> Self {
+        Self {
+            kind: ElementKind::Edge,
+            id: id.into(),
+            base_labels: base_label.into_iter().collect(),
+            labels: label.into_iter().collect(),
+            endpoints: Some((out.into(), into.into())),
+            properties,
+        }
+    }
+}
+
+/// What a layer changed against its base
+/// ([`GraphStorage::layer_diff`](crate::graph::GraphStorage::layer_diff)).
+///
+/// Ordered: vertices before edges in each list; added elements in the layer's slot order
+/// (creation order, a slot freed by a drop is reused), removed and modified ones in base slot
+/// order. A request's limit counts the entries of all three lists, filled vertices first
+/// (added, removed, modified), then edges in the same order. Empty for a storage without
+/// layers ([`LayerDiff::default`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct LayerDiff {
+    /// Elements the layer created, with the layer's labels and properties.
+    pub added: Vec<LayerDiffEntry>,
+    /// Base elements the layer removed (also the base edges a removed vertex took along), with
+    /// the base's labels and properties.
+    pub removed: Vec<LayerDiffEntry>,
+    /// Base elements whose labels or properties the layer changed.
+    pub modified: Vec<LayerDiffChange>,
+    /// `true` when the request's limit left out at least one entry.
+    pub truncated: bool,
+}
+
+impl LayerDiff {
+    /// The number of entries in the three lists.
+    pub fn len(&self) -> usize {
+        self.added.len() + self.removed.len() + self.modified.len()
+    }
+
+    /// `true` when the diff holds no entry.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_names_round_trip() {
+        for origin in [LayerOrigin::Base, LayerOrigin::Added, LayerOrigin::Modified] {
+            assert_eq!(LayerOrigin::from_name(origin.as_str()), Some(origin));
+            assert_eq!(origin.to_string(), origin.as_str());
+        }
+        assert_eq!(LayerOrigin::from_name("removed"), None);
+    }
+
+    #[test]
+    fn request_filters() {
+        let all = LayerDiffRequest::new();
+        assert!(all.wants_kind(ElementKind::Vertex) && all.wants_kind(ElementKind::Edge));
+        assert!(all.matches_labels(&[]));
+        let some = LayerDiffRequest::new()
+            .kind(ElementKind::Edge)
+            .labels(["a", "b", "a"]);
+        assert_eq!(some.labels.as_deref().map(<[_]>::len), Some(2));
+        assert!(!some.wants_kind(ElementKind::Vertex));
+        assert!(some.matches_labels(&["x".into(), "b".into()]));
+        assert!(!some.matches_labels(&["x".into()]));
+        assert!(!some.matches_labels(&[]));
+    }
+}
