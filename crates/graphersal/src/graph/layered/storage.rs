@@ -160,38 +160,26 @@ impl GraphStorage for LayeredGraph {
 
     #[inline]
     fn vertex_id(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
-        self.vertex_read(
-            node,
-            |base, node| GraphStorage::vertex_id(base, node),
-            |view| Ok(view.map(|v| v.id)),
-        )
+        self.vertex_read(node, GraphStorage::vertex_id, |view| Ok(view.map(|v| v.id)))
     }
 
     #[inline]
     fn edge_id(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
-        self.edge_read(
-            edge,
-            |base, edge| GraphStorage::edge_id(base, edge),
-            |view| Ok(view.map(|e| e.id)),
-        )
+        self.edge_read(edge, GraphStorage::edge_id, |view| Ok(view.map(|e| e.id)))
     }
 
     #[inline]
     fn vertex_label(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
-        self.vertex_read(
-            node,
-            |base, node| GraphStorage::vertex_label(base, node),
-            |view| Ok(view_labels(view).first().map(|l| l.as_str())),
-        )
+        self.vertex_read(node, GraphStorage::vertex_label, |view| {
+            Ok(view_labels(view).first().map(|l| l.as_str()))
+        })
     }
 
     #[inline]
     fn edge_label(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
-        self.edge_read(
-            edge,
-            |base, edge| GraphStorage::edge_label(base, edge),
-            |view| Ok(view.and_then(|e| e.label.first()).map(|l| l.as_str())),
-        )
+        self.edge_read(edge, GraphStorage::edge_label, |view| {
+            Ok(view.and_then(|e| e.label.first()).map(|l| l.as_str()))
+        })
     }
 
     #[inline]
@@ -213,20 +201,16 @@ impl GraphStorage for LayeredGraph {
 
     #[inline]
     fn vertex_properties(&self, node: LayeredVertex) -> Result<Option<&PropertyMap>, GraphError> {
-        self.vertex_read(
-            node,
-            |base, node| GraphStorage::vertex_properties(base, node),
-            |view| Ok(view.map(|v| v.properties)),
-        )
+        self.vertex_read(node, GraphStorage::vertex_properties, |view| {
+            Ok(view.map(|v| v.properties))
+        })
     }
 
     #[inline]
     fn edge_properties(&self, edge: LayeredEdge) -> Result<Option<&PropertyMap>, GraphError> {
-        self.edge_read(
-            edge,
-            |base, edge| GraphStorage::edge_properties(base, edge),
-            |view| Ok(view.and_then(|e| e.properties)),
-        )
+        self.edge_read(edge, GraphStorage::edge_properties, |view| {
+            Ok(view.and_then(|e| e.properties))
+        })
     }
 
     #[inline]
@@ -247,20 +231,14 @@ impl GraphStorage for LayeredGraph {
 
     #[inline]
     fn contains_vertex(&self, node: LayeredVertex) -> Result<bool, GraphError> {
-        self.vertex_read(
-            node,
-            |base, node| GraphStorage::contains_vertex(base, node),
-            |view| Ok(view.is_some()),
-        )
+        self.vertex_read(node, GraphStorage::contains_vertex, |view| {
+            Ok(view.is_some())
+        })
     }
 
     #[inline]
     fn contains_edge(&self, edge: LayeredEdge) -> Result<bool, GraphError> {
-        self.edge_read(
-            edge,
-            |base, edge| GraphStorage::contains_edge(base, edge),
-            |view| Ok(view.is_some()),
-        )
+        self.edge_read(edge, GraphStorage::contains_edge, |view| Ok(view.is_some()))
     }
 
     /// The base's label index (no scan), without removed base vertices and those whose image
