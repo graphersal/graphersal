@@ -72,6 +72,27 @@ impl LayeredVertex {
     pub(crate) fn to_base(self) -> VertexHandle {
         VertexHandle::new(NodeIndex::from_slot(self.slot), self.generation)
     }
+
+    /// The layer's handle of a vertex of the delta store (`handle` names a slot of the delta's
+    /// own topology, below 2^31): the slot tagged with bit 31, same generation.
+    #[inline]
+    pub(crate) fn from_delta(handle: VertexHandle) -> Self {
+        Self {
+            slot: handle.index().slot() | DELTA_BIT,
+            generation: handle.generation(),
+        }
+    }
+
+    /// The handle in the delta store's own slot space: the tag bit cleared. Meaningful for a
+    /// delta handle; a base handle maps to a delta slot of the same number, so callers route
+    /// on [`Self::is_delta`] first.
+    #[inline]
+    pub(crate) fn to_delta(self) -> VertexHandle {
+        VertexHandle::new(
+            NodeIndex::from_slot(self.slot & !DELTA_BIT),
+            self.generation,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +144,24 @@ impl LayeredEdge {
     #[inline]
     pub(crate) fn to_base(self) -> EdgeHandle {
         EdgeHandle::new(EdgeIndex::from_slot(self.slot), self.generation)
+    }
+
+    /// The layer's handle of an edge of the delta store; see [`LayeredVertex::from_delta`].
+    #[inline]
+    pub(crate) fn from_delta(handle: EdgeHandle) -> Self {
+        Self {
+            slot: handle.index().slot() | DELTA_BIT,
+            generation: handle.generation(),
+        }
+    }
+
+    /// The handle in the delta store's own slot space; see [`LayeredVertex::to_delta`].
+    #[inline]
+    pub(crate) fn to_delta(self) -> EdgeHandle {
+        EdgeHandle::new(
+            EdgeIndex::from_slot(self.slot & !DELTA_BIT),
+            self.generation,
+        )
     }
 }
 

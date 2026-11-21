@@ -1,5 +1,7 @@
 //! `impl GraphStorage for LayeredGraph`: the reads answer from the base (an untouched element
-//! with one bit test, no lookup) merged with the delta; the writes are not implemented yet.
+//! with one bit test, no lookup) merged with the delta; every write runs its write rule
+//! (`graph/write_rules.rs`) first and then stores in the delta. Writes to base elements and
+//! edges touching base vertices are not implemented yet.
 
 use compact_str::CompactString;
 
@@ -7,16 +9,34 @@ use super::handle::{LayeredEdge, LayeredVertex};
 use super::{LayeredGraph, delta::VertexView};
 use crate::error::GraphError;
 use crate::graph::definition::{Definition, DefinitionKind};
+use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
+use crate::graph::write_rules::{self, PathRemoval};
 use crate::graph::{
     CompressionEstimate, CompressionEstimateRequest, CompressionStats, ExecutionPolicy,
     GraphNodeType, GraphStatistics, GraphStorage, PropertyIndexInfo, PropertyIndexRange,
     PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates,
 };
-use crate::value::{ElementProperty, PropertyMap};
+use crate::value::{ElementProperty, JsonPath, PropertyMap};
 
-/// The operation every write names until the layer's write path exists.
-const WRITES: &str = "writes to a layered graph yet";
+/// The operation a write to a base element names until the layer can change base elements
+/// (tasks S1.5, S1.6).
+const BASE_WRITES: &str = "writes to base elements of a layered graph yet";
+
+/// The operation an edge touching a base vertex names until task S1.4.
+const CROSS_EDGES: &str = "edges touching base vertices of a layered graph yet";
+
+/// `Ok` for a write to an element of the delta, [`GraphError::Unsupported`] for one to a base
+/// element. Called after the write rule passed and found something to change, so a stale
+/// handle, an invalid value or a no-op answers exactly as in `TraversalGraph`.
+#[inline]
+fn delta_only(is_delta: bool) -> Result<(), GraphError> {
+    if is_delta {
+        Ok(())
+    } else {
+        Err(GraphError::unsupported(BASE_WRITES))
+    }
+}
 
 /// The labels of a vertex view (empty for none).
 #[inline]
@@ -139,7 +159,7 @@ impl GraphStorage for LayeredGraph {
         self.edge_read(
             edge,
             |base, edge| GraphStorage::edge_label(base, edge),
-            |view| Ok(view.and_then(|e| e.label)),
+            |view| Ok(view.and_then(|e| e.label.first()).map(|l| l.as_str())),
         )
     }
 
@@ -246,10 +266,10 @@ impl GraphStorage for LayeredGraph {
         ))
     }
 
-    /// The base's statistics (the layer changes nothing yet).
+    /// The layer's own statistics: the base's at creation, kept exact by every write.
     #[inline]
     fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
-        GraphStorage::statistics(&*self.base)
+        Ok(Some(&self.statistics))
     }
 
     /// The base's schema.
@@ -387,42 +407,42 @@ impl GraphStorage for LayeredGraph {
         GraphStorage::execution_policy(&*self.base)
     }
 
-    /// Neither `writable` nor `atomic` yet (writes are not implemented); the property index
-    /// lookups are the base's, so they are exact when the base's are.
+    /// `writable` (new elements, see the module docs), not `atomic`: the unit methods are the
+    /// trait's no-ops until task S1.8, so nothing is rolled back. The property index lookups
+    /// are the base's, so they are exact when the base's are.
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
         let base = GraphStorage::capabilities(&*self.base)?;
         Ok(StorageCapabilities::none()
+            .with_writable(true)
             .with_exact_property_index_lookups(base.exact_property_index_lookups))
     }
 
+    /// The write rules of `insert_vertex`, then the id (unique across base and delta, the
+    /// auto id continuing the base's sequence), then the new vertex is stored in the delta.
     fn insert_vertex(
         &mut self,
         id: Option<CompactString>,
         labels: Vec<CompactString>,
         properties: PropertyMap,
     ) -> Result<LayeredVertex, GraphError> {
-        let _ = (id, labels, properties);
-        Err(GraphError::unsupported(WRITES))
+        let (labels, properties) = write_rules::insert_vertex(&*self, labels, properties)?;
+        self.store_vertex(id, labels, properties)
     }
 
-    fn add_vertex_label(
+    fn add_vertex_with(
         &mut self,
-        node: LayeredVertex,
-        label: CompactString,
-    ) -> Result<bool, GraphError> {
-        let _ = (node, label);
-        Err(GraphError::unsupported(WRITES))
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+        context: &CreateContext,
+    ) -> Result<LayeredVertex, GraphError> {
+        let (labels, properties) =
+            write_rules::add_vertex_with(&*self, labels, properties, context)?;
+        self.store_vertex(id, labels, properties)
     }
 
-    fn remove_vertex_label(
-        &mut self,
-        node: LayeredVertex,
-        label: &str,
-    ) -> Result<bool, GraphError> {
-        let _ = (node, label);
-        Err(GraphError::unsupported(WRITES))
-    }
-
+    /// The write rules of `insert_edge`; an edge between two added vertices is stored in the
+    /// delta, one touching a base vertex is [`GraphError::Unsupported`] (task S1.4).
     fn insert_edge(
         &mut self,
         id: Option<CompactString>,
@@ -431,8 +451,63 @@ impl GraphStorage for LayeredGraph {
         to: LayeredVertex,
         properties: PropertyMap,
     ) -> Result<LayeredEdge, GraphError> {
-        let _ = (id, label, from, to, properties);
-        Err(GraphError::unsupported(WRITES))
+        let properties = write_rules::insert_edge(&*self, label.as_deref(), from, to, properties)?;
+        self.store_edge(id, label, from, to, properties)
+    }
+
+    fn add_edge_with(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: LayeredVertex,
+        to: LayeredVertex,
+        properties: PropertyMap,
+        context: &CreateContext,
+    ) -> Result<LayeredEdge, GraphError> {
+        let properties =
+            write_rules::add_edge_with(&*self, label.as_deref(), from, to, properties, context)?;
+        self.store_edge(id, label, from, to, properties)
+    }
+
+    fn add_vertex_label(
+        &mut self,
+        node: LayeredVertex,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        let Some(new_labels) = write_rules::add_vertex_label(&*self, node, &label)? else {
+            return Ok(false);
+        };
+        delta_only(node.is_delta())?;
+        self.delta
+            .set_vertex_labels(node, new_labels, &mut self.statistics);
+        Ok(true)
+    }
+
+    fn remove_vertex_label(
+        &mut self,
+        node: LayeredVertex,
+        label: &str,
+    ) -> Result<bool, GraphError> {
+        let Some(new_labels) = write_rules::remove_vertex_label(&*self, node, label)? else {
+            return Ok(false);
+        };
+        delta_only(node.is_delta())?;
+        self.delta
+            .set_vertex_labels(node, new_labels, &mut self.statistics);
+        Ok(true)
+    }
+
+    fn set_edge_label(
+        &mut self,
+        edge: LayeredEdge,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        if !write_rules::set_edge_label(&*self, edge, &label)? {
+            return Ok(false);
+        }
+        delta_only(edge.is_delta())?;
+        self.delta.set_edge_label(edge, label, &mut self.statistics);
+        Ok(true)
     }
 
     fn set_vertex_property(
@@ -441,8 +516,10 @@ impl GraphStorage for LayeredGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
-        let _ = (node, key, value);
-        Err(GraphError::unsupported(WRITES))
+        let value = write_rules::set_vertex_property(&*self, node, &key, value)?;
+        delta_only(node.is_delta())?;
+        self.delta.set_vertex_property(node, key, value);
+        Ok(())
     }
 
     fn set_edge_property(
@@ -451,27 +528,157 @@ impl GraphStorage for LayeredGraph {
         key: CompactString,
         value: ElementProperty,
     ) -> Result<(), GraphError> {
-        let _ = (edge, key, value);
-        Err(GraphError::unsupported(WRITES))
+        let value = write_rules::set_edge_property(&*self, edge, &key, value)?;
+        delta_only(edge.is_delta())?;
+        self.delta.set_edge_property(edge, key, value);
+        Ok(())
     }
 
+    /// `TraversalGraph`'s path write (the leaf coerced, the whole resulting property checked),
+    /// not the trait default.
+    fn set_vertex_property_path(
+        &mut self,
+        node: LayeredVertex,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let (key, value) = write_rules::set_vertex_property_path(&*self, node, path, value)?;
+        delta_only(node.is_delta())?;
+        self.delta.set_vertex_property(node, key, value);
+        Ok(())
+    }
+
+    fn set_edge_property_path(
+        &mut self,
+        edge: LayeredEdge,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let (key, value) = write_rules::set_edge_property_path(&*self, edge, path, value)?;
+        delta_only(edge.is_delta())?;
+        self.delta.set_edge_property(edge, key, value);
+        Ok(())
+    }
+
+    fn remove_vertex_property_path(
+        &mut self,
+        node: LayeredVertex,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        match write_rules::remove_vertex_property_path(&*self, node, path)? {
+            PathRemoval::Nothing => {}
+            PathRemoval::Drop(key) => {
+                delta_only(node.is_delta())?;
+                self.delta.drop_vertex_property(node, &key);
+            }
+            PathRemoval::Store(key, value) => {
+                delta_only(node.is_delta())?;
+                self.delta.set_vertex_property(node, key, value);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_edge_property_path(
+        &mut self,
+        edge: LayeredEdge,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        match write_rules::remove_edge_property_path(&*self, edge, path)? {
+            PathRemoval::Nothing => {}
+            PathRemoval::Drop(key) => {
+                delta_only(edge.is_delta())?;
+                self.delta.drop_edge_property(edge, &key);
+            }
+            PathRemoval::Store(key, value) => {
+                delta_only(edge.is_delta())?;
+                self.delta.set_edge_property(edge, key, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// A stale handle is a no-op (idempotent drop), as in `TraversalGraph`.
     fn drop_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
-        let _ = node;
-        Err(GraphError::unsupported(WRITES))
+        if !write_rules::drop_vertex(&*self, node) {
+            return Ok(());
+        }
+        delta_only(node.is_delta())?;
+        self.delta.remove_vertex(node, &mut self.statistics);
+        Ok(())
     }
 
     fn drop_vertex_property(&mut self, prop: &str, node: LayeredVertex) -> Result<(), GraphError> {
-        let _ = (prop, node);
-        Err(GraphError::unsupported(WRITES))
+        if !write_rules::drop_vertex_property(&*self, node, prop)? {
+            return Ok(());
+        }
+        delta_only(node.is_delta())?;
+        self.delta.drop_vertex_property(node, prop);
+        Ok(())
     }
 
     fn drop_edge(&mut self, edge: LayeredEdge) -> Result<(), GraphError> {
-        let _ = edge;
-        Err(GraphError::unsupported(WRITES))
+        if !write_rules::drop_edge(&*self, edge) {
+            return Ok(());
+        }
+        delta_only(edge.is_delta())?;
+        self.delta.remove_edge(edge, &mut self.statistics);
+        Ok(())
     }
 
     fn drop_edge_property(&mut self, prop: &str, edge: LayeredEdge) -> Result<(), GraphError> {
-        let _ = (prop, edge);
-        Err(GraphError::unsupported(WRITES))
+        if !write_rules::drop_edge_property(&*self, edge, prop)? {
+            return Ok(());
+        }
+        delta_only(edge.is_delta())?;
+        self.delta.drop_edge_property(edge, prop);
+        Ok(())
+    }
+
+    /// Raises the layer's own sequences (`max`, never lowered); the base's stay as they are.
+    fn raise_id_sequences(
+        &mut self,
+        node_sequence: u64,
+        edge_sequence: u64,
+    ) -> Result<(), GraphError> {
+        self.node_sequence = self.node_sequence.max(node_sequence);
+        self.edge_sequence = self.edge_sequence.max(edge_sequence);
+        Ok(())
+    }
+}
+
+impl LayeredGraph {
+    /// Stores a vertex the write rules accepted: its id checked, then the delta insert.
+    fn store_vertex(
+        &mut self,
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<LayeredVertex, GraphError> {
+        let (id, sequence) = self.vertex_id_for(id)?;
+        if let Err(err) = write_rules::check_vertex_id_free(&*self, &id) {
+            self.node_sequence = sequence;
+            return Err(err);
+        }
+        self.delta
+            .insert_vertex(id, labels, properties, &mut self.statistics)
+    }
+
+    /// Stores an edge the write rules accepted (both endpoints live): an edge between two
+    /// added vertices goes to the delta once its id is checked.
+    fn store_edge(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: LayeredVertex,
+        to: LayeredVertex,
+        properties: PropertyMap,
+    ) -> Result<LayeredEdge, GraphError> {
+        if !(from.is_delta() && to.is_delta()) {
+            return Err(GraphError::unsupported(CROSS_EDGES));
+        }
+        let id = self.edge_id_for(id)?;
+        self.delta
+            .insert_edge(id, label, properties, from, to, &mut self.statistics)
     }
 }
