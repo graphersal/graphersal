@@ -2075,8 +2075,6 @@ impl IndexState {
     }
 
     /// Whether it holds no entry and skips no value.
-    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0 && self.skipped == 0
     }
@@ -2094,9 +2092,7 @@ impl IndexState {
     /// The keys inside `range` in key order, each with its postings (slots ascending);
     /// `None` when the range holds nothing (bounds of different kinds, a non-scalar bound, no
     /// bound, a lower bound past the upper one). The slices `index_slice` and [`Self::count`]
-    /// read, for a reader that merges several states key by key.
-    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// read, for a reader that merges several states key by key (a layer's index overlay).
     pub(crate) fn range_postings<'a>(
         &'a self,
         range: &PropertyIndexRange,
@@ -2123,7 +2119,7 @@ impl IndexState {
     /// the same number), by key then slot; nothing for a `null` key, which is not part of
     /// uniqueness. Unlike `other_holder` it names every holder, so a reader that must skip some
     /// slots (an overlay's excluded base slots) can.
-    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    // Read by the layer's unique checks (S4.3); unit-tested here.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn holders<'a>(&'a self, key: &IndexKey) -> Box<dyn Iterator<Item = u32> + 'a> {
         match key {
@@ -2328,6 +2324,56 @@ impl IndexState {
             }
         }
         groups
+    }
+
+    /// The slots inside `range`, by key then slot; an `each` slice of more than one key is
+    /// collected and deduplicated, by slot (an element holding several values of the slice is
+    /// in several postings, D15). What a lookup of [`TraversalGraph`] (and of a layer whose
+    /// overlay holds nothing of its own) reads.
+    pub(crate) fn slice<'a>(
+        &'a self,
+        range: &PropertyIndexRange,
+    ) -> Box<dyn Iterator<Item = u32> + 'a> {
+        let Some(bounds) = set_bounds(range).and_then(key_bounds) else {
+            return Box::new(std::iter::empty());
+        };
+        if self.has_each() {
+            let mut keys = self.entries.range(bounds.clone());
+            let first = keys.next();
+            if keys.next().is_some() {
+                let mut slots: Vec<u32> = self
+                    .entries
+                    .range(bounds)
+                    .flat_map(|(_, postings)| self.runs.iter(postings))
+                    .collect();
+                slots.sort_unstable();
+                slots.dedup();
+                return Box::new(slots.into_iter());
+            }
+            return match first {
+                Some((_, postings)) => Box::new(self.runs.iter(postings)),
+                None => Box::new(std::iter::empty()),
+            };
+        }
+        Box::new(
+            self.entries
+                .range(bounds)
+                .flat_map(|(_, postings)| self.runs.iter(postings)),
+        )
+    }
+
+    /// The index's description with `stats` (its own, or a layer overlay's combined figures).
+    pub(crate) fn info(&self, stats: PropertyIndexStats) -> PropertyIndexInfo {
+        PropertyIndexInfo {
+            name: self.name.to_string(),
+            element: self.element,
+            label: self.label.as_ref().map(CompactString::to_string),
+            key: self.key.to_string(),
+            index_type: PropertyIndexType::MemoryOrdered,
+            transform: self.transform.clone(),
+            unique: self.unique,
+            stats,
+        }
     }
 
     /// Whether the index keys array elements (its transform starts with `each`).
@@ -2574,15 +2620,30 @@ impl PropertyIndexes {
         key: &str,
         transform: Option<&PropertyIndexTransform>,
     ) -> Option<&IndexState> {
+        self.indexes
+            .get(self.find_position(element, label, key, transform)?)
+    }
+
+    /// The position of the index on `(element, label, key, transform)` (`label` `None`: the
+    /// label-less one); what a layer's index overlays are found by (their parts keep the
+    /// positions and lookups of the indexes they overlay).
+    pub(crate) fn find_position(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+    ) -> Option<usize> {
         let positions = match (label, element) {
             (Some(label), _) => self.by_label(element).get(label)?,
             (None, ElementKind::Vertex) => &self.vertex_any,
             (None, ElementKind::Edge) => &self.edge_any,
         };
-        positions
-            .iter()
-            .filter_map(|position| self.indexes.get(*position))
-            .find(|index| index.key == key && index.transform.as_ref() == transform)
+        positions.iter().copied().find(|position| {
+            self.indexes
+                .get(*position)
+                .is_some_and(|index| index.key == key && index.transform.as_ref() == transform)
+        })
     }
 
     /// The number of installed indexes (their positions are `0..len`).
@@ -2841,7 +2902,8 @@ impl TraversalGraph {
     /// The installed index named `name` (a layered graph reads it in place as the shared base
     /// part of its overlay); `None` when no such index is installed (absent, of a type this
     /// version does not serve, or a disabled unique one).
-    // Read by the layer's lookups and unique checks (S4.2, S4.3); unit-tested here.
+    // Read by the layer's unique checks and layer-defined indexes (S4.3, S4.4); unit-tested
+    // here.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn index_state(&self, name: &str) -> Option<&IndexState> {
         self.property_indexes
@@ -2937,16 +2999,7 @@ impl TraversalGraph {
         self.property_indexes
             .indexes
             .iter()
-            .map(|index| PropertyIndexInfo {
-                name: index.name.to_string(),
-                element: index.element,
-                label: index.label.as_ref().map(CompactString::to_string),
-                key: index.key.to_string(),
-                index_type: PropertyIndexType::MemoryOrdered,
-                transform: index.transform.clone(),
-                unique: index.unique,
-                stats: index.stats(),
-            })
+            .map(|index| index.info(index.stats()))
             .collect()
     }
 
@@ -2960,36 +3013,11 @@ impl TraversalGraph {
         transform: Option<&PropertyIndexTransform>,
         range: &PropertyIndexRange,
     ) -> Option<Box<dyn Iterator<Item = u32> + 'a>> {
-        let index = self.property_indexes.find(element, label, key, transform)?;
-        let Some(bounds) = set_bounds(range).and_then(key_bounds) else {
-            return Some(Box::new(std::iter::empty()));
-        };
-        if index.has_each() {
-            // D15: an element holding several values of the slice is in several postings; a
-            // slice of more than one key is collected and deduplicated (by slot).
-            let mut keys = index.entries.range(bounds.clone());
-            let first = keys.next();
-            if keys.next().is_some() {
-                let mut slots: Vec<u32> = index
-                    .entries
-                    .range(bounds)
-                    .flat_map(|(_, postings)| index.runs.iter(postings))
-                    .collect();
-                slots.sort_unstable();
-                slots.dedup();
-                return Some(Box::new(slots.into_iter()));
-            }
-            return Some(match first {
-                Some((_, postings)) => Box::new(index.runs.iter(postings)),
-                None => Box::new(std::iter::empty()),
-            });
-        }
-        Some(Box::new(
-            index
-                .entries
-                .range(bounds)
-                .flat_map(|(_, postings)| index.runs.iter(postings)),
-        ))
+        Some(
+            self.property_indexes
+                .find(element, label, key, transform)?
+                .slice(range),
+        )
     }
 
     /// The vertices labelled `label` (every vertex: `None`) whose `key` (transformed by

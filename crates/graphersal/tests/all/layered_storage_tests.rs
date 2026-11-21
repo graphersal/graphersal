@@ -29,12 +29,30 @@
 //!   equal).
 //!
 //! Anything else is a bug.
+//!
+//! **The index fixture** (S4.2, `*_on_an_indexed_layer`): the same lists, plus curated index
+//! scripts (`INDEX_SCRIPTS`: equality, range, `each`, label-less, `to_lower`, counts, around
+//! writes), run over the modern graph with seven property indexes in the base, in three setups
+//! compared with a `TraversalGraph` holding the same data and indexes: `Base` (the indexed
+//! modern graph is the base), `Delta` (an empty base holding only the index definitions, the
+//! data in the delta: every lookup merges the delta part alone) and `Touched` (the indexed
+//! modern graph plus 94 filler vertices as the base, with a few percent of it changed in the
+//! layer before the script: an image, an added person, a dropped filler, an imaged edge; the
+//! reference is a `TraversalGraph` built from that layer's data). After every script the
+//! overlays must equal a rebuild (`check_layer_indexes`). One more accepted class there:
+//!
+//! - index stats: a script listing the indexes (`indexes(`) whose result differs only in the
+//!   `bytes` (the layer counts only its own parts) and `distinct_values` (an upper bound on a
+//!   touched layer) figures;
+//! - origin queries in the `Touched` setup, as in `Delta`: the elements changed before the
+//!   script are `added` / `modified` there, `base` in the reference.
 #![cfg(all(feature = "script", feature = "io"))]
 
 use std::sync::Arc;
 
 use graphersal::TraversalGraph;
-use graphersal::storage::{Graph, GraphStorage, LayeredGraph};
+use graphersal::catalog::{Definition, PropertyIndexDefinition, PropertyIndexTransform};
+use graphersal::storage::{ElementKind, Graph, GraphStorage, LayeredGraph};
 
 use crate::foreign_storage_tests::{self as reference_scripts, Mode, Outcome, reference};
 use crate::test_storage::{copy_into_delta, layer_over};
@@ -46,9 +64,45 @@ enum Setup {
     Base,
     /// The modern graph is in the delta of a layer over an empty base.
     Delta,
+    /// The index fixture only: a base with filler vertices, a few percent of it changed in the
+    /// layer.
+    Touched,
 }
 
 const SETUPS: [Setup; 2] = [Setup::Base, Setup::Delta];
+const INDEX_SETUPS: [Setup; 3] = [Setup::Base, Setup::Delta, Setup::Touched];
+
+/// What a differential compares: the reference per setup, the layered graph per setup, and
+/// whether the index overlays are checked after every script.
+#[derive(Clone, Copy)]
+struct Fixture {
+    setups: &'static [Setup],
+    reference: fn(Setup) -> Arc<Graph<TraversalGraph>>,
+    layered: fn(Setup) -> Arc<Graph<LayeredGraph>>,
+    check_indexes: bool,
+}
+
+/// The modern graph, as the lists were written for.
+const MODERN: Fixture = Fixture {
+    setups: &SETUPS,
+    reference: |_| reference(),
+    layered,
+    check_indexes: false,
+};
+
+/// The modern graph with seven property indexes (module docs).
+const INDEXED: Fixture = Fixture {
+    setups: &INDEX_SETUPS,
+    reference: indexed_reference,
+    layered: indexed_layered,
+    check_indexes: true,
+};
+
+impl Default for Fixture {
+    fn default() -> Self {
+        MODERN
+    }
+}
 const MODES: [Mode; 3] = [Mode::Plain, Mode::Atomic, Mode::DryRun];
 
 /// The modern graph as a layered graph in `setup`.
@@ -57,7 +111,172 @@ fn layered(setup: Setup) -> Arc<Graph<LayeredGraph>> {
     Arc::new(Graph::new(match setup {
         Setup::Base => layer_over(modern),
         Setup::Delta => copy_into_delta(&modern),
+        Setup::Touched => panic!("the modern fixture has no Touched setup"),
     }))
+}
+
+/// The index definitions of the index fixture: per label and label-less, vertices and edges,
+/// `to_lower` and `each`.
+fn index_definitions() -> Vec<Definition> {
+    [
+        (
+            "age",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+        ),
+        (
+            "lang",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "software", "lang"),
+        ),
+        (
+            "name",
+            PropertyIndexDefinition::label_less(ElementKind::Vertex, "name"),
+        ),
+        (
+            "name_lower",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name")
+                .with_transform(Some(PropertyIndexTransform::ToLower)),
+        ),
+        (
+            "tags",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "tags")
+                .with_transform(Some(PropertyIndexTransform::Each)),
+        ),
+        (
+            "knows_weight",
+            PropertyIndexDefinition::new(ElementKind::Edge, "knows", "weight"),
+        ),
+        (
+            "weight",
+            PropertyIndexDefinition::label_less(ElementKind::Edge, "weight"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, definition)| Definition::property_index(name, definition))
+    .collect()
+}
+
+/// `graph` with the index fixture's definitions.
+fn with_indexes(mut graph: TraversalGraph) -> TraversalGraph {
+    for definition in index_definitions() {
+        graph.set_definition(definition).unwrap();
+    }
+    graph
+}
+
+/// The base of the `Touched` setup: the indexed modern graph plus 94 filler vertices (100 in
+/// all), some of them people with an age.
+fn touched_base() -> TraversalGraph {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    for i in 0..94_i64 {
+        let label = if i % 2 == 0 { "filler" } else { "person" };
+        let mut properties = graphersal::prelude::PropertyMap::default();
+        properties.insert("name", format!("Filler{i}").as_str().into());
+        properties.insert("age", (40 + i % 7).into());
+        graph
+            .insert_vertex(None, vec![label.into()], properties)
+            .unwrap();
+    }
+    with_indexes(graph)
+}
+
+/// The `Touched` layer: a few percent of its base changed before any script (an image of a
+/// base person, an added person, a dropped filler, an imaged base edge).
+fn touched_layer() -> LayeredGraph {
+    let mut layer = layer_over(touched_base());
+    let marko = layer.get_vertex_by_id("1").unwrap().unwrap();
+    layer
+        .set_vertex_property(marko, "age".into(), 30.into())
+        .unwrap();
+    let mut properties = graphersal::prelude::PropertyMap::default();
+    properties.insert("name", "Ada".into());
+    properties.insert("age", 30.into());
+    layer
+        .insert_vertex(None, vec!["person".into()], properties)
+        .unwrap();
+    let filler = layer.vertices_by_label("filler").unwrap().next().unwrap();
+    layer.drop_vertex(filler).unwrap();
+    let knows = layer.get_edge_by_id("0").unwrap().unwrap();
+    layer
+        .set_edge_property(knows, "weight".into(), 0.75.into())
+        .unwrap();
+    layer.check_layer_indexes().unwrap();
+    layer
+}
+
+/// The reference of the index fixture: the indexed modern graph, or for `Touched` a
+/// `TraversalGraph` built from the touched layer's data.
+fn indexed_reference(setup: Setup) -> Arc<Graph<TraversalGraph>> {
+    Arc::new(Graph::new(match setup {
+        Setup::Touched => crate::layered_index_tests::materialize(&touched_layer()),
+        _ => with_indexes(TraversalGraph::tinkerpop_modern()),
+    }))
+}
+
+/// The index fixture as a layered graph in `setup`.
+fn indexed_layered(setup: Setup) -> Arc<Graph<LayeredGraph>> {
+    Arc::new(Graph::new(match setup {
+        Setup::Base => layer_over(with_indexes(TraversalGraph::tinkerpop_modern())),
+        Setup::Delta => indexed_delta(),
+        Setup::Touched => touched_layer(),
+    }))
+}
+
+/// A layer over an empty base holding only the index definitions, the modern graph's data in
+/// its delta (vertices, then edges, in the source's scan order, as `copy_into_delta`).
+fn indexed_delta() -> LayeredGraph {
+    let source = TraversalGraph::tinkerpop_modern();
+    let mut layer = layer_over(with_indexes(TraversalGraph::new()));
+    let mut vertices = std::collections::HashMap::new();
+    for node in source.vertices().unwrap() {
+        let id = source.vertex_id(node).unwrap().map(Into::into);
+        let labels = source.vertex_labels(node).unwrap().to_vec();
+        let properties = source.vertex_properties(node).unwrap().cloned();
+        let copy = layer
+            .insert_vertex(id, labels, properties.unwrap_or_default())
+            .unwrap();
+        vertices.insert(node, copy);
+    }
+    for edge in source.edges().unwrap() {
+        let id = source.edge_id(edge).unwrap().map(Into::into);
+        let label = source.edge_label(edge).unwrap().map(Into::into);
+        let (from, to) = source.edge_endpoints(edge).unwrap().unwrap();
+        let properties = source.edge_properties(edge).unwrap().cloned();
+        layer
+            .insert_edge(
+                id,
+                label,
+                vertices[&from],
+                vertices[&to],
+                properties.unwrap_or_default(),
+            )
+            .unwrap();
+    }
+    layer
+}
+
+/// Whether `script` lists the indexes with their stats (`g.indexes()`).
+fn lists_indexes(script: &str) -> bool {
+    script.contains("indexes(")
+}
+
+/// `text` with the figures of the `bytes` and `distinct_values` stats blanked.
+fn without_index_sizes(text: &Result<String, String>) -> Result<String, String> {
+    text.clone().map(|text| {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = ["\"bytes\": ", "\"distinct_values\": "]
+            .iter()
+            .filter_map(|needle| rest.find(needle).map(|at| (at, needle.len())))
+            .min()
+        {
+            let (at, len) = at;
+            out.push_str(&rest[..at + len]);
+            rest = rest[at + len..].trim_start_matches(|c: char| c.is_ascii_digit());
+            out.push('#');
+        }
+        out.push_str(rest);
+        out
+    })
 }
 
 /// Whether `script` drops elements, properties or labels, or relabels an edge: the scripts
@@ -131,6 +350,19 @@ const SORTED_STATE: &str = r#"[
     g.statistics()
 ]"#;
 
+/// [`reference_scripts::run_curated`] with the commit position counted from the graph's
+/// position before the script (the index fixture's reference committed its index definitions,
+/// a layer starts at 0).
+fn run_relative<S>(graph: Arc<Graph<S>>, mode: Mode, script: &str) -> Outcome
+where
+    S: GraphStorage + Default + Send + Sync + 'static,
+{
+    let start = graph.read().last_commit_seq().unwrap();
+    let mut outcome = reference_scripts::run_curated(graph, mode, script);
+    outcome.last_commit_seq -= start;
+    outcome
+}
+
 /// One script of one list in one mode and setup that differs.
 struct Difference {
     setup: Setup,
@@ -143,9 +375,33 @@ struct Difference {
 
 impl Difference {
     fn describe(&self) -> String {
+        let (expected, actual) = (format!("{:?}", self.expected), format!("{:?}", self.actual));
+        // Where the two outcomes part, with some context (the outcomes are long).
+        let at = expected
+            .char_indices()
+            .zip(actual.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(expected.len().min(actual.len()), |((at, _), _)| at);
+        let from = expected[..at]
+            .char_indices()
+            .rev()
+            .nth(80)
+            .map_or(0, |(i, _)| i);
+        let around = |text: &str| {
+            text[from.min(text.len())..]
+                .chars()
+                .take(240)
+                .collect::<String>()
+        };
         format!(
-            "[{:?} {:?} {}] `{}`\n  TraversalGraph: {:?}\n  LayeredGraph:   {:?}",
-            self.setup, self.mode, self.list, self.script, self.expected, self.actual
+            "[{:?} {:?} {}] `{}`\n  TraversalGraph: {expected}\n  LayeredGraph:   {actual}\n  \
+             first difference: ...{}\n                vs ...{}",
+            self.setup,
+            self.mode,
+            self.list,
+            self.script,
+            around(&expected),
+            around(&actual)
         )
     }
 }
@@ -153,8 +409,10 @@ impl Difference {
 /// The differences of one list, sorted into the accepted classes and the rest.
 #[derive(Default)]
 struct Differences {
+    fixture: Fixture,
     /// Scripts compared (script x mode x setup).
     compared: usize,
+    index_stats: Vec<String>,
     order_only: Vec<String>,
     p5_refusals: Vec<String>,
     origin_queries: Vec<String>,
@@ -165,13 +423,31 @@ struct Differences {
 impl Differences {
     /// Runs `script` (of `list`) in every mode on the reference and on both layered setups.
     fn compare(&mut self, list: &'static str, script: &str) {
+        let fixture = self.fixture;
         for mode in MODES {
-            let expected = reference_scripts::run_curated(reference(), mode, script);
-            for setup in SETUPS {
+            let mut expected = None;
+            let mut expected_for = None;
+            for &setup in fixture.setups {
                 self.compared += 1;
-                let layer = layered(setup);
-                let actual = reference_scripts::run_curated(Arc::clone(&layer), mode, script);
-                if expected == actual {
+                // The reference is the same for every setup but `Touched`.
+                let key = setup == Setup::Touched;
+                if expected_for != Some(key) {
+                    expected = Some(run_relative((fixture.reference)(setup), mode, script));
+                    expected_for = Some(key);
+                }
+                let Some(expected) = expected.as_ref() else {
+                    continue;
+                };
+                let layer = (fixture.layered)(setup);
+                let actual = run_relative(Arc::clone(&layer), mode, script);
+                if fixture.check_indexes
+                    && let Err(problem) = layer.read().check_layer_indexes()
+                {
+                    self.unexplained.push(format!(
+                        "[{setup:?} {mode:?} {list}] `{script}`: overlays: {problem}"
+                    ));
+                }
+                if *expected == actual {
                     continue;
                 }
                 let difference = Difference {
@@ -179,7 +455,7 @@ impl Differences {
                     mode,
                     list,
                     script: script.to_string(),
-                    expected: reference_scripts::run_curated(reference(), mode, script),
+                    expected: run_relative((fixture.reference)(setup), mode, script),
                     actual,
                 };
                 self.classify(difference, layer);
@@ -198,13 +474,22 @@ impl Differences {
             self.p5_refusals.push(difference.describe());
             return;
         }
-        if difference.setup == Setup::Delta
+        if matches!(difference.setup, Setup::Delta | Setup::Touched)
             && asks_origins(script)
             && expected.changes == actual.changes
             && expected.state == actual.state
             && expected.last_commit_seq == actual.last_commit_seq
         {
             self.origin_queries.push(difference.describe());
+            return;
+        }
+        if lists_indexes(script)
+            && without_index_sizes(&expected.result) == without_index_sizes(&actual.result)
+            && expected.changes == actual.changes
+            && expected.state == actual.state
+            && expected.last_commit_seq == actual.last_commit_seq
+        {
+            self.index_stats.push(difference.describe());
             return;
         }
         if let Some(task) = later_task(script, expected, actual) {
@@ -221,7 +506,7 @@ impl Differences {
         {
             // The same data in another order: the states sorted by id must be equal (the
             // reference re-runs the script on a fresh graph in the same mode).
-            let plain = reference();
+            let plain = (self.fixture.reference)(difference.setup);
             let _ = reference_scripts::run_curated(Arc::clone(&plain), difference.mode, script);
             if reference_scripts::render(plain, SORTED_STATE)
                 == reference_scripts::render(layer, SORTED_STATE)
@@ -242,14 +527,19 @@ impl Differences {
         );
         println!(
             "{what}: {} runs compared; order-only differences (P4): {}; P5 refusals: {}; \
-             origin queries in the Delta setup: {}; left to later tasks: {}",
+             origin queries (Delta, Touched): {}; index stats: {}; left to later tasks: {}",
             self.compared,
             self.order_only.len(),
             self.p5_refusals.len(),
             self.origin_queries.len(),
+            self.index_stats.len(),
             self.later_tasks.len()
         );
-        let lines = self.order_only.iter().chain(&self.p5_refusals);
+        let lines = self
+            .order_only
+            .iter()
+            .chain(&self.p5_refusals)
+            .chain(&self.index_stats);
         for line in lines.chain(&self.origin_queries).chain(&self.later_tasks) {
             // The script and the class; the outcomes only for order-only differences.
             println!("{}", line.lines().next().unwrap_or_default());
@@ -431,4 +721,70 @@ fn compression_estimates_answer_only_for_untouched_kinds() {
     assert!(GraphStorage::estimate_compression(&layer, &edges).is_ok());
     let delta = copy_into_delta(&TraversalGraph::tinkerpop_modern());
     assert!(GraphStorage::estimate_compression(&delta, &vertices).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The index fixture (S4.2)
+// ---------------------------------------------------------------------------------------------
+
+/// Curated index scripts: every lookup shape the overlays serve (equality, range, `each`,
+/// label-less, `to_lower`, counts from the postings, edges), before and after writes of every
+/// kind in the same script.
+const INDEX_SCRIPTS: &[&str] = &[
+    r#"g.V().has("name", "marko").values("age").toList()"#,
+    r#"g.V().has("name", "marko").count().next()"#,
+    r#"g.V().has("name", "Ada").id().toList()"#,
+    r#"g.V().hasLabel("person").has("age", 30).values("name").toList()"#,
+    r#"g.V().hasLabel("person").has("age", P.gte(30)).values("name").toList()"#,
+    r#"g.V().hasLabel("person").has("age", P.between(27, 33)).count().next()"#,
+    r#"g.V().hasLabel("person").has("age", P.within(29, 30, 32)).id().toList()"#,
+    r#"g.V().hasLabel("person").has("name", __.to_lower().is(P.eq("marko"))).id().toList()"#,
+    r#"g.V().hasLabel("person").has("name", __.to_lower().is(P.eq("marko"))).count().next()"#,
+    r#"g.V().hasLabel("software").has("lang", "java").values("name").toList()"#,
+    r#"g.E().has("weight", 0.5).id().toList()"#,
+    r#"g.E().hasLabel("knows").has("weight", P.lt(0.8)).id().toList()"#,
+    r#"g.E().has("weight", P.gt(0.3)).count().next()"#,
+    r#"g.addV("person").property("name", "MARKO").property("age", 30).iterate(); [g.V().has("name", "MARKO").id().toList(), g.V().hasLabel("person").has("name", __.to_lower().is(P.eq("marko"))).id().toList(), g.V().hasLabel("person").has("age", 30).count().next()]"#,
+    r#"g.V().has("name", "vadas").property("age", 30).iterate(); [g.V().hasLabel("person").has("age", 30).values("name").toList(), g.V().hasLabel("person").has("age", 27).count().next()]"#,
+    r#"g.V().has("name", "josh").drop().iterate(); [g.V().hasLabel("person").has("age", P.gt(0)).values("name").toList(), g.V().has("name", "josh").count().next(), g.E().has("weight", 1.0).count().next()]"#,
+    r#"g.V("1").property("tags", ["a", "b", "a"]).iterate(); g.V("2").property("tags", ["b"]).iterate(); g.addV("person").property("tags", ["c", "b"]).iterate(); [g.V().hasLabel("person").has("tags", __.unfold().is(P.eq("b"))).id().toList(), g.V().hasLabel("person").has("tags", __.unfold().is(P.eq("b"))).count().next(), g.V().hasLabel("person").has("tags", __.unfold().is(P.within("a", "c"))).id().toList()]"#,
+    r#"g.V("1").drop_label("person").iterate(); g.V("3").add_label("person").iterate(); [g.V().hasLabel("person").has("age", P.gte(0)).values("name").toList(), g.V().hasLabel("person").has("name", __.to_lower().is(P.eq("lop"))).count().next()]"#,
+    r#"g.V("1").property("name", "Marko").iterate(); g.V("2").properties("name").drop().iterate(); [g.V().has("name", "marko").count().next(), g.V().has("name", "Marko").id().toList(), g.V().hasLabel("person").has("name", __.to_lower().is(P.eq("marko"))).id().toList()]"#,
+    r#"g.E("2").property("weight", 0.5).iterate(); g.E("0").set_label("likes").iterate(); g.V("1").addE("knows").to(__.V("3")).property("weight", 0.5).iterate(); [g.E().hasLabel("knows").has("weight", 0.5).id().toList(), g.E().has("weight", 0.5).count().next(), g.E().hasLabel("knows").has("weight", P.gte(0.0)).count().next()]"#,
+    r#"g.V().hasLabel("person").property("age", 50).iterate(); [g.V().hasLabel("person").has("age", 50).count().next(), g.V().hasLabel("person").has("age", P.lt(50)).count().next()]"#,
+    r#"g.indexes().map(|i| [i.name, i.entries, i.skipped])"#,
+    r#"g.V("1").property("name", "Mx").iterate(); g.indexes()"#,
+];
+
+#[test]
+fn every_documented_example_gives_the_same_result_on_an_indexed_layer() {
+    let mut differences = Differences {
+        fixture: INDEXED,
+        ..Differences::default()
+    };
+    for (_receiver, _name, example, result) in graphersal::script::doc_examples() {
+        if result.is_none() {
+            continue;
+        }
+        differences.compare("doc examples", example);
+    }
+    differences.check("doc examples, indexed", 200 * 9);
+}
+
+#[test]
+fn curated_index_scripts_give_the_same_result_on_an_indexed_layer() {
+    let mut differences = Differences {
+        fixture: INDEXED,
+        ..Differences::default()
+    };
+    for script in INDEX_SCRIPTS {
+        differences.compare("INDEX_SCRIPTS", script);
+    }
+    for (_mode, script) in reference_scripts::CURATED {
+        differences.compare("CURATED", script);
+    }
+    differences.check(
+        "curated scripts, indexed",
+        (INDEX_SCRIPTS.len() + reference_scripts::CURATED.len()) * 9,
+    );
 }

@@ -585,6 +585,26 @@ impl Delta {
             .map(LayeredEdge::from_delta)
     }
 
+    /// The added vertex at delta node slot `slot` (bit 31 clear), with the slot's current
+    /// generation: what an index overlay's delta part names (exact maintenance names only live
+    /// added vertices' slots, never a stub's).
+    #[inline]
+    pub(crate) fn added_vertex_at(&self, slot: u32) -> Option<LayeredVertex> {
+        let index = NodeIndex::from_slot(slot);
+        let vertex = self.graph.node_weight(index)?;
+        Some(LayeredVertex::from_delta(VertexHandle::new(
+            index, vertex.3,
+        )))
+    }
+
+    /// The edge counterpart of [`Self::added_vertex_at`].
+    #[inline]
+    pub(crate) fn added_edge_at(&self, slot: u32) -> Option<LayeredEdge> {
+        let index = EdgeIndex::from_slot(slot);
+        let edge = self.graph.edge_weight(index)?;
+        Some(LayeredEdge::from_delta(EdgeHandle::new(index, edge.3.own)))
+    }
+
     /// The delta node slot of a live added vertex (`node.is_delta()`), [`NodeIndex::end`]
     /// (never occupied, so it lists nothing) for a stale handle or one naming a stub.
     #[inline]
@@ -826,8 +846,8 @@ impl Delta {
         self.relabeled_edges.any()
     }
 
-    /// `true` while the layer has added, removed or modified (imaged) any vertex: a property
-    /// index of the base may then miss or wrongly hold vertices (index deltas: stage 4).
+    /// `true` while the layer has added, removed or modified (imaged) any vertex: the base's
+    /// compression estimate then misses the layer's values (`estimate_compression` refuses).
     #[inline]
     pub(crate) fn vertices_touched(&self) -> bool {
         self.graph.node_count() > self.stubs.len()

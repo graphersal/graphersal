@@ -711,8 +711,6 @@ pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S
 /// twice, nested, beside objects), `null`, a missing key, multi-label and unlabeled vertices.
 /// Checked after writes and a rollback too. Skipped without the capability.
 pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mut S) {
-    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
-    use graphersal::storage::{ElementKind, PropertyIndexRange};
     let caps = storage.capabilities().unwrap();
     if !caps.exact_property_index_lookups
         || !caps.property_indexes
@@ -721,10 +719,52 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
     {
         return;
     }
+    let handles = exact_lookup_fixture(storage);
+    assert_exact_lookups(storage, "built");
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(
+            handles[0],
+            "ex".into(),
+            ElementProperty::Array(vec!["x".into(), "z".into()]),
+        )
+        .unwrap();
+    storage
+        .set_vertex_property(handles[6], "ex".into(), "x".into())
+        .unwrap();
+    storage.drop_vertex(handles[2]).unwrap();
+    assert_exact_lookups(storage, "after writes");
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_exact_lookups(storage, "after the rollback");
+    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
+        let kind = if name == "ex_p" {
+            DefinitionKind::PROPERTY_INDEX
+        } else {
+            DefinitionKind::PROPERTY_INDEX_EXT
+        };
+        assert!(storage.remove_definition(kind, name).unwrap(), "{name}");
+    }
+}
+
+/// The uuid value of the exact-lookup data.
+const EXACT_UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+
+/// The data and indexes of [`exact_property_index_lookups_return_exactly`]: vertices `ex_00` to
+/// `ex_17` holding the look-alikes under the key `ex` (other kinds, other case, arrays, nested
+/// arrays and objects, `null`, a missing key; multi-label and unlabeled vertices), then four
+/// indexes on it: `ex_p` (label `p`), `ex_any` (label-less), `ex_any_each` (`each`) and
+/// `ex_any_lower` (`to_lower`). Returns the vertices in that order. Public so a storage whose
+/// indexes come from elsewhere (a layer serving its base's indexes) can build them in the
+/// storage that defines them and check another one with [`assert_exact_lookups`].
+pub fn exact_lookup_fixture<S: GraphStorage>(storage: &mut S) -> Vec<S::VertexId> {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::ElementKind;
     let list = |items: &[ElementProperty]| ElementProperty::Array(items.to_vec());
     let mut object = PropertyMap::default();
     object.insert("x", "x".into());
-    let uuid = ElementProperty::Uuid(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let uuid = ElementProperty::Uuid(EXACT_UUID);
     let values: Vec<(&[&str], Option<ElementProperty>)> = vec![
         (&["p"], Some("x".into())),
         (&["p", "q"], Some("x".into())),
@@ -757,7 +797,6 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         };
         handles.push(vertex(storage, Some(&id), labels, properties));
     }
-    let each = PropertyIndexTransform::Each;
     for (name, definition) in [
         (
             "ex_p",
@@ -770,7 +809,7 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         (
             "ex_any_each",
             PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
-                .with_transform(Some(each.clone())),
+                .with_transform(Some(PropertyIndexTransform::Each)),
         ),
         (
             "ex_any_lower",
@@ -782,6 +821,18 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
             .set_definition(Definition::property_index(name, definition))
             .expect("an index");
     }
+    handles
+}
+
+/// Asserts that the four indexes of [`exact_lookup_fixture`] answer an equality slice of
+/// `"x"`, `"1"`, `true`, the uuid and an absent value exactly: what a scan of `storage`
+/// accepts for the condition (per label, label-less, `each`, `to_lower`), each vertex once.
+/// `stage` names the moment in the failure message.
+pub fn assert_exact_lookups<S: GraphStorage>(storage: &S, stage: &str) {
+    use graphersal::catalog::PropertyIndexTransform;
+    use graphersal::storage::PropertyIndexRange;
+    let each = PropertyIndexTransform::Each;
+    let uuid = ElementProperty::Uuid(EXACT_UUID);
     // Exactly what the conditions accept, from a scan.
     let expected = |storage: &S, label: Option<&str>, by_each: bool, wanted: &ElementProperty| {
         let mut ids: Vec<String> = Vec::new();
@@ -815,7 +866,7 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         ids.sort();
         ids
     };
-    let check = |storage: &S, stage: &str| {
+    {
         for wanted in [
             ElementProperty::from("x"),
             ElementProperty::from("1"),
@@ -892,28 +943,6 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
                 "{stage}: to_lower lookup of {wanted:?}"
             );
         }
-    };
-    check(storage, "built");
-    let mark = storage.begin_unit().unwrap();
-    storage
-        .set_vertex_property(handles[0], "ex".into(), list(&["x".into(), "z".into()]))
-        .unwrap();
-    storage
-        .set_vertex_property(handles[6], "ex".into(), "x".into())
-        .unwrap();
-    storage.drop_vertex(handles[2]).unwrap();
-    check(storage, "after writes");
-    storage
-        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
-        .unwrap();
-    check(storage, "after the rollback");
-    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
-        let kind = if name == "ex_p" {
-            DefinitionKind::PROPERTY_INDEX
-        } else {
-            DefinitionKind::PROPERTY_INDEX_EXT
-        };
-        assert!(storage.remove_definition(kind, name).unwrap(), "{name}");
     }
 }
 

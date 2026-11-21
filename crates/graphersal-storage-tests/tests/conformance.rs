@@ -302,3 +302,79 @@ fn change_capture_items_on_a_layer_with_changed_base_elements() {
     extension::transaction_with_metadata_reaches_hooks(&mut layer());
     extension::commit_clock_is_shared_with_hooks(&mut layer());
 }
+
+/// Exact property-index lookups on a TOUCHED layer (S4.2): the base holds the look-alike data
+/// and the four indexes of `extension::exact_lookup_fixture`; the layer, which serves them from
+/// its overlays and claims `exact_property_index_lookups` as the base does, then changes base
+/// vertices (copy-up values into and out of the slices, labels gained and lost, a drop), adds
+/// look-alikes of its own, and rolls a unit back: after each stage every lookup returns exactly
+/// what a scan of the layer accepts.
+#[test]
+fn layered_touched_layer_keeps_exact_property_index_lookups() {
+    use graphersal::ElementProperty;
+    use graphersal::storage::{LayeredGraph, RollbackReason};
+    use graphersal_storage_tests::extension::{assert_exact_lookups, exact_lookup_fixture};
+
+    let mut base = TraversalGraph::new();
+    let handles = exact_lookup_fixture(&mut base);
+    assert_exact_lookups(&base, "the base");
+    let ids: Vec<String> = handles
+        .iter()
+        .map(|v| base.vertex_id(*v).unwrap().unwrap().to_string())
+        .collect();
+    let mut layer = LayeredGraph::over(Arc::new(base)).unwrap();
+    assert!(layer.capabilities().unwrap().exact_property_index_lookups);
+    assert_exact_lookups(&layer, "untouched");
+    let at = |layer: &LayeredGraph, n: usize| layer.get_vertex_by_id(&ids[n]).unwrap().unwrap();
+    let list = |items: &[ElementProperty]| ElementProperty::Array(items.to_vec());
+
+    let x0 = at(&layer, 0);
+    layer
+        .set_vertex_property(x0, "ex".into(), list(&["x".into(), "z".into()]))
+        .unwrap();
+    let x6 = at(&layer, 6);
+    layer
+        .set_vertex_property(x6, "ex".into(), "x".into())
+        .unwrap();
+    let x4 = at(&layer, 4);
+    layer
+        .set_vertex_property(x4, "ex".into(), "x".into())
+        .unwrap();
+    let x3 = at(&layer, 3);
+    layer.add_vertex_label(x3, "p".into()).unwrap();
+    let x1 = at(&layer, 1);
+    layer.remove_vertex_label(x1, "p").unwrap();
+    let x2 = at(&layer, 2);
+    layer.drop_vertex(x2).unwrap();
+    for (labels, value) in [
+        (vec!["p"], ElementProperty::from("x")),
+        (vec!["p"], ElementProperty::from("X")),
+        (vec![], ElementProperty::from(true)),
+        (vec!["p", "q"], list(&["x".into(), "x".into(), "1".into()])),
+        (
+            vec!["p"],
+            ElementProperty::Uuid(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+        ),
+        (vec!["q"], 1.into()),
+    ] {
+        contract::vertex(&mut layer, None, &labels, contract::props(&[("ex", value)]));
+    }
+    contract::assert_consistent(&layer);
+    assert_exact_lookups(&layer, "touched");
+
+    let mark = layer.begin_unit().unwrap();
+    let x11 = at(&layer, 11);
+    layer
+        .set_vertex_property(x11, "ex".into(), "1".into())
+        .unwrap();
+    layer
+        .set_vertex_property(x0, "ex".into(), "true".into())
+        .unwrap();
+    let x10 = at(&layer, 10);
+    layer.drop_vertex(x10).unwrap();
+    assert_exact_lookups(&layer, "inside a unit");
+    layer
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_exact_lookups(&layer, "after the rollback");
+}
