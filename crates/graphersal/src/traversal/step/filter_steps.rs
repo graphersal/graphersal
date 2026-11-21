@@ -19,6 +19,7 @@ mod step_has_id;
 mod step_has_key;
 mod step_has_label;
 mod step_has_labeled;
+mod step_has_layer;
 mod step_has_not;
 mod step_has_p;
 pub(crate) mod step_has_path;

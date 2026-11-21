@@ -103,6 +103,33 @@ impl ScriptGraphTraversalSource {
         self.add_step(Step::Labels)
     }
 
+    /// See [`crate::GraphTraversalSource::layer`]: the layer origin of each vertex or edge.
+    pub fn layer(&mut self) -> Self {
+        self.add_step(Step::Layer)
+    }
+
+    /// `has_layer()` without arguments: keeps every vertex and edge (each has an origin). See
+    /// [`crate::GraphTraversalSource::has_layer`].
+    pub fn has_any_layer(&mut self) -> Self {
+        self.add_step(Step::HasAnyLayer)
+    }
+
+    /// Keeps the vertices and edges whose layer origin is the given one. Rhai binding of
+    /// `has_layer()`, the overload with one argument.
+    pub fn has_layer_single(&mut self, arg: Dynamic) -> Result<Self, Box<rhai::EvalAltResult>> {
+        self.has_layer(vec![arg])
+    }
+
+    /// Keeps the vertices and edges whose layer origin (`"base"`, `"added"`, `"modified"`) is
+    /// one of the given ones; an unknown name fails before the traversal runs. Rhai binding of
+    /// `has_layer()`. See [`crate::GraphTraversalSource::has_layer`].
+    pub fn has_layer(&mut self, arg: Vec<Dynamic>) -> Result<Self, Box<rhai::EvalAltResult>> {
+        Ok(self.add_step(Step::HasLayer(vec_dynamic_to_compact_string(
+            "has_layer",
+            arg,
+        )?)))
+    }
+
     /// Yields the id of each vertex or edge (a string). Rhai binding of `id()`.
     pub fn id(&mut self) -> Self {
         self.add_step(Step::Id)

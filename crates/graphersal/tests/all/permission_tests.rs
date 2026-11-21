@@ -402,6 +402,42 @@ mod request_mapping {
             ]
         );
     }
+
+    /// `layer()` and `has_layer()` read what the steps before them reached, so they ask
+    /// nothing of their own; `has_layer()` is a filter and keeps the flow, so a write after it
+    /// still names the edge label the plan states (the Rhai effects analysis agrees).
+    #[test]
+    fn the_layer_steps_ask_nothing_and_keep_the_flow() {
+        let graph = modern();
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(
+            &graph,
+            r#"g.v().layer().to_list(); g.e().has_label("knows").has_layer("base").limit(1).property("w", 1).iterate();"#,
+            recorder.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorder.seen(),
+            [
+                "Read Data(vertex)",
+                "Read Data(edge)",
+                r#"Update Data(edge "knows")"#,
+            ]
+        );
+        let _ = run(
+            &graph,
+            r#"g.e().has_label("knows").has_layer("base").drop().iterate()"#,
+            ProtectCreated,
+        )
+        .unwrap();
+        let err = run(
+            &graph,
+            r#"g.e().has_layer("base").drop().iterate()"#,
+            ProtectCreated,
+        )
+        .unwrap_err();
+        assert!(err.contains("created edges are protected"), "{err}");
+    }
 }
 
 /// A role-based authorizer as a server would build it per connection, e.g. from the roles of a

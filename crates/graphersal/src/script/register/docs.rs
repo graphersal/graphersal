@@ -453,6 +453,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "has_label":
         "Keeps elements whose label is one of the given labels (or matches a predicate); without arguments it keeps the elements that have a label, so not(__.has_label()) selects the unlabeled ones (Graphersal extension).",
         "{ g.add_v().to_list(); [g.v().has_label(\"software\").count().next(), g.v().not(__.has_label()).count().next()] }" => "[2, 1]";
+    "traversal" "has_layer":
+        "Keeps the vertices and edges whose layer origin is one of the given names (\"base\", \"added\", \"modified\"); on a graph without layers everything is \"base\" (Graphersal extension).",
+        "[g.v().has_layer(\"base\", \"added\").count().next(), g.v().has_layer(\"modified\").count().next()]" => "[6, 0]";
     "traversal" "has_not":
         "Keeps elements that do not have the given property.",
         "g.v().has_not(\"age\").values(\"name\").to_list()" => "[\"lop\", \"ripple\"]";
@@ -525,6 +528,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "labels":
         "Yields the full label set of each vertex as a list (Graphersal multi-label vertices).",
         "g.v(1).labels().next()" => "[\"person\"]";
+    "traversal" "layer":
+        "Yields the layer origin of each vertex or edge: \"base\", \"added\" or \"modified\"; on a graph without layers always \"base\" (Graphersal extension).",
+        "g.v().group_count().by(__.layer()).next().values()" => "[6]";
     "traversal" "length":
         "Yields the length of each string in characters (Unicode scalar values, see the book page Type Conversion and length()).",
         "g.v(1).values(\"name\").length().next()" => "5";

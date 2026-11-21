@@ -29,6 +29,7 @@ mod step_intersect;
 mod step_key;
 mod step_label;
 mod step_labels;
+mod step_layer;
 mod step_length;
 mod step_loops;
 mod step_ltrim;
