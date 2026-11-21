@@ -866,3 +866,176 @@ fn a_fill_on_a_layer_graph_is_journaled() {
     assert_eq!(fills[1].commit, Some(schema_commit));
     assert!(graph.vector_fill_progress().is_none());
 }
+
+/// The models of the base's database on a layer (S4.6): a layer made from a [`LayerBase`] of a
+/// Store's graph serves the Store's catalog models (rule fills, `embed()`, text `nearest`) with
+/// the results the Store's own graph gives; a bare layer serves none and fails like a graph
+/// without them.
+#[cfg(all(feature = "model2vec", feature = "persist", feature = "script"))]
+mod catalog_models {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use graphersal::catalog::DefinitionKind;
+    use graphersal::persist::{RecoveryTarget, Store};
+    use graphersal::prelude::*;
+    use graphersal::storage::{IntoAnyGraph, LayerBase, LayeredGraph};
+
+    use crate::model_fixture::{Temp, import, options};
+
+    /// An open schema whose `doc.emb` vectors are made by `model` from `doc.text`.
+    fn rule_naming(model: &str) -> GraphSchema {
+        GraphSchema::from_json(&format!(
+            r#"{{"mode": "open", "vertices": {{"doc": {{"schema": {{"type": "object", "properties": {{
+                "text": {{"type": "string"}},
+                "emb": {{"type": "array", "format": "vector", "embedder": "{model}", "from": "text"}}}}}}}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// A Store at `path` with the tiny model, a rule on it, and two docs embedded by the rule;
+    /// returns the model's identity.
+    fn store_with_rule(path: &Path) -> String {
+        let store = Store::create(path, options()).unwrap();
+        let identity = import(&store, 1, "acme/tiny").model.identity;
+        store
+            .graph()
+            .write()
+            .traversal_mut()
+            .set_schema(rule_naming(&identity))
+            .unwrap();
+        for (id, text) in [("d1", "graph model"), ("d2", "vector")] {
+            run(
+                store.graph().clone(),
+                &format!(
+                    r#"g.add_v("doc").property(T.id, "{id}").property("text", "{text}").iterate()"#
+                ),
+            )
+            .unwrap();
+        }
+        store.shutdown().unwrap();
+        identity
+    }
+
+    /// The Store's graph, read-only, with its models attached.
+    fn store_graph(path: &Path) -> Graph {
+        Store::open_read_only(path, RecoveryTarget::Latest)
+            .unwrap()
+            .into_graph()
+    }
+
+    fn run(graph: impl IntoAnyGraph, script: &str) -> Result<String, String> {
+        graphersal::script::eval_value(graph, script)
+            .map(|value| value.to_string())
+            .map_err(|err| err.to_string())
+    }
+
+    /// The writes both graphs get: a new doc and a changed base doc.
+    const WRITES: [&str; 2] = [
+        r#"g.add_v("doc").property(T.id, "d3").property("text", "vector model").iterate()"#,
+        r#"g.v("d1").property("text", "model graph vector").iterate()"#,
+    ];
+
+    const VECTORS: &str = r#"g.v().has_label("doc").order().by(T.id).project("id", "emb").by(T.id).by("emb").to_list()"#;
+
+    #[test]
+    fn a_layer_from_a_layer_base_serves_the_stores_models() {
+        let temp = Temp::new("layer-base-models");
+        let path = temp.join("s");
+        let identity = store_with_rule(&path);
+        let base = LayerBase::from_graph(store_graph(&path))
+            .unwrap()
+            .with_name("product");
+        assert!(base.serves_models());
+        assert_eq!(base.name(), "product");
+        assert!(base.base_ref().is_none());
+        let layer = Arc::new(base.new_layer().unwrap());
+        let reference = Arc::new(store_graph(&path));
+
+        // The base's vectors are read in place; the rule pass embeds the layer's writes with
+        // the catalog model, as the Store's own graph does.
+        for script in WRITES {
+            run(layer.clone(), script).unwrap();
+            run(reference.clone(), script).unwrap();
+        }
+        let on_layer = run(layer.clone(), VECTORS).unwrap();
+        assert_eq!(on_layer, run(reference.clone(), VECTORS).unwrap());
+        assert_eq!(
+            run(
+                layer.clone(),
+                r#"g.v().has_label("doc").has("emb").count().next()"#
+            )
+            .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            base.graph().vertex_count().unwrap(),
+            2,
+            "the base is never written"
+        );
+
+        // `embed()` with the catalog model and a text `nearest` on the rule's property.
+        let embed = r#"embed("graph vector", #{embedder: "acme/tiny"})"#;
+        let embedded = run(layer.clone(), embed).unwrap();
+        assert_eq!(embedded, run(reference.clone(), embed).unwrap());
+        let step = r#"g.inject("graph vector").embed(#{embedder: "acme/tiny"}).next()"#;
+        assert_eq!(run(layer.clone(), step).unwrap(), embedded);
+        let nearest = r#"g.v().nearest("emb", "vector model", 3).values("text").to_list()"#;
+        let found = run(layer.clone(), nearest).unwrap();
+        assert_eq!(found, run(reference.clone(), nearest).unwrap());
+        assert!(found.contains("vector model"), "{found}");
+        let embedders = run(layer.clone(), "g.embedders()").unwrap();
+        assert!(embedders.contains("acme/tiny"), "{embedders}");
+
+        // A second layer over the same base shares the models and sees none of the writes.
+        let second = Arc::new(base.clone().new_layer().unwrap());
+        assert_eq!(run(second.clone(), embed).unwrap(), embedded);
+        assert_eq!(run(second, r#"g.v("d3").count().next()"#).unwrap(), "0");
+
+        // Model definitions on the layer stay refused (the layer only uses the base's).
+        let model = base
+            .graph()
+            .definition(DefinitionKind::MODEL, &identity)
+            .unwrap()
+            .unwrap()
+            .clone();
+        let refused = layer.write().set_definition(model).unwrap_err();
+        assert!(
+            matches!(refused, GraphError::Unsupported { .. }),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_layer_fails_like_a_graph_without_the_models() {
+        let temp = Temp::new("layer-bare-models");
+        let path = temp.join("s");
+        store_with_rule(&path);
+        let storage = Arc::new(store_graph(&path).into_inner());
+        let bare = Arc::new(Graph::new(
+            LayeredGraph::over(Arc::clone(&storage)).unwrap(),
+        ));
+        let from_base = Arc::new(LayerBase::new(Arc::clone(&storage)).new_layer().unwrap());
+        assert!(!LayerBase::new(Arc::clone(&storage)).serves_models());
+
+        for graph in [bare, from_base] {
+            // A graph of the same data without its models: the Store's storage unwrapped.
+            let no_models = Arc::new(Graph::new(store_graph(&path).into_inner()));
+            for script in WRITES {
+                let on_layer = run(graph.clone(), script).unwrap_err();
+                let on_graph = run(no_models.clone(), script).unwrap_err();
+                assert_eq!(on_layer, on_graph);
+                assert!(on_layer.contains("not served here"), "{on_layer}");
+            }
+            assert_eq!(
+                run(graph.clone(), VECTORS).unwrap(),
+                run(no_models.clone(), VECTORS).unwrap()
+            );
+            let embed = r#"embed("graph vector", #{embedder: "acme/tiny"})"#;
+            assert_eq!(
+                run(graph.clone(), embed).unwrap_err(),
+                run(no_models.clone(), embed).unwrap_err()
+            );
+        }
+    }
+}

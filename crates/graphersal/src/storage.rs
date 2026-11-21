@@ -31,7 +31,10 @@
 //! [`GraphStorage::vertex_layer`] / [`GraphStorage::edge_layer`] answer an element's
 //! [`LayerOrigin`] and [`GraphStorage::layer_diff`] a [`LayerDiff`] (request
 //! [`LayerDiffRequest`]; entries [`LayerDiffEntry`], [`LayerDiffChange`],
-//! [`LayerPropertyChange`]); every other storage answers `Base` and an empty diff.
+//! [`LayerPropertyChange`]); every other storage answers `Base` and an empty diff. A
+//! [`LayerBase`] is the shareable base itself: the frozen graph with its database's embedding
+//! models, a display name and its identity ([`BaseRef`], not filled yet);
+//! [`LayerBase::new_layer`] makes a `Graph<LayeredGraph>` that serves those models.
 //!
 //! # Example
 //!
@@ -226,13 +229,14 @@ pub use crate::graph::write_checks::{
     path_property_name, remove_path, remove_path_in, write_path, write_path_in,
 };
 pub use crate::graph::{
-    AnyGraph, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks, CommitMetadata,
-    Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy, Graph,
-    GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError, IntoAnyGraph,
-    IsolationLevel, JournalSlot, LayerDiff, LayerDiffChange, LayerDiffEntry, LayerDiffRequest,
-    LayerOrigin, LayerPropertyChange, LayeredEdge, LayeredGraph, LayeredVertex, Mark, MemoryStats,
-    Mutation, RollbackReason, ShrinkReport, StorageCapabilities, StorageIdentity, Transactional,
-    TraversalGraph, UnitChanges, UnitMark, VertexHandle, VertexState,
+    AnyGraph, BaseRef, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks,
+    CommitMetadata, Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy,
+    Graph, GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError,
+    IntoAnyGraph, IsolationLevel, JournalSlot, LayerBase, LayerDiff, LayerDiffChange,
+    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayeredEdge, LayeredGraph,
+    LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport, StorageCapabilities,
+    StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark, VertexHandle,
+    VertexState,
 };
 pub use crate::value::{ElementProperty, JsonPath, JsonPathSegment, PropertyMap};
 pub use compact_str::CompactString;

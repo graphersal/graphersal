@@ -11,7 +11,9 @@
 //!
 //! - **Base:** an `Arc<TraversalGraph>` nobody can change any more (the `Arc` is shared, so no
 //!   `&mut` exists). Reads of an untouched base element go straight to it, through the base's
-//!   own inlined accessors.
+//!   own inlined accessors. [`LayerBase`] (`base`) carries it with the embedding models of its
+//!   database, a display name and its identity ([`BaseRef`], a placeholder); its `new_layer`
+//!   attaches those models to the layer's `Graph`.
 //! - **Handles:** [`LayeredVertex`] and [`LayeredEdge`] are 8 bytes: a `u32` slot and a
 //!   generation. Bit 31 of the slot clear names a base slot (the base's handle, unchanged, no
 //!   lookup); set, it names a slot of the layer's own store. So a base must have fewer than 2^31
@@ -94,6 +96,7 @@
 //! ceiling checks the outermost unit at its commit on the layer's own footprint, as
 //! `TraversalGraph` does on its own.
 
+mod base;
 mod capture;
 mod delta;
 mod dirty;
@@ -109,6 +112,7 @@ mod write;
 
 use std::sync::Arc;
 
+pub use base::{BaseRef, LayerBase};
 pub use handle::{LayeredEdge, LayeredVertex};
 
 use crate::error::GraphError;
@@ -157,8 +161,12 @@ use units::UnitLog;
 /// to the value a base element already holds copies nothing up. A rule the layer adds or
 /// changes on a base label fills every element of the label, copying each one it writes into
 /// the layer; the fill preview counts them
-/// ([`PlannedFill::base_copies`](crate::schema::PlannedFill::base_copies)). Only the built-in
-/// `hash-ngram/1` embeds for now: the layer does not serve the base's catalog models yet.
+/// ([`PlannedFill::base_copies`](crate::schema::PlannedFill::base_copies)). A rule embeds with
+/// `hash-ngram/1` or a model of the base's database: a layer made by
+/// [`LayerBase::new_layer`] serves the base's models (also to `embed()` and text `nearest`); a
+/// bare layer (or a `Graph` of one made with [`Graph::new`](crate::graph::Graph::new)) serves
+/// none, and a rule naming a catalog model fails at commit as on a `TraversalGraph` without that
+/// model.
 ///
 /// **Not supported yet** ([`GraphError::Unsupported`]):
 /// - persistence: a layer cannot be saved, opened from a Store or journaled;

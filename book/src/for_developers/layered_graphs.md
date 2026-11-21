@@ -66,6 +66,41 @@ assert!(stats.total_bytes() < stats.shared_bytes);
 
 `LayeredGraph::default()` is a layer over an empty base.
 
+## The base and its models
+
+`LayeredGraph::over(Arc<TraversalGraph>)` takes the bare base graph. The embedding models of
+the base's database are not part of the storage: a Store, a recovered view or a `.gsnap` read
+attaches their registry to the `Graph<TraversalGraph>` wrapper, and `Graph::into_inner` leaves
+it behind. `graphersal::storage::LayerBase` (EXPERIMENTAL) is the frozen base together with
+that registry, a display name and the base's identity:
+
+- `LayerBase::from_graph(Graph<TraversalGraph>)` takes the storage and its registry (a
+  poisoned graph is refused); `LayerBase::new(Arc<TraversalGraph>)` takes a graph without
+  models.
+- A clone is one `Arc`: every layer made from it shares one base graph and one registry. The
+  registry's commit hook sits on the frozen base, which never commits, so the shared registry
+  never changes under the layers.
+- `new_layer()` returns a `Graph<LayeredGraph>` with the registry attached: vector rules on
+  catalog models, `embed()`, text `nearest` and `g.embedders()` on the layer use the base's
+  models. `LayeredGraph::over_base(&base)` is the bare storage, without models.
+- The layer only uses the models: model definitions in the layer's catalog stay refused.
+- `base_ref()` is `Option<BaseRef>`, `None` for now. It will name the base's identity (graph
+  lineage id, commit sequence and commit time) when layers can be saved, so a saved layer is
+  checked against its base.
+
+```rust
+use std::sync::Arc;
+use graphersal::prelude::*;
+use graphersal::storage::{LayerBase, LayeredGraph};
+
+let base = LayerBase::new(Arc::new(TraversalGraph::tinkerpop_modern())).with_name("modern");
+assert!(!base.serves_models());
+let shared = base.new_layer().unwrap(); // a Graph<LayeredGraph>
+let bare = LayeredGraph::over_base(&base).unwrap();
+assert!(Arc::ptr_eq(bare.base(), base.graph()));
+assert_eq!(shared.read().vertex_count().unwrap(), 6);
+```
+
 ## How it works
 
 - **Handles** (`LayeredVertex`, `LayeredEdge`) are 8 bytes. One bit of the slot number tells a
@@ -161,10 +196,14 @@ alone, with the base as one line, is planned.
   the layer adds or changes on a base label, which copies every element of the label it
   writes. `PlannedFill::base_copies` counts them (exact in `validate_schema`, the label's
   untouched base elements in `diff_schema`), from the new capability
-  `StorageCapabilities::layered` and the element origins. Models: only `hash-ngram/1` embeds
-  until the layer carries the base's model registry (`LayerBase`, planned); a rule on a
-  catalog model of the base passes the schema check (the catalog is copied) and its pass
-  fails with `GraphError::VectorRuleFailed` ("not served here"), rolling the unit back.
+  `StorageCapabilities::layered` and the element origins. Models: the pass finds a catalog
+  model in the registry the `Graph` guard attaches to the thread, so a
+  `Graph<LayeredGraph>` made by `LayerBase::new_layer()` embeds with the base's models (see
+  [The base and its models](#the-base-and-its-models)). A bare layer (`LayeredGraph::over`,
+  or `Graph::new` of one) serves only `hash-ngram/1`: a rule on a catalog model of the base
+  passes the schema check (the catalog is copied) and its pass fails with
+  `GraphError::VectorRuleFailed` ("not served here"), rolling the unit back, as on a
+  `Graph<TraversalGraph>` without the model.
 
   A base with plain or unique indexes or compression rules is fine: the layer reads it. The
   layer stores its own values uncompressed. `compression_stats` reports the base's figures.
