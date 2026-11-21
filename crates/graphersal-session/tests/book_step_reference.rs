@@ -348,6 +348,9 @@ const TOPIC_PAGES: &[(&str, &str)] = &[
 
 /// The book pages that explain a step or a group further (paths below `book/src/`).
 const SEE_ALSO: &[(&str, &str, &str)] = &[
+    ("layer", "Layers", "users_guide/layered_graphs.md"),
+    ("has_layer", "Layers", "users_guide/layered_graphs.md"),
+    ("layer_diff", "Layers", "users_guide/layered_graphs.md"),
     ("add_label", "Label Steps", "traversal/steps/label_steps.md"),
     (
         "drop_label",

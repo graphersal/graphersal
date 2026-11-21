@@ -17,3 +17,7 @@ layer_diff(arg1: any)
 ```rhai,graph=modern
 g.layer_diff()   // #{"added": [], "modified": [], "removed": [], "truncated": false}
 ```
+
+## See also
+
+- [Layers](../../users_guide/layered_graphs.md)

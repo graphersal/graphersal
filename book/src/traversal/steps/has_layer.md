@@ -20,3 +20,7 @@ has_layer(arg1, …, arg10)
 ```rhai,graph=modern
 [g.v().has_layer("base", "added").count().next(), g.v().has_layer("modified").count().next()]   // [6, 0]
 ```
+
+## See also
+
+- [Layers](../../users_guide/layered_graphs.md)

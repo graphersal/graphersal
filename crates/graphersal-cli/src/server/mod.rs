@@ -169,7 +169,9 @@ pub fn run(cli: &Cli) -> i32 {
             return EXIT_USAGE_ERROR;
         }
     };
+    // A layer is never saved: "Save to file" must not write the layer over its base's file.
     let source = match &cli.graph {
+        GraphSpec::File(_) if cli.layer => None,
         GraphSpec::File(path) => match std::fs::canonicalize(path) {
             Ok(path) => Some(path),
             Err(err) => {
@@ -275,14 +277,10 @@ pub fn run(cli: &Cli) -> i32 {
     let opens = matches!(cli.graph, GraphSpec::Store(_))
         || matches!(&cli.graph, GraphSpec::File(path) if graphersal::prelude::GraphSource::is_snapshot_path(path))
         || cli.schema.is_some()
-        || cli.read_only;
+        || cli.read_only
+        || cli.layer;
     let (store, preloaded) = if opens {
-        match cli.graph.open(
-            cli.create_store,
-            cli.on_damage,
-            cli.schema.as_ref(),
-            cli.read_only,
-        ) {
+        match cli.open_graph() {
             Ok(opened) => match opened.store {
                 Some(store) => (Some(store), None),
                 None => (None, Some((opened.graph, graph_title(&cli.graph)))),
@@ -296,7 +294,9 @@ pub fn run(cli: &Cli) -> i32 {
         (None, None)
     };
     // The whole server refuses writes: --read-only, or a Store opened read-only.
-    let read_only = cli.read_only || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none());
+    // A layer over a Store base is writable: the Store itself was opened read-only.
+    let read_only = cli.read_only
+        || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none() && !cli.layer);
     let presets = session_presets(cli);
     let presets_json = presets.to_value();
     let shared = store
@@ -458,6 +458,13 @@ pub fn run(cli: &Cli) -> i32 {
     } else {
         graph_section.row("source", graph_title(&cli.graph));
         graph_section.row("loaded", loaded);
+    }
+    if cli.layer {
+        graph_section.row(
+            "layer",
+            "LAYER over the loaded graph: writes go to the layer, in memory only (nothing is \
+             saved); layer(), has_layer() and g.layer_diff() show them",
+        );
     }
     if read_only {
         graph_section.row(
@@ -1032,7 +1039,7 @@ fn start_session(
     source: Option<&Path>,
     presets: SessionPresets,
     shared: Option<(Arc<Store>, String)>,
-    preloaded: Option<(Arc<graphersal::prelude::Graph>, String)>,
+    preloaded: Option<(Arc<dyn graphersal_session::storage::SessionGraph>, String)>,
     pool: Option<Arc<pool::Pool>>,
 ) -> Result<(Sender<Job>, CancelToken, u64, Value), String> {
     type Started = (

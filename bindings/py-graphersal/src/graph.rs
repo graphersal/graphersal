@@ -38,6 +38,69 @@ pub struct Graph {
     limits: Mutex<GraphLimits>,
 }
 
+/// The request of `layer_diff`'s keyword arguments; a wrong type raises `TypeError`, a wrong
+/// value `ValueError`.
+fn layer_diff_request(
+    kinds: Option<Bound<'_, PyAny>>,
+    labels: Option<Bound<'_, PyAny>>,
+    limit: Option<Bound<'_, PyAny>>,
+) -> PyResult<graphersal::storage::LayerDiffRequest> {
+    use graphersal::storage::{ElementKind, LayerDiffRequest};
+    let mut request = LayerDiffRequest::new();
+    if let Some(kinds) = kinds.filter(|k| !k.is_none()) {
+        let names = strings_argument("kinds", &kinds)?;
+        if names.is_empty() {
+            return Err(PyValueError::new_err(
+                "'kinds' names at least one kind: \"vertex\" or \"edge\"",
+            ));
+        }
+        let mut wanted = (false, false);
+        for name in &names {
+            match name.as_str() {
+                "vertex" => wanted.0 = true,
+                "edge" => wanted.1 = true,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown kind {other:?} in 'kinds': use \"vertex\" or \"edge\""
+                    )));
+                }
+            }
+        }
+        match wanted {
+            (true, false) => request = request.kind(ElementKind::Vertex),
+            (false, true) => request = request.kind(ElementKind::Edge),
+            _ => {}
+        }
+    }
+    if let Some(labels) = labels.filter(|l| !l.is_none()) {
+        request = request.labels(strings_argument("labels", &labels)?);
+    }
+    if let Some(limit) = limit.filter(|l| !l.is_none()) {
+        if limit.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyTypeError::new_err("'limit' is a positive int"));
+        }
+        let n: i64 = limit
+            .extract()
+            .map_err(|_| PyTypeError::new_err("'limit' is a positive int"))?;
+        let n = usize::try_from(n)
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| PyValueError::new_err(format!("'limit' is a positive int, not {n}")))?;
+        request = request.limit(n);
+    }
+    Ok(request)
+}
+
+/// A keyword argument that is one `str` or a list of them.
+fn strings_argument(name: &str, value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(one) = value.extract::<String>() {
+        return Ok(vec![one]);
+    }
+    value
+        .extract::<Vec<String>>()
+        .map_err(|_| PyTypeError::new_err(format!("'{name}' is a str or a list of str")))
+}
+
 /// The advisor's thresholds: the defaults, or every candidate with `everything`.
 fn advice_request(everything: bool) -> graphersal::advisor::AdviceRequest {
     if everything {
@@ -1474,6 +1537,43 @@ impl Graph {
         }
         let script = format!("g.memory_report(#{{{}}})", fields.join(", "));
         self.run(py, &script, Some(&params), false, policy.as_deref())
+    }
+
+    /// ``graph.layer_diff(*, kinds=None, labels=None, limit=None, policy=None)``: what a
+    /// layered graph changed against its frozen base, like the DSL's
+    /// ``g.layer_diff(#{kinds, labels, limit})``, as a ``dict`` with the keys in this order:
+    /// ``added`` and ``removed`` (lists of ``{kind, id, labels, properties}``, edges with
+    /// ``out`` and ``in``), ``modified`` (``{kind, id, base_labels, labels, properties}``
+    /// where ``properties`` maps each changed key to ``{base, layer}``, a missing side left
+    /// out) and ``truncated``. ``kinds`` is ``"vertex"``, ``"edge"`` or a list of them
+    /// (default both), ``labels`` a label or a list of labels (any base or layer label
+    /// matches), ``limit`` a positive number of entries across the whole diff. A graph without
+    /// layers (every ``Graph`` today) answers an empty diff, and ``layer()`` /
+    /// ``has_layer(...)`` in its queries answer ``"base"`` (book page "Layered Graphs").
+    /// ``policy`` is asked for ``Read`` on ``Data``.
+    #[pyo3(signature = (*, kinds=None, labels=None, limit=None, policy=None))]
+    fn layer_diff(
+        &self,
+        py: Python<'_>,
+        kinds: Option<Bound<'_, PyAny>>,
+        labels: Option<Bound<'_, PyAny>>,
+        limit: Option<Bound<'_, PyAny>>,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let request = layer_diff_request(kinds, labels, limit)?;
+        let authorizer = effective_authorizer(policy.as_deref());
+        let graph = Arc::clone(&self.inner);
+        let diff = py
+            .detach(move || {
+                let guard = graph.read();
+                guard
+                    .traversal()
+                    .with_authorizer(authorizer)
+                    .layer_diff(&request)
+                    .map_err(|err| format_diagnostic(&*err))
+            })
+            .map_err(|text| map_diagnostic(py, &text))?;
+        crate::convert::property_to_pyobject(py, &diff.to_property())
     }
 
     /// ``graph.shrink_to_fit(*, policy=None)``: releases the spare capacity a graph built by

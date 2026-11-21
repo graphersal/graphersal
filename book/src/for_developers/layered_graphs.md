@@ -9,6 +9,10 @@ run on a `TraversalGraph`. The base never changes: each layer stores only its ow
 > **EXPERIMENTAL in 0.6.x**, like the `GraphStorage` trait. Persistence and a few catalog
 > kinds are not supported yet (see [Limitations](#limitations)).
 
+What a layer is for and how queries see it (`layer()`, `has_layer()`, `g.layer_diff()`, the
+CLI's `--layer`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This
+page describes the storage.
+
 ## When to use it
 
 - **Many writers over one large graph.** Give every user, session or agent its own layer over

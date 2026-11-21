@@ -39,6 +39,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("schema-mode", Kind::Value),
     ("create-store", Kind::Switch),
     ("read-only", Kind::Switch),
+    ("layer", Kind::Switch),
     ("on-damage", Kind::Value),
     ("eval", Kind::Repeat),
     ("in", Kind::Switch),

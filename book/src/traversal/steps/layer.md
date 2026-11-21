@@ -16,3 +16,7 @@ layer()
 ```rhai,graph=modern
 g.v(1).out_e().layer().to_list()   // ["base", "base", "base"]
 ```
+
+## See also
+
+- [Layers](../../users_guide/layered_graphs.md)
