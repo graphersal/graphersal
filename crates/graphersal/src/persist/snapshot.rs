@@ -66,6 +66,8 @@ pub struct WriteOptions {
     pub(crate) parent: (u128, u64),
     /// The manifest's creation time; `None`: now (crate tests fix it to compare bytes).
     pub(crate) created_at: Option<i64>,
+    /// A layer written as the whole graph it shows ([`WriteOptions::with_materialize`]).
+    pub(crate) materialize: bool,
 }
 
 impl Default for WriteOptions {
@@ -78,6 +80,7 @@ impl Default for WriteOptions {
             segment_bytes: DEFAULT_SEGMENT_BYTES,
             parent: (0, 0),
             created_at: None,
+            materialize: false,
         }
     }
 }
@@ -133,6 +136,20 @@ impl WriteOptions {
     /// reaches it.
     pub fn with_segment_bytes(mut self, bytes: u64) -> Self {
         self.segment_bytes = bytes.max(1);
+        self
+    }
+
+    /// Writes a LAYER ([`LayeredGraph`](crate::storage::LayeredGraph)) as the whole graph it
+    /// shows (default `false`): a plain, standalone snapshot (file format version 4) of every
+    /// visible element, the layer's schema and catalog, lineage id, position and auto-id
+    /// sequences, which loads without the base ([`read_snapshot`], older releases) and whose
+    /// size follows the whole graph. Without it a layer writes a layer snapshot: only its
+    /// changes to the base (format spec 7.5, version 5), which loads only over that base
+    /// ([`read_layer_snapshot`]). No effect on a graph that is no layer.
+    /// [`Store::export_materialized`](crate::persist::Store::export_materialized) writes a
+    /// layer store's state this way.
+    pub fn with_materialize(mut self, yes: bool) -> Self {
+        self.materialize = yes;
         self
     }
 }

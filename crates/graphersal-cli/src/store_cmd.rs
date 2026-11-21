@@ -204,8 +204,8 @@ pub fn command_help(command: &str) -> Option<String> {
             "Prints the store's identity (graph id, lineage), position (commit, time), snapshots,\n\
              marks, WAL size and attic, the embedding models it keeps (identity, size, licence,\n\
              whether the schema uses them; models the schema names but the store lacks), and\n\
-             the parameters fixed when it was created (chunk size, damage policy, backend).\n\
-             A layer store (only a layer's changes to a frozen base) names its base.\n\
+             the parameters fixed when it was created (chunk size, damage policy, backend; the\n\
+             base of a layer store, which holds only a layer's changes to a frozen base).\n\
              Works while a server has the store open.",
             false,
         ),
@@ -1200,9 +1200,9 @@ pub fn run(args: &[String]) -> i32 {
                 Ok(info) => {
                     outln!("store       {}", info.location);
                     if let Some(base) = &info.layer_base {
-                        // A layer store (format spec 7.5): only a layer's changes to its base.
+                        // A layer store (format spec 7.5): only a layer's changes to its base,
+                        // a creation parameter (listed under "fixed at creation" too).
                         outln!("layer       over the base {base}");
-                        outln!("            # it opens only over that base (Store::open_layer)");
                     }
                     outln!("format      version {}", info.format_version);
                     outln!("graph id    {}", uuid_text(info.graph_id));
@@ -1349,6 +1349,14 @@ pub fn run(args: &[String]) -> i32 {
                         },
                         info.format_version
                     );
+                    if let Some(base) = &info.layer_base {
+                        // The base a layer store was built over (book: Creation parameters).
+                        outln!("  base          {base}");
+                        outln!(
+                            "                # opens only over this base (Store::open_layer); \
+                             a backup is useless without it"
+                        );
+                    }
                     if !info.attic.is_empty() {
                         outln!("attic       {} entr(y/ies)", info.attic.len());
                     }

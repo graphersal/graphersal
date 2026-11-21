@@ -7,6 +7,13 @@ problem under `models/<id>/`, but it never makes an open store read-only (it is 
 remove it and add it again. On a writable store a verification waits while a rollback or a prune
 changes files, and a rollback, an attic change or a prune is refused while it reads.
 
+A **layer store** ([Layered Graphs](../for_developers/layered_graphs.md)) holds only a layer's
+changes to a frozen base, so its snapshots load only over that base: `store.verify()` of an open
+layer store and `Store::<LayeredGraph>::verify_layer_dir(dir, &base)` load every snapshot over
+it, while `Store::verify_dir` (CLI `store verify`) checks a layer store without its base: every
+checksum, every layer file decoded against its manifest row, the snapshots not loaded (a note
+says so). The model blobs its catalog names are the base's: a note, not a problem.
+
 ```rust,no_run
 # use graphersal::persist::{Store, StoreOptions};
 let report = Store::verify_dir("data")?;              // or store.verify() on an open store

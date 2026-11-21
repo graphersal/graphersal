@@ -1568,12 +1568,24 @@ fn rebuild_definitions(
 
 /// Scans the store in `dir` for damage and builds its best state (format spec 13).
 pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, PersistError> {
+    salvage_as(dir, read, super::files::StoreKind::Plain)
+}
+
+/// [`salvage`] of a store of `kind`. A layer store (format spec 7.5, [`StoreKind::Either`](super::files::StoreKind::Either))
+/// is scanned like a plain one: the damage of its files, the readable position; its state is
+/// built without the base, so it is good for the report only (a damaged layer store is not
+/// repaired or opened in maintenance mode).
+pub(super) fn salvage_as(
+    dir: &DirPath,
+    read: &ReadOptions,
+    kind: super::files::StoreKind,
+) -> Result<Salvage, PersistError> {
     let max_depth = read.max_value_depth();
     let mut damage = Vec::new();
     let mut notes = Vec::new();
     // Files of a newer (or older) format are never damage and never salvaged (format spec
     // 15): refused before anything is scanned.
-    super::files::refuse_other_version(dir)?;
+    super::files::refuse_other_version_as(dir, kind)?;
     // The backend's own records come first: what it lost is missing from every file below.
     let backend = crate::persist::dir::backend_check(&**dir.store_dir());
     for reason in backend.damage {

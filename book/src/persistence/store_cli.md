@@ -201,9 +201,12 @@ fixed at creation (never changed):
 ```
 
 Also printed when they apply: `layer  over the base graph <id> at commit N (commit time T)`
-right after `store` for a layer store (it holds only a layer's changes to that base and opens
-only over it; see [Layered Graphs](../for_developers/layered_graphs.md); the other `store`
-commands that copy or verify refuse a layer store for now), `parent` and `branched at` (a fork, a rolled-back store), `backup
+right after `store` for a layer store, and the same base as `base` under "fixed at creation"
+(it holds only a layer's changes to that base and opens only over it, and a backup of it is
+useless without that base, which `store backup` warns about; see
+[Layered Graphs](../for_developers/layered_graphs.md); `store backup`, `restore`, `verify`
+(without the base: every checksum, the snapshots not loaded) and `export` work on a layer
+store, fork, repair, convert and rollback refuse it for now), `parent` and `branched at` (a fork, a rolled-back store), `backup
 up to commit N` with `taken` and `access` below it and the command that makes it the live store
 (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
 (a `models` block: one block per model under its repository, one field per line: `full name`

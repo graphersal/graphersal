@@ -12,6 +12,14 @@ A backup also holds the store's [embedding models](store_models.md) with their l
 models. `Store::backup_zip_with(archive, ModelCopy::Exclude)` (CLI `store backup --zip
 --without-models`) leaves them out of a ZIP archive meant to be handed on.
 
+A backup of a **layer store** (a project layer over a frozen base, [Layered
+Graphs](../for_developers/layered_graphs.md)) works the same way and restores into a layer
+store over the same base, but it holds only the layer's changes: **it is useless without that
+very base** (the same graph at the same commit). `BackupReport::layer_base` names the base and
+`BackupReport::warnings` says so (`graphersal store backup` prints it as a warning). Keep the
+base with its backups, or export a standalone copy of the whole graph the layer shows with
+`Store::export_materialized` (a plain `.gsnap`, readable without the base).
+
 ```rust,no_run
 use graphersal::persist::{BackupMode, RecoveryTarget, Store, StoreOptions};
 

@@ -7242,3 +7242,64 @@ fn store_info_names_the_base_of_a_layer_store() {
     assert!(res.stdout.contains(&expected), "{}", res.stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `store info` of a layer store lists the base it was built over among the parameters fixed at
+/// creation (book: Creation parameters, rule 22); `store backup` of it warns that the backup is
+/// useless without that base, and `store verify` checks it without the base.
+#[test]
+fn store_info_lists_the_base_of_a_layer_store_as_fixed_at_creation() {
+    use graphersal::persist::{Store, StoreOptions};
+    use graphersal::prelude::TraversalGraph;
+    use graphersal::storage::{LayerBase, LayeredGraph};
+
+    let dir = temp_path("layer-store-fixed");
+    let backup = temp_path("layer-store-fixed-backup");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&backup);
+    let base = LayerBase::new(std::sync::Arc::new(TraversalGraph::tinkerpop_modern()));
+    Store::<LayeredGraph>::create_layer(&dir, &base, StoreOptions::new())
+        .unwrap()
+        .close()
+        .unwrap();
+    let base_ref = base.base_ref().unwrap().to_string();
+    let d = dir.to_str().unwrap();
+    let res = run(&["store", "info", d], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let (_, fixed) = res
+        .stdout
+        .split_once("fixed at creation (never changed):")
+        .unwrap_or_else(|| panic!("{}", res.stdout));
+    assert!(
+        fixed.contains(&format!("  base          {base_ref}")),
+        "{}",
+        res.stdout
+    );
+    assert!(
+        fixed.contains("a backup is useless without it"),
+        "{}",
+        res.stdout
+    );
+
+    let b = backup.to_str().unwrap();
+    let res = run(&["store", "backup", d, b], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stderr
+            .contains("warning: this is a backup of a layer store")
+            && res.stderr.contains("useless without that very base")
+            && res.stderr.contains(&base_ref),
+        "{}",
+        res.stderr
+    );
+    let res = run(&["store", "info", b], "");
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains(&format!("  base          {base_ref}")),
+        "{}",
+        res.stdout
+    );
+    let res = run(&["store", "verify", d], "");
+    assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&backup);
+}

@@ -116,7 +116,16 @@ impl ClosedCommitOptions {
 /// its version, a backup refused ([`PersistError::IsBackup`]), an interrupted operation
 /// (`INTENT`) completed and temporary files removed, as an open does.
 pub(crate) fn closed_store_prelude(dir: &DirPath) -> Result<(DirLock, GraphFile), PersistError> {
-    files::refuse_other_version(dir)?;
+    closed_store_prelude_as(dir, files::StoreKind::Plain)
+}
+
+/// [`closed_store_prelude`] of a store of `kind` (a layer store over its base: format spec
+/// 7.5).
+pub(crate) fn closed_store_prelude_as(
+    dir: &DirPath,
+    kind: files::StoreKind,
+) -> Result<(DirLock, GraphFile), PersistError> {
+    files::refuse_other_version_as(dir, kind)?;
     if !Store::is_store(dir.store_dir())? {
         return Err(PersistError::NotAStore {
             path: dir.display(),
