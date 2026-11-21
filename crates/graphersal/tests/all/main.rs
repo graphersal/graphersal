@@ -142,6 +142,7 @@ mod layer_steps_tests;
 mod layered_graph_tests;
 mod layered_index_tests;
 mod layered_storage_tests;
+mod layered_unique_tests;
 mod layered_visibility_tests;
 mod lazy_materialization_tests;
 mod list_function_tests;

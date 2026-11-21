@@ -3409,8 +3409,8 @@ fn open_mode_extension_then_writes_follow_the_layer_schema() {
     );
 }
 
-/// Plan decision P5: a base with a unique property index or with vector rules cannot carry a
-/// layer yet; a base with a plain index or a compression rule can. On a layer, a schema with
+/// Plan decision P5: a base with vector rules cannot carry a layer yet; a base with a plain
+/// or a unique index (S4.3) or a compression rule can. On a layer, a schema with
 /// vector rules and the catalog kinds needing storage machinery are refused, naming the
 /// limitation, and change nothing.
 #[test]
@@ -3432,7 +3432,7 @@ fn p5_refusals_and_refused_catalog_kinds() {
         println!("{text}");
     };
 
-    // A unique index in the base.
+    // A unique index in the base is accepted (S4.3): the layer enforces it.
     let mut base = TraversalGraph::tinkerpop_modern();
     base.traversal_mut()
         .create_index(
@@ -3440,9 +3440,13 @@ fn p5_refusals_and_refused_catalog_kinds() {
             PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name").with_unique(true),
         )
         .unwrap();
-    refusal(
-        LayeredGraph::over(Arc::new(base)).unwrap_err(),
-        "unique property indexes",
+    let layer = LayeredGraph::over(Arc::new(base)).expect("a base with a unique index");
+    assert!(
+        layer
+            .property_indexes()
+            .unwrap()
+            .iter()
+            .any(|info| info.name == "person_name" && info.unique)
     );
 
     // Vector rules in the base's schema.

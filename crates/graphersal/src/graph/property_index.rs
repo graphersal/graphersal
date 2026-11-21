@@ -2114,14 +2114,17 @@ impl IndexState {
             .map(|(key, postings)| (key, self.runs.iter(postings)))
     }
 
-    /// Every slot holding a key equal to `key` by [`Self::other_holder`]'s equality (`has()`'s:
-    /// an `int64` and a `float64` of the same value are equal, two `int64`s only when they are
-    /// the same number), by key then slot; nothing for a `null` key, which is not part of
-    /// uniqueness. Unlike `other_holder` it names every holder, so a reader that must skip some
-    /// slots (an overlay's excluded base slots) can.
-    // Read by the layer's unique checks (S4.3); unit-tested here.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn holders<'a>(&'a self, key: &IndexKey) -> Box<dyn Iterator<Item = u32> + 'a> {
+    /// Every `(key, slot)` entry holding a key equal to `key` by [`Self::other_holder`]'s
+    /// equality (`has()`'s: an `int64` and a `float64` of the same value are equal, two
+    /// `int64`s only when they are the same number), in key-then-slot order (the order
+    /// `other_holder` searches); nothing for a `null` key, which is not part of uniqueness.
+    /// Unlike `other_holder` it names every holder with its key, so a reader that must skip
+    /// some slots (an overlay's excluded base slots) and merge two parts in `other_holder`'s
+    /// order can: the layer's unique checks.
+    pub(crate) fn holder_entries<'a>(
+        &'a self,
+        key: &IndexKey,
+    ) -> Box<dyn Iterator<Item = (&'a IndexKey, u32)> + 'a> {
         match key {
             IndexKey::Null => Box::new(std::iter::empty()),
             IndexKey::Number(value, kind, int) => {
@@ -2137,14 +2140,24 @@ impl IndexState {
                             }
                             _ => false,
                         })
-                        .flat_map(|(_, postings)| self.runs.iter(postings)),
+                        .flat_map(|(held, postings)| {
+                            self.runs.iter(postings).map(move |slot| (held, slot))
+                        }),
                 )
             }
-            _ => match self.entries.get(key) {
-                Some(postings) => Box::new(self.runs.iter(postings)),
+            _ => match self.entries.get_key_value(key) {
+                Some((held, postings)) => {
+                    Box::new(self.runs.iter(postings).map(move |slot| (held, slot)))
+                }
                 None => Box::new(std::iter::empty()),
             },
         }
+    }
+
+    /// The slots of [`Self::holder_entries`] (a test view).
+    #[cfg(test)]
+    pub(crate) fn holders<'a>(&'a self, key: &IndexKey) -> impl Iterator<Item = u32> + 'a {
+        self.holder_entries(key).map(|(_, slot)| slot)
     }
 
     /// Puts in (`insert`) or takes out the entry of a stored value of the element at `slot`: its
@@ -2423,6 +2436,14 @@ pub(crate) struct UniqueConflict {
     value: ElementProperty,
 }
 
+impl UniqueConflict {
+    /// The position of the index, the other element's slot and the value written: what a
+    /// storage that resolves slots itself (a layered graph) builds its error from.
+    pub(crate) fn into_parts(self) -> (usize, u32, ElementProperty) {
+        (self.position, self.slot, self.value)
+    }
+}
+
 impl PropertyIndexes {
     /// Whether no index exists at all.
     #[inline]
@@ -2450,6 +2471,27 @@ impl PropertyIndexes {
         properties: Option<&PropertyMap>,
         write: Option<(&str, &ElementProperty)>,
     ) -> Option<UniqueConflict> {
+        self.unique_conflict_by(element, labels, properties, write, |_, index, key| {
+            index.other_holder(key, me)
+        })
+    }
+
+    /// [`Self::unique_conflict`] with the search for another holder left to `holder`: called
+    /// with the position, the index state of these lookups and the key the write would give
+    /// it, it answers the slot of an element other than the written one that holds an equal
+    /// key. The order of the indexes checked (label-less first, then per label in label
+    /// order) and which value is checked are this function's, so a storage whose indexes are
+    /// split in parts (a layered graph's overlays, one `PropertyIndexes` keeping their
+    /// lookups) reports the same first conflict as a `TraversalGraph` with the same data.
+    #[inline]
+    pub(crate) fn unique_conflict_by<'l>(
+        &self,
+        element: ElementKind,
+        labels: impl IntoIterator<Item = &'l str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+        holder: impl Fn(usize, &IndexState, &IndexKey) -> Option<u32>,
+    ) -> Option<UniqueConflict> {
         let (by_label, any) = match element {
             ElementKind::Vertex => (&self.vertex, &self.vertex_any),
             ElementKind::Edge => (&self.edge, &self.edge_any),
@@ -2463,7 +2505,7 @@ impl PropertyIndexes {
             };
             // A unique index never has `each` (refused at create, never served): one key.
             let key = transformed_key(index.transform.as_ref(), value)?;
-            let slot = index.other_holder(&key, me)?;
+            let slot = holder(position, index, &key)?;
             Some(UniqueConflict {
                 position,
                 slot,
@@ -2853,7 +2895,7 @@ impl TraversalGraph {
     }
 
     /// The id of the live element of kind `element` at `slot`.
-    fn slot_id(&self, element: ElementKind, slot: u32) -> Option<String> {
+    pub(crate) fn slot_id(&self, element: ElementKind, slot: u32) -> Option<String> {
         match element {
             ElementKind::Vertex => self
                 .graph

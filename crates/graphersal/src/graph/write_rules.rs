@@ -15,15 +15,18 @@
 //!
 //! # Not covered here (the caller's part)
 //!
-//! Three checks of `TraversalGraph`'s write methods are tied to state a read view does not carry,
+//! Two checks of `TraversalGraph`'s write methods are tied to state a read view does not carry,
 //! and are left out on purpose. A layered graph refuses a base that needs them until stage 4
 //! (plan P5), so the delta never meets them:
 //!
 //! - the vector (derived) rules, `check_derived_*`: in `TraversalGraph` right after the
 //!   property-value check of every property write;
 //! - the compression rules, `compression_prepare_*` / `compression_normalize_*`: after the
-//!   schema validation (delta values are stored uncompressed);
-//! - unique property indexes, `property_indexes.unique_conflict`: after the compression step.
+//!   schema validation (delta values are stored uncompressed).
+//!
+//! Unique property indexes are checked through the view ([`WriteView::check_unique_vertex`],
+//! [`WriteView::check_unique_edge`]) at the point `TraversalGraph` checks them: after the
+//! schema validation (and its compression step), before an id is checked or anything stored.
 //!
 //! Id uniqueness has the two check functions [`check_vertex_id_free`] and
 //! [`check_edge_id_free`]; the auto-id sequences are the caller's (S1.3).
@@ -34,7 +37,7 @@ use compact_str::CompactString;
 
 use crate::error::{GraphError, SchemaError};
 use crate::graph::schema::defaults::{CreateContext, fill_defaults};
-use crate::graph::schema::{GraphSchema, SchemaMode, SchemaValidator};
+use crate::graph::schema::{ElementKind, GraphSchema, SchemaMode, SchemaValidator};
 use crate::graph::write_checks::{
     check_label, check_properties, check_property_value, normalize_vertex_labels,
     path_property_name, remove_path, single_segment_name, write_path,
@@ -72,6 +75,30 @@ pub(crate) trait WriteView {
 
     /// `true` when a live edge has the id `id`.
     fn contains_edge_id(&self, id: &str) -> bool;
+
+    /// The unique property indexes of a vertex write: `Err` with the
+    /// [`GraphError::UniqueViolation`] `TraversalGraph` returns when an element other than `me`
+    /// (`None`: a vertex being created) already holds a key that a unique index of `labels`
+    /// would get, from `write` (`Some((key, value))`: only the indexes on `key`, with `value`)
+    /// or else from `properties` (every unique index of the labels). The first conflict in
+    /// `TraversalGraph`'s order is reported (`PropertyIndexes::unique_conflict`).
+    fn check_unique_vertex(
+        &self,
+        me: Option<Self::Vertex>,
+        labels: &[CompactString],
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError>;
+
+    /// The edge counterpart of [`Self::check_unique_vertex`] (`label`: the edge's label as it
+    /// would be after the write).
+    fn check_unique_edge(
+        &self,
+        me: Option<Self::Edge>,
+        label: Option<&str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError>;
 }
 
 /// One live edge as the write rules see it.
@@ -120,7 +147,8 @@ pub(crate) fn insert_vertex<V: WriteView>(
     check_properties(&properties)?;
     // (vector rules: `check_derived_map`, see the module docs)
     SchemaValidator::validate_vertex(&view.schema(), &labels, &mut properties)?;
-    // (compression and unique property indexes, see the module docs)
+    // (compression, see the module docs)
+    view.check_unique_vertex(None, &labels, Some(&properties), None)?;
     Ok((labels, properties))
 }
 
@@ -166,7 +194,8 @@ pub(crate) fn insert_edge<V: WriteView>(
         target_labels,
         &mut properties,
     )?;
-    // (compression and unique property indexes)
+    // (compression)
+    view.check_unique_edge(None, label, Some(&properties), None)?;
     Ok(properties)
 }
 
@@ -235,7 +264,15 @@ pub(crate) fn add_vertex_label<V: WriteView>(
     new_labels.push(CompactString::from(label));
     SchemaValidator::check_vertex(&view.schema(), &new_labels, properties)?;
     check_incident_topology(view, vertex, &new_labels)?;
-    // (unique property indexes of the new label)
+    // The unique property indexes of the new label (only those: the others hold the vertex).
+    if let Some(added) = new_labels.last() {
+        view.check_unique_vertex(
+            Some(vertex),
+            std::slice::from_ref(added),
+            Some(properties),
+            None,
+        )?;
+    }
     Ok(Some(new_labels))
 }
 
@@ -296,7 +333,7 @@ pub(crate) fn set_edge_label<V: WriteView>(
             current.properties.unwrap_or(&empty),
         )?;
     }
-    // (unique property indexes of the new label)
+    view.check_unique_edge(Some(edge), Some(label), current.properties, None)?;
     Ok(true)
 }
 
@@ -354,7 +391,8 @@ pub(crate) fn set_vertex_property<V: WriteView>(
     };
     let value =
         SchemaValidator::validate_element_property(&view.schema(), "vertex", labels, key, value)?;
-    // (compression and unique property indexes)
+    // (compression)
+    view.check_unique_vertex(Some(vertex), labels, None, Some((key, &value)))?;
     Ok(value)
 }
 
@@ -376,6 +414,13 @@ pub(crate) fn set_edge_property<V: WriteView>(
         current.label,
         key,
         value,
+    )?;
+    // (compression)
+    view.check_unique_edge(
+        Some(edge),
+        current.label.first().map(CompactString::as_str),
+        None,
+        Some((key, &value)),
     )?;
     Ok(value)
 }
@@ -403,7 +448,9 @@ pub(crate) fn set_vertex_property_path<V: WriteView>(
     let value = SchemaValidator::coerce_path_leaf(&schema, "vertex", labels, path, value)?;
     let (key, resulting) = write_path(properties.get(name.as_str()), path, value)?;
     SchemaValidator::check_element_property(&schema, "vertex", labels, &key, &resulting)?;
-    // (unique property indexes, compression)
+    drop(schema);
+    view.check_unique_vertex(Some(vertex), labels, None, Some((&key, &resulting)))?;
+    // (compression)
     Ok((key, resulting))
 }
 
@@ -427,6 +474,13 @@ pub(crate) fn set_edge_property_path<V: WriteView>(
         .and_then(|properties| properties.get(name.as_str()));
     let (key, resulting) = write_path(existing, path, value)?;
     SchemaValidator::check_element_property(&schema, "edge", current.label, &key, &resulting)?;
+    drop(schema);
+    view.check_unique_edge(
+        Some(edge),
+        current.label.first().map(CompactString::as_str),
+        None,
+        Some((&key, &resulting)),
+    )?;
     Ok((key, resulting))
 }
 
@@ -603,6 +657,50 @@ impl WriteView for TraversalGraph {
 
     fn contains_edge_id(&self, id: &str) -> bool {
         self.index.get_edge(&self.graph, id).is_some()
+    }
+
+    fn check_unique_vertex(
+        &self,
+        me: Option<VertexHandle>,
+        labels: &[CompactString],
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError> {
+        if !self.property_indexes.has_unique() {
+            return Ok(());
+        }
+        match self.property_indexes.unique_conflict(
+            ElementKind::Vertex,
+            me.map(|node| node.index().slot()),
+            labels.iter().map(CompactString::as_str),
+            properties,
+            write,
+        ) {
+            Some(conflict) => Err(self.unique_violation(conflict)),
+            None => Ok(()),
+        }
+    }
+
+    fn check_unique_edge(
+        &self,
+        me: Option<EdgeHandle>,
+        label: Option<&str>,
+        properties: Option<&PropertyMap>,
+        write: Option<(&str, &ElementProperty)>,
+    ) -> Result<(), GraphError> {
+        if !self.property_indexes.has_unique() {
+            return Ok(());
+        }
+        match self.property_indexes.unique_conflict(
+            ElementKind::Edge,
+            me.map(|edge| edge.index().slot()),
+            label,
+            properties,
+            write,
+        ) {
+            Some(conflict) => Err(self.unique_violation(conflict)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1452,6 +1550,146 @@ mod tests {
             assert!(drop_vertex(&g, marko));
             GraphStorage::drop_vertex(&mut g, marko).unwrap();
             assert!(!drop_vertex(&g, marko));
+        }
+    }
+
+    // --- unique property indexes ------------------------------------------------------------
+
+    /// The modern graph of [`graph`] with four unique indexes: person `name` (`to_lower`), the
+    /// label-less vertex `code`, `knows` `weight` and the label-less edge `tag`.
+    fn unique_graph(schema: Option<&str>) -> (TraversalGraph, VertexHandle, EdgeHandle) {
+        use crate::graph::definition::Definition;
+        use crate::graph::property_index::{PropertyIndexDefinition, PropertyIndexTransform};
+        let (mut g, peter, e12) = graph(schema);
+        let (lop, e7) = (v(&g, "3"), e(&g, "0"));
+        GraphStorage::set_vertex_property(&mut g, lop, "code".into(), "c3".into()).unwrap();
+        GraphStorage::set_edge_property(&mut g, e7, "tag".into(), "t7".into()).unwrap();
+        for (name, definition) in [
+            (
+                "person_name",
+                PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name")
+                    .with_transform(Some(PropertyIndexTransform::ToLower)),
+            ),
+            (
+                "code",
+                PropertyIndexDefinition::label_less(ElementKind::Vertex, "code"),
+            ),
+            (
+                "knows_weight",
+                PropertyIndexDefinition::new(ElementKind::Edge, "knows", "weight"),
+            ),
+            (
+                "tag",
+                PropertyIndexDefinition::label_less(ElementKind::Edge, "tag"),
+            ),
+        ] {
+            GraphStorage::set_definition(
+                &mut g,
+                Definition::property_index(name, definition.with_unique(true)),
+            )
+            .unwrap();
+        }
+        assert!(g.property_indexes.has_unique());
+        (g, peter, e12)
+    }
+
+    /// Every write `TraversalGraph` checks against unique indexes: the rule (with the unique
+    /// check of the view) fails exactly as the write does, also when a schema fault and a
+    /// conflict meet (the schema fault wins, as in the write). Modes none and open (the
+    /// closed schema does not declare the indexed `code` and `tag`).
+    #[test]
+    fn unique_index_checks_match_in_none_and_open_mode() {
+        for (mode, schema) in [None, Some(OPEN)].into_iter().enumerate() {
+            let (mut g, peter, e12) = unique_graph(schema);
+            let m = |what: &str| format!("mode {mode}: {what}");
+            let (marko, vadas, lop, josh) = (v(&g, "1"), v(&g, "2"), v(&g, "3"), v(&g, "4"));
+            let (e8, e9) = (e(&g, "1"), e(&g, "2"));
+            assert!(!insert_v(
+                &mut g,
+                &m("insert, name taken"),
+                &["person"],
+                props(&[("name", "MARKO".into())])
+            ));
+            assert!(!insert_v(
+                &mut g,
+                &m("insert, code taken"),
+                &["software"],
+                props(&[("code", "c3".into())])
+            ));
+            insert_v(
+                &mut g,
+                &m("insert, schema fault and name taken"),
+                &["person"],
+                props(&[("name", "marko".into()), ("age", "x".into())]),
+            );
+            assert!(insert_v(
+                &mut g,
+                &m("insert, free"),
+                &["person"],
+                props(&[("name", "zed".into())])
+            ));
+            insert_e(
+                &mut g,
+                &m("edge insert, weight taken"),
+                Some("knows"),
+                josh,
+                vadas,
+                props(&[("weight", 0.5_f64.into())]),
+                false,
+            );
+            insert_e(
+                &mut g,
+                &m("edge insert, int equals float"),
+                Some("knows"),
+                josh,
+                vadas,
+                props(&[("weight", 1_i64.into())]),
+                true,
+            );
+            insert_e(
+                &mut g,
+                &m("edge insert, tag taken"),
+                Some("created"),
+                josh,
+                lop,
+                props(&[("tag", "t7".into())]),
+                false,
+            );
+            set_vp(&mut g, &m("set, name taken"), vadas, "name", "Josh".into());
+            set_vp(&mut g, &m("set, own name"), vadas, "name", "VADAS".into());
+            set_vp(&mut g, &m("set, code taken"), marko, "code", "c3".into());
+            set_vp(&mut g, &m("set, stale"), peter, "code", "c3".into());
+            set_vp(
+                &mut g,
+                &m("set, null exempt"),
+                marko,
+                "code",
+                ElementProperty::Null,
+            );
+            set_ep(
+                &mut g,
+                &m("edge set, weight taken"),
+                e8,
+                "weight",
+                0.5_f64.into(),
+            );
+            set_ep(&mut g, &m("edge set, tag taken"), e9, "tag", "t7".into());
+            set_ep(&mut g, &m("edge set, stale"), e12, "tag", "t7".into());
+            set_vpath(&mut g, &m("path, code taken"), josh, "$.code", "c3".into());
+            set_vpath(
+                &mut g,
+                &m("path, object skipped"),
+                josh,
+                "$.code.x",
+                "c3".into(),
+            );
+            set_epath(&mut g, &m("edge path, tag taken"), e8, "$.tag", "t7".into());
+            add_label(&mut g, &m("label, name taken"), lop, "person");
+            edge_label(&mut g, &m("relabel, weight taken"), e9, "knows");
+            // The conflicts changed nothing; free values still pass.
+            set_vp(&mut g, &m("set, free"), marko, "name", "mark".into());
+            set_vp(&mut g, &m("set, freed name"), vadas, "name", "marko".into());
+            assert!(g.check_property_indexes().is_ok(), "{}", m("indexes"));
         }
     }
 }

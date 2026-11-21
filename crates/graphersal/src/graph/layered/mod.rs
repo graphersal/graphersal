@@ -70,8 +70,9 @@
 //! queries, jobs, host kinds and kinds this version does not know; the kinds that need index,
 //! compression or embedding machinery (property indexes, compression rules, models) are
 //! refused until the layer has index deltas (stage 4), and so are schemas with vector rules
-//! and bases with unique indexes or vector rules (plan decision P5, [`LayeredGraph::over`]).
-//! The property index lookups and the execution policy are the base's.
+//! and bases with vector rules (plan decision P5, [`LayeredGraph::over`]). The base's property
+//! indexes serve the layer through overlays (`index`); its unique indexes are enforced over
+//! base + delta at every write (S4.3). The execution policy is the base's.
 //!
 //! Delta visibility (S2.1, `visibility`): `GraphStorage::vertex_layer` / `edge_layer` answer
 //! an element's origin (`Base` for an untouched base element after the read path's one
@@ -145,10 +146,13 @@ use units::UnitLog;
 ///
 /// **Not supported yet** ([`GraphError::Unsupported`]):
 /// - persistence: a layer cannot be saved, opened from a Store or journaled;
-/// - a base with a unique property index or vector rules ([`Self::over`]); vector rules,
-///   property index, compression rule and embedding model definitions on the layer. The
-///   base's plain indexes serve the layer's data exactly (lookups, counts, stats), through
-///   overlays the layer keeps of them.
+/// - a base with vector rules ([`Self::over`]); vector rules, property index, compression
+///   rule and embedding model definitions on the layer. The base's indexes serve the layer's
+///   data exactly (lookups, counts, stats), through overlays the layer keeps of them, and its
+///   unique indexes are enforced over base + delta: a write that would give a second element
+///   a unique key fails with the same [`GraphError::UniqueViolation`] a `TraversalGraph` with
+///   the layer's data returns (a value a base element dropped or changed is free again); a
+///   unique index the base keeps disabled (stored over repeated values) stays disabled.
 ///
 /// Values the layer stores are uncompressed. After a drop followed by a create, or a drop or
 /// label removal followed by a label lookup, unordered traversals may list elements in
@@ -217,8 +221,9 @@ impl LayeredGraph {
     ///
     /// [`GraphError::Unsupported`] when `base` cannot carry a layer: it has 2^31 or more vertex
     /// or edge slots (live or vacant), which the layer's handles cannot address; or, not
-    /// supported on a layered graph yet, it has a unique property index or its schema has
-    /// vector rules (properties an embedder derives from another property).
+    /// supported on a layered graph yet, its schema has vector rules (properties an embedder
+    /// derives from another property). A base with unique property indexes is accepted: the
+    /// layer enforces them over base + delta.
     pub fn over(base: Arc<TraversalGraph>) -> Result<Self, GraphError> {
         check_base(&base)?;
         Ok(Self::new_unchecked(base))
@@ -421,10 +426,6 @@ impl LayeredGraph {
     }
 }
 
-/// The `operation` of the refusal of a base with a unique property index (plan decision P5).
-const UNIQUE_INDEX_BASE: &str =
-    "a layer over a base with unique property indexes: not supported on a layered graph yet";
-
 /// The `operation` of the refusal of a base whose schema has vector rules (P5).
 const VECTOR_RULES_BASE: &str = "a layer over a base whose schema has vector rules \
      (properties derived by an embedder): not supported on a layered graph yet";
@@ -432,8 +433,6 @@ const VECTOR_RULES_BASE: &str = "a layer over a base whose schema has vector rul
 /// The one place that decides whether a base can carry a layer: `Err` names what the layer
 /// cannot handle. Today:
 /// - a slot count the handles cannot address;
-/// - (P5, until index deltas) a unique property index: the layer cannot check uniqueness
-///   across base and delta;
 /// - (P5, until index deltas) vector rules in the schema: the rule pass needs units and change
 ///   capture, and the layer cannot keep the derived vectors of base elements in step.
 fn check_base(base: &TraversalGraph) -> Result<(), GraphError> {
@@ -441,13 +440,6 @@ fn check_base(base: &TraversalGraph) -> Result<(), GraphError> {
         return Err(GraphError::unsupported(
             "a layer over a base with 2^31 or more vertex or edge slots",
         ));
-    }
-    if base.definitions.iter().any(|definition| {
-        definition
-            .as_property_index()
-            .is_some_and(|index| index.is_unique())
-    }) {
-        return Err(GraphError::unsupported(UNIQUE_INDEX_BASE));
     }
     if crate::graph::vector_rules::has_rules(&base.schema.read()) {
         return Err(GraphError::unsupported(VECTOR_RULES_BASE));
