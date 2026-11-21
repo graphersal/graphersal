@@ -194,8 +194,13 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
 
 ## Limitations
 
-- **No persistence yet.** A layer cannot be saved, opened from a Store or journaled. `mark()`
-  finds no journal.
+- **No snapshot format or Store yet.** A layer implements `PersistentStorage` (load sink,
+  replay of journaled change sets, `clear`, the journal slot, its own lineage id and auto-id
+  sequences), and `PersistentStorage::layer_parts` lists what a layer snapshot will hold: its
+  changes to the base as `BasePatch` entries, which name base elements by id (removed
+  vertices and edges, images of changed ones, base definitions it removed), and the elements
+  it added. `load_base_patch` and the ordinary load sink rebuild the same layer over the same
+  base. No file format and no Store take a layer yet, so it cannot be saved or opened.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):

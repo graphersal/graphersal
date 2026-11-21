@@ -770,6 +770,44 @@ impl LayeredGraph {
         self.delta.indexes_mut().install(name, built, disabled);
     }
 
+    /// Rebuilds every overlay from the layer's catalog and data, as a live layer holding them
+    /// would have them (the end of a load, module `persist`): the base's installed indexes
+    /// first, at their positions (dropped when the layer's catalog no longer serves them, a
+    /// part of its own when the layer redefined them), then the indexes only the layer's catalog
+    /// names, appended in catalog order. A unique index the base keeps disabled and the layer
+    /// holds unchanged stays disabled with the base's report, as on a live layer.
+    #[cfg(feature = "persist")]
+    pub(crate) fn rebuild_layer_indexes(&mut self) {
+        *self.delta.indexes_mut() = LayerIndexes::inherit(&self.base);
+        let base = std::sync::Arc::clone(&self.base);
+        let installed = &base.property_indexes;
+        let mut names: Vec<CompactString> = (0..installed.len())
+            .filter_map(|position| installed.state(position))
+            .map(|state| CompactString::from(state.name()))
+            .collect();
+        for definition in self.catalog.iter() {
+            if definition.kind().is_property_index()
+                && !names.iter().any(|name| name == definition.name())
+            {
+                names.push(CompactString::from(definition.name()));
+            }
+        }
+        for name in names {
+            let inherited_disabled = installed
+                .disabled()
+                .iter()
+                .any(|(disabled, _)| *disabled == name)
+                && self
+                    .layer_index_definition(&name)
+                    .is_some_and(|definition| {
+                        base.definitions.get(definition.kind(), &name) == Some(definition)
+                    });
+            if !inherited_disabled {
+                self.layer_index_after_change(&name);
+            }
+        }
+    }
+
     /// The three parts of the overlay of the index `name` (`definition` as the layer's catalog
     /// holds it, `index` its body); a unique one whose merged view holds repeated values gives
     /// the report instead (`TraversalGraph::build_checked`'s counterpart over the layer's

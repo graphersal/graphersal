@@ -819,6 +819,14 @@ impl Delta {
             .map(|edge| LayeredEdge::from_base(*edge))
     }
 
+    /// Every base edge relabeled away from its base label, label by label, each label's in the
+    /// order they gained it (a layer snapshot writes the edge images in this order, so a load
+    /// rebuilds the same lists).
+    #[cfg(feature = "persist")]
+    pub(crate) fn gained_edges_in_order(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+        self.gained_edge_labels.values().flatten().copied()
+    }
+
     /// `true` while the layer holds an added vertex (stubs are not vertices).
     #[inline]
     pub(crate) fn has_added_vertices(&self) -> bool {

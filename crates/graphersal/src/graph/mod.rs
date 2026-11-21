@@ -98,7 +98,7 @@ pub use layered::{BaseRef, LayerBase, LayeredEdge, LayeredGraph, LayeredVertex};
 pub use memory::{MemoryStats, ShrinkReport};
 pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
-pub use persistent::PersistentStorage;
+pub use persistent::{BasePatch, LayerParts, PersistentStorage};
 pub use property_index::{
     PropertyIndexDefinition, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
     PropertyIndexTransform, UniqueIndexDuplicates,

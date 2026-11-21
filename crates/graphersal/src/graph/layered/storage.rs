@@ -649,7 +649,7 @@ impl GraphStorage for LayeredGraph {
     }
 
     /// `TraversalGraph`'s mark: refused while a unit is open, then the journal slot of the
-    /// layer's hooks records it (no journal can be attached to a layer yet: stage 3).
+    /// layer's hooks records it (`PersistentStorage::attach_journal`).
     fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {
         if self.units.is_recording() {
             return Err(GraphError::MarkUnavailable {
@@ -950,7 +950,7 @@ impl LayeredGraph {
     /// Stores the label list a label rule returned (a change: the rule answered `Some`): in the
     /// delta vertex, or in the image of the base vertex (copied up on its first change; a
     /// return to clean checked when it had one). The dirty bit is set before the copy-up.
-    fn store_vertex_labels(
+    pub(super) fn store_vertex_labels(
         &mut self,
         node: LayeredVertex,
         new_labels: Vec<CompactString>,
@@ -990,7 +990,7 @@ impl LayeredGraph {
     /// is recorded in an open unit for the change set only), any other goes
     /// into its image (copied up on the first change; a return to clean checked when it had
     /// one).
-    fn change_vertex_property(
+    pub(super) fn change_vertex_property(
         &mut self,
         node: LayeredVertex,
         change: PropertyChange,
@@ -1046,7 +1046,7 @@ impl LayeredGraph {
     }
 
     /// The edge counterpart of [`Self::change_vertex_property`].
-    fn change_edge_property(
+    pub(super) fn change_edge_property(
         &mut self,
         edge: LayeredEdge,
         change: PropertyChange,
@@ -1109,7 +1109,7 @@ impl LayeredGraph {
     /// incident edges first, each once (a self-loop from the outgoing list only), in the order
     /// of its lists (added edges at its stub, newest first, then its base edges), then the
     /// vertex itself (its tombstone; its stub goes with it). The vertex stays dirty.
-    fn drop_base_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
+    pub(super) fn drop_base_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
         let mut incident: Vec<LayeredEdge> = GraphStorage::out_edges(&*self, node)?.collect();
         for edge in GraphStorage::in_edges(&*self, node)? {
             if GraphStorage::edge_endpoints(&*self, edge)?.is_none_or(|(from, _)| from != node) {
@@ -1260,7 +1260,7 @@ impl LayeredGraph {
     /// Drops the live base edge `edge`: its tombstone, and the dirty bits of the edge and of
     /// both endpoints (one for a self-loop), so the base adjacency lists of each endpoint are
     /// filtered (invariant of `base_adjacency_exact`).
-    fn drop_base_edge(&mut self, edge: LayeredEdge) {
+    pub(super) fn drop_base_edge(&mut self, edge: LayeredEdge) {
         let base = edge.to_base();
         if let Ok(Some((from, to))) = GraphStorage::edge_endpoints(&*self.base, base) {
             self.dirty_vertices.set(from.index().slot());
@@ -1328,7 +1328,10 @@ impl LayeredGraph {
     /// The delta node slot (with the endpoint handle's generation) a new edge at the live
     /// vertex `node` is linked to: the added vertex itself, or the stub of a base vertex,
     /// created when missing, with the vertex's dirty bit set (which also sets `any`).
-    fn edge_endpoint(&mut self, node: LayeredVertex) -> Result<VertexHandle, GraphError> {
+    pub(super) fn edge_endpoint(
+        &mut self,
+        node: LayeredVertex,
+    ) -> Result<VertexHandle, GraphError> {
         if node.is_delta() {
             return Ok(node.to_delta());
         }
