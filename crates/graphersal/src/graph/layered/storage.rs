@@ -29,10 +29,6 @@ use crate::graph::{
 };
 use crate::value::{ElementProperty, JsonPath, PropertyMap};
 
-/// The `operation` of the refusal of a schema with vector rules on a layer.
-const VECTOR_RULES: &str =
-    "vector rules (properties derived by an embedder) on a layered graph yet";
-
 /// The `operation` of the refusal of a compression rule on a layer.
 const COMPRESSION_RULES: &str = "compression rules on a layered graph yet";
 
@@ -46,8 +42,8 @@ const MODELS: &str = "embedding model definitions on a layered graph yet";
 /// jobs, host kinds and kinds this version does not know (kept opaque, as `TraversalGraph`
 /// keeps them) need no storage machinery, property indexes are served by the layer's
 /// overlays (module `index`, S4.4). Compression rules need value machinery over base + delta
-/// (the layer stores its values plain), models belong to the vector rules: refused, with an
-/// error naming the limitation.
+/// (the layer stores its values plain), models need blob storage in the layer (plan decision
+/// D3): refused, with an error naming the limitation.
 fn check_layer_kind(kind: DefinitionKind) -> Result<(), GraphError> {
     if kind == DefinitionKind::COMPRESSION {
         Err(GraphError::unsupported(COMPRESSION_RULES))
@@ -358,9 +354,12 @@ impl GraphStorage for LayeredGraph {
     /// Checks the layer's current state (base elements as the layer shows them, images, added
     /// elements) against `schema` exactly as `TraversalGraph` checks its own (only the labels
     /// whose declaration changed while the mode stays `Open`/`Closed`), the same errors, then
-    /// stores it in the layer; the base's schema is never written. A schema with vector rules
-    /// is refused (not supported on a layered graph yet). Outside a unit it is a unit of its
-    /// own, as on a `TraversalGraph`; inside one the old schema is recorded.
+    /// stores it in the layer; the base's schema is never written. A vector rule's model is
+    /// checked as `TraversalGraph` checks it (`hash-ngram/1` or a model of the layer's catalog,
+    /// [`GraphError::VectorRuleModelMissing`]); a rule the change adds or changes is filled at
+    /// the unit's commit (module `rules`; on a base label it copies the label's base elements
+    /// into the layer). Outside a unit it is a unit of its own, as on a `TraversalGraph`;
+    /// inside one the old schema is recorded.
     fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
         self.in_own_unit(|this| this.store_schema(schema))
     }
@@ -566,7 +565,8 @@ impl GraphStorage for LayeredGraph {
             .with_atomic(true)
             .with_change_capture(true)
             .with_property_indexes(true)
-            .with_exact_property_index_lookups(base.exact_property_index_lookups))
+            .with_exact_property_index_lookups(base.exact_property_index_lookups)
+            .with_layered(true))
     }
 
     /// Opens a unit of the layer's undo log: from now on every write records its inverse. The
@@ -617,7 +617,7 @@ impl GraphStorage for LayeredGraph {
     /// Derives the unit's change set from the layer's undo log, then undoes it and closes the
     /// unit without hooks.
     fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
-        Ok(self.discard_layer_unit(mark))
+        self.discard_layer_unit(mark)
     }
 
     /// Registers a hook (registration order; never removed): from now on every outermost
@@ -897,18 +897,35 @@ impl GraphStorage for LayeredGraph {
         self.edge_sequence = self.edge_sequence.max(edge_sequence);
         Ok(())
     }
+
+    /// The default's unit with the vector rules off, as on a `TraversalGraph` (book page
+    /// "Vector Rules"): the change set carries its vectors, so they are neither refused nor
+    /// recomputed, and inside an open unit the range it wrote is exempt from the rule pass.
+    fn apply_change_set(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
+        let start = self.units.entries().len();
+        self.rules_off += 1;
+        let applied = crate::graph::storage::apply_change_set_with(
+            self,
+            changes,
+            &mut crate::graph::replay::clone_map,
+        );
+        self.rules_off -= 1;
+        if applied.is_ok() {
+            self.units.exempt_from(start);
+        }
+        applied
+    }
 }
 
 impl LayeredGraph {
     /// The checks of `set_schema`, then the schema stored (the old one recorded in an open
     /// unit).
     fn store_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
-        if crate::graph::vector_rules::has_rules(&schema) {
-            return Err(GraphError::unsupported(VECTOR_RULES));
-        }
         // As `TraversalGraph::set_schema_recorded`: a vector property may name its model by
-        // repository; the schema stores the identity of the catalog's current revision.
+        // repository; the schema stores the identity of the catalog's current revision; a
+        // vector rule embeds with a model of the catalog or `hash-ngram/1`.
         let schema = crate::graph::model_definition::resolve_model_names(&self.catalog, schema);
+        let schema = crate::graph::vector_rules::check_rule_models(&self.catalog, schema)?;
         let report =
             crate::graph::schema::apply::scan_storage_change(&*self, Some(&self.schema), &schema)?;
         if !report.is_empty() {
@@ -918,6 +935,7 @@ impl LayeredGraph {
             .into());
         }
         let old = std::mem::replace(&mut self.schema, schema);
+        self.refresh_vector_rules();
         self.units.record(LayerUndo::Schema(Box::new(old)));
         Ok(())
     }

@@ -4029,14 +4029,14 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     /// A read-only view: claims nothing (no writes, so nothing to make atomic or capture),
-    /// except the exactness of the index lookups it forwards to the viewed storage.
+    /// except the exactness of the index lookups it forwards to the viewed storage and whether
+    /// that storage is a layer.
     #[inline]
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
-        Ok(
-            StorageCapabilities::none().with_exact_property_index_lookups(
-                (**self).capabilities()?.exact_property_index_lookups,
-            ),
-        )
+        let viewed = (**self).capabilities()?;
+        Ok(StorageCapabilities::none()
+            .with_exact_property_index_lookups(viewed.exact_property_index_lookups)
+            .with_layered(viewed.layered))
     }
 
     /// A read-only view writes no journal record.

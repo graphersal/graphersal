@@ -3452,15 +3452,13 @@ fn p5_refusals_and_refused_catalog_kinds() {
             .any(|info| info.name == "person_name" && info.unique)
     );
 
-    // Vector rules in the base's schema.
+    // Vector rules in the base's schema are accepted (S4.5b): the layer runs the rule pass.
     let mut base = TraversalGraph::new();
     base.traversal_mut()
         .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
         .unwrap();
-    refusal(
-        LayeredGraph::over(Arc::new(base)).unwrap_err(),
-        "vector rules",
-    );
+    let ruled = LayeredGraph::over(Arc::new(base)).expect("a base with vector rules");
+    assert!(ruled.get_schema().unwrap().is_some());
 
     // A plain index and a compression rule are fine; the layer cannot change them.
     let mut base = TraversalGraph::tinkerpop_modern();
@@ -3526,23 +3524,18 @@ fn p5_refusals_and_refused_catalog_kinds() {
     assert_eq!(definitions_of(&*base), before);
     assert_ne!(definitions_of(&layer), before);
 
-    // A schema with vector rules, directly and through the traversal source.
+    // A schema with vector rules is accepted (S4.5b), directly and through the traversal
+    // source; the base's schema stays as it was.
     let schema_before = layer.get_schema().unwrap();
-    refusal(
-        layer
-            .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
-            .unwrap_err(),
-        "vector rules",
-    );
-    let through_source = GraphTraversalSource::new(&mut layer)
+    layer
         .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
-        .unwrap_err();
-    assert!(
-        through_source.to_string().contains("vector rules"),
-        "{through_source}"
-    );
-    println!("{through_source}");
-    assert_eq!(layer.get_schema().unwrap(), schema_before);
+        .unwrap();
+    assert_ne!(layer.get_schema().unwrap(), schema_before);
+    layer.set_schema(GraphSchema::default()).unwrap();
+    GraphTraversalSource::new(&mut layer)
+        .set_schema(GraphSchema::from_json(RULE_SCHEMA).unwrap())
+        .unwrap();
+    assert_eq!(base.get_schema().unwrap(), schema_before);
     // A plain vector property (no rule) is an ordinary declaration.
     layer
         .set_schema(

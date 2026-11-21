@@ -18,8 +18,8 @@
 //!   elements or labels (or relabels an edge) and differs only in the order the layer lists
 //!   elements afterwards; checked by re-rendering both graphs with every list sorted;
 //! - refusals of plan decision P5: compression rules (and a compression estimate over changed
-//!   elements) and vector rules are refused on a layer with
-//!   `GraphError::Unsupported`; the script must fail on the layer with that refusal, and only
+//!   elements) are refused on a layer with `GraphError::Unsupported` (vector rules are
+//!   accepted since S4.5b); the script must fail on the layer with that refusal, and only
 //!   scripts that define or estimate one of them may;
 //! - origin queries in the `Delta` setup (S2.3): a script asking for layer origins
 //!   (`layer(`, `has_layer(`, `layer_diff(`) may give another result there, since every element
