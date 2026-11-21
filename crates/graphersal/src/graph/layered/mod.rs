@@ -91,6 +91,11 @@
 //! served from the overlays (S4.2): the base slice minus the excluded slots merged with the
 //! delta part, key then slot; an overlay holding nothing of its own reads the base slice alone.
 //!
+//! Persistence (S3.1, `persist`, feature `persist`): `PersistentStorage` with a load sink for
+//! the layer's changes to its base by element id (`BasePatch`) beside its own elements,
+//! `layer_parts` for an encoder, replay of journaled change sets outside units, `clear` back
+//! to an empty layer over the same base.
+//!
 //! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
 //! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
 //! ceiling checks the outermost unit at its commit on the layer's own footprint, as
@@ -103,6 +108,8 @@ mod dirty;
 mod handle;
 mod index;
 mod memory;
+#[cfg(feature = "persist")]
+mod persist;
 mod route;
 mod rules;
 mod storage;
@@ -168,8 +175,11 @@ use units::UnitLog;
 /// none, and a rule naming a catalog model fails at commit as on a `TraversalGraph` without that
 /// model.
 ///
+/// **Persistence** (feature `persist`): `PersistentStorage` (the load sink with
+/// `load_base_patch`, `layer_parts` for an encoder, replay of journaled change sets, `clear`,
+/// the journal slot); no snapshot format or Store takes a layer yet.
+///
 /// **Not supported yet** ([`GraphError::Unsupported`]):
-/// - persistence: a layer cannot be saved, opened from a Store or journaled;
 /// - compression rule and embedding model definitions on the layer. The base's indexes serve the layer's data exactly
 ///   (lookups, counts, stats), through overlays the layer keeps of them, and its unique
 ///   indexes are enforced over base + delta: a write that would give a second element a
@@ -245,6 +255,10 @@ pub struct LayeredGraph {
     /// The cached walk of the layer's own footprint (`memory`): what the memory budget starts
     /// from without walking the delta on every run.
     footprint: Box<crate::graph::memory::FootprintCache>,
+    /// The layer's own lineage id (`PersistentStorage::graph_id`, module `persist`), created on
+    /// first use like `TraversalGraph`'s; not the base's. Boxed: see the note on the struct.
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
+    graph_id: Box<std::sync::OnceLock<u128>>,
 }
 
 impl LayeredGraph {
@@ -285,6 +299,7 @@ impl LayeredGraph {
             rules_off: 0,
             units: Box::new(UnitLog::after(base.undo.last_committed_at)),
             footprint: Box::default(),
+            graph_id: Box::default(),
             base,
         }
     }

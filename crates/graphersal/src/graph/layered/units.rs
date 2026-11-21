@@ -271,6 +271,15 @@ impl UnitLog {
         self.last_committed_at
     }
 
+    /// Raises the commit sequence number and the commit time (and the instance clock's floor)
+    /// to at least these values, never lowering either (`PersistentStorage::raise_position`).
+    #[cfg(feature = "persist")]
+    pub(crate) fn raise_position(&mut self, commit_seq: u64, committed_at: i64) {
+        self.last_commit_seq = self.last_commit_seq.max(commit_seq);
+        self.last_committed_at = self.last_committed_at.max(committed_at);
+        self.hooks.clock_ref().raise(committed_at);
+    }
+
     /// The start of the outermost open unit.
     pub(crate) fn started_at(&self) -> Option<i128> {
         self.started_at

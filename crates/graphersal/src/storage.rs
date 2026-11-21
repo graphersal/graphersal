@@ -23,7 +23,9 @@
 //! is on [`CommitHooks`]); it times its commits with [`CommitHooks::commit_time`] (the instance
 //! [`CommitClock`]) and hands the clock out through [`GraphStorage::commit_clock`]. With feature `persist`, `PersistentStorage` (EXPERIMENTAL like
 //! [`GraphStorage`]) is what a snapshot and a Store need from a storage: lineage id, commit
-//! position, a load sink, `clear`, the journal slot ([`JournalSlot`]) and `replay`.
+//! position, a load sink, `clear`, the journal slot ([`JournalSlot`]) and `replay`; a layer's
+//! snapshot takes its changes to the base as `BasePatch` entries and the layer's own elements
+//! (`PersistentStorage::layer_parts`, `PersistentStorage::load_base_patch`).
 //!
 //! [`LayeredGraph`] (EXPERIMENTAL, in progress) is a storage of the crate built on this trait: a
 //! frozen [`TraversalGraph`] shared by many layers, each reading through it with its own handles
@@ -208,8 +210,6 @@
 //! ```
 
 pub use crate::error::GraphError;
-#[cfg(feature = "persist")]
-pub use crate::graph::PersistentStorage;
 pub use crate::graph::compression::CompressionStats;
 pub use crate::graph::compression_estimate::{CompressionEstimate, CompressionEstimateRequest};
 pub use crate::graph::memory_report::{
@@ -238,5 +238,7 @@ pub use crate::graph::{
     StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark, VertexHandle,
     VertexState,
 };
+#[cfg(feature = "persist")]
+pub use crate::graph::{BasePatch, LayerParts, PersistentStorage};
 pub use crate::value::{ElementProperty, JsonPath, JsonPathSegment, PropertyMap};
 pub use compact_str::CompactString;

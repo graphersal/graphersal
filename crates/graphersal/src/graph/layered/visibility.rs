@@ -171,14 +171,14 @@ impl LayeredGraph {
     }
 
     /// The live base vertex in base slot `slot` (a set bit of a layer bitset names one).
-    fn base_vertex_at(&self, slot: u32) -> Option<VertexHandle> {
+    pub(super) fn base_vertex_at(&self, slot: u32) -> Option<VertexHandle> {
         let index = NodeIndex::new(slot as usize);
         let vertex = self.base.graph.node_weight(index)?;
         Some(VertexHandle::new(index, vertex.3))
     }
 
     /// The live base edge in base slot `slot`.
-    fn base_edge_at(&self, slot: u32) -> Option<EdgeHandle> {
+    pub(super) fn base_edge_at(&self, slot: u32) -> Option<EdgeHandle> {
         let index = EdgeIndex::new(slot as usize);
         let edge = self.base.graph.edge_weight(index)?;
         Some(EdgeHandle::new(index, edge.3.own))
