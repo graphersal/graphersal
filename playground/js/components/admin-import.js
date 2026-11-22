@@ -5,15 +5,16 @@
 // JSON form). Sources: a packed snapshot (full or layer), a Store, GraphSON or GraphML; the format
 // is detected unless chosen. Request and rules: js/admin-api.js `importRequest`, `uploadImport`.
 // The server's `error`/`help` (a `413` included) stay open in the dialog; Cancel aborts a running
-// upload.
+// upload. "Import as a base" (P4) sends `role=base` (only a plain source becomes a base: the
+// server refuses a layer source with `400` and a source missing its model with `409` + help).
 
 import { ref, reactive, computed, nextTick } from 'vue';
 import {
   importRequest, uploadImport, uploadLimit, uploadSizeProblem, progressText, suggestName,
-  outcomeText, needsModelHint, bytesText, IMPORT_FORMATS,
+  outcomeText, needsModelHint, bytesText, IMPORT_FORMATS, BASE_IS_FROZEN,
 } from '../admin-api.js';
 
-const freshForm = () => ({ source: 'upload', file: null, path: '', name: '', base: '', format: '', description: '' });
+const freshForm = () => ({ source: 'upload', file: null, path: '', name: '', base: '', format: '', description: '', role: 'normal' });
 
 export const AdminImport = {
   props: {
@@ -109,7 +110,7 @@ export const AdminImport = {
     expose({ open, close });
     return {
       dlg, form, s, limit, fileProblem, percent, close, cancel, submit, pickFile, pathChanged,
-      progressText, bytesText, formats: IMPORT_FORMATS,
+      progressText, bytesText, formats: IMPORT_FORMATS, frozen: BASE_IS_FROZEN,
       touchName: () => { nameTouched = true; },
     };
   },
@@ -138,7 +139,11 @@ export const AdminImport = {
           <select v-model="form.format" name="format" :disabled="s.busy">
             <option v-for="f in formats" :key="f" :value="f">{{ f || 'detected from the content' }}</option>
           </select></label>
-        <label v-if="bases.length">Base (a layer snapshot or layer Store; empty: the base with its identity)
+        <label class="inline"><input type="checkbox" name="role" :checked="form.role === 'base'" :disabled="s.busy"
+            @change="form.role = $event.target.checked ? 'base' : 'normal'">
+          Import as a base (from a full snapshot, a plain Store, GraphSON or GraphML; layers are built over it)</label>
+        <p v-if="form.role === 'base'" class="muted landing-sub">{{ frozen }}</p>
+        <label v-if="bases.length && form.role !== 'base'">Base (a layer snapshot or layer Store; empty: the base with its identity)
           <select v-model="form.base" name="base" :disabled="s.busy">
             <option value="">(found by the snapshot's base identity)</option>
             <option v-for="b in bases" :key="b" :value="b">{{ b }}</option>
