@@ -54,6 +54,7 @@ pub mod filter;
 pub mod indexes;
 pub mod jobs;
 pub mod journal;
+pub mod layer;
 pub mod layout;
 pub mod process;
 pub mod queries;

@@ -20,9 +20,10 @@ use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, EdgeHandle,
     ElementKind, ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics,
-    GraphStorage, JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange,
-    PropertyIndexTransform, PropertyMap, PropertySchema, RollbackReason, StorageCapabilities,
-    UniqueIndexDuplicates, UnitChanges, UnitMark, VertexHandle,
+    GraphStorage, JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark,
+    MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap,
+    PropertySchema, RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges,
+    UnitMark, VertexHandle,
 };
 
 /// The vertex handle of [`Forwarding`]: a newtype around the wrapped graph's [`VertexHandle`],
@@ -42,7 +43,9 @@ pub struct ForwardEdgeId(EdgeHandle);
 /// properties and path writes, the schema, the catalog, compression (`recompress`,
 /// `compression_stats`, `estimate_compression`), property indexes (`property_indexes` and the two lookups), statistics, memory, the execution policy, units, commit hooks and
 /// change capture (`unit_changes`, `set_unit_metadata`, `discard_unit`), `mark`, the id
-/// sequences and the capabilities. Left on the trait default ON PURPOSE, because
+/// sequences, the capabilities, and the layer reads (`vertex_layer`, `edge_layer`,
+/// `layer_diff`: `TraversalGraph` keeps their defaults, forwarded so a wrapper's forwarding is
+/// covered). Left on the trait default ON PURPOSE, because
 /// `TraversalGraph` keeps the default too and the default then runs over this storage's own
 /// methods (which is what a foreign storage gets): `vertex_has_label`, `infer_schema` and
 /// `apply_change_set`.
@@ -396,6 +399,19 @@ impl GraphStorage for Forwarding {
 
     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
         GraphStorage::memory_usage(&self.0)
+    }
+
+    fn vertex_layer(&self, node: ForwardVertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        GraphStorage::vertex_layer(&self.0, node.0)
+    }
+    fn edge_layer(&self, edge: ForwardEdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        GraphStorage::edge_layer(&self.0, edge.0)
+    }
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        GraphStorage::layer_diff(&self.0, request)
+    }
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        GraphStorage::layer_summary(&self.0)
     }
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         GraphStorage::memory_footprint_bytes(&self.0)

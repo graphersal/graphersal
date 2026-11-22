@@ -1,0 +1,202 @@
+//! The dirty bitsets of a [`LayeredGraph`](super::LayeredGraph): one bit per base slot.
+//!
+//! A clear bit means the base element is untouched by the layer: every read goes straight to
+//! the base, no hash map, no delta lookup. A set bit means "consult the delta for this
+//! element": for a vertex, it may have a stub with new incident edges (S1.4), be removed or
+//! have a copied-up image; for an edge, be removed or have an image. A set bit alone never
+//! means the element changed: the delta answers that. Allocated for every base slot when the
+//! layer is created, all clear.
+
+use super::handle::DELTA_BIT;
+
+/// One bit per base slot of one element kind.
+#[derive(Debug, Clone)]
+pub(crate) struct SlotBits {
+    words: Vec<u64>,
+    /// [`DELTA_BIT`] while no bit was ever set, 0 once one was: every base slot is below it
+    /// exactly while the set is untouched, so "a base slot of an untouched set" is ONE compare
+    /// ([`Self::clean_below`]), and while it is [`DELTA_BIT`] a read skips the word load.
+    clean_below: u32,
+}
+
+impl Default for SlotBits {
+    /// No slot, no bit set.
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl SlotBits {
+    /// `slots` clear bits.
+    pub(crate) fn new(slots: usize) -> Self {
+        Self {
+            words: vec![0; slots.div_ceil(64)],
+            clean_below: DELTA_BIT,
+        }
+    }
+
+    /// `true` once any bit was set.
+    #[inline]
+    pub(crate) fn any(&self) -> bool {
+        self.clean_below == 0
+    }
+
+    /// [`DELTA_BIT`] while no bit was ever set, else 0: `slot < clean_below()` holds exactly for
+    /// a base slot (bit 31 clear) of a set without any bit, the one-compare fast path of the
+    /// layer's reads.
+    #[inline(always)]
+    pub(crate) fn clean_below(&self) -> u32 {
+        self.clean_below
+    }
+
+    /// `true` iff the bit of base slot `slot` is set. A slot beyond the allocated bits (a delta
+    /// slot, or a forged handle) reads as clear: the caller routes delta slots before asking.
+    #[inline]
+    pub(crate) fn contains(&self, slot: u32) -> bool {
+        self.any() && self.word_contains(slot)
+    }
+
+    /// Sets the bit of base slot `slot` and [`Self::any`] with it (the one way to set a bit, so
+    /// the two never disagree). A slot beyond the allocated bits is ignored: the bits cover
+    /// every base slot, and the caller only sets the bit of a live base element.
+    #[inline]
+    pub(crate) fn set(&mut self, slot: u32) {
+        if let Some(word) = self.words.get_mut((slot >> 6) as usize) {
+            *word |= 1 << (slot & 63);
+            self.clean_below = 0;
+        }
+    }
+
+    /// [`Self::set`] for a set that starts empty and grows on demand (the tombstones: a layer
+    /// that never removes a base element allocates nothing for them). `slot` must be a base
+    /// slot (below 2^31): the words grow to cover it.
+    #[inline]
+    pub(crate) fn set_growing(&mut self, slot: u32) {
+        let word = (slot >> 6) as usize;
+        if self.words.len() <= word {
+            self.words.resize(word + 1, 0);
+        }
+        self.set(slot);
+    }
+
+    /// Clears the bit of `slot` (nothing beyond the allocated bits). [`Self::any`] stays set: it
+    /// only lets a never-touched set skip the word load, so a stale `true` costs one load.
+    /// Never used on the dirty bits themselves (they are never cleared, plan invariant S1.5),
+    /// only on the sets read behind them (images, lost labels, relabeled edges).
+    #[inline]
+    pub(crate) fn clear(&mut self, slot: u32) {
+        if let Some(word) = self.words.get_mut((slot >> 6) as usize) {
+            *word &= !(1 << (slot & 63));
+        }
+    }
+
+    /// The heap bytes of the words (`memory_usage()`): their allocated capacity.
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        self.words.capacity() as u64 * std::mem::size_of::<u64>() as u64
+    }
+
+    /// Releases the spare capacity of the words (the bits stay: a set covering every base slot
+    /// keeps covering it).
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.words.shrink_to_fit();
+    }
+
+    /// The set bits in slot order, a word at a time (a word without a set bit costs one test):
+    /// what the layer diff walks instead of every base element.
+    pub(crate) fn ones(&self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, &word)| {
+            let first = (index as u32) << 6;
+            Ones(word).map(move |bit| first + bit)
+        })
+    }
+
+    /// The bit itself, without the [`Self::any`] shortcut (a slot beyond the words, a delta
+    /// slot among them, reads as clear).
+    #[inline(always)]
+    pub(crate) fn word_contains(&self, slot: u32) -> bool {
+        match self.words.get((slot >> 6) as usize) {
+            Some(word) => (word >> (slot & 63)) & 1 != 0,
+            None => false,
+        }
+    }
+}
+
+/// The set bits of one word, lowest first.
+struct Ones(u64);
+
+impl Iterator for Ones {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        if self.0 == 0 {
+            return None;
+        }
+        let bit = self.0.trailing_zeros();
+        self.0 &= self.0 - 1;
+        Some(bit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_bits_are_clear_and_cover_every_slot() {
+        let bits = SlotBits::new(130);
+        assert_eq!(bits.words.len(), 3);
+        assert!((0..130).all(|slot| !bits.contains(slot)));
+        assert!(!bits.contains(u32::MAX));
+        assert!(!SlotBits::default().contains(0));
+    }
+
+    #[test]
+    fn set_marks_one_slot_and_any() {
+        let mut bits = SlotBits::new(130);
+        bits.set(129);
+        assert!(bits.any());
+        assert!(bits.contains(129));
+        assert!((0..129).all(|slot| !bits.contains(slot)));
+        let mut empty = SlotBits::default();
+        empty.set(0);
+        assert!(!empty.any(), "a slot beyond the bits is ignored");
+    }
+
+    #[test]
+    fn set_growing_covers_the_slot() {
+        let mut bits = SlotBits::default();
+        assert!(!bits.contains(200));
+        bits.set_growing(200);
+        assert!(bits.any() && bits.contains(200));
+        assert_eq!(bits.words.len(), 4);
+        assert!((0..200).all(|slot| !bits.contains(slot)));
+        bits.set_growing(3);
+        assert!(bits.contains(3) && bits.contains(200));
+        assert_eq!(bits.words.len(), 4, "no growth for a covered slot");
+    }
+
+    #[test]
+    fn clear_unsets_one_slot_only() {
+        let mut bits = SlotBits::default();
+        bits.set_growing(70);
+        bits.set_growing(71);
+        bits.clear(70);
+        bits.clear(5000);
+        assert!(!bits.contains(70) && bits.contains(71));
+        bits.clear(71);
+        assert!(!bits.contains(71) && bits.any(), "any stays set");
+    }
+
+    #[test]
+    fn ones_lists_the_set_bits_in_order() {
+        let mut bits = SlotBits::new(200);
+        assert_eq!(bits.ones().count(), 0);
+        for slot in [199, 0, 63, 64, 130] {
+            bits.set(slot);
+        }
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [0, 63, 64, 130, 199]);
+        bits.clear(64);
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [0, 63, 130, 199]);
+    }
+}

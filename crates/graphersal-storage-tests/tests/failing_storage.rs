@@ -930,3 +930,108 @@ fn a_value_unreadable_for_a_type_name_keeps_the_original_error() {
         );
     }
 }
+
+/// The layer reads (`vertex_layer`, `edge_layer`, `layer_diff`) are forwarded through
+/// `Failing` and `Forwarding` to a storage without layers: every live element is `Base`, a
+/// removed one has no origin, the diff is empty; the `layer` fault makes all three fail.
+#[test]
+fn layer_reads_are_forwarded_and_can_fail() {
+    use graphersal::storage::{GraphStorage, LayerDiffRequest, LayerOrigin};
+    let mut storage = modern();
+    let vertices: Vec<_> = storage.vertices().unwrap().collect();
+    let edges: Vec<_> = storage.edges().unwrap().collect();
+    for &node in &vertices {
+        assert_eq!(storage.vertex_layer(node).unwrap(), Some(LayerOrigin::Base));
+    }
+    for &edge in &edges {
+        assert_eq!(storage.edge_layer(edge).unwrap(), Some(LayerOrigin::Base));
+    }
+    assert!(
+        storage
+            .layer_diff(&LayerDiffRequest::new())
+            .unwrap()
+            .is_empty()
+    );
+    storage.drop_edge(edges[0]).unwrap();
+    storage.drop_vertex(vertices[0]).unwrap();
+    assert_eq!(storage.vertex_layer(vertices[0]).unwrap(), None);
+    assert_eq!(storage.edge_layer(edges[0]).unwrap(), None);
+    Faults::set(&storage.faults().layer, true);
+    for err in [
+        storage.vertex_layer(vertices[1]).unwrap_err(),
+        storage.edge_layer(edges[3]).unwrap_err(),
+        storage.layer_diff(&LayerDiffRequest::new()).unwrap_err(),
+    ] {
+        assert!(matches!(err, GraphError::StorageFailed { .. }), "{err}");
+    }
+    Faults::set(&storage.faults().layer, false);
+    assert_eq!(
+        storage.vertex_layer(vertices[1]).unwrap(),
+        Some(LayerOrigin::Base)
+    );
+}
+
+/// `layer_summary` is forwarded (`None`: no layer under `Forwarding`) and fails with the layer
+/// fault, never a made-up summary.
+#[test]
+fn the_layer_summary_is_forwarded_and_can_fail() {
+    use graphersal::storage::GraphStorage;
+    let storage = modern();
+    assert_eq!(storage.layer_summary().unwrap(), None);
+    Faults::set(&storage.faults().layer, true);
+    let err = storage.layer_summary().unwrap_err();
+    assert!(matches!(err, GraphError::StorageFailed { .. }), "{err}");
+    Faults::set(&storage.faults().layer, false);
+    assert_eq!(storage.layer_summary().unwrap(), None);
+}
+
+/// A failing layer read fails the `layer()` / `has_layer()` step that reads it (vertices and
+/// edges), as a storage error at that step, never a panic or a made-up origin; once the backend
+/// is back the same queries answer.
+#[test]
+fn a_layer_read_failure_fails_the_layer_steps() {
+    let storage = modern();
+    let faults = storage.faults();
+    Faults::set(&faults.layer, true);
+    let errors = [
+        GraphTraversalSource::new(&storage)
+            .v(None)
+            .layer()
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .e(None)
+            .layer()
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .v(None)
+            .has_layer("added")
+            .to_list()
+            .unwrap_err(),
+        GraphTraversalSource::new(&storage)
+            .e(None)
+            .has_layer("base")
+            .count()
+            .next()
+            .unwrap_err(),
+    ];
+    for err in &errors {
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::Graph(GraphError::StorageFailed { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(err.step_location().is_some(), "{err:?}");
+    }
+    Faults::set(&faults.layer, false);
+    let count = GraphTraversalSource::new(&storage)
+        .v(None)
+        .has_layer("base")
+        .count()
+        .next()
+        .unwrap();
+    assert_eq!(count.and_then(|c| c.as_i64()), Some(6));
+}

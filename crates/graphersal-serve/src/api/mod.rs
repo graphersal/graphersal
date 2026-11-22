@@ -433,6 +433,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             let body = request.json_body()?;
             value(context.call(move |s| s.memory_report(&body))?)
         }
+        // What a layered graph changed against its base (`Session::layer_diff`): POST a spec
+        // `{kinds?, labels?, limit?}`, `{}` for the whole diff; an empty diff on another graph.
+        (Method::Post, "layer/diff") => {
+            let body = request.json_body()?;
+            value(context.call(move |s| s.layer_diff(&body))?)
+        }
         (Method::Get, "statistics") => value(
             context.with_process_memory(context.call_fallible(|s| s.statistics_with_process())?),
         ),
@@ -573,8 +579,10 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             let Some(path) = context.source.clone() else {
                 return Err(HttpError(
                     409,
-                    "the graph did not come from a file (--graph <file>): download it with Save graph"
-                        .into(),
+                    context.save_refusal.clone().unwrap_or_else(|| {
+                        "the graph did not come from a file (--graph <file>): download it with Save graph"
+                            .into()
+                    }),
                 ));
             };
             value(save_to_source(context, path)?)
@@ -606,6 +614,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             | "token-values"
             | "memory"
             | "memory/report"
+            | "layer/diff"
             | "advise"
             | "advise/apply"
             | "advise/dismiss"

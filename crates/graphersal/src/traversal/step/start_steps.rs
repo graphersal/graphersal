@@ -55,6 +55,7 @@ pub(crate) fn render_source(
             if name == "e" { "edge" } else { "vertex" },
             labels.as_deref(),
             count_only,
+            crate::traversal::step::IndexDeclined::default(),
         ),
         _ => String::new(),
     };

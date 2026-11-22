@@ -3186,6 +3186,16 @@ impl DiagnosticError for ScriptError {
                  A list of labels is not accepted."
                     .to_string(),
             ),
+            ScriptError::ArgumentMismatch { step_name, .. } if step_name == "layer_diff" => Some(
+                "layer_diff() takes no argument or one options map with the keys kinds, labels \
+                 and limit: kinds is \"vertex\", \"edge\" or a list of them (default both), \
+                 labels a label or a list of labels, limit a positive integer (the number of \
+                 entries across added, removed and modified; truncated says whether it cut any), \
+                 for example g.layer_diff(#{kinds: \"vertex\", labels: [\"person\"], limit: 10}). \
+                 On a graph without layers the diff is empty; layer() and has_layer(\"added\", \
+                 \"modified\") show the origin of the elements a traversal reaches."
+                    .to_string(),
+            ),
             ScriptError::ArgumentMismatch { step_name, .. } if step_name == "gql" => Some(
                 "gql() takes the query as a string and, optionally, the values of its \
                  $parameters as a map from name to value, for example \
@@ -4712,6 +4722,18 @@ pub enum TraverserError {
         step: String,
     },
 
+    /// `has_layer(..)` named something that is not a layer origin (`"base"`, `"added"`,
+    /// `"modified"`). Raised by the plan-time validation pass before execution, even when no
+    /// traverser reaches the step.
+    #[error(
+        "`has_layer()` got \"{name}\", which is not a layer origin: expected \"base\", \"added\" or \"modified\""
+    )]
+    #[non_exhaustive]
+    UnknownLayerOrigin {
+        /// The name as given.
+        name: String,
+    },
+
     /// A property write asked for a cardinality Graphersal cannot honour: `Cardinality.list` or
     /// `Cardinality.set` on a vertex (Graphersal stores one value per property key), or any
     /// cardinality on an edge (edge properties have none, as in TinkerPop's `AddPropertyStep`).
@@ -5641,6 +5663,7 @@ impl TraverserError {
                 Some(invalid_modulator_help(step, reason))
             }
             TraverserError::SourceStepInChild { step } => Some(source_step_in_child_help(step)),
+            TraverserError::UnknownLayerOrigin { name } => Some(unknown_layer_origin_help(name)),
             TraverserError::MathExpression { expr, kind, .. } => {
                 Some(math_expression_help(expr, kind, None))
             }
@@ -6037,6 +6060,18 @@ fn repeat_inject_help() -> String {
 
 /// Advice for a source step (`with_sack()`, `with_side_effect()`) written inside a child
 /// traversal: move it to the `g` the outer traversal starts from.
+fn unknown_layer_origin_help(name: &str) -> String {
+    format!(
+        "has_layer() keeps the vertices and edges of the named layer origins, and there are \
+         three: \"base\" (an element of the base graph the layer left unchanged), \"added\" \
+         (created in the layer) and \"modified\" (a base element whose labels or properties the \
+         layer changed). Name one or more of them, for example g.v().has_layer(\"added\") \
+         instead of g.v().has_layer(\"{name}\"), or g.v().has_layer(\"added\", \"modified\") \
+         for everything the layer touched. layer() shows the origin of each element, for \
+         example g.v().layer(); on a graph without layers every element is \"base\"."
+    )
+}
+
 fn source_step_in_child_help(step: &str) -> String {
     let example = if step == "with_sack" {
         "g.with_sack(1).v().local(__.out().sack()) instead of g.v().local(__.with_sack(1).out().sack())"

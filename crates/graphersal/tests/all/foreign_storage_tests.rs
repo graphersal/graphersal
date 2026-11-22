@@ -8,6 +8,8 @@
 //! `graphersal::script::doc_examples`) and a curated list of mutating, whole-script
 //! (`eval_value_atomic`: commit and rollback), dry-run (`eval_value_dry_run`: the compacted
 //! `ChangeSet`), saved-query, schema, catalog, `g.mark` and GraphSON import/export scripts.
+//!
+//! `layered_storage_tests.rs` runs the same examples and scripts against `LayeredGraph`.
 #![cfg(all(feature = "script", feature = "io"))]
 
 use std::collections::HashMap;
@@ -23,7 +25,7 @@ use crate::script_host::{
 };
 
 /// The reference: the modern graph as a `TraversalGraph`.
-fn reference() -> Arc<Graph<TraversalGraph>> {
+pub(crate) fn reference() -> Arc<Graph<TraversalGraph>> {
     Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()))
 }
 
@@ -35,7 +37,7 @@ fn forwarded() -> Arc<Graph<Forwarding>> {
 }
 
 /// `(script).to_string()` on `graph`, or the error text.
-fn render(graph: impl IntoAnyGraph, script: &str) -> Result<String, String> {
+pub(crate) fn render(graph: impl IntoAnyGraph, script: &str) -> Result<String, String> {
     eval_value_with_limits(
         graph,
         &format!("({{ {script} }}).to_string()"),
@@ -75,7 +77,7 @@ fn every_documented_example_gives_the_same_result_on_both_storages() {
 
 /// How a curated script runs.
 #[derive(Clone, Copy, Debug)]
-enum Mode {
+pub(crate) enum Mode {
     /// `eval_value_with_limits`: every traversal is its own unit.
     Plain,
     /// `eval_value_atomic`: the whole script is one unit (commit iff it succeeds).
@@ -86,7 +88,7 @@ enum Mode {
 
 /// The script that renders the state of a graph after a curated script: data, schema, catalog
 /// and statistics.
-const STATE: &str = r#"[
+pub(crate) const STATE: &str = r#"[
     g.V().elementMap().toList(),
     g.E().elementMap().toList(),
     g.get_schema(),
@@ -98,14 +100,14 @@ const STATE: &str = r#"[
 /// What a curated script did on one storage: its rendered outcome, the change set of a dry run
 /// (compacted), the state afterwards and the commit position.
 #[derive(PartialEq, Debug)]
-struct Outcome {
-    result: Result<String, String>,
-    changes: Option<ChangeSet>,
-    state: Result<String, String>,
-    last_commit_seq: u64,
+pub(crate) struct Outcome {
+    pub(crate) result: Result<String, String>,
+    pub(crate) changes: Option<ChangeSet>,
+    pub(crate) state: Result<String, String>,
+    pub(crate) last_commit_seq: u64,
 }
 
-fn run_curated<S>(graph: Arc<Graph<S>>, mode: Mode, script: &str) -> Outcome
+pub(crate) fn run_curated<S>(graph: Arc<Graph<S>>, mode: Mode, script: &str) -> Outcome
 where
     S: GraphStorage + Default + Send + Sync + 'static,
 {
@@ -137,7 +139,7 @@ where
 }
 
 /// The curated scripts: `(mode, script)`.
-const CURATED: &[(Mode, &str)] = &[
+pub(crate) const CURATED: &[(Mode, &str)] = &[
     // Mutations, one unit per traversal.
     (
         Mode::Plain,
@@ -302,7 +304,7 @@ const CURATED: &[(Mode, &str)] = &[
 /// variable, trail checks, `ORDER BY` / `OFFSET` / `LIMIT`, parameters, a property index read
 /// by the planner (through `GraphStorage::property_indexes`) and errors before and during the run.
 #[cfg(feature = "gql")]
-const GQL_CURATED: &[&str] = &[
+pub(crate) const GQL_CURATED: &[&str] = &[
     // Node patterns: labels, label expressions, inline properties, WHERE with NULLs.
     r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name, p.age AS age").toList()"#,
     r#"g.gql("MATCH (n:!person) RETURN n.name, n.lang, labels(n), element_id(n)").toList()"#,
@@ -361,7 +363,7 @@ const GQL_CURATED: &[&str] = &[
 /// Stage 1b GQL scripts that fail: data errors of an aggregate, binder refusals, the loop limit
 /// of an unbounded quantifier. Both storages fail them the same way.
 #[cfg(feature = "gql")]
-const GQL_CURATED_1B_ERRORS: &[&str] = &[
+pub(crate) const GQL_CURATED_1B_ERRORS: &[&str] = &[
     r#"g.gql("MATCH (p) RETURN sum(p.name) AS s").toList()"#,
     r#"g.gql("MATCH (p) RETURN p.name AS n, count(*) AS c ORDER BY p.age").toList()"#,
     r#"g.gql("MATCH (a)-[:knows]->{1,}(b) WITH b RETURN a.name").toList()"#,
@@ -373,7 +375,7 @@ const GQL_CURATED_1B_ERRORS: &[&str] = &[
 /// `GraphStorage::edge_endpoints`, `nodes` / `relationships` of paths), the pure families on
 /// stored values, and data errors, limits and not-yet functions (the last six entries fail).
 #[cfg(feature = "gql")]
-const GQL_CURATED_1C: &[&str] = &[
+pub(crate) const GQL_CURATED_1C: &[&str] = &[
     // Elements: keys / properties (order kept), stored endpoints, either direction.
     r#"g.gql("MATCH (n) RETURN element_id(n) AS id, keys(n) AS k, properties(n) AS p ORDER BY id").toList()"#,
     r#"g.gql("MATCH ()-[e]->() RETURN element_id(e) AS id, keys(e) AS k, properties(e) AS p ORDER BY id").toList()"#,
@@ -408,7 +410,7 @@ const GQL_CURATED_1C: &[&str] = &[
 /// `GraphStorage::vertices_by_property_index`), whose plans name the lookup on both storages;
 /// the last two entries fail (a binder error, a data error).
 #[cfg(feature = "gql")]
-const GQL_CURATED_2A: &[&str] = &[
+pub(crate) const GQL_CURATED_2A: &[&str] = &[
     r#"g.gql("FOR x IN [1, 2, 2, null] WITH ORDINALITY i RETURN x, i").toList()"#,
     r#"g.gql("FOR x IN [3, 1, [2]] WITH OFFSET i RETURN x, i").toList()"#,
     r#"g.gql("RETURN 1 AS one, 'a' || 'b' AS s, $n + 1 AS m", #{n: 1}).toList()"#,
@@ -469,7 +471,7 @@ fn curated_gql_2a_scripts_give_the_same_result_on_both_storages() {
 /// nested and correlated bodies, a `NULL` import, trail inside a body, a lookup by property
 /// index inside a body; the last two entries fail (a binder error, a limit).
 #[cfg(feature = "gql")]
-const GQL_CURATED_2B: &[&str] = &[
+pub(crate) const GQL_CURATED_2B: &[&str] = &[
     r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS n").toList()"#,
     r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS n").profile().to_string().contains("not(__.out(\"created\"))")"#,
     r#"g.gql("MATCH (p) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name AS n ORDER BY n").toList()"#,
@@ -497,7 +499,7 @@ const GQL_CURATED_2B: &[&str] = &[
 /// `p {.name, friends: [..]}` and the `gql:value` child asserted in the profile; the last two
 /// entries fail (a binder error, a limit).
 #[cfg(feature = "gql")]
-const GQL_CURATED_2C: &[&str] = &[
+pub(crate) const GQL_CURATED_2C: &[&str] = &[
     r#"g.gql("MATCH (p:person) RETURN p {.name, .age} AS m ORDER BY p.name").toList()"#,
     r#"g.gql("MATCH (n) RETURN n {.*} AS m ORDER BY element_id(n)").toList()"#,
     r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN p {.name, f, w: e.weight} AS m ORDER BY f.name").toList()"#,
@@ -526,7 +528,7 @@ const GQL_CURATED_2C: &[&str] = &[
 /// `COLLECT { }`, whole-query `EXISTS`, a body served by `gql:lookup` through a property index,
 /// the list functions; then the plan of a `CALL` (`flat_map`) and two refused queries.
 #[cfg(feature = "gql")]
-const GQL_CURATED_2D: &[&str] = &[
+pub(crate) const GQL_CURATED_2D: &[&str] = &[
     r#"g.gql("MATCH (p:person) RETURN p.name AS n, 'p' AS k UNION MATCH (s:software) RETURN 's' AS k, s.name AS n NEXT RETURN k, n ORDER BY k, n").toList()"#,
     r#"g.gql("MATCH (p:person)-->(x) RETURN x.name AS n UNION ALL MATCH (s:software)<--(y) RETURN y.name AS n NEXT RETURN n, count(*) AS c ORDER BY n").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY n DESC LIMIT 2 UNION MATCH (s:software) RETURN s.name AS n ORDER BY n LIMIT 1 NEXT RETURN n ORDER BY n").toList()"#,
@@ -553,7 +555,7 @@ const GQL_CURATED_2D: &[&str] = &[
 /// (also walked from the far end), `?` singletons, the forms inside subqueries, pattern
 /// predicates and comprehensions, a correlated lookup by index into a body, and two errors
 /// (the loop limit naming the pattern, an E17 refusal).
-const GQL_CURATED_2E: &[&str] = &[
+pub(crate) const GQL_CURATED_2E: &[&str] = &[
     r#"g.gql("MATCH (a {name: 'marko'}) ((x)-[e]->(y)){1,3} (b) RETURN b.name AS b, [v IN x | v.name] AS xs, e ORDER BY b, xs").toList()"#,
     r#"g.gql("MATCH (a) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20){1,2} (b) RETURN a.name AS a, b.name AS b, e, f ORDER BY a, b").toList()"#,
     r#"g.gql("MATCH (a) ((x)-[e]-(y) WHERE e.weight > 0.3)+ (b:software {name: 'ripple'}) RETURN a.name AS a, [v IN y | v.name] AS ys ORDER BY a, ys").toList()"#,
@@ -576,7 +578,7 @@ const GQL_CURATED_2E: &[&str] = &[
 /// The canonical state dump that ends every stage 3a script: every element with its labels
 /// and properties, in element order (the same on both storages: ids are assigned alike).
 #[cfg(feature = "gql")]
-const DUMP_3A: &str =
+pub(crate) const DUMP_3A: &str =
     r#"[g.V().elementMap().toList(), g.E().elementMap().toList(), g.statistics()]"#;
 
 /// Stage 3a: GQL writes (`INSERT` / `CREATE`, `FINISH`, write endings, `CALL` bodies that write,
@@ -584,7 +586,7 @@ const DUMP_3A: &str =
 /// per run, so every script starts from the modern graph. Errors: the last row fails, a NULL
 /// endpoint, a closed schema, a refused construct, an atomic script that throws.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3A: &[(Mode, &str)] = &[
+pub(crate) const GQL_CURATED_3A: &[(Mode, &str)] = &[
     (
         Mode::Plain,
         r#"g.gql("INSERT (:person {name: 'ann', age: 41})").toList()"#,
@@ -711,7 +713,7 @@ fn curated_gql_3a_scripts_give_the_same_result_on_both_storages() {
 /// (nothing of the query stays): the last row fails, `SET n = NULL` (D4), a label item on an
 /// edge at run time, a closed schema, a required key removed, an atomic script that throws.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3C: &[(Mode, &str)] = &[
+pub(crate) const GQL_CURATED_3C: &[(Mode, &str)] = &[
     (
         Mode::Plain,
         r#"g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, (p).nick = 'mk', p:Old:Tall RETURN p.age AS a").toList()"#,
@@ -858,7 +860,7 @@ fn curated_gql_3c_scripts_give_the_same_result_on_both_storages() {
 /// deleted node (W27, W28), the last row fails, a non-element target (22G03), an atomic
 /// script that throws.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3D: &[(Mode, &str)] = &[
+pub(crate) const GQL_CURATED_3D: &[(Mode, &str)] = &[
     (
         Mode::Plain,
         r#"g.gql("MATCH (n:person {name: 'marko'}) DETACH DELETE n").toList()"#,
@@ -1005,7 +1007,7 @@ fn curated_gql_3d_scripts_give_the_same_result_on_both_storages() {
 /// query stays): a NULL property on the last row (E1), a NULL bound end, a failing ON MATCH
 /// item after a create, a lone bound node (E2), an atomic script that throws.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3E: &[(Mode, &str)] = &[
+pub(crate) const GQL_CURATED_3E: &[(Mode, &str)] = &[
     (
         Mode::Plain,
         r#"g.gql("MERGE (p:person {name: 'ann'}) ON CREATE SET p.new = true ON MATCH SET p.new = false RETURN p.new").toList()"#,
@@ -1079,7 +1081,7 @@ const GQL_CURATED_3E: &[(Mode, &str)] = &[
 /// properties, index lookups and ordering on them (no live clock: two storages run at different
 /// instants, so a clock is only compared with itself). The last two scripts fail.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3G: &[&str] = &[
+pub(crate) const GQL_CURATED_3G: &[&str] = &[
     r#"g.gql("MATCH (p:person) SET p.born = date({year: 2024 - p.age, month: 3, day: 1}) RETURN p.name, p.born.year AS y, toString(p.born) AS s ORDER BY p.born").toList()"#,
     r#"g.gql("MATCH (p:person) SET p.at = localdatetime({date: date('2020-01-01'), hour: p.age % 24}) WITH p WHERE p.at > localdatetime('2020-01-01T08:00') RETURN p.name, p.at ORDER BY p.at DESC").toList()"#,
     r#"g.gql("INSERT (:event {name: 'a', at: datetime('2015-07-21T21:40:32.142+01:00'), d: duration('P1M2DT3H')}), (:event {name: 'b', at: datetime('2015-07-21T20:40:32.142Z'), d: duration('PT1S')})").toList(); g.gql("MATCH (e:event) RETURN e.name, e.at = datetime('2015-07-21T20:40:32.142Z') AS same, e.at + e.d AS later, e.d.seconds AS s ORDER BY e.name").toList()"#,
@@ -1136,7 +1138,7 @@ fn curated_gql_3g_scripts_give_the_same_result_on_both_storages() {
 /// standalone and in-query forms, VOID writes per row, transitive effects, calls in bodies and
 /// `UNION` operands, the profile; errors: not found, arity, a Rhai body, a recursive chain.
 #[cfg(feature = "gql")]
-const GQL_CURATED_3H: &[&str] = &[
+pub(crate) const GQL_CURATED_3H: &[&str] = &[
     r#"OLDER; g.gql("CALL people.older(26) YIELD name, age RETURN name, age ORDER BY name").toList()"#,
     r#"OLDER; [g.gql("CALL people.older()").toList(), g.gql("CALL people.older YIELD *", #{min: 33}).toList()]"#,
     r#"OLDER; g.gql("MATCH (s:software) CALL people.older($m) YIELD name AS who, age WHERE age < 35 RETURN s.name AS sw, who ORDER BY sw, who", #{m: 26}).toList()"#,
@@ -1184,9 +1186,9 @@ fn curated_gql_3h_scripts_give_the_same_result_on_both_storages() {
 
 /// The saved queries the [`GQL_CURATED_3H`] scripts define (`OLDER`, `HIRE` in their text).
 #[cfg(feature = "gql")]
-const OLDER_QUERY_3H: &str = r#"g.define_query(#{name: "older", folder: "people", language: "gql", params: #{min: #{schema: #{type: "integer"}, default: 30}}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"})"#;
+pub(crate) const OLDER_QUERY_3H: &str = r#"g.define_query(#{name: "older", folder: "people", language: "gql", params: #{min: #{schema: #{type: "integer"}, default: 30}}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"})"#;
 #[cfg(feature = "gql")]
-const HIRE_QUERY_3H: &str = r#"g.define_query(#{name: "hire", folder: "staff", language: "gql", params: #{name: "string"}, body: "MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)"})"#;
+pub(crate) const HIRE_QUERY_3H: &str = r#"g.define_query(#{name: "hire", folder: "staff", language: "gql", params: #{name: "string"}, body: "MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)"})"#;
 
 #[test]
 #[cfg(feature = "gql")]

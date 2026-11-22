@@ -18,7 +18,8 @@
 //!    counts are compared with the pre-run numbers; a change is recorded in
 //!    [`ScenarioRun::harness_error`] and the template is reloaded.
 //! 4. On a worker thread: initializer (on the *setup* engine, whose expression-depth limit is
-//!    lifted, see below; its value is iterated and ignored), then the parameters and side effects
+//!    lifted, see below; its value is iterated and ignored; on the `layered` storage it writes
+//!    into the layer's base, `storage::write_into_base`), then the parameters and side effects
 //!    are bound, then the traversal runs on the *user* engine (the DSL engine exactly as users
 //!    get it), then the `GraphCount` traversals run on the same graph and scope.
 //!
@@ -605,13 +606,17 @@ fn execute_with(job: Job, user: &Engine, setup: &Engine) -> JobResult {
     };
 
     if let Some(init) = &job.initializer {
-        let mut scope = graphersal::script::graph_scope_with_options(
-            job.graph.clone(),
-            &[],
-            std::sync::Arc::new(graphersal::auth::AllowAll),
-        );
-        push_constants(&mut scope);
-        if let Err(e) = evaluate(setup, &mut scope, init) {
+        // On the `layered` storage the initializer writes into the base (`storage.rs`).
+        let initialized = super::storage::write_into_base(&job.graph, |graph| {
+            let mut scope = graphersal::script::graph_scope_with_options(
+                graph,
+                &[],
+                std::sync::Arc::new(graphersal::auth::AllowAll),
+            );
+            push_constants(&mut scope);
+            evaluate(setup, &mut scope, init)
+        });
+        if let Err(e) = initialized {
             result.outcome = e.into_outcome();
             result.initializer_failed = true;
             return result;

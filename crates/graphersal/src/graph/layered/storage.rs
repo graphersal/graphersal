@@ -1,0 +1,1361 @@
+//! `impl GraphStorage for LayeredGraph`: the reads answer from the base (an untouched element
+//! with one bit test, no lookup) merged with the delta; every write runs its write rule
+//! (`graph/write_rules.rs`) first and then stores in the delta. Drops of base elements leave a
+//! tombstone (S1.5); property, path and label writes to base elements go into images (S1.6,
+//! `delta` module docs). The schema and the catalog are the layer's own copies (S1.7).
+
+use compact_str::CompactString;
+
+use super::LayeredGraph;
+use super::delta::{PropertyChange, VertexView};
+use super::handle::{LayeredEdge, LayeredVertex};
+use super::route::BaseThenDelta;
+use super::units::LayerUndo;
+use crate::error::{DefinitionError, GraphError, SchemaError};
+use crate::graph::change::{ChangeSet, CommitMetadata};
+use crate::graph::clock::CommitClock;
+use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
+use crate::graph::hooks::{CommitHook, Mark, RollbackReason};
+use crate::graph::layer_diff::{
+    LayerCounts, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary,
+};
+use crate::graph::schema::defaults::CreateContext;
+use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
+use crate::graph::storage::{StorageIdentity, UnitMark};
+use crate::graph::topology::Direction;
+use crate::graph::write_rules::{self, PathRemoval};
+use crate::graph::{
+    CompressionEstimate, CompressionEstimateRequest, CompressionStats, ExecutionPolicy,
+    GraphNodeType, GraphStatistics, GraphStorage, PropertyIndexInfo, PropertyIndexRange,
+    PropertyIndexTransform, StorageCapabilities, UniqueIndexDuplicates, UnitChanges, VertexHandle,
+};
+use crate::value::{ElementProperty, JsonPath, PropertyMap};
+
+/// The `operation` of the refusal of a compression rule on a layer.
+const COMPRESSION_RULES: &str = "compression rules on a layered graph yet";
+
+/// The `operation` of the refusal of a compression estimate over a layer's changed elements.
+const COMPRESSION_ESTIMATE: &str = "compression estimates over a layered graph's changes yet";
+
+/// The `operation` of the refusal of an embedding model definition on a layer.
+const MODELS: &str = "embedding model definitions on a layered graph yet";
+
+/// Whether the layer's catalog can take (or remove) a definition of `kind`: saved queries,
+/// jobs, host kinds and kinds this version does not know (kept opaque, as `TraversalGraph`
+/// keeps them) need no storage machinery, property indexes are served by the layer's
+/// overlays (module `index`, S4.4). Compression rules need value machinery over base + delta
+/// (the layer stores its values plain), models need blob storage in the layer (plan decision
+/// D3): refused, with an error naming the limitation.
+fn check_layer_kind(kind: DefinitionKind) -> Result<(), GraphError> {
+    if kind == DefinitionKind::COMPRESSION {
+        Err(GraphError::unsupported(COMPRESSION_RULES))
+    } else if kind == DefinitionKind::MODEL {
+        Err(GraphError::unsupported(MODELS))
+    } else {
+        Ok(())
+    }
+}
+
+/// The labels of a vertex view (empty for none).
+#[inline]
+fn view_labels<'a>(view: Option<VertexView<'a>>) -> &'a [CompactString] {
+    view.map(|v| v.labels).unwrap_or(&[])
+}
+
+impl GraphStorage for LayeredGraph {
+    type VertexId = LayeredVertex;
+    type EdgeId = LayeredEdge;
+
+    #[inline]
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        Ok(self
+            .base
+            .graph
+            .node_count()
+            .saturating_add_signed(self.delta.vertex_count_change()))
+    }
+
+    #[inline]
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        Ok(self
+            .base
+            .graph
+            .edge_count()
+            .saturating_add_signed(self.delta.edge_count_change()))
+    }
+
+    /// The base's scan without the removed base vertices, then the added vertices. Decided
+    /// once per call (`route.rs`): with nothing removed the filter passes every item without a
+    /// memory load, with nothing added the delta part is absent.
+    #[inline(always)]
+    fn vertices(&self) -> Result<impl Iterator<Item = LayeredVertex> + '_, GraphError> {
+        let base = GraphStorage::vertices(&*self.base)?
+            .filter(Self::live_base_vertices(self.delta.removed_vertices()))
+            .map(LayeredVertex::from_base);
+        let delta = self
+            .delta
+            .has_added_vertices()
+            .then(|| self.delta.vertices());
+        Ok(BaseThenDelta::new(base, delta))
+    }
+
+    /// See [`Self::vertices`].
+    #[inline(always)]
+    fn edges(&self) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
+        let base = GraphStorage::edges(&*self.base)?
+            .filter(Self::live_base_edges(self.delta.removed_edges()))
+            .map(LayeredEdge::from_base);
+        let delta = self.delta.has_added_edges().then(|| self.delta.edges());
+        Ok(BaseThenDelta::new(base, delta))
+    }
+
+    #[inline]
+    fn get_vertex_by_id(&self, id: &str) -> Result<Option<LayeredVertex>, GraphError> {
+        if let Some(node) = GraphStorage::get_vertex_by_id(&*self.base, id)?
+            && self.base_vertex_live(node)
+        {
+            return Ok(Some(LayeredVertex::from_base(node)));
+        }
+        Ok(self.delta.vertex_by_id(id))
+    }
+
+    #[inline]
+    fn get_edge_by_id(&self, id: &str) -> Result<Option<LayeredEdge>, GraphError> {
+        if let Some(edge) = GraphStorage::get_edge_by_id(&*self.base, id)?
+            && self.base_edge_live(edge)
+        {
+            return Ok(Some(LayeredEdge::from_base(edge)));
+        }
+        Ok(self.delta.edge_by_id(id))
+    }
+
+    /// The edges the layer added at `node` (an added vertex's own list, a dirty base vertex's
+    /// stub), newest first, then the base's list (a delta vertex has none there: its slot is
+    /// out of the base's range) without removed base edges (tested only for a dirty vertex).
+    /// The same order as a `TraversalGraph` holding the same writes: it puts a new edge at the
+    /// front of the lists. A self-loop is in both lists. Decided once per call (`route.rs`): a
+    /// clean base vertex gets the base's list with no delta part and a filter that passes
+    /// every edge without a memory load.
+    #[inline(always)]
+    fn out_edges(
+        &self,
+        node: LayeredVertex,
+    ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
+        self.adjacency(node, Direction::Outgoing)
+    }
+
+    /// See [`Self::out_edges`].
+    #[inline(always)]
+    fn in_edges(
+        &self,
+        node: LayeredVertex,
+    ) -> Result<impl Iterator<Item = LayeredEdge> + '_, GraphError> {
+        self.adjacency(node, Direction::Incoming)
+    }
+
+    #[inline(always)]
+    fn vertex_id(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
+        self.vertex_read(node, GraphStorage::vertex_id, |view| Ok(view.map(|v| v.id)))
+    }
+
+    #[inline(always)]
+    fn edge_id(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
+        self.edge_read(edge, GraphStorage::edge_id, |view| Ok(view.map(|e| e.id)))
+    }
+
+    #[inline(always)]
+    fn vertex_label(&self, node: LayeredVertex) -> Result<Option<&str>, GraphError> {
+        self.vertex_read(node, GraphStorage::vertex_label, |view| {
+            Ok(view_labels(view).first().map(|l| l.as_str()))
+        })
+    }
+
+    #[inline(always)]
+    fn edge_label(&self, edge: LayeredEdge) -> Result<Option<&str>, GraphError> {
+        self.edge_read(edge, GraphStorage::edge_label, |view| {
+            Ok(view.and_then(|e| e.label.first()).map(|l| l.as_str()))
+        })
+    }
+
+    #[inline(always)]
+    fn vertex_labels(&self, node: LayeredVertex) -> Result<&[CompactString], GraphError> {
+        self.vertex_read(
+            node,
+            |base, node| GraphStorage::vertex_labels(base, node),
+            |view| Ok(view_labels(view)),
+        )
+    }
+
+    #[inline(always)]
+    fn vertex_has_label(&self, node: LayeredVertex, label: &str) -> Result<bool, GraphError> {
+        Ok(self
+            .vertex_labels(node)?
+            .iter()
+            .any(|l| l.as_str() == label))
+    }
+
+    #[inline(always)]
+    fn vertex_properties(&self, node: LayeredVertex) -> Result<Option<&PropertyMap>, GraphError> {
+        self.vertex_read(node, GraphStorage::vertex_properties, |view| {
+            Ok(view.map(|v| v.properties))
+        })
+    }
+
+    #[inline(always)]
+    fn edge_properties(&self, edge: LayeredEdge) -> Result<Option<&PropertyMap>, GraphError> {
+        self.edge_read(edge, GraphStorage::edge_properties, |view| {
+            Ok(view.and_then(|e| e.properties))
+        })
+    }
+
+    #[inline(always)]
+    fn edge_endpoints(
+        &self,
+        edge: LayeredEdge,
+    ) -> Result<Option<(LayeredVertex, LayeredVertex)>, GraphError> {
+        self.edge_read(
+            edge,
+            |base, edge| {
+                Ok(GraphStorage::edge_endpoints(base, edge)?.map(|(from, to)| {
+                    (LayeredVertex::from_base(from), LayeredVertex::from_base(to))
+                }))
+            },
+            |view| Ok(view.map(|e| e.endpoints)),
+        )
+    }
+
+    #[inline(always)]
+    fn contains_vertex(&self, node: LayeredVertex) -> Result<bool, GraphError> {
+        self.vertex_read(node, GraphStorage::contains_vertex, |view| {
+            Ok(view.is_some())
+        })
+    }
+
+    #[inline(always)]
+    fn contains_edge(&self, edge: LayeredEdge) -> Result<bool, GraphError> {
+        self.edge_read(edge, GraphStorage::contains_edge, |view| Ok(view.is_some()))
+    }
+
+    /// The base's label index (no scan), without removed base vertices and those whose image
+    /// lost `label` (one bit test per member, the sets fetched once per call), in the base
+    /// bucket's order; then the delta's bucket: the added vertices and the base vertices that
+    /// gained `label`, in the order of the writes. Decided once per call: with nothing to hide
+    /// and an empty delta bucket, the base's own bucket.
+    fn vertices_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = LayeredVertex> + 'a>, GraphError> {
+        let removed = self.delta.removed_vertices();
+        let lost = self.delta.lost_vertex_label(label);
+        let delta = self.delta.vertices_by_label(label);
+        let base = self.base.index.get_nodes_by_label(label);
+        if removed.is_none() && lost.is_none() {
+            // No `Flatten` over the `Option`: it costs a branch per item.
+            return Ok(match base {
+                Some(nodes) if delta.size_hint().1 == Some(0) => {
+                    Box::new(nodes.map(LayeredVertex::from_base))
+                }
+                Some(nodes) => Box::new(BaseThenDelta::new(
+                    nodes.map(LayeredVertex::from_base),
+                    Some(delta),
+                )),
+                None => Box::new(delta),
+            });
+        }
+        Ok(Box::new(
+            base.into_iter()
+                .flatten()
+                .filter(move |node| {
+                    let slot = node.index().slot();
+                    removed.is_none_or(|removed| !removed.word_contains(slot))
+                        && lost.is_none_or(|lost| !lost.contains(slot))
+                })
+                .map(LayeredVertex::from_base)
+                .chain(delta),
+        ))
+    }
+
+    /// The base's label index without removed and relabeled base edges, then the base edges
+    /// relabeled to `label` (in the order they gained it), then the added edges. Decided once
+    /// per call: with nothing to hide or add, the base's own bucket.
+    fn edges_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Result<Box<dyn Iterator<Item = LayeredEdge> + 'a>, GraphError> {
+        let removed = self.delta.removed_edges();
+        let relabeled = self
+            .delta
+            .may_have_relabeled_edges()
+            .then(|| self.delta.relabeled_edges());
+        let delta = self
+            .delta
+            .gained_edges(label)
+            .chain(self.delta.edges_by_label(label));
+        let base = self.base.index.get_edges_by_label(label);
+        if removed.is_none() && relabeled.is_none() {
+            // No `Flatten` over the `Option`: it costs a branch per item.
+            return Ok(match base {
+                Some(edges) if delta.size_hint().1 == Some(0) => {
+                    Box::new(edges.map(LayeredEdge::from_base))
+                }
+                Some(edges) => Box::new(BaseThenDelta::new(
+                    edges.map(LayeredEdge::from_base),
+                    Some(delta),
+                )),
+                None => Box::new(delta),
+            });
+        }
+        Ok(Box::new(
+            base.into_iter()
+                .flatten()
+                .filter(move |edge| {
+                    let slot = edge.index().slot();
+                    removed.is_none_or(|removed| !removed.word_contains(slot))
+                        && relabeled.is_none_or(|relabeled| !relabeled.contains(slot))
+                })
+                .map(LayeredEdge::from_base)
+                .chain(delta),
+        ))
+    }
+
+    /// The origin of `node` (`visibility`): one compare for an untouched base vertex.
+    #[inline]
+    fn vertex_layer(&self, node: LayeredVertex) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.vertex_origin(node))
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: LayeredEdge) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.edge_origin(edge))
+    }
+
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        self.diff(request)
+    }
+
+    /// The base's name and identity, the delta's counters (O(1)) and the cached footprints:
+    /// the layer's own (a walk of the delta only when it changed since) and the frozen base's
+    /// (walked once, then cached).
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        let [added, modified, removed] = self.delta.change_counts();
+        let counts = |(vertices, edges): (u64, u64)| LayerCounts::new(vertices, edges);
+        Ok(Some(
+            LayerSummary::new(self.base_name(), Some(self.base_ref()))
+                .with_counts(counts(added), counts(modified), counts(removed))
+                .with_bytes(
+                    self.layer_footprint_bytes(),
+                    crate::graph::memory::footprint_bytes(&self.base),
+                ),
+        ))
+    }
+
+    /// The layer's own statistics: the base's at creation, kept exact by every write.
+    #[inline]
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
+        Ok(Some(&self.statistics))
+    }
+
+    /// The layer's own schema (the base's copied at creation, then the layer's `set_schema`).
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
+        Ok((!self.schema.is_empty()).then(|| self.schema.clone()))
+    }
+
+    fn declared_property_schema(
+        &self,
+        kind: GraphNodeType,
+        labels: &[CompactString],
+        key: &str,
+    ) -> Result<Option<PropertySchema>, GraphError> {
+        Ok(self.schema.declared_property(kind, labels, key).cloned())
+    }
+
+    /// Checks the layer's current state (base elements as the layer shows them, images, added
+    /// elements) against `schema` exactly as `TraversalGraph` checks its own (only the labels
+    /// whose declaration changed while the mode stays `Open`/`Closed`), the same errors, then
+    /// stores it in the layer; the base's schema is never written. A vector rule's model is
+    /// checked as `TraversalGraph` checks it (`hash-ngram/1` or a model of the layer's catalog,
+    /// [`GraphError::VectorRuleModelMissing`]); a rule the change adds or changes is filled at
+    /// the unit's commit (module `rules`; on a base label it copies the label's base elements
+    /// into the layer). Outside a unit it is a unit of its own, as on a `TraversalGraph`;
+    /// inside one the old schema is recorded.
+    fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
+        self.in_own_unit(|this| this.store_schema(schema))
+    }
+
+    /// The layer's own catalog (the base's copied at creation, then the layer's writes).
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
+        Ok(self.catalog.iter())
+    }
+
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
+        Ok(self.catalog.get(kind, name))
+    }
+
+    fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
+        self.set_definitions(vec![definition])
+    }
+
+    /// Stores each definition in turn as `TraversalGraph` does (validated, an index replacing
+    /// the other index kind's definition of its name, checked against the catalog, an equal
+    /// one again is no change, at most `MAX_DEFINITIONS`), in the layer's catalog only, each
+    /// recorded: a refused definition returns its error with the ones before it stored, and
+    /// the unit rolls them back (outside a unit the list is a unit of its own, so it leaves
+    /// nothing). Each property index named is built once, after the list (module `index`). A
+    /// kind that needs storage machinery is refused (`check_layer_kind`).
+    fn set_definitions(&mut self, definitions: Vec<Definition>) -> Result<(), GraphError> {
+        self.in_own_unit(|this| {
+            let mut indexes: Vec<CompactString> = Vec::new();
+            let mut outcome = Ok(());
+            for definition in definitions {
+                if let Err(err) = this.store_definition(definition, &mut indexes) {
+                    outcome = Err(err);
+                    break;
+                }
+            }
+            // Also after a refusal: the overlays follow the catalog until the unit rolls back.
+            for name in indexes {
+                this.layer_index_after_change(&name);
+            }
+            outcome
+        })
+    }
+
+    /// Removes the definition from the layer's catalog (the base keeps its own; a property
+    /// index loses its overlay, so the layer stops serving and enforcing it); a kind that
+    /// needs storage machinery is refused (`check_layer_kind`), also when the layer holds no
+    /// definition of that name. Recorded; outside a unit a unit of its own.
+    fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
+        self.in_own_unit(|this| this.drop_definition(kind, name))
+    }
+
+    /// Each removal in turn, in ONE unit (outside a unit a unit of its own, as on a
+    /// `TraversalGraph`): a refused kind leaves nothing.
+    fn remove_definitions(
+        &mut self,
+        definitions: &[(DefinitionKind, &str)],
+    ) -> Result<usize, GraphError> {
+        self.in_own_unit(|this| {
+            let mut removed = 0;
+            for (kind, name) in definitions {
+                removed += usize::from(this.drop_definition(*kind, name)?);
+            }
+            Ok(removed)
+        })
+    }
+
+    /// The base's figures: the layer stores no values of its own yet.
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
+        GraphStorage::compression_stats(&*self.base, name)
+    }
+
+    /// The base's estimate while the layer has not added, removed or modified any element of
+    /// the kind asked about (its values are then the base's); otherwise refused, as compression
+    /// rules are on a layer (plan decision P5): the base's figures would miss the layer's values.
+    fn estimate_compression(
+        &self,
+        request: &CompressionEstimateRequest,
+    ) -> Result<CompressionEstimate, GraphError> {
+        let touched = match request.element() {
+            ElementKind::Vertex => self.delta.vertices_touched(),
+            ElementKind::Edge => self.delta.edges_touched(),
+        };
+        if touched {
+            return Err(GraphError::unsupported(COMPRESSION_ESTIMATE));
+        }
+        GraphStorage::estimate_compression(&*self.base, request)
+    }
+
+    /// The indexes installed in the base, each served from the layer's overlay of it (module
+    /// `index`): `entries` and `skipped` are the layer's exactly, `distinct_values` an upper
+    /// bound (the base's keys plus the layer's own), `bytes` the layer-owned parts only (the
+    /// shared base part is in `MemoryStats::shared_bytes`).
+    fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
+        Ok(self.layer_index_infos())
+    }
+
+    /// From the overlay: the base's slice minus the slots the layer removed or holds an image
+    /// of, merged with the layer's own entries; exact as the base's (an overlay holding nothing
+    /// of its own is the base's slice, read in place).
+    fn vertices_by_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
+        Ok(self.layer_index_vertices(label, key, None, range))
+    }
+
+    fn edges_by_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
+        Ok(self.layer_index_edges(label, key, None, range))
+    }
+
+    fn vertices_by_transformed_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = LayeredVertex> + 'a>>, GraphError> {
+        Ok(self.layer_index_vertices(label, key, Some(transform), range))
+    }
+
+    fn edges_by_transformed_property_index<'a>(
+        &'a self,
+        label: Option<&'a str>,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = LayeredEdge> + 'a>>, GraphError> {
+        Ok(self.layer_index_edges(label, key, Some(transform), range))
+    }
+
+    /// From the overlay's postings lengths: `base - masked + delta` (`None` where a part's
+    /// `each` slice holds more than one key).
+    fn count_by_property_index(
+        &self,
+        element: ElementKind,
+        label: Option<&str>,
+        key: &str,
+        transform: Option<&PropertyIndexTransform>,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<u64>, GraphError> {
+        Ok(self.layer_index_count(element, label, key, transform, range))
+    }
+
+    /// The layer's answer: an enforced unique index is enforced by the layer over base + delta
+    /// (`None`); one the base keeps disabled stays disabled with the base's report until the
+    /// layer drops or redefines it; one the layer defines over repeated values (of its merged
+    /// view) is disabled with the layer's own report.
+    fn unique_index_duplicates(
+        &self,
+        name: &str,
+    ) -> Result<Option<UniqueIndexDuplicates>, GraphError> {
+        Ok(self.delta.indexes().disabled_report(name))
+    }
+
+    /// Releases the spare capacity of the layer's own structures (the delta: slots above the
+    /// last used one, indexes, maps, shapes no map uses any more); the base is never touched.
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        self.shrink_layer();
+        Ok(())
+    }
+
+    /// The layer's own footprint (its delta and dirty bitsets) as the total, with the shared
+    /// base's total as [`MemoryStats::shared_bytes`](crate::graph::MemoryStats::shared_bytes),
+    /// outside the total (design §7; module `memory`). Always `Some`.
+    fn memory_usage(&self) -> Result<Option<crate::graph::MemoryStats>, GraphError> {
+        Ok(Some(self.layer_memory()))
+    }
+
+    /// The structure of the memory report: the layer's own slots (added elements and stubs),
+    /// id and label indexes and shape table, with the totals of [`Self::memory_usage`] (the base
+    /// as `shared_bytes`) and the stubs and removed base elements (module `memory`).
+    fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
+        Ok(Some(self.layer_structure()))
+    }
+
+    /// The layer's own total, cached by its commit position and the delta's slot counts; an
+    /// estimate while an open unit holds changes (as `TraversalGraph`).
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        Ok(Some(self.layer_footprint_bytes()))
+    }
+
+    fn memory_footprint_hint(&self) -> Result<Option<u64>, GraphError> {
+        Ok(self.layer_footprint_hint())
+    }
+
+    /// The base's policy: a layer runs under the limits its base was built with.
+    fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
+        GraphStorage::execution_policy(&*self.base)
+    }
+
+    /// `writable`, `atomic` (the layer's undo log, `units`), `change_capture` (commit hooks
+    /// and dry runs, the change set derived from that log) and `property_indexes` (the layer
+    /// defines, drops and redefines indexes, module `index`). The property index lookups are
+    /// the overlays' (base slice minus the excluded slots plus the layer's entries, every
+    /// excluded slot answered by its current value), so they are exact when the base's are.
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        let base = GraphStorage::capabilities(&*self.base)?;
+        Ok(StorageCapabilities::none()
+            .with_writable(true)
+            .with_atomic(true)
+            .with_change_capture(true)
+            .with_property_indexes(true)
+            .with_exact_property_index_lookups(base.exact_property_index_lookups)
+            .with_layered(true))
+    }
+
+    /// Opens a unit of the layer's undo log: from now on every write records its inverse. The
+    /// mark is the log position.
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
+        Ok(self.begin_layer_unit_now())
+    }
+
+    /// The layer's unit with `started_at` as its time (never earlier than the previous unit's).
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
+        Ok(self.begin_layer_unit(started_at))
+    }
+
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(Some(self.units.next_started_at()))
+    }
+
+    /// The unit's start; before the layer's unit opens, the time a
+    /// [`Graph`](crate::graph::Graph) pinned for the unit the current thread holds on this
+    /// storage (as `TraversalGraph`).
+    fn unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        Ok(self
+            .units
+            .started_at()
+            .or_else(|| crate::graph::shared::held_unit_clock(StorageIdentity::of(self))))
+    }
+
+    /// Closes the unit; the outermost commit of a unit that changed something counts, takes a
+    /// commit time and runs the commit hooks (a veto rolls it back).
+    fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
+        self.commit_layer_unit(mark)
+    }
+
+    /// Undoes every write since `mark` and closes the unit; never fails (there is no backend).
+    /// The outermost unit's rollback sends `after_rollback(reason)` to the hooks when it had
+    /// recorded anything.
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        self.rollback_layer_unit(mark, reason);
+        Ok(())
+    }
+
+    /// The metadata the outermost commit reports (`TraversalGraph`'s precedence rules).
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        self.set_layer_unit_metadata(metadata);
+        Ok(())
+    }
+
+    /// Derives the unit's change set from the layer's undo log, then undoes it and closes the
+    /// unit without hooks.
+    fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
+        self.discard_layer_unit(mark)
+    }
+
+    /// Registers a hook (registration order; never removed): from now on every outermost
+    /// commit that changed something derives its change set and asks the hook.
+    fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
+        self.units.hooks.register(hook);
+        Ok(())
+    }
+
+    /// The layer's instance clock (commit times; never earlier than the base's last commit).
+    fn commit_clock(&self) -> Result<Option<CommitClock>, GraphError> {
+        Ok(Some(self.units.hooks.clock()))
+    }
+
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
+        Ok(self.layer_unit_changes(mark))
+    }
+
+    /// The commit sequence number of the layer's last outermost unit that changed something.
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
+        Ok(self.units.last_commit_seq())
+    }
+
+    /// `TraversalGraph`'s mark: refused while a unit is open, then the journal slot of the
+    /// layer's hooks records it (`PersistentStorage::attach_journal`).
+    fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {
+        if self.units.is_recording() {
+            return Err(GraphError::MarkUnavailable {
+                reason: "a mark cannot be set while a unit (a traversal or a transaction) is open",
+            });
+        }
+        let (commit_seq, last_committed_at) =
+            (self.units.last_commit_seq(), self.units.last_committed_at());
+        self.units.hooks.mark(name, commit_seq, last_committed_at)
+    }
+
+    /// The write rules of `insert_vertex`, then the id (unique across base and delta, the
+    /// auto id continuing the base's sequence), then the new vertex is stored in the delta.
+    fn insert_vertex(
+        &mut self,
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<LayeredVertex, GraphError> {
+        let (labels, properties) = write_rules::insert_vertex(&*self, labels, properties)?;
+        self.store_vertex(id, labels, properties)
+    }
+
+    fn add_vertex_with(
+        &mut self,
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+        context: &CreateContext,
+    ) -> Result<LayeredVertex, GraphError> {
+        let (labels, properties) =
+            write_rules::add_vertex_with(&*self, labels, properties, context)?;
+        self.store_vertex(id, labels, properties)
+    }
+
+    /// The write rules of `insert_edge`, then the id, then the edge is stored in the delta
+    /// whatever its endpoints (a base endpoint through its stub).
+    fn insert_edge(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: LayeredVertex,
+        to: LayeredVertex,
+        properties: PropertyMap,
+    ) -> Result<LayeredEdge, GraphError> {
+        let properties = write_rules::insert_edge(&*self, label.as_deref(), from, to, properties)?;
+        self.store_edge(id, label, from, to, properties)
+    }
+
+    fn add_edge_with(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: LayeredVertex,
+        to: LayeredVertex,
+        properties: PropertyMap,
+        context: &CreateContext,
+    ) -> Result<LayeredEdge, GraphError> {
+        let properties =
+            write_rules::add_edge_with(&*self, label.as_deref(), from, to, properties, context)?;
+        self.store_edge(id, label, from, to, properties)
+    }
+
+    /// The rule first; a base vertex gets the new labels in its image (copied up on the first
+    /// change).
+    fn add_vertex_label(
+        &mut self,
+        node: LayeredVertex,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        let Some(new_labels) = write_rules::add_vertex_label(&*self, node, &label)? else {
+            return Ok(false);
+        };
+        self.store_vertex_labels(node, new_labels)?;
+        Ok(true)
+    }
+
+    fn remove_vertex_label(
+        &mut self,
+        node: LayeredVertex,
+        label: &str,
+    ) -> Result<bool, GraphError> {
+        let Some(new_labels) = write_rules::remove_vertex_label(&*self, node, label)? else {
+            return Ok(false);
+        };
+        self.store_vertex_labels(node, new_labels)?;
+        Ok(true)
+    }
+
+    fn set_edge_label(
+        &mut self,
+        edge: LayeredEdge,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        if !write_rules::set_edge_label(&*self, edge, &label)? {
+            return Ok(false);
+        }
+        if edge.is_delta() {
+            let id = self.logged_edge_id(edge);
+            let old = self
+                .delta
+                .set_edge_label(edge, Some(label), &mut self.statistics);
+            if let Some(id) = id {
+                self.units.record(LayerUndo::EdgeLabel { id, old });
+            }
+        } else {
+            self.dirty_edges.set(edge.slot());
+            let base = edge.to_base();
+            let (had_image, old, position) = self.delta.set_base_edge_label(
+                &self.base,
+                base,
+                Some(label),
+                None,
+                &mut self.statistics,
+            )?;
+            if had_image {
+                self.delta.settle_base_edge(&self.base, base);
+            }
+            self.units.record(LayerUndo::BaseEdgeLabel {
+                edge: base,
+                old,
+                position,
+                had_image,
+            });
+        }
+        Ok(true)
+    }
+
+    fn set_vertex_property(
+        &mut self,
+        node: LayeredVertex,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let value = write_rules::set_vertex_property(&*self, node, &key, value)?;
+        self.change_vertex_property(node, PropertyChange::Set(key, value))
+    }
+
+    fn set_edge_property(
+        &mut self,
+        edge: LayeredEdge,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let value = write_rules::set_edge_property(&*self, edge, &key, value)?;
+        self.change_edge_property(edge, PropertyChange::Set(key, value))
+    }
+
+    /// `TraversalGraph`'s path write (the leaf coerced, the whole resulting property checked),
+    /// not the trait default.
+    fn set_vertex_property_path(
+        &mut self,
+        node: LayeredVertex,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let (key, value) = write_rules::set_vertex_property_path(&*self, node, path, value)?;
+        self.change_vertex_property(node, PropertyChange::Set(key, value))
+    }
+
+    fn set_edge_property_path(
+        &mut self,
+        edge: LayeredEdge,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        let (key, value) = write_rules::set_edge_property_path(&*self, edge, path, value)?;
+        self.change_edge_property(edge, PropertyChange::Set(key, value))
+    }
+
+    fn remove_vertex_property_path(
+        &mut self,
+        node: LayeredVertex,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        match write_rules::remove_vertex_property_path(&*self, node, path)? {
+            PathRemoval::Nothing => Ok(()),
+            PathRemoval::Drop(key) => self.change_vertex_property(node, PropertyChange::Drop(key)),
+            PathRemoval::Store(key, value) => {
+                self.change_vertex_property(node, PropertyChange::Set(key, value))
+            }
+        }
+    }
+
+    fn remove_edge_property_path(
+        &mut self,
+        edge: LayeredEdge,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        match write_rules::remove_edge_property_path(&*self, edge, path)? {
+            PathRemoval::Nothing => Ok(()),
+            PathRemoval::Drop(key) => self.change_edge_property(edge, PropertyChange::Drop(key)),
+            PathRemoval::Store(key, value) => {
+                self.change_edge_property(edge, PropertyChange::Set(key, value))
+            }
+        }
+    }
+
+    /// A stale handle is a no-op (idempotent drop), as in `TraversalGraph`. A base vertex is
+    /// tombstoned with its incident edges (`drop_base_vertex`).
+    fn drop_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
+        if !write_rules::drop_vertex(&*self, node) {
+            return Ok(());
+        }
+        if node.is_delta() {
+            self.drop_delta_vertex(node);
+        } else {
+            self.drop_base_vertex(node)?;
+        }
+        Ok(())
+    }
+
+    fn drop_vertex_property(&mut self, prop: &str, node: LayeredVertex) -> Result<(), GraphError> {
+        if !write_rules::drop_vertex_property(&*self, node, prop)? {
+            return Ok(());
+        }
+        self.change_vertex_property(node, PropertyChange::Drop(prop.into()))
+    }
+
+    /// A stale handle is a no-op; a base edge is tombstoned (`drop_base_edge`).
+    fn drop_edge(&mut self, edge: LayeredEdge) -> Result<(), GraphError> {
+        if !write_rules::drop_edge(&*self, edge) {
+            return Ok(());
+        }
+        if edge.is_delta() {
+            self.drop_delta_edge(edge);
+        } else {
+            self.drop_base_edge(edge);
+        }
+        Ok(())
+    }
+
+    fn drop_edge_property(&mut self, prop: &str, edge: LayeredEdge) -> Result<(), GraphError> {
+        if !write_rules::drop_edge_property(&*self, edge, prop)? {
+            return Ok(());
+        }
+        self.change_edge_property(edge, PropertyChange::Drop(prop.into()))
+    }
+
+    /// Raises the layer's own sequences (`max`, never lowered); the base's stay as they are.
+    /// Not undone by a rollback; a real raise makes the unit's commit count (as on a
+    /// `TraversalGraph`).
+    fn raise_id_sequences(
+        &mut self,
+        node_sequence: u64,
+        edge_sequence: u64,
+    ) -> Result<(), GraphError> {
+        if node_sequence > self.node_sequence || edge_sequence > self.edge_sequence {
+            self.units.mark_sequences_raised();
+        }
+        self.node_sequence = self.node_sequence.max(node_sequence);
+        self.edge_sequence = self.edge_sequence.max(edge_sequence);
+        Ok(())
+    }
+
+    /// The default's unit with the vector rules off, as on a `TraversalGraph` (book page
+    /// "Vector Rules"): the change set carries its vectors, so they are neither refused nor
+    /// recomputed, and inside an open unit the range it wrote is exempt from the rule pass.
+    fn apply_change_set(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
+        let start = self.units.entries().len();
+        self.rules_off += 1;
+        let applied = crate::graph::storage::apply_change_set_with(
+            self,
+            changes,
+            &mut crate::graph::replay::clone_map,
+        );
+        self.rules_off -= 1;
+        if applied.is_ok() {
+            self.units.exempt_from(start);
+        }
+        applied
+    }
+}
+
+impl LayeredGraph {
+    /// The checks of `set_schema`, then the schema stored (the old one recorded in an open
+    /// unit).
+    fn store_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
+        // As `TraversalGraph::set_schema_recorded`: a vector property may name its model by
+        // repository; the schema stores the identity of the catalog's current revision; a
+        // vector rule embeds with a model of the catalog or `hash-ngram/1`.
+        let schema = crate::graph::model_definition::resolve_model_names(&self.catalog, schema);
+        let schema = crate::graph::vector_rules::check_rule_models(&self.catalog, schema)?;
+        let report =
+            crate::graph::schema::apply::scan_storage_change(&*self, Some(&self.schema), &schema)?;
+        if !report.is_empty() {
+            return Err(SchemaError::ExistingDataViolatesSchema {
+                report: Box::new(report),
+            }
+            .into());
+        }
+        let old = std::mem::replace(&mut self.schema, schema);
+        self.refresh_vector_rules();
+        self.units.record(LayerUndo::Schema(Box::new(old)));
+        Ok(())
+    }
+
+    /// Stores the label list a label rule returned (a change: the rule answered `Some`): in the
+    /// delta vertex, or in the image of the base vertex (copied up on its first change; a
+    /// return to clean checked when it had one). The dirty bit is set before the copy-up.
+    pub(super) fn store_vertex_labels(
+        &mut self,
+        node: LayeredVertex,
+        new_labels: Vec<CompactString>,
+    ) -> Result<(), GraphError> {
+        if node.is_delta() {
+            let id = self.logged_vertex_id(node);
+            let old = self
+                .delta
+                .set_vertex_labels(node, new_labels, &mut self.statistics);
+            if let Some(id) = id {
+                self.units.record(LayerUndo::VertexLabels { id, old });
+            }
+            return Ok(());
+        }
+        self.dirty_vertices.set(node.slot());
+        let base = node.to_base();
+        let (had_image, old) = self.delta.set_base_vertex_labels(
+            &self.base,
+            base,
+            new_labels,
+            &mut self.statistics,
+        )?;
+        if had_image {
+            self.delta.settle_base_vertex(&self.base, base);
+        }
+        self.units.record(LayerUndo::BaseVertexLabels {
+            node: base,
+            old,
+            had_image,
+        });
+        Ok(())
+    }
+
+    /// Stores one property change a write rule returned. A delta vertex takes it as it is; for
+    /// a base vertex a change that changes nothing (plan P6: an identical value by
+    /// `identity_eq`, a drop of an absent key) is skipped without an image (an identical value
+    /// is recorded in an open unit for the change set only), any other goes
+    /// into its image (copied up on the first change; a return to clean checked when it had
+    /// one).
+    pub(super) fn change_vertex_property(
+        &mut self,
+        node: LayeredVertex,
+        change: PropertyChange,
+    ) -> Result<(), GraphError> {
+        let recording = self.units.is_recording();
+        if node.is_delta() {
+            let id = self.logged_vertex_id(node);
+            let (key, old) = match change {
+                PropertyChange::Set(key, value) => {
+                    let logged = recording.then(|| key.clone());
+                    (logged, self.delta.set_vertex_property(node, key, value))
+                }
+                PropertyChange::Drop(key) => {
+                    let old = self.delta.drop_vertex_property(node, &key);
+                    (old.is_some().then_some(key), old)
+                }
+            };
+            if let (Some(id), Some(key)) = (id, key) {
+                self.units
+                    .record(LayerUndo::VertexProperty { id, key, old });
+            }
+            return Ok(());
+        }
+        if change.is_noop(GraphStorage::vertex_properties(&*self, node)?) {
+            // Nothing stored; an identical value is still recorded for the change set (as
+            // `TraversalGraph` records it), a drop of an absent key is not (neither there).
+            if recording && let PropertyChange::Set(key, _) = change {
+                self.units.record(LayerUndo::UnchangedBaseVertexProperty {
+                    node: node.to_base(),
+                    key,
+                });
+            }
+            return Ok(());
+        }
+        self.dirty_vertices.set(node.slot());
+        let base = node.to_base();
+        let key = recording.then(|| change.key().clone());
+        let (had_image, old) = self
+            .delta
+            .change_base_vertex_property(&self.base, base, change)?;
+        if had_image {
+            self.delta.settle_base_vertex(&self.base, base);
+        }
+        if let Some(key) = key {
+            self.units.record(LayerUndo::BaseVertexProperty {
+                node: base,
+                key,
+                old,
+                had_image,
+            });
+        }
+        Ok(())
+    }
+
+    /// The edge counterpart of [`Self::change_vertex_property`].
+    pub(super) fn change_edge_property(
+        &mut self,
+        edge: LayeredEdge,
+        change: PropertyChange,
+    ) -> Result<(), GraphError> {
+        let recording = self.units.is_recording();
+        if edge.is_delta() {
+            let id = self.logged_edge_id(edge);
+            let (key, old, map_was_none) = match change {
+                PropertyChange::Set(key, value) => {
+                    let logged = recording.then(|| key.clone());
+                    let (old, map_was_none) = self.delta.set_edge_property(edge, key, value);
+                    (logged, old, map_was_none)
+                }
+                PropertyChange::Drop(key) => {
+                    let old = self.delta.drop_edge_property(edge, &key);
+                    (old.is_some().then_some(key), old, false)
+                }
+            };
+            if let (Some(id), Some(key)) = (id, key) {
+                self.units.record(LayerUndo::EdgeProperty {
+                    id,
+                    key,
+                    old,
+                    map_was_none,
+                });
+            }
+            return Ok(());
+        }
+        if change.is_noop(GraphStorage::edge_properties(&*self, edge)?) {
+            if recording && let PropertyChange::Set(key, _) = change {
+                self.units.record(LayerUndo::UnchangedBaseEdgeProperty {
+                    edge: edge.to_base(),
+                    key,
+                });
+            }
+            return Ok(());
+        }
+        self.dirty_edges.set(edge.slot());
+        let base = edge.to_base();
+        let key = recording.then(|| change.key().clone());
+        let (had_image, old, map_was_none) = self
+            .delta
+            .change_base_edge_property(&self.base, base, change)?;
+        if had_image {
+            self.delta.settle_base_edge(&self.base, base);
+        }
+        if let Some(key) = key {
+            self.units.record(LayerUndo::BaseEdgeProperty {
+                edge: base,
+                key,
+                old,
+                map_was_none,
+                had_image,
+            });
+        }
+        Ok(())
+    }
+
+    /// Drops the live base vertex `node` as `TraversalGraph::remove_vertex_raw` drops one: its
+    /// incident edges first, each once (a self-loop from the outgoing list only), in the order
+    /// of its lists (added edges at its stub, newest first, then its base edges), then the
+    /// vertex itself (its tombstone; its stub goes with it). The vertex stays dirty.
+    pub(super) fn drop_base_vertex(&mut self, node: LayeredVertex) -> Result<(), GraphError> {
+        let mut incident: Vec<LayeredEdge> = GraphStorage::out_edges(&*self, node)?.collect();
+        for edge in GraphStorage::in_edges(&*self, node)? {
+            if GraphStorage::edge_endpoints(&*self, edge)?.is_none_or(|(from, _)| from != node) {
+                incident.push(edge);
+            }
+        }
+        for edge in incident {
+            if edge.is_delta() {
+                self.drop_delta_edge(edge);
+            } else {
+                self.drop_base_edge(edge);
+            }
+        }
+        self.dirty_vertices.set(node.slot());
+        let base = node.to_base();
+        if let Some(image) = self
+            .delta
+            .remove_base_vertex(&self.base, base, &mut self.statistics)
+        {
+            self.units.record(LayerUndo::RemovedBaseVertex {
+                node: base,
+                image: image.map(Box::new),
+            });
+        }
+        Ok(())
+    }
+
+    /// Drops the live added vertex `node` with its incident edges, each recorded in an open
+    /// unit (the edges first, in removal order, then the vertex).
+    fn drop_delta_vertex(&mut self, node: LayeredVertex) {
+        if !self.units.is_recording() {
+            self.delta.remove_vertex(node, &mut self.statistics, None);
+            return;
+        }
+        let mut edges = Vec::new();
+        let removed = self
+            .delta
+            .remove_vertex(node, &mut self.statistics, Some(&mut edges));
+        for edge in edges {
+            self.units.record(LayerUndo::RemovedEdge(Box::new(edge)));
+        }
+        if let Some(removed) = removed {
+            self.units
+                .record(LayerUndo::RemovedVertex(Box::new(removed)));
+        }
+    }
+
+    /// Drops the live added edge `edge`, recorded in an open unit.
+    fn drop_delta_edge(&mut self, edge: LayeredEdge) {
+        let recording = self.units.is_recording();
+        if let Some(removed) = self
+            .delta
+            .remove_edge(edge, &mut self.statistics, recording)
+        {
+            self.units.record(LayerUndo::RemovedEdge(Box::new(removed)));
+        }
+    }
+
+    /// The id of the added vertex `node` when a unit is open (what its undo entry names it by),
+    /// else `None` (nothing is recorded, nothing cloned).
+    fn logged_vertex_id(&self, node: LayeredVertex) -> Option<CompactString> {
+        if !self.units.is_recording() {
+            return None;
+        }
+        self.delta.vertex(node).map(|view| view.id.into())
+    }
+
+    /// The edge counterpart of [`Self::logged_vertex_id`].
+    fn logged_edge_id(&self, edge: LayeredEdge) -> Option<CompactString> {
+        if !self.units.is_recording() {
+            return None;
+        }
+        self.delta.edge(edge).map(|view| view.id.into())
+    }
+
+    /// Stores one definition as `TraversalGraph::set_definitions_recorded` does, in its order
+    /// (validated; an index replaces the other index kind's definition of its name, recorded;
+    /// `check_conflict` against the catalog; an equal one again is no change; a new one only
+    /// while the catalog has room) and records what was there before. The name of a property
+    /// index changed (also by that replacement) goes into `indexes`, once: the caller builds it.
+    fn store_definition(
+        &mut self,
+        definition: Definition,
+        indexes: &mut Vec<CompactString>,
+    ) -> Result<(), GraphError> {
+        check_layer_kind(definition.kind())?;
+        definition.validate()?;
+        if definition.kind().is_property_index() {
+            let sibling = if definition.kind() == DefinitionKind::PROPERTY_INDEX {
+                DefinitionKind::PROPERTY_INDEX_EXT
+            } else {
+                DefinitionKind::PROPERTY_INDEX
+            };
+            if let Some(old) = self.catalog.remove(sibling, definition.name()) {
+                let name = CompactString::from(definition.name());
+                self.units.record(LayerUndo::Definition {
+                    kind: sibling,
+                    name: name.clone(),
+                    old: Some(Box::new(old)),
+                });
+                if !indexes.contains(&name) {
+                    indexes.push(name);
+                }
+            }
+        }
+        crate::graph::property_index::check_conflict(&self.catalog, &definition)?;
+        let current = self.catalog.get(definition.kind(), definition.name());
+        if current == Some(&definition) {
+            return Ok(());
+        }
+        if current.is_none() && self.catalog.len() >= MAX_DEFINITIONS {
+            return Err(DefinitionError::TooManyDefinitions {
+                limit: MAX_DEFINITIONS,
+            }
+            .into());
+        }
+        let kind = definition.kind();
+        let name = CompactString::from(definition.name());
+        let old = self.catalog.insert(definition);
+        if kind.is_property_index() && !indexes.contains(&name) {
+            indexes.push(name.clone());
+        }
+        self.units.record(LayerUndo::Definition {
+            kind,
+            name,
+            old: old.map(Box::new),
+        });
+        Ok(())
+    }
+
+    /// Removes one definition (a refused kind first, also for an absent name) and records it.
+    fn drop_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
+        check_layer_kind(kind)?;
+        let Some(old) = self.catalog.remove(kind, name) else {
+            return Ok(false);
+        };
+        if kind.is_property_index() {
+            self.layer_index_after_change(name);
+        }
+        self.units.record(LayerUndo::Definition {
+            kind,
+            name: CompactString::from(name),
+            old: Some(Box::new(old)),
+        });
+        Ok(true)
+    }
+
+    /// Drops the live base edge `edge`: its tombstone, and the dirty bits of the edge and of
+    /// both endpoints (one for a self-loop), so the base adjacency lists of each endpoint are
+    /// filtered (invariant of `base_adjacency_exact`).
+    pub(super) fn drop_base_edge(&mut self, edge: LayeredEdge) {
+        let base = edge.to_base();
+        if let Ok(Some((from, to))) = GraphStorage::edge_endpoints(&*self.base, base) {
+            self.dirty_vertices.set(from.index().slot());
+            self.dirty_vertices.set(to.index().slot());
+        }
+        self.dirty_edges.set(edge.slot());
+        if let Some((image, position)) =
+            self.delta
+                .remove_base_edge(&self.base, base, &mut self.statistics)
+        {
+            self.units.record(LayerUndo::RemovedBaseEdge {
+                edge: base,
+                image: image.map(Box::new),
+                position,
+            });
+        }
+    }
+
+    /// Stores a vertex the write rules accepted: its id checked, then the delta insert.
+    fn store_vertex(
+        &mut self,
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<LayeredVertex, GraphError> {
+        let (id, sequence) = self.vertex_id_for(id)?;
+        if let Err(err) = write_rules::check_vertex_id_free(&*self, &id) {
+            self.node_sequence = sequence;
+            return Err(err);
+        }
+        let logged = self.units.is_recording().then(|| id.clone());
+        let node = self
+            .delta
+            .insert_vertex(id, labels, properties, &mut self.statistics)?;
+        if let Some(id) = logged {
+            self.units.record(LayerUndo::AddedVertex { id });
+        }
+        Ok(node)
+    }
+
+    /// Stores an edge the write rules accepted (both endpoints live) once its id is checked:
+    /// in the delta topology, a base endpoint through its stub (created on first use, after
+    /// the id check, so a failed write leaves no stub and no dirty bit).
+    fn store_edge(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: LayeredVertex,
+        to: LayeredVertex,
+        properties: PropertyMap,
+    ) -> Result<LayeredEdge, GraphError> {
+        let id = self.edge_id_for(id)?;
+        let from = self.edge_endpoint(from)?;
+        let to = self.edge_endpoint(to)?;
+        let logged = self.units.is_recording().then(|| id.clone());
+        let edge = self
+            .delta
+            .insert_edge(id, label, properties, from, to, &mut self.statistics)?;
+        if let Some(id) = logged {
+            self.units.record(LayerUndo::AddedEdge { id });
+        }
+        Ok(edge)
+    }
+
+    /// The delta node slot (with the endpoint handle's generation) a new edge at the live
+    /// vertex `node` is linked to: the added vertex itself, or the stub of a base vertex,
+    /// created when missing, with the vertex's dirty bit set (which also sets `any`).
+    pub(super) fn edge_endpoint(
+        &mut self,
+        node: LayeredVertex,
+    ) -> Result<VertexHandle, GraphError> {
+        if node.is_delta() {
+            return Ok(node.to_delta());
+        }
+        let base = node.to_base();
+        let stub = self.delta.stub_for(base)?;
+        self.dirty_vertices.set(node.slot());
+        Ok(VertexHandle::new(stub, base.generation()))
+    }
+}

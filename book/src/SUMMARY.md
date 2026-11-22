@@ -66,8 +66,11 @@
   - [The Store in the Playground](persistence/playground_store.md)
   - [Python](persistence/python.md)
   - [FAQ and Troubleshooting](persistence/faq.md)
+- [Layers](users_guide/layered_graphs.md)
 - [Custom Storages](for_developers/custom_storage.md)
   - [Storage Conformance](for_developers/storage_conformance.md)
+  - [Layered Graphs](for_developers/layered_graphs.md)
+  - [Serving Layers](for_developers/serving_layers.md)
 
 # GQL
 
@@ -234,6 +237,7 @@
   - [has_id](traversal/steps/has_id.md)
   - [has_key](traversal/steps/has_key.md)
   - [has_label](traversal/steps/has_label.md)
+  - [has_layer](traversal/steps/has_layer.md)
   - [has_not](traversal/steps/has_not.md)
   - [has_p](traversal/steps/has_p.md)
   - [has_value](traversal/steps/has_value.md)
@@ -259,6 +263,8 @@
   - [l_trim](traversal/steps/l_trim.md)
   - [label](traversal/steps/label.md)
   - [labels](traversal/steps/labels.md)
+  - [layer](traversal/steps/layer.md)
+  - [layer_diff](traversal/steps/layer_diff.md)
   - [length](traversal/steps/length.md)
   - [limit](traversal/steps/limit.md)
   - [local](traversal/steps/local.md)

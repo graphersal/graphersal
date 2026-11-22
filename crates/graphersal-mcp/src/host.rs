@@ -119,6 +119,33 @@ pub trait Host: Executor {
     /// when the host has none.
     fn examples_json(&self) -> Option<Vec<u8>>;
 
+    /// Whether the served graph is a layer over a frozen base (`StorageCapabilities::layered`,
+    /// `graphersal::storage::LayeredGraph`): `initialize` then adds a note on the layer steps
+    /// (`layer()`, `has_layer()`, `g.layer_diff()`) to the built-in instructions. Asked once
+    /// per `initialize`, which runs no session job of its own: answer from what the host
+    /// knows (a host that must run a job should not wait for a busy session). Default:
+    /// `false`, the instructions of a plain graph.
+    fn serves_layer(&self) -> bool {
+        false
+    }
+
+    /// The route tag that pins a new MCP session to the graph this host serves (e.g. the
+    /// versioned name `acme@2026.3` its graph resolver resolved an alias to, or an opaque
+    /// token), or `None` (the default) for an unpinned session. Asked once per HTTP
+    /// `initialize` (a stream connection is its own session and is not asked), which runs no
+    /// session job of its own: answer from what the host knows. The endpoint puts it into the
+    /// `Mcp-Session-Id` it mints (`<route>~<id>`; covered by the signature of a signed id), so
+    /// the host's resolver sends every later request of the session to the same graph
+    /// ([`crate::session_route`]), also after its alias moved: new sessions see the new graph,
+    /// open ones finish on the old one. A route must pass [`crate::is_valid_session_route`]
+    /// (at most [`crate::MAX_SESSION_ROUTE_BYTES`] bytes of a header-safe character set);
+    /// otherwise `initialize` fails with a JSON-RPC error and no session is created, rather
+    /// than leaving the session unpinned. The route is visible to the client: never put a
+    /// secret into it.
+    fn session_route(&self) -> Option<String> {
+        None
+    }
+
     /// A query of `client` is about to be queued: it runs under `cancel`, a token of this run
     /// alone (the caller's own, an AI Chat turn's, or a new one). The host keeps it until
     /// [`Host::run_ended`] with the returned id, so it can cancel the run, also while the run

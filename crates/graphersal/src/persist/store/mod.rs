@@ -444,6 +444,11 @@ pub struct StoreInfo {
     pub schema_models: Vec<String>,
     /// The blobs the store holds (format spec 4.6): by names and lengths, no hashing.
     pub blobs: blobs::BlobUsage,
+    /// The base of a LAYER store (format spec 7.5; read from its newest snapshot's layer
+    /// row): the store holds only a layer's changes to that base and opens only over it
+    /// ([`Store::open_layer`]). `None`: a plain store. A layer store lists no models: they are
+    /// the base's.
+    pub layer_base: Option<crate::graph::BaseRef>,
 }
 
 /// Damage found ON DISK while the store was open (by a backup, a checkpoint, a verification):
@@ -502,6 +507,11 @@ struct Shared {
     /// (`try_write`, never waiting), so the journal never writes in the middle of another
     /// operation. Commits do not take it: the WAL and the journal are other files.
     operations: parking_lot::RwLock<()>,
+    /// The base of a layer store (format spec 7.5; `None`: a plain store): its checkpoints
+    /// encode the loaded layer (a merge is not layer-aware); its views, forks, rollbacks,
+    /// attic operations and verification load over it, and a reload after a rollback or an
+    /// attic restore does not rebuild the base's model registry.
+    layer: Option<crate::graph::LayerBase>,
 }
 
 /// The Store's parts of a memory report (`memory_report::components`): `store` (the journal's
@@ -738,7 +748,9 @@ impl Store {
     ) -> Result<(usize, u64), PersistError> {
         let from = DirPath::root(from.into_store_dir());
         let to = DirPath::root(to.into_store_dir());
-        files::refuse_other_version(&from)?;
+        // A layer store too (format spec 7.5): its files, the base's identity in its
+        // manifests included, are copied as they are.
+        files::refuse_other_version_as(&from, files::StoreKind::Either)?;
         if !Self::is_store(from.store_dir())? {
             return Err(PersistError::NotAStore {
                 path: from.display(),
@@ -767,7 +779,7 @@ impl Store {
                 }
             }
             files::sync_dir(&to)?;
-            let verified = maintenance::verify(&to, None)?;
+            let verified = maintenance::verify_as(&to, None, maintenance::VerifyAs::Either)?;
             if !verified.is_ok() {
                 return Err(PersistError::store(
                     "convert the store",
@@ -812,10 +824,27 @@ impl Store {
 
     /// The damage report of the store in `dir` without opening it (no lock, nothing
     /// written): what maintenance mode would show.
+    ///
+    /// A layer store (format spec 7.5) is scanned too, without its base: the report lists the
+    /// damage of its files and the readable position (a note says it is a layer store; it is
+    /// not opened in maintenance mode or repaired).
     pub fn damage_report_dir(dir: impl IntoStoreDir) -> Result<DamageReport, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         let dir = upgrade::older_view(&dir).unwrap_or(dir);
-        Ok(damage::salvage(&dir, &ReadOptions::new().with_max_value_depth(4096))?.report)
+        let mut report = damage::salvage_as(
+            &dir,
+            &ReadOptions::new().with_max_value_depth(4096),
+            files::StoreKind::Either,
+        )?
+        .report;
+        if let Ok(Some(base)) = layer_base_in(&dir) {
+            report.notes.push(format!(
+                "a layer store over the base {base}: the report covers its own files (the \
+                 base is not read); a damaged layer store opens neither in maintenance mode \
+                 nor is it repaired: restore a backup of it, or rebuild the layer"
+            ));
+        }
+        Ok(report)
     }
 
     /// Loads the store in `dir` read-only at `target` (format spec 12.1): the
@@ -879,27 +908,9 @@ impl Store {
                     )),
                 }
             }
-            merge::Merged::TooLarge { .. } | merge::Merged::NoBase => {
+            merge::Merged::TooLarge { .. } | merge::Merged::NoBase | merge::Merged::Layer => {
                 let recovered = StoreCore::load_at(&dir, RecoveryTarget::Latest, &options.read)?;
-                let graph = recovered.graph;
-                if let Some(reason) = super::definitions::critical_unknown(graph.definitions.iter())
-                {
-                    return Err(PersistError::ReadOnly {
-                        path: dir.display(),
-                        reason,
-                    });
-                }
-                let seq = graph.last_commit_seq();
-                let existing = list_snapshot_infos(&dir)?;
-                if let Some(same) = existing_snapshot(&existing, seq, name)? {
-                    return Ok(CheckpointReport::existing(same));
-                }
-                check_snapshot_name(&existing, name)?;
-                let snapshot = NewSnapshotDir::begin(&dir, seq)?;
-                write_graph_snapshot(snapshot.tmp(), &graph, &write)?;
-                let (_, mut info) = snapshot.finish()?;
-                info.meta.clear();
-                Ok(CheckpointReport::encoded(info))
+                encode_closed_checkpoint(&dir, &recovered.graph, &write, name)
             }
         }
     }
@@ -908,7 +919,8 @@ impl Store {
     /// (works while a writer has it open): the position is the last complete commit in the WAL.
     pub fn inspect(dir: impl IntoStoreDir) -> Result<StoreInfo, PersistError> {
         let dir = &DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(dir)?;
+        // A layer store too (format spec 7.5): its info names the base.
+        files::refuse_other_version_as(dir, files::StoreKind::Any)?;
         let file = read_graph_file(dir)?.file;
         let mut info = info_of(dir, &file, BlobCount::Unreferenced, None)?;
         let (commit_seq, time) = maintenance::last_commit_in_files(dir, &info.snapshots)?;
@@ -916,7 +928,10 @@ impl Store {
         info.last_commit_at = time;
         (info.definitions_by_kind, info.schema_models) = maintenance::definitions_in_files(dir)?;
         info.definitions = info.definitions_by_kind.values().sum();
-        info.models = model_catalog::infos_in_files(dir)?;
+        // A layer store keeps no model: the model definitions of its catalog are the base's.
+        if info.layer_base.is_none() {
+            info.models = model_catalog::infos_in_files(dir)?;
+        }
         info.default_model = info
             .models
             .iter()
@@ -935,6 +950,7 @@ impl Store {
             &DirPath::root(dir.into_store_dir()),
             target,
             &DirPath::root(new_dir.into_store_dir()),
+            None,
         )
     }
 
@@ -945,7 +961,7 @@ impl Store {
         policy: CompactionPolicy,
     ) -> Result<CompactionAdvice, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         let file = read_graph_file(&dir)?.file;
         let blocked = file.backup.map(|marker| {
             format!(
@@ -967,15 +983,23 @@ impl Store {
         up_to: u64,
     ) -> Result<PruneReport, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         read_graph_file(&dir)?;
         Ok(maintenance::prune_estimate(&dir, up_to, None)?.0)
     }
 
     /// [`Store::verify`] of the store in `dir`, without a lock (works while a writer has it
     /// open; an incomplete last record is then a note, not damage).
+    ///
+    /// A layer store (format spec 7.5) is verified without its base: every checksum of its
+    /// files and its layer files decoded, its snapshots not loaded (a note says so;
+    /// [`Store::verify_layer_dir`] loads them over the base).
     pub fn verify_dir(dir: impl IntoStoreDir) -> Result<VerifyReport, PersistError> {
-        maintenance::verify(&DirPath::root(dir.into_store_dir()), None)
+        maintenance::verify_as(
+            &DirPath::root(dir.into_store_dir()),
+            None,
+            maintenance::VerifyAs::Either,
+        )
     }
 
     /// [`Store::backup`] of the store in `dir` by another process (no durable end there: the
@@ -996,8 +1020,14 @@ impl Store {
         let target = DirPath::root(target_dir.into_store_dir());
         let mut report =
             backup::backup_into(&DirPath::root(dir.into_store_dir()), None, &target, mode)?;
-        // The models the backup holds, as the live store's backup reports them.
-        report.models = model_catalog::infos_in_files(&target)?;
+        // A layer store (format spec 7.5): the backup is useless without its base, and it
+        // keeps no model.
+        let layer = layer_base_in(&target)?;
+        if layer.is_none() {
+            // The models the backup holds, as the live store's backup reports them.
+            report.models = model_catalog::infos_in_files(&target)?;
+        }
+        report.of_layer(layer);
         Ok(report)
     }
 
@@ -1025,9 +1055,11 @@ impl Store {
     {
         let dir = DirPath::root(dir.into_store_dir());
         let mut report = maintenance::backup_to_zip(&dir, None, &mut archive, models)?;
-        if models == ModelCopy::Include {
+        let layer = layer_base_in(&dir)?;
+        if models == ModelCopy::Include && layer.is_none() {
             report.models = model_catalog::infos_in_files(&dir)?;
         }
+        report.of_layer(layer);
         Ok(report)
     }
 
@@ -1056,8 +1088,9 @@ impl Store {
                 ));
             }
         }
-        // A backup of a NEWER format (format spec 15): nothing of it is left behind.
-        if let Err(err) = files::refuse_newer_version(&dir) {
+        // A backup of a NEWER format (format spec 15): nothing of it is left behind. A layer
+        // store's backup becomes a layer store over the same base (format spec 7.5).
+        if let Err(err) = files::refuse_newer_version_as(&dir, files::StoreKind::Either) {
             files::undo_new_dir(&dir, existed);
             return Err(err);
         }
@@ -1134,20 +1167,22 @@ impl Store {
         )?)
     }
 
-    /// [`Store::attic_list`] of the store in `dir`, without a lock.
+    /// [`Store::attic_list`] of the store in `dir`, without a lock. A listing of the files:
+    /// works on a layer store too.
     pub fn attic_list_dir(dir: impl IntoStoreDir) -> Result<Vec<AtticEntry>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         rollback::attic_list(&dir)
     }
 
-    /// [`Store::attic_changes`] of the store in `dir`, without a lock.
+    /// [`Store::attic_changes`] of the store in `dir`, without a lock. The entry's journal
+    /// records: works on a layer store too.
     pub fn attic_changes_dir(
         dir: impl IntoStoreDir,
         id: &str,
     ) -> Result<ChangesSince, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         StoreCore::attic_changes_at(&dir, id)
     }
 
@@ -1161,6 +1196,7 @@ impl Store {
             &DirPath::root(dir.into_store_dir()),
             id,
             &DirPath::root(new_dir.into_store_dir()),
+            None,
         )
     }
 }
@@ -1225,6 +1261,15 @@ impl<S: PersistentStorage + Default> Store<S> {
         options: StoreOptions,
     ) -> Result<Store<S>, PersistError> {
         graph::require_journal_capabilities(graph.capabilities()?)?;
+        // A layer (format spec 7.5) needs its base to open again: `S::default` is not it.
+        if graph.layer_parts()?.is_some() {
+            return Err(PersistError::store(
+                "create the store",
+                StoreFailure::LayerStore,
+                "the graph is a layer: a layer store is created with Store::create_layer or \
+                 Store::create_layer_with, which open it over its base",
+            ));
+        }
         let dir = DirPath::root(dir.into_store_dir());
         let lineage = vec![LineageEntry {
             graph_id: graph.graph_id(),
@@ -1283,8 +1328,13 @@ impl<S: PersistentStorage + Default> Store<S> {
         empty: S,
     ) -> Result<Recovered<S>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        let mut recovered =
-            StoreCore::load_plan_at(&dir, target, &ReadOptions::default())?.run_in(empty)?;
+        let mut recovered = StoreCore::load_plan_at(
+            &dir,
+            target,
+            &ReadOptions::default(),
+            files::StoreKind::Plain,
+        )?
+        .run_in(empty)?;
         recovered.models = model_catalog::models_of_view(&dir, &recovered.graph)?;
         Ok(recovered)
     }
@@ -1881,6 +1931,409 @@ impl<S: PersistentStorage + Default> Store<S> {
     }
 }
 
+/// A LAYER store (format spec 7.5, book page "Layered Graphs"): one project layer over a frozen
+/// base, durable and recoverable. Its snapshots hold only the layer's changes to the base (by
+/// element id) and name the base ([`BaseRef`](crate::storage::BaseRef)); its WAL holds the
+/// layer's commits, which an open replays onto the loaded layer as for any store. The store
+/// records only the base's identity, not where the base lives: the base may be a Store opened
+/// read-only, a `.gsnap` or an in-memory graph, as long as it is the same graph at the same
+/// commit.
+///
+/// **EXPERIMENTAL**, like [`LayeredGraph`](crate::storage::LayeredGraph). Every method of
+/// [`Store`] works on it, and every copy (backups, restores, export, fork, attic fork, convert,
+/// upgrade) is a layer store over the same base, except: the repair ([`Store::repair_to`],
+/// [`Store::repair_dir`]: a salvage rebuilds whole graphs) and the closed-store model commits
+/// ([`Store::import_model_dir`] and its siblings: the store keeps no model) refuse with
+/// [`StoreFailure::LayerStore`]; so do the plain forms that would load the layer over no base
+/// ([`Store::open_read_only`], [`Store::open_backup`], [`Store::checkpoint_dir`],
+/// [`Store::fork_dir`], [`Store::attic_fork_dir`]), whose layer forms below take the base. A
+/// checkpoint encodes the loaded layer (a merge works on whole graphs); a damaged layer store
+/// refuses the open with the damage (no maintenance mode): restore a backup of it. A rollback
+/// or attic restore reloads the layer over its base and leaves the base's model registry as it
+/// is. The embedding models are the base's ([`LayerBase`](crate::storage::LayerBase)): the
+/// store keeps none.
+impl Store<crate::graph::LayeredGraph> {
+    /// Creates a layer store for an empty layer over `base` in `dir` (which must not exist or
+    /// be empty) and opens it ([`Store::open_layer`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::create_layer_with`].
+    pub fn create_layer(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        options: StoreOptions,
+    ) -> Result<Self, PersistError> {
+        let layer = crate::graph::LayeredGraph::over_base(base)?;
+        Self::create_layer_with(dir, base, layer, options)
+    }
+
+    /// Creates a layer store whose first snapshot is `layer` (its changes to `base`, schema,
+    /// catalog, lineage id, commit position and auto-id sequences) and opens it over `base`.
+    /// `dir` must not exist or be empty.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when `layer` was built over another base than
+    /// `base` (nothing written); [`PersistError::Graph`] when the base cannot carry a layer;
+    /// the errors of [`Store::create`].
+    pub fn create_layer_with(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        layer: crate::graph::LayeredGraph,
+        options: StoreOptions,
+    ) -> Result<Self, PersistError> {
+        let maker = graph::LayerGraphs(base.clone());
+        maker.check()?;
+        let given = base_identity(base)?;
+        let built_on = layer.base_ref();
+        if built_on != given {
+            return Err(PersistError::LayerBaseMismatch {
+                expected: Box::new(built_on),
+                given: Box::new(given),
+            });
+        }
+        let dir = DirPath::root(dir.into_store_dir());
+        let lineage = vec![LineageEntry {
+            graph_id: layer.graph_id(),
+            branched_at: 0,
+            time: now(),
+        }];
+        StoreCore::create_lineage(
+            &dir,
+            &layer,
+            lineage,
+            WriteOptions::new(),
+            &options,
+            ("create", None),
+        )?;
+        drop(layer);
+        Self::from_core(StoreCore::open_at(dir, options, &maker)?)
+    }
+
+    /// Opens the layer store in `dir` read-write over `base`, as [`Store::open`] opens a plain
+    /// store: recovery (the newest layer snapshot loaded over the base, the WAL after it
+    /// replayed, a torn tail cut), the journal attached. The graph serves the base's embedding
+    /// models.
+    ///
+    /// # Errors
+    ///
+    /// Checked from the store's manifests before the lock and before any file is changed:
+    /// [`PersistError::LayerBaseMismatch`] when the store's layer was built over another base
+    /// (both named; rebuild the layer over the new base, or open it over its own);
+    /// [`PersistError::SnapshotKindMismatch`] when `dir` is a plain store. Damage refuses the
+    /// open with the damage (no maintenance mode for layer stores yet). Otherwise the errors
+    /// of [`Store::open`].
+    pub fn open_layer(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        options: StoreOptions,
+    ) -> Result<Self, PersistError> {
+        base_identity(base)?;
+        Self::from_core(StoreCore::open_at(
+            DirPath::root(dir.into_store_dir()),
+            options,
+            &graph::LayerGraphs(base.clone()),
+        )?)
+    }
+
+    /// The base this layer store's layer was built over (its newest snapshot's layer row; the
+    /// base it was opened over).
+    pub fn layer_base(&self) -> Result<crate::graph::BaseRef, PersistError> {
+        Ok(self.graph.read_checked()?.base_ref())
+    }
+
+    /// Loads the layer store in `dir` read-only at `target` over `base`, as
+    /// [`Store::open_read_only`] loads a plain store (no lock, no file changed; the nearest
+    /// snapshot at or before the target plus the WAL up to it): a layer over `base` holding
+    /// the layer's state at the target, serving the base's embedding models
+    /// ([`Recovered::into_graph`]). [`Store::read_only_at`] is the same for an open layer
+    /// store.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when the store's layer was built over another base,
+    /// [`PersistError::SnapshotKindMismatch`] when `dir` is a plain store (both before
+    /// anything is loaded); otherwise the errors of [`Store::open_read_only`].
+    pub fn open_layer_read_only(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        target: RecoveryTarget,
+    ) -> Result<Recovered<crate::graph::LayeredGraph>, PersistError> {
+        let given = base_identity(base)?;
+        let dir = DirPath::root(dir.into_store_dir());
+        let empty = crate::graph::LayeredGraph::over_base(base)?;
+        let mut recovered = StoreCore::load_plan_at(
+            &dir,
+            target,
+            &ReadOptions::default(),
+            files::StoreKind::Layer(given),
+        )?
+        .run_in(empty)?;
+        recovered.models = base.models();
+        Ok(recovered)
+    }
+
+    /// Opens the BACKUP of a layer store in `dir` READ-ONLY over `base`, as
+    /// [`Store::open_backup`] opens a plain store's backup (its latest state; every commit
+    /// refused with [`PersistError::IsBackup`]; no lock, nothing written).
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when the backed-up layer was built over another
+    /// base, [`PersistError::SnapshotKindMismatch`] when `dir` is a backup of a plain store;
+    /// otherwise the errors of [`Store::open_backup`].
+    pub fn open_layer_backup(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        options: StoreOptions,
+    ) -> Result<Self, PersistError> {
+        base_identity(base)?;
+        Self::from_core(StoreCore::open_backup_at(
+            DirPath::root(dir.into_store_dir()),
+            options,
+            &graph::LayerGraphs(base.clone()),
+        )?)
+    }
+
+    /// [`Store::verify`] of the layer store in `dir` over `base`, without a lock: every file
+    /// checked as [`Store::verify_dir`] checks it, and every snapshot loaded over `base`
+    /// ([`Store::verify_dir`] of a layer store checks its snapshots without loading them).
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when the store's layer was built over another base,
+    /// [`PersistError::SnapshotKindMismatch`] when `dir` is a plain store; otherwise the
+    /// errors of [`Store::verify_dir`]. Damage is listed in the report, not an error.
+    pub fn verify_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+    ) -> Result<VerifyReport, PersistError> {
+        base_identity(base)?;
+        maintenance::verify_as(
+            &DirPath::root(dir.into_store_dir()),
+            None,
+            maintenance::VerifyAs::Layer(base),
+        )
+    }
+
+    /// Writes a snapshot of the CLOSED layer store in `dir` over `base`, as
+    /// [`Store::checkpoint_dir`] does for a plain store (the writer lock taken, an interrupted
+    /// operation completed, temporary files removed, no Checkpoint record, `GRAPH`
+    /// unchanged). A layer store's checkpoint is never a merge: the layer is loaded over
+    /// `base` and encoded, a layer snapshot the size of its changes (format spec 7.5).
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`], [`PersistError::SnapshotKindMismatch`] as
+    /// [`Store::open_layer`] (nothing written); otherwise the errors of
+    /// [`Store::checkpoint_dir`].
+    pub fn checkpoint_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        options: StoreOptions,
+        name: Option<&str>,
+    ) -> Result<CheckpointReport, PersistError> {
+        let given = base_identity(base)?;
+        graph::LayerGraphs(base.clone()).check()?;
+        let dir = DirPath::root(dir.into_store_dir());
+        let kind = files::StoreKind::Layer(given);
+        let (_lock, graph_file) = closed_commit::closed_store_prelude_as(&dir, kind)?;
+        let name = name.unwrap_or_default();
+        check_snapshot_name(&[], name)?;
+        let write = checkpoint_write_options(&options, graph_file.chunk_bytes, name);
+        let recovered = StoreCore::load_plan_at(&dir, RecoveryTarget::Latest, &options.read, kind)?
+            .run_in(crate::graph::LayeredGraph::over_base(base)?)?;
+        encode_closed_checkpoint(&dir, &recovered.graph, &write, name)
+    }
+
+    /// [`Store::fork`] of the layer store in `dir` over `base`, read without a lock: the
+    /// layer's state at `target` loaded over `base` becomes the first snapshot of a NEW layer
+    /// store in `new_dir` over the same base (a new lineage whose parent is this store's at the
+    /// target, the creation parameters carried, marks not carried). [`Store::fork_dir`] of a
+    /// layer store is refused ([`StoreFailure::LayerStore`]): it would load over no base.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when the store's layer was built over another base,
+    /// [`PersistError::SnapshotKindMismatch`] when `dir` is a plain store (both before anything
+    /// is loaded or written); otherwise the errors of [`Store::fork_dir`].
+    pub fn fork_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        target: RecoveryTarget,
+        new_dir: impl IntoStoreDir,
+    ) -> Result<ForkReport, PersistError> {
+        StoreCore::fork_at(
+            &DirPath::root(dir.into_store_dir()),
+            target,
+            &DirPath::root(new_dir.into_store_dir()),
+            Some(base),
+        )
+    }
+
+    /// [`Store::attic_fork`] of the layer store in `dir` over `base`, without a lock: the end of
+    /// attic entry `id` loaded over `base` becomes a NEW layer store in `new_dir` over the same
+    /// base. [`Store::attic_fork_dir`] of a layer store is refused
+    /// ([`StoreFailure::LayerStore`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::fork_layer_dir`]; otherwise the errors of [`Store::attic_fork_dir`].
+    pub fn attic_fork_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        id: &str,
+        new_dir: impl IntoStoreDir,
+    ) -> Result<ForkReport, PersistError> {
+        rollback::attic_fork(
+            &DirPath::root(dir.into_store_dir()),
+            id,
+            &DirPath::root(new_dir.into_store_dir()),
+            Some(base),
+        )
+    }
+
+    /// Writes the layer's current state as a STANDALONE packed snapshot (`.gsnap`) of the
+    /// whole graph it shows: the base's elements with the layer's changes applied, the
+    /// layer's schema and catalog, its lineage id, position and auto-id sequences (format
+    /// spec 8, file format version 4, the [`WriteOptions::with_materialize`] write of the
+    /// layer). Unlike [`Store::export_packed`] (a layer snapshot, which loads only over its
+    /// base) and every backup of a layer store, it needs no base: [`read_snapshot`](crate::persist::read_snapshot),
+    /// [`Store::create_from_packed`] and older Graphersal releases read it. Its size follows
+    /// the whole graph. `models` as [`Store::export_packed_with`]: with
+    /// [`ModelCopy::Include`] the embedding models the catalog references are carried from
+    /// the base, which serves them.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::Graph`] when the graph cannot be read; the errors of
+    /// [`write_graph_snapshot`](crate::persist::write_graph_snapshot).
+    pub fn export_materialized(
+        &self,
+        writer: impl std::io::Write,
+        models: ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError> {
+        super::snapshot::write_graph_snapshot(
+            &self.graph,
+            writer,
+            &WriteOptions::new()
+                .with_chunk_bytes(self.core.shared.chunk_bytes)
+                .with_codec(self.core.shared.options.codec)
+                .with_materialize(true),
+            models,
+        )
+    }
+}
+
+/// The encoded checkpoint of a closed store whose latest state `graph` was loaded
+/// ([`Store::checkpoint_dir`] beyond the merge bound, [`Store::checkpoint_layer_dir`]).
+fn encode_closed_checkpoint<S: PersistentStorage>(
+    dir: &DirPath,
+    graph: &S,
+    write: &WriteOptions,
+    name: &str,
+) -> Result<CheckpointReport, PersistError> {
+    if let Some(reason) = super::definitions::critical_unknown(graph.definitions()?) {
+        return Err(PersistError::ReadOnly {
+            path: dir.display(),
+            reason,
+        });
+    }
+    let seq = graph.last_commit_seq()?;
+    let existing = list_snapshot_infos(dir)?;
+    if let Some(same) = existing_snapshot(&existing, seq, name)? {
+        return Ok(CheckpointReport::existing(same));
+    }
+    check_snapshot_name(&existing, name)?;
+    let snapshot = NewSnapshotDir::begin(dir, seq)?;
+    write_graph_snapshot(snapshot.tmp(), graph, write)?;
+    let (_, mut info) = snapshot.finish()?;
+    info.meta.clear();
+    Ok(CheckpointReport::encoded(info))
+}
+
+/// What a fork (or an attic fork) writes its new store from: the source store's files and
+/// `GRAPH` (`parent`, whose lineage and creation parameters the new store continues), the
+/// options carrying those parameters, the new location and the system journal's name of the
+/// creation.
+pub(super) struct ForkSource<'a> {
+    pub(super) dir: &'a DirPath,
+    pub(super) parent: &'a GraphFile,
+    pub(super) options: &'a StoreOptions,
+    pub(super) new_dir: &'a DirPath,
+    pub(super) created: &'static str,
+}
+
+impl ForkSource<'_> {
+    /// Writes `graph` (the forked state, a whole graph or a layer over its base) as the first
+    /// snapshot of a new store with a new lineage whose parent is the graph's at its position;
+    /// `marks` lists the marks of the forked history up to that position (before anything is
+    /// written: a fork that cannot report them writes nothing). The blobs the new snapshot
+    /// references are carried; a layer store's copy (`layer`) skips the blobs the source does
+    /// not hold, which are the base's (format spec 7.5), and lists no models.
+    pub(super) fn write<S: PersistentStorage>(
+        &self,
+        mut graph: S,
+        marks: impl FnOnce(&DirPath, u64) -> Result<Vec<Mark>, PersistError>,
+        layer: bool,
+    ) -> Result<ForkReport, PersistError> {
+        let branched_at = crate::graph::GraphStorage::last_commit_seq(&graph)?;
+        let marks_not_carried = marks(self.dir, branched_at)?;
+        let parent_id = graph.graph_id();
+        graph.set_graph_id(crate::value::uuid::new_v7())?;
+        let mut lineage = vec![LineageEntry {
+            graph_id: graph.graph_id(),
+            branched_at,
+            time: now(),
+        }];
+        lineage.extend(self.parent.lineage.iter().copied());
+        let existed = self.new_dir.exists();
+        StoreCore::create_lineage(
+            self.new_dir,
+            &graph,
+            lineage,
+            WriteOptions::new().with_parent(parent_id, branched_at),
+            self.options,
+            (self.created, Some((self.parent.store_id, branched_at))),
+        )?;
+        drop(graph);
+        models::carry_into_new(self.dir, self.new_dir, existed)?;
+        let (blobs, blobs_not_carried) =
+            blobs::carry_state_as(self.dir, self.new_dir, false, layer)
+                .inspect_err(|_| files::undo_new_dir(self.new_dir, existed))?;
+        // A layer store keeps no model: the model definitions of its catalog are the base's.
+        let models = if layer {
+            Vec::new()
+        } else {
+            model_catalog::infos_in_files(self.new_dir)?
+        };
+        let (_, path) = list_snapshots(self.new_dir)?.pop().ok_or_else(|| {
+            PersistError::store(
+                "fork the store",
+                StoreFailure::ChangedConcurrently,
+                "the new store has no snapshot",
+            )
+        })?;
+        Ok(ForkReport {
+            snapshot: read_listing(&path)?,
+            marks_not_carried,
+            models,
+            blobs,
+            blobs_not_carried,
+        })
+    }
+}
+
+/// The identity of `base`, which a layer store records ([`LayerBase::base_ref`](crate::graph::LayerBase::base_ref)).
+fn base_identity(base: &crate::graph::LayerBase) -> Result<crate::graph::BaseRef, PersistError> {
+    base.base_ref().copied().ok_or_else(|| {
+        PersistError::Graph(crate::error::GraphError::unsupported(
+            "a layer store over a base without an identity",
+        ))
+    })
+}
+
 impl StoreCore {
     /// [`Store::open_backup`] with the graph `maker` builds.
     fn open_backup_at(
@@ -1890,7 +2343,8 @@ impl StoreCore {
     ) -> Result<StoreCore, PersistError> {
         let started = web_time::Instant::now();
         maker.check()?;
-        files::refuse_other_version(&dir)?;
+        // A backup of a layer store opens over its base only (format spec 7.5).
+        files::refuse_other_version_as(&dir, maker.store_kind())?;
         let graph_file = read_graph_file(&dir)?.file;
         guard_version(&dir, graph_file.version)?;
         let Some(marker) = graph_file.backup else {
@@ -1901,8 +2355,13 @@ impl StoreCore {
                     .into(),
             });
         };
-        let plan = Self::load_plan_at(&dir, RecoveryTarget::Latest, &options.read)?;
-        let graph = maker.empty();
+        let plan = Self::load_plan_at(
+            &dir,
+            RecoveryTarget::Latest,
+            &options.read,
+            maker.store_kind(),
+        )?;
+        let graph = maker.empty()?;
         let recovered = {
             let mut live = graph.write();
             let recovered = live.reload(&plan)?;
@@ -1922,17 +2381,22 @@ impl StoreCore {
         };
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
-        let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
-        let models = model_catalog::check_at_open(
-            &dir,
-            definitions,
-            schema.as_ref(),
-            &model_catalog::OpenCheck {
-                unchecked: false,
-                journal_writable: false,
-                instance_name: None,
-            },
-        )?;
+        // A layer store keeps no model: its graph serves the base's (see `open_at`).
+        let models = if maker.layer().is_some() {
+            model_catalog::ModelsAtOpen::none()
+        } else {
+            let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
+            model_catalog::check_at_open(
+                &dir,
+                definitions,
+                schema.as_ref(),
+                &model_catalog::OpenCheck {
+                    unchecked: false,
+                    journal_writable: false,
+                    instance_name: None,
+                },
+            )?
+        };
         let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let system_journal = open_system_journal(&dir, &options, &graph, false);
         models.finish(&*graph, &system_journal, false)?;
@@ -1956,6 +2420,7 @@ impl StoreCore {
             attic_blobs: Default::default(),
             operations: parking_lot::RwLock::new(()),
             system_journal,
+            layer: maker.layer().cloned(),
         });
         register_memory(&shared);
         shared.journal_opened(&report, started, true);
@@ -1982,6 +2447,18 @@ impl StoreCore {
         prepare_new_dir(dir)?;
         let result = (|| {
             let (_, fixed) = snapshot_dir::import_packed(dir, packed)?;
+            // A layer snapshot (format spec 7.5) does not become a plain store, and a layer
+            // store from a `.gsnap` is not supported yet: refused before GRAPH is written, the
+            // new directory removed.
+            if layer_base_in(dir)?.is_some() {
+                return Err(PersistError::store(
+                    "create a store from the packed snapshot",
+                    StoreFailure::LayerStore,
+                    "the packed snapshot is a layer snapshot (it holds only a layer's changes \
+                     to its base): read it over its base with persist::read_layer_snapshot; a \
+                     layer store from a .gsnap is not supported yet",
+                ));
+            }
             system_journal::record_created(dir, "packed", None, options.instance_name.as_deref());
             write_graph_file(
                 dir,
@@ -2080,8 +2557,11 @@ impl StoreCore {
         let started = web_time::Instant::now();
         maker.check()?;
         // A newer (or older) format is refused before the lock and before any file is read
-        // as this version's (format spec 15): never damage, never maintenance mode.
-        files::refuse_other_version(&dir)?;
+        // as this version's (format spec 15): never damage, never maintenance mode. So is a
+        // layer store opened as a plain one, a plain store opened as a layer, and a layer
+        // store over another base (format spec 7.5): checked from the manifests.
+        files::refuse_other_version_as(&dir, maker.store_kind())?;
+        let layer = maker.layer().cloned();
         if !dir.join(files::GRAPH_FILE).exists() && !dir.join(files::GRAPH_COPY).exists() {
             return Err(PersistError::NotAStore {
                 path: dir.display(),
@@ -2149,7 +2629,7 @@ impl StoreCore {
             }
         }
 
-        let graph = maker.empty();
+        let graph = maker.empty()?;
         let loaded = match load_latest(
             &dir,
             &options,
@@ -2169,24 +2649,31 @@ impl StoreCore {
         graph.clock().raise(loaded.clock_floor);
         // The models the schema needs are loaded now: a store whose needed model is missing,
         // damaged or does not fit does not open (format spec 4.5).
-        let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
-        let models = model_catalog::check_at_open(
-            &dir,
-            definitions,
-            schema.as_ref(),
-            &model_catalog::OpenCheck {
-                unchecked: false,
-                journal_writable: loaded.read_only.is_none(),
-                instance_name: options.instance_name.as_deref(),
-            },
-        )?;
+        let models = if layer.is_some() {
+            // A layer store keeps no model: the model definitions of the layer's catalog are
+            // the base's, served by the base's registry, which the layer graph shares
+            // (`GraphMaker::empty` of `LayerGraphs`).
+            model_catalog::ModelsAtOpen::none()
+        } else {
+            let (definitions, schema) = model_catalog::live_catalog(&*graph)?;
+            model_catalog::check_at_open(
+                &dir,
+                definitions,
+                schema.as_ref(),
+                &model_catalog::OpenCheck {
+                    unchecked: false,
+                    journal_writable: loaded.read_only.is_none(),
+                    instance_name: options.instance_name.as_deref(),
+                },
+            )?
+        };
         if let Some(reason) = loaded
             .read_only
             .clone()
             .or_else(|| models.read_only.clone())
         {
             return Self::open_read_only_mode(
-                dir, lock, options, graph_file, report, graph, reason, started, models,
+                dir, lock, options, graph_file, report, graph, reason, started, models, layer,
             );
         }
         let marks = sync_marks(&dir, &loaded, &options, &mut report)?;
@@ -2263,6 +2750,7 @@ impl StoreCore {
             attic_blobs: Default::default(),
             operations: parking_lot::RwLock::new(()),
             system_journal,
+            layer,
         });
         register_memory(&shared);
         let thread = if shared.options.checkpoint_after_bytes > 0 {
@@ -2303,6 +2791,7 @@ impl StoreCore {
         reason: String,
         started: web_time::Instant,
         models: model_catalog::ModelsAtOpen,
+        layer: Option<crate::graph::LayerBase>,
     ) -> Result<StoreCore, PersistError> {
         graph.write().register_guard_hook(Box::new(ReadOnlyHook {
             path: dir.display(),
@@ -2340,6 +2829,7 @@ impl StoreCore {
             attic_blobs: Default::default(),
             operations: parking_lot::RwLock::new(()),
             system_journal,
+            layer,
         });
         register_memory(&shared);
         shared.journal_opened(&report, started, true);
@@ -2377,6 +2867,12 @@ impl StoreCore {
         trigger: PersistError,
         maker: &dyn GraphMaker,
     ) -> Result<StoreCore, PersistError> {
+        // Maintenance mode is not supported for layer stores yet (a salvage works on whole
+        // graphs): the damage refuses the open, nothing is written.
+        if maker.layer().is_some() {
+            drop(lock);
+            return Err(trigger);
+        }
         let salvage = damage::salvage(&dir, &options.read)?;
         let mut damage = salvage.report;
         damage
@@ -2434,6 +2930,7 @@ impl StoreCore {
             attic_blobs: Default::default(),
             operations: parking_lot::RwLock::new(()),
             system_journal,
+            layer: None,
         });
         register_memory(&shared);
         shared.journal_opened(&report, web_time::Instant::now(), true);
@@ -2482,8 +2979,20 @@ impl StoreCore {
         new_dir: &DirPath,
         options: &RepairOptions,
     ) -> Result<RepairReport, PersistError> {
-        // Never a lossy repair of files a newer Graphersal wrote (format spec 15).
-        files::refuse_newer_version(dir)?;
+        // Never a lossy repair of files a newer Graphersal wrote (format spec 15). A layer
+        // store is not repaired (format spec 7.5): refused, saying why.
+        if let Err(err) = files::refuse_newer_version(dir) {
+            return Err(match (&err, layer_base_in(dir)) {
+                (
+                    PersistError::Store {
+                        cause: StoreFailure::LayerStore,
+                        ..
+                    },
+                    Ok(Some(base)),
+                ) => files::layer_store_not_repaired(dir, &base),
+                _ => err,
+            });
+        }
         // A store of a released older format is read as upgraded (format spec 15.1): the
         // repaired store is of the current format.
         let models_from = dir.clone();
@@ -2611,12 +3120,33 @@ impl StoreCore {
     pub fn read_only_at<S: PersistentStorage>(
         &self,
         target: RecoveryTarget,
-        empty: S,
+        mut empty: S,
     ) -> Result<Recovered<S>, PersistError> {
-        let mut recovered =
-            Self::load_plan_at(&self.shared.dir, target, &self.shared.options.read)?
-                .run_in(empty)?;
-        recovered.models = model_catalog::models_of_view(&self.shared.dir, &recovered.graph)?;
+        // A layer store (format spec 7.5): the view is a layer over the store's base (the
+        // `S::default()` the caller made is a layer over an empty base), serving the base's
+        // models.
+        if let Some(base) = &self.shared.layer {
+            let any: &mut dyn std::any::Any = &mut empty;
+            let Some(layer) = any.downcast_mut::<crate::graph::LayeredGraph>() else {
+                return Err(files::layer_store_refused(
+                    &self.shared.dir,
+                    &base_identity(base)?,
+                    "load a view of the store into another storage type",
+                ));
+            };
+            *layer = crate::graph::LayeredGraph::over_base(base)?;
+        }
+        let mut recovered = Self::load_plan_at(
+            &self.shared.dir,
+            target,
+            &self.shared.options.read,
+            self.store_kind(),
+        )?
+        .run_in(empty)?;
+        recovered.models = match &self.shared.layer {
+            Some(base) => base.models(),
+            None => model_catalog::models_of_view(&self.shared.dir, &recovered.graph)?,
+        };
         // A view of the past keeps the instance floor (every time the files and this instance
         // wrote), not the target's commit time.
         if let Some(clock) = recovered.graph.commit_clock()? {
@@ -2630,7 +3160,7 @@ impl StoreCore {
         target: RecoveryTarget,
         read: &ReadOptions,
     ) -> Result<Recovered, PersistError> {
-        Self::load_plan_at(dir, target, read)?.run()
+        Self::load_plan_at(dir, target, read, files::StoreKind::Plain)?.run()
     }
 
     /// What [`StoreCore::load_at`] loads: the nearest snapshot at or before `target` and the
@@ -2639,8 +3169,9 @@ impl StoreCore {
         dir: &DirPath,
         target: RecoveryTarget,
         read: &ReadOptions,
+        kind: files::StoreKind,
     ) -> Result<LoadPlan, PersistError> {
-        files::refuse_other_version(dir)?;
+        files::refuse_other_version_as(dir, kind)?;
         let graph_file = read_graph_file(dir)?.file;
         guard_version(dir, graph_file.version)?;
         let not_reached = |reason: String| PersistError::TargetNotReached {
@@ -2803,7 +3334,10 @@ impl StoreCore {
             count_by_kind(self.shared.graph.read().definition_kinds()?.into_iter());
         info.definitions = info.definitions_by_kind.values().sum();
         info.schema_models = self.shared.graph.read().schema_models()?;
-        info.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)?;
+        // A layer store keeps no model: the model definitions of its catalog are the base's.
+        if self.shared.layer.is_none() {
+            info.models = model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)?;
+        }
         info.default_model = info
             .models
             .iter()
@@ -2837,58 +3371,45 @@ impl StoreCore {
             &self.shared.dir,
             target,
             &DirPath::root(new_dir.into_store_dir()),
+            self.shared.layer.as_ref(),
         )
     }
 
+    /// The fork of the store in `dir` at `target` into `new_dir`: a plain store (`layer`
+    /// `None`), or a layer store over `layer`, whose copy is a layer store over the same base
+    /// (format spec 7.5; another base: [`PersistError::LayerBaseMismatch`], nothing written).
     fn fork_at(
         dir: &DirPath,
         target: RecoveryTarget,
         new_dir: &DirPath,
+        layer: Option<&crate::graph::LayerBase>,
     ) -> Result<ForkReport, PersistError> {
-        files::refuse_other_version(dir)?;
+        let kind = match layer {
+            Some(base) => files::StoreKind::Layer(base_identity(base)?),
+            None => files::StoreKind::Plain,
+        };
+        files::refuse_other_version_as(dir, kind)?;
         let parent = read_graph_file(dir)?.file;
         let options = StoreOptions::new()
             .with_chunk_bytes(parent.chunk_bytes)
             .with_damage_policy(parent.damage_policy);
-        let recovered = Self::load_at(dir, target, &options.read)?;
-        let branched_at = recovered.graph.last_commit_seq();
-        // Listed before anything is written: a fork that cannot report them writes nothing.
-        let marks_not_carried = marks_up_to(dir, branched_at)?;
-        let parent_id = recovered.graph.graph_id();
-        let graph = recovered.graph.with_graph_id(crate::value::uuid::new_v7());
-        let mut lineage = vec![LineageEntry {
-            graph_id: graph.graph_id(),
-            branched_at,
-            time: now(),
-        }];
-        lineage.extend(parent.lineage.iter().copied());
-        let existed = new_dir.exists();
-        Self::create_lineage(
+        let plan = Self::load_plan_at(dir, target, &options.read, kind)?;
+        let forked = ForkSource {
+            dir,
+            parent: &parent,
+            options: &options,
             new_dir,
-            &graph,
-            lineage,
-            WriteOptions::new().with_parent(parent_id, branched_at),
-            &options,
-            ("fork", Some((parent.store_id, branched_at))),
-        )?;
-        models::carry_into_new(dir, new_dir, existed)?;
-        let (blobs, blobs_not_carried) = blobs::carry_state(dir, new_dir, false)
-            .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
-        let models = model_catalog::infos_in_files(new_dir)?;
-        let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
-            PersistError::store(
-                "fork the store",
-                StoreFailure::ChangedConcurrently,
-                "the new store has no snapshot",
-            )
-        })?;
-        Ok(ForkReport {
-            snapshot: read_listing(&path)?,
-            marks_not_carried,
-            models,
-            blobs,
-            blobs_not_carried,
-        })
+            created: "fork",
+        };
+        match layer {
+            Some(base) => forked.write(
+                plan.run_in(crate::graph::LayeredGraph::over_base(base)?)?
+                    .graph,
+                marks_up_to,
+                true,
+            ),
+            None => forked.write(plan.run()?.graph, marks_up_to, false),
+        }
     }
 
     pub fn prune(&self, up_to: u64) -> Result<PruneReport, PersistError> {
@@ -2984,7 +3505,12 @@ impl StoreCore {
     pub fn verify(&self) -> Result<VerifyReport, PersistError> {
         let _quiet = self.shared.operations.read();
         let _pin = self.pin_files("verify the store")?;
-        let report = match maintenance::verify(&self.shared.dir, self.durable_position()) {
+        // A layer store's snapshots load over its base (format spec 7.5).
+        let kind = match &self.shared.layer {
+            Some(base) => maintenance::VerifyAs::Layer(base),
+            None => maintenance::VerifyAs::Plain,
+        };
+        let report = match maintenance::verify_as(&self.shared.dir, self.durable_position(), kind) {
             Ok(report) => report,
             // Both GRAPH copies unusable: damage of the open store's files too.
             Err(err @ PersistError::NotAStore { .. }) => {
@@ -3079,7 +3605,11 @@ impl StoreCore {
         let result = self.pin_files("back up the store").and_then(|_pin| {
             backup::backup_into(&self.shared.dir, self.durable_position(), &target, mode).map(
                 |mut report| {
-                    report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+                    // A layer store keeps no model (its catalog's models are the base's).
+                    if self.shared.layer.is_none() {
+                        report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+                    }
+                    report.of_layer(self.layer_ref());
                     report
                 },
             )
@@ -3141,7 +3671,10 @@ impl StoreCore {
             graph.backup_from_memory(&self.shared.dir, &graph_file, &write, &target, mode)
         }
         .map(|mut report| {
-            report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+            if self.shared.layer.is_none() {
+                report.models = model_catalog::infos_in_files(&target).unwrap_or_default();
+            }
+            report.of_layer(self.layer_ref());
             report
         });
         self.journal_backup(&result, &target.display(), "memory");
@@ -3232,11 +3765,12 @@ impl StoreCore {
                 models,
             )
             .map(|mut report| {
-                if models == ModelCopy::Include {
+                if models == ModelCopy::Include && self.shared.layer.is_none() {
                     report.models =
                         model_catalog::infos_live(&self.shared.dir, &*self.shared.graph)
                             .unwrap_or_default();
                 }
+                report.of_layer(self.layer_ref());
                 report
             })
         });
@@ -3285,9 +3819,7 @@ impl StoreCore {
         let target = match target {
             RecoveryTarget::CommitSeq(seq) => seq,
             RecoveryTarget::Latest => current,
-            other => Self::load_at(dir, other, &self.shared.options.read)?
-                .graph
-                .last_commit_seq(),
+            other => self.commit_at(other)?,
         };
         if target >= current {
             return Err(PersistError::store(
@@ -3419,6 +3951,7 @@ impl StoreCore {
             &self.shared.dir,
             id,
             &DirPath::root(new_dir.into_store_dir()),
+            self.shared.layer.as_ref(),
         )
     }
 
@@ -3481,6 +4014,40 @@ impl StoreCore {
         if let Ok(mut stopped) = self.shared.stopped.lock() {
             *stopped = Some(reason);
         }
+    }
+
+    /// The commit the store's state at `target` is at (a rollback's target given as a time or
+    /// a mark): loaded read-only, a layer store's over its base.
+    fn commit_at(&self, target: RecoveryTarget) -> Result<u64, PersistError> {
+        let plan = Self::load_plan_at(
+            &self.shared.dir,
+            target,
+            &self.shared.options.read,
+            self.store_kind(),
+        )?;
+        match &self.shared.layer {
+            Some(base) => Ok(crate::graph::GraphStorage::last_commit_seq(
+                &plan
+                    .run_in(crate::graph::LayeredGraph::over_base(base)?)?
+                    .graph,
+            )?),
+            None => Ok(plan.run()?.graph.last_commit_seq()),
+        }
+    }
+
+    /// The kind of the open store ([`files::StoreKind`]): a layer store over its base, else
+    /// plain.
+    fn store_kind(&self) -> files::StoreKind {
+        self.shared.store_kind()
+    }
+
+    /// The base identity of a layer store (`None`: a plain store).
+    fn layer_ref(&self) -> Option<crate::graph::BaseRef> {
+        self.shared
+            .layer
+            .as_ref()
+            .and_then(|base| base.base_ref())
+            .copied()
     }
 
     fn writable(&self, operation: &'static str) -> Result<(), PersistError> {
@@ -3595,7 +4162,11 @@ impl StoreCore {
             self.shared.durable.clone(),
         )?;
         self.shared.wal.rotate.store(false, Ordering::Release);
-        self.refresh_models(graph)?;
+        // A layer store keeps no model: its graph serves the base's registry, which the layer's
+        // catalog never rebuilds (format spec 7.5).
+        if self.shared.layer.is_none() {
+            self.refresh_models(graph)?;
+        }
         Ok(graph_id)
     }
 
@@ -4096,7 +4667,9 @@ impl Shared {
         }
         check_snapshot_name(&existing, name)?;
         let write = checkpoint_write_options(&self.options, self.chunk_bytes, name);
-        let merged = if self.options.checkpoint_merge_bytes == 0 {
+        // A layer store encodes the loaded layer (its delta only, format spec 7.5): a merge
+        // works on whole-graph snapshots.
+        let merged = if self.options.checkpoint_merge_bytes == 0 || self.layer.is_some() {
             merge::Merged::TooLarge { wal_bytes: 0 }
         } else {
             let graph_file = self
@@ -4142,7 +4715,9 @@ impl Shared {
                 }
                 self.checkpoint_from_graph(&write, name)?
             }
-            merge::Merged::NoBase => self.checkpoint_from_graph(&write, name)?,
+            merge::Merged::NoBase | merge::Merged::Layer => {
+                self.checkpoint_from_graph(&write, name)?
+            }
         };
         if !report.written {
             return Ok(report);
@@ -4224,6 +4799,16 @@ impl Shared {
 /// processes within about a second, independent of the system job `stats_flush`. It writes only
 /// while no other operation of the store runs (`Shared::operations`), retrying every 50 ms,
 /// and ends when the store closes or its journal stops writing.
+impl Shared {
+    /// The kind of the store ([`files::StoreKind`]): a layer store over its base, else plain.
+    fn store_kind(&self) -> files::StoreKind {
+        match self.layer.as_ref().and_then(|base| base.base_ref()) {
+            Some(base) => files::StoreKind::Layer(*base),
+            None => files::StoreKind::Plain,
+        }
+    }
+}
+
 fn spawn_journal_flusher(shared: &Arc<Shared>) -> Option<std::thread::JoinHandle<()>> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -5540,7 +6125,38 @@ fn info_of(
             BlobCount::Unreferenced => blobs::usage(dir, &file.chain(), attic)?,
             BlobCount::Listing => blobs::listing_usage(dir)?,
         },
+        layer_base: layer_base_in(dir)?,
     })
+}
+
+/// The base the newest snapshot of the store in `dir` names when it is a layer snapshot
+/// (format spec 7.5: a layer store); `None` for a plain store or one without a snapshot.
+pub(super) fn layer_base_in(dir: &DirPath) -> Result<Option<crate::graph::BaseRef>, PersistError> {
+    use super::manifest::{FIXED_BYTES, ManifestFixed};
+    let Some((_, path)) = list_snapshots(dir)?.pop() else {
+        return Ok(None);
+    };
+    // Only a manifest of file format version 5 is a layer manifest: the fixed part tells (the
+    // tail copy when the head is damaged); a plain store reads nothing more, and a damaged
+    // manifest is left to the operations that load it.
+    let file = path.join(snapshot_dir::MANIFEST_FILE);
+    let version = |at: u64| {
+        file.read_range(at, FIXED_BYTES)
+            .ok()
+            .and_then(|bytes| ManifestFixed::decode(&bytes).ok())
+            .map(|fixed| fixed.version.0)
+    };
+    let tail = file
+        .len()
+        .ok()
+        .and_then(|len| len.checked_sub(FIXED_BYTES as u64));
+    let layer = version(0)
+        .or_else(|| tail.and_then(version))
+        .is_some_and(|v| v == super::codec::LAYER_FORMAT_VERSION);
+    if !layer {
+        return Ok(None);
+    }
+    super::layer::layer_row(&read_manifest(&path)?.1.segments)
 }
 
 fn export_packed_from(
@@ -5564,13 +6180,15 @@ fn export_packed_from(
             },
         ));
     };
+    // A layer snapshot (format spec 7.5) never carries model blobs: they stay with the base.
+    let layer = read_listing(path)?.layer_base.is_some();
     let model_files = match models {
-        ModelCopy::Include => {
+        ModelCopy::Include if !layer => {
             let mut files = models::packed_files(dir)?.0;
             files.extend(blobs::packed_files(dir, path)?);
             files
         }
-        ModelCopy::Exclude => Vec::new(),
+        ModelCopy::Include | ModelCopy::Exclude => Vec::new(),
     };
     let mut reader = DirSnapshotReader::open_with_models(path, model_files)?;
     std::io::copy(&mut reader, &mut writer)
@@ -5589,7 +6207,8 @@ impl Store {
         writer: impl std::io::Write,
     ) -> Result<SnapshotInfo, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        // A layer store too (format spec 7.5): its snapshot is a layer snapshot.
+        files::refuse_other_version_as(&dir, files::StoreKind::Either)?;
         export_packed_from(&dir, commit_seq, writer, ModelCopy::Include)
     }
 
@@ -5601,7 +6220,8 @@ impl Store {
         models: ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        // A layer store too (format spec 7.5): its snapshot is a layer snapshot.
+        files::refuse_other_version_as(&dir, files::StoreKind::Either)?;
         export_packed_from(&dir, commit_seq, writer, models)
     }
 
@@ -5609,15 +6229,19 @@ impl Store {
     /// state in its files (states by the blobs' lengths: nothing is loaded).
     pub fn models_dir(dir: impl IntoStoreDir) -> Result<Vec<ModelInfo>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_other_version(&dir)?;
+        // A layer store keeps no model (its models are the base's): none listed.
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         read_graph_file(&dir)?;
+        if layer_base_in(&dir)?.is_some() {
+            return Ok(Vec::new());
+        }
         model_catalog::infos_in_files(&dir)
     }
 
     /// The snapshots of the store in `dir`, without a lock.
     pub fn snapshots_dir(dir: impl IntoStoreDir) -> Result<Vec<SnapshotInfo>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         list_snapshot_infos(&dir)
     }
 
@@ -5625,7 +6249,7 @@ impl Store {
     /// lock.
     pub fn marks_dir(dir: impl IntoStoreDir) -> Result<Vec<Mark>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         list_marks(&dir)
     }
 

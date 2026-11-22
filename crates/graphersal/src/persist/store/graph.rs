@@ -16,15 +16,15 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use super::backup::BackupMode;
-use super::files::{DirPath, GraphFile};
+use super::files::{self, DirPath, GraphFile};
 use super::maintenance::BackupReport;
 use super::snapshot_dir::{DirSnapshotReader, write_graph_snapshot};
 use super::wal_files::{WalWriter, open_segment_reader};
 use crate::error::GraphError;
 use crate::graph::hooks::{CommitHook, HookError, JournalHook, JournalSlot, Mark};
 use crate::graph::{
-    ChangeSet, CommitClock, DefinitionKind, Graph, GraphStorage, PersistentStorage, RollbackReason,
-    StorageCapabilities, TraversalGraph,
+    ChangeSet, CommitClock, DefinitionKind, Graph, GraphStorage, LayerBase, LayeredGraph,
+    PersistentStorage, RollbackReason, StorageCapabilities, TraversalGraph,
 };
 use crate::persist::error::{PersistError, StoreFailure};
 use crate::persist::journal::Journal;
@@ -312,17 +312,29 @@ pub(crate) trait GraphMaker {
         Ok(())
     }
     /// A new, empty graph.
-    fn empty(&self) -> Arc<dyn StoreGraph>;
+    fn empty(&self) -> Result<Arc<dyn StoreGraph>, PersistError>;
     /// A graph holding `graph` (the salvaged state of a damaged store).
     fn salvaged(&self, graph: TraversalGraph) -> Result<Arc<dyn StoreGraph>, PersistError>;
+    /// The base of the layer this maker builds (a layer store, format spec 7.5); `None`: a
+    /// whole graph (a plain store).
+    fn layer(&self) -> Option<&LayerBase> {
+        None
+    }
+    /// Which stores the graphs of this maker load ([`files::StoreKind`]).
+    fn store_kind(&self) -> files::StoreKind {
+        match self.layer().and_then(LayerBase::base_ref) {
+            Some(base) => files::StoreKind::Layer(*base),
+            None => files::StoreKind::Plain,
+        }
+    }
 }
 
 /// The [`GraphMaker`] of a `Store` over [`TraversalGraph`].
 pub(crate) struct TraversalGraphs;
 
 impl GraphMaker for TraversalGraphs {
-    fn empty(&self) -> Arc<dyn StoreGraph> {
-        Arc::new(Graph::new_persistent(TraversalGraph::new()))
+    fn empty(&self) -> Result<Arc<dyn StoreGraph>, PersistError> {
+        Ok(Arc::new(Graph::new_persistent(TraversalGraph::new())))
     }
 
     fn salvaged(&self, graph: TraversalGraph) -> Result<Arc<dyn StoreGraph>, PersistError> {
@@ -343,8 +355,8 @@ where
         require_journal_capabilities((self.0)().capabilities()?)
     }
 
-    fn empty(&self) -> Arc<dyn StoreGraph> {
-        Arc::new(Graph::new_persistent((self.0)()))
+    fn empty(&self) -> Result<Arc<dyn StoreGraph>, PersistError> {
+        Ok(Arc::new(Graph::new_persistent((self.0)())))
     }
 
     /// Copies the salvaged state into a new `S`: written as a packed snapshot (no
@@ -373,6 +385,39 @@ where
             &mut storage,
         )?;
         Ok(Arc::new(Graph::new_persistent(storage)))
+    }
+}
+
+/// The [`GraphMaker`] of a layer store (`Store<LayeredGraph>`, format spec 7.5): empty layers
+/// over the base, sharing its embedding models ([`LayerBase::share`]).
+pub(crate) struct LayerGraphs(pub(crate) LayerBase);
+
+impl GraphMaker for LayerGraphs {
+    /// The base can carry a layer ([`LayeredGraph::over_base`]) and the layer can be
+    /// journaled.
+    fn check(&self) -> Result<(), PersistError> {
+        let layer = LayeredGraph::over_base(&self.0)?;
+        require_journal_capabilities(layer.capabilities()?)
+    }
+
+    fn empty(&self) -> Result<Arc<dyn StoreGraph>, PersistError> {
+        let layer = LayeredGraph::over_base(&self.0)?;
+        Ok(Arc::new(self.0.share_persistent(layer)))
+    }
+
+    /// Maintenance mode is not supported for layer stores yet: a salvage works on whole
+    /// graphs. The open refuses with the damage before it comes here; this is the backstop.
+    fn salvaged(&self, _graph: TraversalGraph) -> Result<Arc<dyn StoreGraph>, PersistError> {
+        Err(PersistError::store(
+            "open the layer store in maintenance mode",
+            StoreFailure::LayerStore,
+            "a damaged layer store is not salvaged: maintenance mode is not supported for \
+             layer stores yet",
+        ))
+    }
+
+    fn layer(&self) -> Option<&LayerBase> {
+        Some(&self.0)
     }
 }
 

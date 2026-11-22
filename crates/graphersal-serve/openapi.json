@@ -373,12 +373,97 @@
                   },
                   "path_depth": {
                     "type": "integer"
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "delta"
+                    ],
+                    "description": "`delta`: a layered graph's own elements only, the base as `shared_bytes`; the whole graph for any other storage (default `all`)."
                   }
                 }
               }
             }
           },
           "description": "A spec; `{}` for a full walk with at most 500 rows per list (the rest counted in `rows_omitted`/`labels_omitted` with their bytes)."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/layer/diff": {
+      "post": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Layer diff",
+        "description": "What a layered graph (`--layer`, `--layer-store`) changed against its base: added, removed (with the base's values) and modified (base value -> layer value per property) vertices and edges, the form of the DSL's `g.layer_diff()` (snake_case keys). An empty diff on a graph without layers. Read-only. `{ok: true, diff: {added, removed, modified, truncated}}` or `{ok: false, error}`.",
+        "operationId": "postApiLayerDiff",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kinds": {
+                    "description": "`vertex`, `edge` or a non-empty list of them (default both).",
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "vertex",
+                          "edge"
+                        ]
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "vertex",
+                            "edge"
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  "labels": {
+                    "description": "A label or a list of labels: an element matches with any label of its base or layer label set (`[]` matches nothing).",
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    ]
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The entries of the three lists together; `truncated` says when more exist."
+                  }
+                }
+              }
+            }
+          },
+          "description": "A spec; `{}` for the whole diff."
         },
         "responses": {
           "200": {

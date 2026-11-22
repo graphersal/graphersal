@@ -118,10 +118,11 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "memory",
-        "[max_elements]",
+        "[delta] [max_elements]",
         "the process memory bar against its ceiling (memory.limit), then where the graph's \
          memory goes per label and property (g.memory_report(): the 500 largest rows per list, \
-         the rest counted); with a number: sampled",
+         the rest counted); with delta: only a layer's own elements (the base counted as \
+         shared); with a number: sampled",
     ),
     (
         "schema",
@@ -137,12 +138,12 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("exit", "", "close the graph and leave the shell"),
 ];
 
-/// The answer of `/memory [max_elements]`: the process memory bar
+/// The answer of `/memory [delta] [max_elements]`: the process memory bar
 /// ([`graphersal_session::process::MemoryBar::text`], 80 columns: the process against its
 /// ceiling, the graph's segments and the process's components: models loaded in the process, a
 /// store, the engine), a blank line,
 /// then [`memory_report`]. An invalid argument answers only the usage line.
-fn memory_answer(graph: &graphersal::storage::Graph, args: &str) -> String {
+fn memory_answer(graph: &dyn graphersal_session::storage::SessionGraph, args: &str) -> String {
     let report = memory_report(graph, args);
     if report.starts_with("Usage: /memory") {
         return report;
@@ -162,15 +163,28 @@ fn memory_answer(graph: &graphersal::storage::Graph, args: &str) -> String {
     }
 }
 
-/// The text of `/memory [max_elements]`'s report: the memory report of `graph`, sampled when a
-/// number is given.
-fn memory_report(graph: &graphersal::storage::Graph, args: &str) -> String {
+/// The text of `/memory [delta] [max_elements]`'s report: the memory report of `graph`, of a
+/// scope when one is named (`all`, `delta`: `MemoryReportScope::from_name`), sampled when a
+/// number is given; the arguments in any order, each at most once.
+fn memory_report(graph: &dyn graphersal_session::storage::SessionGraph, args: &str) -> String {
+    const USAGE: &str = "Usage: /memory [delta] [max_elements] (delta: only a layer's own \
+                         elements; a positive number samples)";
     let mut request = graphersal::storage::MemoryReportRequest::new();
-    let args = args.trim();
-    if !args.is_empty() {
-        match args.parse::<u64>() {
-            Ok(n) if n > 0 => request = request.with_max_elements(n),
-            _ => return "Usage: /memory [max_elements] (a positive number samples)".to_string(),
+    let (mut scoped, mut sampled) = (false, false);
+    for arg in args.split_whitespace() {
+        if let Some(scope) = graphersal::storage::MemoryReportScope::from_name(arg)
+            && !scoped
+        {
+            request = request.with_scope(scope);
+            scoped = true;
+            continue;
+        }
+        match arg.parse::<u64>() {
+            Ok(n) if n > 0 && !sampled => {
+                request = request.with_max_elements(n);
+                sampled = true;
+            }
+            _ => return USAGE.to_string(),
         }
     }
     match graphersal::storage::AnyGraph::memory_report(graph, &request) {
@@ -181,7 +195,7 @@ fn memory_report(graph: &graphersal::storage::Graph, args: &str) -> String {
 
 /// The text of `/schema [label ...]`: the schema summary of `graph`, the named labels in
 /// detail when some are given.
-fn schema_summary(graph: &graphersal::storage::Graph, args: &str) -> String {
+fn schema_summary(graph: &dyn graphersal_session::storage::SessionGraph, args: &str) -> String {
     let labels: Vec<&str> = args.split_whitespace().collect();
     let request = graphersal::schema::SchemaSummaryRequest::new().with_labels(labels);
     match graphersal::storage::AnyGraph::schema_summary(graph, &request) {
@@ -190,9 +204,36 @@ fn schema_summary(graph: &graphersal::storage::Graph, args: &str) -> String {
     }
 }
 
+/// A graph the REPL's slash commands read: a session graph, behind an `Arc` or not.
+trait ReplGraph {
+    /// The graph as the session holds it.
+    fn session_graph(&self) -> &dyn graphersal_session::storage::SessionGraph;
+}
+
+impl<S> ReplGraph for graphersal::storage::Graph<S>
+where
+    S: graphersal::storage::GraphStorage + Default + Send + Sync + 'static,
+{
+    fn session_graph(&self) -> &dyn graphersal_session::storage::SessionGraph {
+        self
+    }
+}
+
+impl ReplGraph for dyn graphersal_session::storage::SessionGraph {
+    fn session_graph(&self) -> &dyn graphersal_session::storage::SessionGraph {
+        self
+    }
+}
+
+impl<T: ReplGraph + ?Sized> ReplGraph for std::sync::Arc<T> {
+    fn session_graph(&self) -> &dyn graphersal_session::storage::SessionGraph {
+        (**self).session_graph()
+    }
+}
+
 /// The text of `/workload`: the workload statistics of `graph` (only a store's graph has them).
-fn workload_report(graph: &graphersal::storage::Graph) -> String {
-    let Some(stats) = graph.workload_stats() else {
+fn workload_report(graph: &(impl ReplGraph + ?Sized)) -> String {
+    let Some(stats) = graphersal::storage::AnyGraph::workload_stats(graph.session_graph()) else {
         return "No workload statistics: only a graph opened from a store (--graph <store>) \
                 counts its workload."
             .to_string();
@@ -821,12 +862,7 @@ impl Hinter for ReplHelper {
 /// keeps no history file.
 pub fn run(options: Cli) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
-    let opened = match options.graph.open(
-        options.create_store,
-        options.on_damage,
-        options.schema.as_ref(),
-        options.read_only,
-    ) {
+    let opened = match options.open_graph() {
         Ok(opened) => opened,
         Err(err) => {
             errln!("{}", err.message);
@@ -898,9 +934,9 @@ Use /exit or CTRL-D to exit; CTRL-C breaks the line input
                                 }
                                 exit(0);
                             }
-                            "memory" => outln!("{}", memory_answer(&arc_graph, args)),
-                            "workload" => outln!("{}", workload_report(&arc_graph)),
-                            "schema" => outln!("{}", schema_summary(&arc_graph, args)),
+                            "memory" => outln!("{}", memory_answer(&*arc_graph, args)),
+                            "workload" => outln!("{}", workload_report(&*arc_graph)),
+                            "schema" => outln!("{}", schema_summary(&*arc_graph, args)),
                             "help" => {
                                 if let Some(helper) = rl.helper() {
                                     outln!("{}", helper.catalogue.help(args, spelling));
@@ -1229,6 +1265,37 @@ mod tests {
         assert!(sampled.contains("Sampled:"), "{sampled}");
         assert!(memory_report(&graph, "lots").starts_with("Usage: /memory"));
         assert!(memory_report(&graph, "0").starts_with("Usage: /memory"));
+    }
+
+    #[test]
+    fn memory_takes_a_scope_in_any_order_with_a_sample() {
+        let base = std::sync::Arc::new(graphersal::TraversalGraph::tinkerpop_modern());
+        let mut layer = graphersal::storage::LayeredGraph::over(base).unwrap();
+        // More own elements than the sample of 3, so the sample shows.
+        for i in 0..10 {
+            graphersal::prelude::GraphTraversalSource::new(&mut layer)
+                .add_v(vec!["person"])
+                .property("name", format!("new{i}"))
+                .iterate()
+                .unwrap();
+        }
+        let graph = graphersal::storage::Graph::new(layer);
+        let delta = memory_report(&graph, "delta");
+        assert!(delta.contains("Scope: delta"), "{delta}");
+        assert!(!memory_report(&graph, "").contains("Scope: delta"));
+        assert!(!memory_report(&graph, "all").contains("Scope: delta"));
+        for args in ["delta 3", " 3  delta "] {
+            let text = memory_report(&graph, args);
+            assert!(text.contains("Scope: delta"), "{text}");
+            assert!(text.contains("Sampled:"), "{text}");
+        }
+        for args in ["delta delta", "3 3", "delta lots", "Delta"] {
+            assert!(
+                memory_report(&graph, args).starts_with("Usage: /memory [delta]"),
+                "{args}"
+            );
+        }
+        assert!(memory_answer(&graph, "delta").contains("Scope: delta"));
     }
 
     #[test]

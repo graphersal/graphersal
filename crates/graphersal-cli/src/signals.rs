@@ -13,7 +13,32 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use graphersal::exec::CancelToken;
-use graphersal::persist::Store;
+use graphersal::persist::{PersistError, Store};
+use graphersal::storage::PersistentStorage;
+
+/// A Store a signal closes: a plain store, or a layer store (`--layer-store`).
+pub trait ClosingStore: Send + Sync {
+    /// Where the store is ([`Store::location`]).
+    fn location(&self) -> String;
+    /// A clean close ([`Store::shutdown`]).
+    fn shutdown(&self) -> Result<(), PersistError>;
+    /// Whether it is in maintenance mode ([`Store::maintenance`]): a close leaves it as it was.
+    fn in_maintenance(&self) -> bool;
+}
+
+impl<S: PersistentStorage + Default> ClosingStore for Store<S> {
+    fn location(&self) -> String {
+        Store::location(self)
+    }
+
+    fn shutdown(&self) -> Result<(), PersistError> {
+        Store::shutdown(self)
+    }
+
+    fn in_maintenance(&self) -> bool {
+        self.maintenance().is_some()
+    }
+}
 
 /// The exit code after an interruption (128 + SIGINT, as shells report it).
 pub const EXIT_INTERRUPTED: i32 = 130;
@@ -24,7 +49,7 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 /// (the dev server tells `graphersal_serve::Server` it stops: `/readyz` 503).
 #[derive(Default)]
 pub struct Stop {
-    store: Mutex<Option<Arc<Store>>>,
+    store: Mutex<Option<Arc<dyn ClosingStore>>>,
     cancel: Mutex<Option<CancelToken>>,
     /// The graceful stop of the read-only serving mode ([`Stop::set_drain`]).
     drain: Mutex<Option<Drain>>,
@@ -41,7 +66,7 @@ pub type Drain = Arc<dyn Fn() + Send + Sync>;
 
 impl Stop {
     /// The Store a signal closes before the process exits.
-    pub fn set_store(&self, store: Arc<Store>) {
+    pub fn set_store(&self, store: Arc<dyn ClosingStore>) {
         if let Ok(mut slot) = self.store.lock() {
             *slot = Some(store);
         }
@@ -143,7 +168,7 @@ impl Stop {
                     store.location()
                 );
                 match store.shutdown() {
-                    Ok(()) if store.maintenance().is_some() => {
+                    Ok(()) if store.in_maintenance() => {
                         errln!(
                             "The store {} was left as it was (maintenance mode).",
                             store.location()
@@ -163,7 +188,11 @@ impl Stop {
 /// Installs the handler for `store`: the first signal cancels the running query (`cancel`),
 /// closes `store` and exits with `exit_code`; a second one exits with [`EXIT_INTERRUPTED`]
 /// immediately. Only one handler per process.
-pub fn close_store_on_signal(store: Arc<Store>, cancel: Option<CancelToken>, exit_code: i32) {
+pub fn close_store_on_signal(
+    store: Arc<dyn ClosingStore>,
+    cancel: Option<CancelToken>,
+    exit_code: i32,
+) {
     let stop = Arc::new(Stop::default());
     stop.set_store(store);
     if let Some(cancel) = cancel {

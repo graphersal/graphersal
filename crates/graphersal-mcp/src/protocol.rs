@@ -15,7 +15,9 @@ use crate::connection::Stream;
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
-use crate::sessions::{SessionKey, Sessions};
+use crate::sessions::{
+    MAX_SESSION_ROUTE_BYTES, SessionKey, Sessions, is_valid_session_route, session_route,
+};
 use crate::stats::{McpStats, Refusal};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
 use crate::transport::{McpRequest, McpResponse};
@@ -109,6 +111,16 @@ impl Mcp {
         self.sessions.is_signed()
     }
 
+    /// The route tag of the MCP session id `session_id` ([`crate::session_route`]), only when
+    /// this endpoint knows the id (signed by its key, or in its table): a forged or altered
+    /// route answers `None`. For a host whose graph resolver holds the endpoint (one shared
+    /// endpoint for its graphs); a resolver without it uses [`crate::session_route`], and the
+    /// endpoint refuses a forged id when it serves the request.
+    pub fn verified_session_route<'a>(&self, session_id: &'a str) -> Option<&'a str> {
+        let route = session_route(session_id)?;
+        self.sessions.knows(session_id).then_some(route)
+    }
+
     /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
     /// by [`McpConfig::with_flags`]). It replaces the whole configuration, including what
     /// `query_tools`, [`Mcp::with_operator_notes`] and [`Mcp::with_max_chars`] set before.
@@ -173,9 +185,10 @@ impl Mcp {
         &self.profile.config
     }
 
-    /// The instructions `initialize` answers under the default profile.
+    /// The instructions `initialize` answers under the default profile for a graph without
+    /// layers (on a layered graph `initialize` adds a note on the layer steps).
     pub fn instructions_text(&self) -> String {
-        instructions_of(&self.profile)
+        instructions_of(&self.profile, false)
     }
 
     /// The caller of the endpoint's tools.
@@ -569,7 +582,24 @@ impl Mcp {
         });
         let session = match peer.stream {
             None => {
-                let session = self.sessions.create(&client);
+                // The host's route tag pins the session to the graph it resolved (asked from
+                // host state, no job). An invalid one is the host's mistake: the session is
+                // refused rather than left unpinned (its later requests would follow an alias).
+                let route = peer.host.session_route();
+                if let Some(route) = &route
+                    && !is_valid_session_route(route)
+                {
+                    return Err((
+                        INTERNAL_ERROR,
+                        format!(
+                            "the server cannot start an MCP session: its session route tag \
+                             ({} bytes) is not 1 to {MAX_SESSION_ROUTE_BYTES} bytes of ASCII \
+                             letters, digits and . _ - @ / : + =",
+                            route.len()
+                        ),
+                    ));
+                }
+                let session = self.sessions.create_routed(&client, route.as_deref());
                 self.stats.record_initialize(&session);
                 Some(session)
             }
@@ -584,7 +614,11 @@ impl Mcp {
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }
-        let instructions = instructions_of(peer.profile);
+        let instructions = match &peer.profile.config.instructions {
+            // The operator's own text is answered as it is: no graph is asked.
+            Instructions::Replace(_) => instructions_of(peer.profile, false),
+            _ => instructions_of(peer.profile, peer.host.serves_layer()),
+        };
         let list_changed = peer.stream.is_some() && lists_change(peer.profile);
         Ok((
             json!({
@@ -715,12 +749,16 @@ fn lists_change(profile: &Profile) -> bool {
     profile.config.has_saved_query_tools()
 }
 
-/// The instructions `initialize` answers under `profile`.
-fn instructions_of(profile: &Profile) -> String {
+/// The instructions `initialize` answers under `profile`, with the note on the layer steps
+/// when the graph is `layered` (never added to an operator's replacing text).
+fn instructions_of(profile: &Profile, layered: bool) -> String {
     let mut instructions = match &profile.config.instructions {
         Instructions::Replace(text) => return text.clone(),
         Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
     };
+    if layered {
+        instructions.push_str(LAYER_NOTE);
+    }
     if profile.read_only {
         instructions.push_str(READ_ONLY_NOTE);
     }
@@ -903,6 +941,16 @@ Persistence \
 (checkpoints, history, views of past states) is the user's, in the browser: when the user opens \
 a read-only view of a past state, `graph_info` says so and writes are refused until they go \
 back to the live graph.";
+
+/// Added to the instructions when the served graph is a layer (and only then, so the
+/// instructions of a plain graph stay as they are).
+pub(crate) const LAYER_NOTE: &str = " This graph is a LAYER over a frozen base graph: writes \
+go to the layer and the base never changes; `graph_info` shows `layer` (the base's name and \
+identity, what the layer added, modified and removed, its own and the shared bytes). In a \
+query, `layer()` yields an element's origin (\"base\", \"added\" or \"modified\"), \
+`has_layer(\"added\", \"modified\")` keeps elements by origin, and `g.layer_diff()` lists \
+what the layer changed against its base (`#{kinds, labels, limit}`; base and layer values side \
+by side).";
 
 /// The heading above the `--mcp-instructions` text.
 const OPERATOR_HEADING: &str = "Notes from the operator of this server about this graph:";

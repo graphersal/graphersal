@@ -137,6 +137,19 @@ mod job_definition_tests;
 mod job_run_tests;
 mod journal_panic_tests;
 mod jpath_tests;
+mod layer_base_tests;
+mod layer_diff_tests;
+mod layer_steps_tests;
+mod layer_summary_tests;
+mod layered_graph_tests;
+mod layered_index_tests;
+mod layered_memory_report_tests;
+mod layered_persist_tests;
+mod layered_storage_tests;
+mod layered_store_tests;
+mod layered_unique_tests;
+mod layered_vector_tests;
+mod layered_visibility_tests;
 mod lazy_materialization_tests;
 mod list_function_tests;
 mod logical_map_tests;
@@ -185,6 +198,7 @@ mod property_cardinality_tests;
 mod property_element_by_token_tests;
 mod property_element_label_tests;
 mod property_handle_tests;
+mod property_index_declined_tests;
 mod property_index_each_tests;
 mod property_index_exact_tests;
 mod property_index_label_less_tests;
@@ -275,6 +289,11 @@ mod temporal_v3_format_tests;
 mod temporal_value_tests;
 mod temporal_zoned_tests;
 mod test_serde;
+// The storage selection of the TinkerPop / openCypher harnesses, included by path for its
+// layered setups (`layered_storage_tests.rs`: `layer_over`, `copy_into_delta`).
+#[allow(dead_code)]
+#[path = "../tinkerpop/harness/storage.rs"]
+mod test_storage;
 mod text_query_tests;
 mod timeout_tests;
 mod token_classes_tests;

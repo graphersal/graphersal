@@ -111,6 +111,52 @@ pub struct MemoryReportProgress {
     pub total: u64,
 }
 
+/// What a [`MemoryReport`] covers ([`MemoryReportRequest::with_scope`]).
+///
+/// - [`All`](Self::All) (the default): every element the graph shows. On a layered storage
+///   (a [`LayeredGraph`](crate::graph::LayeredGraph)) that is the base's elements too: the rows
+///   then describe the visible graph, while [`MemoryReport::structure`] stays the layer's own
+///   figures and the base is [`MemoryReport::shared_bytes`]. A report is thus the same on a
+///   layer as on the graph it shows, so queries stay portable.
+/// - [`Delta`](Self::Delta): only what the storage holds of its own. On a layered storage
+///   ([`StorageCapabilities::layered`](crate::graph::StorageCapabilities::layered)) the walk
+///   reads only the elements whose origin is not [`LayerOrigin::Base`](crate::graph::LayerOrigin)
+///   (added and modified ones: the delta's elements and images); the base elements the layer
+///   removed are counts in [`StructureMemory::removed_base_vertices`] and
+///   [`StructureMemory::removed_base_edges`], and the base is the one line
+///   [`MemoryReport::shared_bytes`]. A storage without layers owns all it shows, so `Delta`
+///   reports the whole graph there, exactly as `All` (no error: a query asking for the delta
+///   stays portable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum MemoryReportScope {
+    /// Every element the graph shows (the default).
+    #[default]
+    All,
+    /// Only the storage's own elements: a layer's delta (the whole graph for a storage without
+    /// layers).
+    Delta,
+}
+
+impl MemoryReportScope {
+    /// The name the query languages use: `"all"` or `"delta"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Delta => "delta",
+        }
+    }
+
+    /// The scope named `name` ([`Self::as_str`]), `None` for any other text.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "all" => Some(Self::All),
+            "delta" => Some(Self::Delta),
+            _ => None,
+        }
+    }
+}
+
 /// A progress callback of a [`MemoryReportRequest`].
 type ProgressFn = Arc<dyn Fn(MemoryReportProgress) + Send + Sync>;
 
@@ -122,13 +168,14 @@ type ProgressFn = Arc<dyn Fn(MemoryReportProgress) + Send + Sync>;
 /// [`MemoryReport::rows_omitted`] and [`MemoryReport::labels_omitted`] with their bytes).
 ///
 /// ```
-/// use graphersal::storage::MemoryReportRequest;
+/// use graphersal::storage::{MemoryReportRequest, MemoryReportScope};
 ///
 /// let request = MemoryReportRequest::new().with_max_elements(50_000).with_max_rows(20);
 /// assert_eq!(request.max_elements(), Some(50_000));
 /// assert_eq!(request.max_rows(), Some(20));
 /// assert_eq!(request.max_labels(), Some(MemoryReportRequest::DEFAULT_LIMIT));
 /// assert_eq!(request.path_depth(), 1);
+/// assert_eq!(request.scope(), MemoryReportScope::All);
 /// // Every row: no cap.
 /// let all = MemoryReportRequest::new().with_limit(usize::MAX);
 /// assert_eq!(all.max_rows(), Some(usize::MAX));
@@ -140,6 +187,7 @@ pub struct MemoryReportRequest {
     path_depth: u32,
     max_rows: Option<usize>,
     max_labels: Option<usize>,
+    scope: MemoryReportScope,
     cancel: Option<CancelToken>,
     progress: Option<ProgressFn>,
 }
@@ -152,6 +200,7 @@ impl Default for MemoryReportRequest {
             path_depth: 1,
             max_rows: Some(Self::DEFAULT_LIMIT),
             max_labels: Some(Self::DEFAULT_LIMIT),
+            scope: MemoryReportScope::All,
             cancel: None,
             progress: None,
         }
@@ -166,6 +215,7 @@ impl std::fmt::Debug for MemoryReportRequest {
             .field("path_depth", &self.path_depth)
             .field("max_rows", &self.max_rows)
             .field("max_labels", &self.max_labels)
+            .field("scope", &self.scope)
             .field("cancel", &self.cancel.is_some())
             .field("progress", &self.progress.is_some())
             .finish()
@@ -232,6 +282,14 @@ impl MemoryReportRequest {
         self
     }
 
+    /// What the report covers (default [`MemoryReportScope::All`]): every element the graph
+    /// shows, or only a layer's own elements ([`MemoryReportScope::Delta`]; the whole graph for
+    /// a storage without layers).
+    pub fn with_scope(mut self, scope: MemoryReportScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
     /// Stops the walk when `token` is cancelled (the report then fails with
     /// [`TraverserError::Cancelled`](crate::TraverserError::Cancelled)). Without a token the
     /// running thread's [`CancelToken::scope`] applies.
@@ -272,6 +330,11 @@ impl MemoryReportRequest {
     /// The label row cap (`Some(DEFAULT_LIMIT)` unless set).
     pub fn max_labels(&self) -> Option<usize> {
         self.max_labels
+    }
+
+    /// The scope ([`MemoryReportScope::All`] unless set).
+    pub fn scope(&self) -> MemoryReportScope {
+        self.scope
     }
 
     /// The cancellation token, if any.
@@ -358,6 +421,13 @@ pub struct MemoryReport {
     /// totals of [`MemoryStats`]; `None` when the storage does not report its structure
     /// ([`GraphStorage::memory_structure`](crate::graph::GraphStorage::memory_structure)).
     pub structure: Option<StructureMemory>,
+    /// What the rows cover: the request's [`MemoryReportScope`].
+    pub scope: MemoryReportScope,
+    /// The memory the storage shares with other storages and does not count as its own:
+    /// [`MemoryStats::shared_bytes`] of [`Self::structure`] (for a layer, the base's footprint;
+    /// `0` for every other storage and when the storage reports no structure). It is never part
+    /// of [`Self::estimated_total_bytes`]: many layers share one base, and none "weighs" it.
+    pub shared_bytes: u64,
     /// The sampling step used (`1`: every element visited).
     pub sample_every: u64,
     /// Whether some figures are extrapolated from a sample (some label had elements not read).
@@ -755,6 +825,14 @@ pub struct StructureMemory {
     pub label_index_bytes: u64,
     /// Shapes held by the shape table (also ones no element uses any more until the next sweep).
     pub shape_table_shapes: u64,
+    /// A layered storage: the stubs among the live vertex slots (a base vertex with an image or
+    /// with edges of the layer gets a slot of the layer), `0` for any other storage.
+    pub base_stubs: u64,
+    /// A layered storage: the base vertices the layer removed (tombstones, no slot of their
+    /// own), `0` for any other storage.
+    pub removed_base_vertices: u64,
+    /// A layered storage: the base edges the layer removed, `0` for any other storage.
+    pub removed_base_edges: u64,
 }
 
 impl StructureMemory {
@@ -783,6 +861,20 @@ impl StructureMemory {
     /// With the shape table's shape count.
     pub fn with_shape_table_shapes(mut self, shapes: u64) -> Self {
         self.shape_table_shapes = shapes;
+        self
+    }
+
+    /// With a layered storage's changes against its base: the base stubs among the live vertex
+    /// slots and the base vertices and edges removed.
+    pub fn with_base_changes(
+        mut self,
+        stubs: u64,
+        removed_vertices: u64,
+        removed_edges: u64,
+    ) -> Self {
+        self.base_stubs = stubs;
+        self.removed_base_vertices = removed_vertices;
+        self.removed_base_edges = removed_edges;
         self
     }
 }

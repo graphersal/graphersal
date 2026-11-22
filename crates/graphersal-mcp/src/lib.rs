@@ -75,7 +75,9 @@
 //! JSON-RPC request is one `POST` answered with one `application/json` object; a notification
 //! or a response is answered `202 Accepted` without a body; `GET` (a stream the server would
 //! push on) is `405`; `DELETE` ends the MCP session. `initialize` assigns an `Mcp-Session-Id`
-//! (random, 128 bits); a request naming an unknown one is `404` (the client then initializes
+//! (random, 128 bits; prefixed `<route>~` when the host pins the session to a graph with a
+//! route tag, [`Host::session_route`], which its resolver reads back with [`session_route`]);
+//! a request naming an unknown one is `404` (the client then initializes
 //! again, e.g. after a restart of the server); a request without one is served too. A request
 //! whose `MCP-Protocol-Version` header names a revision this server does not speak (a
 //! stateless, newer client) is `400` with a plain JSON-RPC error, which tells a dual-era client
@@ -202,7 +204,9 @@ pub use protocol::{
     MAX_TEXT_CHARS, Mcp, PROTOCOL_VERSIONS, PromptCost, dsl_reference_text, instructions,
 };
 pub use resources::gql_reference_text;
-pub use sessions::{MAX_CLIENT_NAMES, SessionKey};
+pub use sessions::{
+    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, SessionKey, is_valid_session_route, session_route,
+};
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use stream::serve_lines;
 pub use tools::{CallRefused, ToolCaller, ToolOutcome, call_tool, tool_listings};

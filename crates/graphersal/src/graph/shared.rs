@@ -1131,7 +1131,6 @@ impl<S: GraphStorage> Graph<S> {
     }
 
     /// Attaches the registry of the catalog's models (set once: `false` when one is attached).
-    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn attach_model_registry(
         &self,
         registry: Arc<crate::value::vector::embed::registry::ModelRegistry>,
@@ -1774,6 +1773,23 @@ impl<S: GraphStorage> Graph<S> {
     /// or salvage the storage before reopening it.
     pub fn into_inner(self) -> S {
         self.lock.into_inner()
+    }
+
+    /// Unwraps the storage together with the registry of its catalog's models
+    /// ([`LayerBase::from_graph`](crate::graph::LayerBase::from_graph)), refusing a poisoned
+    /// graph ([`GraphError::Poisoned`]).
+    pub(crate) fn into_storage_and_models(
+        self,
+    ) -> Result<
+        (
+            S,
+            Option<Arc<crate::value::vector::embed::registry::ModelRegistry>>,
+        ),
+        GraphError,
+    > {
+        self.poison.check()?;
+        let models = self.models.get().cloned();
+        Ok((self.lock.into_inner(), models))
     }
 }
 

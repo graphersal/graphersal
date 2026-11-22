@@ -37,6 +37,10 @@ pub(crate) mod index;
 /// Scheduled jobs: the scheduler a host ticks, cron schedules.
 pub mod jobs;
 pub(crate) mod labels;
+/// Delta visibility of layered storages: element origins and layer diffs.
+pub mod layer_diff;
+/// Layered graphs: a frozen shared base plus a per-layer delta.
+pub(crate) mod layered;
 /// A graph's own memory footprint (`memory_usage()`).
 pub mod memory;
 /// The memory report: where a graph's memory goes, per label and per property path.
@@ -67,6 +71,7 @@ pub(crate) mod vector_rules;
 /// Workload statistics: time-bucketed series of what an instance did.
 pub mod workload;
 pub mod write_checks;
+pub(crate) mod write_rules;
 pub use any_graph::{AnyGraph, IntoAnyGraph};
 pub use authorization::{
     AccessPolicy, AccessRequest, AccessRequestBuf, Action, ActionKind, AllowAll, Authorizer,
@@ -86,10 +91,15 @@ pub use hooks::{
     CommitHook, CommitHooks, HookError, HookRefusal, JournalSlot, Mark, RollbackReason,
 };
 pub(crate) use index::GraphIndex;
+pub use layer_diff::{
+    LayerCounts, LayerDiff, LayerDiffChange, LayerDiffEntry, LayerDiffRequest, LayerOrigin,
+    LayerPropertyChange, LayerSummary,
+};
+pub use layered::{BaseRef, LayerBase, LayeredEdge, LayeredGraph, LayeredVertex};
 pub use memory::{MemoryStats, ShrinkReport};
 pub use memory_report::{MemoryComponent, MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
-pub use persistent::PersistentStorage;
+pub use persistent::{BasePatch, LayerParts, PersistentStorage};
 pub use property_index::{
     PropertyIndexDefinition, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
     PropertyIndexTransform, UniqueIndexDuplicates,

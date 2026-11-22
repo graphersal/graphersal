@@ -925,7 +925,7 @@ impl TraversalGraph {
                 }
             }
             crate::graph::compression::check_conflict(self, &definition)?;
-            crate::graph::property_index::check_conflict(self, &definition)?;
+            crate::graph::property_index::check_conflict(&self.definitions, &definition)?;
             crate::graph::model_definition::check_conflict(self, &definition)?;
             let current = self.definitions.get(definition.kind(), definition.name());
             if current == Some(&definition) {

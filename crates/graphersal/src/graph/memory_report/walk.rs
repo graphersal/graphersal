@@ -20,11 +20,12 @@ use compact_str::CompactString;
 
 use super::hll::HyperLogLog;
 use super::{
-    DegreeStats, LabelMemory, MemoryReport, MemoryReportRequest, PropertyMemory, PropertyTarget,
-    RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket, StringMemory,
-    ValueTypeCount, VectorMemory,
+    DegreeStats, LabelMemory, MemoryReport, MemoryReportRequest, MemoryReportScope, PropertyMemory,
+    PropertyTarget, RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket,
+    StringMemory, ValueTypeCount, VectorMemory,
 };
 use crate::graph::GraphStorage;
+use crate::graph::LayerOrigin;
 use crate::graph::definition::DefinitionKind;
 use crate::graph::memory::CompressedCount;
 use crate::graph::schema::ElementKind;
@@ -460,6 +461,29 @@ impl Walk {
     }
 }
 
+/// Whether an element's origin is its layered storage's base (a removed element, `None`, is
+/// never met by a scan).
+fn is_base(origin: Option<LayerOrigin>) -> bool {
+    matches!(origin, Some(LayerOrigin::Base))
+}
+
+/// The elements a layered storage holds of its own (origin not [`LayerOrigin::Base`]): what a
+/// delta-scope walk reads, for its sampling step.
+fn own_elements<S: GraphStorage>(storage: &S) -> Result<u64, crate::error::GraphError> {
+    let mut own = 0u64;
+    for vertex in storage.vertices()? {
+        if !is_base(storage.vertex_layer(vertex)?) {
+            own += 1;
+        }
+    }
+    for edge in storage.edges()? {
+        if !is_base(storage.edge_layer(edge)?) {
+            own += 1;
+        }
+    }
+    Ok(own)
+}
+
 /// The heap bytes of an id of `len` bytes (kept inline up to 24 bytes).
 fn id_heap(len: usize) -> u64 {
     if len > INLINE_ID { len as u64 } else { 0 }
@@ -477,11 +501,23 @@ pub(crate) fn compute<S: GraphStorage>(
     let tracked_live_bytes = crate::traversal::memory_budget::tracked_live_bytes();
     let vertex_total = storage.vertex_count()? as u64;
     let total = vertex_total + storage.edge_count()? as u64;
-    let step = request.step_for(total);
+    // The delta scope of a layered storage reads only the elements the layer holds of its own
+    // (added and modified); every other storage owns all it shows.
+    let delta_only = request.scope() == MemoryReportScope::Delta && storage.capabilities()?.layered;
+    // The sampling step is computed over the elements the walk reads: with the delta scope the
+    // layer's own elements, counted first (one origin check each, no property read) only when
+    // an element cap needs the figure.
+    let step = if delta_only && request.max_elements().is_some() {
+        request.step_for(own_elements(storage)?)
+    } else {
+        request.step_for(total)
+    };
     let cancel = request.cancel_token();
     let mut walk = Walk::default();
     let mut passed = 0u64;
     let mut visited = 0u64;
+    // Elements in the scope passed (sampled or not).
+    let mut read = 0u64;
     let mut cancelled = false;
 
     let tick = |passed: u64| -> bool {
@@ -500,6 +536,10 @@ pub(crate) fn compute<S: GraphStorage>(
             cancelled = true;
             break;
         }
+        if delta_only && is_base(storage.vertex_layer(vertex)?) {
+            continue;
+        }
+        read += 1;
         let labels = storage.vertex_labels(vertex)?;
         let label = walk.label_index(ElementKind::Vertex, labels.first().map(|l| l.as_str()));
         if !walk.take(label, step) {
@@ -532,6 +572,10 @@ pub(crate) fn compute<S: GraphStorage>(
                 cancelled = true;
                 break;
             }
+            if delta_only && is_base(storage.edge_layer(edge)?) {
+                continue;
+            }
+            read += 1;
             let label = walk.label_index(ElementKind::Edge, storage.edge_label(edge)?);
             if !walk.take(label, step) {
                 continue;
@@ -550,9 +594,13 @@ pub(crate) fn compute<S: GraphStorage>(
 
     let structure = storage.memory_structure()?;
     let mut report = fold(storage, walk, structure.as_ref(), request)?;
+    report.shared_bytes = structure
+        .as_ref()
+        .map_or(0, |structure| structure.totals.shared_bytes);
     report.structure = structure;
+    report.scope = request.scope();
     report.sample_every = step;
-    report.sampled = visited < passed;
+    report.sampled = visited < read;
     report.visited_elements = visited;
     report.path_depth = request.path_depth();
     report.commit_seq = storage.last_commit_seq()?;
@@ -562,6 +610,13 @@ pub(crate) fn compute<S: GraphStorage>(
             "graph",
             structure.totals.total_bytes(),
         ));
+        // A layer's base lives in the process too, shared by every layer over it.
+        if structure.totals.shared_bytes > 0 {
+            report.components.push(
+                super::MemoryComponent::estimated("graph", structure.totals.shared_bytes)
+                    .with_detail("shared base"),
+            );
+        }
     }
     report.elapsed_micros = started.elapsed().as_micros() as u64;
     Ok((report, cancelled))

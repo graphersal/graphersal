@@ -169,7 +169,10 @@ pub fn run(cli: &Cli) -> i32 {
             return EXIT_USAGE_ERROR;
         }
     };
+    // A layer is never saved: "Save to file" must not write the layer over its base's file
+    // (`--layer-store` implies `cli.layer`).
     let source = match &cli.graph {
+        GraphSpec::File(_) if cli.layer => None,
         GraphSpec::File(path) => match std::fs::canonicalize(path) {
             Ok(path) => Some(path),
             Err(err) => {
@@ -275,17 +278,19 @@ pub fn run(cli: &Cli) -> i32 {
     let opens = matches!(cli.graph, GraphSpec::Store(_))
         || matches!(&cli.graph, GraphSpec::File(path) if graphersal::prelude::GraphSource::is_snapshot_path(path))
         || cli.schema.is_some()
-        || cli.read_only;
+        || cli.read_only
+        || cli.layer;
+    // A layer store (`--layer-store`) is not the session's Store (the Store panel serves plain
+    // stores): its graph is preloaded, and the server keeps the store to close it.
+    let mut layer_store = None;
     let (store, preloaded) = if opens {
-        match cli.graph.open(
-            cli.create_store,
-            cli.on_damage,
-            cli.schema.as_ref(),
-            cli.read_only,
-        ) {
+        match cli.open_graph() {
             Ok(opened) => match opened.store {
                 Some(store) => (Some(store), None),
-                None => (None, Some((opened.graph, graph_title(&cli.graph)))),
+                None => {
+                    layer_store = opened.layer_store;
+                    (None, Some((opened.graph, graph_title(&cli.graph))))
+                }
             },
             Err(err) => {
                 errln!("{}", err.message);
@@ -296,13 +301,15 @@ pub fn run(cli: &Cli) -> i32 {
         (None, None)
     };
     // The whole server refuses writes: --read-only, or a Store opened read-only.
-    let read_only = cli.read_only || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none());
+    // A layer over a Store base is writable: the Store itself was opened read-only.
+    let read_only = cli.read_only
+        || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none() && !cli.layer);
     let presets = session_presets(cli);
     let presets_json = presets.to_value();
     let shared = store
         .as_ref()
         .map(|store| (store.clone(), store.location()));
-    let (jobs, cancel, commit_seq, statistics) = match start_session(
+    let (jobs, cancel, commit_seq, statistics, layered) = match start_session(
         &cli.graph,
         source.as_deref(),
         presets,
@@ -320,6 +327,9 @@ pub fn run(cli: &Cli) -> i32 {
     // Ctrl+C / SIGTERM: the running queries are cancelled and the store closed cleanly; in the
     // read-only serving mode the running queries get the drain timeout first.
     if let Some(store) = &store {
+        stop.set_store(store.clone());
+    }
+    if let Some(store) = &layer_store {
         stop.set_store(store.clone());
     }
     let runs = Arc::new(graphersal_serve::Runs::default());
@@ -376,7 +386,7 @@ pub fn run(cli: &Cli) -> i32 {
             }));
         }
     }
-    let banner = if store.is_some() {
+    let banner = if store.is_some() || (layer_store.is_some() && !read_only) {
         STORE_BANNER
     } else if read_only {
         READ_ONLY_BANNER
@@ -406,7 +416,12 @@ pub fn run(cli: &Cli) -> i32 {
     }
     let replayed = store
         .as_ref()
-        .map(|store| store.open_report().commits_replayed);
+        .map(|store| store.open_report().commits_replayed)
+        .or_else(|| {
+            layer_store
+                .as_ref()
+                .map(|store| store.open_report().commits_replayed)
+        });
     let loaded = start_stats::loaded(load_time, replayed);
     let mut store_section = crate::sections::Section::new("Store");
     let mut graph_section = crate::sections::Section::new("Graph");
@@ -455,9 +470,55 @@ pub fn run(cli: &Cli) -> i32 {
             );
         }
         store_section.row("loaded", loaded);
+    } else if let Some(layer_store) = &layer_store {
+        // A layer store: its own position, over the base it was created over.
+        let location = layer_store.location();
+        store_section.row("path", location);
+        store_section.row("kind", "LAYER STORE: only the layer's changes to its base");
+        store_section.row(
+            "base",
+            match layer_store.layer_base() {
+                Ok(base) => format!("{} ({base})", graph_title(&cli.graph)),
+                Err(_) => graph_title(&cli.graph),
+            },
+        );
+        let snapshots = layer_store.snapshots().map(|s| s.len()).unwrap_or(0);
+        store_section.row(
+            "commit",
+            format!(
+                "{}, {snapshots} snapshot{}",
+                layer_store.open_report().commit_seq,
+                if snapshots == 1 { "" } else { "s" }
+            ),
+        );
+        store_section.row(
+            "state",
+            "durable: every commit is in the layer store's write-ahead log before the query \
+             answers; the base is never written; Ctrl+C stops the server and closes the store \
+             cleanly",
+        );
+        store_section.row("loaded", loaded);
     } else {
         graph_section.row("source", graph_title(&cli.graph));
         graph_section.row("loaded", loaded);
+    }
+    if let Some(path) = &cli.layer_store
+        && layer_store.is_none()
+    {
+        // `--layer-store --read-only`: the layer store loaded read-only.
+        graph_section.row(
+            "layer",
+            format!(
+                "LAYER STORE {path} over the loaded graph, loaded read-only (nothing in it is \
+                 written)"
+            ),
+        );
+    } else if cli.layer && layer_store.is_none() {
+        graph_section.row(
+            "layer",
+            "LAYER over the loaded graph: writes go to the layer, in memory only (nothing is \
+             saved); layer(), has_layer() and g.layer_diff() show them",
+        );
     }
     if read_only {
         graph_section.row(
@@ -593,11 +654,13 @@ pub fn run(cli: &Cli) -> i32 {
         .runs(runs)
         .ui(ui)
         .source(source)
+        .save_refusal(save_refusal(cli))
         .schema_source(schema_source)
         .presets(presets_json)
         .read_only(read_only)
         .store(store)
         .commit_seq(commit_seq)
+        .layered(layered)
         .mcp(mcp)
         .hooks(hooks);
     // `--ui-profile`: what the playground pages show (`GET /api/info` `uiProfile`).
@@ -639,6 +702,27 @@ pub fn run(cli: &Cli) -> i32 {
         None => accept(&server, &serving),
     }
     EXIT_OK
+}
+
+/// Why "Save to file" saves nothing for a layer (`POST /api/save` 409): an in-memory layer
+/// (`--layer`) is never saved over its base's file, a layer store (`--layer-store`) keeps every
+/// commit already. `None`: the default answer (a graph that came from no file).
+fn save_refusal(cli: &Cli) -> Option<String> {
+    if cli.layer_store.is_some() {
+        Some(
+            "the graph is a layer store: every commit is already durable in it, there is \
+             nothing to save (the base is never written); download it with Save graph"
+                .to_string(),
+        )
+    } else if cli.layer {
+        Some(
+            "the graph is a layer kept in memory over its base: it is never saved over the \
+             base's file; download it with Save graph, or keep the layer with --layer-store"
+                .to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 /// The dev server's parts of a memory report (book page "Memory Usage"): `mcp` (the client
@@ -1020,9 +1104,10 @@ fn presets_summary(presets: &Value) -> String {
 
 /// Starts the session thread with the graph of `spec` loaded and `presets` applied (or the
 /// Store `shared`, or the graph `preloaded` with its title); returns its job queue, its
-/// cancellation token, the commit position of the loaded graph and its statistics
-/// ([`Session::statistics`] with `process.memory` added, printed at start), or the diagnostic
-/// of a graph that could not be loaded.
+/// cancellation token, the commit position of the loaded graph, its statistics
+/// ([`Session::statistics`] with `process.memory` added, printed at start) and whether it is a
+/// layer (`--layer`, `--layer-store`: the MCP instructions name the layer steps), or the
+/// diagnostic of a graph that could not be loaded.
 ///
 /// With a `pool` (the read-only serving mode) the thread loads the graph, then serves as the
 /// pool's first worker; the other workers start here, each with a session of its own over the
@@ -1032,13 +1117,14 @@ fn start_session(
     source: Option<&Path>,
     presets: SessionPresets,
     shared: Option<(Arc<Store>, String)>,
-    preloaded: Option<(Arc<graphersal::prelude::Graph>, String)>,
+    preloaded: Option<(Arc<dyn graphersal_session::storage::SessionGraph>, String)>,
     pool: Option<Arc<pool::Pool>>,
-) -> Result<(Sender<Job>, CancelToken, u64, Value), String> {
+) -> Result<(Sender<Job>, CancelToken, u64, Value, bool), String> {
     type Started = (
         CancelToken,
         u64,
         Value,
+        bool,
         Option<graphersal_session::SessionTemplate>,
     );
     let spec = spec.clone();
@@ -1091,13 +1177,18 @@ fn start_session(
                 Some(template)
             }
         };
-        Ok((session.cancel_token(), seq, statistics, template))
+        let layered = session
+            .graph()
+            .capabilities()
+            .map_err(|err| err.to_string())?
+            .layered;
+        Ok((session.cancel_token(), seq, statistics, layered, template))
     };
     // The pool's first worker is the session thread itself, once the graph is loaded.
     let takeover = pool
         .clone()
         .map(|pool| Box::new(move |session: &mut Session| pool.work(session)) as Job);
-    let (jobs, (cancel, commit_seq, statistics, template)) =
+    let (jobs, (cancel, commit_seq, statistics, layered, template)) =
         graphersal_serve::spawn_session(presets, setup, takeover).map_err(|err| err.to_string())?;
     if let (Some(pool), Some(template)) = (pool, template) {
         for worker in 1..pool.config().workers {
@@ -1119,7 +1210,7 @@ fn start_session(
                 .map_err(|err| format!("Error: cannot start a worker thread: {err}"))?;
         }
     }
-    Ok((jobs, cancel, commit_seq, statistics))
+    Ok((jobs, cancel, commit_seq, statistics, layered))
 }
 
 /// Force-layout jobs the pages of the read-only serving mode share (at least one per worker).

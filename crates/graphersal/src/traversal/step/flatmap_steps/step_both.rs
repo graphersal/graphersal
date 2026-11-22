@@ -125,16 +125,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepBoth {
                 for edge in context.storage.out_edges(node_index)? {
                     let target = context.storage.edge_endpoints(edge)?.map(|(_, to)| to);
                     if let Some(target) = target {
-                        let edge_label = context.storage.edge_label(edge)?;
-                        let mut found = false;
-                        match &self.labels {
-                            Some(labels) => {
-                                if let Some(edge_label) = edge_label {
-                                    found = labels.contains(&edge_label.to_string());
-                                }
-                            }
-                            None => found = true,
-                        }
+                        // The label is read only when the step filters by it.
+                        let found = match &self.labels {
+                            Some(labels) => context
+                                .storage
+                                .edge_label(edge)?
+                                .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                            None => true,
+                        };
                         if found {
                             output.push(Traverser::with_parts(
                                 TraverserValue::Vertex(target),
@@ -150,16 +148,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepBoth {
                 for edge in context.storage.in_edges(node_index)? {
                     let source_node = context.storage.edge_endpoints(edge)?.map(|(from, _)| from);
                     if let Some(source_node) = source_node {
-                        let edge_label = context.storage.edge_label(edge)?;
-                        let mut found = false;
-                        match &self.labels {
-                            Some(labels) => {
-                                if let Some(edge_label) = edge_label {
-                                    found = labels.contains(&edge_label.to_string());
-                                }
-                            }
-                            None => found = true,
-                        }
+                        // The label is read only when the step filters by it.
+                        let found = match &self.labels {
+                            Some(labels) => context
+                                .storage
+                                .edge_label(edge)?
+                                .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                            None => true,
+                        };
                         if found {
                             output.push(Traverser::with_parts(
                                 TraverserValue::Vertex(source_node),
@@ -251,16 +247,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepBoth {
                 let mut count = 0u64;
                 for edge in context.storage.out_edges(node_index)? {
                     if context.storage.edge_endpoints(edge)?.is_some() {
-                        let edge_label = context.storage.edge_label(edge)?;
-                        let mut found = false;
-                        match &self.labels {
-                            Some(labels) => {
-                                if let Some(edge_label) = edge_label {
-                                    found = labels.contains(&edge_label.to_string());
-                                }
-                            }
-                            None => found = true,
-                        }
+                        // The label is read only when the step filters by it.
+                        let found = match &self.labels {
+                            Some(labels) => context
+                                .storage
+                                .edge_label(edge)?
+                                .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                            None => true,
+                        };
                         if found {
                             count += 1;
                         }
@@ -268,16 +262,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepBoth {
                 }
                 for edge in context.storage.in_edges(node_index)? {
                     if context.storage.edge_endpoints(edge)?.is_some() {
-                        let edge_label = context.storage.edge_label(edge)?;
-                        let mut found = false;
-                        match &self.labels {
-                            Some(labels) => {
-                                if let Some(edge_label) = edge_label {
-                                    found = labels.contains(&edge_label.to_string());
-                                }
-                            }
-                            None => found = true,
-                        }
+                        // The label is read only when the step filters by it.
+                        let found = match &self.labels {
+                            Some(labels) => context
+                                .storage
+                                .edge_label(edge)?
+                                .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                            None => true,
+                        };
                         if found {
                             count += 1;
                         }

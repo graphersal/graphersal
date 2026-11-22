@@ -179,6 +179,28 @@ fn chains_infer_exactly_the_requests_of_the_authorization_check() {
     }
 }
 
+/// `has_layer()` keeps the flow in the inference as in the authorization check, so a write
+/// after it names the edge label stated before it.
+#[test]
+fn has_layer_keeps_the_flow_like_the_authorization_check() {
+    for (script, expected) in [
+        (
+            r#"g.e().has_label("knows").has_layer("base").drop().iterate()"#,
+            r#"Delete Data(edge "knows")"#,
+        ),
+        (
+            r#"g.v().has_layer("added", "modified").property("x", 1).iterate()"#,
+            "Update Data(vertex)",
+        ),
+    ] {
+        let (writes, outcome) = recorded(script);
+        assert!(outcome.is_ok(), "{script}: {outcome:?}");
+        assert_eq!(texts(&writes), [expected], "asked for {script}");
+        let analysis = inferred(script).unwrap();
+        assert_eq!(texts(&analysis.writes), [expected], "inferred for {script}");
+    }
+}
+
 #[test]
 fn the_inference_covers_every_write_of_every_documented_example() {
     let mut problems = Vec::new();

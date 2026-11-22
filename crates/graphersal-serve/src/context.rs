@@ -35,6 +35,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -469,6 +470,26 @@ fn serve_jobs(session: &mut Session, queue: Receiver<Job>) {
     }
 }
 
+/// The states of [`Context::layered`].
+pub(crate) struct Layered;
+
+impl Layered {
+    /// No job has run yet.
+    pub(crate) const UNKNOWN: u8 = 0;
+    /// A graph without layers (or one whose capabilities cannot be read).
+    pub(crate) const PLAIN: u8 = 1;
+    /// A layer over a frozen base (`StorageCapabilities::layered`).
+    pub(crate) const LAYER: u8 = 2;
+
+    /// The state of the graph `session` serves.
+    fn of(session: &Session) -> u8 {
+        match session.graph().capabilities() {
+            Ok(capabilities) if capabilities.layered => Self::LAYER,
+            _ => Self::PLAIN,
+        }
+    }
+}
+
 /// Where a [`Context`]'s jobs go (the [`Runner`], the session sender behind a lock).
 enum Jobs {
     Session(Mutex<Sender<Job>>),
@@ -488,6 +509,9 @@ pub struct Context {
     pub(crate) source: Option<PathBuf>,
     /// The `--schema` file the graph was loaded with, when one was given.
     pub(crate) schema_source: Option<PathBuf>,
+    /// Why "Save to file" saves nothing when the graph has no [`Self::source`] (the host's own
+    /// words, such as "a layer store keeps every commit"); `None`: the default answer.
+    pub(crate) save_refusal: Option<String>,
     /// The `Host`/`Origin` checks every request passes first.
     pub(crate) check: HostCheck,
     /// The host's request filter, run after the checks; `None`: none.
@@ -510,6 +534,9 @@ pub struct Context {
     pub(crate) view: Mutex<Option<Value>>,
     /// The change feed (`GET /api/changes`), updated by the session jobs.
     pub(crate) feed: Arc<Mutex<Feed>>,
+    /// Whether the session serves a layered graph, as the last job saw it ([`Layered`]),
+    /// refreshed by every job after which the session serves another graph.
+    pub(crate) layered: Arc<AtomicU8>,
     /// The threads that do the work of the scheduled jobs ([`job_workers`]).
     pub(crate) job_workers: job_workers::JobWorkers,
     /// The MCP endpoint (`--mcp`), or `None`; possibly shared with the contexts of other
@@ -519,6 +546,10 @@ pub struct Context {
     /// default.
     #[cfg(feature = "mcp")]
     pub(crate) mcp_profile: Option<graphersal_mcp::Profile>,
+    /// The route tag of the MCP sessions this context starts
+    /// ([`ContextBuilder::mcp_session_route`]); `None`: unpinned sessions.
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_session_route: Option<String>,
     /// What the host adds.
     pub(crate) hooks: Arc<dyn Hooks>,
     /// The allow-list mode of the HTTP API ([`ContextBuilder::api_allow_list`]); `None`: every
@@ -542,13 +573,17 @@ pub struct ContextBuilder {
     ui: Ui,
     source: Option<PathBuf>,
     schema_source: Option<PathBuf>,
+    save_refusal: Option<String>,
     presets: Value,
     read_only: bool,
     store: Option<Arc<Store>>,
     commit_seq: u64,
+    layered: u8,
     mcp: Option<Arc<mcp::Mcp>>,
     #[cfg(feature = "mcp")]
     mcp_profile: Option<graphersal_mcp::Profile>,
+    #[cfg(feature = "mcp")]
+    mcp_session_route: Option<String>,
     hooks: Option<Arc<dyn Hooks>>,
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
@@ -582,6 +617,15 @@ impl ContextBuilder {
         self
     }
 
+    /// The answer (409) of "Save to file" (`POST /api/save`) when the graph came from no file
+    /// ([`Self::source`] `None`): why nothing is saved, in the host's words (a layer kept in
+    /// memory, a layer store that keeps every commit). Default: "the graph did not come from a
+    /// file".
+    pub fn save_refusal(mut self, reason: Option<String>) -> Self {
+        self.save_refusal = reason;
+        self
+    }
+
     /// The session presets as `GET /api/info` reports them (`SessionPresets::to_value`).
     pub fn presets(mut self, presets: Value) -> Self {
         self.presets = presets;
@@ -603,6 +647,20 @@ impl ContextBuilder {
     /// The commit position of the loaded graph (the change feed starts there).
     pub fn commit_seq(mut self, commit_seq: u64) -> Self {
         self.commit_seq = commit_seq;
+        self
+    }
+
+    /// Whether the loaded graph is a layer over a frozen base (`StorageCapabilities::layered`),
+    /// as the host knows it from loading it: the MCP instructions then name the layer steps
+    /// (`graphersal_mcp::Host::serves_layer`). Every job after which the session serves
+    /// another graph refreshes it. Default: unknown until the first job, answered as a plain
+    /// graph.
+    pub fn layered(mut self, layered: bool) -> Self {
+        self.layered = if layered {
+            Layered::LAYER
+        } else {
+            Layered::PLAIN
+        };
         self
     }
 
@@ -631,6 +689,20 @@ impl ContextBuilder {
     #[cfg(feature = "mcp")]
     pub fn mcp_profile(mut self, profile: graphersal_mcp::Profile) -> Self {
         self.mcp_profile = Some(profile);
+        self
+    }
+
+    /// The route tag that pins the MCP sessions this context starts to its graph
+    /// (`graphersal_mcp::Host::session_route`): the versioned graph name the host's graph
+    /// resolver resolved an alias to (`acme@2026.3`), or an opaque token. Every `initialize`
+    /// this context answers mints an `Mcp-Session-Id` carrying it, and the resolver sends the
+    /// session's later requests back here with `graphersal_mcp::session_route` (the request's
+    /// [`crate::Request::header`] `Mcp-Session-Id`), also after its alias moved to another
+    /// context. It must pass `graphersal_mcp::is_valid_session_route`, else `initialize` fails
+    /// with a JSON-RPC error. Default: `None`, unpinned sessions (one graph needs none).
+    #[cfg(feature = "mcp")]
+    pub fn mcp_session_route(mut self, route: Option<String>) -> Self {
+        self.mcp_session_route = route;
         self
     }
 
@@ -700,6 +772,7 @@ impl ContextBuilder {
             ui: self.ui,
             source: self.source,
             schema_source: self.schema_source,
+            save_refusal: self.save_refusal,
             check: self.check,
             filter: self.filter,
             memory_tracked: self.memory_tracked,
@@ -712,10 +785,13 @@ impl ContextBuilder {
                 commit_seq: self.commit_seq,
                 ..Feed::default()
             })),
+            layered: Arc::new(AtomicU8::new(self.layered)),
             job_workers: job_workers::JobWorkers::default(),
             mcp: self.mcp,
             #[cfg(feature = "mcp")]
             mcp_profile: self.mcp_profile,
+            #[cfg(feature = "mcp")]
+            mcp_session_route: self.mcp_session_route,
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
             allow_list: self.allow_list.map(Arc::new),
         })
@@ -733,13 +809,17 @@ impl Context {
             ui: Ui::embedded(),
             source: None,
             schema_source: None,
+            save_refusal: None,
             presets: Value::Null,
             read_only: false,
             store: None,
             commit_seq: 0,
+            layered: Layered::UNKNOWN,
             mcp: None,
             #[cfg(feature = "mcp")]
             mcp_profile: None,
+            #[cfg(feature = "mcp")]
+            mcp_session_route: None,
             hooks: None,
             filter: None,
             memory_tracked: false,
@@ -864,6 +944,7 @@ impl Context {
     ) -> Result<T, ServeError> {
         let (reply, answer) = channel();
         let feed = self.feed.clone();
+        let layered = self.layered.clone();
         let client = CLIENT.with(|c| c.borrow().clone());
         // The workload statistics count only the queries a client runs (`Session::execute*`)
         // under its channel; the page's drawing and panels are technical.
@@ -876,6 +957,14 @@ impl Context {
             let before = position(session);
             let out = graphersal::workload::scope(channel, true, || job(session));
             let after = position(session);
+            // Another graph (or the first job): whether it is a layer, for the MCP instructions.
+            let swapped = match (&before, &after) {
+                (Ok(before), Ok(after)) => before.0 != after.0,
+                _ => true,
+            };
+            if swapped || layered.load(Ordering::Relaxed) == Layered::UNKNOWN {
+                layered.store(Layered::of(session), Ordering::Relaxed);
+            }
             // The change feed is a notification for the other clients: a position that cannot
             // be read before or after counts as a change (they reload and see for themselves).
             let changed = match (&before, &after) {

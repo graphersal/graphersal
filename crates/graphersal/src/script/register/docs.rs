@@ -453,6 +453,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "has_label":
         "Keeps elements whose label is one of the given labels (or matches a predicate); without arguments it keeps the elements that have a label, so not(__.has_label()) selects the unlabeled ones (Graphersal extension).",
         "{ g.add_v().to_list(); [g.v().has_label(\"software\").count().next(), g.v().not(__.has_label()).count().next()] }" => "[2, 1]";
+    "traversal" "has_layer":
+        "Keeps the vertices and edges whose layer origin is one of the given names (\"base\", \"added\", \"modified\"); on a graph without layers everything is \"base\" (Graphersal extension).",
+        "[g.v().has_layer(\"base\", \"added\").count().next(), g.v().has_layer(\"modified\").count().next()]" => "[6, 0]";
     "traversal" "has_not":
         "Keeps elements that do not have the given property.",
         "g.v().has_not(\"age\").values(\"name\").to_list()" => "[\"lop\", \"ripple\"]";
@@ -525,6 +528,12 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "labels":
         "Yields the full label set of each vertex as a list (Graphersal multi-label vertices).",
         "g.v(1).labels().next()" => "[\"person\"]";
+    "traversal" "layer":
+        "Yields the layer origin of each vertex or edge: \"base\", \"added\" or \"modified\"; on a graph without layers always \"base\" (Graphersal extension).",
+        "g.v(1).out_e().layer().to_list()" => "[\"base\", \"base\", \"base\"]";
+    "traversal" "layer_diff":
+        "Returns what a layered graph changed against its frozen base as a map of added, removed and modified vertices and edges (base and layer values side by side), filtered by #{kinds, labels} and cut at #{limit} (truncated); empty on a graph without layers (Graphersal extension).",
+        "g.layer_diff()" => "#{\"added\": [], \"modified\": [], \"removed\": [], \"truncated\": false}";
     "traversal" "length":
         "Yields the length of each string in characters (Unicode scalar values, see the book page Type Conversion and length()).",
         "g.v(1).values(\"name\").length().next()" => "5";
@@ -556,10 +565,10 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Yields the median of the numbers in the stream.",
         "g.v().values(\"age\").median().next()" => "30.5";
     "traversal" "memory_report":
-        "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots, and where the whole process memory goes (components: the graph, embedding models, the script engine, stores, the host's parts); #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted).",
+        "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots, and where the whole process memory goes (components: the graph, embedding models, the script engine, stores, the host's parts); #{sample_every, max_elements} sample it, #{limit, max_rows, max_labels} keep the largest rows (default 500 per list, the rest counted), #{scope: \"delta\"} reports only a layered graph's own elements with its base as shared_bytes (a plain graph owns all it shows).",
         "g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)" => "[4, 2]";
     "traversal" "memory_usage":
-        "Returns the graph's own memory footprint in bytes (structure, indexes, properties), with its workload statistics and loaded embedding models beside the total (workload_bytes, model_bytes).",
+        "Returns the graph's own memory footprint in bytes (structure, indexes, properties), with its workload statistics, loaded embedding models and the memory shared with other graphs (a layered graph's base) beside the total (workload_bytes, model_bytes, shared_bytes).",
         "g.memory_usage().total_bytes > 0" => "true";
     "traversal" "merge":
         "Merges the given list (union without duplicates) or map (keys of the argument win) into the incoming one.",

@@ -23,7 +23,21 @@
 //! is on [`CommitHooks`]); it times its commits with [`CommitHooks::commit_time`] (the instance
 //! [`CommitClock`]) and hands the clock out through [`GraphStorage::commit_clock`]. With feature `persist`, `PersistentStorage` (EXPERIMENTAL like
 //! [`GraphStorage`]) is what a snapshot and a Store need from a storage: lineage id, commit
-//! position, a load sink, `clear`, the journal slot ([`JournalSlot`]) and `replay`.
+//! position, a load sink, `clear`, the journal slot ([`JournalSlot`]) and `replay`; a layer's
+//! snapshot takes its changes to the base as `BasePatch` entries and the layer's own elements
+//! (`PersistentStorage::layer_parts`, `PersistentStorage::load_base_patch`).
+//!
+//! [`LayeredGraph`] (EXPERIMENTAL, in progress) is a storage of the crate built on this trait: a
+//! frozen [`TraversalGraph`] shared by many layers, each reading through it with its own handles
+//! ([`LayeredVertex`], [`LayeredEdge`]) and storing only what it changes. Delta visibility:
+//! [`GraphStorage::vertex_layer`] / [`GraphStorage::edge_layer`] answer an element's
+//! [`LayerOrigin`] and [`GraphStorage::layer_diff`] a [`LayerDiff`] (request
+//! [`LayerDiffRequest`]; entries [`LayerDiffEntry`], [`LayerDiffChange`],
+//! [`LayerPropertyChange`]) and [`GraphStorage::layer_summary`] a [`LayerSummary`] (counts
+//! [`LayerCounts`]); every other storage answers `Base`, an empty diff and no summary. A
+//! [`LayerBase`] is the shareable base itself: the frozen graph with its database's embedding
+//! models, a display name and its identity ([`BaseRef`]: lineage id, commit sequence number
+//! and commit time); [`LayerBase::new_layer`] makes a `Graph<LayeredGraph>` that serves those models.
 //!
 //! # Example
 //!
@@ -197,15 +211,13 @@
 //! ```
 
 pub use crate::error::GraphError;
-#[cfg(feature = "persist")]
-pub use crate::graph::PersistentStorage;
 pub use crate::graph::compression::CompressionStats;
 pub use crate::graph::compression_estimate::{CompressionEstimate, CompressionEstimateRequest};
 pub use crate::graph::memory_report::{
     DegreeStats, LabelMemory, MemoryComponent, MemoryComponents, MemoryReport,
-    MemoryReportProgress, MemoryReportRequest, MemorySource, PropertyMemory, PropertyTarget,
-    RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket, SlotUsage, StringMemory,
-    StructureMemory, ValueTypeCount, VectorMemory, register_memory_source,
+    MemoryReportProgress, MemoryReportRequest, MemoryReportScope, MemorySource, PropertyMemory,
+    PropertyTarget, RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary, SizeBucket,
+    SlotUsage, StringMemory, StructureMemory, ValueTypeCount, VectorMemory, register_memory_source,
 };
 pub use crate::graph::property_index::{
     DuplicateValue, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
@@ -218,12 +230,16 @@ pub use crate::graph::write_checks::{
     path_property_name, remove_path, remove_path_in, write_path, write_path_in,
 };
 pub use crate::graph::{
-    AnyGraph, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks, CommitMetadata,
-    Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy, Graph,
-    GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError, IntoAnyGraph,
-    IsolationLevel, JournalSlot, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport,
+    AnyGraph, BaseRef, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks,
+    CommitMetadata, Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy,
+    Graph, GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError,
+    IntoAnyGraph, IsolationLevel, JournalSlot, LayerBase, LayerCounts, LayerDiff, LayerDiffChange,
+    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayerSummary, LayeredEdge,
+    LayeredGraph, LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport,
     StorageCapabilities, StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark,
     VertexHandle, VertexState,
 };
+#[cfg(feature = "persist")]
+pub use crate::graph::{BasePatch, LayerParts, PersistentStorage};
 pub use crate::value::{ElementProperty, JsonPath, JsonPathSegment, PropertyMap};
 pub use compact_str::CompactString;

@@ -157,7 +157,9 @@ export class WasmEngine extends Engine {
     // A cached, older worker.js does not list the store methods: no Store menu then.
     const storeMemory = Array.isArray(meta.methods) && meta.methods.includes('storeInfo');
     // ai: null: the AI Chat needs the local dev server (`--ai`); the tab is read-only here.
-    return { name: 'wasm', version: meta.version, memoryTracked: meta.memoryTracked, storeMemory, ai: null };
+    // layers: Start / Drop layer over the loaded graph (a cached, older worker.js lacks them).
+    const layers = Array.isArray(meta.methods) && meta.methods.includes('startLayer');
+    return { name: 'wasm', version: meta.version, memoryTracked: meta.memoryTracked, storeMemory, layers, ai: null };
   }
 
   // The AI Chat stub: the agent runs in the dev server only (the API key never reaches a page).
@@ -547,6 +549,25 @@ export class WasmEngine extends Engine {
 
   async workloadReport(history) {
     return this.call('workloadReport', history || null);
+  }
+
+  // Layers. Stop (a worker restart) restores the restore point, the graph as it was loaded or
+  // last saved: a started layer and its changes are gone then.
+
+  async layerDiff(spec) {
+    return this.call('layerDiff', plain(spec || {}));
+  }
+
+  async startLayer() {
+    const res = await this.call('startLayer');
+    if (res && res.ok && res.info) this.graph = res.info;
+    return res;
+  }
+
+  async dropLayer() {
+    const res = await this.call('dropLayer');
+    if (res && res.ok && res.info) this.graph = res.info;
+    return res;
   }
 
   async journal(spec) {

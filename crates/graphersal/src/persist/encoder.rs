@@ -114,6 +114,10 @@ pub(crate) struct SnapshotEncoder<'g, S: PersistentStorage + ?Sized> {
     options: &'g WriteOptions,
     vertices: Vec<(&'g str, S::VertexId)>,
     edges: Vec<(&'g str, S::EdgeId)>,
+    /// A layer's base identity and its changes to the base (`PersistentStorage::layer_parts`):
+    /// the index then holds only the layer's own elements, and a packed write adds the layer
+    /// file (format spec 7.5, kind 128). `None`: a whole graph.
+    layer: Option<(crate::graph::BaseRef, Vec<crate::graph::BasePatch>)>,
     peak: Cell<usize>,
     chunks_encoded: Cell<usize>,
 }
@@ -124,7 +128,9 @@ pub(crate) struct KindTotals {
 }
 
 impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
-    /// Sorts the graph's element ids (the only allocation that grows with the graph).
+    /// Sorts the graph's element ids (the only allocation that grows with the graph). A layer
+    /// (`PersistentStorage::layer_parts` is `Some`) is indexed by its own elements only, and
+    /// its base identity and patch are kept for the layer file.
     /// `Err` when the storage cannot read its elements, or when the index and one chunk do not
     /// fit under the process memory ceiling (`GraphError::ResourceLimitExceeded` naming
     /// `operation`, checked before anything is allocated).
@@ -133,7 +139,21 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
         options: &'g WriteOptions,
         operation: &'static str,
     ) -> Result<Self, crate::error::GraphError> {
-        let (vertex_count, edge_count) = (graph.vertex_count()?, graph.edge_count()?);
+        // A layer: its own elements (counted first, so the index is sized and checked before
+        // it is allocated, like a whole graph's).
+        // A materialized layer is written as the whole graph it shows (format version 4).
+        let layer_parts = || {
+            if options.materialize {
+                Ok(None)
+            } else {
+                graph.layer_parts()
+            }
+        };
+        let counts = match layer_parts()? {
+            Some(parts) => (parts.vertices.count(), parts.edges.count()),
+            None => (graph.vertex_count()?, graph.edge_count()?),
+        };
+        let (vertex_count, edge_count) = counts;
         let index_bytes = (vertex_count as u64)
             .saturating_mul(size_of::<(&str, S::VertexId)>() as u64)
             .saturating_add(
@@ -146,27 +166,51 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
         )?;
         // Sized up front: the index is allocated once, at its final size.
         let mut vertices: Vec<(&str, S::VertexId)> = Vec::with_capacity(vertex_count);
-        for vertex in graph.vertices()? {
-            if let Some(id) = graph.vertex_id(vertex)? {
-                vertices.push((id, vertex));
-            }
-        }
-        vertices.sort_unstable_by(|a, b| a.0.cmp(b.0));
         let mut edges: Vec<(&str, S::EdgeId)> = Vec::with_capacity(edge_count);
-        for edge in graph.edges()? {
-            if let Some(id) = graph.edge_id(edge)? {
-                edges.push((id, edge));
+        let layer = match layer_parts()? {
+            Some(parts) => {
+                for vertex in parts.vertices {
+                    if let Some(id) = graph.vertex_id(vertex)? {
+                        vertices.push((id, vertex));
+                    }
+                }
+                for edge in parts.edges {
+                    if let Some(id) = graph.edge_id(edge)? {
+                        edges.push((id, edge));
+                    }
+                }
+                Some((parts.base_ref, parts.patch))
             }
-        }
+            None => {
+                for vertex in graph.vertices()? {
+                    if let Some(id) = graph.vertex_id(vertex)? {
+                        vertices.push((id, vertex));
+                    }
+                }
+                for edge in graph.edges()? {
+                    if let Some(id) = graph.edge_id(edge)? {
+                        edges.push((id, edge));
+                    }
+                }
+                None
+            }
+        };
+        vertices.sort_unstable_by(|a, b| a.0.cmp(b.0));
         edges.sort_unstable_by(|a, b| a.0.cmp(b.0));
         Ok(Self {
             graph,
             options,
             vertices,
             edges,
+            layer,
             peak: Cell::new(0),
             chunks_encoded: Cell::new(0),
         })
+    }
+
+    /// A layer's base identity and patch (`None`: a whole graph).
+    pub(crate) fn layer(&self) -> Option<&(crate::graph::BaseRef, Vec<crate::graph::BasePatch>)> {
+        self.layer.as_ref()
     }
 
     pub(crate) fn stats(&self) -> EncodeStats {
@@ -329,8 +373,10 @@ impl<'g, S: PersistentStorage + ?Sized> SnapshotEncoder<'g, S> {
                 last_commit_at: graph.last_committed_at(),
                 node_sequence,
                 edge_sequence,
-                vertex_count: graph.vertex_count()? as u64,
-                edge_count: graph.edge_count()? as u64,
+                // The elements the snapshot holds: every element of a whole graph, a layer's
+                // own elements only.
+                vertex_count: self.vertices.len() as u64,
+                edge_count: self.edges.len() as u64,
                 vertex_property_count,
                 edge_property_count,
                 memory_bytes: graph.memory_usage()?.map_or(0, |usage| usage.total_bytes()),

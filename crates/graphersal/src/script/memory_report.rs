@@ -6,16 +6,18 @@
 use super::saved_query::{fail, graph_fail};
 use super::*;
 use crate::error::ScriptError;
+use crate::graph::memory_report::MemoryReportScope;
 use crate::graph::{AccessRequest, Action, MemoryReportRequest, Resource};
 
 /// The keys an options map may have.
-const REPORT_KEYS: [&str; 6] = [
+const REPORT_KEYS: [&str; 7] = [
     "sample_every",
     "max_elements",
     "limit",
     "max_rows",
     "max_labels",
     "path_depth",
+    "scope",
 ];
 
 impl ScriptGraphTraversalSource {
@@ -25,12 +27,14 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.memory_report(#{sample_every?, max_elements?, limit?, max_rows?, max_labels?,
-    /// path_depth?})` / `g.memory_report(..)`: where the graph's memory goes, per label and per
+    /// path_depth?, scope?})` / `g.memory_report(..)`: where the graph's memory goes, per label and per
     /// top-level property (a map, see [`crate::graph::MemoryReport::to_property`]), or `()` when
     /// the source has no graph. `sample_every`/`max_elements` sample (figures extrapolated),
     /// `limit` keeps the property rows and the label rows with the most bytes (default 500;
-    /// `max_rows`/`max_labels` set one list each and win over it), `path_depth` is `1`.
-    /// Read-only; asks for `Read` on `Data`.
+    /// `max_rows`/`max_labels` set one list each and win over it), `path_depth` is `1`,
+    /// `scope` is `"all"` (the default: every element the graph shows) or `"delta"` (a layer's
+    /// own elements only; the whole graph for a storage without layers, see
+    /// [`MemoryReportScope`]). Read-only; asks for `Read` on `Data`.
     pub fn memory_report_with(&mut self, options: Dynamic) -> Result<Dynamic, Box<EvalAltResult>> {
         let operation = "memory_report";
         let actual = type_name_of(&options);
@@ -43,7 +47,8 @@ impl ScriptGraphTraversalSource {
         };
         let Some(mut options) = options.try_cast::<rhai::Map>() else {
             return Err(mismatch(
-                "a map #{sample_every?, max_elements?, limit?, max_rows?, max_labels?, path_depth?}"
+                "a map #{sample_every?, max_elements?, limit?, max_rows?, max_labels?, path_depth?, \
+                 scope?}"
                     .into(),
                 actual,
             ));
@@ -57,6 +62,24 @@ impl ScriptGraphTraversalSource {
                 format!("the key '{unknown}'"),
             ));
         }
+        let scope = match options.remove("scope") {
+            None => None,
+            Some(value) if value.is_unit() => None,
+            Some(value) => match value
+                .clone()
+                .into_immutable_string()
+                .ok()
+                .and_then(|name| MemoryReportScope::from_name(name.as_str()))
+            {
+                Some(scope) => Some(scope),
+                None => {
+                    return Err(mismatch(
+                        "scope as \"all\" or \"delta\"".into(),
+                        dynamic_text(&value),
+                    ));
+                }
+            },
+        };
         let mut positive = |key: &str| -> Result<Option<u64>, Box<EvalAltResult>> {
             let Some(value) = options.remove(key) else {
                 return Ok(None);
@@ -90,6 +113,9 @@ impl ScriptGraphTraversalSource {
         }
         if let Some(depth) = positive("path_depth")? {
             request = request.with_path_depth(u32::try_from(depth).unwrap_or(u32::MAX));
+        }
+        if let Some(scope) = scope {
+            request = request.with_scope(scope);
         }
         request.validate().map_err(graph_fail)?;
         self.require(

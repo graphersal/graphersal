@@ -60,6 +60,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "has_id",
             "has_key",
             "has_label",
+            "has_layer",
             "has_not",
             "has_p",
             "has_value",
@@ -98,6 +99,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "id",
             "label",
             "labels",
+            "layer",
             "key",
             "value",
             "constant",
@@ -298,6 +300,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "statistics",
             "memory_usage",
             "memory_report",
+            "layer_diff",
             "shrink_to_fit",
             "mark",
             "import_graphml",
@@ -345,6 +348,9 @@ const TOPIC_PAGES: &[(&str, &str)] = &[
 
 /// The book pages that explain a step or a group further (paths below `book/src/`).
 const SEE_ALSO: &[(&str, &str, &str)] = &[
+    ("layer", "Layers", "users_guide/layered_graphs.md"),
+    ("has_layer", "Layers", "users_guide/layered_graphs.md"),
+    ("layer_diff", "Layers", "users_guide/layered_graphs.md"),
     ("add_label", "Label Steps", "traversal/steps/label_steps.md"),
     (
         "drop_label",

@@ -164,6 +164,194 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+
+    /// Load sink of a LAYER (a storage over a base it does not own, like
+    /// [`LayeredGraph`](crate::graph::LayeredGraph)): applies one entry of the layer's changes to
+    /// its base, naming base elements by their ids ([`BasePatch`]). A layer load is the base's
+    /// patch, then the layer's own elements through the ordinary sink: [`Self::load_schema`],
+    /// [`Self::load_definition`] (the layer's whole catalog), every [`BasePatch`] entry BEFORE
+    /// the first [`Self::load_vertex`] (an added element may reuse the id of a base element the
+    /// layer removed), then [`Self::load_vertex`], [`Self::load_edge`] (an edge at a base vertex
+    /// names it by id, like any edge) and [`Self::finish_load`]. Nothing is validated, recorded
+    /// or reported to a hook (the patch was valid when written).
+    ///
+    /// **EXPERIMENTAL**, like the trait. Default: [`GraphError::Unsupported`] (a storage that is
+    /// not a layer). `Err` for a layer: the base holds no element of the entry's id
+    /// ([`GraphError::VertexNotFound`], [`GraphError::EdgeNotFound`]) or the element is removed
+    /// already; the load fails with it.
+    fn load_base_patch(&mut self, patch: BasePatch) -> Result<(), GraphError> {
+        let _ = patch;
+        Err(GraphError::unsupported(
+            "a base patch on a storage that is not a layer",
+        ))
+    }
+
+    /// What an encoder of a LAYER writes instead of the whole graph: the layer's changes to its
+    /// base ([`BasePatch`] entries, by base element id) and the elements the layer added (its
+    /// handles, read through the ordinary [`GraphStorage`] read methods). The schema, the
+    /// catalog, the position and the id sequences are read as for any storage. Loaded back over
+    /// the same base through [`Self::load_base_patch`] and the ordinary load sink, it gives the
+    /// same layer.
+    ///
+    /// **EXPERIMENTAL**, like the trait. Default: `Ok(None)`, a storage that is not a layer (an
+    /// encoder then writes every element).
+    #[allow(clippy::type_complexity)] // the parts borrow the storage and name its handle types
+    fn layer_parts(
+        &self,
+    ) -> Result<Option<LayerParts<'_, Self::VertexId, Self::EdgeId>>, GraphError> {
+        Ok(None)
+    }
+}
+
+/// One change a layer made to its base, naming the base element by its id (element ids are
+/// stable across loads of the same base, slots are not): what a layer snapshot stores beside
+/// the layer's own elements, the entries of [`LayerParts::patch`] and the argument of
+/// [`PersistentStorage::load_base_patch`]. Values are logical (plain strings, no storage
+/// coding).
+///
+/// **EXPERIMENTAL**, like [`PersistentStorage`]. Built with its constructors.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BasePatch {
+    /// The layer removed the base vertex `id` (and with it every base edge at it).
+    #[non_exhaustive]
+    RemovedVertex {
+        /// The base vertex's id.
+        id: CompactString,
+    },
+    /// The layer removed the base edge `id`.
+    #[non_exhaustive]
+    RemovedEdge {
+        /// The base edge's id.
+        id: CompactString,
+    },
+    /// The layer changed the labels or properties of the base vertex `id`: its whole state in
+    /// the layer (its image).
+    #[non_exhaustive]
+    VertexImage {
+        /// The base vertex's id.
+        id: CompactString,
+        /// Its labels in the layer, in order (the first is the primary label).
+        labels: Vec<CompactString>,
+        /// Its properties in the layer, in order.
+        properties: PropertyMap,
+    },
+    /// The layer changed the label or properties of the base edge `id`: its whole state in the
+    /// layer (its image).
+    #[non_exhaustive]
+    EdgeImage {
+        /// The base edge's id.
+        id: CompactString,
+        /// Its label in the layer (`None`: unlabeled).
+        label: Option<CompactString>,
+        /// Its properties in the layer, in order (`None`: no map, as `edge_properties` reads).
+        properties: Option<PropertyMap>,
+    },
+    /// The layer removed the definition of `kind` named `name` that it copied from the base's
+    /// catalog (the layer's catalog is a copy of the base's, then changed by the layer).
+    #[non_exhaustive]
+    RemovedDefinition {
+        /// The definition's kind.
+        kind: crate::graph::definition::DefinitionKind,
+        /// The definition's name.
+        name: CompactString,
+    },
+}
+
+impl BasePatch {
+    /// [`BasePatch::RemovedVertex`].
+    pub fn removed_vertex(id: impl Into<CompactString>) -> Self {
+        Self::RemovedVertex { id: id.into() }
+    }
+
+    /// [`BasePatch::RemovedEdge`].
+    pub fn removed_edge(id: impl Into<CompactString>) -> Self {
+        Self::RemovedEdge { id: id.into() }
+    }
+
+    /// [`BasePatch::VertexImage`].
+    pub fn vertex_image(
+        id: impl Into<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Self {
+        Self::VertexImage {
+            id: id.into(),
+            labels,
+            properties,
+        }
+    }
+
+    /// [`BasePatch::EdgeImage`].
+    pub fn edge_image(
+        id: impl Into<CompactString>,
+        label: Option<CompactString>,
+        properties: Option<PropertyMap>,
+    ) -> Self {
+        Self::EdgeImage {
+            id: id.into(),
+            label,
+            properties,
+        }
+    }
+
+    /// [`BasePatch::RemovedDefinition`].
+    pub fn removed_definition(
+        kind: crate::graph::definition::DefinitionKind,
+        name: impl Into<CompactString>,
+    ) -> Self {
+        Self::RemovedDefinition {
+            kind,
+            name: name.into(),
+        }
+    }
+}
+
+/// The parts of a layer an encoder writes ([`PersistentStorage::layer_parts`]): the identity
+/// of the base, the changes to the base and the handles of the elements the layer added, every
+/// vertex before the edges (an encoder reads their ids, labels, properties and endpoints
+/// through the ordinary [`GraphStorage`] read methods). A snapshot loader reads the parts of
+/// the EMPTY layer it loads into for its base's identity (a snapshot of a layer over another
+/// base is refused).
+///
+/// **EXPERIMENTAL**, like [`PersistentStorage`]. Built with [`LayerParts::new`].
+#[non_exhaustive]
+pub struct LayerParts<'a, V, E> {
+    /// The identity of the base the layer is over (what a layer snapshot records).
+    pub base_ref: crate::graph::BaseRef,
+    /// The changes to the base, by base element id: every removed base edge and vertex, every
+    /// image, every removed base definition.
+    pub patch: Vec<BasePatch>,
+    /// The vertices the layer added, in its order.
+    pub vertices: Box<dyn Iterator<Item = V> + 'a>,
+    /// The edges the layer added (also those at base vertices), in its order.
+    pub edges: Box<dyn Iterator<Item = E> + 'a>,
+}
+
+impl<'a, V, E> LayerParts<'a, V, E> {
+    /// The parts from the base's identity, the patch and the added elements.
+    pub fn new(
+        base_ref: crate::graph::BaseRef,
+        patch: Vec<BasePatch>,
+        vertices: Box<dyn Iterator<Item = V> + 'a>,
+        edges: Box<dyn Iterator<Item = E> + 'a>,
+    ) -> Self {
+        Self {
+            base_ref,
+            patch,
+            vertices,
+            edges,
+        }
+    }
+}
+
+impl<V, E> std::fmt::Debug for LayerParts<'_, V, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerParts")
+            .field("base_ref", &self.base_ref)
+            .field("patch", &self.patch)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One mutation of the default [`PersistentStorage::replay`].

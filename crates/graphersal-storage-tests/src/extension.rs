@@ -711,8 +711,6 @@ pub fn each_property_index_holds_array_elements<S: GraphStorage>(storage: &mut S
 /// twice, nested, beside objects), `null`, a missing key, multi-label and unlabeled vertices.
 /// Checked after writes and a rollback too. Skipped without the capability.
 pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mut S) {
-    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
-    use graphersal::storage::{ElementKind, PropertyIndexRange};
     let caps = storage.capabilities().unwrap();
     if !caps.exact_property_index_lookups
         || !caps.property_indexes
@@ -721,10 +719,52 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
     {
         return;
     }
+    let handles = exact_lookup_fixture(storage);
+    assert_exact_lookups(storage, "built");
+    let mark = storage.begin_unit().unwrap();
+    storage
+        .set_vertex_property(
+            handles[0],
+            "ex".into(),
+            ElementProperty::Array(vec!["x".into(), "z".into()]),
+        )
+        .unwrap();
+    storage
+        .set_vertex_property(handles[6], "ex".into(), "x".into())
+        .unwrap();
+    storage.drop_vertex(handles[2]).unwrap();
+    assert_exact_lookups(storage, "after writes");
+    storage
+        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
+        .unwrap();
+    assert_exact_lookups(storage, "after the rollback");
+    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
+        let kind = if name == "ex_p" {
+            DefinitionKind::PROPERTY_INDEX
+        } else {
+            DefinitionKind::PROPERTY_INDEX_EXT
+        };
+        assert!(storage.remove_definition(kind, name).unwrap(), "{name}");
+    }
+}
+
+/// The uuid value of the exact-lookup data.
+const EXACT_UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+
+/// The data and indexes of [`exact_property_index_lookups_return_exactly`]: vertices `ex_00` to
+/// `ex_17` holding the look-alikes under the key `ex` (other kinds, other case, arrays, nested
+/// arrays and objects, `null`, a missing key; multi-label and unlabeled vertices), then four
+/// indexes on it: `ex_p` (label `p`), `ex_any` (label-less), `ex_any_each` (`each`) and
+/// `ex_any_lower` (`to_lower`). Returns the vertices in that order. Public so a storage whose
+/// indexes come from elsewhere (a layer serving its base's indexes) can build them in the
+/// storage that defines them and check another one with [`assert_exact_lookups`].
+pub fn exact_lookup_fixture<S: GraphStorage>(storage: &mut S) -> Vec<S::VertexId> {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::ElementKind;
     let list = |items: &[ElementProperty]| ElementProperty::Array(items.to_vec());
     let mut object = PropertyMap::default();
     object.insert("x", "x".into());
-    let uuid = ElementProperty::Uuid(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let uuid = ElementProperty::Uuid(EXACT_UUID);
     let values: Vec<(&[&str], Option<ElementProperty>)> = vec![
         (&["p"], Some("x".into())),
         (&["p", "q"], Some("x".into())),
@@ -757,7 +797,6 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         };
         handles.push(vertex(storage, Some(&id), labels, properties));
     }
-    let each = PropertyIndexTransform::Each;
     for (name, definition) in [
         (
             "ex_p",
@@ -770,7 +809,7 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         (
             "ex_any_each",
             PropertyIndexDefinition::label_less(ElementKind::Vertex, "ex")
-                .with_transform(Some(each.clone())),
+                .with_transform(Some(PropertyIndexTransform::Each)),
         ),
         (
             "ex_any_lower",
@@ -782,6 +821,18 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
             .set_definition(Definition::property_index(name, definition))
             .expect("an index");
     }
+    handles
+}
+
+/// Asserts that the four indexes of [`exact_lookup_fixture`] answer an equality slice of
+/// `"x"`, `"1"`, `true`, the uuid and an absent value exactly: what a scan of `storage`
+/// accepts for the condition (per label, label-less, `each`, `to_lower`), each vertex once.
+/// `stage` names the moment in the failure message.
+pub fn assert_exact_lookups<S: GraphStorage>(storage: &S, stage: &str) {
+    use graphersal::catalog::PropertyIndexTransform;
+    use graphersal::storage::PropertyIndexRange;
+    let each = PropertyIndexTransform::Each;
+    let uuid = ElementProperty::Uuid(EXACT_UUID);
     // Exactly what the conditions accept, from a scan.
     let expected = |storage: &S, label: Option<&str>, by_each: bool, wanted: &ElementProperty| {
         let mut ids: Vec<String> = Vec::new();
@@ -815,7 +866,7 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
         ids.sort();
         ids
     };
-    let check = |storage: &S, stage: &str| {
+    {
         for wanted in [
             ElementProperty::from("x"),
             ElementProperty::from("1"),
@@ -892,28 +943,6 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
                 "{stage}: to_lower lookup of {wanted:?}"
             );
         }
-    };
-    check(storage, "built");
-    let mark = storage.begin_unit().unwrap();
-    storage
-        .set_vertex_property(handles[0], "ex".into(), list(&["x".into(), "z".into()]))
-        .unwrap();
-    storage
-        .set_vertex_property(handles[6], "ex".into(), "x".into())
-        .unwrap();
-    storage.drop_vertex(handles[2]).unwrap();
-    check(storage, "after writes");
-    storage
-        .rollback_unit(mark, &RollbackReason::failed(&"contract"))
-        .unwrap();
-    check(storage, "after the rollback");
-    for name in ["ex_p", "ex_any", "ex_any_each", "ex_any_lower"] {
-        let kind = if name == "ex_p" {
-            DefinitionKind::PROPERTY_INDEX
-        } else {
-            DefinitionKind::PROPERTY_INDEX_EXT
-        };
-        assert!(storage.remove_definition(kind, name).unwrap(), "{name}");
     }
 }
 
@@ -925,20 +954,89 @@ pub fn exact_property_index_lookups_return_exactly<S: GraphStorage>(storage: &mu
 /// element may write its own key again; a swap through an intermediate value passes; an index
 /// stored over repeated values is neither listed nor enforced, and `unique_index_duplicates`
 /// reports them. Skipped without the capability.
+///
+/// The first part is split into [`unique_index_fixture`] and [`assert_unique_index_enforced`],
+/// so a storage that cannot define an index itself (a layered graph over a base that has it)
+/// can run the enforcement checks on its own.
 pub fn unique_property_index_refuses_repeated_keys<S: GraphStorage>(storage: &mut S) {
-    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
-    use graphersal::storage::ElementKind;
     let caps = storage.capabilities().unwrap();
     if !caps.property_indexes || !caps.atomic || !has_catalog(storage) {
         return;
     }
-    let a = vertex(
+    unique_index_fixture(storage);
+    assert_unique_index_enforced(storage);
+    let index = unique_email_index();
+    let b = storage.get_vertex_by_id("uq_b").unwrap().expect("uq_b");
+    // Stored over repeated values (no create check): neither listed nor enforced.
+    storage
+        .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
+        .unwrap();
+    storage
+        .set_vertex_property(b, "email".into(), "B@X".into())
+        .unwrap();
+    storage.set_definition(index).unwrap();
+    assert!(
+        storage
+            .property_indexes()
+            .unwrap()
+            .iter()
+            .all(|info| info.name != "uq_email")
+    );
+    let report = storage
+        .unique_index_duplicates("uq_email")
+        .unwrap()
+        .expect("the repeated values");
+    assert_eq!(report.total, 1);
+    assert_eq!(report.values[0].count, 2);
+    assert_eq!(report.values[0].value, "\"b@x\"");
+    vertex(
+        storage,
+        Some("uq_c"),
+        &["uq"],
+        props(&[("email", "b@x".into())]),
+    );
+    assert!(
+        storage
+            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
+            .unwrap()
+    );
+}
+
+/// The unique index of [`unique_property_index_refuses_repeated_keys`]: `uq_email`, vertex
+/// label `uq`, key `email`, `to_lower`.
+pub fn unique_email_index() -> Definition {
+    use graphersal::catalog::{PropertyIndexDefinition, PropertyIndexTransform};
+    use graphersal::storage::ElementKind;
+    Definition::property_index(
+        "uq_email",
+        PropertyIndexDefinition::new(ElementKind::Vertex, "uq", "email")
+            .with_transform(Some(PropertyIndexTransform::ToLower))
+            .with_unique(true),
+    )
+}
+
+/// The data and the unique index `uq_email` of [`unique_property_index_refuses_repeated_keys`]:
+/// vertices `uq_a`, `uq_b`, `uq_n1` (label `uq`) and `uq_o` (label `uq_other`) with an
+/// `email` each, then the index (on a storage that can define it; check another one built over
+/// it with [`assert_unique_index_enforced`]).
+pub fn unique_index_fixture<S: GraphStorage>(storage: &mut S) {
+    unique_index_data(storage);
+    let index = unique_email_index();
+    assert_eq!(index.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
+    assert!(index.flags().is_critical());
+    storage.set_definition(index).expect("a unique index");
+}
+
+/// The vertices of [`unique_index_fixture`] without the index (for a storage whose base
+/// already defines [`unique_email_index`]).
+pub fn unique_index_data<S: GraphStorage>(storage: &mut S) {
+    vertex(
         storage,
         Some("uq_a"),
         &["uq"],
         props(&[("email", "a@x".into())]),
     );
-    let b = vertex(
+    vertex(
         storage,
         Some("uq_b"),
         &["uq"],
@@ -950,23 +1048,23 @@ pub fn unique_property_index_refuses_repeated_keys<S: GraphStorage>(storage: &mu
         &["uq"],
         props(&[("email", ElementProperty::Null)]),
     );
-    let other = vertex(
+    vertex(
         storage,
         Some("uq_o"),
         &["uq_other"],
         props(&[("email", "A@x".into())]),
     );
-    let index = Definition::property_index(
-        "uq_email",
-        PropertyIndexDefinition::new(ElementKind::Vertex, "uq", "email")
-            .with_transform(Some(PropertyIndexTransform::ToLower))
-            .with_unique(true),
-    );
-    assert_eq!(index.kind(), DefinitionKind::PROPERTY_INDEX_EXT);
-    assert!(index.flags().is_critical());
-    storage
-        .set_definition(index.clone())
-        .expect("a unique index");
+}
+
+/// The enforcement checks of [`unique_property_index_refuses_repeated_keys`] over the data of
+/// [`unique_index_fixture`] (found by id): the index listed as unique without duplicates, a
+/// repeating insert, property write and label refused with `UniqueViolation` and nothing
+/// changed, the exempt writes passing, and a swap through an intermediate value inside a unit.
+/// Leaves `uq_a` with `b@x` and `uq_b` with `a@x`.
+pub fn assert_unique_index_enforced<S: GraphStorage>(storage: &mut S) {
+    let a = storage.get_vertex_by_id("uq_a").unwrap().expect("uq_a");
+    let b = storage.get_vertex_by_id("uq_b").unwrap().expect("uq_b");
+    let other = storage.get_vertex_by_id("uq_o").unwrap().expect("uq_o");
     let listed = storage.property_indexes().unwrap();
     let info = listed
         .iter()
@@ -1040,39 +1138,6 @@ pub fn unique_property_index_refuses_repeated_keys<S: GraphStorage>(storage: &mu
         .unwrap();
     storage.commit_unit(mark).unwrap();
     assert_eq!(email(storage, a), Some("b@x".into()));
-    // Stored over repeated values (no create check): neither listed nor enforced.
-    storage
-        .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
-        .unwrap();
-    storage
-        .set_vertex_property(b, "email".into(), "B@X".into())
-        .unwrap();
-    storage.set_definition(index).unwrap();
-    assert!(
-        storage
-            .property_indexes()
-            .unwrap()
-            .iter()
-            .all(|info| info.name != "uq_email")
-    );
-    let report = storage
-        .unique_index_duplicates("uq_email")
-        .unwrap()
-        .expect("the repeated values");
-    assert_eq!(report.total, 1);
-    assert_eq!(report.values[0].count, 2);
-    assert_eq!(report.values[0].value, "\"b@x\"");
-    vertex(
-        storage,
-        Some("uq_c"),
-        &["uq"],
-        props(&[("email", "b@x".into())]),
-    );
-    assert!(
-        storage
-            .remove_definition(DefinitionKind::PROPERTY_INDEX_EXT, "uq_email")
-            .unwrap()
-    );
 }
 
 /// `set_definitions` stores a list in order exactly like one `set_definition` per item (a name

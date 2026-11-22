@@ -7,8 +7,8 @@ every open, it may differ from one open to the next and is stored nowhere.
 
 `graphersal store info <dir>` lists the creation parameters under "fixed at creation"; `Store::info`
 / `Store::inspect` return them (`StoreInfo::store_id`, `chunk_bytes`, `damage_policy`, `created_at`,
-`format_version`, `space` for a single file), the dev server's `GET /api/store` and the Store menu
-show them.
+`format_version`, `space` for a single file, `layer_base` for a layer store), the dev server's
+`GET /api/store` and the Store menu show them.
 
 ```text
 $ graphersal store create data/ --from modern --on-damage continue
@@ -23,6 +23,14 @@ fixed at creation (never changed):
   backend       directory (format version 4)
 ```
 
+A layer store lists its base too, as the last line of the block:
+
+```text
+  base          graph 019a6b2e-... at commit 42 (commit time 1763...)
+                # a layer store: opens only over this base, a backup is useless without it
+                graphersal --graph <BASE> --layer-store <dir>
+```
+
 ## The parameters fixed at creation
 
 | Parameter | Default | Set with | Stored in | Carried by |
@@ -32,6 +40,7 @@ fixed at creation (never changed):
 | Store id: the store's identity, which an incremental backup requires to be equal | random (128 bits) | (made by the create) | `GRAPH` offset 100 ([format spec](format.md) 5.5) | every write of `GRAPH`; rollback, attic restore, compact, every backup (full, increment, ZIP, from memory), restore (a restored backup IS the store), upgrade (copy and in place: the upgraded store IS the store in the new format). RENEWED (a new store) by fork, attic fork, repair and convert |
 | Creation time | the time of the create | (the clock) | `GRAPH` offset 32 | convert, backups, restore, rollback, upgrade (a fork or repair is a new store with its own time) |
 | Backend: a directory, one container file (`.gstore`), memory | by the path (`store_dir_at`): an existing file or a new `.gstore` path is a single file | the path; CLI `--single-file`; Rust `SingleFileDir`, `MemDir`; Python `Store.create_file` | the location itself; a single file's preamble holds its container version (14.1) | compact (same file), upgrade in place; `store convert` and `store upgrade <old> <new>` make a NEW store, in any backend |
+| Base of a layer store (`base_ref`): the identity of the frozen base graph the layer was built over (its lineage id, commit and commit time, `BaseRef`); only a layer store has one ([Layered Graphs](../for_developers/layered_graphs.md)) | none (a plain store) | Rust `Store::<LayeredGraph>::create_layer(dir, &base, options)` / `create_layer_with` (the `LayerBase` given); CLI and dev server: `graphersal --graph <base> --layer-store <dir> --create-store` (the `--graph` is the base: a Store or a `.gsnap`; `graphersal store info` shows it); Python: not yet (its layers live in memory) | the layer file (`layer.bin`, segment kind 128) of every snapshot and its segment-table row in the manifest, file format version 5 ([format spec](format.md) 7.5); no `GRAPH` field or flag (the manifests tell, 15) | every snapshot the store writes (checkpoints, live and closed); every backup (full, increment, ZIP, from memory), restore (in place and from a ZIP), the read-only open of a backup, `export_packed` (a layer `.gsnap`); a fork (`fork`, `Store::fork_layer_dir`, CLI `store fork --base`) and an attic fork (`attic_fork`, `Store::attic_fork_layer_dir`, CLI `store attic <dir> fork --base`): a new layer store over the same base; a rollback and an attic restore (the store stays a layer over it); `convert` (byte copy); `upgrade_in_place` (a layer store is current: unchanged). Not carried, by design: the materialized export (`Store::export_materialized`, CLI `store materialize --base`, a plain whole-graph snapshot without a base). Refused for a layer store (`StoreFailure::LayerStore`, nothing written): the repair (a salvage rebuilds whole graphs, a layer store holds only changes to a base it does not read: restore a backup instead), the closed-store model commits (a layer store keeps no model), the plain `fork_dir`/`attic_fork_dir` (no base to load over) |
 | Store format version | the build's (4) | (the build) | `GRAPH` offset 8 (the file format version, 4, is in every other file header; a store created from an older packed snapshot keeps that snapshot's older files) | everything; a newer version is refused; an older released one (2, Graphersal 0.1.x; 3, Graphersal 0.2.x to 0.4.x) is refused until `graphersal store upgrade` converts it (a 0.4.0 store's models become blobs), the only change of this parameter, which carries every other one ([Format Versions](store_versions.md#upgrading-a-store-of-an-older-version)); the pre-release version 1 moves through a [packed snapshot](../users_guide/command_cheat_sheet.md#migrate-a-store-from-an-older-format) |
 
 The **graph id** is not a parameter: it identifies the current lineage. It is set when the store is
@@ -63,6 +72,17 @@ decision; an open never overrides it. An open given another policy ignores it
 (`StoreOptions::with_damage_policy` is used only when a store is created), and the CLI refuses
 `--on-damage` for an existing store with another policy instead of ignoring it silently. A store
 whose `GRAPH` files are both lost cannot tell its policy: a repair of it gets the default.
+
+The **base of a layer store** is fixed because the layer holds only its changes to that very
+base, by element id: over any other graph (also the same lineage at another commit) the changes
+mean something else. An open, a view, a verification or a checkpoint with the base is checked
+against it before anything is read (`PersistError::LayerBaseMismatch`, naming both; so is a
+fork or attic fork of the closed store, `Store::fork_layer_dir`/`attic_fork_layer_dir`), and a copy
+of the store is useless without the base: a backup's report warns about it. To move a layer to a
+new base, rebuild it there. No `GRAPH` flag marks a layer store: every one of its snapshots names
+the base in its manifest (which the version guard reads anyway, format spec 15), so a flag would
+only be a second copy that could disagree, and releases that do not know layer stores already
+refuse the version-5 manifests.
 
 The storage type of the graph (`Store<TraversalGraph>` or a host's `Store<S>`,
 [Your Own Storage](store_own_storage.md)) is NOT a creation parameter: the files do not depend on

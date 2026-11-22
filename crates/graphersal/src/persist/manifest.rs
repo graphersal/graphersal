@@ -60,15 +60,16 @@ pub(crate) struct ManifestFixed {
     pub(crate) name: String,
     pub(crate) chunk_bytes: u32,
     /// The file format version the manifest was read with (not a field of its own: the version
-    /// word; [`ManifestFixed::encode`] always writes the current one).
+    /// word; [`Manifest::encode`] writes [`Manifest::version_word`]).
     pub(crate) version: FileVersion,
 }
 
 impl ManifestFixed {
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    /// Encodes the fixed part with the version word `version` ([`Manifest::version_word`]).
+    pub(crate) fn encode_as(&self, version: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity(FIXED_BYTES);
         out.extend_from_slice(MANIFEST_MAGIC);
-        put_u32(&mut out, FORMAT_VERSION);
+        put_u32(&mut out, version);
         put_u32(&mut out, self.flags);
         out.extend_from_slice(&self.graph_id.to_be_bytes());
         out.extend_from_slice(&self.parent_graph_id.to_be_bytes());
@@ -123,7 +124,10 @@ impl ManifestFixed {
             return Err(DecodeError::new(0, "not a manifest (bad magic)"));
         }
         let version = r.u32()?;
-        DecodeError::check_version(8, "manifest", version)?;
+        // A layer snapshot's manifest (format spec 7.5, 15); the full decode requires its row.
+        if version != super::codec::LAYER_FORMAT_VERSION {
+            DecodeError::check_version(8, "manifest", version)?;
+        }
         let mut fixed = ManifestFixed {
             flags: r.u32()?,
             graph_id: r.u128_be()?,
@@ -213,9 +217,10 @@ pub(crate) fn is_element_kind(kind: u8) -> bool {
 }
 
 /// Whether a segment kind this version does not know is critical (format spec 7.5: kinds
-/// 128-255; a store whose snapshot has one opens read-only).
+/// 128-255; a store whose snapshot has one opens read-only). The layer file (kind 128,
+/// `persist::layer`) is critical too, but known: a snapshot with it loads only into a layer.
 pub(crate) fn is_critical_segment_kind(kind: u8) -> bool {
-    !is_element_kind(kind) && kind >= 128
+    !is_element_kind(kind) && kind >= 128 && kind != super::layer::KIND_LAYER
 }
 
 impl Manifest {
@@ -237,6 +242,22 @@ impl Manifest {
 }
 
 impl Manifest {
+    /// The file format version the manifest is written in: [`LAYER_FORMAT_VERSION`] for a
+    /// layer snapshot (a layer row, format spec 7.5), else the current one.
+    ///
+    /// [`LAYER_FORMAT_VERSION`]: super::codec::LAYER_FORMAT_VERSION
+    pub(crate) fn version_word(&self) -> u32 {
+        if self
+            .segments
+            .iter()
+            .any(|s| s.kind == super::layer::KIND_LAYER)
+        {
+            super::codec::LAYER_FORMAT_VERSION
+        } else {
+            FORMAT_VERSION
+        }
+    }
+
     /// Encodes the manifest; fills `segment_count`, `variable_offset` and `variable_len`.
     pub(crate) fn encode(&mut self) -> Vec<u8> {
         let mut variable = Vec::new();
@@ -263,7 +284,7 @@ impl Manifest {
         self.fixed.segment_count = self.segments.len() as u32;
         self.fixed.variable_offset = FIXED_BYTES as u64;
         self.fixed.variable_len = variable.len() as u64;
-        let fixed = self.fixed.encode();
+        let fixed = self.fixed.encode_as(self.version_word());
         let mut out = Vec::with_capacity(2 * FIXED_BYTES + variable.len() + 4);
         out.extend_from_slice(&fixed);
         let variable_crc = crc(&variable);
@@ -406,6 +427,13 @@ impl Manifest {
                 base + r.offset(),
                 "trailing bytes in the manifest",
             ));
+        }
+        // The layer version only with a layer file: otherwise a newer version's manifest.
+        let layer_version = super::codec::LAYER_FORMAT_VERSION;
+        if fixed.version.0 == layer_version
+            && !segments.iter().any(|s| s.kind == super::layer::KIND_LAYER)
+        {
+            return Err(DecodeError::newer(8, "manifest", layer_version));
         }
         Ok(Manifest {
             fixed,

@@ -19,6 +19,8 @@
 // option the allow-list form is built (the visible labels listed, the others hidden). A side
 // without hidden labels and without conditions is left out, so the unfiltered case costs nothing.
 
+import { originColumns } from '../graph-data.js';
+
 /** Timing and size thresholds of the filter drawer. */
 export const FILTER_TUNING = Object.freeze({
   /** Changes apply this long after the last edit (automatic mode). */
@@ -455,6 +457,7 @@ export function labelFilterView(view, spec) {
     edgeSource: Uint32Array.from(ej, (j) => map[view.edgeSource[j]]),
     edgeTarget: Uint32Array.from(ej, (j) => map[view.edgeTarget[j]]),
     edgeLabel: Uint32Array.from(ej, (j) => view.edgeLabel[j]),
+    ...originColumns(view, vi, ej),
     matchedNodes: vi.length,
     matchedEdges: ej.length,
     of: Uint32Array.from(vi),

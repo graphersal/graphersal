@@ -287,6 +287,145 @@ fn foreign_hosts_and_origins_are_refused() {
     assert!(message.contains("--allowed-host"), "{message}");
 }
 
+/// A context whose session serves an empty layer over the `modern` sample (the CLI's
+/// `--layer`).
+fn layer_context() -> Arc<Context> {
+    let (jobs, ()) = spawn_session(
+        SessionPresets::new(),
+        |session| {
+            let base = graphersal::storage::LayerBase::from_graph(graphersal::prelude::Graph::new(
+                graphersal::TraversalGraph::tinkerpop_modern(),
+            ))
+            .map_err(|err| err.to_string())?
+            .with_name("modern");
+            let layer = base.new_layer().map_err(|err| err.to_string())?;
+            session
+                .load_shared(Arc::new(layer), "modern", "layer")
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        },
+        None,
+    )
+    .expect("the session thread starts");
+    Context::builder(Runner::Session(jobs), check()).build()
+}
+
+/// The MCP host knows whether its session serves a layer (`Host::serves_layer`, the layer
+/// note of the instructions) without running a job: from the builder (`layered`), else from
+/// the first job, refreshed by every job that swaps the graph.
+#[cfg(feature = "mcp")]
+#[test]
+fn the_mcp_host_knows_whether_it_serves_a_layer() {
+    use graphersal_mcp::Host;
+    let plain = context();
+    assert!(!plain.serves_layer(), "unknown: a plain graph");
+    handle(&plain, request(Method::Get, "/api/graph", b""));
+    assert!(!plain.serves_layer());
+    let layer = layer_context();
+    assert!(!layer.serves_layer(), "unknown before the first job");
+    handle(&layer, request(Method::Get, "/api/graph", b""));
+    assert!(layer.serves_layer(), "seen by the first job");
+    // A host that knows says so when it builds the context: no job needed.
+    let (jobs, ()) = spawn_session(SessionPresets::new(), |_| Ok::<(), String>(()), None)
+        .expect("the session thread starts");
+    let told = Context::builder(Runner::Session(jobs), check())
+        .layered(true)
+        .build();
+    assert!(told.serves_layer());
+}
+
+/// `POST /api/layer/diff`: the session's `layer_diff` (an empty diff on a plain graph, the
+/// layer's changes on a layer, `{ok: false, error}` for a bad spec), JSON bodies only, POST
+/// only, behind the Host/Origin checks like every API route.
+#[test]
+fn the_layer_diff_endpoint_answers_the_sessions_diff() {
+    let empty = json!({"added": [], "removed": [], "modified": [], "truncated": false});
+    let plain = context();
+    let answer = handle(&plain, json_request("/api/layer/diff", b"{}"));
+    assert_eq!(answer.status(), 200);
+    assert_eq!(body_json(&answer), json!({"ok": true, "diff": empty}));
+    let info = handle(&plain, request(Method::Get, "/api/graph", b""));
+    assert!(
+        body_json(&info).get("layer").is_none(),
+        "{}",
+        body_json(&info)
+    );
+
+    let layer = layer_context();
+    let info = body_json(&handle(&layer, request(Method::Get, "/api/graph", b"")));
+    assert_eq!(info["layer"]["base"], "modern", "{info}");
+    let written = handle(
+        &layer,
+        json_request(
+            "/api/execute",
+            br#"{"script": "g.v(1).property(\"age\", 30).iterate(); g.add_v(\"person\").iterate()"}"#,
+        ),
+    );
+    assert_eq!(
+        written.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(written.body())
+    );
+    let answer = body_json(&handle(&layer, json_request("/api/layer/diff", b"{}")));
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(
+        answer["diff"]["added"].as_array().unwrap().len(),
+        1,
+        "{answer}"
+    );
+    assert_eq!(
+        answer["diff"]["modified"][0]["properties"]["age"],
+        json!({"base": 29, "layer": 30}),
+        "{answer}"
+    );
+    let vertices_only = body_json(&handle(
+        &layer,
+        json_request("/api/layer/diff", br#"{"kinds": "edge"}"#),
+    ));
+    assert_eq!(vertices_only["diff"], empty, "{vertices_only}");
+    let info = body_json(&handle(&layer, request(Method::Get, "/api/graph", b"")));
+    assert_eq!(info["layer"]["added"]["vertices"], 1, "{info}");
+    assert_eq!(info["layer"]["modified"]["vertices"], 1, "{info}");
+
+    let bad = body_json(&handle(
+        &layer,
+        json_request("/api/layer/diff", br#"{"limit": 0}"#),
+    ));
+    assert_eq!(bad["ok"], false, "{bad}");
+    assert!(
+        bad["error"]
+            .as_str()
+            .unwrap()
+            .contains("limit must be a positive integer"),
+        "{bad}"
+    );
+    let wrong_method = handle(&layer, request(Method::Get, "/api/layer/diff", b""));
+    assert_eq!(wrong_method.status(), 405);
+    assert_eq!(
+        body_json(&wrong_method)["error"],
+        "method GET is not allowed on /api/layer/diff"
+    );
+    let not_json = handle(
+        &layer,
+        request(Method::Post, "/api/layer/diff", b"{}").with_body_length(Some(2)),
+    );
+    assert_eq!(not_json.status(), 415);
+    let cross_site = handle(
+        &layer,
+        json_request("/api/layer/diff", b"{}").with_header("Origin", "http://evil.example"),
+    );
+    assert_eq!(cross_site.status(), 403);
+    let foreign_host = handle(
+        &layer,
+        Request::new(Method::Post, "/api/layer/diff", Cursor::new(&b"{}"[..]))
+            .with_header("Host", "evil.example:8080")
+            .with_header("Content-Type", "application/json")
+            .with_body_length(Some(2)),
+    );
+    assert_eq!(foreign_host.status(), 403);
+}
+
 /// Waits until `runs` holds `n` runs: the test follows the server, not the clock.
 fn wait_for_runs(runs: &Runs, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(60);

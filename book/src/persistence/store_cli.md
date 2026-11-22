@@ -76,6 +76,7 @@ graphersal store rollback --help      # the same (-h works too)
 | [`backup`](#backup) | full, incremental or ZIP backup |
 | [`restore`](#restore) | a backup (or ZIP) as the live store |
 | [`export`](#export) | a stored snapshot as a `.gsnap` |
+| [`materialize`](#materialize) | a layer store's whole visible graph as a standalone `.gsnap` |
 | [`models`](#models) | the embedding models the store keeps; remove one |
 | [`prune`](#prune) | remove old history |
 | [`compact`](#compact) | prune to now; give a single file's free space back |
@@ -84,6 +85,18 @@ graphersal store rollback --help      # the same (-h works too)
 | [`upgrade`](#upgrade) | a store of an older Graphersal, converted to the current format |
 | [`repair`](#repair) | a damaged store, repaired into a new directory |
 | [`restore-blobs`](#restore-blobs) | missing or damaged blobs copied back from another copy |
+
+**Layer stores** (a layer's changes to a frozen base, kept with `graphersal --graph <base>
+--layer-store <dir>`; [Layers](../users_guide/layered_graphs.md#keeping-a-layer-durably---layer-store)):
+the commands that read or copy files work on them without the base (`info`, `list`, `marks`,
+`journal`, the `attic` listing and `changes`, `backup`, `restore`, `export`, `convert`,
+`upgrade`). Those that load the layer take `--base <SOURCE>`, the base it was created over (a
+store directory or `.gstore`, opened read-only, or a `.gsnap`): `verify`, `checkpoint`, `fork`,
+`rollback`, `attic restore|remove|fork` and `materialize`. Without it they exit 1 with the
+`LayerStore` reason and a note naming `--base`; another base exits 1 naming both
+(`LayerBaseMismatch`); a `--base` that is not a store or `.gsnap` is a usage error (exit 2).
+`repair` and `models remove|default` refuse a layer store (exit 1), and `models <DIR>` says that
+its graph serves the base's models. The commands' "open it" hints name `--layer-store`.
 
 ### create
 
@@ -200,7 +213,12 @@ fixed at creation (never changed):
   backend       directory (format version 4)
 ```
 
-Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back store), `backup
+Also printed when they apply: for a layer store its base as `base` under "fixed at creation",
+with the command that opens it (`graphersal --graph <BASE> --layer-store <DIR>`; it holds only a
+layer's changes to that base and opens only over it, and a backup of it is useless without
+that base, which `store backup` warns about; see
+[Layers](../users_guide/layered_graphs.md#store-commands-on-a-layer-store) for the commands that
+take `--base`), `parent` and `branched at` (a fork, a rolled-back store), `backup
 up to commit N` with `taken` and `access` below it and the command that makes it the live store
 (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
 (a `models` block: one block per model under its repository, one field per line: `full name`
@@ -275,7 +293,7 @@ menu has **Mark**).
 ### checkpoint
 
 ```text
-graphersal store checkpoint <DIR> [--name <NAME>]
+graphersal store checkpoint <DIR> [--name <NAME>] [--base <SOURCE>]
 ```
 
 Writes a snapshot of the current state of the CLOSED store, merged from the last snapshot and the
@@ -293,12 +311,13 @@ Snapshot at commit 3
 is current.
 "In use" while another process has the store open (a server's Store menu has **Checkpoint**,
 which merges the same way while commits go on). Damage in what it reads stops it with exit 1 and
-nothing written; run `verify`.
+nothing written; run `verify`. A layer store needs `--base`: its layer is loaded over the base
+and encoded (`encoded from: the loaded graph ...`), a snapshot the size of its changes.
 
 ### verify
 
 ```text
-graphersal store verify <DIR>
+graphersal store verify <DIR> [--base <SOURCE>]
 ```
 
 Reads every checksum (snapshots, WAL, `GRAPH`, marks) and says what it read (`Checked the store
@@ -307,12 +326,15 @@ damage found`;
 exit **1** with every problem and the damage report (the donor of each damaged item). See
 [Verify](store_verify.md). Files of a newer format version are never listed as damage: `verify`
 exits **1** with the "written by a newer Graphersal" refusal shown under [info](#info) (no
-`DAMAGE` lines, no repair advice), and `store repair` refuses such a store the same way.
+`DAMAGE` lines, no repair advice), and `store repair` refuses such a store the same way. A layer
+store is checked without its base file by file (a `note:` says its snapshots were not loaded,
+and a block names `store verify <DIR> --base <BASE>`); with `--base` every snapshot is also
+loaded over the base.
 
 ### fork
 
 ```text
-graphersal store fork <DIR> <NEW_DIR> [TARGET]
+graphersal store fork <DIR> <NEW_DIR> [TARGET] [--base <SOURCE>]
 ```
 
 A new store in `NEW_DIR` (it must not exist, or be empty) from the state at `TARGET` (default:
@@ -335,7 +357,9 @@ Forked data/ into branch/
 
 A fork starts without marks: the `marks not carried` and `mark` lines (printed only when there are any) name
 the source's marks at or before the fork's position. Exit 1 when the target is not reached
-(`Recovery target mark "nosuch" not reached`).
+(`Recovery target mark "nosuch" not reached`). A layer store needs `--base`; the fork is a new
+layer store over the same base (its hint: `graphersal --graph <SOURCE> --layer-store
+<NEW_DIR>`).
 
 ### rollback
 
@@ -522,6 +546,33 @@ models are missing in what is made from the file: `graphersal embed-model import
 <store>` writes a missing model's blob back). `store create --from FILE.gsnap` and the
 playground put them back into a store. A damaged model blob stops the export (exit 1; export
 `--without-models`).
+
+### materialize
+
+```text
+graphersal store materialize <DIR> <FILE.gsnap> --base <SOURCE> [TARGET] [--without-models]
+```
+
+Writes the whole graph a LAYER STORE shows at `TARGET` (default: the latest) as one standalone
+packed file: the base's elements with the layer's changes applied, the layer's schema and
+catalog, file format version 4. Unlike `export` (a layer snapshot, which loads only over its
+base) the file needs no base: `--graph FILE.gsnap`, `store create --from FILE.gsnap` and older
+Graphersal releases read it; its size follows the whole graph. The base's embedding models the
+layer's catalog references travel with it unless `--without-models`. Reads the files only (no
+lock), so it works while a server has `DIR` open.
+
+```text
+$ graphersal store materialize project whole.gsnap --base product
+Materialized the layer store project at commit 1 into whole.gsnap
+  vertices: 7
+  edges: 6
+  standalone: yes: the whole graph (base and layer), it needs no base
+  # open it in the REPL
+  graphersal --graph whole.gsnap
+```
+
+`--base` is required (exit 2 without it); a plain store is refused (exit 1, naming `store
+export`).
 
 ### models
 

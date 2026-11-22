@@ -402,6 +402,42 @@ mod request_mapping {
             ]
         );
     }
+
+    /// `layer()` and `has_layer()` read what the steps before them reached, so they ask
+    /// nothing of their own; `has_layer()` is a filter and keeps the flow, so a write after it
+    /// still names the edge label the plan states (the Rhai effects analysis agrees).
+    #[test]
+    fn the_layer_steps_ask_nothing_and_keep_the_flow() {
+        let graph = modern();
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(
+            &graph,
+            r#"g.v().layer().to_list(); g.e().has_label("knows").has_layer("base").limit(1).property("w", 1).iterate();"#,
+            recorder.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorder.seen(),
+            [
+                "Read Data(vertex)",
+                "Read Data(edge)",
+                r#"Update Data(edge "knows")"#,
+            ]
+        );
+        let _ = run(
+            &graph,
+            r#"g.e().has_label("knows").has_layer("base").drop().iterate()"#,
+            ProtectCreated,
+        )
+        .unwrap();
+        let err = run(
+            &graph,
+            r#"g.e().has_layer("base").drop().iterate()"#,
+            ProtectCreated,
+        )
+        .unwrap_err();
+        assert!(err.contains("created edges are protected"), "{err}");
+    }
 }
 
 /// A role-based authorizer as a server would build it per connection, e.g. from the roles of a
@@ -652,6 +688,41 @@ mod access_policy {
                 AccessPolicy::read_only()
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_layer_diff_asks_for_read_on_data() {
+        let graph = modern();
+        for script in ["g.layer_diff()", "g.layer_diff(#{limit: 1})"] {
+            assert_denied(
+                run(&graph, script, AccessPolicy::deny_all()),
+                "layer_diff",
+                "Read Data",
+            );
+            assert!(run(&graph, script, AccessPolicy::read_only()).is_ok());
+        }
+        // The Rust API asks the same request once an authorizer is attached.
+        let guard = graph.read();
+        let err = guard
+            .traversal()
+            .with_authorizer(Arc::new(AccessPolicy::deny_all()))
+            .layer_diff(&graphersal::storage::LayerDiffRequest::new())
+            .unwrap_err();
+        let TraverserError::PermissionDenied { step, request, .. } = err.root_cause() else {
+            panic!("{err:?}");
+        };
+        assert_eq!(step, "layer_diff");
+        assert_eq!(
+            request.as_request(),
+            AccessRequest::new(Action::Read, Resource::data(None, None))
+        );
+        assert!(
+            guard
+                .traversal()
+                .with_authorizer(Arc::new(AccessPolicy::read_only()))
+                .layer_diff(&graphersal::storage::LayerDiffRequest::new())
+                .is_ok_and(|diff| diff.is_empty())
         );
     }
 
@@ -4181,4 +4252,45 @@ fn creating_and_dropping_a_per_label_unique_index_asks_for_the_extended_kind() {
     assert_eq!(graph.read().property_indexes().unwrap().len(), 1);
     let _ = run(&graph, r#"g.drop_index("person_name")"#, AllowAll).unwrap();
     assert!(graph.read().property_indexes().unwrap().is_empty());
+}
+
+/// On a layered graph (S4.4) creating and dropping an index asks exactly what it asks on a
+/// plain graph: a read-only host is refused with the same request and nothing changes, an
+/// allowing one creates it on the layer only.
+#[test]
+fn creating_and_dropping_an_index_on_a_layer_asks_the_same() {
+    use graphersal::storage::LayeredGraph;
+    let base = Arc::new(TraversalGraph::tinkerpop_modern());
+    let layer = Arc::new(graphersal::storage::Graph::new(
+        LayeredGraph::over(Arc::clone(&base)).unwrap(),
+    ));
+    let run_on_layer = |script: &str, authorizer: Arc<dyn Authorizer>| {
+        script::eval_value_with_limits(
+            layer.clone(),
+            script,
+            Default::default(),
+            &ScriptLimits::default(),
+            authorizer,
+        )
+        .map_err(|err| err.to_string())
+    };
+    let create = r#"g.create_index(#{label: "person", key: "age"})"#;
+    assert_denied(
+        run_on_layer(create, Arc::new(AccessPolicy::read_only())),
+        "create_index",
+        r#"Create Definition(property_index "person_age")"#,
+    );
+    assert!(layer.read().property_indexes().unwrap().is_empty());
+    let _ = run_on_layer(create, Arc::new(AllowAll)).unwrap();
+    assert_eq!(layer.read().property_indexes().unwrap().len(), 1);
+    assert!(base.property_indexes().unwrap().is_empty());
+    assert_denied(
+        run_on_layer(
+            r#"g.drop_index("person_age")"#,
+            Arc::new(AccessPolicy::read_only()),
+        ),
+        "drop_index",
+        r#"Delete Definition(property_index "person_age")"#,
+    );
+    assert_eq!(layer.read().property_indexes().unwrap().len(), 1);
 }

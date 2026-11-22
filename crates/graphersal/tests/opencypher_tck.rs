@@ -378,19 +378,16 @@ fn baseline_path() -> PathBuf {
 
 /// Path of the Markdown report: `$CARGO_TARGET_DIR/opencypher-report.md` (relative values resolve
 /// against the workspace root), else `<workspace root>/target/opencypher-report.md`; on the
-/// forwarding storage (`GRAPHERSAL_TEST_STORAGE=forwarding`) `opencypher-report-forwarding.md`.
+/// forwarding storage (`GRAPHERSAL_TEST_STORAGE=forwarding`) `opencypher-report-forwarding.md`, and
+/// `opencypher-report-<name>.md` on every other lane (`layered`, `layered-delta`).
 fn report_path() -> PathBuf {
-    use harness::storage::TestStorage;
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let workspace = workspace.canonicalize().unwrap_or(workspace);
     let target = match std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
         Some(dir) => workspace.join(dir),
         None => workspace.join("target"),
     };
-    target.join(match harness::storage::current() {
-        TestStorage::TraversalGraph => "opencypher-report.md",
-        TestStorage::Forwarding => "opencypher-report-forwarding.md",
-    })
+    target.join(harness::storage::current().report_file("opencypher"))
 }
 
 /// Every case of the tree, sorted by id.
@@ -568,11 +565,12 @@ fn opencypher_tck_conformance() {
 
     let storage = harness::storage::current();
     assert!(
-        !(storage == TestStorage::Forwarding && update_requested()),
-        "{}=1 is refused with {}=forwarding: the default run (on TraversalGraph) owns the \
+        !(storage != TestStorage::TraversalGraph && update_requested()),
+        "{}=1 is refused with {}={}: the default run (on TraversalGraph) owns the \
          baseline and the compliance page",
         baseline::UPDATE_ENV,
         harness::storage::STORAGE_ENV,
+        storage.name(),
     );
     let features =
         gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));

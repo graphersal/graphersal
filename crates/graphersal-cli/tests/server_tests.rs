@@ -8807,3 +8807,252 @@ fn skip_on_ci(what: &str) -> bool {
     }
     on_ci
 }
+
+/// A server started with `args` (plus `--server --port 0`) whose stderr start banner is read up
+/// to its `listening` row: the server and the banner.
+fn start_with_banner(args: &[&str]) -> (DevServer, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(args)
+        .args(["--server", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("graphersal starts");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut banner = Vec::new();
+    let mut lines = BufReader::new(stderr).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let last = line.starts_with("  listening:");
+        banner.push(line);
+        if last {
+            break;
+        }
+    }
+    std::thread::spawn(move || lines.for_each(drop));
+    let stdout = child.stdout.take().expect("stdout");
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let port = line
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no address on stdout: {line:?}\n{}", banner.join("\n")));
+    (DevServer { child, port }, banner.join("\n"))
+}
+
+/// The bytes of every file under `dir`, by relative path.
+fn layer_tree(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(name, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// S3.5: `--server --layer-store` commits to the layer store (durable: a new process sees the
+/// write), the base Store is never written, the banner names the layer store and its base, and
+/// "Save to file" answers 409 saying the commits are durable already.
+#[test]
+fn a_layer_store_server_commits_to_the_layer_store() {
+    let ui = ui_dir("layer-store");
+    let root = ui.parent().unwrap().to_path_buf();
+    let base = root.join("base");
+    let layer = root.join("layer");
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&layer);
+    let created = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "store",
+            "create",
+            base.to_str().unwrap(),
+            "--from",
+            "modern",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    let base_files = layer_tree(&base);
+
+    let (server, banner) = start_with_banner(&[
+        "--graph",
+        base.to_str().unwrap(),
+        "--layer-store",
+        layer.to_str().unwrap(),
+        "--create-store",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    assert!(banner.contains("The graph is a Store on disk."), "{banner}");
+    assert!(banner.contains("LAYER STORE"), "{banner}");
+    assert!(banner.contains(layer.to_str().unwrap()), "{banner}");
+    assert!(banner.contains("  base:"), "{banner}");
+    let wrote = execute(
+        port,
+        r#"g.add_v("person").property("name", "zed").iterate()"#,
+    );
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let origin = execute(port, r#"g.v().has("name", "zed").layer().next()"#);
+    assert_eq!(origin["ok"], true, "{origin}");
+    let saved = post(port, "/api/save", "{}");
+    assert_eq!(saved.status, 409, "{}", saved.body);
+    assert!(
+        saved.body.contains("layer store") && saved.body.contains("already durable"),
+        "{}",
+        saved.body
+    );
+    drop(server);
+
+    // A new process over the same base sees the commit; the base is unchanged.
+    let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "--graph",
+            base.to_str().unwrap(),
+            "--layer-store",
+            layer.to_str().unwrap(),
+            "-e",
+            r#"g.v().has("name", "zed").count().next()"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
+    assert_eq!(layer_tree(&base), base_files, "the base store was written");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// S3.5: "Save to file" of an in-memory `--layer` over a graph file says that the layer is kept
+/// in memory (not that the graph came from no file), and the file stays as it was.
+#[test]
+fn save_of_an_in_memory_layer_says_it_is_a_layer() {
+    let ui = ui_dir("layer-save");
+    let file = ui.parent().unwrap().join("graph.json");
+    let exported = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "-e",
+            &format!("g.export_graphson({:?})", file.to_str().unwrap()),
+        ])
+        .output()
+        .unwrap();
+    assert!(exported.status.success(), "{exported:?}");
+    let bytes = std::fs::read(&file).unwrap();
+    let server = start(&[
+        "--graph",
+        file.to_str().unwrap(),
+        "--layer",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let wrote = execute(server.port, r#"g.add_v("person").iterate()"#);
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let saved = post(server.port, "/api/save", "{}");
+    assert_eq!(saved.status, 409, "{}", saved.body);
+    assert!(
+        saved.body.contains("layer kept in memory") && !saved.body.contains("did not come"),
+        "{}",
+        saved.body
+    );
+    drop(server);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+}
+
+/// The dev server over `--layer` (stage 3.5): `GET /api/graph` carries `layer` (base name,
+/// counts), the drawing carries the origin columns, and `POST /api/layer/diff` answers the
+/// layer's changes; a server without `--layer` answers no `layer` and an empty diff.
+#[test]
+fn a_layer_server_answers_its_layer_info_origins_and_diff() {
+    let ui = ui_dir("layer-diff");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--layer",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let info = get(server.port, "/api/graph").json();
+    assert_eq!(info["layer"]["added"]["vertices"], 0, "{info}");
+    let wrote = execute(
+        server.port,
+        r#"g.add_v("person").property(T.id, "ada").iterate(); g.v(1).property("age", 30).iterate()"#,
+    );
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let info = get(server.port, "/api/graph").json();
+    assert_eq!(info["layer"]["added"]["vertices"], 1, "{info}");
+    assert_eq!(info["layer"]["modified"]["vertices"], 1, "{info}");
+    let view = post(server.port, "/api/graph-view", r#"{"maxNodes": 100}"#).json();
+    let origins: Vec<(Value, Value)> = view["vertexIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .zip(view["vertexOrigin"].as_array().unwrap().iter().cloned())
+        .collect();
+    assert!(origins.contains(&("ada".into(), "added".into())), "{view}");
+    assert!(origins.contains(&("1".into(), "modified".into())), "{view}");
+    let diff = post(server.port, "/api/layer/diff", r#"{"kinds": "vertex"}"#);
+    assert_eq!(diff.status, 200, "{}", diff.body);
+    let diff = diff.json();
+    assert_eq!(diff["ok"], true, "{diff}");
+    assert_eq!(diff["diff"]["added"][0]["id"], "ada", "{diff}");
+    assert_eq!(diff["diff"]["modified"][0]["id"], "1", "{diff}");
+    drop(server);
+
+    let plain = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    assert!(get(plain.port, "/api/graph").json().get("layer").is_none());
+    let diff = post(plain.port, "/api/layer/diff", "{}").json();
+    assert_eq!(diff["diff"]["added"], serde_json::json!([]), "{diff}");
+}
+
+/// MCP on `--layer` (layered-graph plan S5.4): `initialize`'s instructions name the layer steps
+/// at once (the CLI tells the context the graph is a layer: no job at `initialize`) and
+/// `graph_info` carries the `layer` block; on a plain graph neither.
+#[test]
+fn mcp_on_a_layer_shows_the_layer() {
+    let init = |port: u16| -> String {
+        mcp_post(
+            port,
+            &[],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}"#,
+        )
+        .json()["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let server = start(&["--graph", "modern", "--layer", "--mcp"]);
+    let instructions = init(server.port);
+    assert!(
+        instructions.contains("This graph is a LAYER") && instructions.contains("`g.layer_diff()`"),
+        "{instructions}"
+    );
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (error, text) = mcp.call("graph_info", serde_json::json!({}));
+    assert!(!error, "{text}");
+    let info: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(info["layer"]["base"], "modern", "{info}");
+    assert!(info["layer"]["baseRef"]["graphId"].is_string(), "{info}");
+    drop(server);
+
+    let server = start(&["--graph", "modern", "--mcp"]);
+    assert!(!init(server.port).contains("layer_diff"));
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (_, text) = mcp.call("graph_info", serde_json::json!({}));
+    let info: Value = serde_json::from_str(&text).unwrap();
+    assert!(info.get("layer").is_none(), "{info}");
+}

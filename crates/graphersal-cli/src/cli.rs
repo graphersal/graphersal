@@ -15,7 +15,9 @@ use graphersal::{
     ElementProperty, GraphSource,
     exec::{RenderOptions, Spelling},
     prelude::Graph,
+    storage::{LayerBase, LayeredGraph},
 };
+use graphersal_session::storage::SessionGraph;
 use rhai::{Dynamic, Engine, Scope};
 
 /// What a script run by the CLI may do: everything ([`AllowAll`](graphersal::auth::AllowAll),
@@ -293,6 +295,20 @@ OPTIONS:
                            --max-inflight-per-client, --max-connections, --drain-timeout),
                            under the SAFE script limits, --timeout 30000 and
                            --max-materialized-bytes 524288000 unless those flags say otherwise.
+        --layer            Run on an empty layer over the --graph (EXPERIMENTAL): the loaded
+                           graph becomes the frozen base, every write goes to the layer in
+                           memory and nothing is saved (a Store is opened read-only, without
+                           its lock; "Save to file" is refused). layer(), has_layer() and
+                           g.layer_diff() show what the session changed. Refused with
+                           --create-store and --read-only (--layer-store keeps a layer).
+        --layer-store <DIR>
+                           Run on the layer kept DURABLY in the layer store DIR over the
+                           --graph (EXPERIMENTAL): the base is a Store (opened read-only,
+                           without its lock) or a .gsnap, never written; every commit goes to
+                           DIR's write-ahead log before it returns. DIR holds only the layer's
+                           changes and opens only over the base it was created over (another
+                           base exits 1 naming both). --create-store creates DIR (with
+                           --on-damage); --read-only opens it read-only. Implies --layer.
         --on-damage <P>    With --create-store: the damage policy of the new store, fixed for
                            its life: "maintenance" (the default: damage found on disk while it
                            is open makes it read-only) or "continue" (it keeps committing and
@@ -653,16 +669,39 @@ fn schema_refused(path: &str, what: &str) -> String {
 
 /// A graph ready for a session: shared, and the Store that keeps it when it came from one.
 pub struct Opened {
-    /// The graph.
-    pub graph: Arc<Graph>,
+    /// The graph: a [`Graph`] of the loaded data, or with `--layer` a layer over it
+    /// ([`GraphSpec::open_layer`]).
+    pub graph: Arc<dyn SessionGraph>,
     /// The open Store of a `--graph <dir>`; close it (or drop it) when the session ends.
     pub store: Option<Arc<graphersal::persist::Store>>,
+    /// The open layer store of `--layer-store` (its graph is [`Self::graph`]); close it (or
+    /// drop it) when the session ends.
+    pub layer_store: Option<Arc<graphersal::persist::Store<LayeredGraph>>>,
 }
 
 impl Opened {
+    /// The graph alone, without a Store.
+    fn graph(graph: Arc<dyn SessionGraph>) -> Self {
+        Opened {
+            graph,
+            store: None,
+            layer_store: None,
+        }
+    }
+
+    /// The Store a signal or the end of the session closes: the plain store, or the layer
+    /// store.
+    pub fn closing_store(&self) -> Option<Arc<dyn crate::signals::ClosingStore>> {
+        match (&self.store, &self.layer_store) {
+            (Some(store), _) => Some(store.clone()),
+            (None, Some(store)) => Some(store.clone()),
+            (None, None) => None,
+        }
+    }
+
     /// Closes the Store (a clean close: the WAL synced, the store marked closed).
     pub fn close(self) {
-        if let Some(store) = self.store
+        if let Some(store) = self.closing_store()
             && let Err(err) = store.shutdown()
         {
             errln!("{}", graphersal::error::format_diagnostic(&err));
@@ -674,8 +713,8 @@ impl Opened {
     /// first process ignores SIGTERM without a handler): there it exits with
     /// [`crate::signals::EXIT_INTERRUPTED`].
     pub fn close_on_signal(&self, cancel: Option<graphersal::exec::CancelToken>, exit_code: i32) {
-        match &self.store {
-            Some(store) => crate::signals::close_store_on_signal(store.clone(), cancel, exit_code),
+        match self.closing_store() {
+            Some(store) => crate::signals::close_store_on_signal(store, cancel, exit_code),
             None => crate::signals::exit_on_signal_as_pid1(),
         }
     }
@@ -707,6 +746,15 @@ impl From<String> for StoreOpenError {
 /// ([`graphersal::persist::Store::open_read_only`]; an interrupted last write is ignored, not
 /// cut), with its embedding models registered and every write refused ([`refuse_writes`]).
 fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
+    let graph = load_store_read_only(path, "--read-only")?;
+    refuse_writes(&graph)?;
+    Ok(Opened::graph(Arc::new(graph)))
+}
+
+/// The graph of the Store at `path` loaded read-only, its models registered, writes not
+/// refused yet ([`open_store_read_only`]; the base of a `--layer`). `flag` is the option that
+/// asked for it, named when `path` is not a store.
+fn load_store_read_only(path: &str, flag: &str) -> Result<Graph, StartError> {
     use graphersal::persist::{RecoveryTarget, Store};
     let format = |err: graphersal::persist::PersistError| {
         StartError::failed(graphersal::error::format_diagnostic(&err))
@@ -714,7 +762,7 @@ fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
     if !Store::is_store(path).map_err(format)? {
         return Err(StartError::failed(format!(
             "Error: '{path}' is not a Graphersal store (no GRAPH file)\n{}",
-            crate::out::Note::new("--read-only opens an existing store; create one first")
+            crate::out::Note::new(format!("{flag} opens an existing store; create one first"))
                 .command(
                     "create the store",
                     format!("graphersal store create {path}")
@@ -728,11 +776,7 @@ fn open_store_read_only(path: &str) -> Result<Opened, StartError> {
     let models = Store::models_dir(path).map_err(format)?;
     let notes = store_model_notes(path, &models);
     serve_models(models, format!("stored in {path}"), notes);
-    refuse_writes(&graph)?;
-    Ok(Opened {
-        graph: Arc::new(graph),
-        store: None,
-    })
+    Ok(graph)
 }
 
 /// The commit hook of `--read-only`: vetoes every unit that changes something (data, schema,
@@ -758,8 +802,7 @@ impl graphersal::changes::CommitHook for ReadOnlyGraph {
 }
 
 /// Makes `graph` refuse every write ([`ReadOnlyGraph`]).
-fn refuse_writes(graph: &Graph) -> Result<(), StartError> {
-    use graphersal::prelude::GraphStorage;
+fn refuse_writes<S: graphersal::prelude::GraphStorage>(graph: &Graph<S>) -> Result<(), StartError> {
     graph
         .write_checked()
         .and_then(|mut graph| graph.register_commit_hook(Box::new(ReadOnlyGraph)))
@@ -928,10 +971,7 @@ impl GraphSpec {
             if read_only {
                 refuse_writes(&graph)?;
             }
-            return Ok(Opened {
-                graph: Arc::new(graph),
-                store: None,
-            });
+            return Ok(Opened::graph(Arc::new(graph)));
         };
         if schema.is_some() {
             return Err(StartError::usage(schema_refused(path, "a Store")));
@@ -941,6 +981,169 @@ impl GraphSpec {
         } else {
             self.open_store_writable(path, create, on_damage)
         }
+    }
+
+    /// Opens the graph as the frozen base of a new, empty layer (`--layer`): the data is
+    /// loaded as [`Self::load_with_schema`] loads it, a Store read-only without its lock
+    /// (nothing in it is written; a layer is in memory only), and the session runs on a
+    /// [`LayeredGraph`] over it: writes go to the layer, the base never changes. The layer is
+    /// made through a [`LayerBase`], so the embedding models the base's database attached (a
+    /// Store's, a `.gsnap`'s) serve it. A base the layer cannot carry (`LayeredGraph::over`
+    /// refuses it) is an invalid invocation.
+    pub fn open_layer(&self, schema: Option<&SchemaSource>) -> Result<Opened, StartError> {
+        let base = self.layer_base(schema, "--layer")?;
+        let layer: Graph<LayeredGraph> = base.new_layer().map_err(layer_refused("--layer"))?;
+        Ok(Opened::graph(Arc::new(layer)))
+    }
+
+    /// The graph loaded as the frozen base of layers (`--layer`, `--layer-store`, `store ...
+    /// --base`): as [`Self::load_with_schema`] loads it, a Store read-only without its lock
+    /// (nothing in it is written), named after its source. The base keeps the embedding models
+    /// its database attached (a Store's, a `.gsnap`'s), so its layers serve them. `flag` is the
+    /// option that asked for it (named in the diagnostics). A graph a layer cannot carry is an
+    /// invalid invocation.
+    pub fn layer_base(
+        &self,
+        schema: Option<&SchemaSource>,
+        flag: &str,
+    ) -> Result<LayerBase, StartError> {
+        let base = match self {
+            GraphSpec::Store(path) => {
+                if schema.is_some() {
+                    return Err(StartError::usage(schema_refused(path, "a Store")));
+                }
+                load_store_read_only(path, flag)?
+            }
+            _ => self.load_with_schema(schema)?,
+        };
+        Ok(LayerBase::from_graph(base)
+            .map_err(layer_refused(flag))?
+            .with_name(match self {
+                GraphSpec::File(path) | GraphSpec::Store(path) => path.as_str(),
+                GraphSpec::Modern => "modern",
+                GraphSpec::Empty => "empty",
+                GraphSpec::Large => "large",
+                GraphSpec::FileTree => "tree",
+            }))
+    }
+
+    /// Opens the layer store `path` over this graph as its base (`--layer-store`): the base is
+    /// loaded by [`Self::layer_base`] (a Store read-only without its lock, a `.gsnap`), and the
+    /// store is opened read-write over it ([`Store::open_layer`]: recovery, its lock held,
+    /// every commit durable in its WAL), created first with `create` (damage policy
+    /// `on_damage`), or loaded read-only with `read_only` ([`Store::open_layer_read_only`]: no
+    /// lock, nothing written, every write refused). A store that cannot be opened (another
+    /// base: `LayerBaseMismatch`, a plain store, in use, damaged) is a failed operation (exit
+    /// 1), as for a `--graph <dir>`.
+    ///
+    /// [`Store::open_layer`]: graphersal::persist::Store::open_layer
+    /// [`Store::open_layer_read_only`]: graphersal::persist::Store::open_layer_read_only
+    pub fn open_layer_store(
+        &self,
+        path: &str,
+        create: bool,
+        on_damage: Option<graphersal::persist::DamagePolicy>,
+        read_only: bool,
+    ) -> Result<Opened, StartError> {
+        use graphersal::persist::{RecoveryTarget, Store, StoreOptions};
+        let format = |err: graphersal::persist::PersistError| {
+            StartError::failed(graphersal::error::format_diagnostic(&err))
+        };
+        let base = self.layer_base(None, "--layer-store")?;
+        let is_store = Store::is_store(path).map_err(format)?;
+        if read_only {
+            if !is_store {
+                return Err(StartError::failed(not_a_layer_store(path, false)));
+            }
+            let recovered =
+                Store::<LayeredGraph>::open_layer_read_only(path, &base, RecoveryTarget::Latest)
+                    .map_err(format)?;
+            let graph = recovered.into_graph();
+            refuse_writes(&graph)?;
+            return Ok(Opened::graph(Arc::new(graph)));
+        }
+        let backup = if is_store {
+            Store::backup_marker_dir(path).ok().flatten()
+        } else {
+            None
+        };
+        let store = if let Some(marker) = backup {
+            // A backup of a layer store opens read-only over the same base (it is restored
+            // with `store restore`).
+            let store = Store::<LayeredGraph>::open_layer_backup(path, &base, StoreOptions::new())
+                .map_err(format)?;
+            crate::out::print_note(
+                "note",
+                &crate::out::Note::new(format!(
+                    "{path} is a BACKUP of a layer store: opened READ-ONLY, writes are refused"
+                ))
+                .detail("backup", format!("up to commit {}", marker.commit_seq))
+                .detail("taken", crate::store_cmd::format_time(marker.taken_at))
+                .command(
+                    "make it the live layer store",
+                    format!("graphersal store restore {path}"),
+                )
+                .text(),
+            );
+            store
+        } else if is_store {
+            let store = Store::<LayeredGraph>::open_layer(path, &base, StoreOptions::new())
+                .map_err(format)?;
+            if let Some(wanted) = on_damage
+                && store.damage_policy().map_err(format)? != wanted
+            {
+                let have = store.damage_policy().map_err(format)?;
+                drop(store);
+                return Err(StartError::failed(format!(
+                    "Error: the layer store {path} exists with the damage policy \"{have}\"; \
+                     --on-damage {wanted} applies only to a store being created\n{}",
+                    crate::out::Note::new(
+                        "the damage policy is fixed when a store is created and never changes; \
+                         drop --on-damage, or create a new layer store with it"
+                    )
+                    .command(
+                        "see the store's damage policy",
+                        format!("graphersal store info {path}")
+                    )
+                    .help()
+                )));
+            }
+            print_unclean_close(path, store.open_report());
+            store
+        } else if create {
+            if let Some(refusal) = crate::store_cmd::create_refusal(path) {
+                return Err(StartError::failed(refusal));
+            }
+            let policy = on_damage.unwrap_or_default();
+            let store = Store::<LayeredGraph>::create_layer(
+                path,
+                &base,
+                StoreOptions::new().with_damage_policy(policy),
+            )
+            .map_err(format)?;
+            let mut note = crate::out::Note::new(format!("created the layer store {path}"))
+                .detail("base", base.name());
+            if let Some(identity) = base.base_ref() {
+                note = note.detail("base identity", identity.to_string());
+            }
+            crate::out::print_note(
+                "note",
+                &note.detail("damage policy", policy.to_string()).text(),
+            );
+            store
+        } else {
+            return Err(StartError::failed(not_a_layer_store(path, true)));
+        };
+        for warning in &store.open_report().warnings {
+            errln!("warning: {warning}");
+        }
+        let store = Arc::new(store);
+        let graph: Arc<Graph<LayeredGraph>> = store.graph().clone();
+        Ok(Opened {
+            graph,
+            store: None,
+            layer_store: Some(store),
+        })
     }
 
     /// [`Self::open`] of a Store read-write, falling back to read-only when this process may
@@ -1091,18 +1294,8 @@ impl GraphSpec {
                 )
                 .help()
             );
-        } else if !report.clean_close {
-            let mut note =
-                crate::out::Note::new(format!("the store {path} was not closed cleanly last time"))
-                    .detail("recovered to", format!("commit {}", report.commit_seq))
-                    .detail("commits replayed", report.commits_replayed.to_string());
-            if let Some(torn) = report.torn_tail {
-                note = note.detail(
-                    "interrupted last write",
-                    format!("{} bytes cut", torn.bytes),
-                );
-            }
-            crate::out::print_note("note", &note.text());
+        } else {
+            print_unclean_close(path, report);
         }
         if let Some(note) = crate::store_cmd::graph_file_repaired_note(path, &store) {
             crate::out::print_note("note", &note);
@@ -1113,10 +1306,60 @@ impl GraphSpec {
         let models = store.models().map_err(format)?;
         let notes = store_model_notes(path, &models);
         serve_models(models, format!("stored in {path}"), notes);
+        let graph: Arc<Graph> = store.graph().clone();
         Ok(Opened {
-            graph: store.graph().clone(),
+            graph,
             store: Some(Arc::new(store)),
+            layer_store: None,
         })
+    }
+}
+
+/// The note of a store whose last close was not clean (what the open recovered); nothing
+/// after a clean close.
+fn print_unclean_close(path: &str, report: &graphersal::persist::OpenReport) {
+    if report.clean_close {
+        return;
+    }
+    let mut note =
+        crate::out::Note::new(format!("the store {path} was not closed cleanly last time"))
+            .detail("recovered to", format!("commit {}", report.commit_seq))
+            .detail("commits replayed", report.commits_replayed.to_string());
+    if let Some(torn) = report.torn_tail {
+        note = note.detail(
+            "interrupted last write",
+            format!("{} bytes cut", torn.bytes),
+        );
+    }
+    crate::out::print_note("note", &note.text());
+}
+
+/// The refusal of a `--layer-store` path that is not a store (`create`: say how to create it).
+fn not_a_layer_store(path: &str, create: bool) -> String {
+    let note = if create {
+        crate::out::Note::new("add --create-store to create the layer store over the --graph now")
+            .command(
+                "create it",
+                format!("graphersal --graph <base> --layer-store {path} --create-store"),
+            )
+    } else {
+        crate::out::Note::new("a read-only open needs an existing layer store")
+    };
+    format!(
+        "Error: '{path}' is not a Graphersal store (no GRAPH file)\n{}",
+        note.help()
+    )
+}
+
+/// The refusal of a base a layer cannot carry (vector rules, a unique index, ...): the
+/// engine's diagnostic and how to use the graph instead (`flag`: the option that asked).
+fn layer_refused(flag: &str) -> impl Fn(graphersal::error::GraphError) -> StartError + '_ {
+    move |err| {
+        StartError::usage(format!(
+            "{}\nnote: {flag} cannot run over this graph yet; run without {flag} to use it \
+             directly",
+            graphersal::error::format_diagnostic(&err)
+        ))
     }
 }
 
@@ -1192,6 +1435,12 @@ pub struct Cli {
     /// `--read-only`: the graph refuses every write; a Store is loaded without its lock and
     /// nothing in it is written (`GraphSpec::open`).
     pub read_only: bool,
+    /// `--layer`: the session runs on an empty layer over the `--graph`, which becomes its
+    /// frozen base (`GraphSpec::open_layer`); writes stay in memory.
+    pub layer: bool,
+    /// `--layer-store`: the layer store the session runs on, over the `--graph` as its base
+    /// (`GraphSpec::open_layer_store`); commits are durable in it. Implies `layer`.
+    pub layer_store: Option<String>,
     /// `--mcp`:the dev server also serves the MCP endpoint `POST /mcp`.
     pub mcp: bool,
     /// `--mcp-read-only`: the MCP endpoint offers no writing tool and refuses writing queries.
@@ -1305,6 +1554,8 @@ impl Default for Cli {
             ui_profile: None,
             create_store: false,
             read_only: false,
+            layer: false,
+            layer_store: None,
             on_damage: None,
             mcp: false,
             mcp_read_only: false,
@@ -1411,6 +1662,8 @@ impl Cli {
                 }
                 "--create-store" => cli.create_store = true,
                 "--read-only" => cli.read_only = true,
+                "--layer" => cli.layer = true,
+                "--layer-store" => cli.layer_store = Some(value(&mut args)?),
                 "--on-damage" => {
                     let raw = value(&mut args)?;
                     cli.on_damage = Some(
@@ -1580,7 +1833,62 @@ impl Cli {
                     .to_string(),
             );
         }
-        if cli.create_store {
+        if let Some(layer_store) = &cli.layer_store {
+            // A layer store keeps the base's identity and opens only over the same base, so
+            // the base must be the same graph at every load: a Store or a packed snapshot.
+            match &cli.graph {
+                GraphSpec::Store(_) => {}
+                GraphSpec::File(path) if GraphSource::is_snapshot_path(path) => {}
+                other => {
+                    let what = match other {
+                        GraphSpec::File(path) => format!("the graph file {path}"),
+                        _ => "a sample graph".to_string(),
+                    };
+                    return Err(crate::out::Note::new(format!(
+                        "--layer-store needs a base with a lasting identity: {what} gets a new \
+                         one at every load, so the layer store would never open over it again; \
+                         make the base a Store (or a .gsnap) first"
+                    ))
+                    .command(
+                        "make the base a Store",
+                        "graphersal store create <base_dir> --from <graph>",
+                    )
+                    .command(
+                        "then keep the layer over it",
+                        format!(
+                            "graphersal --graph <base_dir> --layer-store {layer_store} \
+                             --create-store"
+                        ),
+                    )
+                    .text());
+                }
+            }
+            cli.layer = true;
+        }
+        if cli.layer && cli.create_store && cli.layer_store.is_none() {
+            return Err(crate::out::Note::new(
+                "--layer and --create-store exclude each other: a layer keeps its writes in \
+                 memory and never writes its base, so it cannot create a store",
+            )
+            .command(
+                "keep the layer durably in a new layer store over the base",
+                "graphersal --graph <base> --layer-store <dir> --create-store",
+            )
+            .text());
+        }
+        if cli.layer && cli.read_only && cli.layer_store.is_none() {
+            return Err(crate::out::Note::new(
+                "--layer and --read-only exclude each other: the layer is where the writes \
+                 go, and its base is never written (a Store base is opened read-only anyway)",
+            )
+            .command(
+                "run a writable layer over the graph",
+                "graphersal --graph <src> --layer",
+            )
+            .text());
+        }
+        // With --layer-store, --create-store creates the layer store, never the --graph.
+        if cli.create_store && cli.layer_store.is_none() {
             match &cli.graph {
                 GraphSpec::File(path) | GraphSpec::Store(path) => {
                     cli.graph = GraphSpec::Store(path.clone())
@@ -1913,6 +2221,29 @@ fn parse_limit(flag: &str, raw: &str) -> Result<usize, String> {
 }
 
 impl Cli {
+    /// Opens the `--graph` for a session: the layer store of `--layer-store` over it
+    /// ([`GraphSpec::open_layer_store`]), a layer over it with `--layer`
+    /// ([`GraphSpec::open_layer`]), else [`GraphSpec::open`] with the store and read-only flags.
+    pub fn open_graph(&self) -> Result<Opened, StartError> {
+        if let Some(layer_store) = &self.layer_store {
+            return self.graph.open_layer_store(
+                layer_store,
+                self.create_store,
+                self.on_damage,
+                self.read_only,
+            );
+        }
+        if self.layer {
+            return self.graph.open_layer(self.schema.as_ref());
+        }
+        self.graph.open(
+            self.create_store,
+            self.on_damage,
+            self.schema.as_ref(),
+            self.read_only,
+        )
+    }
+
     /// Whether this is the read-only serving mode (`--server --read-only`): a pool of workers
     /// over the immutable graph, with safe default limits ([`Self::with_serving_defaults`]).
     pub fn read_only_serving(&self) -> bool {
@@ -2137,7 +2468,11 @@ impl ScriptBudget {
     /// Builds the engine of a session under `limits`, with the budget's options preset on the
     /// traversal sources a script creates itself and the budget installed.
     /// `graph` is the host graph of the global `embed(text)` (its database's models).
-    pub fn engine(&self, limits: &ScriptLimits, graph: Arc<Graph>) -> Engine {
+    pub fn engine(
+        &self,
+        limits: &ScriptLimits,
+        graph: Arc<dyn graphersal::storage::AnyGraph>,
+    ) -> Engine {
         let mut engine = graphersal::script::engine_with_options(
             limits,
             authorizer(),
@@ -2151,7 +2486,11 @@ impl ScriptBudget {
     /// Builds the script scope over `graph` (with [`authorizer`]) with the budget as the default
     /// traversal timeout and
     /// `render` as the session display limits.
-    pub fn scope(&self, graph: Arc<Graph>, render: &RenderOptions) -> Scope<'static> {
+    pub fn scope(
+        &self,
+        graph: Arc<dyn graphersal::storage::AnyGraph>,
+        render: &RenderOptions,
+    ) -> Scope<'static> {
         let mut options = self.traversal_options();
         options.extend(graphersal::script::render_scope_options(render));
         graphersal::script::graph_scope_with_options(graph, &options, authorizer())
@@ -2163,7 +2502,7 @@ impl ScriptBudget {
     pub fn refresh_scope(
         &self,
         scope: &mut Scope<'static>,
-        graph: Arc<Graph>,
+        graph: Arc<dyn graphersal::storage::AnyGraph>,
         render: &RenderOptions,
     ) {
         let fresh = self.scope(graph, render);
@@ -2231,12 +2570,7 @@ pub fn run_eval(cli: &Cli) -> i32 {
         return EXIT_OK;
     }
 
-    let opened = match cli.graph.open(
-        cli.create_store,
-        cli.on_damage,
-        cli.schema.as_ref(),
-        cli.read_only,
-    ) {
+    let opened = match cli.open_graph() {
         Ok(opened) => opened,
         Err(err) => {
             errln!("{}", err.message);
@@ -2250,7 +2584,11 @@ pub fn run_eval(cli: &Cli) -> i32 {
 }
 
 /// Evaluates `scripts` against `graph`; returns the exit code.
-fn eval_scripts(cli: &Cli, scripts: Vec<String>, graph: Arc<Graph>) -> i32 {
+fn eval_scripts(
+    cli: &Cli,
+    scripts: Vec<String>,
+    graph: Arc<dyn graphersal::storage::AnyGraph>,
+) -> i32 {
     let limits = cli.script_limits();
     let budget = cli.budget();
     let engine = budget.engine(&limits, graph.clone());

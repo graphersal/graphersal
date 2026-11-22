@@ -66,6 +66,8 @@ pub struct WriteOptions {
     pub(crate) parent: (u128, u64),
     /// The manifest's creation time; `None`: now (crate tests fix it to compare bytes).
     pub(crate) created_at: Option<i64>,
+    /// A layer written as the whole graph it shows ([`WriteOptions::with_materialize`]).
+    pub(crate) materialize: bool,
 }
 
 impl Default for WriteOptions {
@@ -78,6 +80,7 @@ impl Default for WriteOptions {
             segment_bytes: DEFAULT_SEGMENT_BYTES,
             parent: (0, 0),
             created_at: None,
+            materialize: false,
         }
     }
 }
@@ -133,6 +136,20 @@ impl WriteOptions {
     /// reaches it.
     pub fn with_segment_bytes(mut self, bytes: u64) -> Self {
         self.segment_bytes = bytes.max(1);
+        self
+    }
+
+    /// Writes a LAYER ([`LayeredGraph`](crate::storage::LayeredGraph)) as the whole graph it
+    /// shows (default `false`): a plain, standalone snapshot (file format version 4) of every
+    /// visible element, the layer's schema and catalog, lineage id, position and auto-id
+    /// sequences, which loads without the base ([`read_snapshot`], older releases) and whose
+    /// size follows the whole graph. Without it a layer writes a layer snapshot: only its
+    /// changes to the base (format spec 7.5, version 5), which loads only over that base
+    /// ([`read_layer_snapshot`]). No effect on a graph that is no layer.
+    /// [`Store::export_materialized`](crate::persist::Store::export_materialized) writes a
+    /// layer store's state this way.
+    pub fn with_materialize(mut self, yes: bool) -> Self {
+        self.materialize = yes;
         self
     }
 }
@@ -281,12 +298,22 @@ pub struct SnapshotInfo {
     /// them (a file written without models): their names in a store (`blobs/sha256/...`). Empty
     /// otherwise, also when the write was asked to leave the models out.
     pub blobs_not_carried: Vec<String>,
+    /// The base a layer snapshot was written over (its layer file, format spec 7.5 kind 128):
+    /// the snapshot holds only the layer's changes to that base and loads only into a layer
+    /// over it. `None`: a whole graph (also in a listing that reads only the manifest's fixed
+    /// part).
+    pub layer_base: Option<crate::graph::BaseRef>,
 }
 
 impl SnapshotInfo {
     pub(crate) fn from_manifest(manifest: &Manifest) -> Self {
         Self {
             meta: manifest.meta.clone(),
+            layer_base: manifest
+                .segments
+                .iter()
+                .find(|s| s.kind == super::layer::KIND_LAYER)
+                .and_then(super::layer::row_base_ref),
             ..Self::from_fixed(&manifest.fixed)
         }
     }
@@ -312,6 +339,7 @@ impl SnapshotInfo {
             chunk_bytes: f.chunk_bytes,
             segment_count: f.segment_count,
             blobs_not_carried: Vec::new(),
+            layer_base: None,
         }
     }
 }
@@ -354,6 +382,13 @@ impl<W: Write> SegmentOut for CrcWriter<W> {
 /// `graph` is any [`PersistentStorage`]: it is read through the storage read API (sorted ids,
 /// labels, properties, endpoints), its schema, catalog and position, so the same graph gives
 /// the same bytes in every storage.
+///
+/// A LAYER ([`PersistentStorage::layer_parts`] is `Some`, a
+/// [`LayeredGraph`](crate::storage::LayeredGraph)) is written as a layer snapshot: only its own
+/// elements as vertex and edge segments, its changes to the base in the layer file (format
+/// spec 7.5, segment kind 128, naming the base), its schema, catalog and position as usual;
+/// it is read back over the same base ([`read_layer_snapshot`]). Its model blobs stay with
+/// the base (never carried).
 ///
 /// The write streams: the manifest, which comes first in the stream, is planned by a first
 /// encoding pass that keeps no chunk, and the segments are then encoded again chunk by chunk
@@ -480,7 +515,22 @@ pub(crate) fn write_packed_carrying<S: PersistentStorage + ?Sized, W: Write>(
         Ok(())
     })?;
     let schema = encoder.schema()?;
-    let index: Vec<_> = plans.iter().map(|plan| plan.index()).collect();
+    let mut index: Vec<_> = plans.iter().map(|plan| plan.index()).collect();
+    // A layer: its changes to the base in the layer file (format spec 7.5, kind 128), the row
+    // after the edge rows. Its model blobs stay with the base (the layer only uses them).
+    let layer_file = match encoder.layer() {
+        Some((base, patch)) => {
+            let file = super::layer::encode(base, patch)?;
+            index.push((super::layer::row(base, patch.len(), &file), Vec::new()));
+            Some(file)
+        }
+        None => None,
+    };
+    let carry = if layer_file.is_some() {
+        CarryBlobs::No
+    } else {
+        carry
+    };
     let (_, mut manifest, mut info) = encoder.manifest(
         &index,
         vertices.property_count,
@@ -489,20 +539,31 @@ pub(crate) fn write_packed_carrying<S: PersistentStorage + ?Sized, W: Write>(
     )?;
     drop(index);
     let carried = carried_blobs(&mut manifest, &mut info, carry)?;
+    let extra_sections = carried.len() as u32 + u32::from(layer_file.is_some());
     let mut out = CrcWriter {
         inner: writer,
         crc: 0,
     };
     let mut head = Vec::with_capacity(16);
     head.extend_from_slice(PACKED_MAGIC);
-    head.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    head.extend_from_slice(&(2 + plans.len() as u32 + carried.len() as u32).to_le_bytes());
+    let version = if layer_file.is_some() {
+        super::codec::LAYER_FORMAT_VERSION
+    } else {
+        FORMAT_VERSION
+    };
+    head.extend_from_slice(&version.to_le_bytes());
+    head.extend_from_slice(&(2 + plans.len() as u32 + extra_sections).to_le_bytes());
     out.put(&head)?;
     out.section(SECTION_MANIFEST, &manifest)?;
     out.section(SECTION_SCHEMA, &schema)?;
     for plan in &plans {
         out.section_head(section_kind(plan.entry.kind), plan.entry.byte_len)?;
         encoder.emit(plan, &mut out)?;
+    }
+    if let Some(file) = &layer_file {
+        let mut named = extra_file_prefix(super::layer::LAYER_FILE);
+        named.extend_from_slice(file);
+        out.section(SECTION_EXTRA_FILE, &named)?;
     }
     if let CarryBlobs::From(Some(source)) = carry {
         for blob in &carried {
@@ -643,6 +704,15 @@ impl<R: Read> CrcReader<R> {
     /// through a bounded buffer, never held (a model file of a packed snapshot, format spec
     /// 4.5, can be large). Returns the offset of the file's bytes in the stream.
     fn extra_file(&mut self, entry: &SegmentEntry) -> Result<u64, PersistError> {
+        self.extra_file_into(entry, &mut std::io::sink())
+    }
+
+    /// [`Self::extra_file`] that also copies the file's bytes into `out`.
+    fn extra_file_into(
+        &mut self,
+        entry: &SegmentEntry,
+        out: &mut dyn Write,
+    ) -> Result<u64, PersistError> {
         let prefix = extra_file_prefix(&entry.path);
         let at = self.offset;
         let [found] = self.fixed::<1>("section header")?;
@@ -680,7 +750,7 @@ impl<R: Read> CrcReader<R> {
             ));
         }
         let content_at = self.offset;
-        let file_crc = self.copy(entry.byte_len, &mut std::io::sink(), "named extra file")?;
+        let file_crc = self.copy(entry.byte_len, out, "named extra file")?;
         if file_crc != entry.crc {
             return Err(PersistError::corrupt(
                 PACKED,
@@ -695,6 +765,31 @@ impl<R: Read> CrcReader<R> {
     }
 }
 
+/// The packed header's version `version` against its manifest: the layer version
+/// (`LAYER_FORMAT_VERSION`, format spec 7.5, 15) exactly when the snapshot is a layer snapshot.
+/// A layer version without a layer file is a newer version's snapshot; a layer snapshot under
+/// an older version word is damage (no writer makes one).
+fn check_packed_version(version: u32, manifest: &Manifest) -> Result<(), PersistError> {
+    let layer = manifest.version_word() == super::codec::LAYER_FORMAT_VERSION;
+    match (version == super::codec::LAYER_FORMAT_VERSION, layer) {
+        (true, false) => Err(PersistError::UnsupportedVersion {
+            location: PACKED.into(),
+            found: version,
+            supported: FORMAT_VERSION,
+        }),
+        (false, true) => Err(PersistError::corrupt(
+            PACKED,
+            8,
+            format!(
+                "a layer snapshot under the version word {version} (a layer snapshot is of \
+                 version {})",
+                super::codec::LAYER_FORMAT_VERSION
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Reads the packed header and the manifest section.
 fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), PersistError> {
     let magic = source.fixed::<8>("header")?;
@@ -706,7 +801,7 @@ fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), Pers
         ));
     }
     let version = u32::from_le_bytes(source.fixed::<4>("header")?);
-    if !super::codec::readable_version(version) {
+    if !super::codec::readable_layer_version(version) {
         return Err(PersistError::UnsupportedVersion {
             location: PACKED.into(),
             found: version,
@@ -716,6 +811,7 @@ fn read_head<R: Read>(source: &mut CrcReader<R>) -> Result<(Manifest, u32), Pers
     let sections = u32::from_le_bytes(source.fixed::<4>("header")?);
     let (start, bytes) = source.section(SECTION_MANIFEST, MAX_META_SECTION_BYTES, "manifest")?;
     let manifest = Manifest::decode(&bytes).map_err(|err| err.at("manifest", 0))?;
+    check_packed_version(version, &manifest)?;
     let _ = start;
     if manifest.fixed.segment_count as u64 + 2 != u64::from(sections) {
         return Err(PersistError::corrupt(
@@ -763,7 +859,7 @@ impl<R: Read> PackedReader<R> {
             ));
         }
         let version = u32::from_le_bytes(source.fixed::<4>("header")?);
-        if !super::codec::readable_version(version) {
+        if !super::codec::readable_layer_version(version) {
             return Err(PersistError::UnsupportedVersion {
                 location: PACKED.into(),
                 found: version,
@@ -774,6 +870,7 @@ impl<R: Read> PackedReader<R> {
         let (_, manifest_bytes) =
             source.section(SECTION_MANIFEST, MAX_META_SECTION_BYTES, "manifest")?;
         let manifest = Manifest::decode(&manifest_bytes).map_err(|err| err.at("manifest", 0))?;
+        check_packed_version(version, &manifest)?;
         if manifest.fixed.segment_count as u64 + 2 != u64::from(sections) {
             return Err(PersistError::corrupt(
                 PACKED,
@@ -1313,6 +1410,13 @@ pub fn read_snapshot<R: Read>(
 /// A storage that already holds elements fails with [`PersistError::Graph`] holding
 /// [`GraphError::Unsupported`](crate::error::GraphError::Unsupported) before anything is read.
 ///
+/// A LAYER ([`PersistentStorage::layer_parts`] is `Some`) is empty when it holds no change to
+/// its base and no element of its own (a new [`LayeredGraph::over`](crate::storage::LayeredGraph::over)
+/// its base): it loads a layer snapshot written over the same base (the base's changes first,
+/// [`PersistentStorage::load_base_patch`], then its own elements; [`read_layer_snapshot`] is
+/// the shared-`Graph` form). The kinds must agree and the base must be the one the snapshot
+/// names: [`PersistError::SnapshotKindMismatch`], [`PersistError::LayerBaseMismatch`].
+///
 /// ```rust
 /// use graphersal::persist::{ReadOptions, read_snapshot_into, write_snapshot, WriteOptions};
 /// use graphersal::prelude::*;
@@ -1331,6 +1435,52 @@ pub fn read_snapshot_into<S: PersistentStorage, R: Read>(
 ) -> Result<S, PersistError> {
     load_snapshot(reader, options, &mut graph)?;
     Ok(graph)
+}
+
+/// Reads a LAYER snapshot (a packed snapshot of a [`LayeredGraph`](crate::storage::LayeredGraph),
+/// format spec 7.5 segment kind 128) over `base`: a new layer over `base`'s graph, shared as a
+/// `Graph` that serves the base's embedding models like
+/// [`LayerBase::new_layer`](crate::storage::LayerBase::new_layer)'s, gets the
+/// layer's changes to the base, then its schema, catalog and own elements, lineage id,
+/// position and auto-id sequences ([`read_snapshot_into`] of an empty layer, which this is).
+///
+/// A layer snapshot holds only what the layer changed (written by [`write_snapshot`] or
+/// [`write_graph_snapshot`] of the layer: its size follows the delta, not the base), so it
+/// loads only over the very base it was built on: the snapshot names that base
+/// ([`BaseRef`](crate::storage::BaseRef), also in [`SnapshotInfo::layer_base`]) and another
+/// one is refused with [`PersistError::LayerBaseMismatch`] before anything is read. A
+/// whole-graph snapshot is refused with [`PersistError::SnapshotKindMismatch`] (and a layer
+/// snapshot read with [`read_snapshot`] the same way).
+///
+/// **EXPERIMENTAL**, like [`LayeredGraph`](crate::storage::LayeredGraph).
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use graphersal::persist::{ReadOptions, read_layer_snapshot, write_graph_snapshot};
+/// use graphersal::persist::{ModelCopy, WriteOptions};
+/// use graphersal::prelude::*;
+/// use graphersal::storage::LayerBase;
+///
+/// let base = LayerBase::new(Arc::new(TraversalGraph::tinkerpop_modern()));
+/// let layer = base.new_layer().unwrap();
+/// GraphTraversalSource::new(&mut *layer.write()).add_v("person").iterate().unwrap();
+/// let mut bytes = Vec::new();
+/// write_graph_snapshot(&layer, &mut bytes, &WriteOptions::new(), ModelCopy::Include).unwrap();
+///
+/// let loaded = read_layer_snapshot(bytes.as_slice(), &ReadOptions::new(), &base).unwrap();
+/// assert_eq!(loaded.read().vertex_count().unwrap(), 7);
+/// // Over another base it is refused.
+/// let other = LayerBase::new(Arc::new(TraversalGraph::tinkerpop_modern()));
+/// assert!(read_layer_snapshot(bytes.as_slice(), &ReadOptions::new(), &other).is_err());
+/// ```
+pub fn read_layer_snapshot<R: Read>(
+    reader: R,
+    options: &ReadOptions,
+    base: &crate::graph::LayerBase,
+) -> Result<crate::graph::Graph<crate::graph::LayeredGraph>, PersistError> {
+    let layer = crate::graph::LayeredGraph::over_base(base)?;
+    let layer = read_snapshot_into(reader, options, layer)?;
+    Ok(base.share(layer))
 }
 
 /// What the memory check of a packed snapshot write names (the encoder's id index).
@@ -1384,18 +1534,16 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
 
 /// [`load_snapshot`] that hands every checked named extra file (format spec 7.5, 8: a blob or
 /// a 0.4.0 model row) with the offset of its bytes in the stream to `extra` (a `.gsnap` served
-/// without a Store reads its model blobs from the file later, `store/packed_load.rs`).
+/// without a Store reads its model blobs from the file later, `store/packed_load.rs`). The
+/// layer file of a layer snapshot (kind 128, `persist::layer`) is read here, never handed on.
 pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
     reader: R,
     options: &ReadOptions,
     graph: &mut S,
     extra: &mut dyn FnMut(&Manifest, &SegmentEntry, u64) -> Result<(), PersistError>,
 ) -> Result<(), PersistError> {
-    if graph.vertex_count()? != 0 || graph.edge_count()? != 0 {
-        return Err(PersistError::Graph(crate::error::GraphError::unsupported(
-            "loading a snapshot into a storage that holds elements",
-        )));
-    }
+    // A layer (it has parts) is loaded over its base: empty means it holds no change yet.
+    let given_base = layer_target(graph)?;
     let mut source = CrcReader {
         inner: reader,
         crc: 0,
@@ -1403,6 +1551,34 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
     };
     let (manifest, _) = read_head(&mut source)?;
     let fixed = &manifest.fixed;
+    // The kinds must agree, and a layer snapshot loads only over its own base: decided from
+    // the manifest, before anything is read or loaded.
+    let layered = match (super::layer::layer_row(&manifest.segments)?, given_base) {
+        (None, None) => false,
+        (Some(expected), Some(given)) if expected == given => true,
+        (Some(expected), Some(given)) => {
+            return Err(PersistError::LayerBaseMismatch {
+                expected: Box::new(expected),
+                given: Box::new(given),
+            });
+        }
+        (Some(expected), None) => {
+            return Err(PersistError::SnapshotKindMismatch {
+                reason: format!(
+                    "The snapshot is a layer over base {expected}, not a whole graph: it holds \
+                     only the layer's changes to that base and loads only into a layer over it"
+                ),
+            });
+        }
+        (None, Some(given)) => {
+            return Err(PersistError::SnapshotKindMismatch {
+                reason: format!(
+                    "The snapshot is a whole graph, not a layer: it does not load into a layer \
+                     (over base {given})"
+                ),
+            });
+        }
+    };
     check_fits(options, fixed.memory_bytes)?;
 
     let (schema_at, schema_bytes) =
@@ -1426,7 +1602,7 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
     let operation = load_operation(options);
     let elements = fixed.vertex_count.saturating_add(fixed.edge_count);
     let element_bytes = fixed.memory_bytes.checked_div(elements).unwrap_or(0);
-    let mut budget = crate::traversal::memory_budget::UnitBudget::start_with_element_bytes(
+    let budget = crate::traversal::memory_budget::UnitBudget::start_with_element_bytes(
         &*graph,
         operation,
         element_bytes,
@@ -1447,12 +1623,58 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
     // The growth check while the graph is built (the manifest's estimate passed above, but the
     // data may grow past it): every 4096 elements and at the end, an element estimated at the
     // manifest's average. All checks run on this thread (the decode threads never check).
-    let mut loaded = 0u64;
-    let mut last_vertex: Option<CompactString> = None;
-    let mut last_edge: Option<CompactString> = None;
-    let (mut vertex_properties, mut edge_properties) = (0u64, 0u64);
+    let mut load = ElementLoad {
+        manifest: &manifest,
+        operation,
+        element_bytes,
+        max_depth,
+        budget,
+        loaded: 0,
+        vertices: 0,
+        edges: 0,
+        last_vertex: None,
+        last_edge: None,
+        vertex_properties: 0,
+        edge_properties: 0,
+    };
+    // A layer's elements wait for its changes to the base (an added element may reuse the id
+    // of a base element the layer removed): the layer file comes after the element segments,
+    // so their checked bytes are held until it is read (the snapshot of a layer is the size of
+    // its delta, never of its base).
+    let mut pending: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut held = 0u64;
     for number in 0..manifest.segments.len() {
         let entry = &manifest.segments[number];
+        if layered && entry.kind == super::layer::KIND_LAYER {
+            let resident = load
+                .loaded
+                .saturating_mul(element_bytes)
+                .saturating_add(held);
+            crate::traversal::memory_budget::ensure_room(operation, entry.byte_len, resident)?;
+            let mut bytes = Vec::new();
+            let at = source.extra_file_into(entry, &mut bytes)?;
+            let file = super::layer::decode(&bytes, max_depth)
+                .map_err(|err| err.at(super::layer::LAYER_LOCATION, at))?;
+            if Some(file.base) != super::layer::row_base_ref(entry)
+                || file.patch.len() as u64 != entry.count
+            {
+                return Err(PersistError::corrupt(
+                    super::layer::LAYER_LOCATION,
+                    at,
+                    "its base or entry count differs from its manifest row",
+                ));
+            }
+            for patch in file.patch {
+                graph.load_base_patch(patch).map_err(|err| {
+                    PersistError::corrupt(super::layer::LAYER_LOCATION, at, err.to_string())
+                })?;
+            }
+            for (number, bytes) in std::mem::take(&mut pending) {
+                held = held.saturating_sub(bytes.len() as u64);
+                load.segment(graph, number, &bytes, held)?;
+            }
+            continue;
+        }
         if !is_element_kind(entry.kind) {
             // A file of another kind (format spec 7.5): checked, not interpreted here.
             let at = source.extra_file(entry)?;
@@ -1465,17 +1687,142 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
             (SECTION_EDGE_SEGMENT, "edge segment")
         };
         // The segment's bytes, then its decoded chunks, are held at once: room for both is
-        // checked before either is allocated (estimated: on top of what was loaded so far).
-        let resident = loaded.saturating_mul(element_bytes);
+        // checked before either is allocated (estimated: on top of what was loaded so far and
+        // the segments a layer holds back).
+        let resident = load
+            .loaded
+            .saturating_mul(element_bytes)
+            .saturating_add(held);
         crate::traversal::memory_budget::ensure_room(operation, entry.byte_len, resident)?;
         let (_, bytes) = source.section(section, entry.byte_len, kind_name)?;
+        if layered {
+            held = held.saturating_add(entry.byte_len);
+            pending.push((number, bytes));
+        } else {
+            load.segment(graph, number, &bytes, held)?;
+        }
+    }
+    if !pending.is_empty() {
+        return Err(PersistError::corrupt(
+            "manifest",
+            0,
+            "the layer file is missing from the segment table",
+        ));
+    }
+    // A whole graph holds what was loaded; a layer holds its base too, so its own loaded
+    // elements are compared.
+    let (vertex_count, edge_count) = if layered {
+        (load.vertices, load.edges)
+    } else {
+        (graph.vertex_count()? as u64, graph.edge_count()? as u64)
+    };
+    if vertex_count != fixed.vertex_count
+        || edge_count != fixed.edge_count
+        || load.vertex_properties != fixed.vertex_property_count
+        || load.edge_properties != fixed.edge_property_count
+    {
+        return Err(PersistError::corrupt(
+            "manifest",
+            96,
+            "element or property counts differ from the segments",
+        ));
+    }
+    let expected = source.crc;
+    let trailer_at = source.offset;
+    let trailer = u32::from_le_bytes(source.fixed::<4>("trailer")?);
+    if trailer != expected {
+        return Err(PersistError::corrupt(
+            PACKED,
+            trailer_at,
+            "trailer checksum mismatch",
+        ));
+    }
+    let _ = FIXED_BYTES;
+    crate::traversal::memory_budget::check(&load.budget, &*graph)?;
+    // Derived state (a `TraversalGraph`'s compressed properties, D11: the file holds plain
+    // values; the end of the load encodes the rule paths and builds the dictionaries).
+    graph.finish_load()?;
+    graph.set_graph_id(fixed.graph_id)?;
+    graph.raise_position(fixed.commit_seq, fixed.last_commit_at)?;
+    graph.raise_id_sequences(fixed.node_sequence, fixed.edge_sequence)?;
+    Ok(())
+}
+
+/// The base identity of `graph` when it is a layer (`PersistentStorage::layer_parts` is
+/// `Some`), after checking it is empty: a whole graph without elements, a layer without
+/// changes to its base nor elements of its own. A storage that holds something fails with
+/// [`PersistError::Graph`] holding `GraphError::Unsupported` before anything is read.
+fn layer_target<S: PersistentStorage + ?Sized>(
+    graph: &S,
+) -> Result<Option<crate::graph::BaseRef>, PersistError> {
+    let refused = || {
+        PersistError::Graph(crate::error::GraphError::unsupported(
+            "loading a snapshot into a storage that holds elements",
+        ))
+    };
+    match graph.layer_parts()? {
+        Some(mut parts) => {
+            if !parts.patch.is_empty()
+                || parts.vertices.next().is_some()
+                || parts.edges.next().is_some()
+            {
+                return Err(refused());
+            }
+            Ok(Some(parts.base_ref))
+        }
+        None if graph.vertex_count()? != 0 || graph.edge_count()? != 0 => Err(refused()),
+        None => Ok(None),
+    }
+}
+
+/// The element segments of one load going into a graph: what they counted and the checks
+/// that span segments (ids strictly increasing per kind, the memory growth check).
+struct ElementLoad<'m> {
+    manifest: &'m Manifest,
+    operation: &'static str,
+    element_bytes: u64,
+    max_depth: usize,
+    budget: Option<crate::traversal::memory_budget::UnitBudget>,
+    /// Elements loaded so far.
+    loaded: u64,
+    vertices: u64,
+    edges: u64,
+    last_vertex: Option<CompactString>,
+    last_edge: Option<CompactString>,
+    vertex_properties: u64,
+    edge_properties: u64,
+}
+
+impl ElementLoad<'_> {
+    /// Checks the bytes of the element segment `number` (read and checksummed against its
+    /// row), decodes its chunks and loads every element into `graph`; `held` is what the load
+    /// holds besides (a layer's segments waiting for the layer file).
+    fn segment<S: PersistentStorage + ?Sized>(
+        &mut self,
+        graph: &mut S,
+        number: usize,
+        bytes: &[u8],
+        held: u64,
+    ) -> Result<(), PersistError> {
+        let manifest = self.manifest;
+        let entry = &manifest.segments[number];
+        let max_depth = self.max_depth;
+        let kind_name = if entry.kind == KIND_VERTEX {
+            "vertex segment"
+        } else {
+            "edge segment"
+        };
+        let resident = self
+            .loaded
+            .saturating_mul(self.element_bytes)
+            .saturating_add(held);
         let location = format!("{kind_name} {number} ({})", entry.path);
-        let frame = check_segment(&manifest, number, &bytes, &location)?;
+        let frame = check_segment(manifest, number, bytes, &location)?;
         let decoded_bytes = frame.chunks.iter().fold(0u64, |sum, chunk| {
             sum.saturating_add(chunk.uncompressed as u64)
         });
         crate::traversal::memory_budget::ensure_room(
-            operation,
+            self.operation,
             entry.byte_len.saturating_add(decoded_bytes),
             resident,
         )?;
@@ -1494,7 +1841,7 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                 check_ids(
                     records.iter().map(|r| &r.id),
                     row,
-                    &mut last_vertex,
+                    &mut self.last_vertex,
                     &location,
                     chunk.offset,
                 )?;
@@ -1509,7 +1856,7 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                             ));
                         }
                     }
-                    vertex_properties += record.properties.len() as u64;
+                    self.vertex_properties += record.properties.len() as u64;
                     count += 1;
                     graph
                         .load_vertex(record.id, record.labels, record.properties)
@@ -1517,9 +1864,10 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                             PersistError::corrupt(&location, chunk.offset, err.to_string())
                         })?;
                 }
-                loaded = loaded.saturating_add(chunk_records as u64);
-                crate::traversal::memory_budget::tick_n(&mut budget, &*graph, chunk_records)?;
+                self.loaded = self.loaded.saturating_add(chunk_records as u64);
+                crate::traversal::memory_budget::tick_n(&mut self.budget, &*graph, chunk_records)?;
             }
+            self.vertices += count;
         } else {
             let decoded = decode_chunks(&frame.chunks, |chunk| {
                 segment::decode_edge_chunk(chunk, max_depth)
@@ -1529,13 +1877,13 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                 check_ids(
                     records.iter().map(|r| &r.id),
                     row,
-                    &mut last_edge,
+                    &mut self.last_edge,
                     &location,
                     chunk.offset,
                 )?;
                 let chunk_records = records.len();
                 for record in records {
-                    edge_properties += record.properties.len() as u64;
+                    self.edge_properties += record.properties.len() as u64;
                     count += 1;
                     let id = record.id.clone();
                     graph
@@ -1559,9 +1907,10 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                             }
                         })?;
                 }
-                loaded = loaded.saturating_add(chunk_records as u64);
-                crate::traversal::memory_budget::tick_n(&mut budget, &*graph, chunk_records)?;
+                self.loaded = self.loaded.saturating_add(chunk_records as u64);
+                crate::traversal::memory_budget::tick_n(&mut self.budget, &*graph, chunk_records)?;
             }
+            self.edges += count;
         }
         if count != entry.count
             || rows.first().map(|r| &r.chunk.first_id) != Some(&entry.first_id)
@@ -1573,37 +1922,8 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
                 "element count or id range differs from the manifest",
             ));
         }
+        Ok(())
     }
-    if graph.vertex_count()? as u64 != fixed.vertex_count
-        || graph.edge_count()? as u64 != fixed.edge_count
-        || vertex_properties != fixed.vertex_property_count
-        || edge_properties != fixed.edge_property_count
-    {
-        return Err(PersistError::corrupt(
-            "manifest",
-            96,
-            "element or property counts differ from the segments",
-        ));
-    }
-    let expected = source.crc;
-    let trailer_at = source.offset;
-    let trailer = u32::from_le_bytes(source.fixed::<4>("trailer")?);
-    if trailer != expected {
-        return Err(PersistError::corrupt(
-            PACKED,
-            trailer_at,
-            "trailer checksum mismatch",
-        ));
-    }
-    let _ = FIXED_BYTES;
-    crate::traversal::memory_budget::check(&budget, &*graph)?;
-    // Derived state (a `TraversalGraph`'s compressed properties, D11: the file holds plain
-    // values; the end of the load encodes the rule paths and builds the dictionaries).
-    graph.finish_load()?;
-    graph.set_graph_id(fixed.graph_id)?;
-    graph.raise_position(fixed.commit_seq, fixed.last_commit_at)?;
-    graph.raise_id_sequences(fixed.node_sequence, fixed.edge_sequence)?;
-    Ok(())
 }
 
 /// Puts the manifest's definitions into `graph`'s catalog (no validation: they were valid when

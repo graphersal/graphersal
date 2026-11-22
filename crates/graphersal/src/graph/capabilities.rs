@@ -67,6 +67,13 @@ pub struct StorageCapabilities {
     /// [`PropertyIndexRange::equal`]: crate::graph::PropertyIndexRange::equal
     /// [`GraphStorage::vertices_by_property_index`]: crate::graph::GraphStorage::vertices_by_property_index
     pub exact_property_index_lookups: bool,
+    /// The storage is a layer over a shared, frozen base
+    /// ([`LayeredGraph`](crate::storage::LayeredGraph)): `GraphStorage::vertex_layer` /
+    /// `edge_layer` tell base elements from the layer's own, and the first write to a base
+    /// element copies it into the layer. Front ends use it to say what a write costs (the fill
+    /// preview of a vector rule counts the base elements it copies up,
+    /// `PlannedFill::base_copies`). A read-only view (`&G`) states it for the storage it views.
+    pub layered: bool,
 }
 
 impl StorageCapabilities {
@@ -82,7 +89,14 @@ impl StorageCapabilities {
             immutable: false,
             property_indexes: false,
             exact_property_index_lookups: false,
+            layered: false,
         }
+    }
+
+    /// Sets [`Self::layered`].
+    pub const fn with_layered(mut self, layered: bool) -> Self {
+        self.layered = layered;
+        self
     }
 
     /// Sets [`Self::atomic`].

@@ -364,6 +364,7 @@ pub(crate) fn all_tools() -> Vec<Tool> {
                     "max_labels": {"type": "integer", "minimum": 1, "description": "Keep the label rows with the most bytes (default: limit); labels_omitted counts the rest."},
                     "max_elements": {"type": "integer", "minimum": 1, "description": "Sample so that about this many elements are read, at least one per label (default: all)."},
                     "sample_every": {"type": "integer", "minimum": 1, "description": "Read every k-th element only (default 1)."},
+                    "scope": {"type": "string", "enum": ["all", "delta"], "description": "all (default): every element the graph shows; delta: only a layered graph's own elements, its base as shared_bytes (the whole graph for a plain one)."},
                 },
             }),
         ),

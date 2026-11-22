@@ -109,6 +109,31 @@ pub enum PersistError {
         found: String,
     },
 
+    /// A layer snapshot (format spec 7.5, segment kind 128) was loaded over another base than
+    /// the one the layer was built over ([`BaseRef`](crate::storage::BaseRef): lineage id,
+    /// commit sequence number, commit time). Nothing was loaded.
+    #[error(
+        "This layer was built over base {expected}, the given base is {given}; rebuild the layer \
+         over the given base, or load it over the base it was built on"
+    )]
+    #[non_exhaustive]
+    LayerBaseMismatch {
+        /// The base the layer snapshot names (boxed: keeps `PersistError` small).
+        expected: Box<crate::graph::BaseRef>,
+        /// The base of the layer it was loaded into.
+        given: Box<crate::graph::BaseRef>,
+    },
+
+    /// The snapshot and the storage it is loaded into are of different kinds: a layer snapshot
+    /// (it holds only a layer's changes to its base, format spec 7.5 segment kind 128) loaded
+    /// as a whole graph, or a whole-graph snapshot loaded into a layer. Nothing was loaded.
+    #[error("{reason}")]
+    #[non_exhaustive]
+    SnapshotKindMismatch {
+        /// Which kind the snapshot is and what it was loaded into.
+        reason: String,
+    },
+
     /// The journals do not continue the snapshot without a gap: a commit is missing.
     #[error("Journal {journal} at byte {offset}: expected commit {expected}, found commit {found}")]
     #[non_exhaustive]
@@ -502,6 +527,13 @@ pub enum StoreFailure {
     /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
     /// failure of an automatic checkpoint is kept as it was raised.
     AutoCheckpointFailed,
+    /// The store is a LAYER store (format spec 7.5: it holds only a layer's changes to a frozen
+    /// base) and the operation does not work on one: it opens only with
+    /// [`Store::open_layer`](super::Store::open_layer) and its base; the plain forms that would
+    /// load it over no base (`open_read_only`, `open_backup`, `checkpoint_dir`, `fork_dir`,
+    /// `attic_fork_dir`) refuse it (their layer forms take the base), and the repair,
+    /// maintenance mode and the closed-store model commits do not work on layer stores.
+    LayerStore,
 }
 
 impl StoreFailure {
@@ -543,6 +575,7 @@ impl StoreFailure {
             StoreFailure::ModelRevisionExists => "model_revision_exists",
             StoreFailure::UpgradeModelDamaged => "upgrade_model_damaged",
             StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
+            StoreFailure::LayerStore => "layer_store",
         }
     }
 
@@ -896,6 +929,18 @@ impl StoreFailure {
                     "graphersal store checkpoint <dir>",
                 )],
             ),
+            StoreFailure::LayerStore => help_text(
+                "This store holds only a layer's changes to a frozen base, by element id: it \
+                 is read only over that very base. Open the base (the Store or .gsnap the \
+                 layer was built on, at that commit) and the layer store with \
+                 Store::open_layer(dir, &base, options); the error names the base. What loads \
+                 the layer from a closed store takes the base too: Store::open_layer_read_only, \
+                 open_layer_backup, checkpoint_layer_dir, fork_layer_dir, \
+                 attic_fork_layer_dir. A repair and the closed-store model commits do not work \
+                 on layer stores: restore a backup of a damaged layer store, and change the \
+                 embedding models in the base.",
+                &[("show the store and its base", "graphersal store info <dir>")],
+            ),
         }
     }
 }
@@ -981,6 +1026,15 @@ impl PersistError {
                 journal: *journal,
                 expected: expected.clone(),
                 found: found.clone(),
+            },
+            PersistError::LayerBaseMismatch { expected, given } => {
+                PersistError::LayerBaseMismatch {
+                    expected: expected.clone(),
+                    given: given.clone(),
+                }
+            }
+            PersistError::SnapshotKindMismatch { reason } => PersistError::SnapshotKindMismatch {
+                reason: reason.clone(),
             },
             PersistError::Gap {
                 journal,
@@ -1167,6 +1221,18 @@ impl DiagnosticError for PersistError {
             PersistError::LineageMismatch { .. } => "Recover each graph from its own snapshot \
                  and journals: a journal is replayed only onto a snapshot of the same graph \
                  lineage (graph_id)."
+                .to_string(),
+            PersistError::LayerBaseMismatch { expected, .. } => format!(
+                "A layer snapshot holds only the layer's changes to its base, by element id, \
+                 so it loads only over the very base it was built on: {expected}. Load that \
+                 base (the Store or .gsnap it was saved as, at that commit) and read the layer \
+                 over it (persist::read_layer_snapshot), or rebuild the layer over the new \
+                 base: apply its changes again, or export the old layer whole and start over."
+            ),
+            PersistError::SnapshotKindMismatch { .. } => "A layer snapshot holds only a layer's \
+                 changes to its base: read it over that base with persist::read_layer_snapshot \
+                 (or read_snapshot_into an empty LayeredGraph over it). A whole-graph snapshot \
+                 is read with persist::read_snapshot (or TraversalGraph::read_snapshot)."
                 .to_string(),
             PersistError::Gap { .. } => "Pass every journal written since the snapshot, in \
                  order; when a journal file is lost, recover to a target before the gap \
@@ -1516,6 +1582,23 @@ mod tests {
             StoreFailure::AutoCheckpointFailed.name(),
             "auto_checkpoint_failed"
         );
+    }
+
+    /// A layer store (format spec 7.5) refused by an operation that does not work on one: the
+    /// help says how to open it, which layer forms take the base and what does not work on
+    /// one, in the note layout.
+    #[test]
+    fn a_layer_store_refusal_says_how_to_open_it() {
+        let help = help_of(StoreFailure::LayerStore);
+        assert!(
+            help.contains("Store::open_layer(dir, &base, options)"),
+            "{help}"
+        );
+        assert!(help.contains("do not work"), "{help}");
+        assert!(help.contains("fork_layer_dir"), "{help}");
+        assert!(help.contains("graphersal store info <dir>"), "{help}");
+        assert_note_layout(&help);
+        assert_eq!(StoreFailure::LayerStore.name(), "layer_store");
     }
 
     /// The causes that need a fault inside the process (the others are triggered through the

@@ -17,6 +17,10 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn("limit", ScriptGraphTraversalSource::limit)
         .register_fn("label", ScriptGraphTraversalSource::label)
         .register_fn("labels", ScriptGraphTraversalSource::labels)
+        .register_fn("layer", ScriptGraphTraversalSource::layer)
+        .register_fn("has_layer", ScriptGraphTraversalSource::has_any_layer)
+        .register_fn("has_layer", ScriptGraphTraversalSource::has_layer_single)
+        .register_fn("has_layer", ScriptGraphTraversalSource::has_layer)
         .register_fn("id", ScriptGraphTraversalSource::id)
         .register_fn("identity", ScriptGraphTraversalSource::identity)
         .register_fn("sack", ScriptGraphTraversalSource::sack)
@@ -585,6 +589,11 @@ pub(super) fn register(registry: &mut Registry) {
         registry,
         ["has_label", "hasLabel"],
         |s: &mut ScriptGraphTraversalSource, args| s.has_label(args)
+    );
+    register_variadic!(
+        registry,
+        ["has_layer"],
+        |s: &mut ScriptGraphTraversalSource, args| s.has_layer(args)
     );
     register_variadic!(
         ctx registry,

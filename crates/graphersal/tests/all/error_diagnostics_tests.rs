@@ -12831,3 +12831,99 @@ fn unique_index_errors_carry_their_help() {
         "{conflict}"
     );
 }
+
+/// `has_layer()` with a name that is not a layer origin fails before the traversal runs (also
+/// inside a child no traverser reaches), and its help lists the three origins with a runnable
+/// fix built from the failing name.
+#[test]
+fn unknown_layer_origin_help_lists_the_origins() {
+    let graph = GraphSource::tinkerpop_modern();
+    let lock = graph.read();
+    let rust = lock
+        .traversal()
+        .v(None)
+        .has_layer(vec!["added", "new"])
+        .to_list()
+        .unwrap_err();
+    // Unreached: `limit(0)` lets no traverser into the child.
+    let unreached = lock
+        .traversal()
+        .v(None)
+        .limit(0)
+        .where_t(__::has_layer("new"))
+        .to_list()
+        .unwrap_err();
+    for err in [&rust, &unreached] {
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::UnknownLayerOrigin { name, .. } if name == "new"
+            ),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("\"new\""), "{text}");
+        let help = err.help().unwrap();
+        for origin in ["\"base\"", "\"added\"", "\"modified\""] {
+            assert!(help.contains(origin), "{help}");
+        }
+        assert!(
+            help.contains("g.v().has_layer(\"added\") instead of g.v().has_layer(\"new\")"),
+            "{help}"
+        );
+        assert!(help.contains("g.v().layer()"), "{help}");
+    }
+}
+
+/// The same error through the Rhai DSL, and the fix in its help runs.
+#[cfg(feature = "script")]
+#[test]
+fn unknown_layer_origin_help_in_the_dsl() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let err = eval_value(graph.clone(), r#"g.v().has_layer("new").to_list()"#).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("not a layer origin"), "{text}");
+    assert!(text.contains("g.v().has_layer(\"added\")"), "{text}");
+    let fixed = eval_value(graph, r#"g.v().has_layer("added").count().next()"#).unwrap();
+    assert_eq!(fixed.to_string(), "0");
+}
+
+/// `g.layer_diff(..)` with an unknown key or a bad value names the valid keys and values, and
+/// its help gives a runnable options map; the fix runs.
+#[cfg(feature = "script")]
+#[test]
+fn layer_diff_options_help_names_the_keys_and_values() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    for (script, actual) in [
+        (r#"g.layer_diff(#{kind: "vertex"})"#, "the key 'kind'"),
+        (r#"g.layer_diff(#{kinds: "node"})"#, "\"node\""),
+        (r#"g.layer_diff(#{kinds: []})"#, "an empty list"),
+        (r#"g.layer_diff(#{labels: 3})"#, "3"),
+        (r#"g.layer_diff(#{labels: ["a", 1]})"#, "the item 1"),
+        (r#"g.layer_diff(#{limit: 0})"#, "0"),
+        (r#"g.layer_diff(#{limit: "ten"})"#, "ten"),
+        (r#"g.layer_diff(5)"#, "int"),
+    ] {
+        let err = eval_value(graph.clone(), script).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("layer_diff"), "{script}: {text}");
+        assert!(text.contains(actual), "{script}: {text}");
+        assert!(
+            text.contains("g.layer_diff(#{kinds: \"vertex\", labels: [\"person\"], limit: 10})"),
+            "{script}: {text}"
+        );
+        for key in ["kinds", "labels", "limit"] {
+            assert!(text.contains(key), "{script}: {text}");
+        }
+    }
+    let fixed = eval_value(
+        graph,
+        r#"g.layer_diff(#{kinds: "vertex", labels: ["person"], limit: 10}).truncated"#,
+    )
+    .unwrap();
+    assert_eq!(fixed.to_string(), "false");
+}

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use graphersal::prelude::*;
 use graphersal::schema::{PropertySchema, SchemaSummaryRequest};
 use graphersal::script::rhai;
-use graphersal::storage::MemoryReportRequest;
+use graphersal::storage::{MemoryReportRequest, MemoryReportScope};
 use serde_json::{Map, Value, json};
 
 use crate::display::{CompactGraph, Table};
@@ -341,11 +341,12 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
 /// `g.memory_usage()` as data: `{structure_bytes, index_bytes, property_bytes, total_bytes,
 /// total_mb, compressed_values, compressed_plain_bytes, compressed_stored_bytes,
 /// compression_dictionary_bytes, property_index_bytes, deduped_values, deduped_plain_bytes,
-/// dedup_table_bytes, shape_bytes, workload_bytes, model_bytes}`, or `null`. `shape_bytes` and
+/// dedup_table_bytes, shape_bytes, workload_bytes, model_bytes, shared_bytes}`, or `null`. `shape_bytes` and
 /// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
 /// `workload_bytes` (the graph's workload statistics, held beside the storage) and `model_bytes`
 /// (its loaded embedding models) are not part of the total either and are `0` from a storage
-/// alone ([`crate::storage::SessionGraph::memory_view`] fills them in).
+/// alone ([`crate::storage::SessionGraph::memory_view`] fills them in). `shared_bytes` is what
+/// the storage shares with others (a layered graph's base), outside the total too.
 pub fn memory_usage<S: GraphStorage>(g: &S) -> Result<Value, GraphError> {
     Ok(memory_stats_view(g.memory_usage()?))
 }
@@ -370,6 +371,7 @@ pub fn memory_stats_view(stats: Option<graphersal::storage::MemoryStats>) -> Val
             "shape_bytes": stats.shape_bytes,
             "workload_bytes": stats.workload_bytes,
             "model_bytes": stats.model_bytes,
+            "shared_bytes": stats.shared_bytes,
         }),
         None => Value::Null,
     }
@@ -441,18 +443,20 @@ pub fn schema_summary_request(spec: &Value) -> Result<SchemaSummaryRequest, Sess
 }
 
 /// The request of a memory report spec `{sample_every?, max_elements?, limit?, max_rows?,
-/// max_labels?, path_depth?}` (`null`: a full walk; `limit` keeps the property rows and the
-/// label rows with the most bytes, default [`MemoryReportRequest::DEFAULT_LIMIT`] (500),
-/// `max_rows`/`max_labels` set one list each; [`crate::Session::memory_report`]), or what is
-/// wrong with it.
+/// max_labels?, path_depth?, scope?}` (`null`: a full walk; `limit` keeps the property rows and
+/// the label rows with the most bytes, default [`MemoryReportRequest::DEFAULT_LIMIT`] (500),
+/// `max_rows`/`max_labels` set one list each; `scope` `"all"` (default) or `"delta"`, a layered
+/// graph's own elements only, the whole graph for any other storage;
+/// [`crate::Session::memory_report`]), or what is wrong with it.
 pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, SessionError> {
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "sample_every",
         "max_elements",
         "limit",
         "max_rows",
         "max_labels",
         "path_depth",
+        "scope",
     ];
     let mut request = MemoryReportRequest::new();
     let fields = match spec {
@@ -461,7 +465,7 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
         _ => {
             return Err(
                 "the memory report spec is a JSON object {sample_every?, max_elements?, \
-                 limit?, max_rows?, max_labels?, path_depth?}"
+                 limit?, max_rows?, max_labels?, path_depth?, scope?}"
                     .into(),
             );
         }
@@ -499,6 +503,15 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, Sessio
     }
     if let Some(depth) = positive("path_depth")? {
         request = request.with_path_depth(u32::try_from(depth).unwrap_or(u32::MAX));
+    }
+    match fields.get("scope") {
+        None | Some(Value::Null) => {}
+        Some(value) => match value.as_str().and_then(MemoryReportScope::from_name) {
+            Some(scope) => request = request.with_scope(scope),
+            None => {
+                return Err(format!("scope must be \"all\" or \"delta\", not {value}").into());
+            }
+        },
     }
     request
         .validate()

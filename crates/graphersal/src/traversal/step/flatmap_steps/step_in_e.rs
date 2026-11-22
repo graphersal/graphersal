@@ -120,17 +120,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepInE {
         match node_index {
             Some(node_index) => {
                 for edge in context.storage.in_edges(node_index)? {
-                    let mut found = false;
-                    let edge_label = context.storage.edge_label(edge)?;
-
-                    match &self.labels {
-                        Some(labels) => {
-                            if let Some(edge_label) = edge_label {
-                                found = labels.contains(&edge_label.to_string());
-                            }
-                        }
-                        None => found = true,
-                    }
+                    // The label is read only when the step filters by it.
+                    let found = match &self.labels {
+                        Some(labels) => context
+                            .storage
+                            .edge_label(edge)?
+                            .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                        None => true,
+                    };
                     if found {
                         output.push(Traverser::with_parts(
                             TraverserValue::Edge(edge),
@@ -220,17 +217,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepInE {
             Some(node_index) => {
                 let mut count = 0u64;
                 for edge in context.storage.in_edges(node_index)? {
-                    let mut found = false;
-                    let edge_label = context.storage.edge_label(edge)?;
-
-                    match &self.labels {
-                        Some(labels) => {
-                            if let Some(edge_label) = edge_label {
-                                found = labels.contains(&edge_label.to_string());
-                            }
-                        }
-                        None => found = true,
-                    }
+                    // The label is read only when the step filters by it.
+                    let found = match &self.labels {
+                        Some(labels) => context
+                            .storage
+                            .edge_label(edge)?
+                            .is_some_and(|edge_label| labels.iter().any(|l| l == edge_label)),
+                        None => true,
+                    };
                     if found {
                         count += 1;
                     }

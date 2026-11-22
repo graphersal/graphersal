@@ -7,6 +7,7 @@ use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::{Mark, RollbackReason};
+use crate::graph::layer_diff::{LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{GraphSchema, PropertySchema, SchemaInferer};
 use crate::graph::undo::UndoEntry;
@@ -309,6 +310,17 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 /// [`Self::declared_property_schema`] default to "no schema"; [`Self::memory_usage`] and
 /// [`Self::execution_policy`] are optional diagnostics and host policy.
 ///
+/// ## Layers
+///
+/// [`Self::vertex_layer`] / [`Self::edge_layer`] (where an element comes from,
+/// [`LayerOrigin`]) and [`Self::layer_diff`] (what a layer changed against its base,
+/// [`LayerDiff`]) default to "no layer": every live element is [`LayerOrigin::Base`] and the
+/// diff is empty, so a storage without layers needs nothing and queries asking for them stay
+/// portable. A storage made of a base and a layer
+/// ([`LayeredGraph`](crate::graph::LayeredGraph)) overrides all three; a wrapper forwards
+/// them. The origin is asked per traverser, so it must stay cheap for an untouched element;
+/// the diff is a diagnostic read once per call.
+///
 /// ## The catalog of definitions
 ///
 /// [`Self::definitions`] / [`Self::definition`] default to "none stored",
@@ -328,7 +340,7 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 ///
 /// - **Element reads** (the counts, [`Self::vertices`] / [`Self::edges`], the label scans, the
 ///   id lookups, [`Self::out_edges`] / [`Self::in_edges`], ids, labels, properties, endpoints,
-///   `contains_*`, [`Self::unit_started_at`]): a single lookup answers `Ok(None)` (or
+///   `contains_*`, the layer origins, [`Self::unit_started_at`]): a single lookup answers `Ok(None)` (or
 ///   `Ok(false)`, an empty label set) for what does not exist, `Err` only when the backend
 ///   cannot answer. An iterating method returns `Result<impl Iterator>`: the `Result` covers
 ///   starting the iteration, once per call, never one per item (an item the backend cannot
@@ -338,7 +350,8 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 ///   unit rolls back as for any failing query.
 /// - **State beyond single elements** (the unit methods, [`Self::capabilities`],
 ///   [`Self::last_commit_seq`], [`Self::statistics`], the schema, catalog, compression, property
-///   index and memory methods, [`Self::shrink_to_fit`], [`Self::execution_policy`]): the engine
+///   index and memory methods, [`Self::shrink_to_fit`], [`Self::execution_policy`],
+///   [`Self::layer_diff`]): the engine
 ///   reads these once per query or unit (never per traverser) and fails the query, import or
 ///   transaction with the error; a failed [`Self::rollback_unit`] still closes the unit and
 ///   poisons a [`Graph`](crate::graph::Graph) holding the storage (see
@@ -491,6 +504,46 @@ pub trait GraphStorage: Send + Sync {
             }
         }
         Ok(Box::new(found.into_iter()))
+    }
+
+    /// Where the vertex `node` comes from in a layered storage ([`LayerOrigin`]: `Base`,
+    /// `Added`, `Modified`); `Ok(None)` for a removed vertex (a stale handle), as the other
+    /// element reads answer. `Err` when the backend cannot answer.
+    ///
+    /// Default: [`LayerOrigin::Base`] for every live vertex ([`Self::contains_vertex`]): a
+    /// storage without layers has nothing else, so a query asking for the origin stays
+    /// portable. A layered storage overrides it and keeps it cheap for an untouched element
+    /// (`LayeredGraph`: one bit test); the engine asks it per traverser.
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.contains_vertex(node)?.then_some(LayerOrigin::Base))
+    }
+
+    /// The edge counterpart of [`Self::vertex_layer`]. Default: [`LayerOrigin::Base`] for every
+    /// live edge ([`Self::contains_edge`]).
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        Ok(self.contains_edge(edge)?.then_some(LayerOrigin::Base))
+    }
+
+    /// What a layered storage changed against its base: the added, removed and modified
+    /// elements the `request` selects, in the order [`LayerDiff`] documents (removed elements
+    /// with their base values: they cannot be traversed). `Err` when the backend cannot answer.
+    ///
+    /// Default: an empty diff ([`LayerDiff::default`]), the answer of a storage without layers.
+    /// A layered storage walks only what its layer holds, never every base element.
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        let _ = request;
+        Ok(LayerDiff::default())
+    }
+
+    /// A layered storage at a glance ([`LayerSummary`]: the base's name and identity, the
+    /// counts of added, modified and removed vertices and edges, its own bytes beside the
+    /// shared base's), for front ends that show whether a graph is a layer. `Err` when the
+    /// backend cannot answer.
+    ///
+    /// Default: `None`, the answer of a storage without layers. A layered storage answers from
+    /// its own bookkeeping (counters, cached footprints), never from a diff walk.
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        Ok(None)
     }
 
     /// The element counts this storage keeps up to date (see [`GraphStatistics`]), or `None` if
@@ -3958,6 +4011,26 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).vertex_layer(node)
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).edge_layer(edge)
+    }
+
+    #[inline]
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        (**self).layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
+    }
+
+    #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
     }
@@ -3972,14 +4045,14 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     /// A read-only view: claims nothing (no writes, so nothing to make atomic or capture),
-    /// except the exactness of the index lookups it forwards to the viewed storage.
+    /// except the exactness of the index lookups it forwards to the viewed storage and whether
+    /// that storage is a layer.
     #[inline]
     fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
-        Ok(
-            StorageCapabilities::none().with_exact_property_index_lookups(
-                (**self).capabilities()?.exact_property_index_lookups,
-            ),
-        )
+        let viewed = (**self).capabilities()?;
+        Ok(StorageCapabilities::none()
+            .with_exact_property_index_lookups(viewed.exact_property_index_lookups)
+            .with_layered(viewed.layered))
     }
 
     /// A read-only view writes no journal record.
@@ -4420,6 +4493,26 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         (**self).memory_structure()
+    }
+
+    #[inline]
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).vertex_layer(node)
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).edge_layer(edge)
+    }
+
+    #[inline]
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        (**self).layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
     }
 
     #[inline]
@@ -4937,6 +5030,26 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         (**self).memory_structure()
+    }
+
+    #[inline]
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).vertex_layer(node)
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        (**self).edge_layer(edge)
+    }
+
+    #[inline]
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        (**self).layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
     }
 
     #[inline]
@@ -5609,6 +5722,26 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn memory_structure(&self) -> Result<Option<crate::graph::StructureMemory>, GraphError> {
         self.as_ref().memory_structure()
+    }
+
+    #[inline]
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.as_ref().vertex_layer(node)
+    }
+
+    #[inline]
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.as_ref().edge_layer(edge)
+    }
+
+    #[inline]
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        self.as_ref().layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        self.as_ref().layer_summary()
     }
 
     #[inline]

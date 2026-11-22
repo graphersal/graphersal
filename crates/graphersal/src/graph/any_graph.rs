@@ -110,6 +110,19 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// the storage reports none. Fails like [`Self::capabilities`].
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError>;
 
+    /// [`GraphStorage::layer_diff`] of the storage, under one read lock: what a layered
+    /// storage changed against its base (empty for any other storage). Fails like
+    /// [`Self::capabilities`]. Unauthorized: a front end asks its authorizer for a read first.
+    fn layer_diff(
+        &self,
+        request: &crate::graph::LayerDiffRequest,
+    ) -> Result<crate::graph::LayerDiff, GraphError>;
+
+    /// [`GraphStorage::layer_summary`] of the storage, under one read lock: the base's name and
+    /// identity, the change counts and the memory of a layered storage; `None` for any other
+    /// storage. Cheap (no diff walk). Fails like [`Self::capabilities`].
+    fn layer_summary(&self) -> Result<Option<crate::graph::LayerSummary>, GraphError>;
+
     /// [`Graph::shrink_to_fit`]: releases the storage's spare capacity under the write lock
     /// and reports its memory total before and after; changes no data, commits nothing.
     /// Unauthorized: the front end asks its authorizer first.
@@ -422,6 +435,17 @@ where
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         self.read_checked()?.memory_footprint_bytes()
+    }
+
+    fn layer_diff(
+        &self,
+        request: &crate::graph::LayerDiffRequest,
+    ) -> Result<crate::graph::LayerDiff, GraphError> {
+        self.read_checked()?.layer_diff(request)
+    }
+
+    fn layer_summary(&self) -> Result<Option<crate::graph::LayerSummary>, GraphError> {
+        self.read_checked()?.layer_summary()
     }
 
     fn shrink_to_fit(&self) -> Result<crate::graph::ShrinkReport, GraphError> {

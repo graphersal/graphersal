@@ -9,8 +9,9 @@ use graphersal::TraversalGraph;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionStats, Definition,
     DefinitionKind, ElementKind, ExecutionPolicy, GraphError, GraphStatistics, GraphStorage,
-    JsonPath, Mark, MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform,
-    PropertyMap, RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
+    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark, MemoryStats,
+    PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap, RollbackReason,
+    StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
 };
 use graphersal_storage_tests::conformance;
 
@@ -245,6 +246,22 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
 
     fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
         self.0.memory_usage()
+    }
+
+    fn vertex_layer(&self, node: Self::VertexId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.0.vertex_layer(node)
+    }
+
+    fn edge_layer(&self, edge: Self::EdgeId) -> Result<Option<LayerOrigin>, GraphError> {
+        self.0.edge_layer(edge)
+    }
+
+    fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
+        self.0.layer_diff(request)
+    }
+
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        self.0.layer_summary()
     }
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {

@@ -833,8 +833,9 @@ fn needs_copy(dir: &DirPath, from_version: u32) -> PersistError {
 /// [`upgrade_in_place`] by the rows of `table` (a test table for the methods no row uses).
 fn upgrade_in_place_by(dir: &DirPath, table: &[UpgradeRow]) -> Result<UpgradeReport, PersistError> {
     // A store with files of a NEWER version is never worked on (format spec 15): refused
-    // before the lock and before anything is written.
-    files::refuse_newer_version(dir)?;
+    // before the lock and before anything is written. A layer store (format spec 7.5) exists
+    // only in the current version: it is current, as a plain store is.
+    files::refuse_newer_version_as(dir, files::StoreKind::Either)?;
     let _lock = DirLock::exclusive(dir)?;
     let from_version = source_version(dir)?;
     if from_version != STORE_VERSION {
@@ -1214,8 +1215,9 @@ fn upgrade_copy_by(
     to: &DirPath,
     table: &[UpgradeRow],
 ) -> Result<UpgradeReport, PersistError> {
-    // A store with files of a NEWER version is never worked on (format spec 15).
-    files::refuse_newer_version(from)?;
+    // A store with files of a NEWER version is never worked on (format spec 15). A layer
+    // store (format spec 7.5) exists only in the current version: refused as current.
+    files::refuse_newer_version_as(from, files::StoreKind::Either)?;
     // The writer lock keeps a writer of the older version (or this one) out while the files
     // are copied; readers take no lock. Nothing of `from` is written.
     let _lock = DirLock::exclusive(from)?;

@@ -1495,6 +1495,7 @@ impl<S: PersistentStorage + Default> Store<S> {
         source: ModelSource,
         options: ImportModelOptions,
     ) -> Result<ImportModelReport, PersistError> {
+        self.refuse_layer_models("import a model")?;
         self.core.writable("import a model")?;
         let prepared = prepare(source, &options)?;
         self.import_prepared(prepared, &options)
@@ -1508,6 +1509,7 @@ impl<S: PersistentStorage + Default> Store<S> {
         options: &ImportModelOptions,
     ) -> Result<ImportModelReport, PersistError> {
         const OP: &str = "import a model";
+        self.refuse_layer_models(OP)?;
         self.core.writable(OP)?;
         let mut warnings = licence_warnings(&prepared.manifest);
         let (definitions, schema) = catalog_of(&self.graph)?;
@@ -1661,6 +1663,7 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// [`Store::set_default_model_dir`].
     pub fn set_default_model(&self, repo: Option<&str>) -> Result<ModelChangeReport, PersistError> {
         const OP: &str = "set the default model";
+        self.refuse_layer_models(OP)?;
         self.core.writable(OP)?;
         let (definitions, _) = catalog_of(&self.graph)?;
         if let Some(repo) = repo
@@ -1688,6 +1691,30 @@ impl<S: PersistentStorage + Default> Store<S> {
             committed_at: Some(self.last_committed_at()?),
             model,
         })
+    }
+
+    /// Refuses a change of the embedding models on a layer store, before anything is read or
+    /// written ([`StoreFailure::LayerStore`]): a layer store keeps no model (its graph serves
+    /// the base's) and a layer takes no model definition, so a blob written first would be
+    /// left behind by the refused commit.
+    fn refuse_layer_models(&self, operation: &'static str) -> Result<(), PersistError> {
+        let Some(base) = &self.core.shared.layer else {
+            return Ok(());
+        };
+        let named = base
+            .base_ref()
+            .map(|base| format!(" over the base {base}"))
+            .unwrap_or_default();
+        Err(PersistError::store(
+            operation,
+            StoreFailure::LayerStore,
+            format!(
+                "the store {} is a layer store{named}: it keeps no embedding model (its graph \
+                 serves the base's models) and a layer takes no change of a model definition, \
+                 so the models are changed in the base",
+                self.core.shared.dir.display()
+            ),
+        ))
     }
 
     /// The time of the store's last commit.
@@ -1738,6 +1765,7 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// [`Store::remove_model_dir`].
     pub fn remove_model(&self, repo: &str) -> Result<ModelChangeReport, PersistError> {
         const OP: &str = "remove a model";
+        self.refuse_layer_models(OP)?;
         self.core.writable(OP)?;
         let (definitions, schema) = catalog_of(&self.graph)?;
         let definition = plan_remove(&definitions, schema.as_ref(), repo)?;
@@ -1906,6 +1934,16 @@ pub(crate) struct ModelsAtOpen {
 }
 
 impl ModelsAtOpen {
+    /// Nothing found, nothing to attach (a layer store: its models are the base's).
+    pub(crate) fn none() -> Self {
+        Self {
+            registry: None,
+            source: None,
+            read_only: None,
+            events: Vec::new(),
+        }
+    }
+
     /// Attaches the registry to `graph` (and its commit hook when `writable`) and writes the
     /// deferred journal records into `journal`.
     pub(crate) fn finish(
